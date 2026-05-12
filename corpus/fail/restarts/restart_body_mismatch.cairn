@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic contains handle body and restart must have matching result kinds
+
+define class <bad-input> (<object>)
+  slot fallback;
+end;
+
+define function main()
+  handle 1 with restart <bad-input> #f end
+end;

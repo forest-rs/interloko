@@ -1,0 +1,18 @@
+// expect: diagnostics 1
+// expect: diagnostic contains signal condition is not handled by the active restart
+
+define class <bad-input> (<object>)
+  slot fallback;
+end;
+
+define class <other-input> (<object>)
+  slot fallback;
+end;
+
+define function main()
+  handle
+    signal(make(<bad-input>, fallback: 0))
+  with restart <other-input>
+    1
+  end
+end;

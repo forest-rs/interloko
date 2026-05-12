@@ -307,6 +307,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Recoverable condition signal.
+    Signal {
+        /// Condition object expression.
+        condition: Box<Expr>,
+        /// Statically known condition class.
+        condition_class: ClassId,
+        /// Result category supplied by the active restart.
+        result_kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Runtime object construction.
     MakeObject {
         /// Nominal class.
@@ -360,6 +371,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Recoverable condition handler expression.
+    Handle {
+        /// Handled body expression.
+        body: Box<Expr>,
+        /// Restart clause for the handled body.
+        restart: Restart,
+        /// Source span.
+        span: Span,
+    },
     /// Placeholder for semantically invalid code.
     Error {
         /// Source span.
@@ -377,14 +397,29 @@ impl Expr {
             | Self::Local { span, .. }
             | Self::DirectCall { span, .. }
             | Self::GenericCall { span, .. }
+            | Self::Signal { span, .. }
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
             | Self::Binary { span, .. }
             | Self::Compare { span, .. }
             | Self::If { span, .. }
+            | Self::Handle { span, .. }
             | Self::Error { span } => *span,
         }
     }
+}
+
+/// Semantic restart clause for a lexical handler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Restart {
+    /// Nominal condition class handled by this restart.
+    pub specializer: ClassId,
+    /// Handler body evaluated when a matching condition is signaled.
+    pub body: Box<Expr>,
+    /// Handler result category.
+    pub result_kind: ValueKind,
+    /// Source span.
+    pub span: Span,
 }
 
 /// Lowers an AST module to semantic IR.
@@ -413,13 +448,21 @@ struct GenericSymbol {
 
 struct FunctionContext {
     locals: Vec<Local>,
+    active_restarts: Vec<ActiveRestart>,
     diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ActiveRestart {
+    specializer: ClassId,
+    result_kind: ValueKind,
 }
 
 impl FunctionContext {
     fn new() -> Self {
         Self {
             locals: Vec::new(),
+            active_restarts: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -453,6 +496,18 @@ impl FunctionContext {
         self.locals
             .get(id.0 as usize)
             .map_or(ValueKind::Error, |local| local.kind)
+    }
+
+    fn push_restart(&mut self, restart: ActiveRestart) {
+        self.active_restarts.push(restart);
+    }
+
+    fn pop_restart(&mut self) {
+        self.active_restarts.pop();
+    }
+
+    fn active_restart(&self) -> Option<ActiveRestart> {
+        self.active_restarts.last().copied()
     }
 }
 
@@ -783,6 +838,9 @@ impl Lowering {
                 ));
                 Expr::Error { span: *span }
             }
+            ast::Expr::Signal {
+                condition, span, ..
+            } => self.lower_signal(ctx, condition, *span),
             ast::Expr::MakeObject {
                 class_name,
                 fields,
@@ -854,7 +912,106 @@ impl Lowering {
                     span: *span,
                 }
             }
+            ast::Expr::Handle {
+                body,
+                restart,
+                span,
+                ..
+            } => self.lower_handle(ctx, body, restart, *span),
             ast::Expr::Error { span, .. } => Expr::Error { span: *span },
+        }
+    }
+
+    fn lower_signal(&self, ctx: &mut FunctionContext, condition: &ast::Expr, span: Span) -> Expr {
+        let condition = self.lower_expr(ctx, condition);
+        let condition_class = match self.expr_kind(ctx, &condition) {
+            ValueKind::Object(class) => class,
+            ValueKind::Error => ClassId(u32::MAX),
+            _ => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    span,
+                    "signal condition must be a known object",
+                ));
+                ClassId(u32::MAX)
+            }
+        };
+        let Some(active) = ctx.active_restart() else {
+            ctx.diagnostics
+                .push(Diagnostic::error(span, "signal requires an active restart"));
+            return Expr::Signal {
+                condition: Box::new(condition),
+                condition_class,
+                result_kind: ValueKind::Error,
+                span,
+            };
+        };
+        if condition_class != ClassId(u32::MAX) && condition_class != active.specializer {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                "signal condition is not handled by the active restart",
+            ));
+            return Expr::Signal {
+                condition: Box::new(condition),
+                condition_class,
+                result_kind: ValueKind::Error,
+                span,
+            };
+        }
+        Expr::Signal {
+            condition: Box::new(condition),
+            condition_class,
+            result_kind: active.result_kind,
+            span,
+        }
+    }
+
+    fn lower_handle(
+        &self,
+        ctx: &mut FunctionContext,
+        body: &ast::Expr,
+        restart: &ast::Restart,
+        span: Span,
+    ) -> Expr {
+        let specializer = self
+            .resolve_class(&restart.class_name)
+            .map(|class| class.id)
+            .unwrap_or_else(|| {
+                ctx.diagnostics.push(Diagnostic::error(
+                    restart.span,
+                    format!("unresolved class `{}`", restart.class_name),
+                ));
+                ClassId(u32::MAX)
+            });
+        let restart_body = self.lower_expr(ctx, &restart.body);
+        let restart_kind = self.expr_kind(ctx, &restart_body);
+
+        ctx.push_restart(ActiveRestart {
+            specializer,
+            result_kind: restart_kind,
+        });
+        let body = self.lower_expr(ctx, body);
+        ctx.pop_restart();
+
+        let body_kind = self.expr_kind(ctx, &body);
+        if body_kind != restart_kind
+            && !matches!(body_kind, ValueKind::Error)
+            && !matches!(restart_kind, ValueKind::Error)
+        {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                "handle body and restart must have matching result kinds",
+            ));
+        }
+
+        Expr::Handle {
+            body: Box::new(body),
+            restart: Restart {
+                specializer,
+                body: Box::new(restart_body),
+                result_kind: restart_kind,
+                span: restart.span,
+            },
+            span,
         }
     }
 
@@ -964,6 +1121,7 @@ impl Lowering {
             | Expr::Binary { .. } => ValueKind::I64,
             Expr::ConstBool { .. } | Expr::Compare { .. } => ValueKind::Bool,
             Expr::Local { local, .. } => ctx.local_kind(*local),
+            Expr::Signal { result_kind, .. } => *result_kind,
             Expr::DirectCall { function, .. } => self
                 .functions
                 .get(function.0 as usize)
@@ -982,6 +1140,7 @@ impl Lowering {
                     ValueKind::Error
                 }
             }
+            Expr::Handle { restart, .. } => restart.result_kind,
             Expr::Error { .. } => ValueKind::Error,
         }
     }
@@ -1124,6 +1283,56 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message
                     == "if branches must have matching result kinds")
+        );
+    }
+
+    #[test]
+    fn resolves_signal_handle_and_restart() {
+        let module = lower_source(
+            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+             define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.functions[0].result_kind, ValueKind::I64);
+        let Expr::Handle { body, restart, .. } = &module.functions[0].body.result else {
+            panic!("expected handle expression");
+        };
+        assert_eq!(restart.specializer, ClassId(0));
+        assert_eq!(restart.result_kind, ValueKind::I64);
+        assert!(matches!(
+            body.as_ref(),
+            Expr::Signal {
+                condition_class: ClassId(0),
+                result_kind: ValueKind::I64,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reports_invalid_signal_and_restart_uses() {
+        let uncaught = lower_source(
+            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+             define function main()\n  signal(make(<bad>, fallback: 0))\nend;",
+        );
+        assert!(
+            uncaught
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "signal requires an active restart")
+        );
+
+        let mismatched_restart = lower_source(
+            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+             define function main()\n  handle 1 with restart <bad> #f end\nend;",
+        );
+        assert!(
+            mismatched_restart
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message
+                    == "handle body and restart must have matching result kinds")
         );
     }
 

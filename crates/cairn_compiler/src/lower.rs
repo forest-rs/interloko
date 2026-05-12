@@ -461,6 +461,14 @@ impl<'module> Lowering<'module> {
 struct Value {
     reg: Register,
     kind: ValueKind,
+    reachable: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ActiveRestart {
+    specializer: sem::ClassId,
+    signal_label: LabelId,
+    result: Value,
 }
 
 struct BodyLowering<'module> {
@@ -471,6 +479,7 @@ struct BodyLowering<'module> {
     locals: Vec<Local>,
     instructions: Vec<Instr>,
     local_regs: Vec<Option<Value>>,
+    active_restarts: Vec<ActiveRestart>,
     next_reg: u32,
     next_label: u32,
 }
@@ -519,6 +528,7 @@ impl<'module> BodyLowering<'module> {
             locals: Vec::new(),
             instructions: Vec::new(),
             local_regs: Vec::new(),
+            active_restarts: Vec::new(),
             next_reg: 2,
             next_label: 0,
         }
@@ -537,6 +547,7 @@ impl<'module> BodyLowering<'module> {
             locals: Vec::new(),
             instructions: Vec::new(),
             local_regs: vec![None; source_locals.len()],
+            active_restarts: Vec::new(),
             next_reg: 1,
             next_label: 0,
         }
@@ -552,7 +563,11 @@ impl<'module> BodyLowering<'module> {
             return Err(invalid_semantic("parameter local id is out of range"));
         };
         let kind = value_kind(local.kind)?;
-        let value = Value { reg, kind };
+        let value = Value {
+            reg,
+            kind,
+            reachable: true,
+        };
         self.set_local(local_id, value)?;
         self.params.push(Param {
             source: Some(local_id),
@@ -725,6 +740,12 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::Signal {
+                condition,
+                condition_class,
+                span,
+                ..
+            } => self.lower_signal(condition, *condition_class, *span),
             sem::Expr::MakeObject {
                 class,
                 fields,
@@ -800,8 +821,42 @@ impl<'module> BodyLowering<'module> {
                 else_branch,
                 span,
             } => self.lower_if(condition, then_branch, else_branch, *span),
+            sem::Expr::Handle {
+                body,
+                restart,
+                span,
+            } => self.lower_handle(body, restart, *span),
             sem::Expr::Error { .. } => Err(invalid_semantic("semantic expression is invalid")),
         }
+    }
+
+    fn lower_signal(
+        &mut self,
+        condition: &sem::Expr,
+        condition_class: sem::ClassId,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let condition = self.lower_expr(condition)?;
+        let ValueKind::Object(Some(lowered_class)) = condition.kind else {
+            return Err(invalid_semantic("signal condition is not an object"));
+        };
+        let Some(active) = self.active_restarts.last().copied() else {
+            return Err(invalid_semantic("signal has no active restart"));
+        };
+        if lowered_class != condition_class || condition_class != active.specializer {
+            return Err(invalid_semantic(
+                "signal condition class does not match restart",
+            ));
+        }
+        self.instructions.push(Instr::Jump {
+            label: active.signal_label,
+            span,
+        });
+        Ok(Value {
+            reg: active.result.reg,
+            kind: active.result.kind,
+            reachable: false,
+        })
     }
 
     fn lower_if(
@@ -829,25 +884,87 @@ impl<'module> BodyLowering<'module> {
         self.instructions.push(Instr::Label { label: then_label });
         let then_value = self.lower_expr(then_branch)?;
         let result = self.alloc(then_value.kind);
-        self.instructions.push(Instr::Move {
-            dst: result.reg,
-            src: then_value.reg,
-            span: then_branch.span(),
-        });
-        self.instructions.push(Instr::Jump {
-            label: join_label,
-            span,
-        });
+        if then_value.reachable {
+            self.instructions.push(Instr::Move {
+                dst: result.reg,
+                src: then_value.reg,
+                span: then_branch.span(),
+            });
+            self.instructions.push(Instr::Jump {
+                label: join_label,
+                span,
+            });
+        }
 
         self.instructions.push(Instr::Label { label: else_label });
         let else_value = self.lower_expr(else_branch)?;
         if else_value.kind != result.kind {
             return Err(invalid_semantic("if branch result kinds differ"));
         }
+        if else_value.reachable {
+            self.instructions.push(Instr::Move {
+                dst: result.reg,
+                src: else_value.reg,
+                span: else_branch.span(),
+            });
+            self.instructions.push(Instr::Jump {
+                label: join_label,
+                span,
+            });
+        }
+
+        self.instructions.push(Instr::Label { label: join_label });
+        Ok(Value {
+            reg: result.reg,
+            kind: result.kind,
+            reachable: then_value.reachable || else_value.reachable,
+        })
+    }
+
+    fn lower_handle(
+        &mut self,
+        body: &sem::Expr,
+        restart: &sem::Restart,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let result = self.alloc(value_kind(restart.result_kind)?);
+        let signal_label = self.alloc_label();
+        let join_label = self.alloc_label();
+        self.active_restarts.push(ActiveRestart {
+            specializer: restart.specializer,
+            signal_label,
+            result,
+        });
+        let body_value = self.lower_expr(body)?;
+        self.active_restarts.pop();
+        if body_value.kind != result.kind {
+            return Err(invalid_semantic("handle body kind does not match restart"));
+        }
+        if body_value.reachable {
+            self.instructions.push(Instr::Move {
+                dst: result.reg,
+                src: body_value.reg,
+                span: body.span(),
+            });
+            self.instructions.push(Instr::Jump {
+                label: join_label,
+                span,
+            });
+        }
+
+        self.instructions.push(Instr::Label {
+            label: signal_label,
+        });
+        let restart_value = self.lower_expr(&restart.body)?;
+        if restart_value.kind != result.kind {
+            return Err(invalid_semantic(
+                "restart result kind does not match handle",
+            ));
+        }
         self.instructions.push(Instr::Move {
             dst: result.reg,
-            src: else_value.reg,
-            span: else_branch.span(),
+            src: restart_value.reg,
+            span: restart.body.span(),
         });
         self.instructions.push(Instr::Jump {
             label: join_label,
@@ -870,6 +987,7 @@ impl<'module> BodyLowering<'module> {
         let value = Value {
             reg: Register(self.next_reg),
             kind,
+            reachable: true,
         };
         self.next_reg = self.next_reg.saturating_add(1);
         value
@@ -1219,6 +1337,20 @@ mod tests {
         assert!(dump.contains("i64.lt"));
         assert!(dump.contains("br "));
         assert!(dump.contains("jmp bb"));
+        assert!(dump.contains(" = mov "));
+    }
+
+    #[test]
+    fn lowers_signal_handle_and_restart_join() {
+        let module = lower_source(
+            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+             define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("make <bad>(%r"));
+        assert!(dump.contains("jmp bb0"));
+        assert!(dump.contains("const.i64 42"));
         assert!(dump.contains(" = mov "));
     }
 }

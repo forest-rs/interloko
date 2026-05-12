@@ -62,6 +62,12 @@ pub enum TokenKind {
     Then,
     /// `else`.
     Else,
+    /// `handle`.
+    Handle,
+    /// `with`.
+    With,
+    /// `restart`.
+    Restart,
     /// `end`.
     End,
     /// User identifier.
@@ -172,6 +178,10 @@ pub enum CstKind {
     BoolExpr,
     /// Conditional expression.
     IfExpr,
+    /// Recoverable condition handler expression.
+    HandleExpr,
+    /// Restart clause in a handler expression.
+    RestartClause,
     /// Type/class name expression.
     TypeExpr,
     /// Malformed syntax placeholder.
@@ -270,6 +280,7 @@ fn syntax_node_id(
         | CstKind::NameExpr
         | CstKind::NumberExpr
         | CstKind::BoolExpr
+        | CstKind::RestartClause
         | CstKind::TypeExpr => {
             mix_first_named_token(&mut builder, children, tokens, source);
         }
@@ -375,6 +386,8 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::Error => 18,
         CstKind::BoolExpr => 19,
         CstKind::IfExpr => 20,
+        CstKind::HandleExpr => 21,
+        CstKind::RestartClause => 22,
     }
 }
 
@@ -413,6 +426,9 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::LessEqual => 31,
         TokenKind::Greater => 32,
         TokenKind::GreaterEqual => 33,
+        TokenKind::Handle => 34,
+        TokenKind::With => 35,
+        TokenKind::Restart => 36,
     }
 }
 
@@ -547,6 +563,9 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "if" => TokenKind::If,
                     "then" => TokenKind::Then,
                     "else" => TokenKind::Else,
+                    "handle" => TokenKind::Handle,
+                    "with" => TokenKind::With,
+                    "restart" => TokenKind::Restart,
                     "end" => TokenKind::End,
                     _ => TokenKind::Ident,
                 }
@@ -869,7 +888,39 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_expr(&mut self) -> CstNode {
-        self.parse_if()
+        self.parse_handle()
+    }
+
+    fn parse_handle(&mut self) -> CstNode {
+        let start = self.current_span();
+        if !self.at(TokenKind::Handle) {
+            return self.parse_if();
+        }
+
+        let mut children = Vec::new();
+        self.expect(TokenKind::Handle, &mut children, "expected `handle`");
+        children.push(CstElement::Node(self.parse_expr()));
+        self.expect(TokenKind::With, &mut children, "expected `with`");
+        children.push(CstElement::Node(self.parse_restart_clause()));
+        self.expect(
+            TokenKind::End,
+            &mut children,
+            "expected `end` after `handle`",
+        );
+        self.node(CstKind::HandleExpr, children, start)
+    }
+
+    fn parse_restart_clause(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::Restart, &mut children, "expected `restart`");
+        self.expect(
+            TokenKind::TypeName,
+            &mut children,
+            "expected restart condition class",
+        );
+        children.push(CstElement::Node(self.parse_expr()));
+        self.node(CstKind::RestartClause, children, start)
     }
 
     fn parse_if(&mut self) -> CstNode {
@@ -1198,6 +1249,41 @@ mod tests {
             tree.tokens
                 .iter()
                 .any(|token| token.kind == TokenKind::Greater)
+        );
+    }
+
+    #[test]
+    fn parse_handle_restart_expression() {
+        let tree = parse(
+            "define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let body = tree
+            .root
+            .child_nodes(CstKind::Function)
+            .next()
+            .and_then(|function| function.child_nodes(CstKind::Body).next())
+            .expect("function body should parse");
+
+        let handle = body
+            .child_nodes(CstKind::HandleExpr)
+            .next()
+            .expect("handle expression should parse");
+        assert_eq!(handle.child_nodes(CstKind::RestartClause).count(), 1);
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Handle)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::With)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Restart)
         );
     }
 }

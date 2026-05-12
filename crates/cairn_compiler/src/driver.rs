@@ -155,6 +155,16 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_recoverable_restart() {
+        let value = compile_and_run_main(
+            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+             define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 42);
+    }
+
+    #[test]
     fn compiled_module_exposes_lowered_and_tape_dumps() {
         let compiled = compile(
             "define class <circle> (<object>)\n  slot radius;\nend;\n\

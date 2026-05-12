@@ -210,6 +210,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Recoverable condition signal.
+    Signal {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Condition object expression.
+        condition: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Object construction through `make(<class>, slot: value)`.
     MakeObject {
         /// Stable-ish AST node identity.
@@ -271,6 +280,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Recoverable condition handler expression.
+    Handle {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Handled body expression.
+        body: Box<Expr>,
+        /// Restart clause.
+        restart: Restart,
+        /// Source span.
+        span: Span,
+    },
     /// Placeholder for malformed syntax.
     Error {
         /// Stable-ish AST node identity.
@@ -289,11 +309,13 @@ impl Expr {
             | Self::Bool { id, .. }
             | Self::Name { id, .. }
             | Self::Call { id, .. }
+            | Self::Signal { id, .. }
             | Self::MakeObject { id, .. }
             | Self::SlotRead { id, .. }
             | Self::Binary { id, .. }
             | Self::Compare { id, .. }
             | Self::If { id, .. }
+            | Self::Handle { id, .. }
             | Self::Error { id, .. } => *id,
         }
     }
@@ -306,14 +328,29 @@ impl Expr {
             | Self::Bool { span, .. }
             | Self::Name { span, .. }
             | Self::Call { span, .. }
+            | Self::Signal { span, .. }
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
             | Self::Binary { span, .. }
             | Self::Compare { span, .. }
             | Self::If { span, .. }
+            | Self::Handle { span, .. }
             | Self::Error { span, .. } => *span,
         }
     }
+}
+
+/// Restart clause for a lexical condition handler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Restart {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Nominal condition class handled by this restart.
+    pub class_name: String,
+    /// Handler expression evaluated when a matching condition is signaled.
+    pub body: Box<Expr>,
+    /// Source span.
+    pub span: Span,
 }
 
 /// Keyword argument used by object construction.
@@ -644,6 +681,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::SlotExpr => self.lower_slot_read(node),
             CstKind::BinaryExpr => self.lower_binary(node),
             CstKind::IfExpr => self.lower_if(node),
+            CstKind::HandleExpr => self.lower_handle(node),
             _ => Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -713,6 +751,9 @@ impl<'tree> Lowering<'tree> {
         if text == "make" {
             return self.lower_make_object(node);
         }
+        if text == "signal" {
+            return self.lower_signal(node);
+        }
         let mut args = Vec::new();
         for arg_list in node.child_nodes(CstKind::ArgList) {
             for child in &arg_list.children {
@@ -730,6 +771,40 @@ impl<'tree> Lowering<'tree> {
             args,
             span: node.span.cover(name_span),
         }
+    }
+
+    fn lower_signal(&mut self, node: &CstNode) -> Expr {
+        let args = self.lower_regular_args(node);
+        if args.len() != 1 {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                "signal expects exactly one condition",
+            ));
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        }
+        Expr::Signal {
+            id: self.ast_id(node),
+            condition: Box::new(args.into_iter().next().expect("arity was checked")),
+            span: node.span,
+        }
+    }
+
+    fn lower_regular_args(&mut self, node: &CstNode) -> Vec<Expr> {
+        let mut args = Vec::new();
+        for arg_list in node.child_nodes(CstKind::ArgList) {
+            for child in &arg_list.children {
+                if let CstElement::Node(expr) = child {
+                    if matches!(expr.kind, CstKind::KeywordArg | CstKind::TypeExpr) {
+                        continue;
+                    }
+                    args.push(self.lower_expr(expr));
+                }
+            }
+        }
+        args
     }
 
     fn lower_make_object(&mut self, node: &CstNode) -> Expr {
@@ -921,6 +996,61 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
+    fn lower_handle(&mut self, node: &CstNode) -> Expr {
+        let mut body = None;
+        let mut restart = None;
+        for child in &node.children {
+            let CstElement::Node(child_node) = child else {
+                continue;
+            };
+            if child_node.kind == CstKind::RestartClause {
+                restart = Some(self.lower_restart(child_node));
+            } else {
+                body = Some(self.lower_expr(child_node));
+            }
+        }
+        Expr::Handle {
+            id: self.ast_id(node),
+            body: Box::new(body.unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            })),
+            restart: restart.unwrap_or_else(|| Restart {
+                id: self.ast_id(node),
+                class_name: String::new(),
+                body: Box::new(Expr::Error {
+                    id: self.ast_id(node),
+                    span: node.span,
+                }),
+                span: node.span,
+            }),
+            span: node.span,
+        }
+    }
+
+    fn lower_restart(&mut self, node: &CstNode) -> Restart {
+        let class_name = self
+            .first_token_text(node, TokenKind::TypeName)
+            .map_or_else(String::new, |(_, text)| text.to_string());
+        let body = node
+            .children
+            .iter()
+            .find_map(|child| match child {
+                CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                _ => None,
+            })
+            .unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            });
+        Restart {
+            id: self.ast_id(node),
+            class_name,
+            body: Box::new(body),
+            span: node.span,
+        }
+    }
+
     fn ast_id(&self, node: &CstNode) -> AstNodeId {
         AstNodeId::from_syntax(node.id)
     }
@@ -1049,6 +1179,35 @@ mod tests {
                 op: CompareOp::Ge,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn lowers_signal_handle_and_restart() {
+        let tree = syntax::parse(
+            "define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+        );
+        let module = lower(&tree);
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::Handle {
+            body,
+            restart,
+            span: _,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected handle expression");
+        };
+        assert_eq!(restart.class_name, "<bad>");
+        assert!(matches!(
+            restart.body.as_ref(),
+            Expr::Number { value: 42, .. }
+        ));
+        assert!(matches!(
+            body.as_ref(),
+            Expr::Signal { condition, .. }
+                if matches!(condition.as_ref(), Expr::MakeObject { class_name, .. } if class_name == "<bad>")
         ));
     }
 

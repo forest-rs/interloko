@@ -1,0 +1,24 @@
+// expect: run 99
+// expect: diagnostics 0
+// expect: dump sem contains handle restart
+// expect: dump lowered contains make <negative-input>
+
+define class <negative-input> (<object>)
+  slot fallback;
+end;
+
+define function checked-double(x)
+  handle
+    if x < 0 then
+      signal(make(<negative-input>, fallback: 99))
+    else
+      x * 2
+    end
+  with restart <negative-input>
+    99
+  end
+end;
+
+define function main()
+  checked-double(0 - 1)
+end;

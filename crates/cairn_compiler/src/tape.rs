@@ -531,4 +531,16 @@ mod tests {
         assert_eq!(tape.program.program().functions.len(), 1);
         assert_eq!(tape.main, Some(FuncId(0)));
     }
+
+    #[test]
+    fn emits_verified_tape_for_signal_handle_restart() {
+        let module = lower_source(
+            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+             define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+
+        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.main, Some(FuncId(0)));
+    }
 }

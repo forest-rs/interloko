@@ -219,6 +219,54 @@
 - Short-circuit boolean operators are deferred so they can be specified as
   control-flow forms rather than eager arithmetic operators.
 
+## Implemented: Recoverable Condition Restart Slice
+
+- Condition classes are ordinary nominal classes. There is no separate
+  condition declaration form in this slice.
+- `signal(condition)` is recognized as a special call-shaped expression where
+  `condition` must be a statically known object.
+- `handle BODY with restart <condition-class> HANDLER end` establishes one
+  lexical restart for `BODY`.
+- A `signal` must appear inside an active lexical handler, and the signaled
+  condition class must match the nearest active restart's condition class.
+- `signal` resumes with the active restart's result category.
+- The handled body and restart handler must produce the same semantic value
+  category.
+- Semantic IR now has explicit `Signal`, `Handle`, and `Restart` nodes.
+- Lowered IR uses an internal lexical restart frame in `BodyLowering`:
+  - normal body completion moves into the handle result register;
+  - `signal` constructs/evaluates the condition object and jumps to the restart
+    handler label;
+  - the handler computes the replacement value and jumps to the shared join.
+- `execution_tape` still receives only ordinary object construction, branches,
+  jumps, moves, and arithmetic. There are no condition-specific tape opcodes.
+- Session dumps and fingerprints include signal/handle/restart structure, so
+  handler body edits affect the expected method-level artifacts.
+- The corpus includes:
+  - invalid-radius area recovery;
+  - checked arithmetic fallback;
+  - uncaught signal diagnostics;
+  - body/restart result-kind mismatch diagnostics;
+  - restart class mismatch diagnostics.
+- Incremental tests cover edits to a restart handler in one method and verify
+  that the edited method's lowered/tape artifacts recompute while an unrelated
+  method's artifacts are reused.
+
+### Deferred Condition Design
+
+- Cross-call condition signaling and dynamic handler lookup are deferred.
+- Runtime handler stacks and dynamic extent edge cases are deferred.
+- Restart handlers do not receive the condition object as a parameter yet, so
+  handlers cannot inspect condition payload slots in this first slice.
+- Full effect typing, effect inference, restart selection, stack inspection,
+  async interaction, and multiple values are deferred.
+
+### Migration Notes
+
+- Public AST and semantic expression enums gained `Signal` and `Handle`
+  variants.
+- Semantic IR gained the public `Restart` type.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
@@ -240,6 +288,7 @@
   deterministic logical ticks and work units.
 - Query scheduling that avoids recomputing prerequisite fingerprints when
   validating cache reuse.
+- Cross-call condition signaling, dynamic handler stacks, and effect typing.
 
 ## Follow-Up Tickets
 

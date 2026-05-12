@@ -1,0 +1,31 @@
+// expect: run 0
+// expect: diagnostics 0
+// expect: dump ast contains handle
+// expect: dump sem contains signal
+// expect: dump lowered contains jmp
+
+define class <circle> (<object>)
+  slot radius;
+end;
+
+define class <invalid-radius> (<object>)
+  slot fallback;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  handle
+    if c.radius < 0 then
+      signal(make(<invalid-radius>, fallback: 0))
+    else
+      c.radius * c.radius
+    end
+  with restart <invalid-radius>
+    0
+  end
+end;
+
+define function main()
+  area(make(<circle>, radius: 0 - 10))
+end;

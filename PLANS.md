@@ -1,5 +1,114 @@
 # Plans
 
+## Build Recoverable Condition Restart Slice
+
+Ticket: `cai-xvew`
+
+### Goal
+
+Add Cairn's first recoverable condition/restart vertical slice. Condition
+objects remain ordinary nominal objects. `signal(condition)` inside a lexical
+`handle ... with restart <condition-class> ... end` resumes with one handler
+value, lowering to existing object construction, branches, jumps, and moves.
+
+### Non-Goals
+
+- No full effect typing.
+- No stack inspection.
+- No async.
+- No dynamic extent edge cases.
+- No multiple values.
+- No optimizer work.
+- No general cross-call unwinding.
+- No runtime handler stack.
+
+### Fence
+
+This slice owns lexical condition signaling and one resumable restart value
+inside a single function or method body. It explicitly does not own general
+dynamic handler lookup, cross-call unwinding, typed effect inference, restart
+selection, or runtime stack inspection.
+
+### Syntax
+
+The first syntax stays expression-oriented:
+
+```text
+handle BODY
+with restart <condition-class>
+  HANDLER
+end
+```
+
+Signals use call-shaped syntax:
+
+```text
+signal(make(<condition-class>, fallback: 0))
+```
+
+### Plumbing
+
+```text
+ordinary class <invalid-radius>
+  -> signal(make(<invalid-radius>, ...))
+  -> handle body with restart <invalid-radius> handler end
+  -> AST Signal / Handle / Restart
+  -> semantic Signal / Handle / Restart + kind diagnostics
+  -> lowered lexical restart frame:
+       body normal path -> join
+       signal path      -> restart handler -> join
+  -> execution_tape ordinary object calls, branches, jumps, moves
+```
+
+### Invariants
+
+- A `signal` must appear inside an active lexical `handle`.
+- A `signal` condition must have a statically known nominal object class.
+- The nearest active restart must specialize the signaled condition class.
+- The handled body and restart handler must produce the same value category.
+- The restart handler receives no condition parameter in this first slice.
+  Inspecting condition payloads from handlers is deferred.
+- The core compiler crate remains `no_std + alloc`.
+
+### Steps
+
+1. Extend syntax for `handle`, `with`, and `restart` plus CST nodes for handle
+   expressions and restart clauses.
+2. Treat `signal(...)` as special call-shaped AST and add AST `Handle` and
+   `Restart`.
+3. Add semantic IR for `Signal`, `Handle`, and `Restart` with diagnostics for:
+   - signal outside a handle;
+   - signal condition that is not a known object;
+   - signal class not handled by the active restart;
+   - handled body / restart result kind mismatch.
+4. Lower handles using an internal lexical restart frame in `BodyLowering`,
+   without adding execution_tape opcodes or a runtime handler stack.
+5. Update AST, semantic, lowered, and tape dumps/fingerprints.
+6. Add corpus cases:
+   - recovering from invalid radius;
+   - checked arithmetic fallback;
+   - diagnostics for uncaught signals and restart/body mismatches.
+7. Add incremental tests proving restart handler edits recompute the edited
+   method's lowered/tape artifacts while unrelated methods are reused.
+8. Update progress notes and migration notes.
+9. Run full gates:
+   - `cargo fmt --all`;
+   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
+   - `cargo test --workspace --all-features`;
+   - `cargo doc --workspace --all-features --no-deps`;
+   - existing examples;
+   - `cairn_lab` fixture tests;
+   - `cairn_corpus`.
+
+### Risks
+
+- Lexical restart frames are intentionally smaller than real conditions. The
+  docs must call out that cross-call signaling and handler stacks are deferred.
+- `signal` returns the active restart's result category, so semantic lowering
+  must lower restart handlers before the handled body.
+- Nested handles should target the nearest matching active restart; corpus tests
+  can stay small, but the lowering stack should be structured for nesting.
+
 ## Add Control Flow, Booleans, and Comparisons
 
 Ticket: `cai-srg5`

@@ -1054,6 +1054,10 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
                 dump_ast_expr(out, arg, indent + 2);
             }
         }
+        ast::Expr::Signal { id, condition, .. } => {
+            let _ = writeln!(out, "{id} signal");
+            dump_ast_expr(out, condition, indent + 2);
+        }
         ast::Expr::MakeObject {
             id,
             class_name,
@@ -1104,6 +1108,17 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             indent_line(out, indent + 2);
             let _ = writeln!(out, "else");
             dump_ast_expr(out, else_branch, indent + 4);
+        }
+        ast::Expr::Handle {
+            id, body, restart, ..
+        } => {
+            let _ = writeln!(out, "{id} handle");
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "body");
+            dump_ast_expr(out, body, indent + 4);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "restart {} {}", restart.id, restart.class_name);
+            dump_ast_expr(out, &restart.body, indent + 4);
         }
         ast::Expr::Error { id, .. } => {
             let _ = writeln!(out, "{id} error");
@@ -1206,6 +1221,15 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 dump_sem_expr(out, arg, indent + 2);
             }
         }
+        sem::Expr::Signal {
+            condition,
+            condition_class,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(out, "signal c{} result={result_kind:?}", condition_class.0);
+            dump_sem_expr(out, condition, indent + 2);
+        }
         sem::Expr::MakeObject { class, fields, .. } => {
             let _ = writeln!(out, "make c{}", class.0);
             for field in fields {
@@ -1249,6 +1273,19 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             indent_line(out, indent + 2);
             let _ = writeln!(out, "else");
             dump_sem_expr(out, else_branch, indent + 4);
+        }
+        sem::Expr::Handle { body, restart, .. } => {
+            let _ = writeln!(
+                out,
+                "handle restart c{} result={:?}",
+                restart.specializer.0, restart.result_kind
+            );
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "body");
+            dump_sem_expr(out, body, indent + 4);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "restart");
+            dump_sem_expr(out, &restart.body, indent + 4);
         }
         sem::Expr::Error { .. } => {
             let _ = writeln!(out, "error");
@@ -1455,6 +1492,20 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_args(module, args, out);
             out.push(')');
         }
+        sem::Expr::Signal {
+            condition,
+            condition_class,
+            result_kind,
+            ..
+        } => {
+            let definition = module
+                .classes
+                .get(condition_class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "signal({definition}:{result_kind:?}:");
+            fingerprint_sem_expr(module, condition, out);
+            out.push(')');
+        }
         sem::Expr::MakeObject { class, fields, .. } => {
             let definition = module
                 .classes
@@ -1513,6 +1564,17 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, then_branch, out);
             out.push(':');
             fingerprint_sem_expr(module, else_branch, out);
+            out.push(')');
+        }
+        sem::Expr::Handle { body, restart, .. } => {
+            let definition = module
+                .classes
+                .get(restart.specializer.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "handle({definition}:{:?}:body=", restart.result_kind);
+            fingerprint_sem_expr(module, body, out);
+            out.push_str(":restart=");
+            fingerprint_sem_expr(module, &restart.body, out);
             out.push(')');
         }
         sem::Expr::Error { .. } => {
@@ -1775,6 +1837,60 @@ mod tests {
                      define method area(c :: <circle>)\n  if c.radius > 0 then c.radius + c.radius else 0 end\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 10))\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("area.cairn", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let circle = first.artifacts.sem.methods[0].definition;
+        let square = first.artifacts.sem.methods[1].definition;
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(circle)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(circle)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+    }
+
+    #[test]
+    fn incremental_restart_handler_edit_recomputes_only_affected_method_artifacts() {
+        let before = "define class <circle> (<object>)\n  slot radius;\nend;\n\
+                      define class <square> (<object>)\n  slot side;\nend;\n\
+                      define class <invalid-radius> (<object>)\n  slot fallback;\nend;\n\
+                      define generic area(x);\n\
+                      define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart <invalid-radius> 0 end\nend;\n\
+                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                      define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
+        let after = "define class <circle> (<object>)\n  slot radius;\nend;\n\
+                     define class <square> (<object>)\n  slot side;\nend;\n\
+                     define class <invalid-radius> (<object>)\n  slot fallback;\nend;\n\
+                     define generic area(x);\n\
+                     define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart <invalid-radius> 1 end\nend;\n\
+                     define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                     define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
         let file = session.add_source("area.cairn", before);
         let first = session
