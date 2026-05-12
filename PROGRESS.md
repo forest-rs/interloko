@@ -179,6 +179,46 @@
 - `cairn_lab diff` output is now an incremental cache report followed by the
   existing preserved/changed/affected definition diff.
 
+## Implemented: Control Flow, Booleans, and Comparisons
+
+- Syntax now recognizes boolean literals `#t` and `#f`, integer comparison
+  operators `=`, `<`, `<=`, `>`, `>=`, and expression-level
+  `if ... then ... else ... end`.
+- AST now has explicit boolean, comparison, and conditional expression nodes.
+- Semantic IR now has a `Bool` value category alongside `I64`, nominal objects,
+  and errors.
+- Integer comparisons require `I64` operands and produce `Bool`.
+- `if` conditions must be `Bool`, and both branches must produce the same
+  semantic value category.
+- Diagnostics cover non-boolean `if` conditions, mismatched branch result
+  kinds, non-`I64` arithmetic operands, and non-`I64` comparison operands.
+- Lowered IR now includes:
+  - boolean constants;
+  - signed integer comparisons;
+  - conditional branches;
+  - unconditional jumps;
+  - register moves used as explicit join values.
+- `execution_tape` emission maps those lowered instructions to ordinary tape
+  operations. There are no special Cairn control-flow opcodes.
+- Session dumps show control flow in CST, AST, semantic IR, lowered IR, and tape
+  disassembly.
+- The corpus now includes small programs for boolean conditionals,
+  comparisons, `max`, `abs`, nested conditionals, generic dispatch guarded by a
+  conditional, and expected control-flow diagnostics.
+- Incremental tests cover edits inside one conditional branch and verify that
+  the edited method's lowered/tape artifacts recompute while unrelated method
+  artifacts are reused.
+
+### Deferred Control-Flow Design
+
+- Loops are deferred until lowered IR has an explicit block model that can
+  represent backedges and loop-carried values cleanly.
+- Recursion-specific analysis is deferred. Direct calls may use simple
+  source-order result categories, but this is not a full fixed-point return-kind
+  inference system.
+- Short-circuit boolean operators are deferred so they can be specified as
+  control-flow forms rather than eager arithmetic operators.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.

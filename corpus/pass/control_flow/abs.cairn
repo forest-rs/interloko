@@ -1,0 +1,11 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump lowered contains i64.lt
+
+define function abs(x)
+  if x < 0 then 0 - x else x end
+end;
+
+define function main()
+  abs(0 - 42)
+end;

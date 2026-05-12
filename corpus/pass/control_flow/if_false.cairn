@@ -1,0 +1,8 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump ast contains bool false
+// expect: dump lowered contains const.bool false
+
+define function main()
+  if #f then 0 else 42 end
+end;

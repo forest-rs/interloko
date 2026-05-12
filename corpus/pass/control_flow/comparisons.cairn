@@ -1,0 +1,20 @@
+// expect: run 1
+// expect: diagnostics 0
+// expect: dump sem contains compare Eq
+// expect: dump lowered contains i64.ge
+
+define function eq()
+  if 3 = 3 then 1 else 0 end
+end;
+
+define function le()
+  if 3 <= 4 then eq() else 0 end
+end;
+
+define function gt()
+  if 4 > 3 then le() else 0 end
+end;
+
+define function main()
+  if 4 >= 4 then gt() else 0 end
+end;

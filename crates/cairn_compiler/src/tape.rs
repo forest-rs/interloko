@@ -205,6 +205,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_i64(dst.0, *value);
             }
+            lower::Instr::ConstBool { dst, value, span } => {
+                self.set_span(*span);
+                self.asm.const_bool(dst.0, *value);
+            }
             lower::Instr::ConstU64 { dst, value, span } => {
                 self.set_span(*span);
                 self.asm.const_u64(dst.0, *value);
@@ -226,6 +230,32 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     sem::BinaryOp::Mul => {
                         self.asm.i64_mul(dst.0, lhs.0, rhs.0);
+                    }
+                }
+            }
+            lower::Instr::I64Compare {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                match op {
+                    sem::CompareOp::Eq => {
+                        self.asm.i64_eq(dst.0, lhs.0, rhs.0);
+                    }
+                    sem::CompareOp::Lt => {
+                        self.asm.i64_lt(dst.0, lhs.0, rhs.0);
+                    }
+                    sem::CompareOp::Le => {
+                        self.asm.i64_le(dst.0, lhs.0, rhs.0);
+                    }
+                    sem::CompareOp::Gt => {
+                        self.asm.i64_gt(dst.0, lhs.0, rhs.0);
+                    }
+                    sem::CompareOp::Ge => {
+                        self.asm.i64_ge(dst.0, lhs.0, rhs.0);
                     }
                 }
             }
@@ -308,6 +338,15 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.br(cond.0, then_label, else_label);
             }
+            lower::Instr::Jump { label, span } => {
+                let label = self.label(*label)?;
+                self.set_span(*span);
+                self.asm.jmp(label);
+            }
+            lower::Instr::Move { dst, src, span } => {
+                self.set_span(*span);
+                self.asm.mov(dst.0, src.0);
+            }
             lower::Instr::Return { value, span } => {
                 self.set_span(*span);
                 self.asm.ret(0, &[value.0]);
@@ -355,6 +394,9 @@ fn labels_for(function: &lower::Function, asm: &mut Asm) -> Vec<Label> {
                 count = count.max(then_label.0 as usize + 1);
                 count = count.max(else_label.0 as usize + 1);
             }
+            lower::Instr::Jump { label, .. } => {
+                count = count.max(label.0 as usize + 1);
+            }
             _ => {}
         }
     }
@@ -377,11 +419,14 @@ fn max_register(function: &lower::Function) -> u32 {
 
 fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
     match instr {
-        lower::Instr::Label { .. } | lower::Instr::Trap { .. } => {}
-        lower::Instr::ConstI64 { dst, .. } | lower::Instr::ConstU64 { dst, .. } => {
+        lower::Instr::Label { .. } | lower::Instr::Jump { .. } | lower::Instr::Trap { .. } => {}
+        lower::Instr::ConstI64 { dst, .. }
+        | lower::Instr::ConstBool { dst, .. }
+        | lower::Instr::ConstU64 { dst, .. } => {
             note_register(*dst, max);
         }
         lower::Instr::I64Binary { dst, lhs, rhs, .. }
+        | lower::Instr::I64Compare { dst, lhs, rhs, .. }
         | lower::Instr::EqU64 { dst, lhs, rhs, .. } => {
             note_register(*dst, max);
             note_register(*lhs, max);
@@ -405,6 +450,10 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         }
         lower::Instr::Branch { cond, .. } => {
             note_register(*cond, max);
+        }
+        lower::Instr::Move { dst, src, .. } => {
+            note_register(*dst, max);
+            note_register(*src, max);
         }
         lower::Instr::Return { value, .. } => {
             note_register(*value, max);
@@ -472,5 +521,14 @@ mod tests {
         assert_eq!(tape.program.program().functions.len(), 3);
         assert_eq!(tape.main, Some(FuncId(0)));
         assert_eq!(tape.runtime.classes[0].slots, ["radius"]);
+    }
+
+    #[test]
+    fn emits_verified_tape_for_boolean_control_flow() {
+        let module = lower_source("define function main()\n  if 10 >= 5 then 42 else 0 end\nend;");
+        let tape = emit(&module).expect("tape emission should succeed");
+
+        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.main, Some(FuncId(0)));
     }
 }

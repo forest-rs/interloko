@@ -39,9 +39,11 @@ fn check_validates_all_corpus_cases() {
     let out = run_corpus(&["check", root.to_str().expect("corpus path should be utf8")]);
 
     assert!(out.contains("pass/arithmetic/add.cairn"));
+    assert!(out.contains("pass/control_flow/generic_guarded.cairn"));
     assert!(out.contains("pass/generics/two_class_dispatch.cairn"));
+    assert!(out.contains("fail/control_flow/invalid_if_condition.cairn"));
     assert!(out.contains("fail/diagnostics/unresolved_local.cairn"));
-    assert!(out.contains("corpus: 14 passed, 0 failed, 14 total"));
+    assert!(out.contains("corpus: 23 passed, 0 failed, 23 total"));
 }
 
 #[test]

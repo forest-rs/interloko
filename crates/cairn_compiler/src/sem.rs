@@ -57,6 +57,8 @@ pub struct LocalId(
 pub enum ValueKind {
     /// Signed integer value.
     I64,
+    /// Boolean value.
+    Bool,
     /// Runtime object with statically known nominal class.
     Object(ClassId),
     /// Invalid or unknown value.
@@ -140,6 +142,8 @@ pub struct Method {
     pub locals: Vec<Local>,
     /// Method body.
     pub body: Block,
+    /// Result value category.
+    pub result_kind: ValueKind,
     /// Source span.
     pub span: Span,
 }
@@ -159,6 +163,8 @@ pub struct Function {
     pub locals: Vec<Local>,
     /// Function body.
     pub body: Block,
+    /// Result value category.
+    pub result_kind: ValueKind,
     /// Source span.
     pub span: Span,
 }
@@ -232,6 +238,33 @@ impl From<ast::BinaryOp> for BinaryOp {
     }
 }
 
+/// Semantic integer comparison operator.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CompareOp {
+    /// Equality.
+    Eq,
+    /// Strictly less than.
+    Lt,
+    /// Less than or equal.
+    Le,
+    /// Strictly greater than.
+    Gt,
+    /// Greater than or equal.
+    Ge,
+}
+
+impl From<ast::CompareOp> for CompareOp {
+    fn from(value: ast::CompareOp) -> Self {
+        match value {
+            ast::CompareOp::Eq => Self::Eq,
+            ast::CompareOp::Lt => Self::Lt,
+            ast::CompareOp::Le => Self::Le,
+            ast::CompareOp::Gt => Self::Gt,
+            ast::CompareOp::Ge => Self::Ge,
+        }
+    }
+}
+
 /// Semantic expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
@@ -239,6 +272,13 @@ pub enum Expr {
     ConstI64 {
         /// Constant value.
         value: i64,
+        /// Source span.
+        span: Span,
+    },
+    /// Boolean constant.
+    ConstBool {
+        /// Constant value.
+        value: bool,
         /// Source span.
         span: Span,
     },
@@ -298,6 +338,28 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Integer comparison.
+    Compare {
+        /// Operator.
+        op: CompareOp,
+        /// Left operand.
+        lhs: Box<Expr>,
+        /// Right operand.
+        rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Conditional expression.
+    If {
+        /// Boolean condition.
+        condition: Box<Expr>,
+        /// Expression evaluated when the condition is true.
+        then_branch: Box<Expr>,
+        /// Expression evaluated when the condition is false.
+        else_branch: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Placeholder for semantically invalid code.
     Error {
         /// Source span.
@@ -311,12 +373,15 @@ impl Expr {
     pub const fn span(&self) -> Span {
         match self {
             Self::ConstI64 { span, .. }
+            | Self::ConstBool { span, .. }
             | Self::Local { span, .. }
             | Self::DirectCall { span, .. }
             | Self::GenericCall { span, .. }
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
             | Self::Binary { span, .. }
+            | Self::Compare { span, .. }
+            | Self::If { span, .. }
             | Self::Error { span } => *span,
         }
     }
@@ -334,6 +399,7 @@ struct FunctionSymbol {
     name: String,
     id: FunctionId,
     arity: usize,
+    return_kind: ValueKind,
     span: Span,
 }
 
@@ -500,6 +566,7 @@ impl Lowering {
                 name: function.name.clone(),
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
                 arity: function.params.len(),
+                return_kind: ValueKind::I64,
                 span: function.span,
             });
         }
@@ -566,6 +633,7 @@ impl Lowering {
             method.param.span,
         );
         let body = self.lower_block(&mut ctx, &method.body);
+        let result_kind = self.expr_kind(&ctx, &body.result);
         self.diagnostics.extend(ctx.diagnostics);
         Method {
             id,
@@ -575,6 +643,7 @@ impl Lowering {
             param,
             locals: ctx.locals,
             body,
+            result_kind,
             span: method.span,
         }
     }
@@ -599,6 +668,10 @@ impl Lowering {
         }
 
         let body = self.lower_block(&mut ctx, &function.body);
+        let result_kind = self.expr_kind(&ctx, &body.result);
+        if let Some(symbol) = self.functions.get_mut(id.0 as usize) {
+            symbol.return_kind = result_kind;
+        }
         self.diagnostics.extend(ctx.diagnostics);
 
         Function {
@@ -608,6 +681,7 @@ impl Lowering {
             params,
             locals: ctx.locals,
             body,
+            result_kind,
             span: function.span,
         }
     }
@@ -645,6 +719,10 @@ impl Lowering {
     fn lower_expr(&self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
         match expr {
             ast::Expr::Number { value, span, .. } => Expr::ConstI64 {
+                value: *value,
+                span: *span,
+            },
+            ast::Expr::Bool { value, span, .. } => Expr::ConstBool {
                 value: *value,
                 span: *span,
             },
@@ -719,14 +797,83 @@ impl Lowering {
             } => self.lower_slot_read(ctx, receiver, slot, *span),
             ast::Expr::Binary {
                 op, lhs, rhs, span, ..
-            } => Expr::Binary {
-                op: (*op).into(),
-                lhs: Box::new(self.lower_expr(ctx, lhs)),
-                rhs: Box::new(self.lower_expr(ctx, rhs)),
-                span: *span,
-            },
+            } => {
+                let lhs = self.lower_expr(ctx, lhs);
+                let rhs = self.lower_expr(ctx, rhs);
+                self.expect_i64_operands(ctx, *span, &lhs, &rhs, "arithmetic operands must be i64");
+                Expr::Binary {
+                    op: (*op).into(),
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: *span,
+                }
+            }
+            ast::Expr::Compare {
+                op, lhs, rhs, span, ..
+            } => {
+                let lhs = self.lower_expr(ctx, lhs);
+                let rhs = self.lower_expr(ctx, rhs);
+                self.expect_i64_operands(ctx, *span, &lhs, &rhs, "comparison operands must be i64");
+                Expr::Compare {
+                    op: (*op).into(),
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: *span,
+                }
+            }
+            ast::Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+                ..
+            } => {
+                let condition = self.lower_expr(ctx, condition);
+                let then_branch = self.lower_expr(ctx, then_branch);
+                let else_branch = self.lower_expr(ctx, else_branch);
+                let condition_kind = self.expr_kind(ctx, &condition);
+                if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
+                    ctx.diagnostics
+                        .push(Diagnostic::error(*span, "if condition must be bool"));
+                }
+                let then_kind = self.expr_kind(ctx, &then_branch);
+                let else_kind = self.expr_kind(ctx, &else_branch);
+                if then_kind != else_kind
+                    && !matches!(then_kind, ValueKind::Error)
+                    && !matches!(else_kind, ValueKind::Error)
+                {
+                    ctx.diagnostics.push(Diagnostic::error(
+                        *span,
+                        "if branches must have matching result kinds",
+                    ));
+                }
+                Expr::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                    span: *span,
+                }
+            }
             ast::Expr::Error { span, .. } => Expr::Error { span: *span },
         }
+    }
+
+    fn expect_i64_operands(
+        &self,
+        ctx: &mut FunctionContext,
+        span: Span,
+        lhs: &Expr,
+        rhs: &Expr,
+        message: &str,
+    ) {
+        let lhs_kind = self.expr_kind(ctx, lhs);
+        let rhs_kind = self.expr_kind(ctx, rhs);
+        if matches!(lhs_kind, ValueKind::I64 | ValueKind::Error)
+            && matches!(rhs_kind, ValueKind::I64 | ValueKind::Error)
+        {
+            return;
+        }
+        ctx.diagnostics.push(Diagnostic::error(span, message));
     }
 
     fn lower_make_object(
@@ -812,12 +959,29 @@ impl Lowering {
     fn expr_kind(&self, ctx: &FunctionContext, expr: &Expr) -> ValueKind {
         match expr {
             Expr::ConstI64 { .. }
-            | Expr::DirectCall { .. }
             | Expr::GenericCall { .. }
             | Expr::SlotRead { .. }
             | Expr::Binary { .. } => ValueKind::I64,
+            Expr::ConstBool { .. } | Expr::Compare { .. } => ValueKind::Bool,
             Expr::Local { local, .. } => ctx.local_kind(*local),
+            Expr::DirectCall { function, .. } => self
+                .functions
+                .get(function.0 as usize)
+                .map_or(ValueKind::Error, |symbol| symbol.return_kind),
             Expr::MakeObject { class, .. } => ValueKind::Object(*class),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_kind = self.expr_kind(ctx, then_branch);
+                let else_kind = self.expr_kind(ctx, else_branch);
+                if then_kind == else_kind {
+                    then_kind
+                } else {
+                    ValueKind::Error
+                }
+            }
             Expr::Error { .. } => ValueKind::Error,
         }
     }
@@ -911,6 +1075,56 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn checks_booleans_comparisons_and_if_kinds() {
+        let module = lower_source(
+            "define function nonnegative(x)\n  x >= 0\nend;\n\
+             define function main(x)\n  if nonnegative(x) then x else 0 - x end\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.functions[0].result_kind, ValueKind::Bool);
+        assert_eq!(module.functions[1].result_kind, ValueKind::I64);
+        let Expr::If {
+            condition,
+            then_branch: _,
+            else_branch: _,
+            ..
+        } = &module.functions[1].body.result
+        else {
+            panic!("expected if expression");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::DirectCall {
+                function: FunctionId(0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reports_invalid_if_condition_and_branch_mismatch() {
+        let invalid_condition =
+            lower_source("define function main()\n  if 1 then 2 else 3 end\nend;");
+        assert!(
+            invalid_condition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "if condition must be bool")
+        );
+
+        let mismatched_branches =
+            lower_source("define function main(x)\n  if x = 0 then #t else 3 end\nend;");
+        assert!(
+            mismatched_branches
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message
+                    == "if branches must have matching result kinds")
+        );
     }
 
     #[test]

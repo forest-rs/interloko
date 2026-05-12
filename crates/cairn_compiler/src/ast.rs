@@ -154,6 +154,21 @@ pub enum BinaryOp {
     Mul,
 }
 
+/// Integer comparison operator.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CompareOp {
+    /// Equality.
+    Eq,
+    /// Strictly less than.
+    Lt,
+    /// Less than or equal.
+    Le,
+    /// Strictly greater than.
+    Gt,
+    /// Greater than or equal.
+    Ge,
+}
+
 /// Surface expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
@@ -163,6 +178,15 @@ pub enum Expr {
         id: AstNodeId,
         /// Parsed value.
         value: i64,
+        /// Source span.
+        span: Span,
+    },
+    /// Boolean literal.
+    Bool {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Parsed value.
+        value: bool,
         /// Source span.
         span: Span,
     },
@@ -221,6 +245,32 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Integer comparison expression.
+    Compare {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Comparison operator.
+        op: CompareOp,
+        /// Left operand.
+        lhs: Box<Expr>,
+        /// Right operand.
+        rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Conditional expression.
+    If {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Boolean condition.
+        condition: Box<Expr>,
+        /// Expression evaluated when the condition is true.
+        then_branch: Box<Expr>,
+        /// Expression evaluated when the condition is false.
+        else_branch: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Placeholder for malformed syntax.
     Error {
         /// Stable-ish AST node identity.
@@ -236,11 +286,14 @@ impl Expr {
     pub const fn id(&self) -> AstNodeId {
         match self {
             Self::Number { id, .. }
+            | Self::Bool { id, .. }
             | Self::Name { id, .. }
             | Self::Call { id, .. }
             | Self::MakeObject { id, .. }
             | Self::SlotRead { id, .. }
             | Self::Binary { id, .. }
+            | Self::Compare { id, .. }
+            | Self::If { id, .. }
             | Self::Error { id, .. } => *id,
         }
     }
@@ -250,11 +303,14 @@ impl Expr {
     pub const fn span(&self) -> Span {
         match self {
             Self::Number { span, .. }
+            | Self::Bool { span, .. }
             | Self::Name { span, .. }
             | Self::Call { span, .. }
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
             | Self::Binary { span, .. }
+            | Self::Compare { span, .. }
+            | Self::If { span, .. }
             | Self::Error { span, .. } => *span,
         }
     }
@@ -582,14 +638,30 @@ impl<'tree> Lowering<'tree> {
     fn lower_expr(&mut self, node: &CstNode) -> Expr {
         match node.kind {
             CstKind::NumberExpr => self.lower_number(node),
+            CstKind::BoolExpr => self.lower_bool(node),
             CstKind::NameExpr => self.lower_name(node),
             CstKind::CallExpr => self.lower_call(node),
             CstKind::SlotExpr => self.lower_slot_read(node),
             CstKind::BinaryExpr => self.lower_binary(node),
+            CstKind::IfExpr => self.lower_if(node),
             _ => Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
             },
+        }
+    }
+
+    fn lower_bool(&mut self, node: &CstNode) -> Expr {
+        let Some((span, text)) = self.first_token_text(node, TokenKind::Bool) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::Bool {
+            id: self.ast_id(node),
+            value: text == "#t",
+            span,
         }
     }
 
@@ -752,20 +824,99 @@ impl<'tree> Lowering<'tree> {
         let lhs = exprs.next().unwrap_or_else(fallback);
         let rhs = exprs.next().unwrap_or_else(fallback);
         let op = node.children.iter().find_map(|child| match child {
-            CstElement::Token(index) => match self.tree.tokens[*index].kind {
-                TokenKind::Plus => Some(BinaryOp::Add),
-                TokenKind::Minus => Some(BinaryOp::Sub),
-                TokenKind::Star => Some(BinaryOp::Mul),
-                _ => None,
-            },
+            CstElement::Token(index) => Some(self.tree.tokens[*index].kind),
             _ => None,
         });
 
-        Expr::Binary {
+        match op {
+            Some(TokenKind::Plus) => Expr::Binary {
+                id: self.ast_id(node),
+                op: BinaryOp::Add,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::Minus) => Expr::Binary {
+                id: self.ast_id(node),
+                op: BinaryOp::Sub,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::Star) => Expr::Binary {
+                id: self.ast_id(node),
+                op: BinaryOp::Mul,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::Equal) => Expr::Compare {
+                id: self.ast_id(node),
+                op: CompareOp::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::Less) => Expr::Compare {
+                id: self.ast_id(node),
+                op: CompareOp::Lt,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::LessEqual) => Expr::Compare {
+                id: self.ast_id(node),
+                op: CompareOp::Le,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::Greater) => Expr::Compare {
+                id: self.ast_id(node),
+                op: CompareOp::Gt,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::GreaterEqual) => Expr::Compare {
+                id: self.ast_id(node),
+                op: CompareOp::Ge,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            _ => Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            },
+        }
+    }
+
+    fn lower_if(&mut self, node: &CstNode) -> Expr {
+        let mut exprs = Vec::new();
+        for child in &node.children {
+            if let CstElement::Node(expr) = child {
+                exprs.push(self.lower_expr(expr));
+            }
+        }
+        let mut exprs = exprs.into_iter();
+        let condition = exprs.next().unwrap_or_else(|| Expr::Error {
             id: self.ast_id(node),
-            op: op.unwrap_or(BinaryOp::Add),
-            lhs: alloc::boxed::Box::new(lhs),
-            rhs: alloc::boxed::Box::new(rhs),
+            span: node.span,
+        });
+        let then_branch = exprs.next().unwrap_or_else(|| Expr::Error {
+            id: self.ast_id(node),
+            span: node.span,
+        });
+        let else_branch = exprs.next().unwrap_or_else(|| Expr::Error {
+            id: self.ast_id(node),
+            span: node.span,
+        });
+        Expr::If {
+            id: self.ast_id(node),
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
             span: node.span,
         }
     }
@@ -863,6 +1014,42 @@ mod tests {
             panic!("expected area call");
         };
         assert!(matches!(args[0], Expr::MakeObject { .. }));
+    }
+
+    #[test]
+    fn lowers_booleans_comparisons_and_if() {
+        let tree =
+            syntax::parse("define function main(x)\n  if x < 0 then #f else x >= 10 end\nend;");
+        let module = lower(&tree);
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected if expression");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::Compare {
+                op: CompareOp::Lt,
+                ..
+            }
+        ));
+        assert!(matches!(
+            then_branch.as_ref(),
+            Expr::Bool { value: false, .. }
+        ));
+        assert!(matches!(
+            else_branch.as_ref(),
+            Expr::Compare {
+                op: CompareOp::Ge,
+                ..
+            }
+        ));
     }
 
     #[test]

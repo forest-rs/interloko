@@ -56,12 +56,20 @@ pub enum TokenKind {
     Method,
     /// `let`.
     Let,
+    /// `if`.
+    If,
+    /// `then`.
+    Then,
+    /// `else`.
+    Else,
     /// `end`.
     End,
     /// User identifier.
     Ident,
     /// Base-10 integer literal.
     Number,
+    /// Boolean literal, currently `#t` or `#f`.
+    Bool,
     /// Nominal type/class name such as `<circle>`.
     TypeName,
     /// `(`.
@@ -78,6 +86,14 @@ pub enum TokenKind {
     Star,
     /// `=`.
     Equal,
+    /// `<`.
+    Less,
+    /// `<=`.
+    LessEqual,
+    /// `>`.
+    Greater,
+    /// `>=`.
+    GreaterEqual,
     /// `:`.
     Colon,
     /// `::`.
@@ -152,6 +168,10 @@ pub enum CstKind {
     NameExpr,
     /// Integer literal expression.
     NumberExpr,
+    /// Boolean literal expression.
+    BoolExpr,
+    /// Conditional expression.
+    IfExpr,
     /// Type/class name expression.
     TypeExpr,
     /// Malformed syntax placeholder.
@@ -249,6 +269,7 @@ fn syntax_node_id(
         | CstKind::KeywordArg
         | CstKind::NameExpr
         | CstKind::NumberExpr
+        | CstKind::BoolExpr
         | CstKind::TypeExpr => {
             mix_first_named_token(&mut builder, children, tokens, source);
         }
@@ -323,7 +344,7 @@ fn mix_first_named_token(
             let token = tokens[*index];
             if matches!(
                 token.kind,
-                TokenKind::Ident | TokenKind::Number | TokenKind::TypeName
+                TokenKind::Ident | TokenKind::Number | TokenKind::TypeName | TokenKind::Bool
             ) {
                 builder.mix_str(token.text(source));
                 return;
@@ -352,6 +373,8 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::NumberExpr => 16,
         CstKind::TypeExpr => 17,
         CstKind::Error => 18,
+        CstKind::BoolExpr => 19,
+        CstKind::IfExpr => 20,
     }
 }
 
@@ -382,6 +405,14 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Whitespace => 23,
         TokenKind::Comment => 24,
         TokenKind::Error => 25,
+        TokenKind::If => 26,
+        TokenKind::Then => 27,
+        TokenKind::Else => 28,
+        TokenKind::Bool => 29,
+        TokenKind::Less => 30,
+        TokenKind::LessEqual => 31,
+        TokenKind::Greater => 32,
+        TokenKind::GreaterEqual => 33,
     }
 }
 
@@ -439,6 +470,26 @@ pub fn lex(source: &str) -> Vec<Token> {
                 pos += 1;
                 TokenKind::Equal
             }
+            b'<' if bytes.get(pos + 1) == Some(&b'=') => {
+                pos += 2;
+                TokenKind::LessEqual
+            }
+            b'<' if lex_type_name_end(bytes, pos).is_some() => {
+                pos = lex_type_name_end(bytes, pos).expect("type name end was just checked");
+                TokenKind::TypeName
+            }
+            b'<' => {
+                pos += 1;
+                TokenKind::Less
+            }
+            b'>' if bytes.get(pos + 1) == Some(&b'=') => {
+                pos += 2;
+                TokenKind::GreaterEqual
+            }
+            b'>' => {
+                pos += 1;
+                TokenKind::Greater
+            }
             b':' if bytes.get(pos + 1) == Some(&b':') => {
                 pos += 2;
                 TokenKind::DoubleColon
@@ -455,21 +506,9 @@ pub fn lex(source: &str) -> Vec<Token> {
                 pos += 1;
                 TokenKind::Semicolon
             }
-            b'<' => {
-                pos += 1;
-                while pos < bytes.len()
-                    && (bytes[pos].is_ascii_alphanumeric()
-                        || bytes[pos] == b'_'
-                        || bytes[pos] == b'-')
-                {
-                    pos += 1;
-                }
-                if bytes.get(pos) == Some(&b'>') {
-                    pos += 1;
-                    TokenKind::TypeName
-                } else {
-                    TokenKind::Error
-                }
+            b'#' if matches!(bytes.get(pos + 1), Some(b't' | b'f')) => {
+                pos += 2;
+                TokenKind::Bool
             }
             b'/' if bytes.get(pos + 1) == Some(&b'/') => {
                 pos += 2;
@@ -505,6 +544,9 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "generic" => TokenKind::Generic,
                     "method" => TokenKind::Method,
                     "let" => TokenKind::Let,
+                    "if" => TokenKind::If,
+                    "then" => TokenKind::Then,
+                    "else" => TokenKind::Else,
                     "end" => TokenKind::End,
                     _ => TokenKind::Ident,
                 }
@@ -526,6 +568,25 @@ pub fn lex(source: &str) -> Vec<Token> {
 
 fn is_ident_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn lex_type_name_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut pos = start + 1;
+    let first = *bytes.get(pos)?;
+    if !is_ident_start(first) {
+        return None;
+    }
+    pos += 1;
+    while pos < bytes.len()
+        && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_' || bytes[pos] == b'-')
+    {
+        pos += 1;
+    }
+    if bytes.get(pos) == Some(&b'>') {
+        Some(pos + 1)
+    } else {
+        None
+    }
 }
 
 fn is_ident_continue(bytes: &[u8], pos: usize) -> bool {
@@ -808,7 +869,46 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_expr(&mut self) -> CstNode {
-        self.parse_add()
+        self.parse_if()
+    }
+
+    fn parse_if(&mut self) -> CstNode {
+        let start = self.current_span();
+        if !self.at(TokenKind::If) {
+            return self.parse_compare();
+        }
+
+        let mut children = Vec::new();
+        self.expect(TokenKind::If, &mut children, "expected `if`");
+        children.push(CstElement::Node(self.parse_expr()));
+        self.expect(TokenKind::Then, &mut children, "expected `then`");
+        children.push(CstElement::Node(self.parse_expr()));
+        self.expect(TokenKind::Else, &mut children, "expected `else`");
+        children.push(CstElement::Node(self.parse_expr()));
+        self.expect(TokenKind::End, &mut children, "expected `end` after `if`");
+        self.node(CstKind::IfExpr, children, start)
+    }
+
+    fn parse_compare(&mut self) -> CstNode {
+        let mut node = self.parse_add();
+        while matches!(
+            self.peek().map(|(_, token)| token.kind),
+            Some(
+                TokenKind::Equal
+                    | TokenKind::Less
+                    | TokenKind::LessEqual
+                    | TokenKind::Greater
+                    | TokenKind::GreaterEqual
+            )
+        ) {
+            let mut children = vec![CstElement::Node(node)];
+            if let Some(op) = self.bump() {
+                children.push(CstElement::Token(op));
+            }
+            children.push(CstElement::Node(self.parse_add()));
+            node = self.node(CstKind::BinaryExpr, children, Span::default());
+        }
+        node
     }
 
     fn parse_add(&mut self) -> CstNode {
@@ -855,6 +955,12 @@ impl<'source> Parser<'source> {
             let mut children = Vec::new();
             self.expect(TokenKind::Number, &mut children, "expected number");
             return self.node(CstKind::NumberExpr, children, start);
+        }
+
+        if self.at(TokenKind::Bool) {
+            let mut children = Vec::new();
+            self.expect(TokenKind::Bool, &mut children, "expected boolean literal");
+            return self.node(CstKind::BoolExpr, children, start);
         }
 
         if self.at(TokenKind::TypeName) {
@@ -1064,5 +1170,34 @@ mod tests {
                 .any(|token| token.kind == TokenKind::DoubleColon)
         );
         assert!(tree.tokens.iter().any(|token| token.kind == TokenKind::Dot));
+    }
+
+    #[test]
+    fn parse_booleans_comparisons_and_if_expression() {
+        let tree = parse("define function main(x)\n  if x <= 10 then #t else x > 20 end\nend;");
+        assert_eq!(tree.diagnostics, Vec::new());
+        let body = tree
+            .root
+            .child_nodes(CstKind::Function)
+            .next()
+            .and_then(|function| function.child_nodes(CstKind::Body).next())
+            .expect("function body should parse");
+
+        assert_eq!(body.child_nodes(CstKind::IfExpr).count(), 1);
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Bool)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::LessEqual)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Greater)
+        );
     }
 }

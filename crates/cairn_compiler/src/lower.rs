@@ -149,6 +149,15 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Boolean constant.
+    ConstBool {
+        /// Destination register.
+        dst: Register,
+        /// Constant value.
+        value: bool,
+        /// Source span.
+        span: Span,
+    },
     /// Unsigned integer constant.
     ConstU64 {
         /// Destination register.
@@ -164,6 +173,19 @@ pub enum Instr {
         dst: Register,
         /// Binary operator.
         op: sem::BinaryOp,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Signed integer comparison.
+    I64Compare {
+        /// Destination register.
+        dst: Register,
+        /// Comparison operator.
+        op: sem::CompareOp,
         /// Left operand register.
         lhs: Register,
         /// Right operand register.
@@ -234,6 +256,22 @@ pub enum Instr {
         then_label: LabelId,
         /// Target when `cond` is false.
         else_label: LabelId,
+        /// Source span.
+        span: Span,
+    },
+    /// Unconditional jump.
+    Jump {
+        /// Target label.
+        label: LabelId,
+        /// Source span.
+        span: Span,
+    },
+    /// Register-to-register move.
+    Move {
+        /// Destination register.
+        dst: Register,
+        /// Source register.
+        src: Register,
         /// Source span.
         span: Span,
     },
@@ -346,7 +384,7 @@ impl<'module> Lowering<'module> {
             name: function.name.clone(),
             kind: FunctionKind::Function(function.id),
             params: body.params,
-            ret: ValueKind::I64,
+            ret: value_kind(function.result_kind)?,
             locals: body.locals,
             instructions: body.instructions,
             span: function.span,
@@ -366,7 +404,7 @@ impl<'module> Lowering<'module> {
             name: format!("{}#method{}", generic.name, method.id.0),
             kind: FunctionKind::Method(method.id),
             params: body.params,
-            ret: ValueKind::I64,
+            ret: value_kind(method.result_kind)?,
             locals: body.locals,
             instructions: body.instructions,
             span: method.span,
@@ -628,6 +666,15 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::ConstBool { value, span } => {
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::ConstBool {
+                    dst: result.reg,
+                    value: *value,
+                    span: *span,
+                });
+                Ok(result)
+            }
             sem::Expr::Local { local, .. } => self
                 .local_regs
                 .get(local.0 as usize)
@@ -639,7 +686,12 @@ impl<'module> BodyLowering<'module> {
                 span,
             } => {
                 let args = self.lower_args(args)?;
-                let result = self.alloc(ValueKind::I64);
+                let function_info = self
+                    .module
+                    .functions
+                    .get(function.0 as usize)
+                    .ok_or_else(|| invalid_semantic("function id is out of range"))?;
+                let result = self.alloc(value_kind(function_info.result_kind)?);
                 self.instructions.push(Instr::Call {
                     dst: result.reg,
                     callee: self
@@ -729,8 +781,81 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::Compare { op, lhs, rhs, span } => {
+                let lhs = self.lower_expr(lhs)?;
+                let rhs = self.lower_expr(rhs)?;
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::I64Compare {
+                    dst: result.reg,
+                    op: *op,
+                    lhs: lhs.reg,
+                    rhs: rhs.reg,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+            } => self.lower_if(condition, then_branch, else_branch, *span),
             sem::Expr::Error { .. } => Err(invalid_semantic("semantic expression is invalid")),
         }
+    }
+
+    fn lower_if(
+        &mut self,
+        condition: &sem::Expr,
+        then_branch: &sem::Expr,
+        else_branch: &sem::Expr,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let condition = self.lower_expr(condition)?;
+        if condition.kind != ValueKind::Bool {
+            return Err(invalid_semantic("if condition is not bool"));
+        }
+
+        let then_label = self.alloc_label();
+        let else_label = self.alloc_label();
+        let join_label = self.alloc_label();
+        self.instructions.push(Instr::Branch {
+            cond: condition.reg,
+            then_label,
+            else_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: then_label });
+        let then_value = self.lower_expr(then_branch)?;
+        let result = self.alloc(then_value.kind);
+        self.instructions.push(Instr::Move {
+            dst: result.reg,
+            src: then_value.reg,
+            span: then_branch.span(),
+        });
+        self.instructions.push(Instr::Jump {
+            label: join_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: else_label });
+        let else_value = self.lower_expr(else_branch)?;
+        if else_value.kind != result.kind {
+            return Err(invalid_semantic("if branch result kinds differ"));
+        }
+        self.instructions.push(Instr::Move {
+            dst: result.reg,
+            src: else_value.reg,
+            span: else_branch.span(),
+        });
+        self.instructions.push(Instr::Jump {
+            label: join_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: join_label });
+        Ok(result)
     }
 
     fn lower_args(&mut self, args: &[sem::Expr]) -> Result<Vec<Register>, LowerError> {
@@ -772,6 +897,7 @@ impl<'module> BodyLowering<'module> {
 fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
     match kind {
         sem::ValueKind::I64 => Ok(ValueKind::I64),
+        sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::Object(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
     }
@@ -861,6 +987,10 @@ impl Module {
                 write!(f, "  {dst} = const.i64 {value}")?;
                 fmt_span(f, *span)
             }
+            Instr::ConstBool { dst, value, span } => {
+                write!(f, "  {dst} = const.bool {value}")?;
+                fmt_span(f, *span)
+            }
             Instr::ConstU64 { dst, value, span } => {
                 write!(f, "  {dst} = const.u64 {value}")?;
                 fmt_span(f, *span)
@@ -876,6 +1006,23 @@ impl Module {
                     sem::BinaryOp::Add => "i64.add",
                     sem::BinaryOp::Sub => "i64.sub",
                     sem::BinaryOp::Mul => "i64.mul",
+                };
+                write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
+                fmt_span(f, *span)
+            }
+            Instr::I64Compare {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                let op = match op {
+                    sem::CompareOp::Eq => "i64.eq",
+                    sem::CompareOp::Lt => "i64.lt",
+                    sem::CompareOp::Le => "i64.le",
+                    sem::CompareOp::Gt => "i64.gt",
+                    sem::CompareOp::Ge => "i64.ge",
                 };
                 write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
                 fmt_span(f, *span)
@@ -932,6 +1079,14 @@ impl Module {
                 span,
             } => {
                 write!(f, "  br {cond}, {then_label}, {else_label}")?;
+                fmt_span(f, *span)
+            }
+            Instr::Jump { label, span } => {
+                write!(f, "  jmp {label}")?;
+                fmt_span(f, *span)
+            }
+            Instr::Move { dst, src, span } => {
+                write!(f, "  {dst} = mov {src}")?;
                 fmt_span(f, *span)
             }
             Instr::Return { value, span } => {
@@ -1049,5 +1204,21 @@ mod tests {
         assert!(dump.contains("fn l2 area#dispatch(%r1 object: object) -> i64"));
         assert!(dump.contains("class_of %r1"));
         assert!(dump.contains("br %r4, bb0, bb1"));
+    }
+
+    #[test]
+    fn lowers_booleans_comparisons_and_if_join() {
+        let module = lower_source(
+            "define function check()\n  #t\nend;\n\
+             define function main()\n  if 10 < 20 then 1 else 2 end\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("fn l0 check() -> bool"));
+        assert!(dump.contains("const.bool true"));
+        assert!(dump.contains("i64.lt"));
+        assert!(dump.contains("br "));
+        assert!(dump.contains("jmp bb"));
+        assert!(dump.contains(" = mov "));
     }
 }

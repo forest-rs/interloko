@@ -1,0 +1,30 @@
+// expect: run 100
+// expect: diagnostics 0
+// expect: dump lowered contains area#dispatch
+// expect: dump lowered contains i64.lt
+
+define class <circle> (<object>)
+  slot radius;
+end;
+
+define class <square> (<object>)
+  slot side;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define method area(s :: <square>)
+  s.side * s.side
+end;
+
+define function main()
+  if 1 < 2 then
+    area(make(<circle>, radius: 10))
+  else
+    area(make(<square>, side: 7))
+  end
+end;

@@ -1040,6 +1040,9 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         ast::Expr::Number { id, value, .. } => {
             let _ = writeln!(out, "{id} number {value}");
         }
+        ast::Expr::Bool { id, value, .. } => {
+            let _ = writeln!(out, "{id} bool {value}");
+        }
         ast::Expr::Name { id, name, .. } => {
             let _ = writeln!(out, "{id} name {name}");
         }
@@ -1077,6 +1080,31 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_expr(out, lhs, indent + 2);
             dump_ast_expr(out, rhs, indent + 2);
         }
+        ast::Expr::Compare {
+            id, op, lhs, rhs, ..
+        } => {
+            let _ = writeln!(out, "{id} compare {op:?}");
+            dump_ast_expr(out, lhs, indent + 2);
+            dump_ast_expr(out, rhs, indent + 2);
+        }
+        ast::Expr::If {
+            id,
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} if");
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "condition");
+            dump_ast_expr(out, condition, indent + 4);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "then");
+            dump_ast_expr(out, then_branch, indent + 4);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "else");
+            dump_ast_expr(out, else_branch, indent + 4);
+        }
         ast::Expr::Error { id, .. } => {
             let _ = writeln!(out, "{id} error");
         }
@@ -1110,8 +1138,12 @@ fn dump_sem(module: &sem::Module) -> String {
     for method in &module.methods {
         let _ = writeln!(
             out,
-            "method m{} {} generic=g{} class=c{}",
-            method.id.0, method.definition, method.generic.0, method.specializer.0
+            "method m{} {} generic=g{} class=c{} result={:?}",
+            method.id.0,
+            method.definition,
+            method.generic.0,
+            method.specializer.0,
+            method.result_kind
         );
         dump_sem_locals(&mut out, &method.locals, 2);
         dump_sem_block(&mut out, &method.body, 2);
@@ -1119,8 +1151,8 @@ fn dump_sem(module: &sem::Module) -> String {
     for function in &module.functions {
         let _ = writeln!(
             out,
-            "function f{} {} {}",
-            function.id.0, function.definition, function.name
+            "function f{} {} {} result={:?}",
+            function.id.0, function.definition, function.name, function.result_kind
         );
         dump_sem_locals(&mut out, &function.locals, 2);
         dump_sem_block(&mut out, &function.body, 2);
@@ -1155,6 +1187,9 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
     match expr {
         sem::Expr::ConstI64 { value, .. } => {
             let _ = writeln!(out, "const.i64 {value}");
+        }
+        sem::Expr::ConstBool { value, .. } => {
+            let _ = writeln!(out, "const.bool {value}");
         }
         sem::Expr::Local { local, .. } => {
             let _ = writeln!(out, "local l{}", local.0);
@@ -1192,6 +1227,28 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "binary {op:?}");
             dump_sem_expr(out, lhs, indent + 2);
             dump_sem_expr(out, rhs, indent + 2);
+        }
+        sem::Expr::Compare { op, lhs, rhs, .. } => {
+            let _ = writeln!(out, "compare {op:?}");
+            dump_sem_expr(out, lhs, indent + 2);
+            dump_sem_expr(out, rhs, indent + 2);
+        }
+        sem::Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let _ = writeln!(out, "if");
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "condition");
+            dump_sem_expr(out, condition, indent + 4);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "then");
+            dump_sem_expr(out, then_branch, indent + 4);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "else");
+            dump_sem_expr(out, else_branch, indent + 4);
         }
         sem::Expr::Error { .. } => {
             let _ = writeln!(out, "error");
@@ -1374,6 +1431,9 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::ConstI64 { value, .. } => {
             let _ = write!(out, "i64({value})");
         }
+        sem::Expr::ConstBool { value, .. } => {
+            let _ = write!(out, "bool({value})");
+        }
         sem::Expr::Local { local, .. } => {
             let _ = write!(out, "local({})", local.0);
         }
@@ -1432,6 +1492,27 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, lhs, out);
             out.push(',');
             fingerprint_sem_expr(module, rhs, out);
+            out.push(')');
+        }
+        sem::Expr::Compare { op, lhs, rhs, .. } => {
+            let _ = write!(out, "compare({op:?}:");
+            fingerprint_sem_expr(module, lhs, out);
+            out.push(',');
+            fingerprint_sem_expr(module, rhs, out);
+            out.push(')');
+        }
+        sem::Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            out.push_str("if(");
+            fingerprint_sem_expr(module, condition, out);
+            out.push('?');
+            fingerprint_sem_expr(module, then_branch, out);
+            out.push(':');
+            fingerprint_sem_expr(module, else_branch, out);
             out.push(')');
         }
         sem::Expr::Error { .. } => {
@@ -1673,6 +1754,58 @@ mod tests {
         assert_eq!(
             cache_action(&update, QueryArtifact::MethodTape(square)),
             Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+    }
+
+    #[test]
+    fn incremental_branch_edit_recomputes_only_affected_method_artifacts() {
+        let before = "define class <circle> (<object>)\n  slot radius;\nend;\n\
+                      define class <square> (<object>)\n  slot side;\nend;\n\
+                      define generic area(x);\n\
+                      define method area(c :: <circle>)\n  if c.radius > 0 then c.radius * c.radius else 0 end\nend;\n\
+                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                      define function main()\n  area(make(<circle>, radius: 10))\nend;";
+        let after = "define class <circle> (<object>)\n  slot radius;\nend;\n\
+                     define class <square> (<object>)\n  slot side;\nend;\n\
+                     define generic area(x);\n\
+                     define method area(c :: <circle>)\n  if c.radius > 0 then c.radius + c.radius else 0 end\nend;\n\
+                     define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                     define function main()\n  area(make(<circle>, radius: 10))\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("area.cairn", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let circle = first.artifacts.sem.methods[0].definition;
+        let square = first.artifacts.sem.methods[1].definition;
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(circle)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(circle)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
         );
         assert_eq!(
             cache_action(&update, QueryArtifact::TapeProgram),

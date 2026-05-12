@@ -1,0 +1,11 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump sem contains if
+
+define function main()
+  if 1 < 2 then
+    if 3 <= 3 then 7 else 8 end
+  else
+    9
+  end
+end;

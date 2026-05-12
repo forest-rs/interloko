@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic contains if condition must be bool
+
+define function main()
+  if 1 then 2 else 3 end
+end;

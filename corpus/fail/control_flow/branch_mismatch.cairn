@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic contains if branches must have matching result kinds
+
+define function main()
+  if 1 = 1 then #t else 0 end
+end;

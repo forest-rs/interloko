@@ -1,5 +1,92 @@
 # Plans
 
+## Add Control Flow, Booleans, and Comparisons
+
+Ticket: `cai-srg5`
+
+### Goal
+
+Add Cairn's first expression-level control-flow slice: boolean literals,
+integer comparisons, and `if` expressions that flow through syntax, AST,
+semantic IR, lowered IR, `execution_tape`, dumps, corpus fixtures, and
+incremental cache reporting.
+
+### Non-Goals
+
+- No loops.
+- No recursion-specific analysis.
+- No short-circuit `and` / `or`.
+- No pattern matching.
+- No type inference beyond the current value categories.
+- No parametric types.
+- No effects or restarts.
+- No sealed dispatch optimization.
+- No Cranelift.
+
+### Fence
+
+This slice owns boolean/comparison/control-flow syntax and the direct lowering
+needed to execute it. It explicitly does not own scheduler behavior, persistent
+caches, richer type inference, multi-file module semantics, loop lowering, or
+backend-specific control-flow opcodes.
+
+### Plumbing
+
+```text
+source #t / #f / comparisons / if
+  -> CST BoolExpr / BinaryExpr / IfExpr
+  -> AST Bool / Compare / If
+  -> semantic Bool value category + diagnostics
+  -> lowered bool constants, comparisons, branches, moves, joins
+  -> execution_tape ordinary instructions
+  -> dumps, corpus, and incremental cache reports
+```
+
+### Invariants
+
+- `if` conditions must have semantic kind `Bool`.
+- Both `if` branches must produce the same semantic value category.
+- Integer comparisons accept only `I64` operands and produce `Bool`.
+- Arithmetic stays `I64 -> I64`; boolean support must not widen object slot
+  storage or generic dispatch semantics.
+- Lowered IR represents joins explicitly with labels, jumps, and register
+  moves rather than a special high-level tape opcode.
+- The compiler core remains `no_std + alloc`.
+
+### Steps
+
+1. Extend lexer/parser/CST for `#t`, `#f`, comparison tokens, and
+   `if ... then ... else ... end`.
+2. Extend AST lowering and dumps for bools, comparisons, and conditionals.
+3. Extend semantic IR with `Bool`, comparison expressions, `if` expressions,
+   and diagnostics for invalid conditions and mismatched branch kinds.
+4. Extend lowered IR with bool constants, integer comparisons, moves, jumps,
+   conditional branches, and explicit join values.
+5. Emit the new lowered instructions into `execution_tape`.
+6. Add corpus programs for passing control-flow examples and expected
+   diagnostics.
+7. Add incremental tests proving a small branch edit has focused lowered/tape
+   cache effects.
+8. Update progress notes with implemented semantics and deferred loop/recursion
+   design.
+9. Run full gates:
+   - `cargo fmt --all`;
+   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
+   - `cargo test --workspace --all-features`;
+   - `cargo doc --workspace --all-features --no-deps`;
+   - existing examples;
+   - `cairn_lab` fixture tests;
+   - `cairn_corpus`.
+
+### Risks
+
+- Reusing `end` for both functions and `if` expressions can expose parser
+  recovery bugs; tests should include nested conditionals.
+- Direct-call return kinds are still simple and source-order based. This slice
+  should document the limit rather than pretend full inference exists.
+- Generic dispatch currently returns `I64`; conditionals may guard generic calls
+  but should not expand generic return typing in this slice.
+
 ## Build Real In-Memory Incremental Compiler Engine
 
 Ticket: `cai-e3zq`
