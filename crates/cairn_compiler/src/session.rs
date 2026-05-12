@@ -17,7 +17,7 @@ use execution_tape::vm::{Limits, Vm};
 use crate::diagnostic::Diagnostic;
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
-use crate::runtime::CairnHost;
+use crate::runtime::{CairnHost, HostObjectKind, RuntimeLayout};
 use crate::syntax::{CstElement, CstNode, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, syntax, tape};
 
@@ -86,6 +86,8 @@ pub enum DumpStage {
     Ast,
     /// Semantic IR dump.
     Sem,
+    /// Metaobject protocol summary.
+    Mop,
     /// Lowered executable IR dump.
     Lowered,
     /// `execution_tape` disassembly.
@@ -140,6 +142,7 @@ impl SessionArtifacts {
             DumpStage::Syntax => dump_syntax(&self.syntax),
             DumpStage::Ast => dump_ast(&self.ast),
             DumpStage::Sem => dump_sem(&self.sem),
+            DumpStage::Mop => dump_mop(&self.sem),
             DumpStage::Lowered => self.lowered.as_ref().map_or_else(
                 || format!("lowered unavailable: {:?}\n", self.lower_error),
                 lower::Module::dump,
@@ -159,6 +162,7 @@ impl SessionArtifacts {
                     DumpStage::Syntax,
                     DumpStage::Ast,
                     DumpStage::Sem,
+                    DumpStage::Mop,
                     DumpStage::Lowered,
                     DumpStage::Tape,
                 ] {
@@ -1348,6 +1352,159 @@ fn dump_sem(module: &sem::Module) -> String {
     out
 }
 
+fn dump_mop(module: &sem::Module) -> String {
+    let runtime = RuntimeLayout::from_sem(module);
+    let mut out = String::new();
+    let _ = writeln!(out, "mop {}", module.source_file);
+
+    let _ = writeln!(out, "classes:");
+    for class in &module.classes {
+        let runtime_class = runtime.classes.get(class.id.0 as usize);
+        let runtime_kind =
+            runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
+        let _ = writeln!(
+            out,
+            "  c{} {} {} origin={} runtime={runtime_kind}",
+            class.id.0,
+            class.definition,
+            class.name,
+            sem_class_origin_label(class.origin)
+        );
+        for slot in &class.slots {
+            let runtime_slot = runtime_class.and_then(|class| class.slots.get(slot.id.0 as usize));
+            let storage = runtime_slot.map_or("missing", |slot| {
+                if slot.host_backed {
+                    "host-backed"
+                } else {
+                    "native"
+                }
+            });
+            let _ = writeln!(
+                out,
+                "    slot s{} {} {} :: {} kind={} origin={} storage={} runtime={}",
+                slot.id.0,
+                slot.definition,
+                slot.name,
+                slot.type_name,
+                sem_kind_label(module, slot.kind),
+                sem_slot_origin_label(slot.origin),
+                storage,
+                sem_runtime_repr(slot.kind)
+            );
+            let _ = writeln!(
+                out,
+                "    accessor {} {}(c{}) -> {} reads c{}.s{}",
+                slot.accessor.definition,
+                slot.accessor.name,
+                slot.accessor.class.0,
+                sem_kind_label(module, slot.accessor.result_kind),
+                slot.accessor.class.0,
+                slot.accessor.slot.0
+            );
+        }
+    }
+
+    let _ = writeln!(out, "generics:");
+    for generic in &module.generics {
+        let params = generic
+            .params
+            .iter()
+            .zip(&generic.param_kinds)
+            .map(|(name, kind)| match kind {
+                Some(kind) => format!("{name}:{}", sem_kind_label(module, *kind)),
+                None => format!("{name}:untyped"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "  g{} {} {}({params}) -> {}",
+            generic.id.0,
+            generic.definition,
+            generic.name,
+            sem_kind_label(module, generic.result_kind)
+        );
+        for method in module
+            .methods
+            .iter()
+            .filter(|method| method.generic == generic.id)
+        {
+            let class = module.classes.get(method.specializer.0 as usize);
+            let class_name = class.map_or("<?>", |class| class.name.as_str());
+            let class_origin = class.map_or_else(
+                || "missing".into(),
+                |class| sem_class_origin_label(class.origin),
+            );
+            let _ = writeln!(
+                out,
+                "    method m{} {} specializer=c{} {} origin={} -> {}",
+                method.id.0,
+                method.definition,
+                method.specializer.0,
+                class_name,
+                class_origin,
+                sem_kind_label(module, method.result_kind)
+            );
+        }
+    }
+
+    let _ = writeln!(out, "dispatch table:");
+    for generic in &module.generics {
+        let _ = writeln!(out, "  g{} {}", generic.id.0, generic.name);
+        for method in module
+            .methods
+            .iter()
+            .filter(|method| method.generic == generic.id)
+        {
+            let class = module.classes.get(method.specializer.0 as usize);
+            let class_name = class.map_or("<?>", |class| class.name.as_str());
+            let class_origin = class.map_or_else(
+                || "missing".into(),
+                |class| sem_class_origin_label(class.origin),
+            );
+            let _ = writeln!(
+                out,
+                "    c{} {} origin={} -> m{}",
+                method.specializer.0, class_name, class_origin, method.id.0
+            );
+        }
+    }
+
+    let _ = writeln!(out, "runtime layout:");
+    for (index, class) in runtime.classes.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "  c{index} {} kind={}",
+            class.name,
+            runtime_object_kind_label(class.kind)
+        );
+        for (slot_index, slot) in class.slots.iter().enumerate() {
+            let storage = if slot.host_backed {
+                "host-backed"
+            } else {
+                "native"
+            };
+            let _ = writeln!(
+                out,
+                "    s{slot_index} {} kind={} storage={} runtime={}",
+                slot.name,
+                sem_kind_label(module, slot.kind),
+                storage,
+                sem_runtime_repr(slot.kind)
+            );
+        }
+    }
+
+    out
+}
+
+fn runtime_object_kind_label(kind: HostObjectKind) -> &'static str {
+    match kind {
+        HostObjectKind::Native => "native",
+        HostObjectKind::HostBacked => "host-backed",
+    }
+}
+
 fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
     match kind {
         sem::ValueKind::Any => "object-top".into(),
@@ -2187,6 +2344,11 @@ mod tests {
                 .dump_stage(DumpStage::Sem)
                 .contains("accessor-call")
         );
+        let mop = artifacts.dump_stage(DumpStage::Mop);
+        assert!(mop.contains("mop"));
+        assert!(mop.contains("classes:"));
+        assert!(mop.contains("origin=native runtime=native"));
+        assert!(mop.contains("dispatch table:"));
         assert!(
             artifacts
                 .dump_stage(DumpStage::Lowered)
@@ -2229,6 +2391,10 @@ mod tests {
         assert!(sem.contains("origin=host-backed(hc0)"));
         assert!(sem.contains("slot s0"));
         assert!(sem.contains("origin=host-backed(hc0.hs0)"));
+        let mop = artifacts.dump_stage(DumpStage::Mop);
+        assert!(mop.contains("<rust-circle> origin=host-backed(hc0) runtime=host-backed"));
+        assert!(mop.contains("storage=host-backed"));
+        assert!(mop.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
     }
 
     #[test]

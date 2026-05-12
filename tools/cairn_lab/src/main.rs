@@ -7,6 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use cairn_compiler::identity::SourceFileId;
+use cairn_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use cairn_compiler::session::{
     CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
 };
@@ -45,6 +46,13 @@ fn run(args: Vec<String>) -> Result<()> {
             print!("{}", artifacts.dump_stage(stage));
             Ok(())
         }
+        "mop" => {
+            let file = single_file_arg(&args)?;
+            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&artifacts.diagnostics);
+            print!("{}", artifacts.dump_stage(DumpStage::Mop));
+            Ok(())
+        }
         "artifacts" => {
             let file = single_file_arg(&args)?;
             let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
@@ -81,7 +89,10 @@ fn compile_path(
     mode: RuntimeMode,
 ) -> Result<cairn_compiler::session::SessionArtifacts> {
     let source = read_path(path)?;
-    Ok(CompilerSession::compile_source(path, &source, mode))
+    let registry = parse_host_registry(Path::new(path), &source)?;
+    Ok(CompilerSession::compile_source_with_host_registry(
+        path, &source, mode, &registry,
+    ))
 }
 
 fn read_path(path: &str) -> Result<String> {
@@ -105,23 +116,87 @@ fn single_file_arg(args: &[String]) -> Result<&str> {
 fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
     if args.len() != 4 || args[2] != "--stage" {
         return Err(LabError::Usage(
-            "usage: cairn_lab dump <file.cairn> --stage syntax|ast|sem|lowered|tape|all".into(),
+            "usage: cairn_lab dump <file.cairn> --stage syntax|ast|sem|mop|lowered|tape|all".into(),
         ));
     }
     let stage = match args[3].as_str() {
         "syntax" => DumpStage::Syntax,
         "ast" => DumpStage::Ast,
         "sem" => DumpStage::Sem,
+        "mop" => DumpStage::Mop,
         "lowered" => DumpStage::Lowered,
         "tape" => DumpStage::Tape,
         "all" => DumpStage::All,
         _ => {
             return Err(LabError::Usage(
-                "stage must be one of syntax|ast|sem|lowered|tape|all".into(),
+                "stage must be one of syntax|ast|sem|mop|lowered|tape|all".into(),
             ));
         }
     };
     Ok((&args[1], stage))
+}
+
+fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
+    let mut host_registry = HostMetaRegistry::new();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// host-class:") {
+                host_registry.add_class(parse_host_class(path, index + 1, rest.trim())?);
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(host_registry)
+}
+
+fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> {
+    let mut parts = input.split_whitespace();
+    let name = parts
+        .next()
+        .ok_or_else(|| invalid_header(path, line, "host-class requires a class name"))?;
+    if !name.starts_with('<') || !name.ends_with('>') {
+        return Err(invalid_header(
+            path,
+            line,
+            "host-class name must be a Cairn class name",
+        ));
+    }
+    let mut class = HostClass::new(name);
+    for part in parts {
+        let Some((slot_name, type_name)) = part.split_once(':') else {
+            return Err(invalid_header(
+                path,
+                line,
+                "host-class slots must be `slot:<type>`",
+            ));
+        };
+        let kind = parse_host_slot_kind(path, line, type_name)?;
+        class = class.with_slot(HostSlot::new(slot_name, kind, type_name));
+    }
+    Ok(class)
+}
+
+fn parse_host_slot_kind(path: &Path, line: usize, input: &str) -> Result<ValueKind> {
+    match input {
+        "<object>" => Ok(ValueKind::Any),
+        "<integer>" => Ok(ValueKind::I64),
+        "<boolean>" => Ok(ValueKind::Bool),
+        _ => Err(invalid_header(
+            path,
+            line,
+            "host-class workbench slots currently support <object>, <integer>, or <boolean>",
+        )),
+    }
+}
+
+fn invalid_header(path: &Path, line: usize, message: &str) -> LabError {
+    LabError::InvalidHeader {
+        path: path.display().to_string(),
+        line,
+        message: message.into(),
+    }
 }
 
 fn print_diagnostics(diagnostics: &[cairn_compiler::diagnostic::Diagnostic]) {
@@ -147,21 +222,29 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "cairn_lab".into());
     format!(
-        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|lowered|tape|all\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
+        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
     )
 }
 
 #[derive(Debug)]
 enum LabError {
     Usage(String),
-    Io { path: String, error: std::io::Error },
+    Io {
+        path: String,
+        error: std::io::Error,
+    },
+    InvalidHeader {
+        path: String,
+        line: usize,
+        message: String,
+    },
     Runtime(String),
 }
 
 impl LabError {
     const fn exit_code(&self) -> i32 {
         match self {
-            Self::Usage(_) => 2,
+            Self::Usage(_) | Self::InvalidHeader { .. } => 2,
             Self::Io { .. } | Self::Runtime(_) => 1,
         }
     }
@@ -172,6 +255,13 @@ impl fmt::Display for LabError {
         match self {
             Self::Usage(message) => write!(f, "{message}"),
             Self::Io { path, error } => write!(f, "failed to read {path}: {error}"),
+            Self::InvalidHeader {
+                path,
+                line,
+                message,
+            } => {
+                write!(f, "{path}:{line}: invalid host-class header: {message}")
+            }
             Self::Runtime(message) => write!(f, "runtime failed: {message}"),
         }
     }

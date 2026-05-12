@@ -2,6 +2,8 @@
 // host-class: <rust-circle> radius:<integer>
 // expect: dump sem contains <rust-circle> origin=host-backed(hc0)
 // expect: dump sem contains method m0
+// expect: dump mop contains <rust-circle> origin=host-backed(hc0) runtime=host-backed
+// expect: dump mop contains c0 <rust-circle> origin=host-backed(hc0) -> m0
 // expect: dump lowered contains area#dispatch
 // expect: dump tape contains name="area#dispatch"
 

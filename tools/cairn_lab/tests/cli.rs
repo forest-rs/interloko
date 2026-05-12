@@ -51,11 +51,37 @@ fn dump_exposes_stages() {
     let sem = run_lab(&["dump", path, "--stage", "sem"]);
     assert!(sem.contains("generic-call"));
 
+    let mop = run_lab(&["dump", path, "--stage", "mop"]);
+    assert!(mop.contains("mop"));
+    assert!(mop.contains("classes:"));
+    assert!(mop.contains("dispatch table:"));
+
     let lowered = run_lab(&["dump", path, "--stage", "lowered"]);
     assert!(lowered.contains("area#dispatch"));
 
     let tape = run_lab(&["dump", path, "--stage", "tape"]);
     assert!(tape.contains("program=\"cairn\""));
+}
+
+#[test]
+fn mop_reports_native_and_host_backed_metaobjects() {
+    let native = fixture("generic_area.cairn");
+    let native_out = run_lab(&["mop", native.to_str().expect("fixture path should be utf8")]);
+    assert!(native_out.contains("c0"));
+    assert!(native_out.contains("<circle>"));
+    assert!(native_out.contains("origin=native runtime=native"));
+    assert!(native_out.contains("accessor"));
+    assert!(native_out.contains("g0 area"));
+    assert!(native_out.contains("c0 <circle> origin=native -> m0"));
+
+    let host = fixture("host_backed_area.cairn");
+    let host_out = run_lab(&["mop", host.to_str().expect("fixture path should be utf8")]);
+    assert!(host_out.contains("<rust-circle> origin=host-backed(hc0) runtime=host-backed"));
+    assert!(host_out.contains("<rust-square> origin=host-backed(hc1) runtime=host-backed"));
+    assert!(host_out.contains("slot s0"));
+    assert!(host_out.contains("storage=host-backed"));
+    assert!(host_out.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
+    assert!(host_out.contains("c1 <rust-square> origin=host-backed(hc1) -> m1"));
 }
 
 #[test]

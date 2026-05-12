@@ -677,6 +677,31 @@
 - Host-backed functions are metadata scaffolding in this slice. Runtime calls
   still go through the existing Cairn lowering and host-call mechanisms.
 
+## Implemented: MOP Inspector Dumps
+
+- `SessionArtifacts::dump_stage(DumpStage::Mop)` renders a read-only
+  metaobject protocol summary from the existing semantic module and runtime
+  layout.
+- The MOP dump exposes:
+  - native and host-backed class origins;
+  - slots, declared slot kinds, storage ownership, and runtime representation;
+  - accessor identities and the slots they read;
+  - generic functions, method specializers, and method result categories;
+  - generic dispatch rows from nominal class to method;
+  - runtime layout class/slot storage kind.
+- `cairn_lab dump <file> --stage mop` and `cairn_lab mop <file>` print the MOP
+  summary.
+- `cairn_corpus` supports `dump mop contains ...` expectations.
+- `cairn_lab` compile-only paths understand leading `// host-class:` headers
+  as workbench metadata, matching the corpus runner. This remains a tooling
+  convention, not Cairn source syntax.
+
+### Migration Notes
+
+- `DumpStage` gained a public `Mop` variant. Exhaustive downstream matches on
+  `DumpStage` must handle it.
+- CLI stage lists now include `mop`.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.

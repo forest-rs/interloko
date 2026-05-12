@@ -1,0 +1,16 @@
+// host-class: <rust-circle> radius:<integer>
+// host-class: <rust-square> side:<integer>
+
+define generic area(shape :: <object>) => <integer>;
+
+define method area(c :: <rust-circle>) => <integer>
+  c.radius * c.radius
+end;
+
+define method area(s :: <rust-square>) => <integer>
+  s.side * s.side
+end;
+
+define function sum-areas(c :: <rust-circle>, s :: <rust-square>) => <integer>
+  area(c) + area(s)
+end;
