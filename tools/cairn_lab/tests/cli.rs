@@ -171,6 +171,20 @@ fn inspect_reports_structured_environment_objects() {
 }
 
 #[test]
+fn inspect_reports_richer_slot_metadata() {
+    let file = fixture("slot_defaults.cairn");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let out = run_lab(&["inspect", path, "slot:c0.s0"]);
+    assert!(out.contains("kind: slot"));
+    assert!(out.contains("type=<integer>"));
+    assert!(out.contains("init-keyword=r: required"));
+    assert!(out.contains("init-value=yes"));
+    assert!(out.contains("allocation=instance"));
+    assert!(out.contains("mutability=constant"));
+}
+
+#[test]
 fn affordances_lists_stable_object_actions_and_unknown_ids_fail() {
     let file = fixture("generic_area.cairn");
     let path = file.to_str().expect("fixture path should be utf8");

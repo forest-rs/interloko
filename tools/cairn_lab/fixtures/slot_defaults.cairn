@@ -1,0 +1,8 @@
+define class <circle> (<object>)
+  constant slot radius :: <integer>, required-init-keyword: r:, init-value: 10;
+  slot cached, init-value: #t;
+end;
+
+define function main()
+  make(<circle>).radius
+end;

@@ -1393,9 +1393,22 @@ fn dump_ast(module: &ast::Module) -> String {
             };
             let _ = writeln!(
                 out,
-                "  slot {} {} {} :: {} init-keyword: {}:{}",
-                slot.id, slot.definition, slot.name, type_name, init_keyword, required
+                "  {} {} {} {} :: {} init-keyword: {}:{} allocation={} mutability={}",
+                ast_slot_mutability_prefix(slot.mutability),
+                slot.id,
+                slot.definition,
+                slot.name,
+                type_name,
+                init_keyword,
+                required,
+                ast_slot_allocation_label(slot.allocation),
+                ast_slot_mutability_label(slot.mutability)
             );
+            if let Some(init_value) = &slot.init_value {
+                indent_line(&mut out, 4);
+                let _ = writeln!(out, "init-value");
+                dump_ast_expr(&mut out, init_value, 6);
+            }
         }
     }
     for generic in &module.generics {
@@ -1471,6 +1484,26 @@ fn dump_type_annotation(annotation: &ast::TypeAnnotation) -> String {
         format!("class {}", annotation.name)
     } else {
         annotation.name.clone()
+    }
+}
+
+fn ast_slot_allocation_label(allocation: ast::SlotAllocation) -> &'static str {
+    match allocation {
+        ast::SlotAllocation::Instance => "instance",
+    }
+}
+
+fn ast_slot_mutability_prefix(mutability: ast::SlotMutability) -> &'static str {
+    match mutability {
+        ast::SlotMutability::Mutable => "slot",
+        ast::SlotMutability::Constant => "constant slot",
+    }
+}
+
+fn ast_slot_mutability_label(mutability: ast::SlotMutability) -> &'static str {
+    match mutability {
+        ast::SlotMutability::Mutable => "mutable",
+        ast::SlotMutability::Constant => "constant",
     }
 }
 
@@ -1625,7 +1658,7 @@ fn dump_sem(module: &sem::Module) -> String {
         for slot in &class.slots {
             let _ = writeln!(
                 out,
-                "  slot s{} {} {} :: {} origin={} accessor {} init-keyword: {}:{} runtime={}",
+                "  slot s{} {} {} :: {} origin={} accessor {} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
                 slot.id.0,
                 slot.definition,
                 slot.name,
@@ -1638,6 +1671,9 @@ fn dump_sem(module: &sem::Module) -> String {
                 } else {
                     ""
                 },
+                sem_slot_init_value_label(slot),
+                sem_slot_allocation_label(slot.allocation),
+                sem_slot_mutability_label(slot.mutability),
                 sem_runtime_repr(slot.kind)
             );
         }
@@ -1738,7 +1774,7 @@ fn dump_mop(module: &sem::Module) -> String {
             });
             let _ = writeln!(
                 out,
-                "    slot s{} {} {} :: {} kind={} origin={} storage={} runtime={}",
+                "    slot s{} {} {} :: {} kind={} origin={} storage={} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
                 slot.id.0,
                 slot.definition,
                 slot.name,
@@ -1746,6 +1782,15 @@ fn dump_mop(module: &sem::Module) -> String {
                 sem_kind_label(module, slot.kind),
                 sem_slot_origin_label(slot.origin),
                 storage,
+                slot.init_keyword,
+                if slot.required_init_keyword {
+                    " required"
+                } else {
+                    ""
+                },
+                sem_slot_init_value_label(slot),
+                sem_slot_allocation_label(slot.allocation),
+                sem_slot_mutability_label(slot.mutability),
                 sem_runtime_repr(slot.kind)
             );
             let _ = writeln!(
@@ -2070,12 +2115,21 @@ fn project_environment_slot(
         affordances: Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::ShowAccessor]),
         execution: None,
         inspection: format!(
-            "definition={} owner=class:c{} slot-id=s{} kind={} type={} runtime={}",
+            "definition={} owner=class:c{} slot-id=s{} kind={} type={} init-keyword={}:{} init-value={} allocation={} mutability={} runtime={}",
             slot.definition,
             class.id.0,
             slot.id.0,
             sem_kind_label(module, slot.kind),
             slot.type_name,
+            slot.init_keyword,
+            if slot.required_init_keyword {
+                " required"
+            } else {
+                ""
+            },
+            sem_slot_init_value_label(slot),
+            sem_slot_allocation_label(slot.allocation),
+            sem_slot_mutability_label(slot.mutability),
             sem_runtime_repr(slot.kind)
         ),
     }));
@@ -2391,6 +2445,27 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::ClassObject(_) => "class-id",
         sem::ValueKind::KnownCallable(_) => "compile-time-callable",
         sem::ValueKind::Error => "error",
+    }
+}
+
+fn sem_slot_init_value_label(slot: &sem::Slot) -> &'static str {
+    if slot.init_value.is_some() {
+        "yes"
+    } else {
+        "none"
+    }
+}
+
+fn sem_slot_allocation_label(allocation: sem::SlotAllocation) -> &'static str {
+    match allocation {
+        sem::SlotAllocation::Instance => "instance",
+    }
+}
+
+fn sem_slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
+    match mutability {
+        sem::SlotMutability::Mutable => "mutable",
+        sem::SlotMutability::Constant => "constant",
     }
 }
 
@@ -2767,13 +2842,16 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     .slots
                     .iter()
                     .map(|slot| format!(
-                        "{}={}:{}:accessor={}:{}:{}",
+                        "{}={}:{}:accessor={}:{}:{}:{}:{}:{}",
                         slot.name,
                         sem_kind_fingerprint(module, slot.kind),
                         sem_slot_origin_label(slot.origin),
                         slot.accessor.definition.raw(),
                         slot.init_keyword,
-                        slot.required_init_keyword
+                        slot.required_init_keyword,
+                        slot_init_fingerprint(module, slot),
+                        sem_slot_allocation_label(slot.allocation),
+                        sem_slot_mutability_label(slot.mutability)
                     ))
                     .collect::<Vec<_>>()
                     .join(",")
@@ -2787,14 +2865,17 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     name: format!("{}.{}", class.name, slot.name),
                 },
                 fingerprint: format!(
-                    "slot:{}:{}:{}:{}:accessor={}:{}:{}",
+                    "slot:{}:{}:{}:{}:accessor={}:{}:{}:{}:{}:{}",
                     class.name,
                     slot.name,
                     sem_kind_fingerprint(module, slot.kind),
                     sem_slot_origin_label(slot.origin),
                     slot.accessor.definition.raw(),
                     slot.init_keyword,
-                    slot.required_init_keyword
+                    slot.required_init_keyword,
+                    slot_init_fingerprint(module, slot),
+                    sem_slot_allocation_label(slot.allocation),
+                    sem_slot_mutability_label(slot.mutability)
                 ),
             });
         }
@@ -2877,6 +2958,15 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
         });
     }
     definitions
+}
+
+fn slot_init_fingerprint(module: &sem::Module, slot: &sem::Slot) -> String {
+    let Some(init_value) = &slot.init_value else {
+        return "none".into();
+    };
+    let mut out = String::new();
+    fingerprint_sem_expr(module, init_value, &mut out);
+    out
 }
 
 fn fingerprint_sem_block(module: &sem::Module, block: &sem::Block) -> String {
@@ -3756,6 +3846,112 @@ mod tests {
                 .artifacts
                 .dump_stage(DumpStage::Sem)
                 .contains("init-keyword: r:")
+        );
+    }
+
+    #[test]
+    fn session_diff_preserves_ids_for_slot_declaration_trivia() {
+        let before = CompilerSession::compile_source(
+            "circle.cairn",
+            "define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 10;\nend;\n\
+             define function main()\n  make(<circle>).radius\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let after = CompilerSession::compile_source(
+            "circle.cairn",
+            "\n// same slot facts with trivia edits\n\
+             define class <circle> (<object>)\n  slot radius   ::   <integer>,   init-value:   10;\nend;\n\
+             define function main()\n  make(<circle>).radius\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let diff = CompilerSession::diff(&before, &after);
+
+        assert!(diff.changed.is_empty());
+        assert!(diff.affected.is_empty());
+        assert!(diff.preserved.iter().any(|definition| {
+            definition.kind == DefinitionKind::Slot && definition.name == "<circle>.radius"
+        }));
+    }
+
+    #[test]
+    fn incremental_slot_init_value_edit_recomputes_executable_artifacts() {
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 10;\nend;\n\
+                      define function main()\n  make(<circle>).radius\nend;";
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 11;\nend;\n\
+                     define function main()\n  make(<circle>).radius\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("circle.cairn", before);
+        let _ = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Slot
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::Bind),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("init-value=yes")
+        );
+    }
+
+    #[test]
+    fn incremental_slot_mutability_edit_reuses_executable_artifacts() {
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 10;\nend;\n\
+                      define function main()\n  make(<circle>).radius\nend;";
+        let after = "define class <circle> (<object>)\n  constant slot radius :: <integer>, init-value: 10;\nend;\n\
+                     define function main()\n  make(<circle>).radius\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("circle.cairn", before);
+        let _ = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Slot
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::Bind),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Reused)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("mutability=constant")
         );
     }
 
