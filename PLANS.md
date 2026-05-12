@@ -1,5 +1,59 @@
 # Plans
 
+## Build Explainable Generic Dispatch-Site Inspection
+
+### Goal
+
+Make each semantic generic call inspectable as a dispatch-site artifact that
+connects the call site, generic contract, argument facts, applicable/rejected
+methods, lowered dispatcher order, and related query artifacts.
+
+### Fence
+
+The session/workbench layer owns dispatch-site inspection records and text
+explanations. Semantic lowering still owns `GenericCall` resolution, and lowering
+still owns executable dispatcher control flow. This slice does not add language
+semantics, optimizer behavior, sealed dispatch, method combination,
+multi-argument dispatch, or new execution_tape opcodes.
+
+### Invariants
+
+- A generic function is a metaobject.
+- A method is a metaobject.
+- A dispatch site is a call-site artifact, not a new language object.
+- Runtime dispatch remains ordinary lowered control flow plus calls.
+- Dispatch-site inspection must explain the current one-argument nominal model
+  without implying broader dispatch features.
+- Friendly IDs such as `dispatch:d0` are stable for unchanged call ordering;
+  stable backing keys include source file, enclosing definition, owner-local
+  call id, and generic definition, while records still report the current source
+  span for navigation.
+
+### Steps
+
+1. Add public session dispatch-site records and explanation data by walking
+   semantic functions/methods for `GenericCall` expressions.
+2. Add specificity/applicability/rejection classification using existing
+   nominal subclass helpers.
+3. Add unit tests for exact selection, child-over-parent selection, parent/top
+   runtime dispatch, sibling rejection, stable IDs across trivia, and changed
+   method/class facts affecting explanations/artifacts.
+4. Commit the compiler/session model slice.
+5. Add `cairn_lab dispatch <file>` and `cairn_lab dispatch <file> <id>`, plus
+   EOP `dispatch:dN` records and `inspect` support.
+6. Add workbench fixtures/tests and commit the CLI/workbench slice.
+7. Document how to list/inspect dispatch sites in MOP/EOP docs and progress
+   notes, then run all final gates and examples.
+
+### Risks
+
+- IDs must be stable enough for harmless edits without overpromising stability
+  after reordered or newly inserted call sites.
+- Static selection must clearly distinguish exact/child-known calls from
+  parent/top-object calls that need runtime dispatch.
+- Explanations should name rejected methods without implying multi-method or
+  method-combination semantics.
+
 ## Make Inheritance Semantically Real And Inspectable
 
 ### Goal

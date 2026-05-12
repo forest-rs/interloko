@@ -18,7 +18,7 @@ use crate::diagnostic::Diagnostic;
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
 use crate::runtime::{CairnHost, HostObjectKind, RuntimeLayout};
-use crate::syntax::{CstElement, CstNode, SyntaxTree, TokenKind};
+use crate::syntax::{CstElement, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, syntax, tape};
 
 /// Named source file accepted by a compiler session.
@@ -448,6 +448,31 @@ impl SessionArtifacts {
     #[must_use]
     pub fn artifact_reports(&self) -> Vec<ArtifactReport> {
         self.invalidation.artifact_reports()
+    }
+
+    /// Returns inspectable generic dispatch-site records in traversal order.
+    #[must_use]
+    pub fn dispatch_sites(&self) -> Vec<DispatchSiteRecord> {
+        collect_dispatch_sites(self)
+    }
+
+    /// Returns one dispatch-site record by friendly selector id.
+    #[must_use]
+    pub fn dispatch_site(&self, id: &str) -> Option<DispatchSiteRecord> {
+        self.dispatch_sites().into_iter().find(|site| site.id == id)
+    }
+
+    /// Dumps a compact list of generic dispatch sites.
+    #[must_use]
+    pub fn dump_dispatch_sites(&self) -> String {
+        dump_dispatch_sites(self)
+    }
+
+    /// Explains one generic dispatch site by friendly selector id.
+    #[must_use]
+    pub fn explain_dispatch_site(&self, id: &str) -> Option<String> {
+        self.dispatch_site(id)
+            .map(|site| explain_dispatch_site(self, &site))
     }
 
     /// Returns structured environment objects projected from these artifacts.
@@ -1007,6 +1032,124 @@ pub struct CacheArtifactReport {
     pub metrics: ArtifactMetrics,
 }
 
+/// Stable backing key for one dispatch-site record.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct DispatchSiteKey(
+    /// Stable raw identifier.
+    pub u64,
+);
+
+impl DispatchSiteKey {
+    /// Returns the raw key bits.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for DispatchSiteKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "dsk{:016x}", self.0)
+    }
+}
+
+/// Kind of source definition enclosing a dispatch site.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DispatchSiteOwnerKind {
+    /// The dispatch site is inside a direct function body.
+    Function,
+    /// The dispatch site is inside a method body.
+    Method,
+}
+
+impl DispatchSiteOwnerKind {
+    /// Returns the stable text label for this owner kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Method => "method",
+        }
+    }
+}
+
+/// Source definition enclosing a dispatch site.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchSiteOwner {
+    /// Owner kind.
+    pub kind: DispatchSiteOwnerKind,
+    /// Stable owner definition id.
+    pub definition: DefinitionId,
+    /// Stable owner display name.
+    pub name: String,
+}
+
+/// One method considered by a dispatch-site explanation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchMethodCandidate {
+    /// Method id.
+    pub method: sem::MethodId,
+    /// Stable method definition id.
+    pub definition: DefinitionId,
+    /// Method specializer class.
+    pub specializer: sem::ClassId,
+    /// Distance from the static exact class to the specializer, if known.
+    pub distance: Option<usize>,
+    /// Whether this is the statically selected method.
+    pub selected: bool,
+    /// Whether this candidate can only be selected by runtime class dispatch.
+    pub runtime_only: bool,
+}
+
+/// One rejected method in a dispatch-site explanation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchMethodRejection {
+    /// Method id.
+    pub method: sem::MethodId,
+    /// Stable method definition id.
+    pub definition: DefinitionId,
+    /// Method specializer class.
+    pub specializer: sem::ClassId,
+    /// Stable rejection reason.
+    pub reason: String,
+}
+
+/// Inspectable record for one semantic generic call site.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchSiteRecord {
+    /// Friendly selector such as `dispatch:d0`.
+    pub id: String,
+    /// Stable backing key derived from source, owner, call-site, and generic.
+    pub key: DispatchSiteKey,
+    /// Zero-based dispatch-site index in module traversal order.
+    pub index: usize,
+    /// Enclosing function or method.
+    pub owner: DispatchSiteOwner,
+    /// Source span for the semantic generic call.
+    pub span: Span,
+    /// Generic function id.
+    pub generic: sem::GenericFunctionId,
+    /// Stable generic definition id.
+    pub generic_definition: DefinitionId,
+    /// Static kind of the first dispatch argument, when present.
+    pub static_argument_kind: Option<sem::ValueKind>,
+    /// Exact static runtime class, when the call argument is an exact
+    /// construction/cast expression.
+    pub exact_static_class: Option<sem::ClassId>,
+    /// Whether the runtime class is still needed to choose the method.
+    pub runtime_needed: bool,
+    /// Statically selected method, when known.
+    pub selected_method: Option<sem::MethodId>,
+    /// Applicable methods in dispatcher specificity order.
+    pub applicable: Vec<DispatchMethodCandidate>,
+    /// Rejected methods and reasons.
+    pub rejected: Vec<DispatchMethodRejection>,
+    /// Lowered dispatcher function name.
+    pub lowered_dispatcher: String,
+    /// Related query artifact reports.
+    pub related_artifacts: Vec<ArtifactReport>,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct ArtifactFingerprint(u64);
 
@@ -1273,6 +1416,632 @@ fn artifact_work_units(artifact: QueryArtifact, artifacts: &SessionArtifacts) ->
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn collect_dispatch_sites(artifacts: &SessionArtifacts) -> Vec<DispatchSiteRecord> {
+    let mut sites = Vec::new();
+    for function in &artifacts.sem.functions {
+        let owner = DispatchSiteOwner {
+            kind: DispatchSiteOwnerKind::Function,
+            definition: function.definition,
+            name: function.name.clone(),
+        };
+        let mut owner_index = 0;
+        collect_dispatch_sites_in_block(
+            artifacts,
+            owner,
+            &function.body,
+            &mut owner_index,
+            &mut sites,
+        );
+    }
+    for method in &artifacts.sem.methods {
+        let generic_name = artifacts
+            .sem
+            .generics
+            .get(method.generic.0 as usize)
+            .map_or("<?>", |generic| generic.name.as_str());
+        let specializer = class_label(&artifacts.sem, method.specializer);
+        let owner = DispatchSiteOwner {
+            kind: DispatchSiteOwnerKind::Method,
+            definition: method.definition,
+            name: format!("{generic_name}({specializer})"),
+        };
+        let mut owner_index = 0;
+        collect_dispatch_sites_in_block(
+            artifacts,
+            owner,
+            &method.body,
+            &mut owner_index,
+            &mut sites,
+        );
+    }
+    sites
+}
+
+fn collect_dispatch_sites_in_block(
+    artifacts: &SessionArtifacts,
+    owner: DispatchSiteOwner,
+    block: &sem::Block,
+    owner_index: &mut usize,
+    sites: &mut Vec<DispatchSiteRecord>,
+) {
+    for binding in &block.lets {
+        collect_dispatch_sites_in_expr(
+            artifacts,
+            owner.clone(),
+            &binding.value,
+            owner_index,
+            sites,
+        );
+    }
+    collect_dispatch_sites_in_expr(artifacts, owner, &block.result, owner_index, sites);
+}
+
+fn collect_dispatch_sites_in_expr(
+    artifacts: &SessionArtifacts,
+    owner: DispatchSiteOwner,
+    expr: &sem::Expr,
+    owner_index: &mut usize,
+    sites: &mut Vec<DispatchSiteRecord>,
+) {
+    match expr {
+        sem::Expr::DirectCall { args, .. } => {
+            for arg in args {
+                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+            }
+        }
+        sem::Expr::GenericCall {
+            generic,
+            args,
+            span,
+        } => {
+            let site = make_dispatch_site(
+                artifacts,
+                owner.clone(),
+                *owner_index,
+                sites.len(),
+                *generic,
+                args,
+                *span,
+            );
+            *owner_index = owner_index.saturating_add(1);
+            sites.push(site);
+            for arg in args {
+                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+            }
+        }
+        sem::Expr::Signal { condition, .. }
+        | sem::Expr::ClassOf {
+            object: condition, ..
+        } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, condition, owner_index, sites);
+        }
+        sem::Expr::InstanceOf { value, .. } | sem::Expr::Cast { value, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
+        }
+        sem::Expr::MakeObject { class, fields, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner.clone(), class, owner_index, sites);
+            for field in fields {
+                collect_dispatch_sites_in_expr(
+                    artifacts,
+                    owner.clone(),
+                    &field.value,
+                    owner_index,
+                    sites,
+                );
+            }
+        }
+        sem::Expr::AccessorCall { receiver, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, receiver, owner_index, sites);
+        }
+        sem::Expr::Binary { lhs, rhs, .. } | sem::Expr::Compare { lhs, rhs, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
+        }
+        sem::Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_dispatch_sites_in_expr(artifacts, owner.clone(), condition, owner_index, sites);
+            collect_dispatch_sites_in_expr(
+                artifacts,
+                owner.clone(),
+                then_branch,
+                owner_index,
+                sites,
+            );
+            collect_dispatch_sites_in_expr(artifacts, owner, else_branch, owner_index, sites);
+        }
+        sem::Expr::Handle { body, restart, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner.clone(), body, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, &restart.body, owner_index, sites);
+        }
+        sem::Expr::ConstI64 { .. }
+        | sem::Expr::ConstBool { .. }
+        | sem::Expr::Local { .. }
+        | sem::Expr::ClassObject { .. }
+        | sem::Expr::KnownCallable { .. }
+        | sem::Expr::Error { .. } => {}
+    }
+}
+
+fn make_dispatch_site(
+    artifacts: &SessionArtifacts,
+    owner: DispatchSiteOwner,
+    owner_index: usize,
+    global_index: usize,
+    generic_id: sem::GenericFunctionId,
+    args: &[sem::Expr],
+    span: Span,
+) -> DispatchSiteRecord {
+    let module = &artifacts.sem;
+    let generic_definition = module.generics.get(generic_id.0 as usize).map_or(
+        DefinitionId::new(module.source_file, DefinitionKind::Generic, "<missing>", ""),
+        |generic| generic.definition,
+    );
+    let static_argument_kind = args.first().map(|arg| sem_expr_kind(module, arg));
+    let exact_static_class = args.first().and_then(exact_static_class);
+    let runtime_needed = exact_static_class.is_none()
+        && matches!(
+            static_argument_kind,
+            Some(sem::ValueKind::Any | sem::ValueKind::Object(_))
+        );
+    let (applicable, rejected, selected_method) =
+        dispatch_site_methods(module, generic_id, static_argument_kind, exact_static_class);
+    let lowered_dispatcher = module.generics.get(generic_id.0 as usize).map_or_else(
+        || format!("g{}#dispatch", generic_id.0),
+        |generic| format!("{}#dispatch", generic.name),
+    );
+    DispatchSiteRecord {
+        id: format!("dispatch:d{global_index}"),
+        key: dispatch_site_key(
+            artifacts.source.id,
+            owner.definition,
+            owner_index,
+            generic_definition,
+        ),
+        index: global_index,
+        owner,
+        span,
+        generic: generic_id,
+        generic_definition,
+        static_argument_kind,
+        exact_static_class,
+        runtime_needed,
+        selected_method,
+        applicable,
+        rejected,
+        lowered_dispatcher,
+        related_artifacts: dispatch_site_artifacts(artifacts, generic_id),
+    }
+}
+
+fn dispatch_site_key(
+    source: SourceFileId,
+    owner: DefinitionId,
+    owner_index: usize,
+    generic: DefinitionId,
+) -> DispatchSiteKey {
+    let mut builder = StableIdBuilder::new(0x4341_4952_4453_5054);
+    builder.mix_u64(source.raw());
+    builder.mix_u64(owner.raw());
+    builder.mix_u64(usize_to_u64(owner_index));
+    builder.mix_u64(generic.raw());
+    DispatchSiteKey(builder.finish())
+}
+
+fn dispatch_site_methods(
+    module: &sem::Module,
+    generic_id: sem::GenericFunctionId,
+    static_kind: Option<sem::ValueKind>,
+    exact_class: Option<sem::ClassId>,
+) -> (
+    Vec<DispatchMethodCandidate>,
+    Vec<DispatchMethodRejection>,
+    Option<sem::MethodId>,
+) {
+    let methods = dispatch_methods(module, generic_id);
+    let selected_method = exact_class.and_then(|actual| {
+        methods
+            .iter()
+            .find(|method| module.is_same_or_subclass(actual, method.specializer))
+            .map(|method| method.id)
+    });
+    let mut applicable = Vec::new();
+    let mut rejected = Vec::new();
+
+    for method in methods {
+        match (static_kind, exact_class) {
+            (_, Some(actual)) if module.is_same_or_subclass(actual, method.specializer) => {
+                applicable.push(DispatchMethodCandidate {
+                    method: method.id,
+                    definition: method.definition,
+                    specializer: method.specializer,
+                    distance: module.inheritance_distance(actual, method.specializer),
+                    selected: selected_method == Some(method.id),
+                    runtime_only: false,
+                });
+            }
+            (_, Some(actual)) => rejected.push(DispatchMethodRejection {
+                method: method.id,
+                definition: method.definition,
+                specializer: method.specializer,
+                reason: exact_class_rejection_reason(module, actual, method.specializer),
+            }),
+            (Some(sem::ValueKind::Object(static_class)), None)
+                if classes_overlap(module, static_class, method.specializer) =>
+            {
+                applicable.push(DispatchMethodCandidate {
+                    method: method.id,
+                    definition: method.definition,
+                    specializer: method.specializer,
+                    distance: module.inheritance_distance(static_class, method.specializer),
+                    selected: false,
+                    runtime_only: true,
+                });
+            }
+            (Some(sem::ValueKind::Object(static_class)), None) => {
+                rejected.push(DispatchMethodRejection {
+                    method: method.id,
+                    definition: method.definition,
+                    specializer: method.specializer,
+                    reason: format!(
+                        "disjoint from static argument {}",
+                        class_label(module, static_class)
+                    ),
+                });
+            }
+            (Some(sem::ValueKind::Any), None) => {
+                applicable.push(DispatchMethodCandidate {
+                    method: method.id,
+                    definition: method.definition,
+                    specializer: method.specializer,
+                    distance: None,
+                    selected: false,
+                    runtime_only: true,
+                });
+            }
+            (Some(kind), None) => rejected.push(DispatchMethodRejection {
+                method: method.id,
+                definition: method.definition,
+                specializer: method.specializer,
+                reason: format!(
+                    "contract mismatch: dispatch argument is {}",
+                    sem_kind_label(module, kind)
+                ),
+            }),
+            (None, None) => rejected.push(DispatchMethodRejection {
+                method: method.id,
+                definition: method.definition,
+                specializer: method.specializer,
+                reason: "contract mismatch: missing dispatch argument".into(),
+            }),
+        }
+    }
+
+    (applicable, rejected, selected_method)
+}
+
+fn exact_class_rejection_reason(
+    module: &sem::Module,
+    actual: sem::ClassId,
+    specializer: sem::ClassId,
+) -> String {
+    if module.is_same_or_subclass(specializer, actual) {
+        format!(
+            "requires subclass {} but exact class is {}",
+            class_label(module, specializer),
+            class_label(module, actual)
+        )
+    } else {
+        format!("disjoint from exact class {}", class_label(module, actual))
+    }
+}
+
+fn classes_overlap(module: &sem::Module, left: sem::ClassId, right: sem::ClassId) -> bool {
+    module.is_same_or_subclass(left, right) || module.is_same_or_subclass(right, left)
+}
+
+fn dispatch_site_artifacts(
+    artifacts: &SessionArtifacts,
+    generic_id: sem::GenericFunctionId,
+) -> Vec<ArtifactReport> {
+    let mut reports = Vec::new();
+    for method in artifacts
+        .sem
+        .methods
+        .iter()
+        .filter(|method| method.generic == generic_id)
+    {
+        push_artifact_report(
+            &mut reports,
+            artifacts,
+            QueryArtifact::MethodLookup(method.definition),
+        );
+    }
+    if let Some(generic) = artifacts.sem.generics.get(generic_id.0 as usize) {
+        push_artifact_report(
+            &mut reports,
+            artifacts,
+            QueryArtifact::GenericDispatcher(generic.definition),
+        );
+    }
+    push_artifact_report(&mut reports, artifacts, QueryArtifact::LoweredModule);
+    push_artifact_report(&mut reports, artifacts, QueryArtifact::TapeProgram);
+    reports
+}
+
+fn push_artifact_report(
+    reports: &mut Vec<ArtifactReport>,
+    artifacts: &SessionArtifacts,
+    artifact: QueryArtifact,
+) {
+    let key = artifacts.invalidation.key_for(artifact);
+    if reports.iter().all(|report| report.key != key) {
+        reports.push(ArtifactReport { artifact, key });
+    }
+}
+
+fn dump_dispatch_sites(artifacts: &SessionArtifacts) -> String {
+    let sites = artifacts.dispatch_sites();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "dispatch sites for {} ({})",
+        artifacts.source.name, artifacts.source.id
+    );
+    if sites.is_empty() {
+        out.push_str("  none\n");
+        return out;
+    }
+    for site in &sites {
+        let generic = generic_label(&artifacts.sem, site.generic);
+        let static_kind = site.static_argument_kind.map_or_else(
+            || "missing".into(),
+            |kind| sem_kind_label(&artifacts.sem, kind),
+        );
+        let selected = site.selected_method.map_or_else(
+            || "runtime".into(),
+            |method| method_label(&artifacts.sem, method),
+        );
+        let _ = writeln!(
+            out,
+            "  {} key={} owner={} {} span={}..{} generic={} static-arg={} runtime-needed={} selected={}",
+            site.id,
+            site.key,
+            site.owner.kind.as_str(),
+            site.owner.name,
+            site.span.start,
+            site.span.end,
+            generic,
+            static_kind,
+            site.runtime_needed,
+            selected
+        );
+    }
+    out
+}
+
+fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord) -> String {
+    let module = &artifacts.sem;
+    let mut out = String::new();
+    let _ = writeln!(out, "dispatch {}", site.id);
+    let _ = writeln!(out, "  key: {}", site.key);
+    let _ = writeln!(
+        out,
+        "  owner: {} {} definition={}",
+        site.owner.kind.as_str(),
+        site.owner.name,
+        site.owner.definition
+    );
+    let _ = writeln!(
+        out,
+        "  source: {} span={}..{}",
+        artifacts.source.name, site.span.start, site.span.end
+    );
+    let _ = writeln!(
+        out,
+        "  generic: {} definition={} contract={}",
+        generic_label(module, site.generic),
+        site.generic_definition,
+        generic_contract_label(module, site.generic)
+    );
+    let static_kind = site
+        .static_argument_kind
+        .map_or_else(|| "missing".into(), |kind| sem_kind_label(module, kind));
+    let exact_class = site
+        .exact_static_class
+        .map_or_else(|| "unknown".into(), |class| class_label(module, class));
+    let selected = site.selected_method.map_or_else(
+        || "runtime-needed".into(),
+        |method| method_label(module, method),
+    );
+    let _ = writeln!(out, "  argument:");
+    let _ = writeln!(out, "    static-kind: {static_kind}");
+    let _ = writeln!(out, "    exact-class: {exact_class}");
+    let _ = writeln!(out, "    runtime-needed: {}", site.runtime_needed);
+    let _ = writeln!(out, "    selected: {selected}");
+    let _ = writeln!(out, "  applicable methods:");
+    if site.applicable.is_empty() {
+        out.push_str("    none\n");
+    } else {
+        for candidate in &site.applicable {
+            let selection = if candidate.selected {
+                "selected"
+            } else if candidate.runtime_only {
+                "runtime-only"
+            } else {
+                "shadowed"
+            };
+            let distance = candidate
+                .distance
+                .map_or_else(|| "unknown".into(), |distance| distance.to_string());
+            let _ = writeln!(
+                out,
+                "    {} definition={} specializer={} distance={} {}",
+                method_label(module, candidate.method),
+                candidate.definition,
+                class_label(module, candidate.specializer),
+                distance,
+                selection
+            );
+        }
+    }
+    let _ = writeln!(out, "  rejected methods:");
+    if site.rejected.is_empty() {
+        out.push_str("    none\n");
+    } else {
+        for rejected in &site.rejected {
+            let _ = writeln!(
+                out,
+                "    {} definition={} specializer={} reason={}",
+                method_label(module, rejected.method),
+                rejected.definition,
+                class_label(module, rejected.specializer),
+                rejected.reason
+            );
+        }
+    }
+    let _ = writeln!(out, "  lowering:");
+    let _ = writeln!(out, "    dispatcher: {}", site.lowered_dispatcher);
+    let _ = writeln!(out, "    order:");
+    for method in dispatch_methods(module, site.generic) {
+        let _ = writeln!(
+            out,
+            "      {} specializer={} applies-to={}",
+            method_label(module, method.id),
+            class_label(module, method.specializer),
+            sem_dispatch_applicability_label(module, method.specializer)
+        );
+    }
+    let _ = writeln!(out, "  related artifacts:");
+    for report in &site.related_artifacts {
+        let _ = writeln!(
+            out,
+            "    {} {}",
+            report.key,
+            artifact_label(report.artifact)
+        );
+    }
+    out
+}
+
+fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
+    match expr {
+        sem::Expr::ConstI64 { .. } | sem::Expr::Binary { .. } => sem::ValueKind::I64,
+        sem::Expr::ConstBool { .. } | sem::Expr::Compare { .. } | sem::Expr::InstanceOf { .. } => {
+            sem::ValueKind::Bool
+        }
+        sem::Expr::Local { result_kind, .. } => *result_kind,
+        sem::Expr::ClassObject { class, .. } | sem::Expr::ClassOf { class, .. } => {
+            sem::ValueKind::ClassObject(*class)
+        }
+        sem::Expr::KnownCallable { callable, .. } => sem::ValueKind::KnownCallable(*callable),
+        sem::Expr::DirectCall { function, .. } => module
+            .functions
+            .get(function.0 as usize)
+            .map_or(sem::ValueKind::Error, |function| function.result_kind),
+        sem::Expr::GenericCall { generic, .. } => module
+            .generics
+            .get(generic.0 as usize)
+            .map_or(sem::ValueKind::Error, |generic| generic.result_kind),
+        sem::Expr::Signal { result_kind, .. } => *result_kind,
+        sem::Expr::Handle { restart, .. } => restart.result_kind,
+        sem::Expr::Cast { class, .. }
+        | sem::Expr::MakeObject {
+            class_id: class, ..
+        } => sem::ValueKind::Object(*class),
+        sem::Expr::AccessorCall { result_kind, .. } => *result_kind,
+        sem::Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_kind = sem_expr_kind(module, then_branch);
+            let else_kind = sem_expr_kind(module, else_branch);
+            if then_kind == else_kind {
+                then_kind
+            } else {
+                sem::ValueKind::Error
+            }
+        }
+        sem::Expr::Error { .. } => sem::ValueKind::Error,
+    }
+}
+
+fn exact_static_class(expr: &sem::Expr) -> Option<sem::ClassId> {
+    match expr {
+        sem::Expr::MakeObject { class_id, .. } => Some(*class_id),
+        sem::Expr::Cast { value, .. } => exact_static_class(value),
+        sem::Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_class = exact_static_class(then_branch)?;
+            let else_class = exact_static_class(else_branch)?;
+            (then_class == else_class).then_some(then_class)
+        }
+        _ => None,
+    }
+}
+
+fn class_label(module: &sem::Module, class_id: sem::ClassId) -> String {
+    module.classes.get(class_id.0 as usize).map_or_else(
+        || format!("c{}:<missing>", class_id.0),
+        |class| format!("c{}:{}", class.id.0, class.name),
+    )
+}
+
+fn generic_label(module: &sem::Module, generic_id: sem::GenericFunctionId) -> String {
+    module.generics.get(generic_id.0 as usize).map_or_else(
+        || format!("g{}:<missing>", generic_id.0),
+        |generic| format!("g{}:{}", generic.id.0, generic.name),
+    )
+}
+
+fn method_label(module: &sem::Module, method_id: sem::MethodId) -> String {
+    module.methods.get(method_id.0 as usize).map_or_else(
+        || format!("m{}:<missing>", method_id.0),
+        |method| {
+            let generic = module
+                .generics
+                .get(method.generic.0 as usize)
+                .map_or("<?>", |generic| generic.name.as_str());
+            format!(
+                "m{}:{}({})",
+                method.id.0,
+                generic,
+                class_label(module, method.specializer)
+            )
+        },
+    )
+}
+
+fn generic_contract_label(module: &sem::Module, generic_id: sem::GenericFunctionId) -> String {
+    module.generics.get(generic_id.0 as usize).map_or_else(
+        || "missing".into(),
+        |generic| {
+            let params = generic
+                .params
+                .iter()
+                .zip(&generic.param_kinds)
+                .map(|(name, kind)| match kind {
+                    Some(kind) => format!("{name}:{}", sem_kind_label(module, *kind)),
+                    None => format!("{name}:untyped"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{}({params}) -> {}",
+                generic.name,
+                sem_kind_label(module, generic.result_kind)
+            )
+        },
+    )
 }
 
 fn compile_file(file: &SourceFile, mode: RuntimeMode) -> SessionArtifacts {
@@ -3475,6 +4244,27 @@ mod tests {
             .expect("environment object should exist")
     }
 
+    fn class_id(artifacts: &SessionArtifacts, name: &str) -> sem::ClassId {
+        artifacts
+            .sem
+            .classes
+            .iter()
+            .find(|class| class.name == name)
+            .map(|class| class.id)
+            .expect("class should exist")
+    }
+
+    fn method_for_class(artifacts: &SessionArtifacts, name: &str) -> sem::MethodId {
+        let class = class_id(artifacts, name);
+        artifacts
+            .sem
+            .methods
+            .iter()
+            .find(|method| method.specializer == class)
+            .map(|method| method.id)
+            .expect("method should exist")
+    }
+
     #[test]
     fn environment_affordance_names_are_stable() {
         let names = [
@@ -3580,6 +4370,240 @@ mod tests {
                 .contains("program=\"cairn\"")
         );
         assert!(artifacts.dump_artifact_graph().contains("dependencies:"));
+    }
+
+    #[test]
+    fn dispatch_sites_explain_exact_class_selection() {
+        let artifacts =
+            CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
+        let sites = artifacts.dispatch_sites();
+
+        assert_eq!(sites.len(), 1);
+        let site = &sites[0];
+        assert_eq!(site.id, "dispatch:d0");
+        assert_eq!(site.owner.name, "main");
+        assert_eq!(site.owner.kind, DispatchSiteOwnerKind::Function);
+        assert_eq!(
+            site.exact_static_class,
+            Some(class_id(&artifacts, "<circle>"))
+        );
+        assert!(!site.runtime_needed);
+        assert_eq!(
+            site.selected_method,
+            Some(method_for_class(&artifacts, "<circle>"))
+        );
+        assert_eq!(site.applicable.len(), 1);
+        assert!(site.rejected.is_empty());
+        assert!(
+            site.related_artifacts
+                .iter()
+                .any(|report| matches!(report.artifact, QueryArtifact::MethodLookup(_)))
+        );
+        assert!(
+            site.related_artifacts
+                .iter()
+                .any(|report| matches!(report.artifact, QueryArtifact::GenericDispatcher(_)))
+        );
+        assert!(
+            site.related_artifacts
+                .iter()
+                .any(|report| report.artifact == QueryArtifact::LoweredModule)
+        );
+        assert!(
+            site.related_artifacts
+                .iter()
+                .any(|report| report.artifact == QueryArtifact::TapeProgram)
+        );
+
+        let list = artifacts.dump_dispatch_sites();
+        assert!(list.contains("dispatch:d0"));
+        assert!(list.contains("static-arg=object(<circle>)"));
+        let explanation = artifacts
+            .explain_dispatch_site("dispatch:d0")
+            .expect("dispatch site should exist");
+        assert!(explanation.contains("owner: function main"));
+        assert!(explanation.contains("generic: g0:area"));
+        assert!(explanation.contains("static-kind: object(<circle>)"));
+        assert!(explanation.contains("runtime-needed: false"));
+        assert!(explanation.contains("selected"));
+        assert!(explanation.contains("dispatcher: area#dispatch"));
+        assert!(explanation.contains("related artifacts:"));
+    }
+
+    #[test]
+    fn dispatch_sites_choose_child_before_parent() {
+        let source = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                      define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                      define generic score(x :: <shape>) => <integer>;\n\
+                      define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+                      define method score(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+                      define function main()\n  score(make(<circle>))\nend;";
+        let artifacts =
+            CompilerSession::compile_source("score.cairn", source, RuntimeMode::CompileOnly);
+        let site = artifacts.dispatch_site("dispatch:d0").expect("site exists");
+
+        assert_eq!(
+            site.exact_static_class,
+            Some(class_id(&artifacts, "<circle>"))
+        );
+        assert_eq!(
+            site.selected_method,
+            Some(method_for_class(&artifacts, "<circle>"))
+        );
+        assert_eq!(site.applicable.len(), 2);
+        assert!(site.applicable[0].selected);
+        assert_eq!(
+            site.applicable[0].specializer,
+            class_id(&artifacts, "<circle>")
+        );
+        assert_eq!(
+            site.applicable[1].specializer,
+            class_id(&artifacts, "<shape>")
+        );
+        assert!(!site.applicable[1].runtime_only);
+        let explanation = artifacts.explain_dispatch_site("dispatch:d0").unwrap();
+        assert!(explanation.contains("m1:score(c1:<circle>)"));
+        assert!(explanation.contains("m0:score(c0:<shape>)"));
+        assert!(explanation.contains("shadowed"));
+    }
+
+    #[test]
+    fn dispatch_sites_mark_parent_typed_calls_runtime_needed() {
+        let source = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                      define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                      define generic score(x :: <shape>) => <integer>;\n\
+                      define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+                      define method score(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+                      define function call-score(s :: <shape>) => <integer>\n  score(s)\nend;";
+        let artifacts =
+            CompilerSession::compile_source("score.cairn", source, RuntimeMode::CompileOnly);
+        let site = artifacts.dispatch_site("dispatch:d0").expect("site exists");
+
+        assert_eq!(
+            site.static_argument_kind,
+            Some(sem::ValueKind::Object(class_id(&artifacts, "<shape>")))
+        );
+        assert_eq!(site.exact_static_class, None);
+        assert!(site.runtime_needed);
+        assert_eq!(site.selected_method, None);
+        assert_eq!(site.applicable.len(), 2);
+        assert!(
+            site.applicable
+                .iter()
+                .all(|candidate| candidate.runtime_only)
+        );
+        let explanation = artifacts.explain_dispatch_site("dispatch:d0").unwrap();
+        assert!(explanation.contains("runtime-needed: true"));
+        assert!(explanation.contains("selected: runtime-needed"));
+    }
+
+    #[test]
+    fn dispatch_sites_report_rejected_sibling_methods() {
+        let source = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                      define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                      define class <square> (<shape>)\n  slot side :: <integer>, init-value: 3;\nend;\n\
+                      define generic area(x :: <shape>) => <integer>;\n\
+                      define method area(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+                      define method area(s :: <square>) => <integer>\n  s.side\nend;\n\
+                      define function main()\n  area(make(<circle>))\nend;";
+        let artifacts =
+            CompilerSession::compile_source("area.cairn", source, RuntimeMode::CompileOnly);
+        let site = artifacts.dispatch_site("dispatch:d0").expect("site exists");
+
+        assert_eq!(
+            site.selected_method,
+            Some(method_for_class(&artifacts, "<circle>"))
+        );
+        assert!(site.rejected.iter().any(|rejected| {
+            rejected.specializer == class_id(&artifacts, "<square>")
+                && rejected.reason.contains("disjoint")
+        }));
+        let explanation = artifacts.explain_dispatch_site("dispatch:d0").unwrap();
+        assert!(explanation.contains("rejected methods:"));
+        assert!(explanation.contains("c2:<square>"));
+        assert!(explanation.contains("reason=disjoint"));
+    }
+
+    #[test]
+    fn dispatch_site_ids_survive_harmless_trivia_edits() {
+        let before = CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
+        let after = CompilerSession::compile_source(
+            "area.cairn",
+            "\n// same dispatch with harmless trivia\n\
+             define class <circle>   (   <object>   )\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius   *   c.radius\nend;\n\
+             define function main()\n  area( make( <circle>, radius: 10 ) )\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let before_sites = before.dispatch_sites();
+        let after_sites = after.dispatch_sites();
+
+        assert_eq!(before_sites.len(), 1);
+        assert_eq!(after_sites.len(), 1);
+        assert_eq!(before_sites[0].id, after_sites[0].id);
+        assert_eq!(before_sites[0].key, after_sites[0].key);
+    }
+
+    #[test]
+    fn dispatch_explanations_change_with_method_and_class_facts() {
+        let before = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                      define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                      define generic score(x :: <object>) => <integer>;\n\
+                      define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+                      define function main()\n  score(make(<circle>))\nend;";
+        let with_child = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                          define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                          define generic score(x :: <object>) => <integer>;\n\
+                          define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+                          define method score(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+                          define function main()\n  score(make(<circle>))\nend;";
+        let class_changed = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                             define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                             define generic score(x :: <object>) => <integer>;\n\
+                             define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+                             define method score(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+                             define function main()\n  score(make(<circle>))\nend;";
+
+        let before =
+            CompilerSession::compile_source("score.cairn", before, RuntimeMode::CompileOnly);
+        let with_child =
+            CompilerSession::compile_source("score.cairn", with_child, RuntimeMode::CompileOnly);
+        let class_changed =
+            CompilerSession::compile_source("score.cairn", class_changed, RuntimeMode::CompileOnly);
+
+        let before_site = before.dispatch_site("dispatch:d0").expect("site exists");
+        let with_child_site = with_child
+            .dispatch_site("dispatch:d0")
+            .expect("site exists");
+        let class_changed_site = class_changed
+            .dispatch_site("dispatch:d0")
+            .expect("site exists");
+
+        assert_eq!(
+            before_site.selected_method,
+            Some(method_for_class(&before, "<shape>"))
+        );
+        assert_eq!(
+            with_child_site.selected_method,
+            Some(method_for_class(&with_child, "<circle>"))
+        );
+        assert!(class_changed_site.rejected.iter().any(|rejected| {
+            rejected.specializer == class_id(&class_changed, "<shape>")
+                && rejected.reason.contains("disjoint")
+        }));
+
+        let diff = CompilerSession::diff(&before, &with_child);
+        let generic = with_child.sem.generics[0].definition;
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Method
+                && change.change == DefinitionChangeKind::Added
+        }));
+        assert!(
+            diff.affected
+                .iter()
+                .any(|report| report.artifact == QueryArtifact::GenericDispatcher(generic))
+        );
     }
 
     #[test]
