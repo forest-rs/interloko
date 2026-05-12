@@ -260,6 +260,16 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_slot_init_value_defaults_and_overrides() {
+        let value = compile_and_run_main(
+            "define class <circle> (<object>)\n  constant slot radius :: <integer>, required-init-keyword: r:, init-value: 10;\nend;\n\
+             define function main()\n  make(<circle>).radius + make(<circle>, r: 2).radius\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 12);
+    }
+
+    #[test]
     fn compiles_and_runs_recoverable_restart() {
         let value = compile_and_run_main(
             "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\

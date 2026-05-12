@@ -111,8 +111,30 @@ pub struct Slot {
     /// Whether the construction keyword was declared with
     /// `required-init-keyword:`.
     pub required_init_keyword: bool,
+    /// Optional expression used when construction omits this slot.
+    pub init_value: Option<Expr>,
+    /// Slot allocation policy. Only instance slots are supported in this slice.
+    pub allocation: SlotAllocation,
+    /// Slot mutability metadata.
+    pub mutability: SlotMutability,
     /// Source span.
     pub span: Span,
+}
+
+/// Slot allocation policy.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SlotAllocation {
+    /// One value per constructed object instance.
+    Instance,
+}
+
+/// Slot mutability metadata.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SlotMutability {
+    /// Slot declared with ordinary `slot`.
+    Mutable,
+    /// Slot declared with `constant slot`.
+    Constant,
 }
 
 /// Generic function declaration.
@@ -548,6 +570,9 @@ impl<'tree> Lowering<'tree> {
                 init_keyword: None,
                 init_keyword_span: node.span,
                 required_init_keyword: false,
+                init_value: None,
+                allocation: SlotAllocation::Instance,
+                mutability: SlotMutability::Mutable,
                 span: node.span,
             };
         };
@@ -556,30 +581,53 @@ impl<'tree> Lowering<'tree> {
         let mut init_keyword = None;
         let mut init_keyword_span = span;
         let mut required_init_keyword = false;
+        let mut init_value = None;
         for option in node.child_nodes(CstKind::SlotOption) {
             let idents = self.ident_tokens(option);
             let Some((option_span, option_name)) = idents.first() else {
                 continue;
             };
-            let Some((keyword_span, keyword_name)) = idents.get(1) else {
-                self.diagnostics.push(Diagnostic::error(
-                    *option_span,
-                    format!("slot option `{option_name}:` requires a keyword value"),
-                ));
-                continue;
-            };
-            match *option_name {
+            let option_span = *option_span;
+            let option_name = (*option_name).to_string();
+            match option_name.as_str() {
                 "init-keyword" => {
+                    let Some((keyword_span, keyword_name)) = idents.get(1) else {
+                        self.diagnostics.push(Diagnostic::error(
+                            option_span,
+                            format!("slot option `{option_name}:` requires a keyword value"),
+                        ));
+                        continue;
+                    };
                     init_keyword = Some((*keyword_name).to_string());
                     init_keyword_span = *keyword_span;
                 }
                 "required-init-keyword" => {
+                    let Some((keyword_span, keyword_name)) = idents.get(1) else {
+                        self.diagnostics.push(Diagnostic::error(
+                            option_span,
+                            format!("slot option `{option_name}:` requires a keyword value"),
+                        ));
+                        continue;
+                    };
                     init_keyword = Some((*keyword_name).to_string());
                     init_keyword_span = *keyword_span;
                     required_init_keyword = true;
                 }
+                "init-value" => {
+                    let Some(expr) = option.children.iter().find_map(|child| match child {
+                        CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                        CstElement::Token(_) => None,
+                    }) else {
+                        self.diagnostics.push(Diagnostic::error(
+                            option_span,
+                            "slot option `init-value:` requires an expression",
+                        ));
+                        continue;
+                    };
+                    init_value = Some(expr);
+                }
                 _ => self.diagnostics.push(Diagnostic::error(
-                    *option_span,
+                    option_span,
                     format!("unsupported slot option `{option_name}:`"),
                 )),
             }
@@ -593,6 +641,13 @@ impl<'tree> Lowering<'tree> {
             init_keyword,
             init_keyword_span,
             required_init_keyword,
+            init_value,
+            allocation: SlotAllocation::Instance,
+            mutability: if self.has_token(node, TokenKind::Constant) {
+                SlotMutability::Constant
+            } else {
+                SlotMutability::Mutable
+            },
             span,
         }
     }
@@ -1413,6 +1468,13 @@ impl<'tree> Lowering<'tree> {
         })
     }
 
+    fn has_token(&self, node: &CstNode, kind: TokenKind) -> bool {
+        node.children.iter().any(|child| match child {
+            CstElement::Token(index) => self.tree.tokens[*index].kind == kind,
+            CstElement::Node(_) => false,
+        })
+    }
+
     fn node_token_indices(&self, node: &CstNode) -> Vec<usize> {
         node.children
             .iter()
@@ -1592,7 +1654,7 @@ mod tests {
     #[test]
     fn lowers_classes_generics_methods_make_and_slot_reads() {
         let tree = syntax::parse(
-            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\n  constant slot cached :: <integer>, init-value: 5;\nend;\n\
              define generic area(x :: <object>) => <integer>;\n\
              define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10, enabled?: #t))\nend;",
@@ -1610,6 +1672,15 @@ mod tests {
             Some("radius")
         );
         assert!(module.classes[0].slots[0].required_init_keyword);
+        assert_eq!(
+            module.classes[0].slots[0].allocation,
+            SlotAllocation::Instance
+        );
+        assert_eq!(
+            module.classes[0].slots[0].mutability,
+            SlotMutability::Mutable
+        );
+        assert!(module.classes[0].slots[0].init_value.is_none());
         assert_eq!(module.classes[0].slots[1].name, "valid?");
         assert_eq!(
             module.classes[0].slots[1].type_name.as_deref(),
@@ -1620,6 +1691,15 @@ mod tests {
             Some("enabled?")
         );
         assert!(!module.classes[0].slots[1].required_init_keyword);
+        assert_eq!(module.classes[0].slots[2].name, "cached");
+        assert_eq!(
+            module.classes[0].slots[2].mutability,
+            SlotMutability::Constant
+        );
+        assert!(matches!(
+            module.classes[0].slots[2].init_value,
+            Some(Expr::Number { value: 5, .. })
+        ));
         assert_eq!(module.generics[0].name, "area");
         assert_eq!(module.generics[0].params[0].name, "x");
         assert_eq!(

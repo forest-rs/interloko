@@ -256,6 +256,40 @@ pub enum SlotOrigin {
     },
 }
 
+/// Slot allocation policy.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SlotAllocation {
+    /// Slot storage is allocated per constructed instance.
+    Instance,
+}
+
+impl From<ast::SlotAllocation> for SlotAllocation {
+    fn from(value: ast::SlotAllocation) -> Self {
+        match value {
+            ast::SlotAllocation::Instance => Self::Instance,
+        }
+    }
+}
+
+/// Slot mutability metadata.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SlotMutability {
+    /// Ordinary slot metadata. Slot writes are not implemented yet.
+    Mutable,
+    /// `constant slot` metadata. Values are set only during construction in
+    /// this slice.
+    Constant,
+}
+
+impl From<ast::SlotMutability> for SlotMutability {
+    fn from(value: ast::SlotMutability) -> Self {
+        match value {
+            ast::SlotMutability::Mutable => Self::Mutable,
+            ast::SlotMutability::Constant => Self::Constant,
+        }
+    }
+}
+
 /// Optional generic function parameter contract.
 ///
 /// `None` preserves the legacy unannotated generic behavior; `Some(kind)` is an
@@ -318,6 +352,12 @@ pub struct Slot {
     pub init_keyword: String,
     /// Whether the slot declared `required-init-keyword:`.
     pub required_init_keyword: bool,
+    /// Optional default initializer used when construction omits this slot.
+    pub init_value: Option<Expr>,
+    /// Allocation policy.
+    pub allocation: SlotAllocation,
+    /// Mutability metadata.
+    pub mutability: SlotMutability,
     /// Source span.
     pub span: Span,
 }
@@ -902,6 +942,7 @@ impl Lowering {
         lowering.collect_classes(module);
         lowering.collect_generics(module);
         lowering.collect_functions(module);
+        lowering.collect_slot_init_values(module);
         lowering
     }
 
@@ -953,6 +994,9 @@ impl Lowering {
                             .clone()
                             .unwrap_or_else(|| slot.name.clone()),
                         required_init_keyword: slot.required_init_keyword,
+                        init_value: None,
+                        allocation: slot.allocation.into(),
+                        mutability: slot.mutability.into(),
                         span: slot.span,
                     }
                 })
@@ -1018,6 +1062,9 @@ impl Lowering {
                         },
                         init_keyword: host_slot.name.clone(),
                         required_init_keyword: false,
+                        init_value: None,
+                        allocation: SlotAllocation::Instance,
+                        mutability: SlotMutability::Mutable,
                         span: Span::default(),
                     }
                 })
@@ -1032,6 +1079,48 @@ impl Lowering {
                 slots,
                 span: Span::default(),
             });
+        }
+    }
+
+    fn collect_slot_init_values(&mut self, module: &ast::Module) {
+        let mut lowered_values = Vec::new();
+        for (class_index, class) in module.classes.iter().enumerate() {
+            for (slot_index, slot) in class.slots.iter().enumerate() {
+                let Some(init_value) = &slot.init_value else {
+                    continue;
+                };
+                let mut ctx = FunctionContext::new();
+                let value = self.lower_expr(&mut ctx, init_value);
+                self.diagnostics.extend(ctx.diagnostics);
+                let slot_kind = self
+                    .classes
+                    .get(class_index)
+                    .and_then(|class| class.slots.get(slot_index))
+                    .map_or(ValueKind::Error, |slot| slot.kind);
+                let value_kind = self.expr_kind(&value);
+                if !self.kinds_match(slot_kind, value_kind) {
+                    self.diagnostics.push(Diagnostic::error(
+                        init_value.span(),
+                        format!(
+                            "slot `{}` expects {} but init-value has {}",
+                            slot.name,
+                            self.kind_name(slot_kind),
+                            self.kind_name(value_kind)
+                        ),
+                    ));
+                }
+                lowered_values.push((class_index, slot_index, value));
+            }
+        }
+
+        for (class_index, slot_index, value) in lowered_values {
+            if let Some(slot) = self
+                .classes
+                .get_mut(class_index)
+                .and_then(|class| class.slots.get_mut(slot_index))
+            {
+                slot.init_value = Some(value);
+            }
         }
     }
 
@@ -2118,7 +2207,13 @@ impl Lowering {
 
         for slot in &class.slots {
             if !resolved.iter().any(|field| field.slot == slot.id) {
-                if slot.required_init_keyword {
+                if let Some(init_value) = &slot.init_value {
+                    resolved.push(FieldInit {
+                        slot: slot.id,
+                        value: init_value.clone(),
+                        span: init_value.span(),
+                    });
+                } else if slot.required_init_keyword {
                     ctx.diagnostics.push(Diagnostic::error(
                         span,
                         format!(
@@ -2934,6 +3029,45 @@ mod tests {
     }
 
     #[test]
+    fn resolves_slot_init_values_and_constant_metadata() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  constant slot radius :: <integer>, required-init-keyword: r:, init-value: 10;\n  slot cached, init-value: #t;\nend;\n\
+             define function main()\n  make(<circle>).radius\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let radius = &module.classes[0].slots[0];
+        assert_eq!(radius.init_keyword, "r");
+        assert!(radius.required_init_keyword);
+        assert_eq!(radius.allocation, SlotAllocation::Instance);
+        assert_eq!(radius.mutability, SlotMutability::Constant);
+        assert!(matches!(
+            radius.init_value,
+            Some(Expr::ConstI64 { value: 10, .. })
+        ));
+        let cached = &module.classes[0].slots[1];
+        assert_eq!(cached.kind, ValueKind::Any);
+        assert_eq!(cached.mutability, SlotMutability::Mutable);
+        assert!(matches!(
+            cached.init_value,
+            Some(Expr::ConstBool { value: true, .. })
+        ));
+
+        let Expr::AccessorCall { receiver, .. } = &module.functions[0].body.result else {
+            panic!("expected accessor call");
+        };
+        let Expr::MakeObject { fields, .. } = receiver.as_ref() else {
+            panic!("expected defaulted make");
+        };
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(fields[0].value, Expr::ConstI64 { value: 10, .. }));
+        assert!(matches!(
+            fields[1].value,
+            Expr::ConstBool { value: true, .. }
+        ));
+    }
+
+    #[test]
     fn reports_slot_type_errors() {
         let mismatch = lower_source(
             "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
@@ -2956,6 +3090,18 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message == "unresolved slot type `<missing>`")
+        );
+
+        let bad_default = lower_source(
+            "define class <flag> (<object>)\n  slot valid? :: <boolean>, init-value: 1;\nend;\n\
+             define function main()\n  make(<flag>)\nend;",
+        );
+        assert!(
+            bad_default
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message
+                    == "slot `valid?` expects <boolean> but init-value has <integer>")
         );
     }
 

@@ -50,6 +50,8 @@ pub enum TokenKind {
     Class,
     /// `slot`.
     Slot,
+    /// `constant`.
+    Constant,
     /// `generic`.
     Generic,
     /// `method`.
@@ -436,6 +438,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Handle => 35,
         TokenKind::With => 36,
         TokenKind::Restart => 37,
+        TokenKind::Constant => 38,
     }
 }
 
@@ -568,6 +571,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "function" => TokenKind::Function,
                     "class" => TokenKind::Class,
                     "slot" => TokenKind::Slot,
+                    "constant" => TokenKind::Constant,
                     "generic" => TokenKind::Generic,
                     "method" => TokenKind::Method,
                     "let" => TokenKind::Let,
@@ -722,10 +726,10 @@ impl<'source> Parser<'source> {
             self.expect(TokenKind::RParen, &mut children, "expected `)`");
         }
         while !self.at(TokenKind::End) && !self.at_end() {
-            if self.at(TokenKind::Slot) {
+            if self.at(TokenKind::Slot) || self.at(TokenKind::Constant) {
                 children.push(CstElement::Node(self.parse_slot_decl()));
             } else if let Some(index) = self.bump() {
-                self.error_at(index, "expected `slot` or `end`");
+                self.error_at(index, "expected `slot`, `constant slot`, or `end`");
                 children.push(CstElement::Token(index));
             }
         }
@@ -743,6 +747,9 @@ impl<'source> Parser<'source> {
     fn parse_slot_decl(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
+        if self.at(TokenKind::Constant) {
+            self.expect(TokenKind::Constant, &mut children, "expected `constant`");
+        }
         self.expect(TokenKind::Slot, &mut children, "expected `slot`");
         self.expect(TokenKind::Ident, &mut children, "expected slot name");
         if self.at(TokenKind::DoubleColon) {
@@ -768,12 +775,17 @@ impl<'source> Parser<'source> {
     fn parse_slot_option(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
+        let option = self.peek().map(|(_, token)| token);
         self.expect(TokenKind::Ident, &mut children, "expected slot option name");
         self.expect(
             TokenKind::Colon,
             &mut children,
             "expected `:` after slot option name",
         );
+        if option.is_some_and(|token| token.text(self.source) == "init-value") {
+            children.push(CstElement::Node(self.parse_expr()));
+            return self.node(CstKind::SlotOption, children, start);
+        }
         self.expect(
             TokenKind::Ident,
             &mut children,
@@ -1290,7 +1302,7 @@ mod tests {
     #[test]
     fn parse_class_generic_method_and_object_syntax() {
         let tree = parse(
-            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\n  constant slot cached :: <integer>, init-value: 5;\nend;\n\
              define generic area(x :: <object>) => <integer>;\n\
              define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10, enabled?: #t))\nend;",
@@ -1305,7 +1317,7 @@ mod tests {
                 .child_nodes(CstKind::SlotDecl)
                 .flat_map(|slot| slot.child_nodes(CstKind::SlotOption))
                 .count(),
-            2
+            3
         );
         assert_eq!(tree.root.child_nodes(CstKind::Generic).count(), 1);
         assert_eq!(tree.root.child_nodes(CstKind::Method).count(), 1);
@@ -1323,6 +1335,11 @@ mod tests {
             tree.tokens
                 .iter()
                 .any(|token| token.text(&tree.source) == "valid?")
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Constant)
         );
         assert!(tree.tokens.iter().any(|token| token.kind == TokenKind::Dot));
     }
