@@ -182,6 +182,8 @@ pub enum ArtifactKind {
     Ast,
     /// Binding and semantic symbol table result.
     Bind,
+    /// Aggregated compiler diagnostics.
+    Diagnostics,
     /// Method lookup result.
     MethodLookup,
     /// Lowered method body.
@@ -190,8 +192,12 @@ pub enum ArtifactKind {
     MethodTape,
     /// Generic dispatcher body.
     GenericDispatcher,
+    /// Whole lowered executable IR module.
+    LoweredModule,
     /// Whole tape program.
     TapeProgram,
+    /// Runtime result for a requested `main` run.
+    RuntimeResult,
 }
 
 impl ArtifactKind {
@@ -201,11 +207,14 @@ impl ArtifactKind {
             Self::Parse => 2,
             Self::Ast => 3,
             Self::Bind => 4,
-            Self::MethodLookup => 5,
-            Self::MethodLowering => 6,
-            Self::MethodTape => 7,
-            Self::GenericDispatcher => 8,
-            Self::TapeProgram => 9,
+            Self::Diagnostics => 5,
+            Self::MethodLookup => 6,
+            Self::MethodLowering => 7,
+            Self::MethodTape => 8,
+            Self::GenericDispatcher => 9,
+            Self::LoweredModule => 10,
+            Self::TapeProgram => 11,
+            Self::RuntimeResult => 12,
         }
     }
 }

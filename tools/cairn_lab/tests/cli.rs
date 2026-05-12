@@ -83,6 +83,11 @@ fn diff_reports_preserved_and_focused_method_changes() {
         before.to_str().expect("fixture path should be utf8"),
         trivia.to_str().expect("fixture path should be utf8"),
     ]);
+    assert!(harmless.contains("incremental report"));
+    assert!(harmless.contains("reused"));
+    assert!(harmless.contains("recomputed"));
+    assert!(harmless.contains("invalidated"));
+    assert!(harmless.contains("affected"));
     assert!(harmless.contains("preserved definitions:"));
     assert!(harmless.contains("affected artifacts:"));
     assert!(!harmless.contains("Modified"));

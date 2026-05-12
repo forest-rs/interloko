@@ -23,6 +23,8 @@ pub enum QueryArtifact {
     Ast,
     /// Binding and semantic symbol table result.
     Bind,
+    /// Aggregated diagnostics result.
+    Diagnostics,
     /// Method lookup result for a method.
     MethodLookup(DefinitionId),
     /// Lowered method body.
@@ -31,8 +33,12 @@ pub enum QueryArtifact {
     MethodTape(DefinitionId),
     /// Generated dispatcher artifact for a generic.
     GenericDispatcher(DefinitionId),
+    /// Whole lowered executable IR module.
+    LoweredModule,
     /// Whole verified tape program artifact.
     TapeProgram,
+    /// Runtime result artifact for an optional `main` run.
+    RuntimeResult,
 }
 
 /// A query artifact and its stable external key.
@@ -62,6 +68,7 @@ impl QueryArtifact {
             Self::Parse => ArtifactKey::new(source_file, ArtifactKind::Parse, None),
             Self::Ast => ArtifactKey::new(source_file, ArtifactKind::Ast, None),
             Self::Bind => ArtifactKey::new(source_file, ArtifactKind::Bind, None),
+            Self::Diagnostics => ArtifactKey::new(source_file, ArtifactKind::Diagnostics, None),
             Self::MethodLookup(id) => {
                 ArtifactKey::new(source_file, ArtifactKind::MethodLookup, Some(id))
             }
@@ -74,7 +81,9 @@ impl QueryArtifact {
             Self::GenericDispatcher(id) => {
                 ArtifactKey::new(source_file, ArtifactKind::GenericDispatcher, Some(id))
             }
+            Self::LoweredModule => ArtifactKey::new(source_file, ArtifactKind::LoweredModule, None),
             Self::TapeProgram => ArtifactKey::new(source_file, ArtifactKind::TapeProgram, None),
+            Self::RuntimeResult => ArtifactKey::new(source_file, ArtifactKind::RuntimeResult, None),
         }
     }
 }
@@ -107,7 +116,11 @@ impl QueryInvalidation {
         this.add(QueryArtifact::Parse, QueryArtifact::Source);
         this.add(QueryArtifact::Ast, QueryArtifact::Parse);
         this.add(QueryArtifact::Bind, QueryArtifact::Ast);
+        this.add(QueryArtifact::Diagnostics, QueryArtifact::Bind);
+        this.add(QueryArtifact::LoweredModule, QueryArtifact::Bind);
         this.add(QueryArtifact::TapeProgram, QueryArtifact::Bind);
+        this.add(QueryArtifact::TapeProgram, QueryArtifact::LoweredModule);
+        this.add(QueryArtifact::RuntimeResult, QueryArtifact::TapeProgram);
 
         for method in &module.methods {
             let method = method.definition;
@@ -121,12 +134,20 @@ impl QueryInvalidation {
                 QueryArtifact::MethodLowering(method),
             );
             this.add(
+                QueryArtifact::LoweredModule,
+                QueryArtifact::MethodLowering(method),
+            );
+            this.add(
                 QueryArtifact::TapeProgram,
                 QueryArtifact::MethodTape(method),
             );
         }
 
         for generic in &module.generics {
+            this.add(
+                QueryArtifact::LoweredModule,
+                QueryArtifact::GenericDispatcher(generic.definition),
+            );
             this.add(
                 QueryArtifact::TapeProgram,
                 QueryArtifact::GenericDispatcher(generic.definition),

@@ -7,7 +7,9 @@ use std::fs;
 use std::path::Path;
 
 use cairn_compiler::identity::SourceFileId;
-use cairn_compiler::session::{CompilerSession, DumpStage, RuntimeMode, RuntimeResult};
+use cairn_compiler::session::{
+    CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
+};
 
 type Result<T> = std::result::Result<T, LabError>;
 
@@ -56,10 +58,17 @@ fn run(args: Vec<String>) -> Result<()> {
                 ));
             }
             let source_file = SourceFileId::from_path(&args[1]);
-            let before = compile_path_with_id(&args[1], source_file, RuntimeMode::CompileOnly)?;
-            let after = compile_path_with_id(&args[2], source_file, RuntimeMode::CompileOnly)?;
-            let diff = CompilerSession::diff(&before, &after);
-            print!("{}", diff.dump());
+            let before = read_path(&args[1])?;
+            let after = read_path(&args[2])?;
+            let mut session = IncrementalCompilerSession::new();
+            session.add_source_with_id(source_file, &args[1], &before);
+            let _ = session
+                .compile(source_file, RuntimeMode::CompileOnly)
+                .expect("source was just added");
+            let update = session
+                .edit_and_compile(source_file, &after, RuntimeMode::CompileOnly)
+                .expect("source was just added");
+            print!("{}", update.dump_cache_report());
             Ok(())
         }
         "-h" | "--help" | "help" => Err(LabError::Usage(usage())),
@@ -71,28 +80,16 @@ fn compile_path(
     path: &str,
     mode: RuntimeMode,
 ) -> Result<cairn_compiler::session::SessionArtifacts> {
-    let source = fs::read_to_string(path).map_err(|error| LabError::Io {
-        path: path.into(),
-        error,
-    })?;
+    let source = read_path(path)?;
     Ok(CompilerSession::compile_source(path, &source, mode))
 }
 
-fn compile_path_with_id(
-    path: &str,
-    source_file: SourceFileId,
-    mode: RuntimeMode,
-) -> Result<cairn_compiler::session::SessionArtifacts> {
+fn read_path(path: &str) -> Result<String> {
     let source = fs::read_to_string(path).map_err(|error| LabError::Io {
         path: path.into(),
         error,
     })?;
-    Ok(CompilerSession::compile_source_with_id(
-        source_file,
-        path,
-        &source,
-        mode,
-    ))
+    Ok(source)
 }
 
 fn single_file_arg(args: &[String]) -> Result<&str> {

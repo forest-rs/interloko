@@ -6,7 +6,9 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cairn_compiler::session::{CompilerSession, DumpStage, RuntimeMode, RuntimeResult};
+use cairn_compiler::session::{
+    CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
+};
 
 type Result<T> = std::result::Result<T, CorpusError>;
 
@@ -208,7 +210,12 @@ fn check_case(case: &Case) -> Vec<String> {
     } else {
         RuntimeMode::CompileOnly
     };
-    let artifacts = CompilerSession::compile_source(&case.display_path, &case.source, mode);
+    let mut session = IncrementalCompilerSession::new();
+    let source = session.add_source(&case.display_path, &case.source);
+    let update = session
+        .compile(source, mode)
+        .expect("source was just added to incremental session");
+    let artifacts = &update.artifacts;
     let mut failures = Vec::new();
 
     for expectation in &case.expectations {

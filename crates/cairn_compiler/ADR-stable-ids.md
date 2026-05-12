@@ -34,6 +34,10 @@ Keep dense semantic IDs for indexing, and add stable-ish IDs alongside them:
   their stable identity. Slots use the class name as discriminator.
 - `ArtifactKey` identifies query artifacts by source file, artifact kind, and
   optional `DefinitionId`.
+- The in-memory incremental engine exposes additional artifact kinds for
+  diagnostics, the whole lowered executable module, and runtime results. These
+  are still keyed by `SourceFileId` and optional `DefinitionId` through the same
+  `ArtifactKey` mechanism.
 
 Existing dense IDs keep their current role:
 
@@ -72,6 +76,9 @@ Not guaranteed across:
 - Existing dense semantic IDs remain boring table indexes.
 - Incremental artifacts can be addressed by stable keys without rewriting the
   compiler pipeline around persistence yet.
+- Adding new artifact kinds is a public API extension. Callers that exhaustively
+  match `ArtifactKind` or `QueryArtifact` must handle diagnostics,
+  lowered-module, and runtime-result artifacts.
 - Future multi-file work should replace anonymous source IDs at driver entry
   points and introduce module/package identity before stable IDs become
   externally durable.

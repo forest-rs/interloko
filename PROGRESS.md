@@ -133,6 +133,52 @@
   `corpus/fail`, adding at least one `// expect:` header line, and running
   `cargo run -p cairn_corpus`.
 
+## Implemented: In-Memory Incremental Compiler Engine
+
+- `cairn_compiler::session::IncrementalCompilerSession` provides an in-memory
+  edit/compile API over named sources with stable `SourceFileId` values.
+- The incremental session retains the latest `SessionArtifacts` snapshot and a
+  cache entry for every stable `ArtifactKey` in the current artifact graph.
+- Cache reports cover:
+  - parse;
+  - AST;
+  - semantic binding;
+  - diagnostics;
+  - method lookup;
+  - method lowering;
+  - method tape;
+  - generic dispatcher;
+  - lowered module;
+  - tape program;
+  - runtime result.
+- Each artifact report includes:
+  - stable artifact key;
+  - `Reused` or `Recomputed` action;
+  - invalidated flag;
+  - affected flag from semantic edit analysis;
+  - deterministic `work_units` and `elapsed_ticks` counters.
+- The core compiler crate remains `no_std + alloc`. Timing is represented as
+  logical ticks in the core cache report; wall-clock collection is deferred to a
+  later std scheduler or workbench wrapper.
+- `cairn_lab diff <before> <after>` now runs through the incremental session
+  and prints cache status, counters, dependency edges, and the semantic diff.
+- `cairn_corpus check` now compiles each program through
+  `IncrementalCompilerSession`.
+- Tests cover:
+  - initial cache population;
+  - repeat compile reusing all artifacts;
+  - harmless trivia edits reusing most artifacts;
+  - focused method-body edits recomputing the edited method's lowered/tape
+    artifacts while reusing unrelated method artifacts;
+  - definition-changing edits marking broad dependents affected.
+
+### Migration Notes
+
+- `ArtifactKind` and `QueryArtifact` gained public variants for diagnostics,
+  whole lowered-module artifacts, and runtime-result artifacts.
+- `cairn_lab diff` output is now an incremental cache report followed by the
+  existing preserved/changed/affected definition diff.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
@@ -150,6 +196,10 @@
 - Full multi-file module sessions beyond compiling named source files independently.
 - Cross-file/module-stable identity beyond caller-provided `SourceFileId` values.
 - Lowered IR optimization passes, canonical basic blocks, and richer type checking.
+- Wall-clock artifact timing in the no-std core; the current engine reports
+  deterministic logical ticks and work units.
+- Query scheduling that avoids recomputing prerequisite fingerprints when
+  validating cache reuse.
 
 ## Follow-Up Tickets
 

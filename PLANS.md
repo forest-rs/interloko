@@ -1,5 +1,114 @@
 # Plans
 
+## Build Real In-Memory Incremental Compiler Engine
+
+Ticket: `cai-e3zq`
+
+### Goal
+
+Turn the current one-shot session plus invalidation graph into a usable
+in-memory incremental compiler engine. A caller should be able to keep named
+source files in a session, edit them by stable `SourceFileId`, compile through
+cached artifacts, and inspect which artifacts were reused, recomputed,
+invalidated, and semantically affected.
+
+### Non-Goals
+
+- No persistent on-disk cache.
+- No watch mode.
+- No LSP.
+- No parallel scheduler.
+- No full multi-file module system.
+- No new language semantics.
+- No sealed dispatch optimization.
+- No Cranelift.
+
+### Fence
+
+The incremental engine owns source-file edit state, artifact cache entries,
+dependency-aware reuse/recompute reports, and per-artifact counters; it
+explicitly does not own parser behavior, semantic rules, lowering rules,
+runtime object storage, tape bytecode encoding, scheduling, or persistence.
+
+The CLI tools own file IO, process exit behavior, and presentation; they
+explicitly do not own cache dependency policy or artifact identity.
+
+### Plumbing
+
+```text
+named source files
+  -> IncrementalCompilerSession
+  -> one-shot stage builders when a cache entry is missing/stale
+  -> per-artifact fingerprints + dependency graph
+  -> reuse / recompute / invalidated / affected reports
+  -> cairn_lab edit output + cairn_corpus checks
+```
+
+### Invariants
+
+- `SourceFileId` is stable for a logical file name or caller-provided id.
+- `ArtifactKey` is the public identity for cache entries.
+- A cache report must include every artifact known to the current query graph.
+- Reuse is keyed by stable artifact fingerprints, not dense semantic indices.
+- Dependency edges stay explicit and inspectable.
+- The core compiler crate remains `no_std + alloc`.
+
+### Metrics
+
+Core cache reports use deterministic counters:
+
+- `work_units`: estimated amount of artifact work performed for a recompute;
+- `elapsed_ticks`: logical timing ticks for the artifact action.
+
+This keeps the core no-std. A later scheduler or std wrapper can map the same
+artifact reports to wall-clock timing without changing cache keys or dependency
+semantics.
+
+### Steps
+
+1. Extend query artifact identity for diagnostics, lowered module, and runtime
+   result artifacts.
+2. Add an in-memory incremental session/cache API:
+   - add named source files;
+   - edit source by `SourceFileId`;
+   - compile through cached artifact reports;
+   - retain current `SessionArtifacts`.
+3. Add artifact reports with:
+   - action: reused or recomputed;
+   - invalidated flag;
+   - affected flag;
+   - `work_units` and `elapsed_ticks`;
+   - dependency edges.
+4. Add tests for:
+   - first compile populating cache;
+   - repeat compile reusing all artifacts;
+   - harmless trivia edits reusing most artifacts;
+   - focused method body edits avoiding unrelated method artifacts;
+   - definition-changing edits invalidating broad dependents.
+5. Add `cairn_lab` output for edit reports.
+6. Update `cairn_corpus` so corpus checks compile through the incremental
+   engine.
+7. Update progress notes and migration notes.
+8. Run full gates:
+   - `cargo fmt --all`;
+   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
+   - `cargo test --workspace --all-features`;
+   - `cargo doc --workspace --all-features --no-deps`;
+   - existing examples;
+   - `cairn_lab` fixture commands;
+   - `cairn_corpus` runner.
+
+### Risks
+
+- A whole-module compiler limits true partial artifact reuse. The first slice
+  should make cache validity and reports explicit, while deferring a scheduler
+  that can avoid all prerequisite recomputation.
+- Dump-based or text-based fingerprints can be brittle. Prefer semantic
+  fingerprints for method-level artifacts and normalize source-span-only text
+  where possible.
+- Public artifact enums will gain variants. Document this as a migration note
+  in progress notes.
+
 ## Build Small-Program Corpus Runner
 
 Ticket: `cai-5zew`
