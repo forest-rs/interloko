@@ -942,6 +942,48 @@
   subtype semantics, inspection commands, artifact propagation, and the
   remaining deferred design.
 
+## Implemented: Explainable Generic Dispatch-Site Inspection
+
+- `SessionArtifacts::dispatch_sites()` now walks semantic functions and methods
+  and records every `GenericCall` as an inspectable dispatch site.
+- Dispatch sites have friendly IDs such as `dispatch:d0` plus stable backing
+  keys derived from the source file, enclosing definition, owner-local call ID,
+  and generic definition. The record also carries the current source span for
+  navigation.
+- `SessionArtifacts::explain_dispatch_site("dispatch:d0")` reports the
+  enclosing function/method, span, generic contract, first argument's static
+  kind, exact class when known, applicable methods in dispatcher specificity
+  order, rejected methods with reasons, selected method when statically known,
+  the lowered dispatcher name, and related artifact keys.
+- Parent-typed and top-object calls are reported as runtime-needed rather than
+  pretending the selected method is statically knowable.
+- `cairn_lab dispatch <file>` lists dispatch sites, and
+  `cairn_lab dispatch <file> dispatch:d0` explains one site.
+- EOP projection now includes `dispatch:dN` objects. `inspect <file>
+  dispatch:d0` shows the structured record, and `invoke-affordance <file>
+  dispatch:d0 show-dispatch` prints the same dispatch explanation.
+- Tests cover exact class selection, child-over-parent selection,
+  parent-typed runtime dispatch, rejected sibling methods, stable dispatch-site
+  IDs across harmless trivia edits, and method/class fact changes affecting the
+  expected explanation and artifacts.
+- `docs/eop_workbench.md` and `docs/mop_class_finalization.md` document how to
+  list and inspect dispatch sites.
+
+### Dispatch-Site Boundaries
+
+- Dispatch-site inspection is read-only and explains the existing semantic and
+  lowered model.
+- Runtime dispatch is still ordinary lowered control flow plus ordinary calls;
+  no execution_tape dispatch opcode was added.
+- Multi-argument dispatch, method combination, sealed dispatch optimization,
+  parametric dispatch, and a public AMOP-level dispatch protocol remain
+  deferred.
+
+### Migration Notes
+
+- `EnvironmentKind` has a new `DispatchSite` variant with stable text label
+  `dispatch-site`.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.

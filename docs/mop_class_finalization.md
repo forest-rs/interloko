@@ -134,12 +134,23 @@ EOP inspection exposes class and slot records from those same facts. A
 it. Generic and method records include the dispatch applicability summary used
 by the lowered dispatcher.
 
+Dispatch sites are exposed as compiler-generated EOP objects with IDs such as
+`dispatch:d0`. A dispatch-site explanation names the enclosing function or
+method, source span, generic contract, static argument kind, applicable methods
+in specificity order, rejected methods and reasons, the generated dispatcher
+function, and the related method lookup/dispatcher/lowered/tape artifact keys.
+This is still an explanation of the current single-argument nominal dispatcher,
+not a new method-combination or optimization protocol.
+
 Useful workbench commands:
 
 ```sh
 cargo run -p cairn_lab -- dump tools/cairn_lab/fixtures/inherited_point.cairn --stage mop
 cargo run -p cairn_lab -- dump tools/cairn_lab/fixtures/inherited_dispatch.cairn --stage mop
+cargo run -p cairn_lab -- dispatch tools/cairn_lab/fixtures/inherited_dispatch.cairn
+cargo run -p cairn_lab -- dispatch tools/cairn_lab/fixtures/inherited_dispatch.cairn dispatch:d0
 cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_dispatch.cairn generic:g0
+cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_dispatch.cairn dispatch:d0
 cargo run -p cairn_lab -- diff tools/cairn_lab/fixtures/inherited_point_parent_before.cairn tools/cairn_lab/fixtures/inherited_point_parent_after.cairn
 ```
 
@@ -156,6 +167,8 @@ place to land.
 - `sem::Class` is the class metaobject record.
 - `sem::Slot` is the direct slot definition record.
 - `sem::EffectiveSlot` is the computed effective slot record.
+- `session::DispatchSiteRecord` is the compiler/session record for one semantic
+  generic call site.
 - Finalization runs inside semantic lowering.
 - Runtime layout is derived from effective slots.
 - MOP/EOP/workbench output is a read-only view over these records.
