@@ -1,0 +1,8 @@
+// expect: diagnostic contains class `<bad>` cannot inherit from primitive `<integer>`
+
+define class <bad> (<integer>)
+end;
+
+define function main()
+  0
+end;

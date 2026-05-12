@@ -1,0 +1,13 @@
+// expect: diagnostic contains duplicate effective init keyword `r:`
+
+define class <shape> (<object>)
+  slot radius :: <integer>, init-keyword: r:, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot diameter :: <integer>, init-keyword: r:, init-value: 2;
+end;
+
+define function main()
+  0
+end;

@@ -1,0 +1,14 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump sem contains init-value=yes
+
+define class <shape> (<object>)
+  slot radius :: <integer>, init-value: 10;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main()
+  make(<circle>).radius
+end;

@@ -96,15 +96,17 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     let native_out = run_lab(&["mop", native.to_str().expect("fixture path should be utf8")]);
     assert!(native_out.contains("c0"));
     assert!(native_out.contains("<circle>"));
-    assert!(native_out.contains("origin=native runtime=native"));
+    assert!(native_out.contains("origin=native"));
+    assert!(native_out.contains("runtime=native"));
     assert!(native_out.contains("accessor"));
     assert!(native_out.contains("g0 area"));
     assert!(native_out.contains("c0 <circle> origin=native -> m0"));
 
     let host = fixture("host_backed_area.cairn");
     let host_out = run_lab(&["mop", host.to_str().expect("fixture path should be utf8")]);
-    assert!(host_out.contains("<rust-circle> origin=host-backed(hc0) runtime=host-backed"));
-    assert!(host_out.contains("<rust-square> origin=host-backed(hc1) runtime=host-backed"));
+    assert!(host_out.contains("<rust-circle> origin=host-backed(hc0)"));
+    assert!(host_out.contains("<rust-square> origin=host-backed(hc1)"));
+    assert!(host_out.contains("runtime=host-backed"));
     assert!(host_out.contains("slot s0"));
     assert!(host_out.contains("storage=host-backed"));
     assert!(host_out.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
@@ -182,6 +184,29 @@ fn inspect_reports_richer_slot_metadata() {
     assert!(out.contains("init-value=yes"));
     assert!(out.contains("allocation=instance"));
     assert!(out.contains("mutability=constant"));
+}
+
+#[test]
+fn inspect_reports_inherited_effective_slots() {
+    let file = fixture("inherited_point.cairn");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let mop = run_lab(&["dump", path, "--stage", "mop"]);
+    assert!(mop.contains("<point>"));
+    assert!(mop.contains("superclass=c0:<shape>"));
+    assert!(mop.contains("effective-slots=2"));
+    assert!(mop.contains("source=inherited c0.s0"));
+
+    let class = run_lab(&["inspect", path, "class:c1"]);
+    assert!(class.contains("superclass=c0:<shape>"));
+    assert!(class.contains("finalized=true"));
+    assert!(class.contains("direct-slots=1"));
+    assert!(class.contains("effective-slots=2"));
+
+    let inherited = run_lab(&["inspect", path, "slot:c1.s0"]);
+    assert!(inherited.contains("source=inherited"));
+    assert!(inherited.contains("source-slot=class:c0.s0"));
+    assert!(inherited.contains("init-keyword=x: required"));
 }
 
 #[test]

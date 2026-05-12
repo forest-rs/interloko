@@ -1,0 +1,8 @@
+// expect: diagnostic contains unresolved superclass `<missing>` for class `<child>`
+
+define class <child> (<missing>)
+end;
+
+define function main()
+  0
+end;

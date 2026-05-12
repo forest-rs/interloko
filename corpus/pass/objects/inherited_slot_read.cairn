@@ -1,0 +1,15 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump sem contains effective slot s0
+// expect: dump mop contains source=inherited
+
+define class <shape> (<object>)
+  slot radius :: <integer>, required-init-keyword: radius:;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main()
+  make(<circle>, radius: 10).radius
+end;

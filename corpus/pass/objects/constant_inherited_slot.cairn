@@ -1,0 +1,15 @@
+// expect: run 5
+// expect: diagnostics 0
+// expect: dump sem contains mutability=constant
+// expect: dump eop contains source=inherited
+
+define class <shape> (<object>)
+  constant slot value :: <integer>, init-value: 5;
+end;
+
+define class <box> (<shape>)
+end;
+
+define function main()
+  make(<box>).value
+end;

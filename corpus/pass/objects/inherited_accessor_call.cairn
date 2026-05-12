@@ -1,0 +1,15 @@
+// expect: run 6
+// expect: diagnostics 0
+// expect: dump lowered contains slot.read
+
+define class <shape> (<object>)
+  slot radius :: <integer>, required-init-keyword: radius:;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main()
+  let c = make(<circle>, radius: 6);
+  radius(c)
+end;

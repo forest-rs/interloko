@@ -1,0 +1,12 @@
+define class <shape> (<object>)
+  slot x :: <integer>, required-init-keyword: x:;
+end;
+
+define class <point> (<shape>)
+  slot y :: <integer>, required-init-keyword: y:;
+end;
+
+define function main()
+  let p = make(<point>, x: 7, y: 8);
+  p.x + p.y
+end;

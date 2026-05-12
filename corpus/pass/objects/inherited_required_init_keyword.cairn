@@ -1,0 +1,14 @@
+// expect: run 12
+// expect: diagnostics 0
+// expect: dump sem contains init-keyword: r: required
+
+define class <shape> (<object>)
+  slot radius :: <integer>, required-init-keyword: r:;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main()
+  make(<circle>, r: 12).radius
+end;

@@ -1,0 +1,13 @@
+// expect: diagnostic contains duplicate effective slot `radius`
+
+define class <shape> (<object>)
+  slot radius :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 2;
+end;
+
+define function main()
+  0
+end;

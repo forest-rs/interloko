@@ -1378,9 +1378,10 @@ fn dump_ast(module: &ast::Module) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "ast {}", module.source_file);
     for class in &module.classes {
+        let superclass = class.superclass.as_deref().unwrap_or("<object>");
         let _ = writeln!(
             out,
-            "class {} {} {}",
+            "class {} {} {} superclass={superclass}",
             class.id, class.definition, class.name
         );
         for slot in &class.slots {
@@ -1647,18 +1648,22 @@ fn dump_sem(module: &sem::Module) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "sem {}", module.source_file);
     for class in &module.classes {
+        let superclass = sem_superclass_label(module, class.superclass);
         let _ = writeln!(
             out,
-            "class c{} {} {} origin={}",
+            "class c{} {} {} origin={} superclass={superclass} finalized={} direct-slots={} effective-slots={}",
             class.id.0,
             class.definition,
             class.name,
-            sem_class_origin_label(class.origin)
+            sem_class_origin_label(class.origin),
+            class.finalized,
+            class.slots.len(),
+            class.effective_slots.len()
         );
         for slot in &class.slots {
             let _ = writeln!(
                 out,
-                "  slot s{} {} {} :: {} origin={} accessor {} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
+                "  direct slot s{} {} {} :: {} origin={} accessor {} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
                 slot.id.0,
                 slot.definition,
                 slot.name,
@@ -1672,6 +1677,38 @@ fn dump_sem(module: &sem::Module) -> String {
                     ""
                 },
                 sem_slot_init_value_label(slot),
+                sem_slot_allocation_label(slot.allocation),
+                sem_slot_mutability_label(slot.mutability),
+                sem_runtime_repr(slot.kind)
+            );
+        }
+        for slot in &class.effective_slots {
+            let source = if slot.source_class == class.id {
+                "direct"
+            } else {
+                "inherited"
+            };
+            let _ = writeln!(
+                out,
+                "  effective slot s{} {} {} :: {} source={} c{}.s{} origin={} accessor {} reads c{}.s{} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
+                slot.id.0,
+                slot.definition,
+                slot.name,
+                slot.type_name,
+                source,
+                slot.source_class.0,
+                slot.source_slot.0,
+                sem_slot_origin_label(slot.origin),
+                slot.accessor.definition,
+                slot.accessor.class.0,
+                slot.accessor.slot.0,
+                slot.init_keyword,
+                if slot.required_init_keyword {
+                    " required"
+                } else {
+                    ""
+                },
+                sem_effective_slot_init_value_label(slot),
                 sem_slot_allocation_label(slot.allocation),
                 sem_slot_mutability_label(slot.mutability),
                 sem_runtime_repr(slot.kind)
@@ -1755,33 +1792,29 @@ fn dump_mop(module: &sem::Module) -> String {
         let runtime_class = runtime.classes.get(class.id.0 as usize);
         let runtime_kind =
             runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
+        let superclass = sem_superclass_label(module, class.superclass);
         let _ = writeln!(
             out,
-            "  c{} {} {} origin={} runtime={runtime_kind}",
+            "  c{} {} {} origin={} superclass={superclass} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
             class.id.0,
             class.definition,
             class.name,
-            sem_class_origin_label(class.origin)
+            sem_class_origin_label(class.origin),
+            class.finalized,
+            class.slots.len(),
+            class.effective_slots.len()
         );
+        let _ = writeln!(out, "    direct-slots:");
         for slot in &class.slots {
-            let runtime_slot = runtime_class.and_then(|class| class.slots.get(slot.id.0 as usize));
-            let storage = runtime_slot.map_or("missing", |slot| {
-                if slot.host_backed {
-                    "host-backed"
-                } else {
-                    "native"
-                }
-            });
             let _ = writeln!(
                 out,
-                "    slot s{} {} {} :: {} kind={} origin={} storage={} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
+                "      slot s{} {} {} :: {} kind={} origin={} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
                 slot.id.0,
                 slot.definition,
                 slot.name,
                 slot.type_name,
                 sem_kind_label(module, slot.kind),
                 sem_slot_origin_label(slot.origin),
-                storage,
                 slot.init_keyword,
                 if slot.required_init_keyword {
                     " required"
@@ -1795,7 +1828,57 @@ fn dump_mop(module: &sem::Module) -> String {
             );
             let _ = writeln!(
                 out,
-                "    accessor {} {}(c{}) -> {} reads c{}.s{}",
+                "      accessor {} {}(c{}) -> {} reads c{}.s{}",
+                slot.accessor.definition,
+                slot.accessor.name,
+                slot.accessor.class.0,
+                sem_kind_label(module, slot.accessor.result_kind),
+                slot.accessor.class.0,
+                slot.accessor.slot.0
+            );
+        }
+        let _ = writeln!(out, "    effective-slots:");
+        for slot in &class.effective_slots {
+            let runtime_slot = runtime_class.and_then(|class| class.slots.get(slot.id.0 as usize));
+            let storage = runtime_slot.map_or("missing", |slot| {
+                if slot.host_backed {
+                    "host-backed"
+                } else {
+                    "native"
+                }
+            });
+            let source = if slot.source_class == class.id {
+                "direct"
+            } else {
+                "inherited"
+            };
+            let _ = writeln!(
+                out,
+                "      slot s{} {} {} :: {} kind={} source={} c{}.s{} origin={} storage={} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
+                slot.id.0,
+                slot.definition,
+                slot.name,
+                slot.type_name,
+                sem_kind_label(module, slot.kind),
+                source,
+                slot.source_class.0,
+                slot.source_slot.0,
+                sem_slot_origin_label(slot.origin),
+                storage,
+                slot.init_keyword,
+                if slot.required_init_keyword {
+                    " required"
+                } else {
+                    ""
+                },
+                sem_effective_slot_init_value_label(slot),
+                sem_slot_allocation_label(slot.allocation),
+                sem_slot_mutability_label(slot.mutability),
+                sem_runtime_repr(slot.kind)
+            );
+            let _ = writeln!(
+                out,
+                "      accessor {} {}(c{}) -> {} reads c{}.s{}",
                 slot.accessor.definition,
                 slot.accessor.name,
                 slot.accessor.class.0,
@@ -2070,6 +2153,7 @@ fn project_environment_class(
     let runtime_class = runtime.classes.get(class.id.0 as usize);
     let runtime_kind =
         runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
+    let superclass = sem_superclass_label(module, class.superclass);
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("class:c{}", class.id.0),
         kind: EnvironmentKind::Class,
@@ -2086,14 +2170,18 @@ fn project_environment_class(
         ]),
         execution: None,
         inspection: format!(
-            "definition={} class-id=c{} runtime={runtime_kind}",
-            class.definition, class.id.0
+            "definition={} class-id=c{} superclass={superclass} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
+            class.definition,
+            class.id.0,
+            class.finalized,
+            class.slots.len(),
+            class.effective_slots.len()
         ),
     }));
 
-    for slot in &class.slots {
+    for slot in &class.effective_slots {
         project_environment_slot(module, sink, class, slot);
-        project_environment_accessor(module, sink, slot);
+        project_environment_accessor(module, sink, class, slot);
     }
 }
 
@@ -2101,10 +2189,15 @@ fn project_environment_slot(
     module: &sem::Module,
     sink: &mut dyn EnvironmentObjectSink,
     class: &sem::Class,
-    slot: &sem::Slot,
+    slot: &sem::EffectiveSlot,
 ) {
     use EnvironmentAffordance as Aff;
 
+    let source = if slot.source_class == class.id {
+        "direct"
+    } else {
+        "inherited"
+    };
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("slot:c{}.s{}", class.id.0, slot.id.0),
         kind: EnvironmentKind::Slot,
@@ -2115,10 +2208,13 @@ fn project_environment_slot(
         affordances: Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::ShowAccessor]),
         execution: None,
         inspection: format!(
-            "definition={} owner=class:c{} slot-id=s{} kind={} type={} init-keyword={}:{} init-value={} allocation={} mutability={} runtime={}",
+            "definition={} owner=class:c{} slot-id=s{} source={} source-slot=class:c{}.s{} kind={} type={} init-keyword={}:{} init-value={} allocation={} mutability={} runtime={}",
             slot.definition,
             class.id.0,
             slot.id.0,
+            source,
+            slot.source_class.0,
+            slot.source_slot.0,
             sem_kind_label(module, slot.kind),
             slot.type_name,
             slot.init_keyword,
@@ -2127,7 +2223,7 @@ fn project_environment_slot(
             } else {
                 ""
             },
-            sem_slot_init_value_label(slot),
+            sem_effective_slot_init_value_label(slot),
             sem_slot_allocation_label(slot.allocation),
             sem_slot_mutability_label(slot.mutability),
             sem_runtime_repr(slot.kind)
@@ -2138,12 +2234,13 @@ fn project_environment_slot(
 fn project_environment_accessor(
     module: &sem::Module,
     sink: &mut dyn EnvironmentObjectSink,
-    slot: &sem::Slot,
+    class: &sem::Class,
+    slot: &sem::EffectiveSlot,
 ) {
     use EnvironmentAffordance as Aff;
 
     sink.emit(environment_object(EnvironmentObjectParts {
-        id: format!("accessor:c{}.s{}", slot.accessor.class.0, slot.id.0),
+        id: format!("accessor:c{}.s{}", class.id.0, slot.id.0),
         kind: EnvironmentKind::Accessor,
         meta_class: "<accessor>",
         origin: eop_slot_origin(slot.origin),
@@ -2153,12 +2250,16 @@ fn project_environment_accessor(
         execution: Some(format!(
             "callable=known result={} reads=slot:c{}.s{}",
             sem_kind_label(module, slot.accessor.result_kind),
-            slot.accessor.class.0,
-            slot.accessor.slot.0
+            class.id.0,
+            slot.id.0
         )),
         inspection: format!(
-            "definition={} owner=class:c{} slot=s{}",
-            slot.accessor.definition, slot.accessor.class.0, slot.accessor.slot.0
+            "definition={} owner=class:c{} slot=s{} source-slot=class:c{}.s{}",
+            slot.accessor.definition,
+            class.id.0,
+            slot.id.0,
+            slot.source_class.0,
+            slot.source_slot.0
         ),
     }));
 }
@@ -2456,6 +2557,14 @@ fn sem_slot_init_value_label(slot: &sem::Slot) -> &'static str {
     }
 }
 
+fn sem_effective_slot_init_value_label(slot: &sem::EffectiveSlot) -> &'static str {
+    if slot.init_value.is_some() {
+        "yes"
+    } else {
+        "none"
+    }
+}
+
 fn sem_slot_allocation_label(allocation: sem::SlotAllocation) -> &'static str {
     match allocation {
         sem::SlotAllocation::Instance => "instance",
@@ -2488,7 +2597,7 @@ fn sem_callable_label(module: &sem::Module, callable: sem::KnownCallable) -> Str
             .get(class.0 as usize)
             .and_then(|class| {
                 class
-                    .slots
+                    .effective_slots
                     .get(slot.0 as usize)
                     .map(|slot| format!("accessor {}.{}", class.name, slot.name))
             })
@@ -2532,7 +2641,7 @@ fn sem_callable_fingerprint(module: &sem::Module, callable: sem::KnownCallable) 
             let slot_definition = module
                 .classes
                 .get(class.0 as usize)
-                .and_then(|class| class.slots.get(slot.0 as usize))
+                .and_then(|class| class.effective_slots.get(slot.0 as usize))
                 .map_or(0, |slot| slot.definition.raw());
             format!(
                 "accessor#{}:{class_definition}.{slot_definition}",
@@ -2728,6 +2837,18 @@ fn sem_class_origin_label(origin: sem::ClassOrigin) -> String {
     }
 }
 
+fn sem_superclass_label(module: &sem::Module, superclass: Option<sem::ClassId>) -> String {
+    superclass.map_or_else(
+        || "<object>".into(),
+        |class| {
+            module.classes.get(class.0 as usize).map_or_else(
+                || format!("c{}:<missing>", class.0),
+                |class| format!("c{}:{}", class.id.0, class.name),
+            )
+        },
+    )
+}
+
 fn sem_slot_origin_label(origin: sem::SlotOrigin) -> String {
     match origin {
         sem::SlotOrigin::Native => "native".into(),
@@ -2835,9 +2956,10 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 name: class.name.clone(),
             },
             fingerprint: format!(
-                "class:{}:{}:{}",
+                "class:{}:{}:super={}:direct={}:effective={}",
                 class.name,
                 sem_class_origin_label(class.origin),
+                sem_superclass_label(module, class.superclass),
                 class
                     .slots
                     .iter()
@@ -2850,6 +2972,25 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                         slot.init_keyword,
                         slot.required_init_keyword,
                         slot_init_fingerprint(module, slot),
+                        sem_slot_allocation_label(slot.allocation),
+                        sem_slot_mutability_label(slot.mutability)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                class
+                    .effective_slots
+                    .iter()
+                    .map(|slot| format!(
+                        "{}={}:{}:source=c{}.s{}:accessor={}:{}:{}:{}:{}:{}",
+                        slot.name,
+                        sem_kind_fingerprint(module, slot.kind),
+                        sem_slot_origin_label(slot.origin),
+                        slot.source_class.0,
+                        slot.source_slot.0,
+                        slot.accessor.definition.raw(),
+                        slot.init_keyword,
+                        slot.required_init_keyword,
+                        effective_slot_init_fingerprint(module, slot),
                         sem_slot_allocation_label(slot.allocation),
                         sem_slot_mutability_label(slot.mutability)
                     ))
@@ -2961,6 +3102,15 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
 }
 
 fn slot_init_fingerprint(module: &sem::Module, slot: &sem::Slot) -> String {
+    let Some(init_value) = &slot.init_value else {
+        return "none".into();
+    };
+    let mut out = String::new();
+    fingerprint_sem_expr(module, init_value, &mut out);
+    out
+}
+
+fn effective_slot_init_fingerprint(module: &sem::Module, slot: &sem::EffectiveSlot) -> String {
     let Some(init_value) = &slot.init_value else {
         return "none".into();
     };
@@ -3082,7 +3232,7 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 let kind = module
                     .classes
                     .get(class_id.0 as usize)
-                    .and_then(|class| class.slots.get(field.slot.0 as usize))
+                    .and_then(|class| class.effective_slots.get(field.slot.0 as usize))
                     .map_or(String::from("error"), |slot| {
                         sem_kind_fingerprint(module, slot.kind)
                     });
@@ -3107,7 +3257,7 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             let slot_definition = module
                 .classes
                 .get(class.0 as usize)
-                .and_then(|class| class.slots.get(slot.0 as usize))
+                .and_then(|class| class.effective_slots.get(slot.0 as usize))
                 .map_or(0, |slot| slot.definition.raw());
             let result = sem_kind_fingerprint(module, *result_kind);
             let _ = write!(
@@ -3298,7 +3448,8 @@ mod tests {
         let mop = artifacts.dump_stage(DumpStage::Mop);
         assert!(mop.contains("mop"));
         assert!(mop.contains("classes:"));
-        assert!(mop.contains("origin=native runtime=native"));
+        assert!(mop.contains("origin=native"));
+        assert!(mop.contains("runtime=native"));
         assert!(mop.contains("dispatch table:"));
         let eop = artifacts.dump_stage(DumpStage::Eop);
         assert!(eop.contains("eop"));
@@ -3427,7 +3578,8 @@ mod tests {
         assert!(sem.contains("slot s0"));
         assert!(sem.contains("origin=host-backed(hc0.hs0)"));
         let mop = artifacts.dump_stage(DumpStage::Mop);
-        assert!(mop.contains("<rust-circle> origin=host-backed(hc0) runtime=host-backed"));
+        assert!(mop.contains("<rust-circle> origin=host-backed(hc0)"));
+        assert!(mop.contains("runtime=host-backed"));
         assert!(mop.contains("storage=host-backed"));
         assert!(mop.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
         let eop = artifacts.dump_stage(DumpStage::Eop);
@@ -3870,6 +4022,136 @@ mod tests {
         assert!(diff.affected.is_empty());
         assert!(diff.preserved.iter().any(|definition| {
             definition.kind == DefinitionKind::Slot && definition.name == "<circle>.radius"
+        }));
+    }
+
+    #[test]
+    fn session_diff_preserves_ids_for_superclass_trivia() {
+        let before = CompilerSession::compile_source(
+            "point.cairn",
+            "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  make(<point>).x\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let after = CompilerSession::compile_source(
+            "point.cairn",
+            "\n// same inheritance facts with trivia edits\n\
+             define class <shape> (<object>)\n  slot x   ::   <integer>, init-value: 1;\nend;\n\
+             define class <point>   (   <shape>   )\n  slot y :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  make(<point>).x\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let diff = CompilerSession::diff(&before, &after);
+
+        assert!(diff.changed.is_empty());
+        assert!(diff.affected.is_empty());
+        assert!(diff.preserved.iter().any(|definition| {
+            definition.kind == DefinitionKind::Class && definition.name == "<point>"
+        }));
+    }
+
+    #[test]
+    fn parent_slot_edit_affects_child_finalization_and_executable_artifacts() {
+        let before = "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+                      define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+                      define function main()\n  make(<point>).x\nend;";
+        let after = "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 3;\nend;\n\
+                     define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+                     define function main()\n  make(<point>).x\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("point.cairn", before);
+        let _ = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Slot
+                && change.definition.name == "<shape>.x"
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Class
+                && change.definition.name == "<point>"
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Mop)
+                .contains("source=inherited")
+        );
+    }
+
+    #[test]
+    fn child_slot_edit_does_not_mark_parent_definitions_changed() {
+        let before = CompilerSession::compile_source(
+            "point.cairn",
+            "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  make(<point>).y\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let after = CompilerSession::compile_source(
+            "point.cairn",
+            "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, init-value: 3;\nend;\n\
+             define function main()\n  make(<point>).y\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let diff = CompilerSession::diff(&before, &after);
+
+        assert!(!diff.changed.iter().any(|change| {
+            change.definition.name == "<shape>" || change.definition.name == "<shape>.x"
+        }));
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Slot && change.definition.name == "<point>.y"
+        }));
+    }
+
+    #[test]
+    fn adding_subclass_preserves_parent_definition_ids() {
+        let before = CompilerSession::compile_source(
+            "shape.cairn",
+            "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define function main()\n  make(<shape>).x\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let after = CompilerSession::compile_source(
+            "shape.cairn",
+            "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  make(<shape>).x\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let diff = CompilerSession::diff(&before, &after);
+
+        assert!(diff.preserved.iter().any(|definition| {
+            definition.kind == DefinitionKind::Class && definition.name == "<shape>"
+        }));
+        assert!(diff.preserved.iter().any(|definition| {
+            definition.kind == DefinitionKind::Slot && definition.name == "<shape>.x"
+        }));
+        assert!(!diff.changed.iter().any(|change| {
+            change.definition.name == "<shape>" || change.definition.name == "<shape>.x"
+        }));
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Class
+                && change.definition.name == "<point>"
+                && change.change == DefinitionChangeKind::Added
         }));
     }
 
