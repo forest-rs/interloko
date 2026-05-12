@@ -105,16 +105,41 @@ impl RuntimeLayout {
                 .collect(),
         }
     }
+
+    /// Returns the runtime class id for a Cairn-visible class name.
+    #[must_use]
+    pub fn class_id(&self, name: &str) -> Option<sem::ClassId> {
+        self.classes
+            .iter()
+            .position(|class| class.name == name)
+            .map(|index| sem::ClassId(u32::try_from(index).unwrap_or(u32::MAX)))
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
 struct RuntimeObject {
     class: sem::ClassId,
-    slots: Vec<Value>,
+    storage: RuntimeObjectStorage,
+}
+
+enum RuntimeObjectStorage {
+    Native {
+        slots: Vec<Value>,
+    },
+    HostBacked {
+        adapter: alloc::boxed::Box<dyn HostObjectAdapter>,
+    },
+}
+
+/// Adapter for reading data from a Rust-owned host-backed object.
+///
+/// Implementors own the concrete Rust value access. Cairn only passes the
+/// resolved slot id and expected Cairn value category.
+pub trait HostObjectAdapter {
+    /// Reads one slot from a host-backed object.
+    fn read_slot(&self, slot: sem::SlotId, kind: sem::ValueKind) -> Result<Value, HostError>;
 }
 
 /// Host implementation for Cairn runtime object operations.
-#[derive(Clone, Debug, PartialEq)]
 pub struct CairnHost {
     layout: RuntimeLayout,
     objects: Vec<RuntimeObject>,
@@ -129,6 +154,40 @@ impl CairnHost {
             layout,
             objects: Vec::new(),
             values: Vec::new(),
+        }
+    }
+
+    /// Installs a Rust-owned host-backed object and returns its Cairn handle.
+    pub fn push_host_object(
+        &mut self,
+        class: sem::ClassId,
+        adapter: impl HostObjectAdapter + 'static,
+    ) -> Result<Value, HostError> {
+        let class_info = self
+            .layout
+            .classes
+            .get(class.0 as usize)
+            .ok_or(HostError::Failed)?;
+        if class_info.kind != HostObjectKind::HostBacked {
+            return Err(HostError::Failed);
+        }
+        Ok(self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::HostBacked {
+                adapter: alloc::boxed::Box::new(adapter),
+            },
+        }))
+    }
+
+    /// Boxes a value into the top `<object>` runtime representation.
+    pub fn box_top_value(&mut self, value: Value) -> Result<Value, HostError> {
+        match value {
+            Value::I64(_) | Value::Bool(_) | Value::U64(_) => Ok(self.push_boxed_value(value)),
+            Value::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => {
+                Ok(self.push_boxed_value(Value::Obj(obj)))
+            }
+            Value::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => Ok(Value::Obj(obj)),
+            _ => Err(HostError::Failed),
         }
     }
 
@@ -162,6 +221,15 @@ impl CairnHost {
             handle,
         })
     }
+
+    fn push_object(&mut self, object: RuntimeObject) -> Value {
+        let handle = ObjHandle(u64::try_from(self.objects.len() + 1).unwrap_or(u64::MAX));
+        self.objects.push(object);
+        Value::Obj(Obj {
+            host_type: CAIRN_OBJECT_TYPE,
+            handle,
+        })
+    }
 }
 
 impl Host for CairnHost {
@@ -184,6 +252,9 @@ impl Host for CairnHost {
                     .classes
                     .get(class_index)
                     .ok_or(HostError::Failed)?;
+                if class.kind != HostObjectKind::Native {
+                    return Err(HostError::Failed);
+                }
                 if args.len() != class.slots.len() + 1 {
                     return Err(HostError::Failed);
                 }
@@ -191,14 +262,9 @@ impl Host for CairnHost {
                 for (arg, slot) in args[1..].iter().zip(&class.slots) {
                     slots.push(self.value_for_slot(*arg, slot.kind)?);
                 }
-                let handle = ObjHandle(u64::try_from(self.objects.len() + 1).unwrap_or(u64::MAX));
-                self.objects.push(RuntimeObject {
+                rets[0] = self.push_object(RuntimeObject {
                     class: sem::ClassId(u32::try_from(class_index).unwrap_or(u32::MAX)),
-                    slots,
-                });
-                rets[0] = Value::Obj(Obj {
-                    host_type: CAIRN_OBJECT_TYPE,
-                    handle,
+                    storage: RuntimeObjectStorage::Native { slots },
                 });
                 Ok(0)
             }
@@ -216,12 +282,21 @@ impl Host for CairnHost {
                 };
                 let object = self.object(*obj)?;
                 let slot_index = usize::try_from(*slot_raw).map_err(|_| HostError::Failed)?;
-                let value = object
-                    .slots
-                    .get(slot_index)
-                    .cloned()
+                let slot = sem::SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX));
+                let slot_info = self
+                    .layout
+                    .classes
+                    .get(object.class.0 as usize)
+                    .and_then(|class| class.slots.get(slot_index))
                     .ok_or(HostError::Failed)?;
-                rets[0] = value;
+                rets[0] = match &object.storage {
+                    RuntimeObjectStorage::Native { slots } => {
+                        slots.get(slot_index).cloned().ok_or(HostError::Failed)?
+                    }
+                    RuntimeObjectStorage::HostBacked { adapter } => {
+                        adapter.read_slot(slot, slot_info.kind)?
+                    }
+                };
                 Ok(0)
             }
             BOX_VALUE => {

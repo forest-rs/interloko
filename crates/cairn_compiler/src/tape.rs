@@ -28,6 +28,8 @@ pub struct TapeModule {
     pub program: VerifiedProgram,
     /// Runtime layout required by the Cairn host.
     pub runtime: RuntimeLayout,
+    /// `execution_tape` function ids in lowered function order.
+    pub functions: Vec<FuncId>,
     /// `execution_tape` function id for `main`, if present.
     pub main: Option<FuncId>,
 }
@@ -112,6 +114,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     Ok(TapeModule {
         program,
         runtime: module.runtime.clone(),
+        functions: ids.functions,
         main,
     })
 }

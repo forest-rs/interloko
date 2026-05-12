@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use execution_tape::trace::TraceMask;
+use execution_tape::value::FuncId;
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 
@@ -33,6 +34,11 @@ pub enum CompileError {
     },
     /// No zero-argument `main` function was available to run.
     MissingMain,
+    /// A requested function name was not found.
+    MissingFunction {
+        /// Requested function name.
+        name: String,
+    },
     /// The `main` function is present but expects arguments.
     MainHasParameters,
     /// Runtime execution trapped.
@@ -42,6 +48,11 @@ pub enum CompileError {
     },
     /// `main` returned a non-`I64` result.
     MainReturnedNonI64,
+    /// Requested function returned a non-`I64` result.
+    FunctionReturnedNonI64 {
+        /// Requested function name.
+        name: String,
+    },
 }
 
 /// Fully compiled milestone-0 module.
@@ -73,6 +84,36 @@ impl CompiledModule {
             "{}",
             execution_tape::disasm::disassemble_verified(&self.tape.program)
         )
+    }
+
+    /// Returns the tape function id for a source direct function.
+    #[must_use]
+    pub fn tape_function(&self, name: &str) -> Option<FuncId> {
+        let function = self
+            .sem
+            .functions
+            .iter()
+            .find(|function| function.name == name)?;
+        self.tape.functions.get(function.id.0 as usize).copied()
+    }
+
+    /// Runs a source direct function with explicit arguments and a prepared host.
+    pub fn run_function_i64(
+        &self,
+        name: &str,
+        args: &[Value],
+        host: CairnHost,
+    ) -> Result<i64, CompileError> {
+        let Some(function) = self.tape_function(name) else {
+            return Err(CompileError::MissingFunction { name: name.into() });
+        };
+        run_tape_function_i64(&self.tape.program, function, args, host).map_err(|error| match error
+        {
+            CompileError::MainReturnedNonI64 => {
+                CompileError::FunctionReturnedNonI64 { name: name.into() }
+            }
+            other => other,
+        })
     }
 }
 
@@ -124,9 +165,18 @@ pub fn compile_and_run_main(source: &str) -> Result<i64, CompileError> {
     }
 
     let host = CairnHost::new(compiled.tape.runtime.clone());
+    run_tape_function_i64(&compiled.tape.program, main, &[], host)
+}
+
+fn run_tape_function_i64(
+    program: &execution_tape::verifier::VerifiedProgram,
+    function: FuncId,
+    args: &[Value],
+    host: CairnHost,
+) -> Result<i64, CompileError> {
     let mut vm = Vm::new(host, Limits::default());
     let output = vm
-        .run(&compiled.tape.program, main, &[], TraceMask::NONE, None)
+        .run(program, function, args, TraceMask::NONE, None)
         .map_err(|trap| CompileError::Runtime {
             message: format!("{trap:?}"),
         })?;
@@ -140,6 +190,52 @@ pub fn compile_and_run_main(source: &str) -> Result<i64, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::HostObjectAdapter;
+    use crate::sem::{HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind};
+    use execution_tape::host::HostError;
+
+    #[derive(Debug)]
+    struct RustCircle {
+        radius: i64,
+    }
+
+    impl HostObjectAdapter for RustCircle {
+        fn read_slot(&self, slot: SlotId, kind: SemValueKind) -> Result<Value, HostError> {
+            match (slot.0, kind) {
+                (0, SemValueKind::I64) => Ok(Value::I64(self.radius)),
+                _ => Err(HostError::Failed),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct RustSquare {
+        side: i64,
+    }
+
+    impl HostObjectAdapter for RustSquare {
+        fn read_slot(&self, slot: SlotId, kind: SemValueKind) -> Result<Value, HostError> {
+            match (slot.0, kind) {
+                (0, SemValueKind::I64) => Ok(Value::I64(self.side)),
+                _ => Err(HostError::Failed),
+            }
+        }
+    }
+
+    fn host_registry() -> HostMetaRegistry {
+        let mut registry = HostMetaRegistry::new();
+        registry.add_class(HostClass::new("<rust-circle>").with_slot(HostSlot::new(
+            "radius",
+            SemValueKind::I64,
+            "<integer>",
+        )));
+        registry.add_class(HostClass::new("<rust-square>").with_slot(HostSlot::new(
+            "side",
+            SemValueKind::I64,
+            "<integer>",
+        )));
+        registry
+    }
 
     #[test]
     fn compiles_and_runs_main_returning_42() {
@@ -217,6 +313,128 @@ mod tests {
         )
         .expect("program should compile and run");
         assert_eq!(value, 19);
+    }
+
+    #[test]
+    fn compiles_and_reads_host_backed_slots() {
+        let registry = host_registry();
+        let compiled = compile_with_host_registry(
+            "define function radius(c :: <rust-circle>) => <integer>\n  c.radius\nend;",
+            &registry,
+        )
+        .expect("program should compile");
+        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let class = compiled
+            .tape
+            .runtime
+            .class_id("<rust-circle>")
+            .expect("host class should be in runtime layout");
+        let circle = host
+            .push_host_object(class, RustCircle { radius: 11 })
+            .expect("host object should install");
+
+        let value = compiled
+            .run_function_i64("radius", &[circle], host)
+            .expect("host-backed slot read should run");
+        assert_eq!(value, 11);
+    }
+
+    #[test]
+    fn compiles_and_dispatches_on_host_backed_objects() {
+        let registry = host_registry();
+        let compiled = compile_with_host_registry(
+            "define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <rust-circle>) => <integer>\n  c.radius * c.radius\nend;\n\
+             define function call-area(c :: <rust-circle>) => <integer>\n  area(c)\nend;",
+            &registry,
+        )
+        .expect("program should compile");
+        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let class = compiled
+            .tape
+            .runtime
+            .class_id("<rust-circle>")
+            .expect("host class should be in runtime layout");
+        let circle = host
+            .push_host_object(class, RustCircle { radius: 7 })
+            .expect("host object should install");
+
+        let value = compiled
+            .run_function_i64("call-area", &[circle], host)
+            .expect("host-backed generic dispatch should run");
+        assert_eq!(value, 49);
+    }
+
+    #[test]
+    fn host_backed_objects_work_through_object_top_tests_and_casts() {
+        let registry = host_registry();
+        let compiled = compile_with_host_registry(
+            "define function guarded(x :: <object>) => <integer>\n\
+               if instance?(x, <rust-circle>) then as(<rust-circle>, x).radius else 0 end\n\
+             end;",
+            &registry,
+        )
+        .expect("program should compile");
+        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let class = compiled
+            .tape
+            .runtime
+            .class_id("<rust-circle>")
+            .expect("host class should be in runtime layout");
+        let circle = host
+            .push_host_object(class, RustCircle { radius: 5 })
+            .expect("host object should install");
+        let boxed = host
+            .box_top_value(circle)
+            .expect("host object should box as <object>");
+
+        let value = compiled
+            .run_function_i64("guarded", &[boxed], host)
+            .expect("host-backed object-top flow should run");
+        assert_eq!(value, 5);
+
+        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let class = compiled
+            .tape
+            .runtime
+            .class_id("<rust-square>")
+            .expect("host class should be in runtime layout");
+        let square = host
+            .push_host_object(class, RustSquare { side: 9 })
+            .expect("host object should install");
+        let boxed = host
+            .box_top_value(square)
+            .expect("host object should box as <object>");
+        let value = compiled
+            .run_function_i64("guarded", &[boxed], host)
+            .expect("host-backed negative instance? should run");
+        assert_eq!(value, 0);
+    }
+
+    #[test]
+    fn reports_invalid_host_backed_slot_reads_and_casts() {
+        let registry = host_registry();
+        let bad_slot = compile_with_host_registry(
+            "define function bad(c :: <rust-circle>) => <integer>\n  c.side\nend;",
+            &registry,
+        )
+        .expect_err("unknown host-backed slot should be rejected");
+        assert!(matches!(
+            bad_slot,
+            CompileError::Diagnostics { diagnostics }
+                if diagnostics.iter().any(|diagnostic| diagnostic.message == "class `<rust-circle>` has no slot `side`")
+        ));
+
+        let bad_cast = compile_with_host_registry(
+            "define function bad(s :: <rust-square>) => <integer>\n  as(<rust-circle>, s).radius\nend;",
+            &registry,
+        )
+        .expect_err("impossible host-backed cast should be rejected");
+        assert!(matches!(
+            bad_cast,
+            CompileError::Diagnostics { diagnostics }
+                if diagnostics.iter().any(|diagnostic| diagnostic.message == "cast is impossible: <rust-square> is not <rust-circle>")
+        ));
     }
 
     #[test]
