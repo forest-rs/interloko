@@ -1,5 +1,50 @@
 # Plans
 
+## Make EOP Workbench Commands Usable
+
+### Goal
+
+Add a small read-only environment workbench surface to `cairn_lab`: inspect one
+EOP object, list its affordances, invoke safe view-producing affordances, and
+demonstrate explicit host projection through a tool fixture.
+
+### Fence
+
+`cairn_lab` owns interactive/workbench command glue over structured EOP records.
+The compiler owns the records. Host adapters own explicit host projection.
+This slice explicitly does not own Portolan subjects, Understory presentation,
+persistence, automatic host reflection, runtime heap enumeration, mutation, or
+authorization policy.
+
+### Invariants
+
+- Inspect/affordance commands read `EnvironmentObject` records, not text dumps.
+- Affordance execution is read-only and maps to existing dumps/views.
+- Host-projected records appear only when an explicit workbench provider is
+  installed by fixture metadata.
+- `CairnHost` remains an execution host, not an environment registry.
+- Existing `eop` and corpus behavior stays intact.
+
+### Steps
+
+1. Add a `cairn_lab` workbench wrapper that compiles source and gathers
+   compiler records plus optional host-projected records.
+2. Add `inspect`, `affordances`, and read-only `invoke-affordance` commands.
+3. Add explicit fixture metadata and a provider for host class-like and
+   instance-like records.
+4. Add CLI tests covering object kinds, affordance listing/execution, unknown
+   IDs, and opt-in host projection.
+5. Add usage docs and progress notes, then run fmt, clippy, tests, docs,
+   examples, and corpus.
+
+### Risks
+
+- If command output becomes too clever, it will look like a UI contract instead
+  of a workbench inspection tool.
+- If fixture metadata is confused with Cairn syntax, the language boundary gets
+  muddy.
+- If invoke support includes mutation affordances, this slice overreaches.
+
 ## Build Structured EOP Records and Host Projection Seam
 
 ### Goal

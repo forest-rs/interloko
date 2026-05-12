@@ -776,6 +776,35 @@
   `EnvironmentObjectSink`, and `HostEnvironmentProvider`.
 - CLI stage lists still include `eop`.
 
+## Implemented: EOP Workbench Commands
+
+- `cairn_lab inspect <file> <object-id>` reads structured EOP records and prints
+  one object with kind, class, origin, storage, presentation, affordances,
+  execution, and inspection facets.
+- `cairn_lab affordances <file> <object-id>` lists the stable affordance names
+  exposed by one object and reports unknown object IDs with available IDs.
+- `cairn_lab invoke-affordance <file> <object-id> <affordance>` executes a
+  read-only workbench action when the object exposes it.
+- Supported read-only invocations map to existing compiler/session views:
+  `show-slot`, `show-accessor`, `show-dispatch`, `show-runtime-layout`,
+  `show-dependencies`, `dump-syntax`, `dump-ast`, `dump-sem`, `dump-mop`,
+  `dump-eop`, `dump-lowered`, `dump-tape`, and `run`.
+- `tools/cairn_lab/fixtures/host_projected_environment.cairn` demonstrates an
+  explicit host projection provider with a class-like host object and an
+  instance-like host object. The provider is installed only from explicit
+  `// host-eop-*` fixture metadata.
+- `docs/eop_workbench.md` documents how to discover object IDs, inspect records,
+  list affordances, invoke read-only views, and inspect host-projected records.
+
+### Workbench Boundary
+
+- `cairn_lab` is a workbench surface, not the long-term UI.
+- Host projection is adapter-owned and explicit. `CairnHost` does not enumerate
+  runtime heap objects.
+- EOP remains structured protocol vocabulary. There is still no Portolan bridge,
+  Understory inspector, persistent image, capability policy, mutation
+  transaction model, or Cairn-level EOP generic function protocol.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
