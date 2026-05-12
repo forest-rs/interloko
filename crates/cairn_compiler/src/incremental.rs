@@ -7,18 +7,10 @@ use alloc::vec::Vec;
 
 use invalidation::{Channel, InvalidationTracker, LazyPolicy};
 
-use crate::sem::{GenericFunctionId, MethodId, Module};
+use crate::identity::{ArtifactKey, ArtifactKind, DefinitionId, SourceFileId};
+use crate::sem::{MethodId, Module};
 
 const COMPILER: Channel = Channel::new(0);
-const SOURCE: u32 = 0;
-const PARSE: u32 = 1;
-const AST: u32 = 2;
-const BIND: u32 = 3;
-const METHOD_LOOKUP_BASE: u32 = 1_000;
-const METHOD_LOWER_BASE: u32 = 2_000;
-const METHOD_TAPE_BASE: u32 = 3_000;
-const GENERIC_DISPATCH_BASE: u32 = 4_000;
-const TAPE_PROGRAM: u32 = 5_000;
 
 /// Query artifact tracked by the invalidation shell.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -32,52 +24,57 @@ pub enum QueryArtifact {
     /// Binding and semantic symbol table result.
     Bind,
     /// Method lookup result for a method.
-    MethodLookup(MethodId),
+    MethodLookup(DefinitionId),
     /// Lowered method body.
-    MethodLowering(MethodId),
+    MethodLowering(DefinitionId),
     /// Tape function artifact for a method body.
-    MethodTape(MethodId),
+    MethodTape(DefinitionId),
     /// Generated dispatcher artifact for a generic.
-    GenericDispatcher(GenericFunctionId),
+    GenericDispatcher(DefinitionId),
     /// Whole verified tape program artifact.
     TapeProgram,
 }
 
-impl QueryArtifact {
-    fn key(self) -> u32 {
-        match self {
-            Self::Source => SOURCE,
-            Self::Parse => PARSE,
-            Self::Ast => AST,
-            Self::Bind => BIND,
-            Self::MethodLookup(id) => METHOD_LOOKUP_BASE + id.0,
-            Self::MethodLowering(id) => METHOD_LOWER_BASE + id.0,
-            Self::MethodTape(id) => METHOD_TAPE_BASE + id.0,
-            Self::GenericDispatcher(id) => GENERIC_DISPATCH_BASE + id.0,
-            Self::TapeProgram => TAPE_PROGRAM,
-        }
-    }
+/// A query artifact and its stable external key.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactReport {
+    /// Query artifact.
+    pub artifact: QueryArtifact,
+    /// Stable artifact key.
+    pub key: ArtifactKey,
+}
 
-    fn from_key(key: u32) -> Self {
-        match key {
-            SOURCE => Self::Source,
-            PARSE => Self::Parse,
-            AST => Self::Ast,
-            BIND => Self::Bind,
-            TAPE_PROGRAM => Self::TapeProgram,
-            key if (METHOD_LOOKUP_BASE..METHOD_LOWER_BASE).contains(&key) => {
-                Self::MethodLookup(MethodId(key - METHOD_LOOKUP_BASE))
+/// Dependency edge in the compiler artifact graph.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactEdge {
+    /// Artifact affected by `dependency`.
+    pub dependent: QueryArtifact,
+    /// Artifact this edge depends on.
+    pub dependency: QueryArtifact,
+}
+
+impl QueryArtifact {
+    /// Returns the stable artifact key for this query artifact in `source_file`.
+    #[must_use]
+    pub fn key(self, source_file: SourceFileId) -> ArtifactKey {
+        match self {
+            Self::Source => ArtifactKey::new(source_file, ArtifactKind::Source, None),
+            Self::Parse => ArtifactKey::new(source_file, ArtifactKind::Parse, None),
+            Self::Ast => ArtifactKey::new(source_file, ArtifactKind::Ast, None),
+            Self::Bind => ArtifactKey::new(source_file, ArtifactKind::Bind, None),
+            Self::MethodLookup(id) => {
+                ArtifactKey::new(source_file, ArtifactKind::MethodLookup, Some(id))
             }
-            key if (METHOD_LOWER_BASE..METHOD_TAPE_BASE).contains(&key) => {
-                Self::MethodLowering(MethodId(key - METHOD_LOWER_BASE))
+            Self::MethodLowering(id) => {
+                ArtifactKey::new(source_file, ArtifactKind::MethodLowering, Some(id))
             }
-            key if (METHOD_TAPE_BASE..GENERIC_DISPATCH_BASE).contains(&key) => {
-                Self::MethodTape(MethodId(key - METHOD_TAPE_BASE))
+            Self::MethodTape(id) => {
+                ArtifactKey::new(source_file, ArtifactKind::MethodTape, Some(id))
             }
-            key if (GENERIC_DISPATCH_BASE..TAPE_PROGRAM).contains(&key) => {
-                Self::GenericDispatcher(GenericFunctionId(key - GENERIC_DISPATCH_BASE))
+            Self::GenericDispatcher(id) => {
+                ArtifactKey::new(source_file, ArtifactKind::GenericDispatcher, Some(id))
             }
-            _ => Self::TapeProgram,
+            Self::TapeProgram => ArtifactKey::new(source_file, ArtifactKind::TapeProgram, None),
         }
     }
 }
@@ -85,60 +82,98 @@ impl QueryArtifact {
 /// Dependency-aware invalidation shell for compiler query artifacts.
 #[derive(Clone, Debug)]
 pub struct QueryInvalidation {
-    tracker: InvalidationTracker<u32>,
+    source_file: SourceFileId,
+    tracker: InvalidationTracker<usize>,
+    artifacts: Vec<(ArtifactKey, QueryArtifact)>,
+    edges: Vec<ArtifactEdge>,
+    methods: Vec<DefinitionId>,
 }
 
 impl QueryInvalidation {
     /// Builds a query invalidation graph for a semantic module.
     #[must_use]
     pub fn for_module(module: &Module) -> Self {
-        let mut tracker = InvalidationTracker::new();
-        add(&mut tracker, QueryArtifact::Parse, QueryArtifact::Source);
-        add(&mut tracker, QueryArtifact::Ast, QueryArtifact::Parse);
-        add(&mut tracker, QueryArtifact::Bind, QueryArtifact::Ast);
-        add(
-            &mut tracker,
-            QueryArtifact::TapeProgram,
-            QueryArtifact::Bind,
-        );
+        let mut this = Self {
+            source_file: module.source_file,
+            tracker: InvalidationTracker::new(),
+            artifacts: Vec::new(),
+            edges: Vec::new(),
+            methods: module
+                .methods
+                .iter()
+                .map(|method| method.definition)
+                .collect(),
+        };
+        this.add(QueryArtifact::Parse, QueryArtifact::Source);
+        this.add(QueryArtifact::Ast, QueryArtifact::Parse);
+        this.add(QueryArtifact::Bind, QueryArtifact::Ast);
+        this.add(QueryArtifact::TapeProgram, QueryArtifact::Bind);
 
         for method in &module.methods {
-            add(
-                &mut tracker,
-                QueryArtifact::MethodLookup(method.id),
-                QueryArtifact::Bind,
+            let method = method.definition;
+            this.add(QueryArtifact::MethodLookup(method), QueryArtifact::Bind);
+            this.add(
+                QueryArtifact::MethodLowering(method),
+                QueryArtifact::MethodLookup(method),
             );
-            add(
-                &mut tracker,
-                QueryArtifact::MethodLowering(method.id),
-                QueryArtifact::MethodLookup(method.id),
+            this.add(
+                QueryArtifact::MethodTape(method),
+                QueryArtifact::MethodLowering(method),
             );
-            add(
-                &mut tracker,
-                QueryArtifact::MethodTape(method.id),
-                QueryArtifact::MethodLowering(method.id),
-            );
-            add(
-                &mut tracker,
-                QueryArtifact::GenericDispatcher(method.generic),
-                QueryArtifact::MethodLookup(method.id),
-            );
-            add(
-                &mut tracker,
+            this.add(
                 QueryArtifact::TapeProgram,
-                QueryArtifact::MethodTape(method.id),
+                QueryArtifact::MethodTape(method),
             );
         }
 
         for generic in &module.generics {
-            add(
-                &mut tracker,
+            this.add(
                 QueryArtifact::TapeProgram,
-                QueryArtifact::GenericDispatcher(generic.id),
+                QueryArtifact::GenericDispatcher(generic.definition),
             );
         }
 
-        Self { tracker }
+        for method in &module.methods {
+            let Some(generic) = module.generics.get(method.generic.0 as usize) else {
+                continue;
+            };
+            this.add(
+                QueryArtifact::GenericDispatcher(generic.definition),
+                QueryArtifact::MethodLookup(method.definition),
+            );
+        }
+
+        this
+    }
+
+    /// Returns this graph's source file identity.
+    #[must_use]
+    pub const fn source_file(&self) -> SourceFileId {
+        self.source_file
+    }
+
+    /// Returns a stable key for `artifact`.
+    #[must_use]
+    pub fn key_for(&self, artifact: QueryArtifact) -> ArtifactKey {
+        artifact.key(self.source_file)
+    }
+
+    /// Returns known artifacts and their stable keys.
+    #[must_use]
+    pub fn artifact_reports(&self) -> Vec<ArtifactReport> {
+        self.artifacts
+            .iter()
+            .map(|(key, artifact)| ArtifactReport {
+                artifact: *artifact,
+                key: *key,
+            })
+            .collect()
+    }
+
+    /// Returns artifact dependency edges.
+    #[must_use]
+    pub fn artifact_edges(&self) -> &[ArtifactEdge] {
+        &self.edges
     }
 
     /// Marks source text changed and drains affected artifacts in dependency order.
@@ -151,36 +186,70 @@ impl QueryInvalidation {
     /// This represents a fine-grained edit after parsing/binding has identified
     /// which method body changed.
     pub fn method_changed(&mut self, method: MethodId) -> Vec<QueryArtifact> {
+        let Some(definition) = self.methods.get(method.0 as usize).copied() else {
+            return Vec::new();
+        };
+        self.method_definition_changed(definition)
+    }
+
+    /// Marks one method definition changed and drains affected artifacts.
+    pub fn method_definition_changed(&mut self, method: DefinitionId) -> Vec<QueryArtifact> {
         self.mark_and_drain(QueryArtifact::MethodLookup(method))
     }
 
     fn mark_and_drain(&mut self, artifact: QueryArtifact) -> Vec<QueryArtifact> {
-        self.tracker
-            .mark_with(artifact.key(), COMPILER, &LazyPolicy);
-        self.tracker
-            .drain_affected_sorted(COMPILER)
-            .map(QueryArtifact::from_key)
+        let key = self.track(artifact);
+        self.tracker.mark_with(key, COMPILER, &LazyPolicy);
+        let keys: Vec<_> = self.tracker.drain_affected_sorted(COMPILER).collect();
+        keys.into_iter()
+            .map(|key| self.artifact_for_key(key))
             .collect()
     }
-}
 
-fn add(
-    tracker: &mut InvalidationTracker<u32>,
-    dependent: QueryArtifact,
-    dependency: QueryArtifact,
-) {
-    tracker
-        .add_dependency(dependent.key(), dependency.key(), COMPILER)
-        .expect("compiler query graph must remain acyclic");
+    fn add(&mut self, dependent: QueryArtifact, dependency: QueryArtifact) {
+        let dependent = self.track(dependent);
+        let dependency = self.track(dependency);
+        self.edges.push(ArtifactEdge {
+            dependent: self.artifact_for_key(dependent),
+            dependency: self.artifact_for_key(dependency),
+        });
+        self.tracker
+            .add_dependency(dependent, dependency, COMPILER)
+            .expect("compiler query graph must remain acyclic");
+    }
+
+    fn artifact_for_key(&self, key: usize) -> QueryArtifact {
+        self.artifacts
+            .get(key)
+            .map_or(QueryArtifact::TapeProgram, |(_, artifact)| *artifact)
+    }
+
+    fn track(&mut self, artifact: QueryArtifact) -> usize {
+        let key = artifact.key(self.source_file);
+        if let Some(index) = self
+            .artifacts
+            .iter()
+            .position(|(existing, _)| *existing == key)
+        {
+            return index;
+        }
+        let index = self.artifacts.len();
+        self.artifacts.push((key, artifact));
+        index
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast, sem, syntax};
+    use crate::{ast, identity::SourceFileId, sem, syntax};
 
     fn lower_source(source: &str) -> sem::Module {
-        let tree = syntax::parse(source);
+        lower_file(SourceFileId::ANONYMOUS, source)
+    }
+
+    fn lower_file(source_file: SourceFileId, source: &str) -> sem::Module {
+        let tree = syntax::parse_file(source_file, source);
         let ast = ast::lower(&tree);
         sem::lower(&ast)
     }
@@ -195,21 +264,24 @@ mod tests {
              define method area(s :: <square>)\n  s.side * s.side\nend;",
         );
         assert_eq!(module.diagnostics, Vec::new());
+        let circle = module.methods[0].definition;
+        let square = module.methods[1].definition;
+        let area = module.generics[0].definition;
 
         let mut invalidation = QueryInvalidation::for_module(&module);
         let affected = invalidation.method_changed(MethodId(0));
 
-        assert!(affected.contains(&QueryArtifact::MethodLookup(MethodId(0))));
-        assert!(affected.contains(&QueryArtifact::MethodLowering(MethodId(0))));
-        assert!(affected.contains(&QueryArtifact::MethodTape(MethodId(0))));
-        assert!(affected.contains(&QueryArtifact::GenericDispatcher(GenericFunctionId(0))));
+        assert!(affected.contains(&QueryArtifact::MethodLookup(circle)));
+        assert!(affected.contains(&QueryArtifact::MethodLowering(circle)));
+        assert!(affected.contains(&QueryArtifact::MethodTape(circle)));
+        assert!(affected.contains(&QueryArtifact::GenericDispatcher(area)));
         assert!(affected.contains(&QueryArtifact::TapeProgram));
         assert!(!affected.contains(&QueryArtifact::Parse));
         assert!(!affected.contains(&QueryArtifact::Ast));
         assert!(!affected.contains(&QueryArtifact::Bind));
-        assert!(!affected.contains(&QueryArtifact::MethodLookup(MethodId(1))));
-        assert!(!affected.contains(&QueryArtifact::MethodLowering(MethodId(1))));
-        assert!(!affected.contains(&QueryArtifact::MethodTape(MethodId(1))));
+        assert!(!affected.contains(&QueryArtifact::MethodLookup(square)));
+        assert!(!affected.contains(&QueryArtifact::MethodLowering(square)));
+        assert!(!affected.contains(&QueryArtifact::MethodTape(square)));
     }
 
     #[test]
@@ -226,9 +298,45 @@ mod tests {
         assert!(affected.contains(&QueryArtifact::Parse));
         assert!(affected.contains(&QueryArtifact::Ast));
         assert!(affected.contains(&QueryArtifact::Bind));
-        assert!(affected.contains(&QueryArtifact::MethodLookup(MethodId(0))));
-        assert!(affected.contains(&QueryArtifact::MethodLowering(MethodId(0))));
-        assert!(affected.contains(&QueryArtifact::MethodTape(MethodId(0))));
+        let method = module.methods[0].definition;
+        assert!(affected.contains(&QueryArtifact::MethodLookup(method)));
+        assert!(affected.contains(&QueryArtifact::MethodLowering(method)));
+        assert!(affected.contains(&QueryArtifact::MethodTape(method)));
         assert!(affected.contains(&QueryArtifact::TapeProgram));
+    }
+
+    #[test]
+    fn artifact_keys_follow_definition_ids_across_insertions() {
+        let source_file = SourceFileId::from_path("examples/area.cairn");
+        let before = lower_file(
+            source_file,
+            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;",
+        );
+        let edited = lower_file(
+            source_file,
+            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+             define class <square> (<object>)\n  slot side;\nend;\n\
+             define generic area(x);\n\
+             define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;",
+        );
+
+        let circle_method = before.methods[0].definition;
+        let edited_circle = edited
+            .methods
+            .iter()
+            .find(|method| method.definition == circle_method)
+            .expect("circle method definition should keep its stable id");
+        assert_ne!(edited_circle.id, MethodId(0));
+
+        let before_graph = QueryInvalidation::for_module(&before);
+        let edited_graph = QueryInvalidation::for_module(&edited);
+        let before_key = before_graph.key_for(QueryArtifact::MethodLookup(circle_method));
+        let edited_key =
+            edited_graph.key_for(QueryArtifact::MethodLookup(edited_circle.definition));
+
+        assert_eq!(before_key, edited_key);
     }
 }

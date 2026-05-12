@@ -5,6 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::diagnostic::Diagnostic;
+use crate::identity::{SourceFileId, StableIdBuilder, SyntaxNodeId};
 
 /// A byte span in a source file.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -178,6 +179,8 @@ impl CstElement {
 /// A concrete syntax tree node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CstNode {
+    /// Stable-ish node identity.
+    pub id: SyntaxNodeId,
     /// Node kind.
     pub kind: CstKind,
     /// Source span covered by this node.
@@ -187,13 +190,22 @@ pub struct CstNode {
 }
 
 impl CstNode {
-    fn new(kind: CstKind, children: Vec<CstElement>, tokens: &[Token], fallback: Span) -> Self {
+    fn new(
+        source_file: SourceFileId,
+        kind: CstKind,
+        children: Vec<CstElement>,
+        tokens: &[Token],
+        source: &str,
+        fallback: Span,
+    ) -> Self {
         let span = children
             .iter()
             .map(|child| child.span(tokens))
             .reduce(Span::cover)
             .unwrap_or(fallback);
+        let id = syntax_node_id(source_file, kind, &children, tokens, source);
         Self {
+            id,
             kind,
             span,
             children,
@@ -209,9 +221,175 @@ impl CstNode {
     }
 }
 
+fn syntax_node_id(
+    source_file: SourceFileId,
+    kind: CstKind,
+    children: &[CstElement],
+    tokens: &[Token],
+    source: &str,
+) -> SyntaxNodeId {
+    let mut builder = SyntaxNodeId::builder(source_file, cst_kind_tag(kind));
+
+    match kind {
+        CstKind::Class => {
+            mix_token_text(&mut builder, children, tokens, source, TokenKind::TypeName);
+        }
+        CstKind::Function => {
+            mix_definition_name(&mut builder, children, tokens, source, TokenKind::Function);
+        }
+        CstKind::Generic => {
+            mix_definition_name(&mut builder, children, tokens, source, TokenKind::Generic);
+        }
+        CstKind::Method => {
+            mix_definition_name(&mut builder, children, tokens, source, TokenKind::Method);
+            mix_token_text(&mut builder, children, tokens, source, TokenKind::TypeName);
+        }
+        CstKind::SlotDecl
+        | CstKind::LetStmt
+        | CstKind::KeywordArg
+        | CstKind::NameExpr
+        | CstKind::NumberExpr
+        | CstKind::TypeExpr => {
+            mix_first_named_token(&mut builder, children, tokens, source);
+        }
+        _ => {
+            for child in children {
+                match child {
+                    CstElement::Node(node) => builder.mix_u64(node.id.raw()),
+                    CstElement::Token(index) => {
+                        let token = tokens[*index];
+                        if token.kind.is_trivia() {
+                            continue;
+                        }
+                        builder.mix_u64(token_kind_tag(token.kind));
+                        builder.mix_str(token.text(source));
+                    }
+                }
+            }
+        }
+    }
+
+    SyntaxNodeId::from_raw(builder.finish())
+}
+
+fn mix_definition_name(
+    builder: &mut StableIdBuilder,
+    children: &[CstElement],
+    tokens: &[Token],
+    source: &str,
+    keyword: TokenKind,
+) {
+    let mut saw_keyword = false;
+    for child in children {
+        let CstElement::Token(index) = child else {
+            continue;
+        };
+        let token = tokens[*index];
+        if token.kind == keyword {
+            saw_keyword = true;
+        } else if saw_keyword && matches!(token.kind, TokenKind::Ident | TokenKind::TypeName) {
+            builder.mix_str(token.text(source));
+            return;
+        }
+    }
+}
+
+fn mix_token_text(
+    builder: &mut StableIdBuilder,
+    children: &[CstElement],
+    tokens: &[Token],
+    source: &str,
+    kind: TokenKind,
+) {
+    for child in children {
+        if let CstElement::Token(index) = child {
+            let token = tokens[*index];
+            if token.kind == kind {
+                builder.mix_str(token.text(source));
+                return;
+            }
+        }
+    }
+}
+
+fn mix_first_named_token(
+    builder: &mut StableIdBuilder,
+    children: &[CstElement],
+    tokens: &[Token],
+    source: &str,
+) {
+    for child in children {
+        if let CstElement::Token(index) = child {
+            let token = tokens[*index];
+            if matches!(
+                token.kind,
+                TokenKind::Ident | TokenKind::Number | TokenKind::TypeName
+            ) {
+                builder.mix_str(token.text(source));
+                return;
+            }
+        }
+    }
+}
+
+const fn cst_kind_tag(kind: CstKind) -> u64 {
+    match kind {
+        CstKind::Root => 1,
+        CstKind::Function => 2,
+        CstKind::Class => 3,
+        CstKind::SlotDecl => 4,
+        CstKind::Generic => 5,
+        CstKind::Method => 6,
+        CstKind::ParameterList => 7,
+        CstKind::Body => 8,
+        CstKind::LetStmt => 9,
+        CstKind::BinaryExpr => 10,
+        CstKind::CallExpr => 11,
+        CstKind::SlotExpr => 12,
+        CstKind::ArgList => 13,
+        CstKind::KeywordArg => 14,
+        CstKind::NameExpr => 15,
+        CstKind::NumberExpr => 16,
+        CstKind::TypeExpr => 17,
+        CstKind::Error => 18,
+    }
+}
+
+const fn token_kind_tag(kind: TokenKind) -> u64 {
+    match kind {
+        TokenKind::Define => 1,
+        TokenKind::Function => 2,
+        TokenKind::Class => 3,
+        TokenKind::Slot => 4,
+        TokenKind::Generic => 5,
+        TokenKind::Method => 6,
+        TokenKind::Let => 7,
+        TokenKind::End => 8,
+        TokenKind::Ident => 9,
+        TokenKind::Number => 10,
+        TokenKind::TypeName => 11,
+        TokenKind::LParen => 12,
+        TokenKind::RParen => 13,
+        TokenKind::Comma => 14,
+        TokenKind::Plus => 15,
+        TokenKind::Minus => 16,
+        TokenKind::Star => 17,
+        TokenKind::Equal => 18,
+        TokenKind::Colon => 19,
+        TokenKind::DoubleColon => 20,
+        TokenKind::Dot => 21,
+        TokenKind::Semicolon => 22,
+        TokenKind::Whitespace => 23,
+        TokenKind::Comment => 24,
+        TokenKind::Error => 25,
+    }
+}
+
 /// Parsed source, retaining the original source and all tokens.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntaxTree {
+    /// Source file identity.
+    pub source_file: SourceFileId,
     /// Original source text.
     pub source: String,
     /// All lexed tokens, including trivia.
@@ -360,11 +538,18 @@ fn is_ident_continue(bytes: &[u8], pos: usize) -> bool {
 /// Parses source into a [`SyntaxTree`].
 #[must_use]
 pub fn parse(source: &str) -> SyntaxTree {
+    parse_file(SourceFileId::ANONYMOUS, source)
+}
+
+/// Parses source from `source_file` into a [`SyntaxTree`].
+#[must_use]
+pub fn parse_file(source_file: SourceFileId, source: &str) -> SyntaxTree {
     let tokens = lex(source);
-    Parser::new(source, tokens).parse()
+    Parser::new(source_file, source, tokens).parse()
 }
 
 struct Parser<'source> {
+    source_file: SourceFileId,
     source: &'source str,
     tokens: Vec<Token>,
     cursor: usize,
@@ -372,8 +557,9 @@ struct Parser<'source> {
 }
 
 impl<'source> Parser<'source> {
-    fn new(source: &'source str, tokens: Vec<Token>) -> Self {
+    fn new(source_file: SourceFileId, source: &'source str, tokens: Vec<Token>) -> Self {
         Self {
+            source_file,
             source,
             tokens,
             cursor: 0,
@@ -407,13 +593,25 @@ impl<'source> Parser<'source> {
         }
 
         let fallback = Span::new(0, self.source.len());
-        let root = CstNode::new(CstKind::Root, children, &self.tokens, fallback);
+        let root = self.node(CstKind::Root, children, fallback);
         SyntaxTree {
+            source_file: self.source_file,
             source: self.source.to_string(),
             tokens: self.tokens,
             root,
             diagnostics: self.diagnostics,
         }
+    }
+
+    fn node(&self, kind: CstKind, children: Vec<CstElement>, fallback: Span) -> CstNode {
+        CstNode::new(
+            self.source_file,
+            kind,
+            children,
+            &self.tokens,
+            self.source,
+            fallback,
+        )
     }
 
     fn parse_class(&mut self) -> CstNode {
@@ -447,7 +645,7 @@ impl<'source> Parser<'source> {
         if self.at(TokenKind::Semicolon) {
             self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
         }
-        CstNode::new(CstKind::Class, children, &self.tokens, start)
+        self.node(CstKind::Class, children, start)
     }
 
     fn parse_slot_decl(&mut self) -> CstNode {
@@ -460,7 +658,7 @@ impl<'source> Parser<'source> {
             &mut children,
             "expected `;` after slot declaration",
         );
-        CstNode::new(CstKind::SlotDecl, children, &self.tokens, start)
+        self.node(CstKind::SlotDecl, children, start)
     }
 
     fn parse_generic(&mut self) -> CstNode {
@@ -485,7 +683,7 @@ impl<'source> Parser<'source> {
             &mut children,
             "expected `;` after generic declaration",
         );
-        CstNode::new(CstKind::Generic, children, &self.tokens, start)
+        self.node(CstKind::Generic, children, start)
     }
 
     fn parse_method(&mut self) -> CstNode {
@@ -514,7 +712,7 @@ impl<'source> Parser<'source> {
         if self.at(TokenKind::Semicolon) {
             self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
         }
-        CstNode::new(CstKind::Method, children, &self.tokens, start)
+        self.node(CstKind::Method, children, start)
     }
 
     fn parse_function(&mut self) -> CstNode {
@@ -543,14 +741,14 @@ impl<'source> Parser<'source> {
         if self.at(TokenKind::Semicolon) {
             self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
         }
-        CstNode::new(CstKind::Function, children, &self.tokens, start)
+        self.node(CstKind::Function, children, start)
     }
 
     fn parse_parameter_list(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
         if self.at(TokenKind::RParen) {
-            return CstNode::new(CstKind::ParameterList, children, &self.tokens, start);
+            return self.node(CstKind::ParameterList, children, start);
         }
 
         loop {
@@ -569,7 +767,7 @@ impl<'source> Parser<'source> {
             self.expect(TokenKind::Comma, &mut children, "expected `,`");
         }
 
-        CstNode::new(CstKind::ParameterList, children, &self.tokens, start)
+        self.node(CstKind::ParameterList, children, start)
     }
 
     fn parse_body(&mut self) -> CstNode {
@@ -587,7 +785,7 @@ impl<'source> Parser<'source> {
                 .push(Diagnostic::error(span, "expected expression"));
         }
 
-        CstNode::new(CstKind::Body, children, &self.tokens, start)
+        self.node(CstKind::Body, children, start)
     }
 
     fn parse_let(&mut self) -> CstNode {
@@ -606,7 +804,7 @@ impl<'source> Parser<'source> {
             &mut children,
             "expected `;` after local binding",
         );
-        CstNode::new(CstKind::LetStmt, children, &self.tokens, start)
+        self.node(CstKind::LetStmt, children, start)
     }
 
     fn parse_expr(&mut self) -> CstNode {
@@ -621,7 +819,7 @@ impl<'source> Parser<'source> {
                 children.push(CstElement::Token(op));
             }
             children.push(CstElement::Node(self.parse_mul()));
-            node = CstNode::new(CstKind::BinaryExpr, children, &self.tokens, Span::default());
+            node = self.node(CstKind::BinaryExpr, children, Span::default());
         }
         node
     }
@@ -634,7 +832,7 @@ impl<'source> Parser<'source> {
                 children.push(CstElement::Token(op));
             }
             children.push(CstElement::Node(self.parse_postfix()));
-            node = CstNode::new(CstKind::BinaryExpr, children, &self.tokens, Span::default());
+            node = self.node(CstKind::BinaryExpr, children, Span::default());
         }
         node
     }
@@ -646,7 +844,7 @@ impl<'source> Parser<'source> {
             let mut children = vec![CstElement::Node(node)];
             self.expect(TokenKind::Dot, &mut children, "expected `.`");
             self.expect(TokenKind::Ident, &mut children, "expected slot name");
-            node = CstNode::new(CstKind::SlotExpr, children, &self.tokens, start);
+            node = self.node(CstKind::SlotExpr, children, start);
         }
         node
     }
@@ -656,18 +854,18 @@ impl<'source> Parser<'source> {
         if self.at(TokenKind::Number) {
             let mut children = Vec::new();
             self.expect(TokenKind::Number, &mut children, "expected number");
-            return CstNode::new(CstKind::NumberExpr, children, &self.tokens, start);
+            return self.node(CstKind::NumberExpr, children, start);
         }
 
         if self.at(TokenKind::TypeName) {
             let mut children = Vec::new();
             self.expect(TokenKind::TypeName, &mut children, "expected type name");
-            return CstNode::new(CstKind::TypeExpr, children, &self.tokens, start);
+            return self.node(CstKind::TypeExpr, children, start);
         }
 
         if self.at(TokenKind::Ident) {
             let Some(name) = self.bump() else {
-                return CstNode::new(CstKind::Error, Vec::new(), &self.tokens, start);
+                return self.node(CstKind::Error, Vec::new(), start);
             };
             if self.at(TokenKind::LParen) {
                 let mut children = vec![CstElement::Token(name)];
@@ -678,14 +876,9 @@ impl<'source> Parser<'source> {
                     &mut children,
                     "expected `)` after arguments",
                 );
-                return CstNode::new(CstKind::CallExpr, children, &self.tokens, start);
+                return self.node(CstKind::CallExpr, children, start);
             }
-            return CstNode::new(
-                CstKind::NameExpr,
-                vec![CstElement::Token(name)],
-                &self.tokens,
-                start,
-            );
+            return self.node(CstKind::NameExpr, vec![CstElement::Token(name)], start);
         }
 
         if self.at(TokenKind::LParen) {
@@ -698,24 +891,19 @@ impl<'source> Parser<'source> {
 
         if let Some(index) = self.bump() {
             self.error_at(index, "expected expression");
-            return CstNode::new(
-                CstKind::Error,
-                vec![CstElement::Token(index)],
-                &self.tokens,
-                start,
-            );
+            return self.node(CstKind::Error, vec![CstElement::Token(index)], start);
         }
 
         self.diagnostics
             .push(Diagnostic::error(start, "expected expression"));
-        CstNode::new(CstKind::Error, Vec::new(), &self.tokens, start)
+        self.node(CstKind::Error, Vec::new(), start)
     }
 
     fn parse_arg_list(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
         if self.at(TokenKind::RParen) {
-            return CstNode::new(CstKind::ArgList, children, &self.tokens, start);
+            return self.node(CstKind::ArgList, children, start);
         }
 
         loop {
@@ -734,7 +922,7 @@ impl<'source> Parser<'source> {
             self.expect(TokenKind::Comma, &mut children, "expected `,`");
         }
 
-        CstNode::new(CstKind::ArgList, children, &self.tokens, start)
+        self.node(CstKind::ArgList, children, start)
     }
 
     fn parse_keyword_arg(&mut self) -> CstNode {
@@ -747,7 +935,7 @@ impl<'source> Parser<'source> {
             "expected `:` after keyword name",
         );
         children.push(CstElement::Node(self.parse_expr()));
-        CstNode::new(CstKind::KeywordArg, children, &self.tokens, start)
+        self.node(CstKind::KeywordArg, children, start)
     }
 
     fn expect(&mut self, kind: TokenKind, children: &mut Vec<CstElement>, message: &str) {

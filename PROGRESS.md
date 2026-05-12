@@ -64,6 +64,44 @@
 - `CompiledModule::dump_tape()` returns the `execution_tape` disassembly.
 - Public API migration: callers that previously invoked `tape::emit(&sem)` should now call `lower::lower(&sem)` and then `tape::emit(&lowered)`.
 
+## Implemented: Stable-ish IDs and Artifact Keys
+
+- `SourceFileId` identifies logical source files, with `syntax::parse_file` for callers that have stable paths.
+- CST nodes carry `SyntaxNodeId` values.
+- AST nodes and definitions carry `AstNodeId` and `DefinitionId` values.
+- Semantic definitions carry stable `DefinitionId` values alongside dense semantic IDs.
+- Incremental query artifacts expose stable `ArtifactKey` values based on source file, artifact kind, and definition identity.
+- `QueryInvalidation` maps stable artifact keys to dense `invalidation 0.2` keys internally.
+- Tests cover syntax/AST definition ID preservation across whitespace/comment edits and method artifact key preservation across insertion-driven method renumbering.
+- Stability guarantees and non-guarantees are documented in `crates/cairn_compiler/ADR-stable-ids.md`.
+
+## Implemented: Compiler Session and Workbench CLI
+
+- `cairn_compiler::session` provides a no-std-friendly compiler session API over named source files.
+- Session artifacts retain:
+  - source file identity and text metadata
+  - syntax tree
+  - AST
+  - semantic IR
+  - lowered IR
+  - tape module
+  - diagnostics
+  - optional runtime result
+- Session dumps cover:
+  - CST/syntax
+  - AST
+  - semantic IR
+  - lowered IR
+  - `execution_tape` disassembly
+  - stable artifact graph with dependencies
+- Session diff reports preserved definitions, added/removed/modified definitions, and affected query artifacts.
+- `tools/cairn_lab` provides:
+  - `run <file>`
+  - `dump <file> --stage syntax|ast|sem|lowered|tape|all`
+  - `artifacts <file>`
+  - `diff <before> <after>`
+- CLI fixtures cover the generic-area program, harmless trivia edits, and a focused method body edit.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
@@ -77,7 +115,9 @@
 - Multi-argument/multi-method dispatch beyond one nominal object argument.
 - Runtime mutation and non-integer slots.
 - Persistent caches or scheduling; the invalidation shell models dependencies only.
-- Stable edit-preserving ID strategy beyond the current per-module semantic IDs.
+- Watch mode, LSP, and persistent on-disk workbench caches.
+- Full multi-file module sessions beyond compiling named source files independently.
+- Cross-file/module-stable identity beyond caller-provided `SourceFileId` values.
 - Lowered IR optimization passes, canonical basic blocks, and richer type checking.
 
 ## Follow-Up Tickets

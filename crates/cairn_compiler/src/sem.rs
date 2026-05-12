@@ -2,11 +2,12 @@
 
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::ast;
 use crate::diagnostic::Diagnostic;
+use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::Span;
 
 /// Durable class identifier within a semantic module.
@@ -65,6 +66,8 @@ pub enum ValueKind {
 /// Semantic module with resolved nominal IDs and calls.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Module {
+    /// Source file identity.
+    pub source_file: SourceFileId,
     /// Nominal class definitions.
     pub classes: Vec<Class>,
     /// Generic function declarations.
@@ -82,6 +85,8 @@ pub struct Module {
 pub struct Class {
     /// Class identifier.
     pub id: ClassId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Source name.
     pub name: String,
     /// Declared slots.
@@ -95,6 +100,8 @@ pub struct Class {
 pub struct Slot {
     /// Slot identifier within the owning class.
     pub id: SlotId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
     /// Source span.
@@ -106,6 +113,8 @@ pub struct Slot {
 pub struct GenericFunction {
     /// Generic function identifier.
     pub id: GenericFunctionId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Source name.
     pub name: String,
     /// Arity.
@@ -119,6 +128,8 @@ pub struct GenericFunction {
 pub struct Method {
     /// Method identifier.
     pub id: MethodId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Implemented generic function.
     pub generic: GenericFunctionId,
     /// Specialized class for the first argument.
@@ -138,6 +149,8 @@ pub struct Method {
 pub struct Function {
     /// Function identifier.
     pub id: FunctionId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Function name.
     pub name: String,
     /// Parameter local IDs in source order.
@@ -155,6 +168,8 @@ pub struct Function {
 pub struct Local {
     /// Local identifier.
     pub id: LocalId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Local name.
     pub name: String,
     /// Value category.
@@ -343,10 +358,17 @@ impl FunctionContext {
         }
     }
 
-    fn add_local(&mut self, name: String, kind: ValueKind, span: Span) -> LocalId {
+    fn add_local(
+        &mut self,
+        definition: DefinitionId,
+        name: String,
+        kind: ValueKind,
+        span: Span,
+    ) -> LocalId {
         let id = LocalId(u32::try_from(self.locals.len()).unwrap_or(u32::MAX));
         self.locals.push(Local {
             id,
+            definition,
             name,
             kind,
             span,
@@ -369,6 +391,7 @@ impl FunctionContext {
 }
 
 struct Lowering {
+    source_file: SourceFileId,
     classes: Vec<Class>,
     generics: Vec<GenericFunction>,
     methods: Vec<Method>,
@@ -380,6 +403,7 @@ struct Lowering {
 impl Lowering {
     fn new(module: &ast::Module) -> Self {
         let mut lowering = Self {
+            source_file: module.source_file,
             classes: Vec::new(),
             generics: Vec::new(),
             methods: Vec::new(),
@@ -410,12 +434,14 @@ impl Lowering {
                 .enumerate()
                 .map(|(slot_index, slot)| Slot {
                     id: SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX)),
+                    definition: slot.definition,
                     name: slot.name.clone(),
                     span: slot.span,
                 })
                 .collect();
             self.classes.push(Class {
                 id: ClassId(u32::try_from(index).unwrap_or(u32::MAX)),
+                definition: class.definition,
                 name: class.name.clone(),
                 slots,
                 span: class.span,
@@ -447,6 +473,7 @@ impl Lowering {
             });
             self.generics.push(GenericFunction {
                 id,
+                definition: generic.definition,
                 name: generic.name.clone(),
                 arity: generic.params.len(),
                 span: generic.span,
@@ -501,6 +528,7 @@ impl Lowering {
             .collect();
 
         Module {
+            source_file: module.source_file,
             classes: self.classes.clone(),
             generics: self.generics.clone(),
             methods: self.methods.clone(),
@@ -532,6 +560,7 @@ impl Lowering {
                 ClassId(u32::MAX)
             });
         let param = ctx.add_local(
+            self.local_definition(method.definition, &method.param.name),
             method.param.name.clone(),
             ValueKind::Object(specializer),
             method.param.span,
@@ -540,6 +569,7 @@ impl Lowering {
         self.diagnostics.extend(ctx.diagnostics);
         Method {
             id,
+            definition: method.definition,
             generic,
             specializer,
             param,
@@ -560,7 +590,12 @@ impl Lowering {
                     format!("parameter `{param}` is already defined"),
                 ));
             }
-            params.push(ctx.add_local(param.clone(), ValueKind::I64, function.span));
+            params.push(ctx.add_local(
+                self.local_definition(function.definition, param),
+                param.clone(),
+                ValueKind::I64,
+                function.span,
+            ));
         }
 
         let body = self.lower_block(&mut ctx, &function.body);
@@ -568,6 +603,7 @@ impl Lowering {
 
         Function {
             id,
+            definition: function.definition,
             name: function.name.clone(),
             params,
             locals: ctx.locals,
@@ -586,7 +622,12 @@ impl Lowering {
                     format!("local `{}` is already defined", local.name),
                 ));
             }
-            let id = ctx.add_local(local.name.clone(), self.expr_kind(ctx, &value), local.span);
+            let id = ctx.add_local(
+                self.local_definition(local.definition, &local.name),
+                local.name.clone(),
+                self.expr_kind(ctx, &value),
+                local.span,
+            );
             lets.push(Let {
                 local: id,
                 value,
@@ -603,11 +644,11 @@ impl Lowering {
 
     fn lower_expr(&self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
         match expr {
-            ast::Expr::Number { value, span } => Expr::ConstI64 {
+            ast::Expr::Number { value, span, .. } => Expr::ConstI64 {
                 value: *value,
                 span: *span,
             },
-            ast::Expr::Name { name, span } => match ctx.find_local(name) {
+            ast::Expr::Name { name, span, .. } => match ctx.find_local(name) {
                 Some(local) => Expr::Local { local, span: *span },
                 None => {
                     ctx.diagnostics.push(Diagnostic::error(
@@ -617,7 +658,9 @@ impl Lowering {
                     Expr::Error { span: *span }
                 }
             },
-            ast::Expr::Call { callee, args, span } => {
+            ast::Expr::Call {
+                callee, args, span, ..
+            } => {
                 let lowered_args: Vec<_> =
                     args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
                 if let Some(symbol) = self.resolve_function(callee) {
@@ -666,19 +709,23 @@ impl Lowering {
                 class_name,
                 fields,
                 span,
+                ..
             } => self.lower_make_object(ctx, class_name, fields, *span),
             ast::Expr::SlotRead {
                 receiver,
                 slot,
                 span,
+                ..
             } => self.lower_slot_read(ctx, receiver, slot, *span),
-            ast::Expr::Binary { op, lhs, rhs, span } => Expr::Binary {
+            ast::Expr::Binary {
+                op, lhs, rhs, span, ..
+            } => Expr::Binary {
                 op: (*op).into(),
                 lhs: Box::new(self.lower_expr(ctx, lhs)),
                 rhs: Box::new(self.lower_expr(ctx, rhs)),
                 span: *span,
             },
-            ast::Expr::Error { span } => Expr::Error { span: *span },
+            ast::Expr::Error { span, .. } => Expr::Error { span: *span },
         }
     }
 
@@ -787,6 +834,15 @@ impl Lowering {
         self.generic_symbols
             .iter()
             .find(|symbol| symbol.name == name)
+    }
+
+    fn local_definition(&self, owner: DefinitionId, name: &str) -> DefinitionId {
+        DefinitionId::new(
+            self.source_file,
+            DefinitionKind::Local,
+            name,
+            &owner.raw().to_string(),
+        )
     }
 }
 

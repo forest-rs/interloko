@@ -3,6 +3,7 @@ members = [
     "crates/cairn_compiler",
     "examples/forty_two",
     "examples/generic_area",
+    "tools/cairn_lab",
 ]
 resolver = "3"
 

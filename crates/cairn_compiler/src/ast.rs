@@ -5,11 +5,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::diagnostic::Diagnostic;
+use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
 
 /// AST module containing function definitions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Module {
+    /// Source file identity.
+    pub source_file: SourceFileId,
     /// Class definitions in source order.
     pub classes: Vec<Class>,
     /// Generic function declarations in source order.
@@ -25,6 +28,10 @@ pub struct Module {
 /// Function definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Function name.
     pub name: String,
     /// Parameter names in source order.
@@ -38,6 +45,10 @@ pub struct Function {
 /// Class definition with nominal slots.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Class {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Class name, including Dylan-style angle brackets.
     pub name: String,
     /// Slot declarations in source order.
@@ -49,6 +60,10 @@ pub struct Class {
 /// Slot declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Slot {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
     /// Source span.
@@ -58,6 +73,10 @@ pub struct Slot {
 /// Generic function declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Generic {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Generic function name.
     pub name: String,
     /// Parameter names.
@@ -69,6 +88,10 @@ pub struct Generic {
 /// Method definition specialized on a nominal class.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Method {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
     /// Generic function name this method implements.
     pub name: String,
     /// Single specialized parameter for this slice.
@@ -82,6 +105,8 @@ pub struct Method {
 /// Method parameter with a nominal specializer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MethodParam {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
     /// Parameter name.
     pub name: String,
     /// Nominal class specializer.
@@ -93,6 +118,8 @@ pub struct MethodParam {
 /// Function body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Block {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
     /// Local `let` bindings.
     pub lets: Vec<Let>,
     /// Final result expression.
@@ -104,6 +131,10 @@ pub struct Block {
 /// Local binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Let {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Stable definition identity for the local binding.
+    pub definition: DefinitionId,
     /// Local name.
     pub name: String,
     /// Bound value expression.
@@ -128,6 +159,8 @@ pub enum BinaryOp {
 pub enum Expr {
     /// Integer literal.
     Number {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
         /// Parsed value.
         value: i64,
         /// Source span.
@@ -135,6 +168,8 @@ pub enum Expr {
     },
     /// Name reference.
     Name {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
         /// Referenced name.
         name: String,
         /// Source span.
@@ -142,6 +177,8 @@ pub enum Expr {
     },
     /// Direct call syntax.
     Call {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
         /// Callee name.
         callee: String,
         /// Argument expressions.
@@ -151,6 +188,8 @@ pub enum Expr {
     },
     /// Object construction through `make(<class>, slot: value)`.
     MakeObject {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
         /// Class name.
         class_name: String,
         /// Keyword slot initializers.
@@ -160,6 +199,8 @@ pub enum Expr {
     },
     /// Object slot read.
     SlotRead {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
         /// Receiver expression.
         receiver: Box<Expr>,
         /// Slot name.
@@ -169,6 +210,8 @@ pub enum Expr {
     },
     /// Binary expression.
     Binary {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
         /// Operator.
         op: BinaryOp,
         /// Left operand.
@@ -180,12 +223,28 @@ pub enum Expr {
     },
     /// Placeholder for malformed syntax.
     Error {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
         /// Source span.
         span: Span,
     },
 }
 
 impl Expr {
+    /// Returns this expression's stable-ish AST node id.
+    #[must_use]
+    pub const fn id(&self) -> AstNodeId {
+        match self {
+            Self::Number { id, .. }
+            | Self::Name { id, .. }
+            | Self::Call { id, .. }
+            | Self::MakeObject { id, .. }
+            | Self::SlotRead { id, .. }
+            | Self::Binary { id, .. }
+            | Self::Error { id, .. } => *id,
+        }
+    }
+
     /// Returns this expression's source span.
     #[must_use]
     pub const fn span(&self) -> Span {
@@ -196,7 +255,7 @@ impl Expr {
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
             | Self::Binary { span, .. }
-            | Self::Error { span } => *span,
+            | Self::Error { span, .. } => *span,
         }
     }
 }
@@ -204,6 +263,8 @@ impl Expr {
 /// Keyword argument used by object construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeywordArg {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
     /// Keyword name.
     pub name: String,
     /// Argument value.
@@ -254,6 +315,7 @@ impl<'tree> Lowering<'tree> {
             .map(|node| self.lower_function(node))
             .collect();
         Module {
+            source_file: self.tree.source_file,
             classes,
             generics,
             methods,
@@ -268,31 +330,41 @@ impl<'tree> Lowering<'tree> {
             .map_or_else(String::new, |(_, text)| text.to_string());
         let slots = node
             .child_nodes(CstKind::SlotDecl)
-            .map(|slot| self.lower_slot(slot))
+            .map(|slot| self.lower_slot(&name, slot))
             .collect();
         Class {
+            id: self.ast_id(node),
+            definition: self.definition(DefinitionKind::Class, &name, ""),
             name,
             slots,
             span: node.span,
         }
     }
 
-    fn lower_slot(&self, node: &CstNode) -> Slot {
+    fn lower_slot(&self, class_name: &str, node: &CstNode) -> Slot {
         let Some((span, text)) = self.first_token_text(node, TokenKind::Ident) else {
             return Slot {
+                id: self.ast_id(node),
+                definition: self.definition(DefinitionKind::Slot, "", class_name),
                 name: String::new(),
                 span: node.span,
             };
         };
+        let name = text.to_string();
         Slot {
-            name: text.to_string(),
+            id: self.ast_id(node),
+            definition: self.definition(DefinitionKind::Slot, &name, class_name),
+            name,
             span,
         }
     }
 
     fn lower_generic(&mut self, node: &CstNode) -> Generic {
+        let name = self.definition_name_after(node, TokenKind::Generic);
         Generic {
-            name: self.definition_name_after(node, TokenKind::Generic),
+            id: self.ast_id(node),
+            definition: self.definition(DefinitionKind::Generic, &name, ""),
+            name,
             params: node
                 .child_nodes(CstKind::ParameterList)
                 .next()
@@ -317,17 +389,27 @@ impl<'tree> Lowering<'tree> {
             .next()
             .map(|body| self.lower_block(body))
             .unwrap_or_else(|| Block {
+                id: self.ast_id(node),
                 lets: Vec::new(),
-                result: Expr::Error { span: node.span },
+                result: Expr::Error {
+                    id: self.ast_id(node),
+                    span: node.span,
+                },
                 span: node.span,
             });
+        let name = self.definition_name_after(node, TokenKind::Method);
+        let param = params.into_iter().next().unwrap_or(MethodParam {
+            id: AstNodeId::child(node.id, 1, ""),
+            name: String::new(),
+            class_name: String::new(),
+            span: node.span,
+        });
+        let definition = self.definition(DefinitionKind::Method, &name, &param.class_name);
         Method {
-            name: self.definition_name_after(node, TokenKind::Method),
-            param: params.into_iter().next().unwrap_or(MethodParam {
-                name: String::new(),
-                class_name: String::new(),
-                span: node.span,
-            }),
+            id: self.ast_id(node),
+            definition,
+            name,
+            param,
             body,
             span: node.span,
         }
@@ -365,12 +447,18 @@ impl<'tree> Lowering<'tree> {
         }
 
         let body = body.unwrap_or_else(|| Block {
+            id: self.ast_id(node),
             lets: Vec::new(),
-            result: Expr::Error { span: node.span },
+            result: Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            },
             span: node.span,
         });
 
         Function {
+            id: self.ast_id(node),
+            definition: self.definition(DefinitionKind::Function, &name, ""),
             name,
             params,
             body,
@@ -427,6 +515,7 @@ impl<'tree> Lowering<'tree> {
                 })
                 .unwrap_or_default();
             params.push(MethodParam {
+                id: AstNodeId::child(node.id, 2, &name),
                 name,
                 class_name,
                 span,
@@ -452,8 +541,12 @@ impl<'tree> Lowering<'tree> {
         }
 
         Block {
+            id: self.ast_id(node),
             lets,
-            result: result.unwrap_or(Expr::Error { span: node.span }),
+            result: result.unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            }),
             span: node.span,
         }
     }
@@ -475,8 +568,13 @@ impl<'tree> Lowering<'tree> {
         }
 
         Let {
+            id: self.ast_id(node),
+            definition: self.definition(DefinitionKind::Local, &name, ""),
             name,
-            value: value.unwrap_or(Expr::Error { span: node.span }),
+            value: value.unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            }),
             span: node.span,
         }
     }
@@ -488,29 +586,46 @@ impl<'tree> Lowering<'tree> {
             CstKind::CallExpr => self.lower_call(node),
             CstKind::SlotExpr => self.lower_slot_read(node),
             CstKind::BinaryExpr => self.lower_binary(node),
-            _ => Expr::Error { span: node.span },
+            _ => Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            },
         }
     }
 
     fn lower_number(&mut self, node: &CstNode) -> Expr {
         let Some((span, text)) = self.first_token_text(node, TokenKind::Number) else {
-            return Expr::Error { span: node.span };
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
         };
         match text.parse::<i64>() {
-            Ok(value) => Expr::Number { value, span },
+            Ok(value) => Expr::Number {
+                id: self.ast_id(node),
+                value,
+                span,
+            },
             Err(_) => {
                 self.diagnostics
                     .push(Diagnostic::error(span, "integer literal is out of range"));
-                Expr::Error { span }
+                Expr::Error {
+                    id: self.ast_id(node),
+                    span,
+                }
             }
         }
     }
 
     fn lower_name(&self, node: &CstNode) -> Expr {
         let Some((span, text)) = self.first_token_text(node, TokenKind::Ident) else {
-            return Expr::Error { span: node.span };
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
         };
         Expr::Name {
+            id: self.ast_id(node),
             name: text.to_string(),
             span,
         }
@@ -518,7 +633,10 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_call(&mut self, node: &CstNode) -> Expr {
         let Some((name_span, text)) = self.first_token_text(node, TokenKind::Ident) else {
-            return Expr::Error { span: node.span };
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
         };
         if text == "make" {
             return self.lower_make_object(node);
@@ -535,6 +653,7 @@ impl<'tree> Lowering<'tree> {
             }
         }
         Expr::Call {
+            id: self.ast_id(node),
             callee: text.to_string(),
             args,
             span: node.span.cover(name_span),
@@ -543,7 +662,10 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_make_object(&mut self, node: &CstNode) -> Expr {
         let Some(arg_list) = node.child_nodes(CstKind::ArgList).next() else {
-            return Expr::Error { span: node.span };
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
         };
         let class_name = arg_list
             .child_nodes(CstKind::TypeExpr)
@@ -555,6 +677,7 @@ impl<'tree> Lowering<'tree> {
             .map(|keyword| self.lower_keyword_arg(keyword))
             .collect();
         Expr::MakeObject {
+            id: self.ast_id(node),
             class_name,
             fields,
             span: node.span,
@@ -564,8 +687,12 @@ impl<'tree> Lowering<'tree> {
     fn lower_keyword_arg(&mut self, node: &CstNode) -> KeywordArg {
         let Some((name_span, name)) = self.first_token_text(node, TokenKind::Ident) else {
             return KeywordArg {
+                id: self.ast_id(node),
                 name: String::new(),
-                value: Expr::Error { span: node.span },
+                value: Expr::Error {
+                    id: self.ast_id(node),
+                    span: node.span,
+                },
                 span: node.span,
             };
         };
@@ -576,8 +703,12 @@ impl<'tree> Lowering<'tree> {
                 CstElement::Node(expr) => Some(self.lower_expr(expr)),
                 _ => None,
             })
-            .unwrap_or(Expr::Error { span: node.span });
+            .unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            });
         KeywordArg {
+            id: self.ast_id(node),
             name: name.to_string(),
             value,
             span: node.span.cover(name_span),
@@ -596,19 +727,30 @@ impl<'tree> Lowering<'tree> {
             _ => None,
         });
         Expr::SlotRead {
-            receiver: Box::new(receiver.unwrap_or(Expr::Error { span: node.span })),
+            id: self.ast_id(node),
+            receiver: Box::new(receiver.unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            })),
             slot: slot.unwrap_or_default(),
             span: node.span,
         }
     }
 
     fn lower_binary(&mut self, node: &CstNode) -> Expr {
-        let mut exprs = node.children.iter().filter_map(|child| match child {
-            CstElement::Node(expr) => Some(self.lower_expr(expr)),
-            _ => None,
-        });
-        let lhs = exprs.next().unwrap_or(Expr::Error { span: node.span });
-        let rhs = exprs.next().unwrap_or(Expr::Error { span: node.span });
+        let mut exprs = Vec::new();
+        for child in &node.children {
+            if let CstElement::Node(expr) = child {
+                exprs.push(self.lower_expr(expr));
+            }
+        }
+        let mut exprs = exprs.into_iter();
+        let fallback = || Expr::Error {
+            id: self.ast_id(node),
+            span: node.span,
+        };
+        let lhs = exprs.next().unwrap_or_else(fallback);
+        let rhs = exprs.next().unwrap_or_else(fallback);
         let op = node.children.iter().find_map(|child| match child {
             CstElement::Token(index) => match self.tree.tokens[*index].kind {
                 TokenKind::Plus => Some(BinaryOp::Add),
@@ -620,11 +762,20 @@ impl<'tree> Lowering<'tree> {
         });
 
         Expr::Binary {
+            id: self.ast_id(node),
             op: op.unwrap_or(BinaryOp::Add),
             lhs: alloc::boxed::Box::new(lhs),
             rhs: alloc::boxed::Box::new(rhs),
             span: node.span,
         }
+    }
+
+    fn ast_id(&self, node: &CstNode) -> AstNodeId {
+        AstNodeId::from_syntax(node.id)
+    }
+
+    fn definition(&self, kind: DefinitionKind, name: &str, discriminator: &str) -> DefinitionId {
+        DefinitionId::new(self.tree.source_file, kind, name, discriminator)
     }
 
     fn first_token_text(&self, node: &CstNode, kind: TokenKind) -> Option<(Span, &'tree str)> {
@@ -657,6 +808,7 @@ impl<'tree> Lowering<'tree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::SourceFileId;
     use crate::syntax;
 
     #[test]
@@ -711,5 +863,38 @@ mod tests {
             panic!("expected area call");
         };
         assert!(matches!(args[0], Expr::MakeObject { .. }));
+    }
+
+    #[test]
+    fn syntax_and_ast_definition_ids_survive_whitespace_edits() {
+        let source_file = SourceFileId::from_path("examples/main.cairn");
+        let before_tree = syntax::parse_file(source_file, "define function main()\n  40 + 2\nend;");
+        let edited_tree = syntax::parse_file(
+            source_file,
+            "\n// comment before the same definition\n\
+             define   function   main(  )\n  40   +   2\nend;",
+        );
+        let before_syntax = before_tree
+            .root
+            .child_nodes(syntax::CstKind::Function)
+            .next()
+            .expect("function syntax should exist")
+            .id;
+        let edited_syntax = edited_tree
+            .root
+            .child_nodes(syntax::CstKind::Function)
+            .next()
+            .expect("edited function syntax should exist")
+            .id;
+        assert_eq!(before_syntax, edited_syntax);
+
+        let before = lower(&before_tree);
+        let edited = lower(&edited_tree);
+        assert_eq!(before.source_file, source_file);
+        assert_eq!(before.functions[0].id, edited.functions[0].id);
+        assert_eq!(
+            before.functions[0].definition,
+            edited.functions[0].definition
+        );
     }
 }

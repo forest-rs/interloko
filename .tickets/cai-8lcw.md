@@ -1,6 +1,6 @@
 ---
 id: cai-8lcw
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-05-11T14:49:13Z
@@ -20,3 +20,9 @@ Prefer explicit IDs and side tables over implicit positions. Document which IDs 
 
 A crate-local ADR or design note defines stability guarantees and tests cover ID preservation for a small edit.
 
+
+## Notes
+
+**2026-05-11T16:15:42Z**
+
+Implemented stable-ish source, syntax, AST, definition, and artifact identities. Added crate ADR and tests for whitespace/comment edit preservation plus method artifact key preservation across method renumbering. Validation: fmt, clippy -D warnings, workspace tests, docs, examples.

@@ -1,0 +1,12 @@
+[package]
+name = "cairn_lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI workbench for inspecting Cairn compiler sessions."
+
+[dependencies]
+cairn_compiler = { path = "../../crates/cairn_compiler" }
+
+[lints]
+workspace = true

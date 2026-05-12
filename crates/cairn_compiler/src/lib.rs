@@ -17,6 +17,8 @@ pub mod ast;
 pub mod diagnostic;
 /// End-to-end compile and run helpers.
 pub mod driver;
+/// Stable-ish compiler identities and artifact keys.
+pub mod identity;
 /// Thin query invalidation shell for compiler artifacts.
 pub mod incremental;
 /// Backend-neutral executable IR lowered from semantic IR.
@@ -25,6 +27,8 @@ pub mod lower;
 pub mod runtime;
 /// Semantic IR with resolved direct calls and locals.
 pub mod sem;
+/// Compiler session API and inspectable stage artifacts.
+pub mod session;
 /// Syntax and parsing support.
 pub mod syntax;
 /// `execution_tape` emission.

@@ -25,6 +25,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn_lab"
+version = "0.1.0"
+dependencies = [
+ "cairn_compiler",
+]
+
+[[package]]
 name = "execution_tape"
 version = "0.0.1"
 

@@ -1,0 +1,15 @@
+// same definitions, with harmless trivia changes
+
+define class <circle> (<object>)
+  slot radius;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius   *   c.radius
+end;
+
+define function main()
+  area(make(<circle>, radius: 10))
+end;
