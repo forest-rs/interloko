@@ -4,12 +4,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use execution_tape::host::{AccessSink, Host, HostError, SigHash, ValueRef};
 use execution_tape::trace::TraceMask;
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::Diagnostic;
+use crate::runtime::CairnHost;
 use crate::{ast, sem, syntax, tape};
 
 /// End-to-end compiler or runtime error.
@@ -88,7 +88,8 @@ pub fn compile_and_run_main(source: &str) -> Result<i64, CompileError> {
         return Err(CompileError::MainHasParameters);
     }
 
-    let mut vm = Vm::new(NoHost, Limits::default());
+    let host = CairnHost::new(compiled.tape.runtime.clone());
+    let mut vm = Vm::new(host, Limits::default());
     let output = vm
         .run(&compiled.tape.program, main, &[], TraceMask::NONE, None)
         .map_err(|trap| CompileError::Runtime {
@@ -98,21 +99,6 @@ pub fn compile_and_run_main(source: &str) -> Result<i64, CompileError> {
     match output.as_slice() {
         [Value::I64(value)] => Ok(*value),
         _ => Err(CompileError::MainReturnedNonI64),
-    }
-}
-
-struct NoHost;
-
-impl Host for NoHost {
-    fn call(
-        &mut self,
-        _symbol: &str,
-        _sig_hash: SigHash,
-        _args: &[ValueRef<'_>],
-        _rets: &mut [Value],
-        _access: Option<&mut dyn AccessSink>,
-    ) -> Result<u64, HostError> {
-        Err(HostError::UnknownSymbol)
     }
 }
 
@@ -128,5 +114,17 @@ mod tests {
         )
         .expect("program should compile and run");
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn compiles_and_runs_generic_area_dispatch() {
+        let value = compile_and_run_main(
+            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function main()\n  area(make(<circle>, radius: 10))\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 100);
     }
 }

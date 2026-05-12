@@ -7,6 +7,7 @@ description = "Milestone-0 Cairn compiler frontend prototype."
 
 [dependencies]
 execution_tape = { path = "../../../execution/execution_tape" }
+invalidation = { version = "0.2", path = "../../../invalidation/crates/invalidation" }
 
 [lints]
 workspace = true

@@ -45,6 +45,14 @@ pub enum TokenKind {
     Define,
     /// `function`.
     Function,
+    /// `class`.
+    Class,
+    /// `slot`.
+    Slot,
+    /// `generic`.
+    Generic,
+    /// `method`.
+    Method,
     /// `let`.
     Let,
     /// `end`.
@@ -53,6 +61,8 @@ pub enum TokenKind {
     Ident,
     /// Base-10 integer literal.
     Number,
+    /// Nominal type/class name such as `<circle>`.
+    TypeName,
     /// `(`.
     LParen,
     /// `)`.
@@ -67,6 +77,12 @@ pub enum TokenKind {
     Star,
     /// `=`.
     Equal,
+    /// `:`.
+    Colon,
+    /// `::`.
+    DoubleColon,
+    /// `.`.
+    Dot,
     /// `;`.
     Semicolon,
     /// Whitespace trivia.
@@ -107,6 +123,14 @@ pub enum CstKind {
     Root,
     /// Function definition.
     Function,
+    /// Class definition.
+    Class,
+    /// Slot declaration.
+    SlotDecl,
+    /// Generic function declaration.
+    Generic,
+    /// Method definition.
+    Method,
     /// Function parameter list.
     ParameterList,
     /// Function body.
@@ -117,12 +141,18 @@ pub enum CstKind {
     BinaryExpr,
     /// Direct function call expression.
     CallExpr,
+    /// Object slot read expression.
+    SlotExpr,
     /// Call argument list.
     ArgList,
+    /// Keyword argument.
+    KeywordArg,
     /// Name reference expression.
     NameExpr,
     /// Integer literal expression.
     NumberExpr,
+    /// Type/class name expression.
+    TypeExpr,
     /// Malformed syntax placeholder.
     Error,
 }
@@ -231,9 +261,37 @@ pub fn lex(source: &str) -> Vec<Token> {
                 pos += 1;
                 TokenKind::Equal
             }
+            b':' if bytes.get(pos + 1) == Some(&b':') => {
+                pos += 2;
+                TokenKind::DoubleColon
+            }
+            b':' => {
+                pos += 1;
+                TokenKind::Colon
+            }
+            b'.' => {
+                pos += 1;
+                TokenKind::Dot
+            }
             b';' => {
                 pos += 1;
                 TokenKind::Semicolon
+            }
+            b'<' => {
+                pos += 1;
+                while pos < bytes.len()
+                    && (bytes[pos].is_ascii_alphanumeric()
+                        || bytes[pos] == b'_'
+                        || bytes[pos] == b'-')
+                {
+                    pos += 1;
+                }
+                if bytes.get(pos) == Some(&b'>') {
+                    pos += 1;
+                    TokenKind::TypeName
+                } else {
+                    TokenKind::Error
+                }
             }
             b'/' if bytes.get(pos + 1) == Some(&b'/') => {
                 pos += 2;
@@ -264,6 +322,10 @@ pub fn lex(source: &str) -> Vec<Token> {
                 match &source[start..pos] {
                     "define" => TokenKind::Define,
                     "function" => TokenKind::Function,
+                    "class" => TokenKind::Class,
+                    "slot" => TokenKind::Slot,
+                    "generic" => TokenKind::Generic,
+                    "method" => TokenKind::Method,
                     "let" => TokenKind::Let,
                     "end" => TokenKind::End,
                     _ => TokenKind::Ident,
@@ -322,11 +384,25 @@ impl<'source> Parser<'source> {
     fn parse(mut self) -> SyntaxTree {
         let mut children = Vec::new();
         while !self.at_end() {
-            if self.at(TokenKind::Define) {
-                children.push(CstElement::Node(self.parse_function()));
-            } else if let Some(index) = self.bump() {
-                self.error_at(index, "expected `define function`");
-                children.push(CstElement::Token(index));
+            if !self.at(TokenKind::Define) {
+                if let Some(index) = self.bump() {
+                    self.error_at(index, "expected definition");
+                    children.push(CstElement::Token(index));
+                }
+                continue;
+            }
+
+            match self.peek_non_trivia(1).map(|(_, token)| token.kind) {
+                Some(TokenKind::Function) => children.push(CstElement::Node(self.parse_function())),
+                Some(TokenKind::Class) => children.push(CstElement::Node(self.parse_class())),
+                Some(TokenKind::Generic) => children.push(CstElement::Node(self.parse_generic())),
+                Some(TokenKind::Method) => children.push(CstElement::Node(self.parse_method())),
+                _ if self.at(TokenKind::Define) => {
+                    let index = self.bump().expect("define token must exist");
+                    self.error_at(index, "expected definition kind after `define`");
+                    children.push(CstElement::Token(index));
+                }
+                _ => {}
             }
         }
 
@@ -338,6 +414,107 @@ impl<'source> Parser<'source> {
             root,
             diagnostics: self.diagnostics,
         }
+    }
+
+    fn parse_class(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::Define, &mut children, "expected `define`");
+        self.expect(TokenKind::Class, &mut children, "expected `class`");
+        self.expect(TokenKind::TypeName, &mut children, "expected class name");
+        if self.at(TokenKind::LParen) {
+            self.expect(TokenKind::LParen, &mut children, "expected `(`");
+            self.expect(
+                TokenKind::TypeName,
+                &mut children,
+                "expected superclass name",
+            );
+            self.expect(TokenKind::RParen, &mut children, "expected `)`");
+        }
+        while !self.at(TokenKind::End) && !self.at_end() {
+            if self.at(TokenKind::Slot) {
+                children.push(CstElement::Node(self.parse_slot_decl()));
+            } else if let Some(index) = self.bump() {
+                self.error_at(index, "expected `slot` or `end`");
+                children.push(CstElement::Token(index));
+            }
+        }
+        self.expect(
+            TokenKind::End,
+            &mut children,
+            "expected `end` after class body",
+        );
+        if self.at(TokenKind::Semicolon) {
+            self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
+        }
+        CstNode::new(CstKind::Class, children, &self.tokens, start)
+    }
+
+    fn parse_slot_decl(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::Slot, &mut children, "expected `slot`");
+        self.expect(TokenKind::Ident, &mut children, "expected slot name");
+        self.expect(
+            TokenKind::Semicolon,
+            &mut children,
+            "expected `;` after slot declaration",
+        );
+        CstNode::new(CstKind::SlotDecl, children, &self.tokens, start)
+    }
+
+    fn parse_generic(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::Define, &mut children, "expected `define`");
+        self.expect(TokenKind::Generic, &mut children, "expected `generic`");
+        self.expect(TokenKind::Ident, &mut children, "expected generic name");
+        self.expect(
+            TokenKind::LParen,
+            &mut children,
+            "expected `(` after generic name",
+        );
+        children.push(CstElement::Node(self.parse_parameter_list()));
+        self.expect(
+            TokenKind::RParen,
+            &mut children,
+            "expected `)` after parameters",
+        );
+        self.expect(
+            TokenKind::Semicolon,
+            &mut children,
+            "expected `;` after generic declaration",
+        );
+        CstNode::new(CstKind::Generic, children, &self.tokens, start)
+    }
+
+    fn parse_method(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::Define, &mut children, "expected `define`");
+        self.expect(TokenKind::Method, &mut children, "expected `method`");
+        self.expect(TokenKind::Ident, &mut children, "expected method name");
+        self.expect(
+            TokenKind::LParen,
+            &mut children,
+            "expected `(` after method name",
+        );
+        children.push(CstElement::Node(self.parse_parameter_list()));
+        self.expect(
+            TokenKind::RParen,
+            &mut children,
+            "expected `)` after parameters",
+        );
+        children.push(CstElement::Node(self.parse_body()));
+        self.expect(
+            TokenKind::End,
+            &mut children,
+            "expected `end` after method body",
+        );
+        if self.at(TokenKind::Semicolon) {
+            self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
+        }
+        CstNode::new(CstKind::Method, children, &self.tokens, start)
     }
 
     fn parse_function(&mut self) -> CstNode {
@@ -378,6 +555,14 @@ impl<'source> Parser<'source> {
 
         loop {
             self.expect(TokenKind::Ident, &mut children, "expected parameter name");
+            if self.at(TokenKind::DoubleColon) {
+                self.expect(TokenKind::DoubleColon, &mut children, "expected `::`");
+                self.expect(
+                    TokenKind::TypeName,
+                    &mut children,
+                    "expected parameter type",
+                );
+            }
             if !self.at(TokenKind::Comma) {
                 break;
             }
@@ -442,14 +627,26 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_mul(&mut self) -> CstNode {
-        let mut node = self.parse_primary();
+        let mut node = self.parse_postfix();
         while self.at(TokenKind::Star) {
             let mut children = vec![CstElement::Node(node)];
             if let Some(op) = self.bump() {
                 children.push(CstElement::Token(op));
             }
-            children.push(CstElement::Node(self.parse_primary()));
+            children.push(CstElement::Node(self.parse_postfix()));
             node = CstNode::new(CstKind::BinaryExpr, children, &self.tokens, Span::default());
+        }
+        node
+    }
+
+    fn parse_postfix(&mut self) -> CstNode {
+        let mut node = self.parse_primary();
+        while self.at(TokenKind::Dot) {
+            let start = node.span;
+            let mut children = vec![CstElement::Node(node)];
+            self.expect(TokenKind::Dot, &mut children, "expected `.`");
+            self.expect(TokenKind::Ident, &mut children, "expected slot name");
+            node = CstNode::new(CstKind::SlotExpr, children, &self.tokens, start);
         }
         node
     }
@@ -460,6 +657,12 @@ impl<'source> Parser<'source> {
             let mut children = Vec::new();
             self.expect(TokenKind::Number, &mut children, "expected number");
             return CstNode::new(CstKind::NumberExpr, children, &self.tokens, start);
+        }
+
+        if self.at(TokenKind::TypeName) {
+            let mut children = Vec::new();
+            self.expect(TokenKind::TypeName, &mut children, "expected type name");
+            return CstNode::new(CstKind::TypeExpr, children, &self.tokens, start);
         }
 
         if self.at(TokenKind::Ident) {
@@ -516,7 +719,15 @@ impl<'source> Parser<'source> {
         }
 
         loop {
-            children.push(CstElement::Node(self.parse_expr()));
+            if self.at(TokenKind::Ident)
+                && self
+                    .peek_non_trivia(1)
+                    .is_some_and(|(_, token)| token.kind == TokenKind::Colon)
+            {
+                children.push(CstElement::Node(self.parse_keyword_arg()));
+            } else {
+                children.push(CstElement::Node(self.parse_expr()));
+            }
             if !self.at(TokenKind::Comma) {
                 break;
             }
@@ -524,6 +735,19 @@ impl<'source> Parser<'source> {
         }
 
         CstNode::new(CstKind::ArgList, children, &self.tokens, start)
+    }
+
+    fn parse_keyword_arg(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::Ident, &mut children, "expected keyword name");
+        self.expect(
+            TokenKind::Colon,
+            &mut children,
+            "expected `:` after keyword name",
+        );
+        children.push(CstElement::Node(self.parse_expr()));
+        CstNode::new(CstKind::KeywordArg, children, &self.tokens, start)
     }
 
     fn expect(&mut self, kind: TokenKind, children: &mut Vec<CstElement>, message: &str) {
@@ -563,6 +787,20 @@ impl<'source> Parser<'source> {
             .get(self.cursor)
             .copied()
             .map(|token| (self.cursor, token))
+    }
+
+    fn peek_non_trivia(&self, ordinal: usize) -> Option<(usize, Token)> {
+        let mut seen = 0;
+        for (index, token) in self.tokens.iter().copied().enumerate().skip(self.cursor) {
+            if token.kind.is_trivia() {
+                continue;
+            }
+            if seen == ordinal {
+                return Some((index, token));
+            }
+            seen += 1;
+        }
+        None
     }
 
     fn skip_trivia(&mut self) {
@@ -613,5 +851,30 @@ mod tests {
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].child_nodes(CstKind::Body).count(), 1);
         assert!(tree.tokens.iter().any(|token| token.kind == TokenKind::Let));
+    }
+
+    #[test]
+    fn parse_class_generic_method_and_object_syntax() {
+        let tree = parse(
+            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function main()\n  area(make(<circle>, radius: 10))\nend;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        assert_eq!(tree.root.child_nodes(CstKind::Class).count(), 1);
+        assert_eq!(tree.root.child_nodes(CstKind::Generic).count(), 1);
+        assert_eq!(tree.root.child_nodes(CstKind::Method).count(), 1);
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::TypeName)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::DoubleColon)
+        );
+        assert!(tree.tokens.iter().any(|token| token.kind == TokenKind::Dot));
     }
 }

@@ -17,6 +17,10 @@ pub mod ast;
 pub mod diagnostic;
 /// End-to-end compile and run helpers.
 pub mod driver;
+/// Thin query invalidation shell for compiler artifacts.
+pub mod incremental;
+/// Runtime host support for generated `execution_tape` programs.
+pub mod runtime;
 /// Semantic IR with resolved direct calls and locals.
 pub mod sem;
 /// Syntax and parsing support.

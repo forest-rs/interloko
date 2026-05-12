@@ -1,6 +1,6 @@
 ---
 id: cai-ki3x
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-05-11T14:49:13Z

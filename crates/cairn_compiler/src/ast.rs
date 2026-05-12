@@ -1,5 +1,6 @@
 //! Surface AST lowered from the milestone-0 CST.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -9,6 +10,12 @@ use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
 /// AST module containing function definitions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Module {
+    /// Class definitions in source order.
+    pub classes: Vec<Class>,
+    /// Generic function declarations in source order.
+    pub generics: Vec<Generic>,
+    /// Method definitions in source order.
+    pub methods: Vec<Method>,
     /// Function definitions in source order.
     pub functions: Vec<Function>,
     /// AST lowering diagnostics.
@@ -24,6 +31,61 @@ pub struct Function {
     pub params: Vec<String>,
     /// Function body.
     pub body: Block,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Class definition with nominal slots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Class {
+    /// Class name, including Dylan-style angle brackets.
+    pub name: String,
+    /// Slot declarations in source order.
+    pub slots: Vec<Slot>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Slot declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Slot {
+    /// Slot name.
+    pub name: String,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Generic function declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Generic {
+    /// Generic function name.
+    pub name: String,
+    /// Parameter names.
+    pub params: Vec<String>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Method definition specialized on a nominal class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Method {
+    /// Generic function name this method implements.
+    pub name: String,
+    /// Single specialized parameter for this slice.
+    pub param: MethodParam,
+    /// Method body.
+    pub body: Block,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Method parameter with a nominal specializer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MethodParam {
+    /// Parameter name.
+    pub name: String,
+    /// Nominal class specializer.
+    pub class_name: String,
     /// Source span.
     pub span: Span,
 }
@@ -87,6 +149,24 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Object construction through `make(<class>, slot: value)`.
+    MakeObject {
+        /// Class name.
+        class_name: String,
+        /// Keyword slot initializers.
+        fields: Vec<KeywordArg>,
+        /// Source span.
+        span: Span,
+    },
+    /// Object slot read.
+    SlotRead {
+        /// Receiver expression.
+        receiver: Box<Expr>,
+        /// Slot name.
+        slot: String,
+        /// Source span.
+        span: Span,
+    },
     /// Binary expression.
     Binary {
         /// Operator.
@@ -113,10 +193,23 @@ impl Expr {
             Self::Number { span, .. }
             | Self::Name { span, .. }
             | Self::Call { span, .. }
+            | Self::MakeObject { span, .. }
+            | Self::SlotRead { span, .. }
             | Self::Binary { span, .. }
             | Self::Error { span } => *span,
         }
     }
+}
+
+/// Keyword argument used by object construction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeywordArg {
+    /// Keyword name.
+    pub name: String,
+    /// Argument value.
+    pub value: Expr,
+    /// Source span.
+    pub span: Span,
 }
 
 /// Lowers a syntax tree to a surface AST.
@@ -136,6 +229,24 @@ struct Lowering<'tree> {
 
 impl<'tree> Lowering<'tree> {
     fn lower_module(&mut self) -> Module {
+        let classes = self
+            .tree
+            .root
+            .child_nodes(CstKind::Class)
+            .map(|node| self.lower_class(node))
+            .collect();
+        let generics = self
+            .tree
+            .root
+            .child_nodes(CstKind::Generic)
+            .map(|node| self.lower_generic(node))
+            .collect();
+        let methods = self
+            .tree
+            .root
+            .child_nodes(CstKind::Method)
+            .map(|node| self.lower_method(node))
+            .collect();
         let functions = self
             .tree
             .root
@@ -143,8 +254,82 @@ impl<'tree> Lowering<'tree> {
             .map(|node| self.lower_function(node))
             .collect();
         Module {
+            classes,
+            generics,
+            methods,
             functions,
             diagnostics: self.diagnostics.clone(),
+        }
+    }
+
+    fn lower_class(&mut self, node: &CstNode) -> Class {
+        let name = self
+            .first_token_text(node, TokenKind::TypeName)
+            .map_or_else(String::new, |(_, text)| text.to_string());
+        let slots = node
+            .child_nodes(CstKind::SlotDecl)
+            .map(|slot| self.lower_slot(slot))
+            .collect();
+        Class {
+            name,
+            slots,
+            span: node.span,
+        }
+    }
+
+    fn lower_slot(&self, node: &CstNode) -> Slot {
+        let Some((span, text)) = self.first_token_text(node, TokenKind::Ident) else {
+            return Slot {
+                name: String::new(),
+                span: node.span,
+            };
+        };
+        Slot {
+            name: text.to_string(),
+            span,
+        }
+    }
+
+    fn lower_generic(&mut self, node: &CstNode) -> Generic {
+        Generic {
+            name: self.definition_name_after(node, TokenKind::Generic),
+            params: node
+                .child_nodes(CstKind::ParameterList)
+                .next()
+                .map_or_else(Vec::new, |params| self.lower_params(params)),
+            span: node.span,
+        }
+    }
+
+    fn lower_method(&mut self, node: &CstNode) -> Method {
+        let params = node
+            .child_nodes(CstKind::ParameterList)
+            .next()
+            .map_or_else(Vec::new, |params| self.lower_method_params(params));
+        if params.len() != 1 {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                "milestone generic dispatch methods require exactly one specialized parameter",
+            ));
+        }
+        let body = node
+            .child_nodes(CstKind::Body)
+            .next()
+            .map(|body| self.lower_block(body))
+            .unwrap_or_else(|| Block {
+                lets: Vec::new(),
+                result: Expr::Error { span: node.span },
+                span: node.span,
+            });
+        Method {
+            name: self.definition_name_after(node, TokenKind::Method),
+            param: params.into_iter().next().unwrap_or(MethodParam {
+                name: String::new(),
+                class_name: String::new(),
+                span: node.span,
+            }),
+            body,
+            span: node.span,
         }
     }
 
@@ -205,6 +390,52 @@ impl<'tree> Lowering<'tree> {
             .collect()
     }
 
+    fn lower_method_params(&self, node: &CstNode) -> Vec<MethodParam> {
+        let mut params = Vec::new();
+        let mut index = 0;
+        while index < node.children.len() {
+            let CstElement::Token(name_index) = node.children[index] else {
+                index += 1;
+                continue;
+            };
+            if self.tree.tokens[name_index].kind != TokenKind::Ident {
+                index += 1;
+                continue;
+            }
+            let name = self.tree.tokens[name_index]
+                .text(&self.tree.source)
+                .to_string();
+            let span = self.tree.tokens[name_index].span;
+            let class_name = node.children[index + 1..]
+                .iter()
+                .find_map(|child| match child {
+                    CstElement::Token(type_index)
+                        if self.tree.tokens[*type_index].kind == TokenKind::TypeName =>
+                    {
+                        Some(
+                            self.tree.tokens[*type_index]
+                                .text(&self.tree.source)
+                                .to_string(),
+                        )
+                    }
+                    CstElement::Token(comma_index)
+                        if self.tree.tokens[*comma_index].kind == TokenKind::Comma =>
+                    {
+                        None
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            params.push(MethodParam {
+                name,
+                class_name,
+                span,
+            });
+            index += 1;
+        }
+        params
+    }
+
     fn lower_block(&mut self, node: &CstNode) -> Block {
         let mut lets = Vec::new();
         let mut result = None;
@@ -255,6 +486,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::NumberExpr => self.lower_number(node),
             CstKind::NameExpr => self.lower_name(node),
             CstKind::CallExpr => self.lower_call(node),
+            CstKind::SlotExpr => self.lower_slot_read(node),
             CstKind::BinaryExpr => self.lower_binary(node),
             _ => Expr::Error { span: node.span },
         }
@@ -288,10 +520,16 @@ impl<'tree> Lowering<'tree> {
         let Some((name_span, text)) = self.first_token_text(node, TokenKind::Ident) else {
             return Expr::Error { span: node.span };
         };
+        if text == "make" {
+            return self.lower_make_object(node);
+        }
         let mut args = Vec::new();
         for arg_list in node.child_nodes(CstKind::ArgList) {
             for child in &arg_list.children {
                 if let CstElement::Node(expr) = child {
+                    if matches!(expr.kind, CstKind::KeywordArg | CstKind::TypeExpr) {
+                        continue;
+                    }
                     args.push(self.lower_expr(expr));
                 }
             }
@@ -300,6 +538,67 @@ impl<'tree> Lowering<'tree> {
             callee: text.to_string(),
             args,
             span: node.span.cover(name_span),
+        }
+    }
+
+    fn lower_make_object(&mut self, node: &CstNode) -> Expr {
+        let Some(arg_list) = node.child_nodes(CstKind::ArgList).next() else {
+            return Expr::Error { span: node.span };
+        };
+        let class_name = arg_list
+            .child_nodes(CstKind::TypeExpr)
+            .next()
+            .and_then(|type_expr| self.first_token_text(type_expr, TokenKind::TypeName))
+            .map_or_else(String::new, |(_, text)| text.to_string());
+        let fields = arg_list
+            .child_nodes(CstKind::KeywordArg)
+            .map(|keyword| self.lower_keyword_arg(keyword))
+            .collect();
+        Expr::MakeObject {
+            class_name,
+            fields,
+            span: node.span,
+        }
+    }
+
+    fn lower_keyword_arg(&mut self, node: &CstNode) -> KeywordArg {
+        let Some((name_span, name)) = self.first_token_text(node, TokenKind::Ident) else {
+            return KeywordArg {
+                name: String::new(),
+                value: Expr::Error { span: node.span },
+                span: node.span,
+            };
+        };
+        let value = node
+            .children
+            .iter()
+            .find_map(|child| match child {
+                CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                _ => None,
+            })
+            .unwrap_or(Expr::Error { span: node.span });
+        KeywordArg {
+            name: name.to_string(),
+            value,
+            span: node.span.cover(name_span),
+        }
+    }
+
+    fn lower_slot_read(&mut self, node: &CstNode) -> Expr {
+        let receiver = node.children.iter().find_map(|child| match child {
+            CstElement::Node(expr) => Some(self.lower_expr(expr)),
+            _ => None,
+        });
+        let slot = node.children.iter().rev().find_map(|child| match child {
+            CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Ident => {
+                Some(self.tree.tokens[*index].text(&self.tree.source).to_string())
+            }
+            _ => None,
+        });
+        Expr::SlotRead {
+            receiver: Box::new(receiver.unwrap_or(Expr::Error { span: node.span })),
+            slot: slot.unwrap_or_default(),
+            span: node.span,
         }
     }
 
@@ -337,6 +636,22 @@ impl<'tree> Lowering<'tree> {
             _ => None,
         })
     }
+
+    fn definition_name_after(&self, node: &CstNode, keyword: TokenKind) -> String {
+        let mut saw_keyword = false;
+        for child in &node.children {
+            let CstElement::Token(index) = child else {
+                continue;
+            };
+            let token = self.tree.tokens[*index];
+            if token.kind == keyword {
+                saw_keyword = true;
+            } else if saw_keyword && token.kind == TokenKind::Ident {
+                return token.text(&self.tree.source).to_string();
+            }
+        }
+        String::new()
+    }
 }
 
 #[cfg(test)]
@@ -371,5 +686,30 @@ mod tests {
         };
         assert_eq!(callee, "add");
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn lowers_classes_generics_methods_make_and_slot_reads() {
+        let tree = syntax::parse(
+            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function main()\n  area(make(<circle>, radius: 10))\nend;",
+        );
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes[0].name, "<circle>");
+        assert_eq!(module.classes[0].slots[0].name, "radius");
+        assert_eq!(module.generics[0].name, "area");
+        assert_eq!(module.methods[0].name, "area");
+        assert_eq!(module.methods[0].param.class_name, "<circle>");
+        assert!(matches!(
+            module.methods[0].body.result,
+            Expr::Binary { lhs: _, rhs: _, .. }
+        ));
+        let Expr::Call { args, .. } = &module.functions[0].body.result else {
+            panic!("expected area call");
+        };
+        assert!(matches!(args[0], Expr::MakeObject { .. }));
     }
 }
