@@ -2,20 +2,124 @@
 
 ## Status
 
-Cairn is a bounded language/compiler experiment, not a production language and not a Dylan compatibility project.
+Cairn is a bounded semantic-kernel/compiler experiment, not a production
+language and not a Dylan compatibility project.
 
-The purpose of Cairn is to provide a concrete, demanding frontend for `execution_tape`, while exploring a modern Dylan-shaped language design centered on generic functions, typed/restartable effects, refinement-friendly types, and incremental compilation.
+The near-term purpose of Cairn is to provide a concrete, demanding frontend for
+`execution_tape`, while exploring a modern Dylan-shaped language design centered
+on generic functions, typed/restartable effects, refinement-friendly types,
+host-backed metaobjects, and incremental compilation.
+
+The broader purpose is more specific than "a programming language": Cairn is
+the programmable semantic kernel for executable object systems that can live
+inside a larger human/agent workspace.
+
+That larger workspace may include persistent objects, documents, transcripts,
+tools, search, semantic UI, histories, branches, and live computations. Cairn
+does not own all of that. Cairn owns the language-level object/protocol model,
+semantic IR, executable behavior, and inspectable lowering path that such a
+workspace can build on.
 
 The first milestone must stay small enough to implement and validate end-to-end.
 
 ## One-sentence summary
 
-Cairn is a small Dylan-inspired incremental compiler/runtime experiment that lowers a rich semantic IR through a DFMC-like middle layer into `execution_tape`, with Cranelift left as a later backend.
+Cairn is a Dylan-shaped semantic kernel for executable object systems: it
+models objects, generic behavior, conditions, host-backed metaobjects, and
+environment-facing affordances, then lowers that model through a DFMC-like
+middle layer into `execution_tape`, with Cranelift left as a later backend.
+
+## Broader framing
+
+The long-term system around Cairn is closer to a programmable shared image than
+to a conventional app or standalone language implementation.
+
+The useful picture is:
+
+```text
+world/image
+  persistent object graph, histories, conversations, tasks, documents,
+  tools, branches, traces, and live computations
+
+Cairn
+  semantic object/protocol model, generic functions, methods, conditions,
+  host-backed metaobjects, EOP/MOP records, executable behavior
+
+Portolan
+  typed retrieval, subjects, affordances, intents, provenance, contextual
+  action discovery
+
+Understory / Overstory
+  semantic presentation, inspectors, outlines, transcripts, interaction
+  state, spatial UI
+
+execution_tape
+  durable, inspectable, replayable execution substrate
+```
+
+This framing gives Cairn a reason to exist beyond syntax. It is the layer that
+keeps environment objects, host-native Rust objects, user-authored code,
+compiler artifacts, and eventually agent-produced artifacts in one explicit
+semantic space.
+
+The Metaobject Protocol is the membrane for object-system meaning: classes,
+slots, accessors, generic functions, methods, dispatch, construction rules,
+conditions, and host-backed origins.
+
+The Environment Object Protocol is the membrane for workspace meaning:
+identity, kind, origin, storage ownership, presentation hints, affordances,
+execution hooks, inspection hooks, provenance, and eventually mutation and
+capability policy.
+
+### Boundary
+
+Cairn owns semantic facts and executable behavior. It explicitly does not own
+canonical persistence, UI rendering, search ranking, agent scheduling,
+capability enforcement, distributed synchronization, or the full workspace
+image.
+
+That boundary keeps the strata replaceable:
+
+* `execution_tape` can remain a boring, verifiable execution substrate.
+* Portolan can own retrieval and affordance discovery over host/projected
+  subjects.
+* Understory/Overstory can own presentation and interaction primitives.
+* A future image/world layer can own persistence, identity over time,
+  transactions, permissions, and branches.
+* Cairn can stay focused on the semantic protocols and compilation path that
+  make those layers coherent.
+
+### Current first slice
+
+The current implementation is intentionally much smaller than the long-term
+image:
+
+* MOP dumps show compiler-known object-system facts: classes, slots,
+  accessors, generics, methods, dispatch rows, class origins, and runtime
+  layout.
+* EOP dumps project those facts into environment-object records with `kind`,
+  `class`, `origin`, `storage`, `presentation`, `affordances`, `execution`,
+  and `inspection` fields.
+* Host-backed objects prove the boundary between Cairn semantic classes and
+  Rust-owned values: the host supplies handles and adapters; Cairn supplies the
+  nominal object model and dispatch semantics.
+* `execution_tape` remains the ordinary lowered execution target. There are no
+  MOP-specific, EOP-specific, or host-backed-specific tape opcodes.
+
+This first slice is not a persistent image. It is the smallest inspectable
+protocol surface that can later feed Portolan subjects, Understory inspectors,
+agent workflows, and a real image/world layer without entangling those
+responsibilities inside the compiler.
 
 ## Goals
 
 * Exercise `execution_tape` with a real frontend instead of designing the instruction set in isolation.
 * Build a small, inspectable compiler pipeline: source → CST → AST → semantic IR → lowered IR → execution tape.
+* Model object-system facts explicitly: classes, slots, accessors, generics,
+  methods, dispatch, class objects, conditions, and host-backed origins.
+* Expose environment-facing protocol facts so humans, agents, workbench tools,
+  and future Portolan/Understory bridges can inspect and act on compiler
+  objects.
 * Explore typed effects as a modernized, generalized condition/restart/control-flow system.
 * Explore parametric types in a Dylan-like, generic-function-centered language without making parametric dispatch the first milestone.
 * Provide a serious workload for incremental invalidation: syntax, bindings, semantic analysis, method lookup, lowering, and backend artifacts.
@@ -33,6 +137,11 @@ Cairn is a small Dylan-inspired incremental compiler/runtime experiment that low
 * Do not require the first version to have a complete type system.
 * Do not implement generic dispatch over parameterized type arguments in the first milestone.
 * Do not make this a replacement for Rust.
+* Do not make Cairn the persistence layer for the workspace image.
+* Do not make Cairn the UI toolkit, search engine, command router, or agent
+  scheduler.
+* Do not let EOP/MOP dumps imply stable serialization, capability enforcement,
+  or persistent object identity before those protocols exist.
 
 ## Design posture
 
@@ -47,6 +156,8 @@ The project should prefer:
 * simple runtime calls before special-purpose bytecode instructions;
 * tests at every stage;
 * inspectable dumps for every IR;
+* explicit MOP/EOP records that explain what objects are and what can be done
+  with them;
 * small source examples that exercise real semantics.
 
 The project should avoid:
@@ -55,7 +166,9 @@ The project should avoid:
 * premature Cranelift integration;
 * full language design before the first end-to-end execution works;
 * clever type-system features without a lowering story;
-* macro support before the syntax/binding/semantic pipeline is stable.
+* macro support before the syntax/binding/semantic pipeline is stable;
+* vague "world model" claims that are not grounded in explicit object,
+  protocol, lowering, and inspection data.
 
 ## Language identity
 

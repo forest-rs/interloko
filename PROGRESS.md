@@ -704,6 +704,9 @@
 
 ## Implemented: Environment Object Protocol Dump
 
+- `DESIGN.md` now frames Cairn as a Dylan-shaped semantic kernel for
+  executable object systems inside a larger human/agent workspace, with clear
+  boundaries around persistence, search, UI, and scheduling.
 - `SessionArtifacts::dump_stage(DumpStage::Eop)` renders a first environment
   object protocol view over the current compilation artifacts.
 - The EOP dump is intentionally descriptive. It does not add persistence,
