@@ -1,0 +1,14 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains hold(x:object-top) result=Any return=object-top
+// expect: dump lowered contains box.any
+// expect: dump tape contains cairn.box_value
+
+define function hold(x :: <object>) => <object>
+  x
+end;
+
+define function main()
+  let ignored = hold(7);
+  42
+end;

@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic contains function `keep?` argument 1 expects <boolean> but got <integer>
+
+define function keep?(flag :: <boolean>) => <boolean>
+  flag
+end;
+
+define function main()
+  keep?(1)
+end;

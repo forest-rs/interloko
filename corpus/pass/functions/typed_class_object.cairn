@@ -1,0 +1,21 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump sem contains circle-class() result=ClassObject(ClassId(0)) return=class-object(<circle>)
+// expect: dump sem contains build(klass:class-object(<circle>), radius:integer)
+// expect: dump lowered contains class(<circle>)
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function circle-class() => class <circle>
+  <circle>
+end;
+
+define function build(klass :: class <circle>, radius :: <integer>) => <circle>
+  make(klass, radius: radius)
+end;
+
+define function main()
+  build(circle-class(), 7).radius
+end;

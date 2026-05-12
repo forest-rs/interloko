@@ -436,6 +436,59 @@
   reflective class/slot enumeration, class-object mutation, and a full Dylan
   class hierarchy remain deferred.
 
+## Implemented: Typed Direct Function Surface
+
+- Direct function parameters may now carry explicit value-kind annotations:
+  - `define function keep?(flag :: <boolean>)`
+  - `define function pass(c :: <circle>)`
+  - `define function build(klass :: class <circle>)`
+- Direct functions may now carry explicit result annotations:
+  - `define function keep?() => <boolean>`
+  - `define function build() => <circle>`
+  - `define function circle-class() => class <circle>`
+- Unannotated direct function parameters still default to `<integer>`, keeping
+  the existing arithmetic examples source-compatible.
+- Unannotated direct function results still use the existing inferred result
+  category. Explicit result annotations are checked against the lowered body
+  result.
+- The first direct-function annotation model supports:
+  - `<integer>`;
+  - `<boolean>`;
+  - `<object>` as boxed top value;
+  - exact nominal runtime objects such as `<circle>`;
+  - exact class-object values spelled `class <circle>`.
+- Semantic declaration pre-pass now records direct function parameter kinds and
+  explicit result kinds before lowering function bodies, so direct calls can be
+  checked against known signatures.
+- Direct function calls are checked at each call site. Mismatches produce
+  diagnostics such as `function keep? argument 1 expects <boolean> but got
+  <integer>`.
+- Lowered IR function signatures now consume the checked semantic kinds.
+  Concrete values flowing into `<object>` parameters or returns are boxed with
+  the existing `box.any` / `cairn.box_value` runtime path.
+- AST, semantic, lowered, and corpus dumps expose annotated parameter and
+  result meaning. Stable semantic fingerprints include parameter and explicit
+  result categories so signature edits participate in session diffs.
+- Incremental coverage includes a signature-only edit from an untyped direct
+  function to an `<object>` boundary. The edit recomputes the changed
+  whole-module lowering and tape artifacts while reusing unrelated generic
+  method lowering/tape artifacts.
+- Corpus coverage includes boolean parameters/returns, nominal object
+  parameters/returns, class-object returns flowing into `make`, `<object>`
+  function boundaries, and argument/return mismatch diagnostics.
+
+### Deferred Direct Function Type Design
+
+- Generic function signature annotations, typed method return annotations,
+  optional/rest/keyword parameters, overloads, union types, parametric types,
+  full local type inference, dynamic unknown class objects, and dynamic casts or
+  unboxing from `<object>` remain deferred.
+- Direct function type checking is intentionally exact and local. There is no
+  subtyping beyond accepting concrete first-slice values at `<object>` boxing
+  boundaries.
+- Runtime does not own type checking. It receives already checked lowered IR and
+  performs only the existing object/boxed-value host operations.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.

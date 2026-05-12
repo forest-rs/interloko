@@ -54,7 +54,13 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/objects/class_of_make.cairn"));
     assert!(out.contains("pass/objects/object_top_slot.cairn"));
     assert!(out.contains("pass/objects/typed_slots.cairn"));
-    assert!(out.contains("corpus: 39 passed, 0 failed, 39 total"));
+    assert!(out.contains("pass/functions/typed_boolean.cairn"));
+    assert!(out.contains("pass/functions/typed_nominal_object.cairn"));
+    assert!(out.contains("pass/functions/typed_class_object.cairn"));
+    assert!(out.contains("pass/functions/typed_object_top.cairn"));
+    assert!(out.contains("fail/diagnostics/function_argument_type.cairn"));
+    assert!(out.contains("fail/diagnostics/function_return_type.cairn"));
+    assert!(out.contains("corpus: 45 passed, 0 failed, 45 total"));
 }
 
 #[test]

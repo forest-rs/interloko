@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic contains function `bad` returns <boolean> but body has <integer>
+
+define function bad() => <boolean>
+  1
+end;
