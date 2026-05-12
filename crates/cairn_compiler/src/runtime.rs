@@ -23,6 +23,10 @@ pub const CLASS_OF: &str = "cairn.class_of";
 pub const SLOT_GET: &str = "cairn.slot_get";
 /// Host-call symbol for boxing a concrete value as the top `<object>` value.
 pub const BOX_VALUE: &str = "cairn.box_value";
+/// Host-call symbol for testing whether a value is an instance of a class.
+pub const INSTANCE_OF: &str = "cairn.instance_of";
+/// Host-call symbol for casting a value to a known runtime object class.
+pub const CAST_OBJECT: &str = "cairn.cast_object";
 
 /// Returns the `execution_tape` value type for Cairn objects.
 #[must_use]
@@ -213,12 +217,50 @@ impl Host for CairnHost {
                 rets[0] = self.push_boxed_value(value);
                 Ok(0)
             }
+            INSTANCE_OF => {
+                let [value, ValueRef::U64(class_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = runtime_class_id(*class_raw)?;
+                rets[0] = Value::Bool(self.value_is_instance(*value, class));
+                Ok(0)
+            }
+            CAST_OBJECT => {
+                let [value, ValueRef::U64(class_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = runtime_class_id(*class_raw)?;
+                let obj = self
+                    .value_object(*value)
+                    .filter(|obj| self.object(*obj).is_ok_and(|object| object.class == class))
+                    .ok_or(HostError::Failed)?;
+                rets[0] = Value::Obj(obj);
+                Ok(0)
+            }
             _ => Err(HostError::UnknownSymbol),
         }
     }
 }
 
 impl CairnHost {
+    fn value_object(&self, value: ValueRef<'_>) -> Option<Obj> {
+        match value {
+            ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => Some(obj),
+            ValueRef::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => {
+                match self.boxed_value(obj).ok()? {
+                    Value::Obj(boxed) if boxed.host_type == CAIRN_OBJECT_TYPE => Some(*boxed),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn value_is_instance(&self, value: ValueRef<'_>, class: sem::ClassId) -> bool {
+        self.value_object(value)
+            .is_some_and(|obj| self.object(obj).is_ok_and(|object| object.class == class))
+    }
+
     fn value_for_slot(
         &self,
         value: ValueRef<'_>,
@@ -284,6 +326,24 @@ pub fn box_value_signature(input: ValueType) -> execution_tape::host::HostSig {
     }
 }
 
+/// Host signature for `instance?`.
+#[must_use]
+pub fn instance_of_signature(input: ValueType) -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![input, ValueType::U64],
+        rets: vec![ValueType::Bool],
+    }
+}
+
+/// Host signature for `as` to a runtime object.
+#[must_use]
+pub fn cast_object_signature(input: ValueType) -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![input, ValueType::U64],
+        rets: vec![object_type()],
+    }
+}
+
 fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
     match kind {
         sem::ValueKind::Any => Some(any_type()),
@@ -293,4 +353,10 @@ fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
         sem::ValueKind::ClassObject(_) => Some(ValueType::U64),
         sem::ValueKind::Error => None,
     }
+}
+
+fn runtime_class_id(raw: u64) -> Result<sem::ClassId, HostError> {
+    Ok(sem::ClassId(
+        u32::try_from(raw).map_err(|_| HostError::Failed)?,
+    ))
 }

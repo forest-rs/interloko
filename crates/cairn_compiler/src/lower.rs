@@ -263,6 +263,32 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Runtime class membership test.
+    InstanceOf {
+        /// Destination register.
+        dst: Register,
+        /// Tested value register.
+        value: Register,
+        /// Tested value kind.
+        input: ValueKind,
+        /// Target class.
+        class: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime checked cast from top `<object>` to a nominal object.
+    CastObject {
+        /// Destination register.
+        dst: Register,
+        /// Cast value register.
+        value: Register,
+        /// Cast value kind.
+        input: ValueKind,
+        /// Target class.
+        class: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
     /// Unsigned integer equality.
     EqU64 {
         /// Destination register.
@@ -730,11 +756,18 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
-            sem::Expr::Local { local, .. } => self
-                .local_regs
-                .get(local.0 as usize)
-                .and_then(|value| *value)
-                .ok_or_else(|| invalid_semantic("local was read before assignment")),
+            sem::Expr::Local {
+                local,
+                result_kind,
+                span,
+            } => {
+                let value = self
+                    .local_regs
+                    .get(local.0 as usize)
+                    .and_then(|value| *value)
+                    .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
+                self.coerce_value(value, value_kind(*result_kind)?, *span)
+            }
             sem::Expr::ClassObject { class, span } => {
                 let result = self.alloc(ValueKind::ClassObject(Some(*class)));
                 self.instructions.push(Instr::ConstClass {
@@ -810,6 +843,42 @@ impl<'module> BodyLowering<'module> {
                 self.instructions.push(Instr::ClassOf {
                     dst: result.reg,
                     object: object.reg,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::InstanceOf { value, class, span } => {
+                let value = self.lower_expr(value)?;
+                if value.kind == ValueKind::Object(Some(*class)) {
+                    let result = self.alloc(ValueKind::Bool);
+                    self.instructions.push(Instr::ConstBool {
+                        dst: result.reg,
+                        value: true,
+                        span: *span,
+                    });
+                    return Ok(result);
+                }
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::InstanceOf {
+                    dst: result.reg,
+                    value: value.reg,
+                    input: value.kind,
+                    class: *class,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::Cast { value, class, span } => {
+                let value = self.lower_expr(value)?;
+                if value.kind == ValueKind::Object(Some(*class)) {
+                    return Ok(value);
+                }
+                let result = self.alloc(ValueKind::Object(Some(*class)));
+                self.instructions.push(Instr::CastObject {
+                    dst: result.reg,
+                    value: value.reg,
+                    input: value.kind,
+                    class: *class,
                     span: *span,
                 });
                 Ok(result)
@@ -897,6 +966,7 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::If {
                 condition,
+                refinement: _,
                 then_branch,
                 else_branch,
                 span,
@@ -1115,6 +1185,19 @@ impl<'module> BodyLowering<'module> {
         }
         if expected == ValueKind::Any {
             return self.box_any(value, span);
+        }
+        if value.kind == ValueKind::Any
+            && let ValueKind::Object(Some(class)) = expected
+        {
+            let casted = self.alloc(expected);
+            self.instructions.push(Instr::CastObject {
+                dst: casted.reg,
+                value: value.reg,
+                input: value.kind,
+                class,
+                span,
+            });
+            return Ok(casted);
         }
         Err(invalid_semantic(
             "semantic type checking allowed an invalid lowered coercion",
@@ -1363,6 +1446,32 @@ impl Module {
             }
             Instr::ClassOf { dst, object, span } => {
                 write!(f, "  {dst} = class_of {object}")?;
+                fmt_span(f, *span)
+            }
+            Instr::InstanceOf {
+                dst,
+                value,
+                input,
+                class,
+                span,
+            } => {
+                write!(f, "  {dst} = instance? {value}: ")?;
+                self.fmt_kind(f, *input)?;
+                write!(f, ", ")?;
+                self.fmt_class(f, *class)?;
+                fmt_span(f, *span)
+            }
+            Instr::CastObject {
+                dst,
+                value,
+                input,
+                class,
+                span,
+            } => {
+                write!(f, "  {dst} = as ")?;
+                self.fmt_class(f, *class)?;
+                write!(f, ", {value}: ")?;
+                self.fmt_kind(f, *input)?;
                 fmt_span(f, *span)
             }
             Instr::EqU64 {
@@ -1614,6 +1723,20 @@ mod tests {
         assert!(dump.contains("fn l0 hold(%r1 x: any) -> any"));
         assert!(dump.contains("fn l1 number-object() -> any"));
         assert!(dump.matches("box.any").count() >= 2);
+    }
+
+    #[test]
+    fn lowers_instance_tests_casts_and_refined_locals() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function radius-or-zero(x :: <object>) => <integer>\n  if instance?(x, <circle>) then x.radius else 0 end\nend;\n\
+             define function main()\n  radius-or-zero(make(<circle>, radius: 8))\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("instance? %r1: any, <circle>"));
+        assert!(dump.contains("as <circle>, %r1: any"));
+        assert!(dump.contains("slot.read"));
     }
 
     #[test]

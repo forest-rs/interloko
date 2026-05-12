@@ -1114,6 +1114,24 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         ast::Expr::ClassName { id, class_name, .. } => {
             let _ = writeln!(out, "{id} class-name {class_name}");
         }
+        ast::Expr::InstanceOf {
+            id,
+            value,
+            class_name,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} instance? {class_name}");
+            dump_ast_expr(out, value, indent + 2);
+        }
+        ast::Expr::Cast {
+            id,
+            class_name,
+            value,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} as {class_name}");
+            dump_ast_expr(out, value, indent + 2);
+        }
         ast::Expr::Call {
             id, callee, args, ..
         } => {
@@ -1312,6 +1330,17 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
     }
 }
 
+fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
+    match kind {
+        sem::ValueKind::Any => "object-top".into(),
+        sem::ValueKind::I64 => "integer".into(),
+        sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Object(class) => format!("object(c{})", class.0),
+        sem::ValueKind::ClassObject(class) => format!("class-object(c{})", class.0),
+        sem::ValueKind::Error => "error".into(),
+    }
+}
+
 fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
     match kind {
         sem::ValueKind::Any => "object-top".into(),
@@ -1371,8 +1400,15 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::ConstBool { value, .. } => {
             let _ = writeln!(out, "const.bool {value}");
         }
-        sem::Expr::Local { local, .. } => {
-            let _ = writeln!(out, "local l{}", local.0);
+        sem::Expr::Local {
+            local, result_kind, ..
+        } => {
+            let _ = writeln!(
+                out,
+                "local l{} as {}",
+                local.0,
+                sem_kind_label_for_expr(*result_kind)
+            );
         }
         sem::Expr::ClassObject { class, .. } => {
             let _ = writeln!(out, "class-object c{}", class.0);
@@ -1401,6 +1437,14 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::ClassOf { object, class, .. } => {
             let _ = writeln!(out, "class-of c{}", class.0);
             dump_sem_expr(out, object, indent + 2);
+        }
+        sem::Expr::InstanceOf { value, class, .. } => {
+            let _ = writeln!(out, "instance? c{}", class.0);
+            dump_sem_expr(out, value, indent + 2);
+        }
+        sem::Expr::Cast { value, class, .. } => {
+            let _ = writeln!(out, "as c{}", class.0);
+            dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::MakeObject {
             class,
@@ -1445,6 +1489,7 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         }
         sem::Expr::If {
             condition,
+            refinement,
             then_branch,
             else_branch,
             ..
@@ -1453,6 +1498,15 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             indent_line(out, indent + 2);
             let _ = writeln!(out, "condition");
             dump_sem_expr(out, condition, indent + 4);
+            if let Some(refinement) = refinement {
+                indent_line(out, indent + 2);
+                let _ = writeln!(
+                    out,
+                    "refinement l{} => {}",
+                    refinement.local.0,
+                    sem_kind_label_for_expr(refinement.kind)
+                );
+            }
             indent_line(out, indent + 2);
             let _ = writeln!(out, "then");
             dump_sem_expr(out, then_branch, indent + 4);
@@ -1715,8 +1769,11 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::ConstBool { value, .. } => {
             let _ = write!(out, "bool({value})");
         }
-        sem::Expr::Local { local, .. } => {
-            let _ = write!(out, "local({})", local.0);
+        sem::Expr::Local {
+            local, result_kind, ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(out, "local({}:{result})", local.0);
         }
         sem::Expr::ClassObject { class, .. } => {
             let definition = module
@@ -1764,6 +1821,24 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "class-of({definition}:");
             fingerprint_sem_expr(module, object, out);
+            out.push(')');
+        }
+        sem::Expr::InstanceOf { value, class, .. } => {
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "instance?({definition}:");
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::Cast { value, class, .. } => {
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "as({definition}:");
+            fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
         sem::Expr::MakeObject {
@@ -1837,12 +1912,17 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         }
         sem::Expr::If {
             condition,
+            refinement,
             then_branch,
             else_branch,
             ..
         } => {
             out.push_str("if(");
             fingerprint_sem_expr(module, condition, out);
+            if let Some(refinement) = refinement {
+                let kind = sem_kind_fingerprint(module, refinement.kind);
+                let _ = write!(out, "|refine{}={kind}", refinement.local.0);
+            }
             out.push('?');
             fingerprint_sem_expr(module, then_branch, out);
             out.push(':');

@@ -147,6 +147,10 @@ struct HostSigs {
     box_bool: HostSigId,
     box_u64: HostSigId,
     box_object: HostSigId,
+    instance_any: HostSigId,
+    instance_object: HostSigId,
+    cast_any: HostSigId,
+    cast_object: HostSigId,
 }
 
 impl HostSigs {
@@ -196,6 +200,22 @@ impl HostSigs {
             runtime::BOX_VALUE,
             runtime::box_value_signature(runtime::object_type()),
         );
+        let instance_any = builder.host_sig_for(
+            runtime::INSTANCE_OF,
+            runtime::instance_of_signature(runtime::any_type()),
+        );
+        let instance_object = builder.host_sig_for(
+            runtime::INSTANCE_OF,
+            runtime::instance_of_signature(runtime::object_type()),
+        );
+        let cast_any = builder.host_sig_for(
+            runtime::CAST_OBJECT,
+            runtime::cast_object_signature(runtime::any_type()),
+        );
+        let cast_object = builder.host_sig_for(
+            runtime::CAST_OBJECT,
+            runtime::cast_object_signature(runtime::object_type()),
+        );
         Ok(Self {
             make_object,
             class_of,
@@ -204,6 +224,10 @@ impl HostSigs {
             box_bool,
             box_u64,
             box_object,
+            instance_any,
+            instance_object,
+            cast_any,
+            cast_object,
         })
     }
 }
@@ -386,6 +410,34 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .host_call(0, self.host_sigs.class_of, 0, &[object.0], &[dst.0]);
             }
+            lower::Instr::InstanceOf {
+                dst,
+                value,
+                input,
+                class,
+                span,
+            } => {
+                let sig = self.instance_sig(*input)?;
+                let class_reg = self.alloc_temp();
+                self.set_span(*span);
+                self.asm.const_u64(class_reg, u64::from(class.0));
+                self.asm
+                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
+            }
+            lower::Instr::CastObject {
+                dst,
+                value,
+                input,
+                class,
+                span,
+            } => {
+                let sig = self.cast_sig(*input)?;
+                let class_reg = self.alloc_temp();
+                self.set_span(*span);
+                self.asm.const_u64(class_reg, u64::from(class.0));
+                self.asm
+                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
+            }
             lower::Instr::EqU64 {
                 dst,
                 lhs,
@@ -443,6 +495,22 @@ impl<'a> FunctionEmitter<'a> {
     fn set_span(&mut self, span: Span) {
         if let Some(span_id) = span_id(span) {
             self.asm.span(span_id);
+        }
+    }
+
+    fn instance_sig(&self, kind: lower::ValueKind) -> Result<HostSigId, TapeError> {
+        match kind {
+            lower::ValueKind::Any => Ok(self.host_sigs.instance_any),
+            lower::ValueKind::Object(_) => Ok(self.host_sigs.instance_object),
+            _ => Err(invalid_lowered("instance? input kind is invalid")),
+        }
+    }
+
+    fn cast_sig(&self, kind: lower::ValueKind) -> Result<HostSigId, TapeError> {
+        match kind {
+            lower::ValueKind::Any => Ok(self.host_sigs.cast_any),
+            lower::ValueKind::Object(_) => Ok(self.host_sigs.cast_object),
+            _ => Err(invalid_lowered("cast input kind is invalid")),
         }
     }
 }
@@ -520,6 +588,11 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         lower::Instr::ClassOf { dst, object, .. } => {
             note_register(*dst, max);
             note_register(*object, max);
+        }
+        lower::Instr::InstanceOf { dst, value, .. }
+        | lower::Instr::CastObject { dst, value, .. } => {
+            note_register(*dst, max);
+            note_register(*value, max);
         }
         lower::Instr::Branch { cond, .. } => {
             note_register(*cond, max);

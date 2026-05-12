@@ -256,6 +256,15 @@ pub struct Let {
     pub span: Span,
 }
 
+/// Local true-branch refinement produced by an `instance?` condition.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Refinement {
+    /// Refined local.
+    pub local: LocalId,
+    /// Narrowed local kind in the true branch.
+    pub kind: ValueKind,
+}
+
 /// Object field initializer resolved to a slot ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldInit {
@@ -336,6 +345,8 @@ pub enum Expr {
     Local {
         /// Local identifier.
         local: LocalId,
+        /// Value category at this use site, including local refinements.
+        result_kind: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -380,6 +391,24 @@ pub enum Expr {
         /// Runtime object expression.
         object: Box<Expr>,
         /// Statically known object class.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime class membership test.
+    InstanceOf {
+        /// Tested value.
+        value: Box<Expr>,
+        /// Target class.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime checked object cast.
+    Cast {
+        /// Cast value.
+        value: Box<Expr>,
+        /// Target class.
         class: ClassId,
         /// Source span.
         span: Span,
@@ -436,6 +465,8 @@ pub enum Expr {
     If {
         /// Boolean condition.
         condition: Box<Expr>,
+        /// Optional local refinement applied to the true branch.
+        refinement: Option<Refinement>,
         /// Expression evaluated when the condition is true.
         then_branch: Box<Expr>,
         /// Expression evaluated when the condition is false.
@@ -472,6 +503,8 @@ impl Expr {
             | Self::GenericCall { span, .. }
             | Self::Signal { span, .. }
             | Self::ClassOf { span, .. }
+            | Self::InstanceOf { span, .. }
+            | Self::Cast { span, .. }
             | Self::MakeObject { span, .. }
             | Self::AccessorCall { span, .. }
             | Self::Binary { span, .. }
@@ -599,6 +632,13 @@ impl FunctionContext {
         self.locals
             .get(id.0 as usize)
             .map_or(ValueKind::Error, |local| local.kind)
+    }
+
+    fn refine_local(&mut self, id: LocalId, kind: ValueKind) -> Option<ValueKind> {
+        let local = self.locals.get_mut(id.0 as usize)?;
+        let previous = local.kind;
+        local.kind = kind;
+        Some(previous)
     }
 
     fn scope_start(&self) -> usize {
@@ -914,7 +954,7 @@ impl Lowering {
             method.param.span,
         );
         let body = self.lower_block(&mut ctx, &method.body);
-        let body_kind = self.expr_kind(&ctx, &body.result);
+        let body_kind = self.expr_kind(&body.result);
         let return_annotation = method
             .return_type
             .as_ref()
@@ -988,7 +1028,7 @@ impl Lowering {
         }
 
         let body = self.lower_block(&mut ctx, &function.body);
-        let body_kind = self.expr_kind(&ctx, &body.result);
+        let body_kind = self.expr_kind(&body.result);
         let return_annotation = symbol.as_ref().and_then(|symbol| symbol.return_annotation);
         let result_kind = return_annotation.unwrap_or(body_kind);
         if let Some(expected) = return_annotation
@@ -1038,7 +1078,7 @@ impl Lowering {
             let id = ctx.add_local(
                 self.local_definition(local.definition, &local.name),
                 local.name.clone(),
-                self.expr_kind(ctx, &value),
+                self.expr_kind(&value),
                 local.span,
             );
             lets.push(Let {
@@ -1066,7 +1106,11 @@ impl Lowering {
                 span: *span,
             },
             ast::Expr::Name { name, span, .. } => match ctx.find_local(name) {
-                Some(local) => Expr::Local { local, span: *span },
+                Some(local) => Expr::Local {
+                    local,
+                    result_kind: ctx.local_kind(local),
+                    span: *span,
+                },
                 None => {
                     ctx.diagnostics.push(Diagnostic::error(
                         *span,
@@ -1078,6 +1122,18 @@ impl Lowering {
             ast::Expr::ClassName {
                 class_name, span, ..
             } => self.lower_class_object(ctx, class_name, *span),
+            ast::Expr::InstanceOf {
+                value,
+                class_name,
+                span,
+                ..
+            } => self.lower_instance_of(ctx, value, class_name, *span),
+            ast::Expr::Cast {
+                class_name,
+                value,
+                span,
+                ..
+            } => self.lower_cast(ctx, value, class_name, *span),
             ast::Expr::Call {
                 callee, args, span, ..
             } => {
@@ -1099,7 +1155,7 @@ impl Lowering {
                         for (index, (arg, expected)) in
                             lowered_args.iter().zip(&symbol.param_kinds).enumerate()
                         {
-                            let actual = self.expr_kind(ctx, arg);
+                            let actual = self.expr_kind(arg);
                             if !self.kinds_match(*expected, actual) {
                                 ctx.diagnostics.push(Diagnostic::error(
                                     arg.span(),
@@ -1136,7 +1192,7 @@ impl Lowering {
                             let Some(expected) = *expected else {
                                 continue;
                             };
-                            let actual = self.expr_kind(ctx, arg);
+                            let actual = self.expr_kind(arg);
                             if !self.generic_argument_matches(expected, actual) {
                                 ctx.diagnostics.push(Diagnostic::error(
                                     arg.span(),
@@ -1240,15 +1296,21 @@ impl Lowering {
                 ..
             } => {
                 let condition = self.lower_expr(ctx, condition);
+                let refinement = self.true_branch_refinement(&condition);
+                let previous_kind = refinement
+                    .and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
                 let then_branch = self.lower_expr(ctx, then_branch);
+                if let (Some(refinement), Some(previous_kind)) = (refinement, previous_kind) {
+                    let _ = ctx.refine_local(refinement.local, previous_kind);
+                }
                 let else_branch = self.lower_expr(ctx, else_branch);
-                let condition_kind = self.expr_kind(ctx, &condition);
+                let condition_kind = self.expr_kind(&condition);
                 if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
                     ctx.diagnostics
                         .push(Diagnostic::error(*span, "if condition must be bool"));
                 }
-                let then_kind = self.expr_kind(ctx, &then_branch);
-                let else_kind = self.expr_kind(ctx, &else_branch);
+                let then_kind = self.expr_kind(&then_branch);
+                let else_kind = self.expr_kind(&else_branch);
                 if then_kind != else_kind
                     && !matches!(then_kind, ValueKind::Error)
                     && !matches!(else_kind, ValueKind::Error)
@@ -1260,6 +1322,7 @@ impl Lowering {
                 }
                 Expr::If {
                     condition: Box::new(condition),
+                    refinement,
                     then_branch: Box::new(then_branch),
                     else_branch: Box::new(else_branch),
                     span: *span,
@@ -1277,7 +1340,7 @@ impl Lowering {
 
     fn lower_signal(&self, ctx: &mut FunctionContext, condition: &ast::Expr, span: Span) -> Expr {
         let condition = self.lower_expr(ctx, condition);
-        let condition_class = match self.expr_kind(ctx, &condition) {
+        let condition_class = match self.expr_kind(&condition) {
             ValueKind::Object(class) => class,
             ValueKind::Error => ClassId(u32::MAX),
             _ => {
@@ -1352,7 +1415,7 @@ impl Lowering {
             )
         });
         let restart_body = self.lower_expr(ctx, &restart.body);
-        let restart_kind = self.expr_kind(ctx, &restart_body);
+        let restart_kind = self.expr_kind(&restart_body);
         ctx.hide_locals_from(scope_start);
 
         ctx.push_restart(ActiveRestart {
@@ -1362,7 +1425,7 @@ impl Lowering {
         let body = self.lower_expr(ctx, body);
         ctx.pop_restart();
 
-        let body_kind = self.expr_kind(ctx, &body);
+        let body_kind = self.expr_kind(&body);
         if body_kind != restart_kind
             && !matches!(body_kind, ValueKind::Error)
             && !matches!(restart_kind, ValueKind::Error)
@@ -1394,8 +1457,8 @@ impl Lowering {
         rhs: &Expr,
         message: &str,
     ) {
-        let lhs_kind = self.expr_kind(ctx, lhs);
-        let rhs_kind = self.expr_kind(ctx, rhs);
+        let lhs_kind = self.expr_kind(lhs);
+        let rhs_kind = self.expr_kind(rhs);
         if matches!(lhs_kind, ValueKind::I64 | ValueKind::Error)
             && matches!(rhs_kind, ValueKind::I64 | ValueKind::Error)
         {
@@ -1419,7 +1482,7 @@ impl Lowering {
     }
 
     fn lower_class_of(&self, ctx: &mut FunctionContext, object: Expr, span: Span) -> Expr {
-        let class = match self.expr_kind(ctx, &object) {
+        let class = match self.expr_kind(&object) {
             ValueKind::Object(class) => class,
             ValueKind::Error => return Expr::Error { span },
             _ => {
@@ -1435,6 +1498,98 @@ impl Lowering {
         }
     }
 
+    fn lower_instance_of(
+        &self,
+        ctx: &mut FunctionContext,
+        value: &ast::Expr,
+        class_name: &str,
+        span: Span,
+    ) -> Expr {
+        let Some(class) = self.resolve_class(class_name) else {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                format!("unresolved class `{class_name}`"),
+            ));
+            return Expr::Error { span };
+        };
+        let value = self.lower_expr(ctx, value);
+        match self.expr_kind(&value) {
+            ValueKind::Any | ValueKind::Object(_) | ValueKind::Error => {}
+            actual => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    span,
+                    format!(
+                        "instance? expects <object> or a known object, got {}",
+                        self.kind_name(actual)
+                    ),
+                ));
+            }
+        }
+        if let ValueKind::Object(actual) = self.expr_kind(&value)
+            && actual != class.id
+        {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                format!(
+                    "instance? test is impossible: {} is not {}",
+                    self.kind_name(ValueKind::Object(actual)),
+                    self.kind_name(ValueKind::Object(class.id))
+                ),
+            ));
+        }
+        Expr::InstanceOf {
+            value: Box::new(value),
+            class: class.id,
+            span,
+        }
+    }
+
+    fn lower_cast(
+        &self,
+        ctx: &mut FunctionContext,
+        value: &ast::Expr,
+        class_name: &str,
+        span: Span,
+    ) -> Expr {
+        let Some(class) = self.resolve_class(class_name) else {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                format!("unresolved class `{class_name}`"),
+            ));
+            return Expr::Error { span };
+        };
+        let value = self.lower_expr(ctx, value);
+        match self.expr_kind(&value) {
+            ValueKind::Any | ValueKind::Object(_) | ValueKind::Error => {}
+            actual => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    span,
+                    format!(
+                        "as expects <object> or a known object, got {}",
+                        self.kind_name(actual)
+                    ),
+                ));
+            }
+        }
+        if let ValueKind::Object(actual) = self.expr_kind(&value)
+            && actual != class.id
+        {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                format!(
+                    "cast is impossible: {} is not {}",
+                    self.kind_name(ValueKind::Object(actual)),
+                    self.kind_name(ValueKind::Object(class.id))
+                ),
+            ));
+        }
+        Expr::Cast {
+            value: Box::new(value),
+            class: class.id,
+            span,
+        }
+    }
+
     fn lower_make_object(
         &self,
         ctx: &mut FunctionContext,
@@ -1443,7 +1598,7 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let class_expr = self.lower_expr(ctx, class_expr);
-        let class_id = match self.expr_kind(ctx, &class_expr) {
+        let class_id = match self.expr_kind(&class_expr) {
             ValueKind::ClassObject(class_id) => class_id,
             ValueKind::Error => return Expr::Error { span },
             _ => {
@@ -1484,7 +1639,7 @@ impl Lowering {
                 continue;
             };
             let value = self.lower_expr(ctx, &field.value);
-            let value_kind = self.expr_kind(ctx, &value);
+            let value_kind = self.expr_kind(&value);
             if !self.kinds_match(slot.kind, value_kind) {
                 ctx.diagnostics.push(Diagnostic::error(
                     field.span,
@@ -1549,7 +1704,7 @@ impl Lowering {
         span: Span,
         syntax: AccessorSyntax,
     ) -> Expr {
-        let ValueKind::Object(class_id) = self.expr_kind(ctx, &receiver) else {
+        let ValueKind::Object(class_id) = self.expr_kind(&receiver) else {
             let message = match syntax {
                 AccessorSyntax::Slot => {
                     "slot read receiver does not have a known object class".to_string()
@@ -1587,7 +1742,20 @@ impl Lowering {
         }
     }
 
-    fn expr_kind(&self, ctx: &FunctionContext, expr: &Expr) -> ValueKind {
+    fn true_branch_refinement(&self, condition: &Expr) -> Option<Refinement> {
+        let Expr::InstanceOf { value, class, .. } = condition else {
+            return None;
+        };
+        let Expr::Local { local, .. } = value.as_ref() else {
+            return None;
+        };
+        Some(Refinement {
+            local: *local,
+            kind: ValueKind::Object(*class),
+        })
+    }
+
+    fn expr_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
             Expr::ConstI64 { .. } | Expr::Binary { .. } => ValueKind::I64,
             Expr::GenericCall { generic, .. } => self
@@ -1598,8 +1766,11 @@ impl Lowering {
                 ValueKind::ClassObject(*class)
             }
             Expr::AccessorCall { result_kind, .. } => *result_kind,
-            Expr::ConstBool { .. } | Expr::Compare { .. } => ValueKind::Bool,
-            Expr::Local { local, .. } => ctx.local_kind(*local),
+            Expr::ConstBool { .. } | Expr::Compare { .. } | Expr::InstanceOf { .. } => {
+                ValueKind::Bool
+            }
+            Expr::Local { result_kind, .. } => *result_kind,
+            Expr::Cast { class, .. } => ValueKind::Object(*class),
             Expr::Signal { result_kind, .. } => *result_kind,
             Expr::DirectCall { function, .. } => self
                 .functions
@@ -1611,8 +1782,8 @@ impl Lowering {
                 else_branch,
                 ..
             } => {
-                let then_kind = self.expr_kind(ctx, then_branch);
-                let else_kind = self.expr_kind(ctx, else_branch);
+                let then_kind = self.expr_kind(then_branch);
+                let else_kind = self.expr_kind(else_branch);
                 if then_kind == else_kind {
                     then_kind
                 } else {
@@ -1983,6 +2154,90 @@ mod tests {
         let result = lower_source("define function bad() => <boolean>\n  1\nend;");
         assert!(result.diagnostics.iter().any(|diagnostic| {
             diagnostic.message == "function `bad` returns <boolean> but body has <integer>"
+        }));
+    }
+
+    #[test]
+    fn resolves_instance_tests_casts_and_true_branch_refinement() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function radius-or-zero(x :: <object>) => <integer>\n  if instance?(x, <circle>) then x.radius else 0 end\nend;\n\
+             define function radius(x :: <object>) => <integer>\n  as(<circle>, x).radius\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::If {
+            condition,
+            refinement,
+            then_branch,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected if");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::InstanceOf {
+                class: ClassId(0),
+                ..
+            }
+        ));
+        assert_eq!(
+            *refinement,
+            Some(Refinement {
+                local: LocalId(0),
+                kind: ValueKind::Object(ClassId(0)),
+            })
+        );
+        let Expr::AccessorCall { receiver, .. } = then_branch.as_ref() else {
+            panic!("expected refined slot accessor");
+        };
+        assert!(matches!(
+            receiver.as_ref(),
+            Expr::Local {
+                local: LocalId(0),
+                result_kind: ValueKind::Object(ClassId(0)),
+                ..
+            }
+        ));
+        let Expr::AccessorCall { receiver, .. } = &module.functions[1].body.result else {
+            panic!("expected cast slot accessor");
+        };
+        assert!(matches!(
+            receiver.as_ref(),
+            Expr::Cast {
+                class: ClassId(0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reports_impossible_instance_tests_and_casts() {
+        let instance = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+             define function main()\n  if instance?(make(<square>, side: 2), <circle>) then 1 else 0 end\nend;",
+        );
+        assert!(instance.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "instance? test is impossible: <square> is not <circle>"
+        }));
+
+        let cast = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+             define function main()\n  as(<circle>, make(<square>, side: 2)).radius\nend;",
+        );
+        assert!(cast.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "cast is impossible: <square> is not <circle>"
+        }));
+
+        let primitive = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  instance?(1, <circle>)\nend;",
+        );
+        assert!(primitive.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "instance? expects <object> or a known object, got <integer>"
         }));
     }
 

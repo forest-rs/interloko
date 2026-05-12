@@ -1,0 +1,18 @@
+// expect: run 9
+// expect: diagnostics 0
+// expect: dump ast contains as <circle>
+// expect: dump sem contains as c0
+// expect: dump lowered contains as <circle>
+// expect: dump tape contains cairn.cast_object
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function radius(x :: <object>) => <integer>
+  as(<circle>, x).radius
+end;
+
+define function main()
+  radius(make(<circle>, radius: 9))
+end;

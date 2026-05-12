@@ -186,6 +186,18 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_instance_refinement_and_casts() {
+        let value = compile_and_run_main(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function radius-or-zero(x :: <object>) => <integer>\n  if instance?(x, <circle>) then x.radius else 0 end\nend;\n\
+             define function radius(x :: <object>) => <integer>\n  as(<circle>, x).radius\nend;\n\
+             define function main()\n  radius-or-zero(make(<circle>, radius: 8)) + radius(make(<circle>, radius: 9))\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 17);
+    }
+
+    #[test]
     fn compiled_module_exposes_lowered_and_tape_dumps() {
         let compiled = compile(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\

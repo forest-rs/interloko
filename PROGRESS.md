@@ -533,12 +533,49 @@
   dispatcher" in this slice, not "any boxed first-slice value". Boxed top values
   require explicit refinement/cast support before they can feed dispatch.
 
+## Implemented: Object Tests, Casts, and Narrow Refinement
+
+- `instance?(value, <class>)` is now recognized as a runtime class-membership
+  test expression.
+- `as(<class>, value)` is now recognized as a checked object cast/narrowing
+  expression.
+- Both forms accept semantic `<object>` top values and known nominal object
+  values. Primitive values are rejected during semantic lowering.
+- Statically impossible nominal checks are diagnosed:
+  - `instance?(make(<square>, ...), <circle>)`;
+  - `as(<circle>, make(<square>, ...))`.
+- The semantic IR records local true-branch refinement for:
+  - `if instance?(x, <circle>) then ... else ... end`
+- Refined local uses carry their narrowed semantic value category, so
+  `<object>` parameters can feed slot reads after an `instance?` guard.
+- Lowered IR represents tests and casts with ordinary instructions that emit
+  ordinary runtime host calls:
+  - `cairn.instance_of`;
+  - `cairn.cast_object`.
+- No new `execution_tape` generic, cast, or class-test opcodes were added.
+- AST, semantic, lowered, and tape dumps expose tests, casts, and refinement.
+  Semantic fingerprints include use-site local result kinds and refinements so
+  cache reports can see edits that affect narrowing.
+- Corpus coverage includes guarded slot access through `<object>`, explicit
+  checked casts, impossible nominal tests/casts, and primitive test
+  diagnostics.
+
+### Deferred Object Refinement Design
+
+- Refinement is deliberately local and positive only. Else-branch narrowing,
+  negative tests, compound boolean conditions, path-sensitive propagation
+  across function calls, and generalized local type inference remain deferred.
+- `as` is a runtime checked cast from top or nominal object values. It is not a
+  general unboxing mechanism for primitive values stored in `<object>`.
+- Runtime class tests are exact nominal checks. Inheritance-aware `instance?`
+  behavior is deferred until the class model has an explicit subtype relation.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
 - Parametric types.
 - Effects and restarts.
-- Refinements.
+- Generalized refinements beyond local positive `instance?` true branches.
 - Macros.
 - Cranelift.
 - Full module system.

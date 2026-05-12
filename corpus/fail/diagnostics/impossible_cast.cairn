@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic contains cast is impossible: <square> is not <circle>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function main()
+  as(<circle>, make(<square>, side: 2)).radius
+end;

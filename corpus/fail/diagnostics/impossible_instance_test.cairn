@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic contains instance? test is impossible: <square> is not <circle>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function main()
+  if instance?(make(<square>, side: 2), <circle>) then 1 else 0 end
+end;

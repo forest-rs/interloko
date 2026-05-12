@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic contains instance? expects <object> or a known object, got <integer>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  instance?(1, <circle>)
+end;

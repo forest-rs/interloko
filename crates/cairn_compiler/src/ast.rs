@@ -270,6 +270,28 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Runtime class membership test.
+    InstanceOf {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Tested value.
+        value: Box<Expr>,
+        /// Tested class name.
+        class_name: String,
+        /// Source span.
+        span: Span,
+    },
+    /// Checked object cast/narrowing expression.
+    Cast {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Target class name.
+        class_name: String,
+        /// Value to cast.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Direct call syntax.
     Call {
         /// Stable-ish AST node identity.
@@ -380,6 +402,8 @@ impl Expr {
             | Self::Bool { id, .. }
             | Self::Name { id, .. }
             | Self::ClassName { id, .. }
+            | Self::InstanceOf { id, .. }
+            | Self::Cast { id, .. }
             | Self::Call { id, .. }
             | Self::Signal { id, .. }
             | Self::MakeObject { id, .. }
@@ -400,6 +424,8 @@ impl Expr {
             | Self::Bool { span, .. }
             | Self::Name { span, .. }
             | Self::ClassName { span, .. }
+            | Self::InstanceOf { span, .. }
+            | Self::Cast { span, .. }
             | Self::Call { span, .. }
             | Self::Signal { span, .. }
             | Self::MakeObject { span, .. }
@@ -989,6 +1015,12 @@ impl<'tree> Lowering<'tree> {
         if text == "signal" {
             return self.lower_signal(node);
         }
+        if text == "instance?" {
+            return self.lower_instance_of(node);
+        }
+        if text == "as" {
+            return self.lower_cast(node);
+        }
         let mut args = Vec::new();
         for arg_list in node.child_nodes(CstKind::ArgList) {
             for child in &arg_list.children {
@@ -1005,6 +1037,70 @@ impl<'tree> Lowering<'tree> {
             callee: text.to_string(),
             args,
             span: node.span.cover(name_span),
+        }
+    }
+
+    fn lower_instance_of(&mut self, node: &CstNode) -> Expr {
+        let args = self.lower_regular_args(node);
+        if args.len() != 2 {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                "instance? expects a value and class",
+            ));
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        }
+        let mut args = args.into_iter();
+        let value = args.next().expect("arity was checked");
+        let class = args.next().expect("arity was checked");
+        let Expr::ClassName { class_name, .. } = class else {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                "instance? class must be a class name",
+            ));
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::InstanceOf {
+            id: self.ast_id(node),
+            value: Box::new(value),
+            class_name,
+            span: node.span,
+        }
+    }
+
+    fn lower_cast(&mut self, node: &CstNode) -> Expr {
+        let args = self.lower_regular_args(node);
+        if args.len() != 2 {
+            self.diagnostics
+                .push(Diagnostic::error(node.span, "as expects a class and value"));
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        }
+        let mut args = args.into_iter();
+        let class = args.next().expect("arity was checked");
+        let value = args.next().expect("arity was checked");
+        let Expr::ClassName { class_name, .. } = class else {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                "as target must be a class name",
+            ));
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::Cast {
+            id: self.ast_id(node),
+            class_name,
+            value: Box::new(value),
+            span: node.span,
         }
     }
 
@@ -1464,6 +1560,33 @@ mod tests {
         };
         assert_eq!(callee, "add");
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn lowers_instance_tests_and_casts() {
+        let tree = syntax::parse(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main(x :: <object>) => <integer>\n  if instance?(x, <circle>) then as(<circle>, x).radius else 0 end\nend;",
+        );
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::If {
+            condition,
+            then_branch,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected if");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::InstanceOf { class_name, .. } if class_name == "<circle>"
+        ));
+        assert!(matches!(
+            then_branch.as_ref(),
+            Expr::SlotRead { receiver, .. }
+                if matches!(receiver.as_ref(), Expr::Cast { class_name, .. } if class_name == "<circle>")
+        ));
     }
 
     #[test]
