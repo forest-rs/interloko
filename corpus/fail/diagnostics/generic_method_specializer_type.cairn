@@ -1,0 +1,16 @@
+// expect: diagnostics 1
+// expect: diagnostic contains method `area` specializer <square> does not satisfy generic parameter 1 contract <circle>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define generic area(x :: <circle>) => <integer>;
+
+define method area(s :: <square>) => <integer>
+  s.side * s.side
+end;

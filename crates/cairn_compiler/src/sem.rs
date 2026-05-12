@@ -69,6 +69,12 @@ pub enum ValueKind {
     Error,
 }
 
+/// Optional generic function parameter contract.
+///
+/// `None` preserves the legacy unannotated generic behavior; `Some(kind)` is an
+/// explicit source contract.
+pub type GenericParamKind = Option<ValueKind>;
+
 /// Semantic module with resolved nominal IDs and calls.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Module {
@@ -149,8 +155,16 @@ pub struct GenericFunction {
     pub definition: DefinitionId,
     /// Source name.
     pub name: String,
+    /// Parameter names in source order.
+    pub params: Vec<String>,
+    /// Explicit parameter contracts in source order.
+    pub param_kinds: Vec<GenericParamKind>,
     /// Arity.
     pub arity: usize,
+    /// Result value category.
+    pub result_kind: ValueKind,
+    /// Explicit declared result category, when present.
+    pub return_annotation: Option<ValueKind>,
     /// Source span.
     pub span: Span,
 }
@@ -174,6 +188,8 @@ pub struct Method {
     pub body: Block,
     /// Result value category.
     pub result_kind: ValueKind,
+    /// Explicit declared result category, when present.
+    pub return_annotation: Option<ValueKind>,
     /// Source span.
     pub span: Span,
 }
@@ -509,8 +525,16 @@ impl FunctionSymbol {
 struct GenericSymbol {
     name: String,
     id: GenericFunctionId,
-    arity: usize,
+    param_kinds: Vec<GenericParamKind>,
+    return_kind: ValueKind,
+    return_annotation: Option<ValueKind>,
     span: Span,
+}
+
+impl GenericSymbol {
+    fn arity(&self) -> usize {
+        self.param_kinds.len()
+    }
 }
 
 struct FunctionContext {
@@ -717,17 +741,61 @@ impl Lowering {
                 ));
             }
             let id = GenericFunctionId(u32::try_from(index).unwrap_or(u32::MAX));
+            let param_kinds = generic
+                .params
+                .iter()
+                .map(|param| {
+                    param
+                        .type_annotation
+                        .as_ref()
+                        .map(|annotation| self.resolve_type_annotation(annotation))
+                })
+                .collect::<Vec<_>>();
+            for (param_index, kind) in param_kinds.iter().enumerate() {
+                if let Some(kind) = kind
+                    && !matches!(
+                        kind,
+                        ValueKind::Any | ValueKind::Object(_) | ValueKind::Error
+                    )
+                {
+                    self.diagnostics.push(Diagnostic::error(
+                        generic
+                            .params
+                            .get(param_index)
+                            .map_or(generic.span, |param| param.span),
+                        format!(
+                            "generic `{}` parameter {} contract must be <object> or a nominal class in this slice",
+                            generic.name,
+                            param_index + 1
+                        ),
+                    ));
+                }
+            }
+            let return_annotation = generic
+                .return_type
+                .as_ref()
+                .map(|annotation| self.resolve_type_annotation(annotation));
             self.generic_symbols.push(GenericSymbol {
                 name: generic.name.clone(),
                 id,
-                arity: generic.params.len(),
+                param_kinds: param_kinds.clone(),
+                return_kind: return_annotation.unwrap_or(ValueKind::I64),
+                return_annotation,
                 span: generic.span,
             });
             self.generics.push(GenericFunction {
                 id,
                 definition: generic.definition,
                 name: generic.name.clone(),
+                params: generic
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
+                param_kinds,
                 arity: generic.params.len(),
+                result_kind: return_annotation.unwrap_or(ValueKind::I64),
+                return_annotation,
                 span: generic.span,
             });
         }
@@ -804,8 +872,9 @@ impl Lowering {
 
     fn lower_method(&mut self, id: MethodId, method: &ast::Method) -> Method {
         let mut ctx = FunctionContext::new();
-        let generic = self
-            .resolve_generic(&method.name)
+        let generic_symbol = self.resolve_generic(&method.name).cloned();
+        let generic = generic_symbol
+            .as_ref()
             .map(|symbol| symbol.id)
             .unwrap_or_else(|| {
                 self.diagnostics.push(Diagnostic::error(
@@ -824,6 +893,20 @@ impl Lowering {
                 ));
                 ClassId(u32::MAX)
             });
+        if let Some(symbol) = &generic_symbol
+            && let Some(expected) = symbol.param_kinds.first().copied().flatten()
+            && !self.generic_specializer_matches(expected, specializer)
+        {
+            ctx.diagnostics.push(Diagnostic::error(
+                method.param.span,
+                format!(
+                    "method `{}` specializer {} does not satisfy generic parameter 1 contract {}",
+                    method.name,
+                    self.kind_name(ValueKind::Object(specializer)),
+                    self.kind_name(expected)
+                ),
+            ));
+        }
         let param = ctx.add_local(
             self.local_definition(method.definition, &method.param.name),
             method.param.name.clone(),
@@ -831,7 +914,39 @@ impl Lowering {
             method.param.span,
         );
         let body = self.lower_block(&mut ctx, &method.body);
-        let result_kind = self.expr_kind(&ctx, &body.result);
+        let body_kind = self.expr_kind(&ctx, &body.result);
+        let return_annotation = method
+            .return_type
+            .as_ref()
+            .map(|annotation| self.resolve_type_annotation(annotation));
+        let result_kind = return_annotation.unwrap_or(body_kind);
+        if let Some(expected) = return_annotation
+            && !self.kinds_match(expected, body_kind)
+        {
+            ctx.diagnostics.push(Diagnostic::error(
+                body.result.span(),
+                format!(
+                    "method `{}` returns {} but body has {}",
+                    method.name,
+                    self.kind_name(expected),
+                    self.kind_name(body_kind)
+                ),
+            ));
+        }
+        if let Some(symbol) = &generic_symbol
+            && let Some(expected) = symbol.return_annotation
+            && !self.kinds_match(expected, result_kind)
+        {
+            ctx.diagnostics.push(Diagnostic::error(
+                body.result.span(),
+                format!(
+                    "method `{}` result {} does not satisfy generic return {}",
+                    method.name,
+                    self.kind_name(result_kind),
+                    self.kind_name(expected)
+                ),
+            ));
+        }
         self.diagnostics.extend(ctx.diagnostics);
         Method {
             id,
@@ -842,6 +957,7 @@ impl Lowering {
             locals: ctx.locals,
             body,
             result_kind,
+            return_annotation,
             span: method.span,
         }
     }
@@ -1013,7 +1129,26 @@ impl Lowering {
                     return Expr::Error { span: *span };
                 }
                 if let Some(symbol) = self.resolve_generic(callee) {
-                    if symbol.arity == args.len() {
+                    if symbol.arity() == args.len() {
+                        for (index, (arg, expected)) in
+                            lowered_args.iter().zip(&symbol.param_kinds).enumerate()
+                        {
+                            let Some(expected) = *expected else {
+                                continue;
+                            };
+                            let actual = self.expr_kind(ctx, arg);
+                            if !self.generic_argument_matches(expected, actual) {
+                                ctx.diagnostics.push(Diagnostic::error(
+                                    arg.span(),
+                                    format!(
+                                        "generic `{callee}` argument {} expects {} but got {}",
+                                        index + 1,
+                                        self.kind_name(expected),
+                                        self.kind_name(actual)
+                                    ),
+                                ));
+                            }
+                        }
                         return Expr::GenericCall {
                             generic: symbol.id,
                             args: lowered_args,
@@ -1024,7 +1159,7 @@ impl Lowering {
                         *span,
                         format!(
                             "generic `{callee}` expects {} arguments but got {}",
-                            symbol.arity,
+                            symbol.arity(),
                             args.len()
                         ),
                     ));
@@ -1454,9 +1589,11 @@ impl Lowering {
 
     fn expr_kind(&self, ctx: &FunctionContext, expr: &Expr) -> ValueKind {
         match expr {
-            Expr::ConstI64 { .. } | Expr::GenericCall { .. } | Expr::Binary { .. } => {
-                ValueKind::I64
-            }
+            Expr::ConstI64 { .. } | Expr::Binary { .. } => ValueKind::I64,
+            Expr::GenericCall { generic, .. } => self
+                .generic_symbols
+                .get(generic.0 as usize)
+                .map_or(ValueKind::Error, |symbol| symbol.return_kind),
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
             }
@@ -1553,6 +1690,23 @@ impl Lowering {
             || expected == actual
             || matches!(expected, ValueKind::Error)
             || matches!(actual, ValueKind::Error)
+    }
+
+    fn generic_specializer_matches(&self, expected: ValueKind, specializer: ClassId) -> bool {
+        match expected {
+            ValueKind::Any | ValueKind::Error => true,
+            ValueKind::Object(class) => class == specializer,
+            ValueKind::I64 | ValueKind::Bool | ValueKind::ClassObject(_) => false,
+        }
+    }
+
+    fn generic_argument_matches(&self, expected: ValueKind, actual: ValueKind) -> bool {
+        match expected {
+            ValueKind::Any => matches!(actual, ValueKind::Object(_) | ValueKind::Error),
+            ValueKind::Object(_) => expected == actual || matches!(actual, ValueKind::Error),
+            ValueKind::Error => true,
+            ValueKind::I64 | ValueKind::Bool | ValueKind::ClassObject(_) => expected == actual,
+        }
     }
 
     fn kind_name(&self, kind: ValueKind) -> String {
@@ -1671,6 +1825,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resolves_typed_generic_contracts_and_method_returns() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
+             define function main()\n  area(make(<circle>, radius: 10))\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.generics[0].params, ["x"]);
+        assert_eq!(module.generics[0].param_kinds, [Some(ValueKind::Any)]);
+        assert_eq!(module.generics[0].result_kind, ValueKind::I64);
+        assert_eq!(module.generics[0].return_annotation, Some(ValueKind::I64));
+        assert_eq!(module.methods[0].return_annotation, Some(ValueKind::I64));
+        assert_eq!(module.methods[0].result_kind, ValueKind::I64);
+        let Expr::GenericCall { generic, .. } = &module.functions[0].body.result else {
+            panic!("expected generic call");
+        };
+        assert_eq!(*generic, GenericFunctionId(0));
+    }
+
+    #[test]
+    fn reports_typed_generic_contract_mismatches() {
+        let bad_call = lower_source(
+            "define generic area(x :: <object>) => <integer>;\n\
+             define function main()\n  area(1)\nend;",
+        );
+        assert!(bad_call.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "generic `area` argument 1 expects <object> but got <integer>"
+        }));
+
+        let bad_method_return = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <circle>) => <boolean>\n  #t\nend;",
+        );
+        assert!(bad_method_return.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "method `area` result <boolean> does not satisfy generic return <integer>"
+        }));
+
+        let bad_body = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <circle>) => <integer>\n  #t\nend;",
+        );
+        assert!(bad_body.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "method `area` returns <integer> but body has <boolean>"
+        }));
+
+        let bad_specializer = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+             define generic area(x :: <circle>) => <integer>;\n\
+             define method area(s :: <square>) => <integer>\n  s.side * s.side\nend;",
+        );
+        assert!(bad_specializer.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "method `area` specializer <square> does not satisfy generic parameter 1 contract <circle>"
+        }));
     }
 
     #[test]

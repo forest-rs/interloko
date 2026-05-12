@@ -1,0 +1,20 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains keep(x:object-top) result=Any return=object-top
+// expect: dump lowered contains keep#dispatch
+// expect: dump lowered contains box.any
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define generic keep(x :: <object>) => <object>;
+
+define method keep(c :: <circle>) => <circle>
+  c
+end;
+
+define function main()
+  let ignored = keep(make(<circle>, radius: 5));
+  42
+end;

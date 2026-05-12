@@ -1,5 +1,68 @@
 # Plans
 
+## Make Typed Object/Function Model Compose
+
+### Goal
+
+Add three narrow composition features as separate commits: typed generic
+contracts, local object refinement, and statically known callable values. The
+goal is to make existing class/object/function machinery compose without adding
+closures, dynamic callable invocation, overloads, or new tape opcodes.
+
+### Fence
+
+AST owns only narrow surface syntax. Semantic lowering owns contract meaning,
+local refinement state, known callable identity, and diagnostics. Lowering and
+tape emission consume resolved semantic kinds and known call targets. Runtime
+provides ordinary host support only where a dynamic class test/cast needs it; it
+does not own static type checking.
+
+### Invariants
+
+- Existing examples and unannotated generic programs still compile.
+- Direct-function type behavior remains unchanged.
+- Generic contracts are collected before checking methods and call sites.
+- Method return annotations are checked, and generic contracts constrain
+  method result kinds when declared.
+- `instance?` refinement is local to the true branch of the matching `if`.
+- `<object>` values become useful through explicit tests/casts, not implicit
+  unboxing.
+- Known callable values stay statically known; no closures or unknown dynamic
+  apply are introduced.
+- Lowered IR and tape use existing calls, branches, and runtime calls.
+
+### Steps
+
+1. Typed generic contracts:
+   - parse and AST-lower generic parameter/result annotations and method return
+     annotations;
+   - collect generic contract kinds before lowering methods and bodies;
+   - check method specializers/results and generic-call arguments;
+   - update dumps, fingerprints, tests, corpus, and progress notes.
+2. Object tests, casts, and refinement:
+   - add `instance?(x, <class>)` and `as(<class>, x)` semantic forms;
+   - refine a matching local in the true branch of `if instance?(x, <class>)`;
+   - lower through ordinary class checks, branches, traps, and runtime calls;
+   - update dumps, fingerprints, tests, corpus, and progress notes.
+3. Known callable objects:
+   - add semantic value kinds/expressions for known direct functions, generic
+     functions, classes, and accessors where practical;
+   - add narrow `apply(f, arg...)` for statically known direct and generic
+     function values;
+   - lower known apply through existing direct/generic call paths;
+   - update dumps, fingerprints, tests, corpus, and progress notes.
+
+### Risks
+
+- Generic contracts can look like a full type system. Keep them exact and
+  local, with `<object>` as the only top boundary.
+- Refinement needs to be visible in semantic dumps so it does not become hidden
+  flow magic.
+- Known callable values must not imply closures, captured environments, or
+  late-bound invocation.
+- `execution_tape` signatures remain static, so any runtime class-test/cast
+  support must fit through existing host-call mechanisms.
+
 ## Add Typed Direct-Function Surface
 
 ### Goal

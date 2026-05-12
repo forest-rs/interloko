@@ -124,8 +124,23 @@ pub struct Generic {
     pub definition: DefinitionId,
     /// Generic function name.
     pub name: String,
-    /// Parameter names.
-    pub params: Vec<String>,
+    /// Parameters in source order.
+    pub params: Vec<GenericParam>,
+    /// Optional declared result type.
+    pub return_type: Option<TypeAnnotation>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Generic function parameter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenericParam {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Parameter name.
+    pub name: String,
+    /// Optional declared parameter type.
+    pub type_annotation: Option<TypeAnnotation>,
     /// Source span.
     pub span: Span,
 }
@@ -141,6 +156,8 @@ pub struct Method {
     pub name: String,
     /// Single specialized parameter for this slice.
     pub param: MethodParam,
+    /// Optional declared method result type.
+    pub return_type: Option<TypeAnnotation>,
     /// Method body.
     pub body: Block,
     /// Source span.
@@ -568,24 +585,56 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_generic(&mut self, node: &CstNode) -> Generic {
-        let name = self.definition_name_after(node, TokenKind::Generic);
+        let mut name = String::new();
+        let mut saw_generic_keyword = false;
+        let mut params = Vec::new();
+        let mut return_type = None;
+
+        for child in &node.children {
+            match child {
+                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Generic => {
+                    saw_generic_keyword = true;
+                }
+                CstElement::Token(index)
+                    if saw_generic_keyword
+                        && self.tree.tokens[*index].kind == TokenKind::Ident
+                        && name.is_empty() =>
+                {
+                    name = self.tree.tokens[*index].text(&self.tree.source).to_string();
+                }
+                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
+                    return_type = self.type_annotation_after(node, *index);
+                }
+                CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
+                    params = self.lower_generic_params(child_node);
+                }
+                _ => {}
+            }
+        }
+
         Generic {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Generic, &name, ""),
             name,
-            params: node
-                .child_nodes(CstKind::ParameterList)
-                .next()
-                .map_or_else(Vec::new, |params| self.lower_params(params)),
+            params,
+            return_type,
             span: node.span,
         }
     }
 
     fn lower_method(&mut self, node: &CstNode) -> Method {
+        let mut return_type = None;
         let params = node
             .child_nodes(CstKind::ParameterList)
             .next()
             .map_or_else(Vec::new, |params| self.lower_method_params(params));
+        for child in &node.children {
+            if let CstElement::Token(index) = child
+                && self.tree.tokens[*index].kind == TokenKind::Arrow
+            {
+                return_type = self.type_annotation_after(node, *index);
+            }
+        }
         if params.len() != 1 {
             self.diagnostics.push(Diagnostic::error(
                 node.span,
@@ -618,6 +667,7 @@ impl<'tree> Lowering<'tree> {
             definition,
             name,
             param,
+            return_type,
             body,
             span: node.span,
         }
@@ -679,16 +729,35 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
-    fn lower_params(&self, node: &CstNode) -> Vec<String> {
-        node.children
-            .iter()
-            .filter_map(|child| match child {
-                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Ident => {
-                    Some(self.tree.tokens[*index].text(&self.tree.source).to_string())
-                }
-                _ => None,
-            })
-            .collect()
+    fn lower_generic_params(&self, node: &CstNode) -> Vec<GenericParam> {
+        let tokens = self.node_token_indices(node);
+        let mut params = Vec::new();
+        let mut index = 0;
+        while index < tokens.len() {
+            let token_index = tokens[index];
+            let token = self.tree.tokens[token_index];
+            if token.kind != TokenKind::Ident {
+                index += 1;
+                continue;
+            }
+            let name = token.text(&self.tree.source).to_string();
+            let type_annotation = if tokens
+                .get(index + 1)
+                .is_some_and(|next| self.tree.tokens[*next].kind == TokenKind::DoubleColon)
+            {
+                self.type_annotation_after(node, tokens[index + 1])
+            } else {
+                None
+            };
+            params.push(GenericParam {
+                id: AstNodeId::child(node.id, 1, &name),
+                name,
+                type_annotation,
+                span: token.span,
+            });
+            index += 1;
+        }
+        params
     }
 
     fn lower_function_params(&self, node: &CstNode) -> Vec<FunctionParam> {
@@ -1401,8 +1470,8 @@ mod tests {
     fn lowers_classes_generics_methods_make_and_slot_reads() {
         let tree = syntax::parse(
             "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\nend;\n\
-             define generic area(x);\n\
-             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10, enabled?: #t))\nend;",
         );
         let module = lower(&tree);
@@ -1429,8 +1498,30 @@ mod tests {
         );
         assert!(!module.classes[0].slots[1].required_init_keyword);
         assert_eq!(module.generics[0].name, "area");
+        assert_eq!(module.generics[0].params[0].name, "x");
+        assert_eq!(
+            module.generics[0].params[0]
+                .type_annotation
+                .as_ref()
+                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
+            Some((false, "<object>"))
+        );
+        assert_eq!(
+            module.generics[0]
+                .return_type
+                .as_ref()
+                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
+            Some((false, "<integer>"))
+        );
         assert_eq!(module.methods[0].name, "area");
         assert_eq!(module.methods[0].param.class_name, "<circle>");
+        assert_eq!(
+            module.methods[0]
+                .return_type
+                .as_ref()
+                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
+            Some((false, "<integer>"))
+        );
         assert!(matches!(
             module.methods[0].body.result,
             Expr::Binary { lhs: _, rhs: _, .. }

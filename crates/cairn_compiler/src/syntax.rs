@@ -804,6 +804,10 @@ impl<'source> Parser<'source> {
             &mut children,
             "expected `)` after parameters",
         );
+        if self.at(TokenKind::Arrow) {
+            self.expect(TokenKind::Arrow, &mut children, "expected `=>`");
+            self.parse_type_annotation(&mut children, "expected generic return type");
+        }
         self.expect(
             TokenKind::Semicolon,
             &mut children,
@@ -829,6 +833,10 @@ impl<'source> Parser<'source> {
             &mut children,
             "expected `)` after parameters",
         );
+        if self.at(TokenKind::Arrow) {
+            self.expect(TokenKind::Arrow, &mut children, "expected `=>`");
+            self.parse_type_annotation(&mut children, "expected method return type");
+        }
         children.push(CstElement::Node(self.parse_body()));
         self.expect(
             TokenKind::End,
@@ -1283,8 +1291,8 @@ mod tests {
     fn parse_class_generic_method_and_object_syntax() {
         let tree = parse(
             "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\nend;\n\
-             define generic area(x);\n\
-             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10, enabled?: #t))\nend;",
         );
         assert_eq!(tree.diagnostics, Vec::new());

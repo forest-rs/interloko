@@ -489,6 +489,50 @@
 - Runtime does not own type checking. It receives already checked lowered IR and
   performs only the existing object/boxed-value host operations.
 
+## Implemented: Typed Generic Contracts
+
+- Generic declarations may now carry explicit parameter and result contracts:
+  - `define generic area(x :: <object>) => <integer>;`
+  - `define generic keep(x :: <object>) => <object>;`
+- Method definitions may now carry explicit result annotations:
+  - `define method area(c :: <circle>) => <integer>`
+  - `define method keep(c :: <circle>) => <circle>`
+- Unannotated generic declarations keep the existing generic-dispatch behavior.
+  Their result category remains the first-slice legacy `<integer>` dispatcher
+  result.
+- The implemented generic parameter contract model is deliberately narrow:
+  explicit contracts must be `<object>` or an exact nominal class, because the
+  current dispatcher still dispatches over one runtime object argument.
+- Method specializers are checked against explicit generic parameter
+  contracts. With no inheritance model yet, a nominal generic parameter
+  contract accepts only the exact same class; `<object>` accepts any known
+  nominal object method specializer.
+- Generic call sites are checked against explicit generic parameter contracts.
+  A contracted generic call requires a known nominal object argument; boxed top
+  `<object>` values must be refined or cast in a later slice before dispatch.
+- Method bodies are checked against explicit method result annotations, and
+  method results are checked against explicit generic result contracts.
+- Lowered dispatcher signatures now use the declared generic result category.
+  When a generic returns `<object>` and a method returns a more precise nominal
+  object, the dispatcher boxes through the existing `box.any` /
+  `cairn.box_value` runtime path.
+- AST, semantic, lowered, and corpus dumps expose generic and method contracts.
+  Definition and dispatcher fingerprints include contract kinds so signature
+  edits participate in session diffs and cache reports.
+- Corpus coverage includes typed generic area dispatch, typed generic
+  `<object>` results, bad generic call arguments, bad method result contracts,
+  and bad method specializers.
+
+### Deferred Generic Contract Design
+
+- Generic dispatch is still one-argument nominal dispatch. Multi-argument
+  dispatch, inheritance-aware subtype checks, primitive specializers, sealed
+  dispatch optimization, method combination, overload resolution, and full
+  generic function type objects remain deferred.
+- `<object>` generic parameters mean "known runtime object accepted by this
+  dispatcher" in this slice, not "any boxed first-slice value". Boxed top values
+  require explicit refinement/cast support before they can feed dispatch.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.

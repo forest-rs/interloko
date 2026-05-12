@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic contains method `area` result <boolean> does not satisfy generic return <integer>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define generic area(x :: <object>) => <integer>;
+
+define method area(c :: <circle>) => <boolean>
+  #t
+end;

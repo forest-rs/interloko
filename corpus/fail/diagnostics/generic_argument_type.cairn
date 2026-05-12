@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic contains generic `area` argument 1 expects <object> but got <integer>
+
+define generic area(x :: <object>) => <integer>;
+
+define function main()
+  area(1)
+end;

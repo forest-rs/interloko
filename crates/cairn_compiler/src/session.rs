@@ -788,10 +788,20 @@ fn fingerprint_dispatcher(module: &sem::Module, generic: DefinitionId) -> String
         return "missing-dispatcher".into();
     };
     let mut out = format!(
-        "dispatcher:{}:{}:{}:",
+        "dispatcher:{}:{}:{}:{}:{}:",
         generic.definition.raw(),
         generic.name,
-        generic.arity
+        generic.arity,
+        generic
+            .param_kinds
+            .iter()
+            .map(|kind| kind.map_or_else(
+                || "untyped".into(),
+                |kind| sem_kind_fingerprint(module, kind)
+            ))
+            .collect::<Vec<_>>()
+            .join(","),
+        sem_kind_fingerprint(module, generic.result_kind)
     );
     for method in module
         .methods
@@ -999,12 +1009,21 @@ fn dump_ast(module: &ast::Module) -> String {
     for generic in &module.generics {
         let _ = writeln!(
             out,
-            "generic {} {} {} arity={}",
+            "generic {} {} {}({})",
             generic.id,
             generic.definition,
             generic.name,
-            generic.params.len()
+            generic
+                .params
+                .iter()
+                .map(dump_generic_param)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
+        if let Some(return_type) = &generic.return_type {
+            indent_line(&mut out, 2);
+            let _ = writeln!(out, "returns {}", dump_type_annotation(return_type));
+        }
     }
     for method in &module.methods {
         let _ = writeln!(
@@ -1012,6 +1031,10 @@ fn dump_ast(module: &ast::Module) -> String {
             "method {} {} {} :: {}",
             method.id, method.definition, method.name, method.param.class_name
         );
+        if let Some(return_type) = &method.return_type {
+            indent_line(&mut out, 2);
+            let _ = writeln!(out, "returns {}", dump_type_annotation(return_type));
+        }
         dump_ast_block(&mut out, &method.body, 2);
     }
     for function in &module.functions {
@@ -1035,6 +1058,13 @@ fn dump_ast(module: &ast::Module) -> String {
         dump_ast_block(&mut out, &function.body, 2);
     }
     out
+}
+
+fn dump_generic_param(param: &ast::GenericParam) -> String {
+    param.type_annotation.as_ref().map_or_else(
+        || param.name.clone(),
+        |annotation| format!("{} :: {}", param.name, dump_type_annotation(annotation)),
+    )
 }
 
 fn dump_function_param(param: &ast::FunctionParam) -> String {
@@ -1199,16 +1229,34 @@ fn dump_sem(module: &sem::Module) -> String {
         }
     }
     for generic in &module.generics {
+        let params = generic
+            .params
+            .iter()
+            .zip(&generic.param_kinds)
+            .map(|(name, kind)| match kind {
+                Some(kind) => format!("{name}:{}", sem_kind_label(module, *kind)),
+                None => format!("{name}:untyped"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let return_annotation = generic.return_annotation.map_or_else(
+            || "inferred".to_string(),
+            |kind| sem_kind_label(module, kind),
+        );
         let _ = writeln!(
             out,
-            "generic g{} {} {} arity={}",
-            generic.id.0, generic.definition, generic.name, generic.arity
+            "generic g{} {} {}({params}) result={:?} return={return_annotation}",
+            generic.id.0, generic.definition, generic.name, generic.result_kind
         );
     }
     for method in &module.methods {
+        let return_annotation = method.return_annotation.map_or_else(
+            || "inferred".to_string(),
+            |kind| sem_kind_label(module, kind),
+        );
         let _ = writeln!(
             out,
-            "method m{} {} generic=g{} class=c{} result={:?}",
+            "method m{} {} generic=g{} class=c{} result={:?} return={return_annotation}",
             method.id.0,
             method.definition,
             method.generic.0,
@@ -1574,7 +1622,24 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Generic,
                 name: generic.name.clone(),
             },
-            fingerprint: format!("generic:{}:{}", generic.name, generic.arity),
+            fingerprint: format!(
+                "generic:{}:{}:{}:{}",
+                generic.name,
+                generic
+                    .param_kinds
+                    .iter()
+                    .map(|kind| kind.map_or_else(
+                        || "untyped".into(),
+                        |kind| sem_kind_fingerprint(module, kind)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                generic.return_annotation.map_or_else(
+                    || "inferred".into(),
+                    |kind| sem_kind_fingerprint(module, kind)
+                ),
+                generic.arity
+            ),
         });
     }
     for method in &module.methods {
@@ -1593,7 +1658,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 name: format!("{generic}({specializer})"),
             },
             fingerprint: format!(
-                "method:{generic}:{specializer}:{}",
+                "method:{generic}:{specializer}:{}:{}",
+                method.return_annotation.map_or_else(
+                    || "inferred".into(),
+                    |kind| sem_kind_fingerprint(module, kind)
+                ),
                 fingerprint_sem_block(module, &method.body)
             ),
         });

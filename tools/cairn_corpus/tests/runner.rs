@@ -60,7 +60,12 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/functions/typed_object_top.cairn"));
     assert!(out.contains("fail/diagnostics/function_argument_type.cairn"));
     assert!(out.contains("fail/diagnostics/function_return_type.cairn"));
-    assert!(out.contains("corpus: 45 passed, 0 failed, 45 total"));
+    assert!(out.contains("pass/generics/typed_contract_area.cairn"));
+    assert!(out.contains("pass/generics/typed_generic_object_result.cairn"));
+    assert!(out.contains("fail/diagnostics/generic_argument_type.cairn"));
+    assert!(out.contains("fail/diagnostics/generic_method_return_type.cairn"));
+    assert!(out.contains("fail/diagnostics/generic_method_specializer_type.cairn"));
+    assert!(out.contains("corpus: 50 passed, 0 failed, 50 total"));
 }
 
 #[test]
