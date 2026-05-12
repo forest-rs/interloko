@@ -99,6 +99,12 @@ end;
   direct slots in source order.
 - Inherited effective slots keep the original direct slot/accessor definition
   identity while receiving a subclass-local layout slot.
+- Each finalized class has an initialization plan derived from its effective
+  slots. The plan is the construction view: accepted keywords, slot order,
+  required/default status, source slot identity, and explicit-argument override
+  behavior.
+- Each explicit `make(<class>, key: value)` keyword is recorded as a semantic
+  init argument before the plan chooses final field values.
 - Init keywords are resolved semantically before lowering. Unknown keywords,
   duplicate keywords, and missing required keywords produce focused
   diagnostics.
@@ -106,6 +112,9 @@ end;
 - Explicit construction values and `init-value:` expressions are type-checked
   against the slot type. For nominal object slots, that check accepts the
   declared class or any subclass.
+- Lowered IR emits object construction in initialization-plan order. The
+  execution_tape path still uses ordinary runtime object calls, not native
+  aggregate or initialization opcodes.
 - Slot allocation metadata is currently always `instance`.
 - Accessor identity remains the slot definition identity, so stable IDs survive
   harmless declaration trivia edits.
@@ -131,6 +140,12 @@ back to the direct slot that introduced the effective slot. MOP runtime layout
 rows repeat the direct/inherited source so it is clear which effective slot
 storage came from which direct declaration.
 
+Class inspection also shows the initialization plan. `inspect ... class:cN`
+reports accepted keywords, inherited/direct slot order, whether each slot is
+required or defaulted, and that explicit init args override defaults. The same
+MOP output says `initialize-methods=deferred` so the current slot
+initialization substrate is not mistaken for the full Dylan protocol.
+
 ## Deferred Design
 
 This is not the full Dylan initialization protocol. The following are deferred:
@@ -139,7 +154,10 @@ This is not the full Dylan initialization protocol. The following are deferred:
 - inherited slot specifications that override inherited defaults;
 - class allocation and each-subclass allocation;
 - virtual or computed slots;
-- before/after/around initialization methods;
+- user-defined `initialize` methods;
+- `make` as an overridable generic function;
+- init-arg forwarding beyond slot initialization;
+- `next-method`, method combination, reinitialization, and class redefinition;
 - sealed slot optimization;
 - persistence/image storage;
 - host-backed construction;

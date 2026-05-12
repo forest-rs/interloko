@@ -895,8 +895,8 @@
 ### Deferred Class-Finalization Design
 
 - AMOP is vocabulary and architecture guidance here, not CLOS compatibility.
-- Dylan inherited slot specifications, initialization argument specifications,
-  init methods, and full initialization protocol hooks remain deferred.
+- Dylan inherited slot specifications, user-defined `initialize` methods, and
+  full initialization protocol hooks remain deferred.
 - Multiple inheritance, class precedence lists, public metaclass protocols,
   user-defined metaclasses, class redefinition, instance obsolescence, method
   combination, setters, sealed slot optimization, persistence, host-backed
@@ -983,6 +983,54 @@
 
 - `EnvironmentKind` has a new `DispatchSite` variant with stable text label
   `dispatch-site`.
+
+## Implemented: Initialization Plans For Dylan-Style Initialize Substrate
+
+- Each finalized semantic class now has an `InitializationPlan` derived from its
+  effective slots. The plan records deterministic construction order, source
+  slot identity, accepted init keyword, value kind/type name, inherited/direct
+  source, requiredness, default presence, and explicit-argument override
+  behavior.
+- Semantic `make(<class>, key: value, ...)` now records explicit `InitArg`
+  entries at the call site before choosing planned field initializers. The
+  chosen field initializers distinguish explicit values from default
+  `init-value:` expressions.
+- Construction validation now separates unknown keywords, duplicate keywords,
+  missing required keywords, explicit initializer type mismatches, and default
+  `init-value:` type mismatches.
+- Initialization order is inherited effective slots in layout order, followed
+  by direct effective slots in layout order. Explicit init args override
+  defaults, and required slots without explicit/default values diagnose.
+- Lowered IR object construction consumes the class initialization plan rather
+  than iterating effective slots ad hoc. The execution_tape path remains
+  ordinary runtime object construction and host calls; no initialization or
+  object-aggregate tape opcode was added.
+- Semantic dumps, MOP dumps, EOP class records, and `cairn_lab inspect <file>
+  class:cN` expose initialization plans, accepted keywords, required/default
+  status, slot order, and explicit-argument override behavior.
+- Inspection explicitly reports `initialize-methods=deferred`. This slice is
+  not avoiding Dylan-style initialization; it is the substrate future
+  `make`/`initialize` semantics can consume.
+- Tests cover inherited initialization order, explicit overrides, required
+  inherited keywords, unknown/duplicate keywords, explicit and default
+  initializer type mismatches, stable init facts across trivia edits, and
+  expected artifact changes after slot init metadata edits.
+- `docs/mop_class_finalization.md`, `docs/slot_model.md`, and
+  `docs/eop_workbench.md` document the current init-plan model, how to inspect
+  it, how it maps toward Dylan `make`/`initialize`, and why user-defined
+  `initialize` remains deferred.
+
+### Deferred Initialization Design
+
+- User-defined `initialize` methods, `make` as an overridable generic function,
+  custom allocation protocols, keyword forwarding beyond slot initialization,
+  `next-method`, method combination, reinitialization, class redefinition,
+  obsolete instances, slot setters, multiple inheritance, and host-backed
+  construction remain deferred.
+- Before user-defined initialization is enabled, Cairn still needs decisions
+  about method ordering, keyword consumption/forwarding rules, allocation hooks,
+  interaction with setters/mutation, and how initialization participates in MOP
+  inspection and incremental invalidation.
 
 ## Intentionally Deferred
 

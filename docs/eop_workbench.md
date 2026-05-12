@@ -60,6 +60,19 @@ Diagnostics are environment objects too:
 cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
 ```
 
+Class inspection includes initialization facts derived from the class's
+finalized effective slots:
+
+```sh
+cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_point.cairn class:c1
+```
+
+The `inspection` text names the accepted init keywords, inherited/direct slot
+order, required/default status, explicit-argument override behavior, and
+`initialize-methods=deferred`. That last field is intentional: the workbench
+shows the substrate that future Dylan-style `initialize` methods can consume,
+not user-defined initialization methods themselves.
+
 ## Affordances
 
 List actions exposed by one object:

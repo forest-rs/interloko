@@ -13,10 +13,16 @@ claiming CLOS compatibility.
 - An **effective slot definition** is the computed slot visible on instances of
   a finalized class. Today it is `sem::EffectiveSlot`, stored in
   `Class::effective_slots`.
+- An **initialization plan** is the computed class fact that orders effective
+  slots for construction and records accepted init keywords, requiredness,
+  defaults, and explicit-argument override behavior. Today it is
+  `sem::InitializationPlan`, stored in `Class::initialization_plan`.
+- An **init argument** is a semantic call-site fact recorded for an explicit
+  `make(<class>, key: value)` keyword argument.
 - An **accessor** is the getter introduced by a direct slot. Its stable identity
   is the original slot definition identity.
 - **Finalization** computes superclass facts, effective slots, and deterministic
-  runtime layout from source-authored class facts.
+  initialization/runtime layout facts from source-authored class facts.
 - **Nominal subtyping** follows the single superclass chain. A subclass instance
   is acceptable where its parent class is expected.
 - **Runtime layout** is the executable storage view consumed by lowered IR and
@@ -77,11 +83,29 @@ This slice intentionally rejects inherited slot conflicts instead of
 implementing Dylan-style inherited slot specifications or AMOP-style slot
 option combination.
 
+After effective slots are finalized, Cairn computes an initialization plan for
+the class. The plan is not another source of slot truth; it is the construction
+view of the effective slots. Plan steps appear in the same inherited-then-direct
+layout order as effective slots. Each step records the accepted keyword, source
+slot identity, declared kind, whether the keyword is required, whether the slot
+has an `init-value:` default, and that explicit init args override defaults.
+
 ## Construction And Reads
 
 `make(<child>, ...)` validates and fills all effective slots. Inherited init
 keywords, required keywords, and `init-value:` defaults are visible during child
 construction. Explicit keyword values override defaults.
+
+Semantic IR now records the explicit init arguments at the `make` call site and
+the planned field initializers chosen from the class initialization plan.
+Diagnostics distinguish unknown keywords, duplicate keywords, missing required
+keywords, explicit initializer type mismatches, and default `init-value:` type
+mismatches.
+
+Lowered IR consumes the initialization plan when emitting object construction.
+It does not iterate effective slots ad hoc, and it does not introduce a new
+execution_tape opcode. The tape still sees ordinary runtime object construction
+and host calls.
 
 `child.parent_slot` and `parent_slot(child)` both lower through the effective
 slot on the receiver class. The lowered IR and tape path still use ordinary
@@ -123,7 +147,9 @@ MOP and semantic dumps show:
 - effective slots as computed facts;
 - direct vs inherited effective-slot source;
 - source class/source slot for inherited slots;
-- effective layout order.
+- effective layout order;
+- initialization plans, accepted keywords, required/default status, slot order,
+  and explicit-argument override behavior.
 - runtime layout rows with superclass and slot source;
 - dispatch applicability for each method, including subclass classes that can
   select a parent-specialized method.
@@ -146,6 +172,7 @@ Useful workbench commands:
 
 ```sh
 cargo run -p cairn_lab -- dump tools/cairn_lab/fixtures/inherited_point.cairn --stage mop
+cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_point.cairn class:c1
 cargo run -p cairn_lab -- dump tools/cairn_lab/fixtures/inherited_dispatch.cairn --stage mop
 cargo run -p cairn_lab -- dispatch tools/cairn_lab/fixtures/inherited_dispatch.cairn
 cargo run -p cairn_lab -- dispatch tools/cairn_lab/fixtures/inherited_dispatch.cairn dispatch:d0
@@ -162,11 +189,29 @@ execute such metaobject-construction functions yet; the compiler still lowers
 syntax directly. The design point is that the eventual reflective protocol has a
 place to land.
 
+## Initialization As Future Protocol
+
+This slice is intentionally shaped toward Dylan's `make`/`initialize` model, but
+it does not execute user-defined `initialize` methods yet. Today, slot
+initialization is the whole protocol: validate the init args, choose explicit
+values or defaults, and construct the object in initialization-plan order.
+
+The substrate added here is meant to be reused by a later protocol. A future
+`make` can allocate an instance, pass the same init-argument records to
+`initialize`, and let user-defined methods consume or forward them. Before that
+is enabled, Cairn still needs decisions about `make` as a generic function,
+custom allocation, keyword forwarding, `next-method`, method combination,
+reinitialization, class redefinition, and mutation/setter interaction.
+
 ## Internal Now
 
 - `sem::Class` is the class metaobject record.
 - `sem::Slot` is the direct slot definition record.
 - `sem::EffectiveSlot` is the computed effective slot record.
+- `sem::InitializationPlan` is the computed construction view of effective
+  slots.
+- `sem::InitArg` is the semantic record for one explicit `make` keyword
+  argument.
 - `session::DispatchSiteRecord` is the compiler/session record for one semantic
   generic call site.
 - Finalization runs inside semantic lowering.
@@ -180,7 +225,8 @@ place to land.
 - class redefinition and instance obsolescence;
 - multiple inheritance and class precedence lists;
 - Dylan inherited slot specifications;
-- initialization argument specifications and init methods;
+- user-defined `initialize`, `make` genericization, init-arg forwarding, and
+  full initialization protocol hooks;
 - method combination;
 - slot setters/writers and mutation enforcement;
 - sealed slot optimization;
