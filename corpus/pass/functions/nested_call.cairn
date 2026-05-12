@@ -1,0 +1,15 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump lowered contains call
+
+define function add(a, b)
+  a + b
+end;
+
+define function double(x)
+  x * 2
+end;
+
+define function main()
+  double(add(10, 11))
+end;

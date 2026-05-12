@@ -1,0 +1,10 @@
+// expect: diagnostic contains missing initializer for slot `radius`
+// expect: dump sem contains make c0
+
+define class <circle> (<object>)
+  slot radius;
+end;
+
+define function main()
+  make(<circle>)
+end;

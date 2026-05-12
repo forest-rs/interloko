@@ -1,5 +1,94 @@
 # Plans
 
+## Build Small-Program Corpus Runner
+
+Ticket: `cai-5zew`
+
+### Goal
+
+Build a small, durable corpus of `.cairn` programs and a workspace runner that
+validates each program through the session API. The corpus should make it easy
+to add new semantic examples, expected diagnostics, and lightweight dump
+stability checks without committing large snapshot files.
+
+### Non-Goals
+
+- No new language semantics.
+- No new production dependencies.
+- No persistent snapshot store.
+- No watch mode or editor integration.
+- No replacement for `tools/cairn_lab`; this runner is batch validation, not an
+  interactive workbench.
+
+### Fence
+
+The `corpus/` tree owns source fixtures and declarative expectations; it
+explicitly does not own compiler behavior or dump formatting.
+
+The `tools/cairn_corpus` crate owns filesystem traversal, expectation parsing,
+session invocation, and human-readable check output; it explicitly does not own
+syntax, semantic, lowering, tape, or runtime rules.
+
+### Plumbing
+
+```text
+corpus/**/*.cairn
+  -> header expectations
+  -> tools/cairn_corpus
+  -> cairn_compiler::session
+  -> runtime result / diagnostics / stage dumps
+  -> pass/fail report
+```
+
+### Header Format
+
+Each corpus file can declare expectations with leading comments:
+
+```text
+// expect: run 42
+// expect: diagnostics 0
+// expect: diagnostic contains unresolved local
+// expect: dump lowered contains call
+```
+
+The runner treats these as the stable manifest for the file.
+
+### Steps
+
+1. Add `corpus/pass` and `corpus/fail` fixtures covering:
+   - arithmetic;
+   - locals;
+   - direct calls;
+   - classes, slots, and object construction;
+   - generic dispatch;
+   - expected diagnostics.
+2. Add `tools/cairn_corpus` with:
+   - recursive corpus discovery;
+   - header expectation parsing;
+   - session compilation;
+   - runtime, diagnostic, and dump containment checks;
+   - concise check and list commands.
+3. Add tests for the runner and fixture set.
+4. Update progress notes with corpus categories and how to add cases.
+5. Run full gates:
+   - `cargo fmt --all`;
+   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
+   - `cargo test --workspace --all-features`;
+   - `cargo doc --workspace --all-features --no-deps`;
+   - existing examples;
+   - `cairn_lab` fixture commands;
+   - `cairn_corpus` runner.
+6. Close ticket and commit coherent changes.
+
+### Risks
+
+- Dump checks can become brittle. Use substring expectations that assert
+  semantic landmarks rather than full dumps.
+- Corpus expectations should not hide compiler regressions. Treat missing
+  expectations as a runner failure.
+- The core compiler remains `no_std + alloc`; keep all filesystem and process
+  behavior in the tool crate.
+
 ## Build Compiler Session and Workbench CLI
 
 Ticket: `cai-lk7f`

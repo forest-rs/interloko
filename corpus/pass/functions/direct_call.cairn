@@ -1,0 +1,11 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains direct-call
+
+define function add(a, b)
+  a + b
+end;
+
+define function main()
+  add(20, 22)
+end;

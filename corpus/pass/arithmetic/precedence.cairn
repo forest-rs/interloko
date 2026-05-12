@@ -1,0 +1,7 @@
+// expect: run 14
+// expect: diagnostics 0
+// expect: dump lowered contains i64.mul
+
+define function main()
+  2 + 3 * 4
+end;

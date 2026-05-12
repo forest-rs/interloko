@@ -102,6 +102,37 @@
   - `diff <before> <after>`
 - CLI fixtures cover the generic-area program, harmless trivia edits, and a focused method body edit.
 
+## Implemented: Small-Program Corpus Runner
+
+- `corpus/pass` contains runnable small programs for:
+  - arithmetic and precedence;
+  - local bindings;
+  - direct function calls;
+  - class definitions, object construction, slot declarations, and slot reads;
+  - single-method and multi-class generic dispatch.
+- `corpus/fail` contains diagnostic examples for:
+  - unresolved locals;
+  - unresolved functions/generics;
+  - arity mismatches;
+  - missing slot initializers;
+  - unknown slot initializers.
+- Each `.cairn` corpus file declares expectations in leading comments:
+  - `// expect: run N`;
+  - `// expect: diagnostics N`;
+  - `// expect: diagnostic contains TEXT`;
+  - `// expect: dump STAGE contains TEXT`.
+- Dump expectations are intentionally substring-based so they act like small
+  semantic landmarks rather than full brittle snapshots.
+- `tools/cairn_corpus` provides:
+  - `check [corpus-root]` to compile every corpus program through
+    `cairn_compiler::session`;
+  - `list [corpus-root]` to inspect discovered cases;
+  - `dump <file.cairn> --stage syntax|ast|sem|lowered|tape|all` for
+    snapshot-like stage output without committing generated dumps.
+- Add a new case by placing a `.cairn` file under `corpus/pass` or
+  `corpus/fail`, adding at least one `// expect:` header line, and running
+  `cargo run -p cairn_corpus`.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
@@ -133,3 +164,4 @@
 - `cargo doc --workspace --all-features --no-deps`
 - `cargo run -p cairn_forty_two_example` prints `42`.
 - `cargo run -p cairn_generic_area_example` prints `100`.
+- `cargo run -p cairn_corpus` checks the small-program corpus.

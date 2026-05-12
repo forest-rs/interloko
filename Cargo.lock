@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn_corpus"
+version = "0.1.0"
+dependencies = [
+ "cairn_compiler",
+]
+
+[[package]]
 name = "cairn_forty_two_example"
 version = "0.1.0"
 dependencies = [

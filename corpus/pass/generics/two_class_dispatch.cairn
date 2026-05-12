@@ -1,0 +1,26 @@
+// expect: run 81
+// expect: diagnostics 0
+// expect: dump sem contains generic-call
+// expect: dump tape contains program="cairn"
+
+define class <circle> (<object>)
+  slot radius;
+end;
+
+define class <square> (<object>)
+  slot side;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define method area(s :: <square>)
+  s.side * s.side
+end;
+
+define function main()
+  area(make(<square>, side: 9))
+end;

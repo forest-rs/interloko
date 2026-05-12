@@ -1,0 +1,13 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains make c0
+
+define class <rectangle> (<object>)
+  slot width;
+  slot height;
+end;
+
+define function main()
+  let r = make(<rectangle>, width: 6, height: 7);
+  r.width * r.height
+end;

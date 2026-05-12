@@ -1,0 +1,6 @@
+// expect: diagnostic contains unresolved local `missing`
+// expect: dump sem contains error
+
+define function main()
+  missing
+end;

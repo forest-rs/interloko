@@ -1,0 +1,9 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump ast contains let
+
+define function main()
+  let base = 40;
+  let delta = 2;
+  base + delta
+end;
