@@ -227,6 +227,9 @@
   `condition` must be a statically known object.
 - `handle BODY with restart <condition-class> HANDLER end` establishes one
   lexical restart for `BODY`.
+- `with restart e :: <condition-class> HANDLER` additionally binds the signaled
+  condition object as a handler-local name, so handlers can inspect ordinary
+  slots such as `e.fallback`.
 - A `signal` must appear inside an active lexical handler, and the signaled
   condition class must match the nearest active restart's condition class.
 - `signal` resumes with the active restart's result category.
@@ -235,8 +238,8 @@
 - Semantic IR now has explicit `Signal`, `Handle`, and `Restart` nodes.
 - Lowered IR uses an internal lexical restart frame in `BodyLowering`:
   - normal body completion moves into the handle result register;
-  - `signal` constructs/evaluates the condition object and jumps to the restart
-    handler label;
+  - `signal` constructs/evaluates the condition object, moves it into the
+    optional handler-local register, and jumps to the restart handler label;
   - the handler computes the replacement value and jumps to the shared join.
 - `execution_tape` still receives only ordinary object construction, branches,
   jumps, moves, and arithmetic. There are no condition-specific tape opcodes.
@@ -251,13 +254,15 @@
 - Incremental tests cover edits to a restart handler in one method and verify
   that the edited method's lowered/tape artifacts recompute while an unrelated
   method's artifacts are reused.
+- Restart condition bindings are handler-scoped; using the bound name after the
+  handler expression is a normal unresolved-local diagnostic.
 
 ### Deferred Condition Design
 
 - Cross-call condition signaling and dynamic handler lookup are deferred.
 - Runtime handler stacks and dynamic extent edge cases are deferred.
-- Restart handlers do not receive the condition object as a parameter yet, so
-  handlers cannot inspect condition payload slots in this first slice.
+- Multiple restart parameters and condition payload typing beyond ordinary
+  nominal slots are deferred.
 - Full effect typing, effect inference, restart selection, stack inspection,
   async interaction, and multiple values are deferred.
 
@@ -266,6 +271,8 @@
 - Public AST and semantic expression enums gained `Signal` and `Handle`
   variants.
 - Semantic IR gained the public `Restart` type.
+- `ast::Restart` now records an optional condition binding name, and
+  `sem::Restart` records the optional bound condition local.
 
 ## Intentionally Deferred
 

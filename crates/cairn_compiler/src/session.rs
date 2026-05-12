@@ -1117,7 +1117,15 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             let _ = writeln!(out, "body");
             dump_ast_expr(out, body, indent + 4);
             indent_line(out, indent + 2);
-            let _ = writeln!(out, "restart {} {}", restart.id, restart.class_name);
+            if let Some(condition_name) = &restart.condition_name {
+                let _ = writeln!(
+                    out,
+                    "restart {} {condition_name} :: {}",
+                    restart.id, restart.class_name
+                );
+            } else {
+                let _ = writeln!(out, "restart {} {}", restart.id, restart.class_name);
+            }
             dump_ast_expr(out, &restart.body, indent + 4);
         }
         ast::Expr::Error { id, .. } => {
@@ -1275,9 +1283,12 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             dump_sem_expr(out, else_branch, indent + 4);
         }
         sem::Expr::Handle { body, restart, .. } => {
+            let condition = restart
+                .condition_local
+                .map_or(String::from("none"), |local| format!("l{}", local.0));
             let _ = writeln!(
                 out,
-                "handle restart c{} result={:?}",
+                "handle restart c{} condition={condition} result={:?}",
                 restart.specializer.0, restart.result_kind
             );
             indent_line(out, indent + 2);
@@ -1571,7 +1582,12 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .classes
                 .get(restart.specializer.0 as usize)
                 .map_or(0, |class| class.definition.raw());
-            let _ = write!(out, "handle({definition}:{:?}:body=", restart.result_kind);
+            let condition = restart.condition_local.map_or(u32::MAX, |local| local.0);
+            let _ = write!(
+                out,
+                "handle({definition}:{:?}:condition={condition}:body=",
+                restart.result_kind
+            );
             fingerprint_sem_expr(module, body, out);
             out.push_str(":restart=");
             fingerprint_sem_expr(module, &restart.body, out);
@@ -1881,14 +1897,14 @@ mod tests {
                       define class <square> (<object>)\n  slot side;\nend;\n\
                       define class <invalid-radius> (<object>)\n  slot fallback;\nend;\n\
                       define generic area(x);\n\
-                      define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart <invalid-radius> 0 end\nend;\n\
+                      define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback end\nend;\n\
                       define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                       define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
         let after = "define class <circle> (<object>)\n  slot radius;\nend;\n\
                      define class <square> (<object>)\n  slot side;\nend;\n\
                      define class <invalid-radius> (<object>)\n  slot fallback;\nend;\n\
                      define generic area(x);\n\
-                     define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart <invalid-radius> 1 end\nend;\n\
+                     define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback + 1 end\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
         let mut session = IncrementalCompilerSession::new();

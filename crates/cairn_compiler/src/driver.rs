@@ -158,7 +158,7 @@ mod tests {
     fn compiles_and_runs_recoverable_restart() {
         let value = compile_and_run_main(
             "define class <bad> (<object>)\n  slot fallback;\nend;\n\
-             define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+             define function main()\n  handle signal(make(<bad>, fallback: 42)) with restart e :: <bad> e.fallback end\nend;",
         )
         .expect("program should compile and run");
         assert_eq!(value, 42);

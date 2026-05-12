@@ -12,7 +12,7 @@ end;
 define function main()
   handle
     signal(make(<bad-input>, fallback: 0))
-  with restart <other-input>
-    1
+  with restart e :: <other-input>
+    e.fallback
   end
 end;

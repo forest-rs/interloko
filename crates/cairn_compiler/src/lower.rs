@@ -469,6 +469,7 @@ struct ActiveRestart {
     specializer: sem::ClassId,
     signal_label: LabelId,
     result: Value,
+    condition: Option<Value>,
 }
 
 struct BodyLowering<'module> {
@@ -848,6 +849,13 @@ impl<'module> BodyLowering<'module> {
                 "signal condition class does not match restart",
             ));
         }
+        if let Some(condition_slot) = active.condition {
+            self.instructions.push(Instr::Move {
+                dst: condition_slot.reg,
+                src: condition.reg,
+                span,
+            });
+        }
         self.instructions.push(Instr::Jump {
             label: active.signal_label,
             span,
@@ -928,12 +936,16 @@ impl<'module> BodyLowering<'module> {
         span: Span,
     ) -> Result<Value, LowerError> {
         let result = self.alloc(value_kind(restart.result_kind)?);
+        let condition = restart
+            .condition_local
+            .map(|_| self.alloc(ValueKind::Object(Some(restart.specializer))));
         let signal_label = self.alloc_label();
         let join_label = self.alloc_label();
         self.active_restarts.push(ActiveRestart {
             specializer: restart.specializer,
             signal_label,
             result,
+            condition,
         });
         let body_value = self.lower_expr(body)?;
         self.active_restarts.pop();
@@ -955,6 +967,21 @@ impl<'module> BodyLowering<'module> {
         self.instructions.push(Instr::Label {
             label: signal_label,
         });
+        if let Some(local_id) = restart.condition_local {
+            let Some(condition) = condition else {
+                return Err(invalid_semantic("restart condition local has no register"));
+            };
+            self.set_local(local_id, condition)?;
+            let local = self
+                .current_local(local_id)
+                .ok_or_else(|| invalid_semantic("restart condition local id is out of range"))?;
+            self.locals.push(Local {
+                source: local_id,
+                name: local.name.clone(),
+                kind: condition.kind,
+                reg: condition.reg,
+            });
+        }
         let restart_value = self.lower_expr(&restart.body)?;
         if restart_value.kind != result.kind {
             return Err(invalid_semantic(
@@ -1344,13 +1371,15 @@ mod tests {
     fn lowers_signal_handle_and_restart_join() {
         let module = lower_source(
             "define class <bad> (<object>)\n  slot fallback;\nend;\n\
-             define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+             define function main()\n  handle signal(make(<bad>, fallback: 42)) with restart e :: <bad> e.fallback end\nend;",
         );
 
         let dump = module.dump();
         assert!(dump.contains("make <bad>(%r"));
         assert!(dump.contains("jmp bb0"));
-        assert!(dump.contains("const.i64 42"));
+        assert!(dump.contains("local l0 e = %r"));
+        assert!(dump.contains("slot.read %r"));
+        assert!(dump.contains("<bad>.fallback"));
         assert!(dump.contains(" = mov "));
     }
 }

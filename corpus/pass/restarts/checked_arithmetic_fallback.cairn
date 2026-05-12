@@ -1,6 +1,7 @@
 // expect: run 99
 // expect: diagnostics 0
 // expect: dump sem contains handle restart
+// expect: dump sem contains slot-read c0.s0
 // expect: dump lowered contains make <negative-input>
 
 define class <negative-input> (<object>)
@@ -14,8 +15,8 @@ define function checked-double(x)
     else
       x * 2
     end
-  with restart <negative-input>
-    99
+  with restart e :: <negative-input>
+    e.fallback
   end
 end;
 

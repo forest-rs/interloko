@@ -1,5 +1,53 @@
 # Plans
 
+## Bind Restart Condition Objects
+
+Ticket: `cai-240w`
+
+### Goal
+
+Let a lexical restart handler bind the signaled condition object and inspect its
+ordinary nominal slots:
+
+```text
+handle
+  signal(make(<invalid-radius>, fallback: 0))
+with restart e :: <invalid-radius>
+  e.fallback
+end
+```
+
+This lifts the first restart slice's "no condition parameter" restriction
+without adding a runtime handler stack or special execution_tape opcodes.
+
+### Non-Goals
+
+- No cross-call signaling.
+- No dynamic handler lookup.
+- No runtime condition stack.
+- No multiple restarts or restart selection.
+- No new condition declaration form.
+- No new tape opcodes.
+
+### Invariants
+
+- The bound name is visible only inside the restart handler expression.
+- The binding's semantic value category is the nominal condition object class.
+- `signal` still evaluates the condition object once on the signal edge.
+- Lowering moves that object into the handler-local register before jumping to
+  the restart handler label.
+- The existing unbound syntax remains accepted for simple handlers.
+
+### Steps
+
+1. Extend restart-clause syntax and AST with an optional `name ::` binding.
+2. Bind the restart condition as a scoped semantic local for the handler body.
+3. Lower the signal edge by moving the condition object into the handler-local
+   register before the restart jump.
+4. Update AST/semantic dumps, fingerprints, corpus fixtures, and incremental
+   tests to show condition-slot access.
+5. Record progress notes and run the full workspace gates.
+
 ## Build Recoverable Condition Restart Slice
 
 Ticket: `cai-xvew`
@@ -31,7 +79,7 @@ selection, or runtime stack inspection.
 
 ### Syntax
 
-The first syntax stays expression-oriented:
+The initial syntax was expression-oriented:
 
 ```text
 handle BODY
@@ -66,8 +114,8 @@ ordinary class <invalid-radius>
 - A `signal` condition must have a statically known nominal object class.
 - The nearest active restart must specialize the signaled condition class.
 - The handled body and restart handler must produce the same value category.
-- The restart handler receives no condition parameter in this first slice.
-  Inspecting condition payloads from handlers is deferred.
+- The first slice did not bind the condition object. Ticket `cai-240w` adds the
+  handler-local binding form.
 - The core compiler crate remains `no_std + alloc`.
 
 ### Steps

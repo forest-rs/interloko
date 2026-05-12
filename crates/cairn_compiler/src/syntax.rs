@@ -914,6 +914,22 @@ impl<'source> Parser<'source> {
         let start = self.current_span();
         let mut children = Vec::new();
         self.expect(TokenKind::Restart, &mut children, "expected `restart`");
+        if self.at(TokenKind::Ident)
+            && self
+                .peek_non_trivia(1)
+                .is_some_and(|(_, token)| token.kind == TokenKind::DoubleColon)
+        {
+            self.expect(
+                TokenKind::Ident,
+                &mut children,
+                "expected restart condition name",
+            );
+            self.expect(
+                TokenKind::DoubleColon,
+                &mut children,
+                "expected `::` after restart condition name",
+            );
+        }
         self.expect(
             TokenKind::TypeName,
             &mut children,
@@ -1255,7 +1271,7 @@ mod tests {
     #[test]
     fn parse_handle_restart_expression() {
         let tree = parse(
-            "define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+            "define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart e :: <bad> e.fallback end\nend;",
         );
         assert_eq!(tree.diagnostics, Vec::new());
         let body = tree
@@ -1284,6 +1300,11 @@ mod tests {
             tree.tokens
                 .iter()
                 .any(|token| token.kind == TokenKind::Restart)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::DoubleColon)
         );
     }
 }

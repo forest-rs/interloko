@@ -345,6 +345,10 @@ impl Expr {
 pub struct Restart {
     /// Stable-ish AST node identity.
     pub id: AstNodeId,
+    /// Optional handler-local name bound to the signaled condition object.
+    pub condition_name: Option<String>,
+    /// Source span for the optional condition binding name.
+    pub condition_span: Span,
     /// Nominal condition class handled by this restart.
     pub class_name: String,
     /// Handler expression evaluated when a matching condition is signaled.
@@ -1017,6 +1021,8 @@ impl<'tree> Lowering<'tree> {
             })),
             restart: restart.unwrap_or_else(|| Restart {
                 id: self.ast_id(node),
+                condition_name: None,
+                condition_span: node.span,
                 class_name: String::new(),
                 body: Box::new(Expr::Error {
                     id: self.ast_id(node),
@@ -1029,6 +1035,7 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_restart(&mut self, node: &CstNode) -> Restart {
+        let condition = self.first_restart_condition_name(node);
         let class_name = self
             .first_token_text(node, TokenKind::TypeName)
             .map_or_else(String::new, |(_, text)| text.to_string());
@@ -1045,6 +1052,8 @@ impl<'tree> Lowering<'tree> {
             });
         Restart {
             id: self.ast_id(node),
+            condition_name: condition.map(|(_, text)| text.to_string()),
+            condition_span: condition.map_or(node.span, |(span, _)| span),
             class_name,
             body: Box::new(body),
             span: node.span,
@@ -1067,6 +1076,30 @@ impl<'tree> Lowering<'tree> {
             }
             _ => None,
         })
+    }
+
+    fn first_restart_condition_name(&self, node: &CstNode) -> Option<(Span, &'tree str)> {
+        let mut tokens = node.children.iter().filter_map(|child| match child {
+            CstElement::Token(index) => Some(*index),
+            CstElement::Node(_) => None,
+        });
+        while let Some(index) = tokens.next() {
+            let token = self.tree.tokens[index];
+            if token.kind != TokenKind::Restart {
+                continue;
+            }
+            let name_index = tokens.next()?;
+            let name = self.tree.tokens[name_index];
+            if name.kind != TokenKind::Ident {
+                return None;
+            }
+            let double_colon_index = tokens.next()?;
+            if self.tree.tokens[double_colon_index].kind != TokenKind::DoubleColon {
+                return None;
+            }
+            return Some((name.span, name.text(&self.tree.source)));
+        }
+        None
     }
 
     fn definition_name_after(&self, node: &CstNode, keyword: TokenKind) -> String {
@@ -1185,7 +1218,7 @@ mod tests {
     #[test]
     fn lowers_signal_handle_and_restart() {
         let tree = syntax::parse(
-            "define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+            "define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart e :: <bad> e.fallback end\nend;",
         );
         let module = lower(&tree);
 
@@ -1200,9 +1233,11 @@ mod tests {
             panic!("expected handle expression");
         };
         assert_eq!(restart.class_name, "<bad>");
+        assert_eq!(restart.condition_name.as_deref(), Some("e"));
         assert!(matches!(
             restart.body.as_ref(),
-            Expr::Number { value: 42, .. }
+            Expr::SlotRead { receiver, slot, .. }
+                if slot == "fallback" && matches!(receiver.as_ref(), Expr::Name { name, .. } if name == "e")
         ));
         assert!(matches!(
             body.as_ref(),

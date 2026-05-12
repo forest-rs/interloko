@@ -414,6 +414,8 @@ impl Expr {
 pub struct Restart {
     /// Nominal condition class handled by this restart.
     pub specializer: ClassId,
+    /// Optional handler-local bound to the signaled condition object.
+    pub condition_local: Option<LocalId>,
     /// Handler body evaluated when a matching condition is signaled.
     pub body: Box<Expr>,
     /// Handler result category.
@@ -448,6 +450,7 @@ struct GenericSymbol {
 
 struct FunctionContext {
     locals: Vec<Local>,
+    visible_locals: Vec<bool>,
     active_restarts: Vec<ActiveRestart>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -462,6 +465,7 @@ impl FunctionContext {
     fn new() -> Self {
         Self {
             locals: Vec::new(),
+            visible_locals: Vec::new(),
             active_restarts: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -482,12 +486,16 @@ impl FunctionContext {
             kind,
             span,
         });
+        self.visible_locals.push(true);
         id
     }
 
     fn find_local(&self, name: &str) -> Option<LocalId> {
         self.locals
             .iter()
+            .enumerate()
+            .filter(|(index, _)| self.visible_locals.get(*index).copied().unwrap_or(false))
+            .map(|(_, local)| local)
             .find(|local| local.name == name)
             .map(|local| local.id)
     }
@@ -496,6 +504,16 @@ impl FunctionContext {
         self.locals
             .get(id.0 as usize)
             .map_or(ValueKind::Error, |local| local.kind)
+    }
+
+    fn scope_start(&self) -> usize {
+        self.locals.len()
+    }
+
+    fn hide_locals_from(&mut self, start: usize) {
+        for visible in self.visible_locals.iter_mut().skip(start) {
+            *visible = false;
+        }
     }
 
     fn push_restart(&mut self, restart: ActiveRestart) {
@@ -982,8 +1000,25 @@ impl Lowering {
                 ));
                 ClassId(u32::MAX)
             });
+
+        let scope_start = ctx.scope_start();
+        let condition_local = restart.condition_name.as_ref().map(|name| {
+            if ctx.find_local(name).is_some() {
+                ctx.diagnostics.push(Diagnostic::error(
+                    restart.condition_span,
+                    format!("restart condition `{name}` is already defined"),
+                ));
+            }
+            ctx.add_local(
+                self.restart_condition_definition(restart, name),
+                name.clone(),
+                ValueKind::Object(specializer),
+                restart.condition_span,
+            )
+        });
         let restart_body = self.lower_expr(ctx, &restart.body);
         let restart_kind = self.expr_kind(ctx, &restart_body);
+        ctx.hide_locals_from(scope_start);
 
         ctx.push_restart(ActiveRestart {
             specializer,
@@ -1007,6 +1042,7 @@ impl Lowering {
             body: Box::new(body),
             restart: Restart {
                 specializer,
+                condition_local,
                 body: Box::new(restart_body),
                 result_kind: restart_kind,
                 span: restart.span,
@@ -1167,6 +1203,15 @@ impl Lowering {
             &owner.raw().to_string(),
         )
     }
+
+    fn restart_condition_definition(&self, restart: &ast::Restart, name: &str) -> DefinitionId {
+        DefinitionId::new(
+            self.source_file,
+            DefinitionKind::Local,
+            name,
+            &restart.id.raw().to_string(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1290,7 +1335,7 @@ mod tests {
     fn resolves_signal_handle_and_restart() {
         let module = lower_source(
             "define class <bad> (<object>)\n  slot fallback;\nend;\n\
-             define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart <bad> 42 end\nend;",
+             define function main()\n  handle signal(make(<bad>, fallback: 42)) with restart e :: <bad> e.fallback end\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());
@@ -1300,6 +1345,22 @@ mod tests {
         };
         assert_eq!(restart.specializer, ClassId(0));
         assert_eq!(restart.result_kind, ValueKind::I64);
+        let condition_local = restart
+            .condition_local
+            .expect("restart should bind condition object");
+        assert_eq!(
+            module.functions[0].locals[condition_local.0 as usize].kind,
+            ValueKind::Object(ClassId(0))
+        );
+        assert!(matches!(
+            restart.body.as_ref(),
+            Expr::SlotRead {
+                receiver,
+                class: ClassId(0),
+                slot: SlotId(0),
+                ..
+            } if matches!(receiver.as_ref(), Expr::Local { local, .. } if *local == condition_local)
+        ));
         assert!(matches!(
             body.as_ref(),
             Expr::Signal {
@@ -1308,6 +1369,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn restart_condition_binding_is_handler_scoped() {
+        let module = lower_source(
+            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+             define function main()\n  let recovered = handle signal(make(<bad>, fallback: 0)) with restart e :: <bad> e.fallback end;\n  e.fallback\nend;",
+        );
+
+        assert!(
+            module
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "unresolved local `e`")
+        );
     }
 
     #[test]

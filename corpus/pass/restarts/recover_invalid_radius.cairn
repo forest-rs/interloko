@@ -2,6 +2,8 @@
 // expect: diagnostics 0
 // expect: dump ast contains handle
 // expect: dump sem contains signal
+// expect: dump sem contains condition=l
+// expect: dump sem contains slot-read c1.s0
 // expect: dump lowered contains jmp
 
 define class <circle> (<object>)
@@ -21,8 +23,8 @@ define method area(c :: <circle>)
     else
       c.radius * c.radius
     end
-  with restart <invalid-radius>
-    0
+  with restart e :: <invalid-radius>
+    e.fallback
   end
 end;
 
