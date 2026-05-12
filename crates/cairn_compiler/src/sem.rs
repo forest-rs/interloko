@@ -329,8 +329,8 @@ pub struct Class {
     pub superclass: Option<ClassId>,
     /// Whether effective slot finalization completed for this class.
     pub finalized: bool,
-    /// Declared source slots.
-    pub slots: Vec<Slot>,
+    /// Direct source slot definitions.
+    pub direct_slots: Vec<Slot>,
     /// Computed effective slots in deterministic instance-layout order.
     pub effective_slots: Vec<EffectiveSlot>,
     /// Source span.
@@ -1021,7 +1021,7 @@ impl Lowering {
                 origin: ClassOrigin::Native,
                 superclass: None,
                 finalized: false,
-                slots: Vec::new(),
+                direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
                 span: class.span,
             });
@@ -1063,7 +1063,7 @@ impl Lowering {
                 .collect::<Vec<_>>();
             self.check_duplicate_init_keywords(class, &slots);
             if let Some(lowered_class) = self.classes.get_mut(class_index) {
-                lowered_class.slots = slots;
+                lowered_class.direct_slots = slots;
             }
         }
 
@@ -1138,7 +1138,7 @@ impl Lowering {
                 },
                 superclass: None,
                 finalized: false,
-                slots,
+                direct_slots: slots,
                 effective_slots: Vec::new(),
                 span: Span::default(),
             });
@@ -1209,7 +1209,7 @@ impl Lowering {
                 let slot_kind = self
                     .classes
                     .get(class_index)
-                    .and_then(|class| class.slots.get(slot_index))
+                    .and_then(|class| class.direct_slots.get(slot_index))
                     .map_or(ValueKind::Error, |slot| slot.kind);
                 let value_kind = self.expr_kind(&value);
                 if !self.kinds_match(slot_kind, value_kind) {
@@ -1231,7 +1231,7 @@ impl Lowering {
             if let Some(slot) = self
                 .classes
                 .get_mut(class_index)
-                .and_then(|class| class.slots.get_mut(slot_index))
+                .and_then(|class| class.direct_slots.get_mut(slot_index))
             {
                 slot.init_value = Some(value);
             }
@@ -1278,7 +1278,7 @@ impl Lowering {
             }
         }
 
-        let direct_slots = self.classes[class_index].slots.clone();
+        let direct_slots = self.classes[class_index].direct_slots.clone();
         for slot in &direct_slots {
             let id = SlotId(u32::try_from(effective_slots.len()).unwrap_or(u32::MAX));
             effective_slots.push(Self::direct_effective_slot(owner, id, slot));
@@ -2598,15 +2598,18 @@ impl Lowering {
     }
 
     fn has_accessor(&self, name: &str) -> bool {
-        self.classes
-            .iter()
-            .any(|class| class.slots.iter().any(|slot| slot.accessor.name == name))
+        self.classes.iter().any(|class| {
+            class
+                .direct_slots
+                .iter()
+                .any(|slot| slot.accessor.name == name)
+        })
     }
 
     fn resolve_accessor_callable(&self, name: &str) -> AccessorResolution {
         let mut found = None;
         for class in &self.classes {
-            for slot in &class.slots {
+            for slot in &class.direct_slots {
                 if slot.accessor.name != name {
                     continue;
                 }
@@ -2876,7 +2879,7 @@ mod tests {
         assert_eq!(
             module.functions[0].locals[0].kind,
             ValueKind::KnownCallable(KnownCallable::SlotAccessor {
-                accessor: module.classes[0].slots[0].accessor.definition,
+                accessor: module.classes[0].direct_slots[0].accessor.definition,
                 class: ClassId(0),
                 slot: SlotId(0),
             })
@@ -2919,7 +2922,7 @@ mod tests {
             }
         );
         assert_eq!(
-            module.classes[0].slots[0].origin,
+            module.classes[0].direct_slots[0].origin,
             SlotOrigin::HostBacked {
                 host_class: HostClassId(0),
                 host_slot: HostSlotId(0),
@@ -2953,11 +2956,11 @@ mod tests {
         );
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.classes[0].id, ClassId(0));
-        assert_eq!(module.classes[0].slots[0].id, SlotId(0));
-        assert_eq!(module.classes[0].slots[0].kind, ValueKind::I64);
+        assert_eq!(module.classes[0].direct_slots[0].id, SlotId(0));
+        assert_eq!(module.classes[0].direct_slots[0].kind, ValueKind::I64);
         assert_eq!(
-            module.classes[0].slots[0].accessor.definition,
-            module.classes[0].slots[0].definition
+            module.classes[0].direct_slots[0].accessor.definition,
+            module.classes[0].direct_slots[0].definition
         );
         assert_eq!(module.generics[0].id, GenericFunctionId(0));
         assert_eq!(module.methods[0].id, MethodId(0));
@@ -2998,7 +3001,7 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.classes[1].superclass, Some(ClassId(0)));
         assert!(module.classes[1].finalized);
-        assert_eq!(module.classes[1].slots.len(), 1);
+        assert_eq!(module.classes[1].direct_slots.len(), 1);
         assert_eq!(module.classes[1].effective_slots.len(), 2);
         assert_eq!(module.classes[1].effective_slots[0].name, "x");
         assert_eq!(
@@ -3131,7 +3134,7 @@ mod tests {
         else {
             panic!("expected accessor call");
         };
-        assert_eq!(*accessor, module.classes[0].slots[0].definition);
+        assert_eq!(*accessor, module.classes[0].direct_slots[0].definition);
         assert_eq!(*class, ClassId(0));
         assert_eq!(*slot, SlotId(0));
         assert_eq!(*result_kind, ValueKind::I64);
@@ -3302,12 +3305,12 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[0].slots[0].kind, ValueKind::I64);
+        assert_eq!(module.classes[0].direct_slots[0].kind, ValueKind::I64);
         assert_eq!(
-            module.classes[1].slots[0].kind,
+            module.classes[1].direct_slots[0].kind,
             ValueKind::Object(ClassId(0))
         );
-        assert_eq!(module.classes[1].slots[1].kind, ValueKind::Bool);
+        assert_eq!(module.classes[1].direct_slots[1].kind, ValueKind::Bool);
         assert_eq!(module.functions[0].result_kind, ValueKind::I64);
     }
 
@@ -3319,11 +3322,11 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[0].slots[0].type_name, "<object>");
-        assert_eq!(module.classes[0].slots[0].kind, ValueKind::Any);
-        assert_eq!(module.classes[0].slots[0].init_keyword, "value");
-        assert!(!module.classes[0].slots[0].required_init_keyword);
-        assert_eq!(module.classes[0].slots[1].kind, ValueKind::Any);
+        assert_eq!(module.classes[0].direct_slots[0].type_name, "<object>");
+        assert_eq!(module.classes[0].direct_slots[0].kind, ValueKind::Any);
+        assert_eq!(module.classes[0].direct_slots[0].init_keyword, "value");
+        assert!(!module.classes[0].direct_slots[0].required_init_keyword);
+        assert_eq!(module.classes[0].direct_slots[1].kind, ValueKind::Any);
         assert_eq!(module.functions[0].result_kind, ValueKind::Any);
     }
 
@@ -3335,10 +3338,10 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[0].slots[0].init_keyword, "r");
-        assert!(module.classes[0].slots[0].required_init_keyword);
-        assert_eq!(module.classes[0].slots[1].init_keyword, "payload");
-        assert!(!module.classes[0].slots[1].required_init_keyword);
+        assert_eq!(module.classes[0].direct_slots[0].init_keyword, "r");
+        assert!(module.classes[0].direct_slots[0].required_init_keyword);
+        assert_eq!(module.classes[0].direct_slots[1].init_keyword, "payload");
+        assert!(!module.classes[0].direct_slots[1].required_init_keyword);
         assert_eq!(module.functions[0].result_kind, ValueKind::I64);
     }
 
@@ -3350,7 +3353,7 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        let radius = &module.classes[0].slots[0];
+        let radius = &module.classes[0].direct_slots[0];
         assert_eq!(radius.init_keyword, "r");
         assert!(radius.required_init_keyword);
         assert_eq!(radius.allocation, SlotAllocation::Instance);
@@ -3359,7 +3362,7 @@ mod tests {
             radius.init_value,
             Some(Expr::ConstI64 { value: 10, .. })
         ));
-        let cached = &module.classes[0].slots[1];
+        let cached = &module.classes[0].direct_slots[1];
         assert_eq!(cached.kind, ValueKind::Any);
         assert_eq!(cached.mutability, SlotMutability::Mutable);
         assert!(matches!(

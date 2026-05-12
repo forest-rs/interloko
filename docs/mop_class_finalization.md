@@ -9,7 +9,7 @@ claiming CLOS compatibility.
 - A **class metaobject** is the semantic record for a nominal class. Today it is
   `sem::Class`.
 - A **direct slot definition** is a slot written in the source class body. Today
-  it is `sem::Slot`, stored in `Class::slots`.
+  it is `sem::Slot`, stored in `Class::direct_slots`.
 - An **effective slot definition** is the computed slot visible on instances of
   a finalized class. Today it is `sem::EffectiveSlot`, stored in
   `Class::effective_slots`.

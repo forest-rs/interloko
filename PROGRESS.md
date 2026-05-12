@@ -815,8 +815,8 @@
   - required init keywords such as `required-init-keyword: radius:`;
   - default initializer expressions with `init-value: <expr>`;
   - `constant slot` metadata.
-- Semantic slots now record declared type, normalized value category, init
-  keyword, required flag, optional default initializer expression, instance
+- Semantic direct slots now record declared type, normalized value category,
+  init keyword, required flag, optional default initializer expression, instance
   allocation metadata, mutability metadata, origin, and stable accessor
   identity.
 - Object construction now fills omitted slots from `init-value:` expressions.
@@ -856,7 +856,7 @@
   `define class <child> (<parent>)`. Omitting the superclass list still
   normalizes to the `<object>` root.
 - Semantic classes now distinguish:
-  - direct slots, which are source-authored facts;
+  - `direct_slots`, which are source-authored facts;
   - effective slots, which are computed finalization facts.
 - Class finalization computes effective slots in deterministic layout order:
   parent effective slots first, then the class's direct slots.
@@ -901,6 +901,12 @@
   combination, inheritance-aware generic dispatch, setters, sealed slot
   optimization, persistence, host-backed construction, and generalized
   mutability enforcement remain deferred.
+
+### Migration Notes
+
+- `sem::Class::slots` was renamed to `sem::Class::direct_slots`. Code that
+  wants source-authored slot declarations should use `direct_slots`; code that
+  wants construction/read/runtime layout should use `effective_slots`.
 
 ## Intentionally Deferred
 

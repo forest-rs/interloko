@@ -1657,10 +1657,10 @@ fn dump_sem(module: &sem::Module) -> String {
             class.name,
             sem_class_origin_label(class.origin),
             class.finalized,
-            class.slots.len(),
+            class.direct_slots.len(),
             class.effective_slots.len()
         );
-        for slot in &class.slots {
+        for slot in &class.direct_slots {
             let _ = writeln!(
                 out,
                 "  direct slot s{} {} {} :: {} origin={} accessor {} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
@@ -1801,11 +1801,11 @@ fn dump_mop(module: &sem::Module) -> String {
             class.name,
             sem_class_origin_label(class.origin),
             class.finalized,
-            class.slots.len(),
+            class.direct_slots.len(),
             class.effective_slots.len()
         );
         let _ = writeln!(out, "    direct-slots:");
-        for slot in &class.slots {
+        for slot in &class.direct_slots {
             let _ = writeln!(
                 out,
                 "      slot s{} {} {} :: {} kind={} origin={} init-keyword: {}:{} init-value={} allocation={} mutability={} runtime={}",
@@ -2174,7 +2174,7 @@ fn project_environment_class(
             class.definition,
             class.id.0,
             class.finalized,
-            class.slots.len(),
+            class.direct_slots.len(),
             class.effective_slots.len()
         ),
     }));
@@ -2961,7 +2961,7 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 sem_class_origin_label(class.origin),
                 sem_superclass_label(module, class.superclass),
                 class
-                    .slots
+                    .direct_slots
                     .iter()
                     .map(|slot| format!(
                         "{}={}:{}:accessor={}:{}:{}:{}:{}:{}",
@@ -2998,7 +2998,7 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     .join(",")
             ),
         });
-        for slot in &class.slots {
+        for slot in &class.direct_slots {
             definitions.push(DefinitionFingerprint {
                 report: DefinitionReport {
                     id: slot.definition,
