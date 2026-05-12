@@ -844,11 +844,63 @@
 
 ### Deferred Slot Design
 
-- Slot writes/setters, inherited slots, class allocation, each-subclass
+- Slot writes/setters, inherited slot specifications, class allocation, each-subclass
   allocation, virtual/computed slots, full Dylan initialization protocol hooks,
   before/after/around init methods, sealed slot optimization, persistence/image
   storage, host-backed construction, and generalized mutability enforcement are
   still deferred.
+
+## Implemented: AMOP-Informed Class Finalization And Inherited Slots
+
+- AST lowering now preserves the explicit superclass written in
+  `define class <child> (<parent>)`. Omitting the superclass list still
+  normalizes to the `<object>` root.
+- Semantic classes now distinguish:
+  - direct slots, which are source-authored facts;
+  - effective slots, which are computed finalization facts.
+- Class finalization computes effective slots in deterministic layout order:
+  parent effective slots first, then the class's direct slots.
+- Inherited effective slots preserve the original direct slot/accessor
+  definition identity while receiving a subclass-local layout slot. This keeps
+  definition IDs stable while allowing the runtime to read the correct child
+  object field.
+- `make(<child>, ...)` initializes all effective slots. Inherited init keywords,
+  required keywords, and `init-value:` defaults work the same way as direct
+  slots, and explicit keyword values still override defaults.
+- Slot reads and explicit accessor calls resolve against the receiver class's
+  effective slots, so `child.parent_slot` and `parent_slot(child)` work for
+  inherited slots.
+- Finalization diagnostics reject unknown superclasses, primitive
+  superclasses, host-backed superclasses, duplicate effective slot names,
+  duplicate effective init keywords, and duplicate effective accessors.
+- Runtime layout is derived from effective slots. `execution_tape` still sees
+  ordinary construction/read host calls; no inheritance-specific tape opcodes
+  were added.
+- Semantic/MOP dumps and EOP inspection now show superclass, finalization
+  status, direct slots, effective slots, direct vs inherited source, source
+  slot identity, and effective layout order.
+- Incremental tests cover harmless superclass/slot trivia, parent slot edits
+  affecting child finalization and executable artifacts, child-only slot edits
+  leaving parent definitions unchanged, and adding a subclass while preserving
+  parent definition IDs.
+- Corpus coverage includes inherited construction/read cases, inherited
+  `init-value:`, inherited required keywords, parent+child slots, inherited
+  accessor calls, constant inherited slots, and expected superclass/conflict
+  diagnostics.
+- `docs/mop_class_finalization.md` explains the AMOP-inspired vocabulary and
+  the boundary between source facts, computed MOP facts, runtime layout, and
+  exposed workbench/EOP views.
+
+### Deferred Class-Finalization Design
+
+- AMOP is vocabulary and architecture guidance here, not CLOS compatibility.
+- Dylan inherited slot specifications, initialization argument specifications,
+  init methods, and full initialization protocol hooks remain deferred.
+- Multiple inheritance, class precedence lists, public metaclass protocols,
+  user-defined metaclasses, class redefinition, instance obsolescence, method
+  combination, inheritance-aware generic dispatch, setters, sealed slot
+  optimization, persistence, host-backed construction, and generalized
+  mutability enforcement remain deferred.
 
 ## Intentionally Deferred
 

@@ -1,5 +1,56 @@
 # Plans
 
+## Build AMOP-Informed Class Finalization And Inherited Slots
+
+### Goal
+
+Add a narrow, AMOP-informed class finalization slice: source classes may name a
+single superclass, semantic lowering computes direct and effective slots, and
+construction/reads/runtime layout consume the effective slot layout.
+
+### Fence
+
+AST and semantic lowering own class-source facts and computed finalization
+facts. Runtime layout, lowered IR, tape emission, and EOP/MOP dumps are views or
+consumers of those finalized facts. This slice does not implement a public AMOP
+API, metaclasses, class redefinition, multiple inheritance, setters, host-backed
+construction, persistence, or new tape opcodes.
+
+### Invariants
+
+- `<object>` remains the root/default superclass.
+- Direct slots are source-authored facts with stable direct IDs.
+- Effective slots are computed facts: parent effective slots first, then direct
+  slots.
+- Inherited effective slots preserve the original direct slot/accessor
+  definition identity while receiving a deterministic layout position in the
+  subclass.
+- Construction and slot reads operate on effective slots.
+- Dumps and EOP inspection make source facts vs computed facts explicit.
+- Host-backed classes remain non-constructible and are not inheritance parents
+  in this slice.
+
+### Steps
+
+1. Thread superclass syntax through AST and semantic class metadata.
+2. Resolve and finalize native classes, computing effective slots and duplicate
+   effective slot/init-keyword/accessor diagnostics.
+3. Teach construction, accessor lookup, lowered IR, runtime layout, dumps, and
+   EOP inspection to use finalized effective slots.
+4. Add corpus, unit, incremental, and CLI coverage for inherited construction,
+   inherited reads/accessors/defaults/required keywords, and error cases.
+5. Add AMOP/finalization docs, update slot/progress notes, run all gates, and
+   commit in coherent slices.
+
+### Risks
+
+- Effective slot IDs must be layout IDs, while definition/accessor identity
+  stays tied to the source slot.
+- Parent changes must affect child finalization without making child-only edits
+  appear to mutate the parent.
+- AMOP vocabulary must clarify architecture without implying CLOS/Dylan
+  compatibility or an exposed metaclass protocol.
+
 ## Build Richer Dylan-Shaped Slots
 
 ### Goal

@@ -54,10 +54,32 @@ define class <box> (<object>)
 end;
 ```
 
+Classes may name one superclass. `<object>` is the root/default superclass:
+
+```cairn
+define class <shape> (<object>)
+  slot radius :: <integer>, required-init-keyword: radius:;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main()
+  make(<circle>, radius: 10).radius
+end;
+```
+
 ## Semantics
 
 - Slot type metadata is normalized during semantic lowering. Missing type
   annotations become `<object>`.
+- Class finalization separates direct slots from effective slots. Direct slots
+  are source-authored facts. Effective slots are computed facts used for
+  construction, reads, runtime layout, MOP dumps, and EOP inspection.
+- Effective slot order is parent effective slots first, followed by the class's
+  direct slots in source order.
+- Inherited effective slots keep the original direct slot/accessor definition
+  identity while receiving a subclass-local layout slot.
 - Init keywords are resolved semantically before lowering. Unknown keywords,
   duplicate keywords, and missing required keywords produce focused
   diagnostics.
@@ -76,18 +98,21 @@ Use the workbench to inspect the semantic facts:
 ```sh
 cargo run -p cairn_lab -- dump corpus/pass/objects/constant_slot.cairn --stage mop
 cargo run -p cairn_lab -- dump corpus/pass/objects/constant_slot.cairn --stage eop
+cargo run -p cairn_lab -- dump corpus/pass/objects/inherited_parent_child_slots.cairn --stage mop
 cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/slot_defaults.cairn slot:c0.s0
 ```
 
 The slot records show the declared type, init keyword, required/default status,
-allocation, mutability, runtime representation, and accessor relationship.
+allocation, mutability, runtime representation, accessor relationship, and
+direct/inherited source. For inherited slots, `source-slot=class:cN.sM` points
+back to the direct slot that introduced the effective slot.
 
 ## Deferred Design
 
 This is not the full Dylan initialization protocol. The following are deferred:
 
 - slot writes and setters;
-- inherited slots;
+- inherited slot specifications that override inherited defaults;
 - class allocation and each-subclass allocation;
 - virtual or computed slots;
 - before/after/around initialization methods;
