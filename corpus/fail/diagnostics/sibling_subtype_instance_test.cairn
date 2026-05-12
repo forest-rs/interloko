@@ -1,0 +1,14 @@
+// expect: diagnostic contains instance? test is impossible: <square> is not <circle>
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define function main()
+  instance?(make(<square>), <circle>)
+end;

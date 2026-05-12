@@ -56,14 +56,19 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/objects/typed_slots.cairn"));
     assert!(out.contains("pass/objects/inherited_slot_read.cairn"));
     assert!(out.contains("pass/objects/inherited_parent_child_slots.cairn"));
+    assert!(out.contains("pass/objects/subtype_instance_cast.cairn"));
+    assert!(out.contains("pass/objects/parent_typed_slot_child.cairn"));
     assert!(out.contains("pass/functions/typed_boolean.cairn"));
     assert!(out.contains("pass/functions/typed_nominal_object.cairn"));
     assert!(out.contains("pass/functions/typed_class_object.cairn"));
     assert!(out.contains("pass/functions/typed_object_top.cairn"));
+    assert!(out.contains("pass/functions/subtype_direct_call.cairn"));
     assert!(out.contains("fail/diagnostics/function_argument_type.cairn"));
     assert!(out.contains("fail/diagnostics/function_return_type.cairn"));
     assert!(out.contains("pass/generics/typed_contract_area.cairn"));
     assert!(out.contains("pass/generics/typed_generic_object_result.cairn"));
+    assert!(out.contains("pass/generics/parent_method_dispatch_child.cairn"));
+    assert!(out.contains("pass/generics/most_specific_subclass_dispatch.cairn"));
     assert!(out.contains("fail/diagnostics/generic_argument_type.cairn"));
     assert!(out.contains("fail/diagnostics/generic_method_return_type.cairn"));
     assert!(out.contains("fail/diagnostics/generic_method_specializer_type.cairn"));
@@ -76,15 +81,18 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/objects/cast_object_slot.cairn"));
     assert!(out.contains("pass/host/host_backed_slot.cairn"));
     assert!(out.contains("pass/host/host_backed_dispatch.cairn"));
+    assert!(out.contains("pass/restarts/subclass_condition_parent_restart.cairn"));
     assert!(out.contains("fail/diagnostics/impossible_instance_test.cairn"));
     assert!(out.contains("fail/diagnostics/impossible_cast.cairn"));
+    assert!(out.contains("fail/diagnostics/sibling_subtype_instance_test.cairn"));
+    assert!(out.contains("fail/diagnostics/sibling_subtype_cast.cairn"));
     assert!(out.contains("fail/diagnostics/primitive_instance_test.cairn"));
     assert!(out.contains("fail/diagnostics/host_backed_make.cairn"));
     assert!(out.contains("fail/diagnostics/host_backed_bad_slot.cairn"));
     assert!(out.contains("fail/diagnostics/host_backed_bad_cast.cairn"));
     assert!(out.contains("fail/diagnostics/unknown_superclass.cairn"));
     assert!(out.contains("fail/diagnostics/duplicate_inherited_slot.cairn"));
-    assert!(out.contains("corpus: 82 passed, 0 failed, 82 total"));
+    assert!(out.contains("corpus: 90 passed, 0 failed, 90 total"));
 }
 
 #[test]

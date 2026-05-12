@@ -1187,16 +1187,31 @@ fn fingerprint_dispatcher(module: &sem::Module, generic: DefinitionId) -> String
             .join(","),
         sem_kind_fingerprint(module, generic.result_kind)
     );
-    for method in module
+    let mut methods: Vec<_> = module
         .methods
         .iter()
         .filter(|method| method.generic == generic.id)
-    {
+        .collect();
+    methods.sort_by(|left, right| {
+        module
+            .class_depth(right.specializer)
+            .cmp(&module.class_depth(left.specializer))
+            .then_with(|| left.id.0.cmp(&right.id.0))
+    });
+    for method in methods {
         let specializer = module
             .classes
             .get(method.specializer.0 as usize)
             .map_or(0, |class| class.definition.raw());
-        let _ = write!(out, "{}:{specializer};", method.definition.raw());
+        let _ = write!(out, "{}:{specializer}:[", method.definition.raw());
+        for class in module
+            .classes
+            .iter()
+            .filter(|class| module.is_same_or_subclass(class.id, method.specializer))
+        {
+            let _ = write!(out, "{},", class.definition.raw());
+        }
+        let _ = write!(out, "];");
     }
     out
 }
@@ -4093,6 +4108,56 @@ mod tests {
                 .artifacts
                 .dump_stage(DumpStage::Mop)
                 .contains("source=inherited")
+        );
+    }
+
+    #[test]
+    fn parent_method_edit_affects_subclass_dispatch_artifacts() {
+        let before = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                      define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                      define generic score(x :: <shape>) => <integer>;\n\
+                      define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+                      define function main()\n  score(make(<circle>))\nend;";
+        let after = "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+                     define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+                     define generic score(x :: <shape>) => <integer>;\n\
+                     define method score(s :: <shape>) => <integer>\n  s.size + 1\nend;\n\
+                     define function main()\n  score(make(<circle>))\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("score.cairn", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let method = first.artifacts.sem.methods[0].definition;
+        let generic = first.artifacts.sem.generics[0].definition;
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLookup(method)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(method)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(method)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::GenericDispatcher(generic)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
         );
     }
 

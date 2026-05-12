@@ -1,0 +1,19 @@
+// expect: run 4
+// expect: dump lowered contains score#dispatch
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 4;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define generic score(x :: <shape>) => <integer>;
+
+define method score(s :: <shape>) => <integer>
+  s.size
+end;
+
+define function main()
+  score(make(<circle>))
+end;

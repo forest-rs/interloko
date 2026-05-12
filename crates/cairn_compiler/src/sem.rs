@@ -314,6 +314,99 @@ pub struct Module {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+impl Module {
+    /// Returns true when `actual` is the same class as `expected` or inherits
+    /// from it through Cairn's single nominal superclass chain.
+    #[must_use]
+    pub fn is_same_or_subclass(&self, actual: ClassId, expected: ClassId) -> bool {
+        is_same_or_subclass_in_classes(&self.classes, actual, expected)
+    }
+
+    /// Returns the number of superclass edges from `actual` to `expected`.
+    ///
+    /// `Some(0)` means the classes are identical. Larger distances mean
+    /// `actual` is a deeper subclass of `expected`. `None` means the classes
+    /// are unrelated by the single-inheritance chain.
+    #[must_use]
+    pub fn inheritance_distance(&self, actual: ClassId, expected: ClassId) -> Option<usize> {
+        inheritance_distance_in_classes(&self.classes, actual, expected)
+    }
+
+    /// Returns the depth of `class` in the nominal superclass tree.
+    #[must_use]
+    pub fn class_depth(&self, class: ClassId) -> usize {
+        class_depth_in_classes(&self.classes, class)
+    }
+
+    /// Returns the superclass chain from `class` to the root.
+    #[must_use]
+    pub fn superclass_chain(&self, class: ClassId) -> Vec<ClassId> {
+        superclass_chain_in_classes(&self.classes, class)
+    }
+}
+
+fn is_same_or_subclass_in_classes(classes: &[Class], actual: ClassId, expected: ClassId) -> bool {
+    inheritance_distance_in_classes(classes, actual, expected).is_some()
+}
+
+fn inheritance_distance_in_classes(
+    classes: &[Class],
+    actual: ClassId,
+    expected: ClassId,
+) -> Option<usize> {
+    let mut current = Some(actual);
+    let mut distance = 0;
+    let mut visited = 0;
+    while let Some(class) = current {
+        if class == expected {
+            return Some(distance);
+        }
+        visited += 1;
+        if visited > classes.len() {
+            return None;
+        }
+        current = classes.get(class.0 as usize)?.superclass;
+        distance += 1;
+    }
+    None
+}
+
+fn class_depth_in_classes(classes: &[Class], class: ClassId) -> usize {
+    let mut current = classes
+        .get(class.0 as usize)
+        .and_then(|class| class.superclass);
+    let mut depth = 0;
+    let mut visited = 0;
+    while let Some(parent) = current {
+        depth += 1;
+        visited += 1;
+        if visited > classes.len() {
+            break;
+        }
+        current = classes
+            .get(parent.0 as usize)
+            .and_then(|class| class.superclass);
+    }
+    depth
+}
+
+fn superclass_chain_in_classes(classes: &[Class], class: ClassId) -> Vec<ClassId> {
+    let mut chain = Vec::new();
+    let mut current = Some(class);
+    let mut visited = 0;
+    while let Some(class) = current {
+        chain.push(class);
+        visited += 1;
+        if visited > classes.len() {
+            break;
+        }
+        current = classes
+            .get(class.0 as usize)
+            .and_then(|class| class.superclass);
+    }
+    chain
+}
+
 /// Nominal class definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Class {
@@ -2142,7 +2235,9 @@ impl Lowering {
                 span,
             };
         };
-        if condition_class != ClassId(u32::MAX) && condition_class != active.specializer {
+        if condition_class != ClassId(u32::MAX)
+            && !self.is_same_or_subclass(condition_class, active.specializer)
+        {
             ctx.diagnostics.push(Diagnostic::error(
                 span,
                 "signal condition is not handled by the active restart",
@@ -2307,7 +2402,7 @@ impl Lowering {
             }
         }
         if let ValueKind::Object(actual) = self.expr_kind(&value)
-            && actual != class.id
+            && !self.classes_may_overlap(actual, class.id)
         {
             ctx.diagnostics.push(Diagnostic::error(
                 span,
@@ -2353,7 +2448,7 @@ impl Lowering {
             }
         }
         if let ValueKind::Object(actual) = self.expr_kind(&value)
-            && actual != class.id
+            && !self.classes_may_overlap(actual, class.id)
         {
             ctx.diagnostics.push(Diagnostic::error(
                 span,
@@ -2543,12 +2638,22 @@ impl Lowering {
         let Expr::InstanceOf { value, class, .. } = condition else {
             return None;
         };
-        let Expr::Local { local, .. } = value.as_ref() else {
+        let Expr::Local {
+            local, result_kind, ..
+        } = value.as_ref()
+        else {
             return None;
+        };
+        let kind = if let ValueKind::Object(actual) = result_kind
+            && self.is_same_or_subclass(*actual, *class)
+        {
+            ValueKind::Object(*actual)
+        } else {
+            ValueKind::Object(*class)
         };
         Some(Refinement {
             local: *local,
-            kind: ValueKind::Object(*class),
+            kind,
         })
     }
 
@@ -2686,6 +2791,7 @@ impl Lowering {
 
     fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
         (matches!(expected, ValueKind::Any) && !matches!(actual, ValueKind::KnownCallable(_)))
+            || matches!((expected, actual), (ValueKind::Object(expected), ValueKind::Object(actual)) if self.is_same_or_subclass(actual, expected))
             || expected == actual
             || matches!(expected, ValueKind::Error)
             || matches!(actual, ValueKind::Error)
@@ -2694,7 +2800,7 @@ impl Lowering {
     fn generic_specializer_matches(&self, expected: ValueKind, specializer: ClassId) -> bool {
         match expected {
             ValueKind::Any | ValueKind::Error => true,
-            ValueKind::Object(class) => class == specializer,
+            ValueKind::Object(class) => self.is_same_or_subclass(specializer, class),
             ValueKind::I64
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
@@ -2705,13 +2811,24 @@ impl Lowering {
     fn generic_argument_matches(&self, expected: ValueKind, actual: ValueKind) -> bool {
         match expected {
             ValueKind::Any => matches!(actual, ValueKind::Object(_) | ValueKind::Error),
-            ValueKind::Object(_) => expected == actual || matches!(actual, ValueKind::Error),
+            ValueKind::Object(expected) => {
+                matches!(actual, ValueKind::Object(actual) if self.is_same_or_subclass(actual, expected))
+                    || matches!(actual, ValueKind::Error)
+            }
             ValueKind::Error => true,
             ValueKind::I64
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
             | ValueKind::KnownCallable(_) => expected == actual,
         }
+    }
+
+    fn is_same_or_subclass(&self, actual: ClassId, expected: ClassId) -> bool {
+        is_same_or_subclass_in_classes(&self.classes, actual, expected)
+    }
+
+    fn classes_may_overlap(&self, left: ClassId, right: ClassId) -> bool {
+        self.is_same_or_subclass(left, right) || self.is_same_or_subclass(right, left)
     }
 
     fn kind_name(&self, kind: ValueKind) -> String {
@@ -3020,6 +3137,114 @@ mod tests {
         };
         assert_eq!(*class, ClassId(1));
         assert_eq!(*slot, SlotId(0));
+    }
+
+    #[test]
+    fn treats_single_inheritance_as_nominal_subtyping() {
+        let module = lower_source(
+            "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 5;\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 7;\nend;\n\
+             define class <holder> (<object>)\n  slot item :: <shape>;\nend;\n\
+             define function hold(s :: <shape>) => <shape>\n  s\nend;\n\
+             define function build() => <shape>\n  make(<circle>)\nend;\n\
+             define generic describe(x :: <shape>) => <integer>;\n\
+             define method describe(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+             define function main()\n  hold(make(<circle>)).size + build().size + make(<holder>, item: make(<circle>)).item.size + describe(make(<circle>))\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(
+            module.classes[2].direct_slots[0].kind,
+            ValueKind::Object(ClassId(0))
+        );
+        assert_eq!(
+            module.functions[0].result_kind,
+            ValueKind::Object(ClassId(0))
+        );
+        assert_eq!(
+            module.functions[1].result_kind,
+            ValueKind::Object(ClassId(0))
+        );
+        assert_eq!(module.methods[0].specializer, ClassId(1));
+    }
+
+    #[test]
+    fn resolves_parent_instance_tests_casts_and_restart_conditions() {
+        let module = lower_source(
+            "define class <problem> (<object>)\n  slot fallback :: <integer>, init-value: 1;\nend;\n\
+             define class <invalid-radius> (<problem>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  handle if instance?(make(<invalid-radius>), <problem>) then as(<problem>, make(<invalid-radius>)).fallback else 0 end with restart e :: <problem> e.fallback end\nend;\n\
+             define function recover()\n  handle signal(make(<invalid-radius>)) with restart e :: <problem> e.fallback end\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::Handle { body, .. } = &module.functions[0].body.result else {
+            panic!("expected handle");
+        };
+        let Expr::If {
+            condition,
+            then_branch,
+            ..
+        } = body.as_ref()
+        else {
+            panic!("expected if");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::InstanceOf {
+                class: ClassId(0),
+                ..
+            }
+        ));
+        let Expr::AccessorCall {
+            receiver, class, ..
+        } = then_branch.as_ref()
+        else {
+            panic!("expected parent slot read");
+        };
+        assert_eq!(*class, ClassId(0));
+        assert!(matches!(
+            receiver.as_ref(),
+            Expr::Cast {
+                class: ClassId(0),
+                ..
+            }
+        ));
+
+        let Expr::Handle { body, restart, .. } = &module.functions[1].body.result else {
+            panic!("expected restart handle");
+        };
+        assert_eq!(restart.specializer, ClassId(0));
+        assert!(matches!(
+            body.as_ref(),
+            Expr::Signal {
+                condition_class: ClassId(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn keeps_sibling_instance_tests_and_casts_impossible() {
+        let instance = lower_source(
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define class <square> (<shape>)\nend;\n\
+             define function main()\n  instance?(make(<square>), <circle>)\nend;",
+        );
+        assert!(instance.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "instance? test is impossible: <square> is not <circle>"
+        }));
+
+        let cast = lower_source(
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 1;\nend;\n\
+             define class <square> (<shape>)\nend;\n\
+             define function main()\n  as(<circle>, make(<square>)).radius\nend;",
+        );
+        assert!(cast.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "cast is impossible: <square> is not <circle>"
+        }));
     }
 
     #[test]

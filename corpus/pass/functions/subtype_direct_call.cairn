@@ -1,0 +1,16 @@
+// expect: run 9
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 9;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function hold(s :: <shape>) => <shape>
+  s
+end;
+
+define function main()
+  hold(make(<circle>)).size
+end;

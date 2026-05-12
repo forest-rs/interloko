@@ -47,6 +47,8 @@ pub struct RuntimeClass {
     pub name: String,
     /// Runtime object kind for this class.
     pub kind: HostObjectKind,
+    /// Runtime superclass, if this class inherits from another native class.
+    pub superclass: Option<sem::ClassId>,
     /// Slots in semantic slot order.
     pub slots: Vec<RuntimeSlot>,
 }
@@ -92,6 +94,7 @@ impl RuntimeLayout {
                         sem::ClassOrigin::Native => HostObjectKind::Native,
                         sem::ClassOrigin::HostBacked { .. } => HostObjectKind::HostBacked,
                     },
+                    superclass: class.superclass,
                     slots: class
                         .effective_slots
                         .iter()
@@ -113,6 +116,27 @@ impl RuntimeLayout {
             .iter()
             .position(|class| class.name == name)
             .map(|index| sem::ClassId(u32::try_from(index).unwrap_or(u32::MAX)))
+    }
+
+    /// Returns true when `actual` is `expected` or inherits from it.
+    #[must_use]
+    pub fn is_same_or_subclass(&self, actual: sem::ClassId, expected: sem::ClassId) -> bool {
+        let mut current = Some(actual);
+        let mut visited = 0;
+        while let Some(class) = current {
+            if class == expected {
+                return true;
+            }
+            visited += 1;
+            if visited > self.classes.len() {
+                return false;
+            }
+            current = self
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.superclass);
+        }
+        false
     }
 }
 
@@ -325,7 +349,11 @@ impl Host for CairnHost {
                 let class = runtime_class_id(*class_raw)?;
                 let obj = self
                     .value_object(*value)
-                    .filter(|obj| self.object(*obj).is_ok_and(|object| object.class == class))
+                    .filter(|obj| {
+                        self.object(*obj).is_ok_and(|object| {
+                            self.layout.is_same_or_subclass(object.class, class)
+                        })
+                    })
                     .ok_or(HostError::Failed)?;
                 rets[0] = Value::Obj(obj);
                 Ok(0)
@@ -350,8 +378,10 @@ impl CairnHost {
     }
 
     fn value_is_instance(&self, value: ValueRef<'_>, class: sem::ClassId) -> bool {
-        self.value_object(value)
-            .is_some_and(|obj| self.object(obj).is_ok_and(|object| object.class == class))
+        self.value_object(value).is_some_and(|obj| {
+            self.object(obj)
+                .is_ok_and(|object| self.layout.is_same_or_subclass(object.class, class))
+        })
     }
 
     fn value_for_slot(
@@ -368,7 +398,10 @@ impl CairnHost {
             (sem::ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
             (sem::ValueKind::Object(expected_class), ValueRef::Obj(obj)) => {
                 let object = self.object(obj)?;
-                if object.class == expected_class {
+                if self
+                    .layout
+                    .is_same_or_subclass(object.class, expected_class)
+                {
                     Ok(Value::Obj(obj))
                 } else {
                     Err(HostError::Failed)

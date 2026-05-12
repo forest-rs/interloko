@@ -1,0 +1,12 @@
+// expect: run 13
+
+define class <problem> (<object>)
+  slot fallback :: <integer>, init-value: 13;
+end;
+
+define class <invalid-radius> (<problem>)
+end;
+
+define function main()
+  handle signal(make(<invalid-radius>)) with restart e :: <problem> e.fallback end
+end;

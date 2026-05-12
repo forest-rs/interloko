@@ -291,6 +291,47 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_nominal_subtype_flow() {
+        let value = compile_and_run_main(
+            "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 5;\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 7;\nend;\n\
+             define class <holder> (<object>)\n  slot item :: <shape>;\nend;\n\
+             define function hold(s :: <shape>) => <shape>\n  s\nend;\n\
+             define function build() => <shape>\n  make(<circle>)\nend;\n\
+             define generic describe(x :: <shape>) => <integer>;\n\
+             define method describe(s :: <shape>) => <integer>\n  s.size\nend;\n\
+             define function main()\n  hold(make(<circle>)).size + build().size + make(<holder>, item: make(<circle>)).item.size + describe(make(<circle>))\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 20);
+    }
+
+    #[test]
+    fn compiles_and_runs_most_specific_subclass_dispatch() {
+        let value = compile_and_run_main(
+            "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+             define generic score(x :: <shape>) => <integer>;\n\
+             define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+             define method score(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+             define function main()\n  score(make(<circle>))\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 2);
+    }
+
+    #[test]
+    fn compiles_and_runs_subclass_conditions_for_parent_restarts() {
+        let value = compile_and_run_main(
+            "define class <problem> (<object>)\n  slot fallback :: <integer>, init-value: 11;\nend;\n\
+             define class <invalid-radius> (<problem>)\nend;\n\
+             define function main()\n  handle signal(make(<invalid-radius>)) with restart e :: <problem> e.fallback end\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 11);
+    }
+
+    #[test]
     fn compiles_and_runs_object_top_slot_reads() {
         let error = compile_and_run_main(
             "define class <box> (<object>)\n  slot value;\nend;\n\

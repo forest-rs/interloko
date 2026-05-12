@@ -686,32 +686,61 @@ impl<'module> BodyLowering<'module> {
             span: generic.span,
         });
 
-        for method in self
+        let mut methods: Vec<_> = self
             .module
             .methods
             .iter()
             .filter(|method| method.generic == generic.id)
-        {
+            .collect();
+        methods.sort_by(|left, right| {
+            self.module
+                .class_depth(right.specializer)
+                .cmp(&self.module.class_depth(left.specializer))
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+
+        for method in methods {
+            let applicable: Vec<_> = self
+                .module
+                .classes
+                .iter()
+                .filter(|class| {
+                    self.module
+                        .is_same_or_subclass(class.id, method.specializer)
+                })
+                .map(|class| class.id)
+                .collect();
+            if applicable.is_empty() {
+                continue;
+            }
             let class_const = self.alloc(ValueKind::U64);
             let cond = self.alloc(ValueKind::Bool);
             let method_result = self.alloc(value_kind(method.result_kind)?);
             let matched = self.alloc_label();
-            let next = self.alloc_label();
-            self.instructions.push(Instr::ConstU64 {
-                dst: class_const.reg,
-                value: u64::from(method.specializer.0),
-                span: method.span,
-            });
-            self.instructions.push(Instr::EqU64 {
-                dst: cond.reg,
-                lhs: class_reg.reg,
-                rhs: class_const.reg,
-                span: method.span,
-            });
-            self.instructions.push(Instr::Branch {
-                cond: cond.reg,
-                then_label: matched,
-                else_label: next,
+            let unmatched = self.alloc_label();
+            for class in applicable {
+                let next = self.alloc_label();
+                self.instructions.push(Instr::ConstU64 {
+                    dst: class_const.reg,
+                    value: u64::from(class.0),
+                    span: method.span,
+                });
+                self.instructions.push(Instr::EqU64 {
+                    dst: cond.reg,
+                    lhs: class_reg.reg,
+                    rhs: class_const.reg,
+                    span: method.span,
+                });
+                self.instructions.push(Instr::Branch {
+                    cond: cond.reg,
+                    then_label: matched,
+                    else_label: next,
+                    span: method.span,
+                });
+                self.instructions.push(Instr::Label { label: next });
+            }
+            self.instructions.push(Instr::Jump {
+                label: unmatched,
                 span: method.span,
             });
             self.instructions.push(Instr::Label { label: matched });
@@ -732,7 +761,7 @@ impl<'module> BodyLowering<'module> {
                 value: result.reg,
                 span: method.span,
             });
-            self.instructions.push(Instr::Label { label: next });
+            self.instructions.push(Instr::Label { label: unmatched });
         }
 
         self.instructions.push(Instr::Trap {
@@ -858,7 +887,9 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::InstanceOf { value, class, span } => {
                 let value = self.lower_expr(value)?;
-                if value.kind == ValueKind::Object(Some(*class)) {
+                if let ValueKind::Object(Some(actual)) = value.kind
+                    && self.module.is_same_or_subclass(actual, *class)
+                {
                     let result = self.alloc(ValueKind::Bool);
                     self.instructions.push(Instr::ConstBool {
                         dst: result.reg,
@@ -879,7 +910,9 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::Cast { value, class, span } => {
                 let value = self.lower_expr(value)?;
-                if value.kind == ValueKind::Object(Some(*class)) {
+                if let ValueKind::Object(Some(actual)) = value.kind
+                    && self.module.is_same_or_subclass(actual, *class)
+                {
                     return Ok(value);
                 }
                 let result = self.alloc(ValueKind::Object(Some(*class)));
@@ -1002,7 +1035,13 @@ impl<'module> BodyLowering<'module> {
         let Some(active) = self.active_restarts.last().copied() else {
             return Err(invalid_semantic("signal has no active restart"));
         };
-        if lowered_class != condition_class || condition_class != active.specializer {
+        if !self
+            .module
+            .is_same_or_subclass(lowered_class, condition_class)
+            || !self
+                .module
+                .is_same_or_subclass(condition_class, active.specializer)
+        {
             return Err(invalid_semantic(
                 "signal condition class does not match restart",
             ));
@@ -1191,6 +1230,15 @@ impl<'module> BodyLowering<'module> {
     ) -> Result<Value, LowerError> {
         if value.kind == expected {
             return Ok(value);
+        }
+        if let (ValueKind::Object(Some(actual)), ValueKind::Object(Some(expected_class))) =
+            (value.kind, expected)
+            && self.module.is_same_or_subclass(actual, expected_class)
+        {
+            return Ok(Value {
+                kind: expected,
+                ..value
+            });
         }
         if expected == ValueKind::Any {
             return self.box_any(value, span);
@@ -1656,7 +1704,24 @@ mod tests {
         assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
         assert!(dump.contains("fn l2 area#dispatch(%r1 x: object) -> i64"));
         assert!(dump.contains("class_of %r1"));
-        assert!(dump.contains("br %r4, bb0, bb1"));
+        assert!(dump.contains("br %r"));
+    }
+
+    #[test]
+    fn lowers_parent_dispatch_as_applicable_to_child_classes() {
+        let module = lower_source(
+            "define class <shape> (<object>)\n  slot size :: <integer>, init-value: 3;\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 4;\nend;\n\
+             define generic score(x :: <shape>) => <integer>;\n\
+             define method score(s :: <shape>) => <integer>\n  s.size\nend;\n\
+             define function main()\n  score(make(<circle>))\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("fn l2 score#dispatch(%r1 x: object(<shape>)) -> i64"));
+        assert!(dump.contains("const.u64 0"));
+        assert!(dump.contains("const.u64 1"));
+        assert!(dump.contains("call l1(%r1)"));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+// expect: diagnostic contains cast is impossible: <square> is not <circle>
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 1;
+end;
+
+define class <square> (<shape>)
+end;
+
+define function main()
+  as(<circle>, make(<square>)).radius
+end;

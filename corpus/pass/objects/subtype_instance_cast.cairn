@@ -1,0 +1,14 @@
+// expect: run 12
+// expect: dump sem contains instance?
+// expect: dump lowered contains const.bool true
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 12;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main()
+  if instance?(make(<circle>), <shape>) then as(<shape>, make(<circle>)).size else 0 end
+end;
