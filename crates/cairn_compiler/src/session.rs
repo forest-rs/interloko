@@ -1057,6 +1057,9 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         ast::Expr::Name { id, name, .. } => {
             let _ = writeln!(out, "{id} name {name}");
         }
+        ast::Expr::ClassName { id, class_name, .. } => {
+            let _ = writeln!(out, "{id} class-name {class_name}");
+        }
         ast::Expr::Call {
             id, callee, args, ..
         } => {
@@ -1070,12 +1073,10 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_expr(out, condition, indent + 2);
         }
         ast::Expr::MakeObject {
-            id,
-            class_name,
-            fields,
-            ..
+            id, class, fields, ..
         } => {
-            let _ = writeln!(out, "{id} make {class_name}");
+            let _ = writeln!(out, "{id} make");
+            dump_ast_expr(out, class, indent + 2);
             for field in fields {
                 indent_line(out, indent + 2);
                 let _ = writeln!(out, "field {} {}", field.id, field.name);
@@ -1214,6 +1215,10 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
             || format!("class#{}", class.0),
             |class| format!("object#{}", class.definition.raw()),
         ),
+        sem::ValueKind::ClassObject(class) => module.classes.get(class.0 as usize).map_or_else(
+            || format!("class-object#{}", class.0),
+            |class| format!("class-object#{}", class.definition.raw()),
+        ),
         sem::ValueKind::Error => "error".into(),
     }
 }
@@ -1224,6 +1229,7 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::I64 => "i64",
         sem::ValueKind::Bool => "bool",
         sem::ValueKind::Object(_) => "object-handle",
+        sem::ValueKind::ClassObject(_) => "class-id",
         sem::ValueKind::Error => "error",
     }
 }
@@ -1262,6 +1268,9 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::Local { local, .. } => {
             let _ = writeln!(out, "local l{}", local.0);
         }
+        sem::Expr::ClassObject { class, .. } => {
+            let _ = writeln!(out, "class-object c{}", class.0);
+        }
         sem::Expr::DirectCall { function, args, .. } => {
             let _ = writeln!(out, "direct-call f{}", function.0);
             for arg in args {
@@ -1283,8 +1292,20 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "signal c{} result={result_kind:?}", condition_class.0);
             dump_sem_expr(out, condition, indent + 2);
         }
-        sem::Expr::MakeObject { class, fields, .. } => {
-            let _ = writeln!(out, "make c{}", class.0);
+        sem::Expr::ClassOf { object, class, .. } => {
+            let _ = writeln!(out, "class-of c{}", class.0);
+            dump_sem_expr(out, object, indent + 2);
+        }
+        sem::Expr::MakeObject {
+            class,
+            class_id,
+            fields,
+            ..
+        } => {
+            let _ = writeln!(out, "make c{}", class_id.0);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "class");
+            dump_sem_expr(out, class, indent + 4);
             for field in fields {
                 indent_line(out, indent + 2);
                 let _ = writeln!(out, "field s{}", field.slot.0);
@@ -1560,6 +1581,13 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::Local { local, .. } => {
             let _ = write!(out, "local({})", local.0);
         }
+        sem::Expr::ClassObject { class, .. } => {
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "class-object({definition})");
+        }
         sem::Expr::DirectCall { function, args, .. } => {
             let definition = module
                 .functions
@@ -1592,16 +1620,32 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, condition, out);
             out.push(')');
         }
-        sem::Expr::MakeObject { class, fields, .. } => {
+        sem::Expr::ClassOf { object, class, .. } => {
             let definition = module
                 .classes
                 .get(class.0 as usize)
                 .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "class-of({definition}:");
+            fingerprint_sem_expr(module, object, out);
+            out.push(')');
+        }
+        sem::Expr::MakeObject {
+            class,
+            class_id,
+            fields,
+            ..
+        } => {
+            let definition = module
+                .classes
+                .get(class_id.0 as usize)
+                .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "make({definition}:");
+            fingerprint_sem_expr(module, class, out);
+            out.push(':');
             for field in fields {
                 let kind = module
                     .classes
-                    .get(class.0 as usize)
+                    .get(class_id.0 as usize)
                     .and_then(|class| class.slots.get(field.slot.0 as usize))
                     .map_or(String::from("error"), |slot| {
                         sem_kind_fingerprint(module, slot.kind)
@@ -1763,6 +1807,11 @@ mod tests {
             artifacts
                 .dump_stage(DumpStage::Sem)
                 .contains("generic-call")
+        );
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("class-object")
         );
         assert!(
             artifacts
@@ -2178,6 +2227,69 @@ mod tests {
         );
         assert!(
             cache_report(&update, QueryArtifact::TapeProgram).is_some_and(|report| report.affected)
+        );
+    }
+
+    #[test]
+    fn incremental_class_reference_edit_recomputes_only_dependent_artifacts() {
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+                      define generic area(x);\n\
+                      define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                      define function main()\n  let klass = <circle>;\n  area(make(klass, radius: 10))\nend;";
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                     define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+                     define generic area(x);\n\
+                     define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+                     define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                     define function main()\n  let klass = <square>;\n  area(make(klass, side: 9))\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("area.cairn", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let circle = first.artifacts.sem.methods[0].definition;
+        let square = first.artifacts.sem.methods[1].definition;
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Function
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(circle)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(circle)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("class-object c1")
         );
     }
 

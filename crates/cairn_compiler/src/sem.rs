@@ -63,6 +63,8 @@ pub enum ValueKind {
     Bool,
     /// Runtime object with statically known nominal class.
     Object(ClassId),
+    /// Class object naming a statically known nominal class.
+    ClassObject(ClassId),
     /// Invalid or unknown value.
     Error,
 }
@@ -317,6 +319,13 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Resolved class object value.
+    ClassObject {
+        /// Nominal class represented by this value.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
     /// Resolved direct function call.
     DirectCall {
         /// Callee function.
@@ -346,10 +355,21 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Reads the class object for a known runtime object.
+    ClassOf {
+        /// Runtime object expression.
+        object: Box<Expr>,
+        /// Statically known object class.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
     /// Runtime object construction.
     MakeObject {
-        /// Nominal class.
-        class: ClassId,
+        /// Class object expression.
+        class: Box<Expr>,
+        /// Statically known nominal class to instantiate.
+        class_id: ClassId,
         /// Field initializers.
         fields: Vec<FieldInit>,
         /// Source span.
@@ -427,9 +447,11 @@ impl Expr {
             Self::ConstI64 { span, .. }
             | Self::ConstBool { span, .. }
             | Self::Local { span, .. }
+            | Self::ClassObject { span, .. }
             | Self::DirectCall { span, .. }
             | Self::GenericCall { span, .. }
             | Self::Signal { span, .. }
+            | Self::ClassOf { span, .. }
             | Self::MakeObject { span, .. }
             | Self::AccessorCall { span, .. }
             | Self::Binary { span, .. }
@@ -889,11 +911,25 @@ impl Lowering {
                     Expr::Error { span: *span }
                 }
             },
+            ast::Expr::ClassName {
+                class_name, span, ..
+            } => self.lower_class_object(ctx, class_name, *span),
             ast::Expr::Call {
                 callee, args, span, ..
             } => {
                 let lowered_args: Vec<_> =
                     args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
+                if callee == "class-of" {
+                    if args.len() == 1 {
+                        let object = lowered_args.into_iter().next().expect("arity was checked");
+                        return self.lower_class_of(ctx, object, *span);
+                    }
+                    ctx.diagnostics.push(Diagnostic::error(
+                        *span,
+                        format!("class-of expects 1 argument but got {}", args.len()),
+                    ));
+                    return Expr::Error { span: *span };
+                }
                 if let Some(symbol) = self.resolve_function(callee) {
                     if symbol.arity == args.len() {
                         return Expr::DirectCall {
@@ -960,11 +996,11 @@ impl Lowering {
                 condition, span, ..
             } => self.lower_signal(ctx, condition, *span),
             ast::Expr::MakeObject {
-                class_name,
+                class,
                 fields,
                 span,
                 ..
-            } => self.lower_make_object(ctx, class_name, fields, *span),
+            } => self.lower_make_object(ctx, class, fields, *span),
             ast::Expr::SlotRead {
                 receiver,
                 slot,
@@ -1169,18 +1205,57 @@ impl Lowering {
         ctx.diagnostics.push(Diagnostic::error(span, message));
     }
 
-    fn lower_make_object(
-        &self,
-        ctx: &mut FunctionContext,
-        class_name: &str,
-        fields: &[ast::KeywordArg],
-        span: Span,
-    ) -> Expr {
+    fn lower_class_object(&self, ctx: &mut FunctionContext, class_name: &str, span: Span) -> Expr {
         let Some(class) = self.resolve_class(class_name) else {
             ctx.diagnostics.push(Diagnostic::error(
                 span,
                 format!("unresolved class `{class_name}`"),
             ));
+            return Expr::Error { span };
+        };
+        Expr::ClassObject {
+            class: class.id,
+            span,
+        }
+    }
+
+    fn lower_class_of(&self, ctx: &mut FunctionContext, object: Expr, span: Span) -> Expr {
+        let class = match self.expr_kind(ctx, &object) {
+            ValueKind::Object(class) => class,
+            ValueKind::Error => return Expr::Error { span },
+            _ => {
+                ctx.diagnostics
+                    .push(Diagnostic::error(span, "class-of requires a known object"));
+                return Expr::Error { span };
+            }
+        };
+        Expr::ClassOf {
+            object: Box::new(object),
+            class,
+            span,
+        }
+    }
+
+    fn lower_make_object(
+        &self,
+        ctx: &mut FunctionContext,
+        class_expr: &ast::Expr,
+        fields: &[ast::KeywordArg],
+        span: Span,
+    ) -> Expr {
+        let class_expr = self.lower_expr(ctx, class_expr);
+        let class_id = match self.expr_kind(ctx, &class_expr) {
+            ValueKind::ClassObject(class_id) => class_id,
+            ValueKind::Error => return Expr::Error { span },
+            _ => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    class_expr.span(),
+                    "make class argument must be a known class object",
+                ));
+                return Expr::Error { span };
+            }
+        };
+        let Some(class) = self.classes.get(class_id.0 as usize) else {
             return Expr::Error { span };
         };
 
@@ -1249,7 +1324,8 @@ impl Lowering {
         }
 
         Expr::MakeObject {
-            class: class.id,
+            class: Box::new(class_expr),
+            class_id,
             fields: resolved,
             span,
         }
@@ -1317,6 +1393,9 @@ impl Lowering {
             Expr::ConstI64 { .. } | Expr::GenericCall { .. } | Expr::Binary { .. } => {
                 ValueKind::I64
             }
+            Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
+                ValueKind::ClassObject(*class)
+            }
             Expr::AccessorCall { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. } | Expr::Compare { .. } => ValueKind::Bool,
             Expr::Local { local, .. } => ctx.local_kind(*local),
@@ -1325,7 +1404,7 @@ impl Lowering {
                 .functions
                 .get(function.0 as usize)
                 .map_or(ValueKind::Error, |symbol| symbol.return_kind),
-            Expr::MakeObject { class, .. } => ValueKind::Object(*class),
+            Expr::MakeObject { class_id, .. } => ValueKind::Object(*class_id),
             Expr::If {
                 then_branch,
                 else_branch,
@@ -1391,6 +1470,10 @@ impl Lowering {
                 .classes
                 .get(class.0 as usize)
                 .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
+            ValueKind::ClassObject(class) => self.classes.get(class.0 as usize).map_or_else(
+                || format!("class-object#{}", class.0),
+                |class| format!("class object {}", class.name),
+            ),
             ValueKind::Error => "<error>".into(),
         }
     }
@@ -1479,7 +1562,7 @@ mod tests {
         assert!(matches!(
             args[0],
             Expr::MakeObject {
-                class: ClassId(0),
+                class_id: ClassId(0),
                 ..
             }
         ));
@@ -1518,6 +1601,39 @@ mod tests {
         assert_eq!(*class, ClassId(0));
         assert_eq!(*slot, SlotId(0));
         assert_eq!(*result_kind, ValueKind::I64);
+    }
+
+    #[test]
+    fn resolves_class_objects_for_make_and_class_of() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let c = <circle>;\n  make(c, radius: 7).radius\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(
+            module.functions[0].locals[0].kind,
+            ValueKind::ClassObject(ClassId(0))
+        );
+        let Expr::ClassObject { class, .. } = &module.functions[0].body.lets[0].value else {
+            panic!("expected class object let value");
+        };
+        assert_eq!(*class, ClassId(0));
+
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let c = make(<circle>, radius: 7);\n  let k = class-of(c);\n  make(k, radius: 8).radius\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(
+            module.functions[0].locals[1].kind,
+            ValueKind::ClassObject(ClassId(0))
+        );
+        let Expr::ClassOf { class, .. } = &module.functions[0].body.lets[1].value else {
+            panic!("expected class-of expression");
+        };
+        assert_eq!(*class, ClassId(0));
     }
 
     #[test]

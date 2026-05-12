@@ -49,6 +49,8 @@ pub enum ValueKind {
     Bool,
     /// Runtime object, optionally tied to a statically known nominal class.
     Object(Option<sem::ClassId>),
+    /// Class object represented by a runtime class id.
+    ClassObject(Option<sem::ClassId>),
 }
 
 /// A lowered module ready for backend emission.
@@ -166,6 +168,15 @@ pub enum Instr {
         dst: Register,
         /// Constant value.
         value: u64,
+        /// Source span.
+        span: Span,
+    },
+    /// Class object constant represented by a runtime class id.
+    ConstClass {
+        /// Destination register.
+        dst: Register,
+        /// Nominal class represented by this value.
+        class: sem::ClassId,
         /// Source span.
         span: Span,
     },
@@ -711,6 +722,15 @@ impl<'module> BodyLowering<'module> {
                 .get(local.0 as usize)
                 .and_then(|value| *value)
                 .ok_or_else(|| invalid_semantic("local was read before assignment")),
+            sem::Expr::ClassObject { class, span } => {
+                let result = self.alloc(ValueKind::ClassObject(Some(*class)));
+                self.instructions.push(Instr::ConstClass {
+                    dst: result.reg,
+                    class: *class,
+                    span: *span,
+                });
+                Ok(result)
+            }
             sem::Expr::DirectCall {
                 function,
                 args,
@@ -762,15 +782,31 @@ impl<'module> BodyLowering<'module> {
                 span,
                 ..
             } => self.lower_signal(condition, *condition_class, *span),
+            sem::Expr::ClassOf {
+                object,
+                class,
+                span,
+            } => {
+                let object = self.lower_expr(object)?;
+                let result = self.alloc(ValueKind::ClassObject(Some(*class)));
+                self.instructions.push(Instr::ClassOf {
+                    dst: result.reg,
+                    object: object.reg,
+                    span: *span,
+                });
+                Ok(result)
+            }
             sem::Expr::MakeObject {
                 class,
+                class_id,
                 fields,
                 span,
             } => {
+                let _ = self.lower_expr(class)?;
                 let class_info = self
                     .module
                     .classes
-                    .get(class.0 as usize)
+                    .get(class_id.0 as usize)
                     .ok_or_else(|| invalid_semantic("class id is out of range"))?;
                 let mut field_regs = Vec::with_capacity(class_info.slots.len());
                 for slot in &class_info.slots {
@@ -785,10 +821,10 @@ impl<'module> BodyLowering<'module> {
                     };
                     field_regs.push(value.reg);
                 }
-                let result = self.alloc(ValueKind::Object(Some(*class)));
+                let result = self.alloc(ValueKind::Object(Some(*class_id)));
                 self.instructions.push(Instr::MakeObject {
                     dst: result.reg,
-                    class: *class,
+                    class: *class_id,
                     fields: field_regs,
                     span: *span,
                 });
@@ -1089,6 +1125,7 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::I64 => Ok(ValueKind::I64),
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::Object(class) => Ok(ValueKind::Object(Some(class))),
+        sem::ValueKind::ClassObject(class) => Ok(ValueKind::ClassObject(Some(class))),
         sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
     }
 }
@@ -1183,6 +1220,11 @@ impl Module {
             }
             Instr::ConstU64 { dst, value, span } => {
                 write!(f, "  {dst} = const.u64 {value}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ConstClass { dst, class, span } => {
+                write!(f, "  {dst} = const.class ")?;
+                self.fmt_class(f, *class)?;
                 fmt_span(f, *span)
             }
             Instr::BoxValue {
@@ -1315,6 +1357,12 @@ impl Module {
                 write!(f, ")")
             }
             ValueKind::Object(None) => write!(f, "object"),
+            ValueKind::ClassObject(Some(class)) => {
+                write!(f, "class(")?;
+                self.fmt_class(f, class)?;
+                write!(f, ")")
+            }
+            ValueKind::ClassObject(None) => write!(f, "class"),
         }
     }
 
@@ -1403,7 +1451,8 @@ mod tests {
         assert_eq!(module.functions.len(), 3);
         assert_eq!(module.main, Some(FunctionId(0)));
         let dump = module.dump();
-        assert!(dump.contains("make <circle>(%r1)"));
+        assert!(dump.contains("const.class <circle>"));
+        assert!(dump.contains("make <circle>(%r"));
         assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
         assert!(dump.contains("fn l2 area#dispatch(%r1 object: object) -> i64"));
         assert!(dump.contains("class_of %r1"));
@@ -1434,6 +1483,34 @@ mod tests {
         assert!(dump.contains("box.any"));
         assert!(dump.contains("<box>.value: any"));
         assert_eq!(module.runtime.classes[0].slots[0].kind, sem::ValueKind::Any);
+    }
+
+    #[test]
+    fn lowers_known_class_objects_to_class_ids() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function circle-class()\n  <circle>\nend;\n\
+             define function main()\n  let klass = circle-class();\n  make(klass, radius: 9).radius\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("fn l0 circle-class() -> class(<circle>)"));
+        assert!(dump.contains("const.class <circle>"));
+        assert!(dump.contains("call l0()"));
+        assert!(dump.contains("make <circle>"));
+    }
+
+    #[test]
+    fn lowers_class_of_to_existing_class_id_operation() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let c = make(<circle>, radius: 1);\n  let klass = class-of(c);\n  make(klass, radius: 10).radius\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("class_of"));
+        assert!(dump.contains("local l1 klass = %r"));
+        assert!(dump.contains("class(<circle>)"));
     }
 
     #[test]

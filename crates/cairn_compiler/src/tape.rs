@@ -123,6 +123,7 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
         lower::ValueKind::Object(_) => runtime::object_type(),
+        lower::ValueKind::ClassObject(_) => ValueType::U64,
     }
 }
 
@@ -144,6 +145,7 @@ struct HostSigs {
     slot_get: Vec<Vec<HostSigId>>,
     box_i64: HostSigId,
     box_bool: HostSigId,
+    box_u64: HostSigId,
     box_object: HostSigId,
 }
 
@@ -186,6 +188,10 @@ impl HostSigs {
             runtime::BOX_VALUE,
             runtime::box_value_signature(ValueType::Bool),
         );
+        let box_u64 = builder.host_sig_for(
+            runtime::BOX_VALUE,
+            runtime::box_value_signature(ValueType::U64),
+        );
         let box_object = builder.host_sig_for(
             runtime::BOX_VALUE,
             runtime::box_value_signature(runtime::object_type()),
@@ -196,6 +202,7 @@ impl HostSigs {
             slot_get,
             box_i64,
             box_bool,
+            box_u64,
             box_object,
         })
     }
@@ -249,6 +256,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(dst.0, *value);
             }
+            lower::Instr::ConstClass { dst, class, span } => {
+                self.set_span(*span);
+                self.asm.const_u64(dst.0, u64::from(class.0));
+            }
             lower::Instr::BoxValue {
                 dst,
                 src,
@@ -259,6 +270,7 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::I64 => self.host_sigs.box_i64,
                     lower::ValueKind::Bool => self.host_sigs.box_bool,
                     lower::ValueKind::Object(_) => self.host_sigs.box_object,
+                    lower::ValueKind::ClassObject(_) => self.host_sigs.box_u64,
                     lower::ValueKind::Any | lower::ValueKind::U64 => {
                         return Err(invalid_lowered("invalid boxed value input kind"));
                     }
@@ -478,7 +490,8 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         lower::Instr::Label { .. } | lower::Instr::Jump { .. } | lower::Instr::Trap { .. } => {}
         lower::Instr::ConstI64 { dst, .. }
         | lower::Instr::ConstBool { dst, .. }
-        | lower::Instr::ConstU64 { dst, .. } => {
+        | lower::Instr::ConstU64 { dst, .. }
+        | lower::Instr::ConstClass { dst, .. } => {
             note_register(*dst, max);
         }
         lower::Instr::BoxValue { dst, src, .. } => {

@@ -206,6 +206,7 @@ impl Host for CairnHost {
                 let value = match args {
                     [ValueRef::I64(value)] => Value::I64(*value),
                     [ValueRef::Bool(value)] => Value::Bool(*value),
+                    [ValueRef::U64(value)] => Value::U64(*value),
                     [ValueRef::Obj(obj)] if obj.host_type == CAIRN_OBJECT_TYPE => Value::Obj(*obj),
                     _ => return Err(HostError::Failed),
                 };
@@ -289,6 +290,7 @@ fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
         sem::ValueKind::I64 => Some(ValueType::I64),
         sem::ValueKind::Bool => Some(ValueType::Bool),
         sem::ValueKind::Object(_) => Some(object_type()),
+        sem::ValueKind::ClassObject(_) => Some(ValueType::U64),
         sem::ValueKind::Error => None,
     }
 }

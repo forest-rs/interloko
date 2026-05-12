@@ -1,0 +1,13 @@
+// expect: run 8
+// expect: diagnostics 0
+// expect: dump sem contains class-object
+// expect: dump lowered contains const.class <circle>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let klass = <circle>;
+  make(klass, radius: 8).radius
+end;

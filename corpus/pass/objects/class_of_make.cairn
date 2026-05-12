@@ -1,0 +1,14 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump sem contains class-of
+// expect: dump lowered contains class_of
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let source = make(<circle>, radius: 1);
+  let klass = class-of(source);
+  make(klass, radius: 10).radius
+end;

@@ -49,9 +49,12 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/restarts/signal_without_restart.cairn"));
     assert!(out.contains("pass/objects/init_keywords.cairn"));
     assert!(out.contains("pass/objects/accessor_call.cairn"));
+    assert!(out.contains("pass/objects/class_object_make.cairn"));
+    assert!(out.contains("pass/objects/class_object_function.cairn"));
+    assert!(out.contains("pass/objects/class_of_make.cairn"));
     assert!(out.contains("pass/objects/object_top_slot.cairn"));
     assert!(out.contains("pass/objects/typed_slots.cairn"));
-    assert!(out.contains("corpus: 36 passed, 0 failed, 36 total"));
+    assert!(out.contains("corpus: 39 passed, 0 failed, 39 total"));
 }
 
 #[test]

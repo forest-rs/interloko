@@ -1,0 +1,17 @@
+// expect: run 9
+// expect: diagnostics 0
+// expect: dump sem contains direct-call
+// expect: dump lowered contains class(<circle>)
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function circle-class()
+  <circle>
+end;
+
+define function main()
+  let klass = circle-class();
+  make(klass, radius: 9).radius
+end;

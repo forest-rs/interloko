@@ -218,6 +218,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Class name expression.
+    ClassName {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Referenced class name.
+        class_name: String,
+        /// Source span.
+        span: Span,
+    },
     /// Direct call syntax.
     Call {
         /// Stable-ish AST node identity.
@@ -242,8 +251,8 @@ pub enum Expr {
     MakeObject {
         /// Stable-ish AST node identity.
         id: AstNodeId,
-        /// Class name.
-        class_name: String,
+        /// Class object expression.
+        class: Box<Expr>,
         /// Keyword slot initializers.
         fields: Vec<KeywordArg>,
         /// Source span.
@@ -327,6 +336,7 @@ impl Expr {
             Self::Number { id, .. }
             | Self::Bool { id, .. }
             | Self::Name { id, .. }
+            | Self::ClassName { id, .. }
             | Self::Call { id, .. }
             | Self::Signal { id, .. }
             | Self::MakeObject { id, .. }
@@ -346,6 +356,7 @@ impl Expr {
             Self::Number { span, .. }
             | Self::Bool { span, .. }
             | Self::Name { span, .. }
+            | Self::ClassName { span, .. }
             | Self::Call { span, .. }
             | Self::Signal { span, .. }
             | Self::MakeObject { span, .. }
@@ -755,6 +766,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::NumberExpr => self.lower_number(node),
             CstKind::BoolExpr => self.lower_bool(node),
             CstKind::NameExpr => self.lower_name(node),
+            CstKind::TypeExpr => self.lower_class_name(node),
             CstKind::CallExpr => self.lower_call(node),
             CstKind::SlotExpr => self.lower_slot_read(node),
             CstKind::BinaryExpr => self.lower_binary(node),
@@ -819,6 +831,20 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
+    fn lower_class_name(&self, node: &CstNode) -> Expr {
+        let Some((span, text)) = self.first_token_text(node, TokenKind::TypeName) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::ClassName {
+            id: self.ast_id(node),
+            class_name: text.to_string(),
+            span,
+        }
+    }
+
     fn lower_call(&mut self, node: &CstNode) -> Expr {
         let Some((name_span, text)) = self.first_token_text(node, TokenKind::Ident) else {
             return Expr::Error {
@@ -836,7 +862,7 @@ impl<'tree> Lowering<'tree> {
         for arg_list in node.child_nodes(CstKind::ArgList) {
             for child in &arg_list.children {
                 if let CstElement::Node(expr) = child {
-                    if matches!(expr.kind, CstKind::KeywordArg | CstKind::TypeExpr) {
+                    if matches!(expr.kind, CstKind::KeywordArg) {
                         continue;
                     }
                     args.push(self.lower_expr(expr));
@@ -875,7 +901,7 @@ impl<'tree> Lowering<'tree> {
         for arg_list in node.child_nodes(CstKind::ArgList) {
             for child in &arg_list.children {
                 if let CstElement::Node(expr) = child {
-                    if matches!(expr.kind, CstKind::KeywordArg | CstKind::TypeExpr) {
+                    if matches!(expr.kind, CstKind::KeywordArg) {
                         continue;
                     }
                     args.push(self.lower_expr(expr));
@@ -892,18 +918,26 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             };
         };
-        let class_name = arg_list
-            .child_nodes(CstKind::TypeExpr)
-            .next()
-            .and_then(|type_expr| self.first_token_text(type_expr, TokenKind::TypeName))
-            .map_or_else(String::new, |(_, text)| text.to_string());
+        let class = arg_list
+            .children
+            .iter()
+            .find_map(|child| match child {
+                CstElement::Node(expr) if expr.kind != CstKind::KeywordArg => {
+                    Some(self.lower_expr(expr))
+                }
+                _ => None,
+            })
+            .unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            });
         let fields = arg_list
             .child_nodes(CstKind::KeywordArg)
             .map(|keyword| self.lower_keyword_arg(keyword))
             .collect();
         Expr::MakeObject {
             id: self.ast_id(node),
-            class_name,
+            class: Box::new(class),
             fields,
             span: node.span,
         }
@@ -1269,7 +1303,11 @@ mod tests {
         let Expr::Call { args, .. } = &module.functions[0].body.result else {
             panic!("expected area call");
         };
-        assert!(matches!(args[0], Expr::MakeObject { .. }));
+        assert!(matches!(
+            &args[0],
+            Expr::MakeObject { class, .. }
+                if matches!(class.as_ref(), Expr::ClassName { class_name, .. } if class_name == "<circle>")
+        ));
     }
 
     #[test]
@@ -1335,7 +1373,11 @@ mod tests {
         assert!(matches!(
             body.as_ref(),
             Expr::Signal { condition, .. }
-                if matches!(condition.as_ref(), Expr::MakeObject { class_name, .. } if class_name == "<bad>")
+                if matches!(
+                    condition.as_ref(),
+                    Expr::MakeObject { class, .. }
+                        if matches!(class.as_ref(), Expr::ClassName { class_name, .. } if class_name == "<bad>")
+                )
         ));
     }
 

@@ -411,6 +411,31 @@
   accessor enumeration, and optimizer choices beyond direct slot-read lowering
   remain deferred.
 
+## Implemented: Class Names As Class Objects
+
+- Source class names such as `<circle>` now lower to semantic class-object
+  values instead of being only raw syntax consumed by `make`.
+- Object construction consumes a class-object expression and keeps the known
+  class ID for validation and runtime layout. This supports local and direct
+  call flow such as `let c = <circle>; make(c, radius: 10)`.
+- `class-of(x)` is a semantic expression returning the known class object for a
+  known runtime object. Lowering emits the existing class-id operation, and
+  generic dispatch continues to use runtime class IDs internally.
+- Lowered IR represents known class objects as class IDs with a distinct
+  `class(<name>)` value kind. Dumps show semantic `class-object` /
+  `class-of` expressions and lowered `const.class` / `class_of` representation.
+- Corpus coverage includes direct class-object construction, class objects
+  returned through direct calls, and `class-of` feeding `make`.
+- Incremental coverage includes a class-reference edit that recomputes the
+  dependent lowered module and tape program while reusing unrelated method
+  lookup/lowering/tape artifacts.
+
+### Deferred Class Object Design
+
+- Metaclasses, user-defined classes of classes, dynamic unknown class objects,
+  reflective class/slot enumeration, class-object mutation, and a full Dylan
+  class hierarchy remain deferred.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
