@@ -1,0 +1,16 @@
+// expect: diagnostics 0
+// host-class: <rust-circle> radius:<integer>
+// expect: dump sem contains <rust-circle> origin=host-backed(hc0)
+// expect: dump sem contains method m0
+// expect: dump lowered contains area#dispatch
+// expect: dump tape contains name="area#dispatch"
+
+define generic area(x :: <object>) => <integer>;
+
+define method area(c :: <rust-circle>) => <integer>
+  c.radius * c.radius
+end;
+
+define function call-area(c :: <rust-circle>) => <integer>
+  area(c)
+end;

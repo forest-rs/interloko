@@ -72,10 +72,15 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/diagnostics/apply_non_callable.cairn"));
     assert!(out.contains("pass/objects/instance_refinement.cairn"));
     assert!(out.contains("pass/objects/cast_object_slot.cairn"));
+    assert!(out.contains("pass/host/host_backed_slot.cairn"));
+    assert!(out.contains("pass/host/host_backed_dispatch.cairn"));
     assert!(out.contains("fail/diagnostics/impossible_instance_test.cairn"));
     assert!(out.contains("fail/diagnostics/impossible_cast.cairn"));
     assert!(out.contains("fail/diagnostics/primitive_instance_test.cairn"));
-    assert!(out.contains("corpus: 60 passed, 0 failed, 60 total"));
+    assert!(out.contains("fail/diagnostics/host_backed_make.cairn"));
+    assert!(out.contains("fail/diagnostics/host_backed_bad_slot.cairn"));
+    assert!(out.contains("fail/diagnostics/host_backed_bad_cast.cairn"));
+    assert!(out.contains("corpus: 65 passed, 0 failed, 65 total"));
 }
 
 #[test]

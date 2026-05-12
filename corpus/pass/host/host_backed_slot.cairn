@@ -1,0 +1,10 @@
+// expect: diagnostics 0
+// host-class: <rust-circle> radius:<integer>
+// expect: dump sem contains <rust-circle> origin=host-backed(hc0)
+// expect: dump sem contains radius :: <integer> origin=host-backed(hc0.hs0)
+// expect: dump lowered contains slot.read %r1, <rust-circle>.radius
+// expect: dump tape contains cairn.slot_get
+
+define function radius(c :: <rust-circle>) => <integer>
+  c.radius
+end;

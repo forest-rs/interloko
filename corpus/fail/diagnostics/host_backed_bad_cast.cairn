@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// host-class: <rust-circle> radius:<integer>
+// host-class: <rust-square> side:<integer>
+// expect: diagnostic contains cast is impossible: <rust-square> is not <rust-circle>
+
+define function bad(s :: <rust-square>) => <integer>
+  as(<rust-circle>, s).radius
+end;

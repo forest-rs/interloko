@@ -611,6 +611,69 @@
   semantic path, but generic dispatch remains limited by the current
   one-argument dispatcher model.
 
+## Implemented: Host-Backed Metaobject Foundation
+
+- `HostMetaRegistry` lets an embedding Rust host declare host-backed classes,
+  slots, and functions explicitly. This is metadata only; the registry does not
+  inspect Rust values or depend on reflection.
+- Host-backed classes and Cairn-native classes share the same nominal
+  `ClassId` space. Methods can specialize on either kind, and generic dispatch
+  uses the same class-id comparison path for both.
+- Semantic classes and slots now carry origin metadata:
+  - `native` for Cairn source definitions;
+  - `host-backed(hcN)` and `host-backed(hcN.hsN)` for registry declarations.
+- Semantic dumps show class and slot origin, so it is visible when a program is
+  using a Rust-backed metaobject instead of a Cairn-native definition.
+- Host-backed slots have Cairn `ValueKind` declarations and are read-only in
+  this slice.
+- `make(<host-backed-class>, ...)` is rejected during semantic lowering.
+  Host-backed object handles must be supplied by the embedding runtime.
+- `CairnHost` can install host-backed object handles through a
+  `HostObjectAdapter`. The adapter owns Rust value access and exposes
+  read-only slot reads back to the Cairn runtime.
+- Host-backed object handles participate in:
+  - `<object>` boxing through the host value representation;
+  - `instance?`;
+  - `as(<host-backed-class>, value)`;
+  - slot reads;
+  - generic method dispatch.
+- Lowered IR continues to expose ordinary model operations such as class tests,
+  casts, generic dispatch calls, and `slot.read` before tape emission.
+- Tape emission still uses ordinary runtime host calls such as
+  `cairn.slot_get`, `cairn.instance_of`, and `cairn.cast_object`. There are no
+  host-backed-specific `execution_tape` opcodes.
+- Tests include hand-written Rust adapters for small Rust-backed shapes and
+  cover slot reads, generic dispatch, `<object>` boxing, casts, invalid slot
+  reads, and invalid casts.
+- `cairn_corpus` supports `// host-class:` headers for compile/dump fixtures,
+  and the corpus now includes host-backed slot, dispatch, construction, slot,
+  and cast cases.
+
+### Host-Backed Glossary
+
+- **Host-backed class:** a nominal Cairn class declared by the embedding host
+  instead of by Cairn source.
+- **Host-backed slot:** a read-only Cairn slot whose value is provided by a
+  host adapter.
+- **Host object handle:** a runtime object handle stored in `CairnHost` that
+  points at adapter-owned Rust data.
+- **Adapter:** Rust code that maps a Cairn `SlotId` and expected `ValueKind` to
+  a runtime value.
+- **Registry:** explicit metadata describing host-backed metaobjects before
+  semantic lowering.
+
+### Deferred Host-Backed Design
+
+- `facet` integration is deferred. It should later populate
+  `HostMetaRegistry`; it should not replace Cairn's object-model semantics.
+- Automatic Rust reflection, mutation, Cairn-side construction of host-backed
+  values, ownership/lifetime generality, dynamic unknown host classes,
+  host-backed generic Rust types, enum/variant modeling, trait discovery,
+  dynamic method installation, persistence, async/effects integration, and
+  Cranelift remain out of scope.
+- Host-backed functions are metadata scaffolding in this slice. Runtime calls
+  still go through the existing Cairn lowering and host-call mechanisms.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
@@ -634,6 +697,9 @@
 - Query scheduling that avoids recomputing prerequisite fingerprints when
   validating cache reuse.
 - Cross-call condition signaling, dynamic handler stacks, and effect typing.
+- Automatic host reflection through `facet`.
+- Host-backed mutation, construction, generic Rust types, enum/variant
+  modeling, trait discovery, and dynamic host class installation.
 
 ## Follow-Up Tickets
 

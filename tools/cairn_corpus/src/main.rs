@@ -6,6 +6,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cairn_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use cairn_compiler::session::{
     CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
 };
@@ -85,7 +86,13 @@ fn dump_command(args: &[String]) -> Result<Outcome> {
         CorpusError::Usage("stage must be one of syntax|ast|sem|lowered|tape|all".into())
     })?;
     let source = read_to_string(Path::new(&args[1]))?;
-    let artifacts = CompilerSession::compile_source(&args[1], &source, RuntimeMode::CompileOnly);
+    let registry = parse_host_registry(Path::new(&args[1]), &source)?;
+    let artifacts = CompilerSession::compile_source_with_host_registry(
+        &args[1],
+        &source,
+        RuntimeMode::CompileOnly,
+        &registry,
+    );
     print!("{}", artifacts.dump_stage(stage));
     Ok(Outcome::Success)
 }
@@ -98,12 +105,13 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
     let mut cases = Vec::with_capacity(paths.len());
     for path in paths {
         let source = read_to_string(&path)?;
-        let expectations = parse_expectations(&path, &source)?;
+        let (expectations, host_registry) = parse_header(&path, &source)?;
         let display_path = display_path(root, &path);
         cases.push(Case {
             display_path,
             source,
             expectations,
+            host_registry,
         });
     }
     Ok(cases)
@@ -132,13 +140,16 @@ fn collect_cairn_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn parse_expectations(path: &Path, source: &str) -> Result<Vec<Expectation>> {
+fn parse_header(path: &Path, source: &str) -> Result<(Vec<Expectation>, HostMetaRegistry)> {
     let mut expectations = Vec::new();
+    let mut host_registry = HostMetaRegistry::new();
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             if let Some(rest) = trimmed.strip_prefix("// expect:") {
                 expectations.push(parse_expectation(path, index + 1, rest.trim())?);
+            } else if let Some(rest) = trimmed.strip_prefix("// host-class:") {
+                host_registry.add_class(parse_host_class(path, index + 1, rest.trim())?);
             }
             continue;
         }
@@ -152,7 +163,62 @@ fn parse_expectations(path: &Path, source: &str) -> Result<Vec<Expectation>> {
             message: "missing // expect: header".into(),
         });
     }
-    Ok(expectations)
+    Ok((expectations, host_registry))
+}
+
+fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
+    let mut host_registry = HostMetaRegistry::new();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// host-class:") {
+                host_registry.add_class(parse_host_class(path, index + 1, rest.trim())?);
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(host_registry)
+}
+
+fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> {
+    let mut parts = input.split_whitespace();
+    let name = parts
+        .next()
+        .ok_or_else(|| invalid_header(path, line, "host-class requires a class name"))?;
+    if !name.starts_with('<') || !name.ends_with('>') {
+        return Err(invalid_header(
+            path,
+            line,
+            "host-class name must be a Cairn class name",
+        ));
+    }
+    let mut class = HostClass::new(name);
+    for part in parts {
+        let Some((slot_name, type_name)) = part.split_once(':') else {
+            return Err(invalid_header(
+                path,
+                line,
+                "host-class slots must be `slot:<type>`",
+            ));
+        };
+        let kind = parse_host_slot_kind(path, line, type_name)?;
+        class = class.with_slot(HostSlot::new(slot_name, kind, type_name));
+    }
+    Ok(class)
+}
+
+fn parse_host_slot_kind(path: &Path, line: usize, input: &str) -> Result<ValueKind> {
+    match input {
+        "<object>" => Ok(ValueKind::Any),
+        "<integer>" => Ok(ValueKind::I64),
+        "<boolean>" => Ok(ValueKind::Bool),
+        _ => Err(invalid_header(
+            path,
+            line,
+            "host-class corpus slots currently support <object>, <integer>, or <boolean>",
+        )),
+    }
 }
 
 fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectation> {
@@ -210,12 +276,7 @@ fn check_case(case: &Case) -> Vec<String> {
     } else {
         RuntimeMode::CompileOnly
     };
-    let mut session = IncrementalCompilerSession::new();
-    let source = session.add_source(&case.display_path, &case.source);
-    let update = session
-        .compile(source, mode)
-        .expect("source was just added to incremental session");
-    let artifacts = &update.artifacts;
+    let artifacts = compile_case(case, mode);
     let mut failures = Vec::new();
 
     for expectation in &case.expectations {
@@ -254,6 +315,28 @@ fn check_case(case: &Case) -> Vec<String> {
     }
 
     failures
+}
+
+fn compile_case(case: &Case, mode: RuntimeMode) -> cairn_compiler::session::SessionArtifacts {
+    if has_host_registry(&case.host_registry) {
+        CompilerSession::compile_source_with_host_registry(
+            &case.display_path,
+            &case.source,
+            mode,
+            &case.host_registry,
+        )
+    } else {
+        let mut session = IncrementalCompilerSession::new();
+        let source = session.add_source(&case.display_path, &case.source);
+        session
+            .compile(source, mode)
+            .expect("source was just added to incremental session")
+            .artifacts
+    }
+}
+
+fn has_host_registry(registry: &HostMetaRegistry) -> bool {
+    !registry.classes().is_empty() || !registry.functions().is_empty()
 }
 
 fn parse_stage(value: &str) -> Option<DumpStage> {
@@ -329,6 +412,7 @@ struct Case {
     display_path: String,
     source: String,
     expectations: Vec<Expectation>,
+    host_registry: HostMetaRegistry,
 }
 
 #[derive(Debug)]
