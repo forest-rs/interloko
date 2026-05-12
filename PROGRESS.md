@@ -645,6 +645,9 @@
 - Tests include hand-written Rust adapters for small Rust-backed shapes and
   cover slot reads, generic dispatch, `<object>` boxing, casts, invalid slot
   reads, and invalid casts.
+- `examples/host_backed_area` is a runnable Rust embedding example. It creates
+  Rust-backed circle and square values, installs them into `CairnHost`, and
+  runs Cairn generic dispatch over those host-backed object handles.
 - `cairn_corpus` supports `// host-class:` headers for compile/dump fixtures,
   and the corpus now includes host-backed slot, dispatch, construction, slot,
   and cast cases.
@@ -714,4 +717,5 @@
 - `cargo doc --workspace --all-features --no-deps`
 - `cargo run -p cairn_forty_two_example` prints `42`.
 - `cargo run -p cairn_generic_area_example` prints `100`.
+- `cargo run -p cairn_host_backed_area_example` prints `74`.
 - `cargo run -p cairn_corpus` checks the small-program corpus.
