@@ -88,6 +88,8 @@ pub enum DumpStage {
     Sem,
     /// Metaobject protocol summary.
     Mop,
+    /// Environment object protocol summary.
+    Eop,
     /// Lowered executable IR dump.
     Lowered,
     /// `execution_tape` disassembly.
@@ -143,6 +145,7 @@ impl SessionArtifacts {
             DumpStage::Ast => dump_ast(&self.ast),
             DumpStage::Sem => dump_sem(&self.sem),
             DumpStage::Mop => dump_mop(&self.sem),
+            DumpStage::Eop => dump_eop(self),
             DumpStage::Lowered => self.lowered.as_ref().map_or_else(
                 || format!("lowered unavailable: {:?}\n", self.lower_error),
                 lower::Module::dump,
@@ -163,6 +166,7 @@ impl SessionArtifacts {
                     DumpStage::Ast,
                     DumpStage::Sem,
                     DumpStage::Mop,
+                    DumpStage::Eop,
                     DumpStage::Lowered,
                     DumpStage::Tape,
                 ] {
@@ -1505,6 +1509,364 @@ fn runtime_object_kind_label(kind: HostObjectKind) -> &'static str {
     }
 }
 
+fn dump_eop(artifacts: &SessionArtifacts) -> String {
+    let module = &artifacts.sem;
+    let runtime = RuntimeLayout::from_sem(module);
+    let mut out = String::new();
+    let _ = writeln!(out, "eop {} {}", artifacts.source.id, artifacts.source.name);
+    let _ = writeln!(out, "objects:");
+
+    let _ = writeln!(out, "  object source:{}", artifacts.source.id);
+    let _ = writeln!(
+        out,
+        "    kind=source-file class=<source-file> origin=source-authored storage=source-defined"
+    );
+    let _ = writeln!(out, "    presentation title=\"{}\"", artifacts.source.name);
+    let _ = writeln!(
+        out,
+        "    affordances inspect,dump-syntax,dump-ast,dump-sem,dump-mop,dump-eop,dump-lowered,dump-tape,artifacts,diff"
+    );
+    let _ = writeln!(
+        out,
+        "    inspection source-file={} bytes={}",
+        artifacts.source.id,
+        artifacts.source.source.len()
+    );
+
+    for class in &module.classes {
+        dump_eop_class(module, &runtime, &mut out, class);
+    }
+    for generic in &module.generics {
+        dump_eop_generic(module, &mut out, generic);
+    }
+    for method in &module.methods {
+        dump_eop_method(module, &mut out, method);
+    }
+    for function in &module.functions {
+        dump_eop_function(module, &mut out, function);
+    }
+    for (index, diagnostic) in artifacts.diagnostics.iter().enumerate() {
+        let _ = writeln!(out, "  object diagnostic:d{index}");
+        let _ = writeln!(
+            out,
+            "    kind=diagnostic class=<diagnostic> origin=compiler-generated storage=cached-artifact"
+        );
+        let _ = writeln!(out, "    presentation title=\"{}\"", diagnostic.message);
+        let _ = writeln!(out, "    affordances inspect,open-source,dump-sem,dump-eop");
+        let _ = writeln!(
+            out,
+            "    inspection severity={:?} span={}..{}",
+            diagnostic.severity, diagnostic.span.start, diagnostic.span.end
+        );
+    }
+    for (index, class) in runtime.classes.iter().enumerate() {
+        dump_eop_runtime_class(module, &mut out, index, class);
+    }
+    for report in artifacts.artifact_reports() {
+        let _ = writeln!(out, "  object artifact:{}", report.key);
+        let _ = writeln!(
+            out,
+            "    kind=artifact class=<query-artifact> origin=compiler-generated storage=cached-artifact"
+        );
+        let _ = writeln!(
+            out,
+            "    presentation title=\"{}\"",
+            artifact_label(report.artifact)
+        );
+        let _ = writeln!(
+            out,
+            "    affordances inspect,show-dependencies,dump-artifacts"
+        );
+        let _ = writeln!(
+            out,
+            "    inspection key={} artifact={}",
+            report.key,
+            artifact_label(report.artifact)
+        );
+    }
+
+    out
+}
+
+fn dump_eop_class(
+    module: &sem::Module,
+    runtime: &RuntimeLayout,
+    out: &mut String,
+    class: &sem::Class,
+) {
+    let origin = eop_class_origin_label(class.origin);
+    let storage = eop_class_storage_label(class.origin);
+    let runtime_class = runtime.classes.get(class.id.0 as usize);
+    let runtime_kind =
+        runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
+    let _ = writeln!(out, "  object class:c{}", class.id.0);
+    let _ = writeln!(
+        out,
+        "    kind=class class=<class> origin={origin} storage={storage}"
+    );
+    let _ = writeln!(out, "    presentation title=\"{}\"", class.name);
+    let _ = writeln!(
+        out,
+        "    affordances inspect,dump-mop,dump-eop,show-runtime-layout,show-slots"
+    );
+    let _ = writeln!(
+        out,
+        "    inspection definition={} class-id=c{} runtime={runtime_kind}",
+        class.definition, class.id.0
+    );
+
+    for slot in &class.slots {
+        dump_eop_slot(module, out, class, slot);
+        dump_eop_accessor(module, out, class, slot);
+    }
+}
+
+fn dump_eop_slot(module: &sem::Module, out: &mut String, class: &sem::Class, slot: &sem::Slot) {
+    let origin = eop_slot_origin_label(slot.origin);
+    let storage = eop_slot_storage_label(slot.origin);
+    let _ = writeln!(out, "  object slot:c{}.s{}", class.id.0, slot.id.0);
+    let _ = writeln!(
+        out,
+        "    kind=slot class=<slot> origin={origin} storage={storage}"
+    );
+    let _ = writeln!(
+        out,
+        "    presentation title=\"{}.{}\"",
+        class.name, slot.name
+    );
+    let _ = writeln!(
+        out,
+        "    affordances inspect,dump-mop,dump-eop,show-accessor"
+    );
+    let _ = writeln!(
+        out,
+        "    inspection definition={} owner=class:c{} slot-id=s{} kind={} type={} runtime={}",
+        slot.definition,
+        class.id.0,
+        slot.id.0,
+        sem_kind_label(module, slot.kind),
+        slot.type_name,
+        sem_runtime_repr(slot.kind)
+    );
+}
+
+fn dump_eop_accessor(module: &sem::Module, out: &mut String, class: &sem::Class, slot: &sem::Slot) {
+    let origin = eop_slot_origin_label(slot.origin);
+    let storage = eop_slot_storage_label(slot.origin);
+    let _ = writeln!(out, "  object accessor:c{}.s{}", class.id.0, slot.id.0);
+    let _ = writeln!(
+        out,
+        "    kind=accessor class=<accessor> origin={origin} storage={storage}"
+    );
+    let _ = writeln!(out, "    presentation title=\"{}\"", slot.accessor.name);
+    let _ = writeln!(out, "    affordances inspect,dump-mop,dump-eop,show-slot");
+    let _ = writeln!(
+        out,
+        "    execution callable=known result={} reads=slot:c{}.s{}",
+        sem_kind_label(module, slot.accessor.result_kind),
+        slot.accessor.class.0,
+        slot.accessor.slot.0
+    );
+    let _ = writeln!(
+        out,
+        "    inspection definition={} owner=class:c{} slot=s{}",
+        slot.accessor.definition, slot.accessor.class.0, slot.accessor.slot.0
+    );
+}
+
+fn dump_eop_generic(module: &sem::Module, out: &mut String, generic: &sem::GenericFunction) {
+    let params = generic
+        .params
+        .iter()
+        .zip(&generic.param_kinds)
+        .map(|(name, kind)| match kind {
+            Some(kind) => format!("{name}:{}", sem_kind_label(module, *kind)),
+            None => format!("{name}:untyped"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let method_count = module
+        .methods
+        .iter()
+        .filter(|method| method.generic == generic.id)
+        .count();
+    let _ = writeln!(out, "  object generic:g{}", generic.id.0);
+    let _ = writeln!(
+        out,
+        "    kind=generic class=<generic-function> origin=source-authored storage=source-defined"
+    );
+    let _ = writeln!(
+        out,
+        "    presentation title=\"{}({params}) -> {}\"",
+        generic.name,
+        sem_kind_label(module, generic.result_kind)
+    );
+    let _ = writeln!(
+        out,
+        "    affordances inspect,dump-mop,dump-eop,show-dispatch,add-method"
+    );
+    let _ = writeln!(
+        out,
+        "    execution callable=generic arity={} methods={method_count}",
+        generic.arity
+    );
+    let _ = writeln!(
+        out,
+        "    inspection definition={} generic-id=g{}",
+        generic.definition, generic.id.0
+    );
+}
+
+fn dump_eop_method(module: &sem::Module, out: &mut String, method: &sem::Method) {
+    let generic = module.generics.get(method.generic.0 as usize);
+    let generic_name = generic.map_or("<?>", |generic| generic.name.as_str());
+    let class = module.classes.get(method.specializer.0 as usize);
+    let class_name = class.map_or("<?>", |class| class.name.as_str());
+    let class_origin = class.map_or_else(
+        || "missing".into(),
+        |class| sem_class_origin_label(class.origin),
+    );
+    let _ = writeln!(out, "  object method:m{}", method.id.0);
+    let _ = writeln!(
+        out,
+        "    kind=method class=<method> origin=source-authored storage=source-defined"
+    );
+    let _ = writeln!(
+        out,
+        "    presentation title=\"{generic_name}({class_name}) -> {}\"",
+        sem_kind_label(module, method.result_kind)
+    );
+    let _ = writeln!(
+        out,
+        "    affordances inspect,dump-sem,dump-lowered,dump-tape,dump-eop,show-dependencies,edit-body"
+    );
+    let _ = writeln!(
+        out,
+        "    execution callable=method participates-in=generic:g{} specializer=class:c{}",
+        method.generic.0, method.specializer.0
+    );
+    let _ = writeln!(
+        out,
+        "    inspection definition={} method-id=m{} specializer-origin={class_origin}",
+        method.definition, method.id.0
+    );
+}
+
+fn dump_eop_function(module: &sem::Module, out: &mut String, function: &sem::Function) {
+    let params = function
+        .params
+        .iter()
+        .zip(&function.param_kinds)
+        .map(|(local, kind)| {
+            let name = function
+                .locals
+                .get(local.0 as usize)
+                .map_or("?", |local| local.name.as_str());
+            format!("{name}:{}", sem_kind_label(module, *kind))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "  object function:f{}", function.id.0);
+    let _ = writeln!(
+        out,
+        "    kind=function class=<function> origin=source-authored storage=source-defined"
+    );
+    let _ = writeln!(
+        out,
+        "    presentation title=\"{}({params}) -> {}\"",
+        function.name,
+        sem_kind_label(module, function.result_kind)
+    );
+    let _ = writeln!(
+        out,
+        "    affordances inspect,dump-sem,dump-lowered,dump-tape,dump-eop,run,show-dependencies,edit-body"
+    );
+    let _ = writeln!(
+        out,
+        "    execution callable=direct arity={}",
+        function.params.len()
+    );
+    let _ = writeln!(
+        out,
+        "    inspection definition={} function-id=f{}",
+        function.definition, function.id.0
+    );
+}
+
+fn dump_eop_runtime_class(
+    module: &sem::Module,
+    out: &mut String,
+    index: usize,
+    class: &crate::runtime::RuntimeClass,
+) {
+    let _ = writeln!(out, "  object runtime-class:c{index}");
+    let _ = writeln!(
+        out,
+        "    kind=runtime-layout-row class=<runtime-class> origin=compiler-generated storage=cached-artifact"
+    );
+    let _ = writeln!(out, "    presentation title=\"runtime {}\"", class.name);
+    let _ = writeln!(out, "    affordances inspect,dump-mop,dump-eop,dump-tape");
+    let _ = writeln!(
+        out,
+        "    inspection class-id=c{index} storage-kind={} slots={}",
+        runtime_object_kind_label(class.kind),
+        class.slots.len()
+    );
+    for (slot_index, slot) in class.slots.iter().enumerate() {
+        let storage = if slot.host_backed {
+            "host-backed"
+        } else {
+            "native"
+        };
+        let _ = writeln!(out, "  object runtime-slot:c{index}.s{slot_index}");
+        let _ = writeln!(
+            out,
+            "    kind=runtime-layout-row class=<runtime-slot> origin=compiler-generated storage=cached-artifact"
+        );
+        let _ = writeln!(
+            out,
+            "    presentation title=\"runtime {}.{}\"",
+            class.name, slot.name
+        );
+        let _ = writeln!(out, "    affordances inspect,dump-mop,dump-eop,dump-tape");
+        let _ = writeln!(
+            out,
+            "    inspection class-id=c{index} slot-id=s{slot_index} storage={} kind={} runtime={}",
+            storage,
+            sem_kind_label(module, slot.kind),
+            sem_runtime_repr(slot.kind)
+        );
+    }
+}
+
+fn eop_class_origin_label(origin: sem::ClassOrigin) -> &'static str {
+    match origin {
+        sem::ClassOrigin::Native => "source-authored",
+        sem::ClassOrigin::HostBacked { .. } => "host-backed",
+    }
+}
+
+fn eop_class_storage_label(origin: sem::ClassOrigin) -> &'static str {
+    match origin {
+        sem::ClassOrigin::Native => "source-defined",
+        sem::ClassOrigin::HostBacked { .. } => "host-registry",
+    }
+}
+
+fn eop_slot_origin_label(origin: sem::SlotOrigin) -> &'static str {
+    match origin {
+        sem::SlotOrigin::Native => "source-authored",
+        sem::SlotOrigin::HostBacked { .. } => "host-backed",
+    }
+}
+
+fn eop_slot_storage_label(origin: sem::SlotOrigin) -> &'static str {
+    match origin {
+        sem::SlotOrigin::Native => "source-defined",
+        sem::SlotOrigin::HostBacked { .. } => "host-adapter",
+    }
+}
+
 fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
     match kind {
         sem::ValueKind::Any => "object-top".into(),
@@ -2349,6 +2711,15 @@ mod tests {
         assert!(mop.contains("classes:"));
         assert!(mop.contains("origin=native runtime=native"));
         assert!(mop.contains("dispatch table:"));
+        let eop = artifacts.dump_stage(DumpStage::Eop);
+        assert!(eop.contains("eop"));
+        assert!(eop.contains("object source:"));
+        assert!(eop.contains("kind=source-file"));
+        assert!(eop.contains("object class:c0"));
+        assert!(eop.contains("object generic:g0"));
+        assert!(eop.contains("object method:m0"));
+        assert!(eop.contains("object function:f0"));
+        assert!(eop.contains("object artifact:"));
         assert!(
             artifacts
                 .dump_stage(DumpStage::Lowered)
@@ -2395,6 +2766,12 @@ mod tests {
         assert!(mop.contains("<rust-circle> origin=host-backed(hc0) runtime=host-backed"));
         assert!(mop.contains("storage=host-backed"));
         assert!(mop.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
+        let eop = artifacts.dump_stage(DumpStage::Eop);
+        assert!(eop.contains("object class:c0"));
+        assert!(eop.contains("origin=host-backed storage=host-registry"));
+        assert!(eop.contains("object slot:c0.s0"));
+        assert!(eop.contains("storage=host-adapter"));
+        assert!(eop.contains("object runtime-class:c0"));
     }
 
     #[test]

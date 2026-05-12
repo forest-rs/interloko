@@ -53,6 +53,13 @@ fn run(args: Vec<String>) -> Result<()> {
             print!("{}", artifacts.dump_stage(DumpStage::Mop));
             Ok(())
         }
+        "eop" => {
+            let file = single_file_arg(&args)?;
+            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&artifacts.diagnostics);
+            print!("{}", artifacts.dump_stage(DumpStage::Eop));
+            Ok(())
+        }
         "artifacts" => {
             let file = single_file_arg(&args)?;
             let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
@@ -116,7 +123,8 @@ fn single_file_arg(args: &[String]) -> Result<&str> {
 fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
     if args.len() != 4 || args[2] != "--stage" {
         return Err(LabError::Usage(
-            "usage: cairn_lab dump <file.cairn> --stage syntax|ast|sem|mop|lowered|tape|all".into(),
+            "usage: cairn_lab dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
+                .into(),
         ));
     }
     let stage = match args[3].as_str() {
@@ -124,12 +132,13 @@ fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
         "ast" => DumpStage::Ast,
         "sem" => DumpStage::Sem,
         "mop" => DumpStage::Mop,
+        "eop" => DumpStage::Eop,
         "lowered" => DumpStage::Lowered,
         "tape" => DumpStage::Tape,
         "all" => DumpStage::All,
         _ => {
             return Err(LabError::Usage(
-                "stage must be one of syntax|ast|sem|mop|lowered|tape|all".into(),
+                "stage must be one of syntax|ast|sem|mop|eop|lowered|tape|all".into(),
             ));
         }
     };
@@ -222,7 +231,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "cairn_lab".into());
     format!(
-        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
+        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
     )
 }
 

@@ -97,7 +97,7 @@
 - Session diff reports preserved definitions, added/removed/modified definitions, and affected query artifacts.
 - `tools/cairn_lab` provides:
   - `run <file>`
-  - `dump <file> --stage syntax|ast|sem|lowered|tape|all`
+  - `dump <file> --stage syntax|ast|sem|mop|eop|lowered|tape|all`
   - `artifacts <file>`
   - `diff <before> <after>`
 - CLI fixtures cover the generic-area program, harmless trivia edits, and a focused method body edit.
@@ -127,7 +127,7 @@
   - `check [corpus-root]` to compile every corpus program through
     `cairn_compiler::session`;
   - `list [corpus-root]` to inspect discovered cases;
-  - `dump <file.cairn> --stage syntax|ast|sem|lowered|tape|all` for
+  - `dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all` for
     snapshot-like stage output without committing generated dumps.
 - Add a new case by placing a `.cairn` file under `corpus/pass` or
   `corpus/fail`, adding at least one `// expect:` header line, and running
@@ -701,6 +701,59 @@
 - `DumpStage` gained a public `Mop` variant. Exhaustive downstream matches on
   `DumpStage` must handle it.
 - CLI stage lists now include `mop`.
+
+## Implemented: Environment Object Protocol Dump
+
+- `SessionArtifacts::dump_stage(DumpStage::Eop)` renders a first environment
+  object protocol view over the current compilation artifacts.
+- The EOP dump is intentionally descriptive. It does not add persistence,
+  permissions, UI rendering, search, scheduling, mutation, or a new runtime.
+- EOP objects currently cover:
+  - source files;
+  - classes, slots, accessors, generics, methods, and direct functions;
+  - diagnostics;
+  - runtime layout rows;
+  - query artifacts.
+- Each object reports a small protocol vocabulary:
+  - `kind`;
+  - meta-level `class`;
+  - `origin`;
+  - `storage`;
+  - `presentation`;
+  - `affordances`;
+  - `execution` when applicable;
+  - `inspection`.
+- `cairn_lab dump <file> --stage eop` and `cairn_lab eop <file>` print the EOP
+  summary. The workbench still understands leading `// host-class:` metadata so
+  host-backed objects are visible in the environment view.
+- `cairn_corpus` supports `dump eop contains ...` expectations.
+
+### EOP Glossary
+
+- **Environment object:** anything the workbench can identify and act on, such
+  as a method, diagnostic, runtime layout row, or query artifact.
+- **Origin:** where the object came from: source, host metadata, compiler
+  generation, and eventually agent/import sources.
+- **Storage:** who owns the current representation: source text, host adapter,
+  registry metadata, or cached compiler artifact.
+- **Presentation:** stable text hints that a future inspector or transcript can
+  render.
+- **Affordance:** a named action that a human, agent, or Portolan subject can
+  discover and request.
+
+### Deferred EOP Design
+
+- EOP records are text dumps only. There is no stable serialized schema,
+  Portolan subject bridge, Understory inspector, persistent image, capability
+  policy, transaction model, or agent provenance model yet.
+- Future EOP work should turn this vocabulary into structured records before
+  wiring it into search, presentation, or persistence.
+
+### Migration Notes
+
+- `DumpStage` gained a public `Eop` variant. Exhaustive downstream matches on
+  `DumpStage` must handle it.
+- CLI stage lists now include `eop`.
 
 ## Intentionally Deferred
 

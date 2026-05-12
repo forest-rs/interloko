@@ -56,6 +56,11 @@ fn dump_exposes_stages() {
     assert!(mop.contains("classes:"));
     assert!(mop.contains("dispatch table:"));
 
+    let eop = run_lab(&["dump", path, "--stage", "eop"]);
+    assert!(eop.contains("eop"));
+    assert!(eop.contains("objects:"));
+    assert!(eop.contains("object source:"));
+
     let lowered = run_lab(&["dump", path, "--stage", "lowered"]);
     assert!(lowered.contains("area#dispatch"));
 
@@ -82,6 +87,29 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(host_out.contains("storage=host-backed"));
     assert!(host_out.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
     assert!(host_out.contains("c1 <rust-square> origin=host-backed(hc1) -> m1"));
+}
+
+#[test]
+fn eop_reports_environment_objects_and_affordances() {
+    let host = fixture("host_backed_area.cairn");
+    let out = run_lab(&["eop", host.to_str().expect("fixture path should be utf8")]);
+
+    assert!(out.contains("object source:"));
+    assert!(out.contains("kind=source-file"));
+    assert!(out.contains("dump-eop"));
+    assert!(out.contains("object class:c0"));
+    assert!(out.contains("origin=host-backed storage=host-registry"));
+    assert!(out.contains("object slot:c0.s0"));
+    assert!(out.contains("storage=host-adapter"));
+    assert!(out.contains("object accessor:c0.s0"));
+    assert!(out.contains("execution callable=known"));
+    assert!(out.contains("object generic:g0"));
+    assert!(out.contains("show-dispatch"));
+    assert!(out.contains("object method:m0"));
+    assert!(out.contains("participates-in=generic:g0"));
+    assert!(out.contains("object function:f0"));
+    assert!(out.contains("object runtime-class:c0"));
+    assert!(out.contains("object artifact:"));
 }
 
 #[test]
