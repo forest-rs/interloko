@@ -1021,11 +1021,35 @@ fn dump_ast(module: &ast::Module) -> String {
             function.id,
             function.definition,
             function.name,
-            function.params.join(", ")
+            function
+                .params
+                .iter()
+                .map(dump_function_param)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
+        if let Some(return_type) = &function.return_type {
+            indent_line(&mut out, 2);
+            let _ = writeln!(out, "returns {}", dump_type_annotation(return_type));
+        }
         dump_ast_block(&mut out, &function.body, 2);
     }
     out
+}
+
+fn dump_function_param(param: &ast::FunctionParam) -> String {
+    param.type_annotation.as_ref().map_or_else(
+        || param.name.clone(),
+        |annotation| format!("{} :: {}", param.name, dump_type_annotation(annotation)),
+    )
+}
+
+fn dump_type_annotation(annotation: &ast::TypeAnnotation) -> String {
+    if annotation.class_object {
+        format!("class {}", annotation.name)
+    } else {
+        annotation.name.clone()
+    }
 }
 
 fn dump_ast_block(out: &mut String, block: &ast::Block, indent: usize) {

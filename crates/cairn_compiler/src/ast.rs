@@ -35,10 +35,36 @@ pub struct Function {
     pub definition: DefinitionId,
     /// Function name.
     pub name: String,
-    /// Parameter names in source order.
-    pub params: Vec<String>,
+    /// Parameters in source order.
+    pub params: Vec<FunctionParam>,
+    /// Optional declared return type.
+    pub return_type: Option<TypeAnnotation>,
     /// Function body.
     pub body: Block,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Direct function parameter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionParam {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Parameter name.
+    pub name: String,
+    /// Optional declared parameter type.
+    pub type_annotation: Option<TypeAnnotation>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Source type annotation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeAnnotation {
+    /// Type name, including angle brackets.
+    pub name: String,
+    /// Whether this annotation denotes the class object named by `name`.
+    pub class_object: bool,
     /// Source span.
     pub span: Span,
 }
@@ -601,6 +627,7 @@ impl<'tree> Lowering<'tree> {
         let mut name = String::new();
         let mut saw_function_keyword = false;
         let mut params = Vec::new();
+        let mut return_type = None;
         let mut body = None;
 
         for child in &node.children {
@@ -617,9 +644,12 @@ impl<'tree> Lowering<'tree> {
                 {
                     name = self.tree.tokens[*index].text(&self.tree.source).to_string();
                 }
+                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
+                    return_type = self.type_annotation_after(node, *index);
+                }
                 CstElement::Token(_) => {}
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
-                    params = self.lower_params(child_node);
+                    params = self.lower_function_params(child_node);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::Body => {
                     body = Some(self.lower_block(child_node));
@@ -643,6 +673,7 @@ impl<'tree> Lowering<'tree> {
             definition: self.definition(DefinitionKind::Function, &name, ""),
             name,
             params,
+            return_type,
             body,
             span: node.span,
         }
@@ -658,6 +689,37 @@ impl<'tree> Lowering<'tree> {
                 _ => None,
             })
             .collect()
+    }
+
+    fn lower_function_params(&self, node: &CstNode) -> Vec<FunctionParam> {
+        let tokens = self.node_token_indices(node);
+        let mut params = Vec::new();
+        let mut index = 0;
+        while index < tokens.len() {
+            let token_index = tokens[index];
+            let token = self.tree.tokens[token_index];
+            if token.kind != TokenKind::Ident {
+                index += 1;
+                continue;
+            }
+            let name = token.text(&self.tree.source).to_string();
+            let type_annotation = if tokens
+                .get(index + 1)
+                .is_some_and(|next| self.tree.tokens[*next].kind == TokenKind::DoubleColon)
+            {
+                self.type_annotation_after(node, tokens[index + 1])
+            } else {
+                None
+            };
+            params.push(FunctionParam {
+                id: AstNodeId::child(node.id, 1, &name),
+                name,
+                type_annotation,
+                span: token.span,
+            });
+            index += 1;
+        }
+        params
     }
 
     fn lower_method_params(&self, node: &CstNode) -> Vec<MethodParam> {
@@ -1186,6 +1248,45 @@ impl<'tree> Lowering<'tree> {
         })
     }
 
+    fn node_token_indices(&self, node: &CstNode) -> Vec<usize> {
+        node.children
+            .iter()
+            .filter_map(|child| match child {
+                CstElement::Token(index) => Some(*index),
+                CstElement::Node(_) => None,
+            })
+            .collect()
+    }
+
+    fn type_annotation_after(&self, node: &CstNode, marker_index: usize) -> Option<TypeAnnotation> {
+        let tokens = self.node_token_indices(node);
+        let marker = tokens.iter().position(|index| *index == marker_index)?;
+        let mut index = marker + 1;
+        let class_object = tokens
+            .get(index)
+            .is_some_and(|token| self.tree.tokens[*token].kind == TokenKind::Class);
+        if class_object {
+            index += 1;
+        }
+        let type_index = tokens.get(index).copied()?;
+        let type_token = self.tree.tokens[type_index];
+        if type_token.kind != TokenKind::TypeName {
+            return None;
+        }
+        let span = if class_object {
+            self.tree.tokens[tokens[marker + 1]]
+                .span
+                .cover(type_token.span)
+        } else {
+            type_token.span
+        };
+        Some(TypeAnnotation {
+            name: type_token.text(&self.tree.source).to_string(),
+            class_object,
+            span,
+        })
+    }
+
     fn first_restart_condition_name(&self, node: &CstNode) -> Option<(Span, &'tree str)> {
         let mut tokens = node.children.iter().filter_map(|child| match child {
             CstElement::Token(index) => Some(*index),
@@ -1240,7 +1341,8 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.functions.len(), 1);
         assert_eq!(module.functions[0].name, "add-one");
-        assert_eq!(module.functions[0].params, ["x"]);
+        assert_eq!(module.functions[0].params[0].name, "x");
+        assert_eq!(module.functions[0].params[0].type_annotation, None);
         assert_eq!(module.functions[0].body.lets[0].name, "one");
         assert!(matches!(
             module.functions[0].body.result,
@@ -1249,6 +1351,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn lowers_function_param_and_return_annotations() {
+        let tree = syntax::parse(
+            "define function build(klass :: class <circle>, radius :: <integer>) => <circle>\n  make(klass, radius: radius)\nend;",
+        );
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let function = &module.functions[0];
+        assert_eq!(function.params[0].name, "klass");
+        assert_eq!(
+            function.params[0]
+                .type_annotation
+                .as_ref()
+                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
+            Some((true, "<circle>"))
+        );
+        assert_eq!(function.params[1].name, "radius");
+        assert_eq!(
+            function.params[1]
+                .type_annotation
+                .as_ref()
+                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
+            Some((false, "<integer>"))
+        );
+        assert_eq!(
+            function
+                .return_type
+                .as_ref()
+                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
+            Some((false, "<circle>"))
+        );
     }
 
     #[test]

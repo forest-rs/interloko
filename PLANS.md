@@ -1,5 +1,54 @@
 # Plans
 
+## Add Typed Direct-Function Surface
+
+### Goal
+
+Add a narrow direct-function signature surface without changing generic or
+method signatures. Function parameters may carry type annotations, function
+returns may carry explicit result annotations, and direct calls are checked
+against those signatures before lowering.
+
+### Fence
+
+The semantic layer owns direct-function signature meaning and call checking; the
+AST owns narrow annotation syntax; lowering and tape emission consume resolved
+value kinds and representation coercions only.
+
+### Invariants
+
+- Unannotated direct function parameters still default to `<integer>`.
+- Unannotated direct function returns may remain inferred when available.
+- Explicit parameter annotations are enforced at every direct call.
+- Explicit return annotations are checked against the body result.
+- Function signatures are collected before lowering function bodies.
+- Class-object values stay distinct from runtime object instances.
+- Generic declarations and method signatures do not gain new annotation syntax
+  in this slice.
+
+### Steps
+
+1. Extend syntax and AST for direct-function parameter annotations and return
+   annotations, including `class <name>` as the class-object type spelling.
+2. Add semantic signature pre-pass data for parameter kinds and explicit return
+   kinds.
+3. Check direct-call arguments and annotated direct-function returns.
+4. Teach lowering to coerce accepted top `<object>` parameters/returns through
+   existing boxed-value representation.
+5. Update dumps, fingerprints, corpus, and incremental tests for signature
+   edits and signature-driven call invalidation.
+6. Update progress notes and run fmt, clippy, workspace tests, docs, examples,
+   `cairn_lab`, and `cairn_corpus`.
+
+### Risks
+
+- `<object>` accepts multiple concrete values semantically, so lowering must box
+  direct-call arguments and returns at the call boundary.
+- Explicit signatures collected before bodies must not erase useful inferred
+  return kinds for earlier unannotated helper functions.
+- Class-object type spelling should stay narrow so it does not imply
+  metaclasses or reflective class protocols.
+
 ## Make Object Model More Dylan-Shaped
 
 ### Goal

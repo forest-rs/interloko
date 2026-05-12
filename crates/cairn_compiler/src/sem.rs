@@ -828,17 +828,17 @@ impl Lowering {
         let mut params = Vec::new();
 
         for param in &function.params {
-            if ctx.find_local(param).is_some() {
+            if ctx.find_local(&param.name).is_some() {
                 ctx.diagnostics.push(Diagnostic::error(
-                    function.span,
-                    format!("parameter `{param}` is already defined"),
+                    param.span,
+                    format!("parameter `{}` is already defined", param.name),
                 ));
             }
             params.push(ctx.add_local(
-                self.local_definition(function.definition, param),
-                param.clone(),
+                self.local_definition(function.definition, &param.name),
+                param.name.clone(),
                 ValueKind::I64,
-                function.span,
+                param.span,
             ));
         }
 

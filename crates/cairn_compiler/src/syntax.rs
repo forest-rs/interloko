@@ -92,6 +92,8 @@ pub enum TokenKind {
     Star,
     /// `=`.
     Equal,
+    /// `=>`.
+    Arrow,
     /// `<`.
     Less,
     /// `<=`.
@@ -415,24 +417,25 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Minus => 16,
         TokenKind::Star => 17,
         TokenKind::Equal => 18,
-        TokenKind::Colon => 19,
-        TokenKind::DoubleColon => 20,
-        TokenKind::Dot => 21,
-        TokenKind::Semicolon => 22,
-        TokenKind::Whitespace => 23,
-        TokenKind::Comment => 24,
-        TokenKind::Error => 25,
-        TokenKind::If => 26,
-        TokenKind::Then => 27,
-        TokenKind::Else => 28,
-        TokenKind::Bool => 29,
-        TokenKind::Less => 30,
-        TokenKind::LessEqual => 31,
-        TokenKind::Greater => 32,
-        TokenKind::GreaterEqual => 33,
-        TokenKind::Handle => 34,
-        TokenKind::With => 35,
-        TokenKind::Restart => 36,
+        TokenKind::Arrow => 19,
+        TokenKind::Colon => 20,
+        TokenKind::DoubleColon => 21,
+        TokenKind::Dot => 22,
+        TokenKind::Semicolon => 23,
+        TokenKind::Whitespace => 24,
+        TokenKind::Comment => 25,
+        TokenKind::Error => 26,
+        TokenKind::If => 27,
+        TokenKind::Then => 28,
+        TokenKind::Else => 29,
+        TokenKind::Bool => 30,
+        TokenKind::Less => 31,
+        TokenKind::LessEqual => 32,
+        TokenKind::Greater => 33,
+        TokenKind::GreaterEqual => 34,
+        TokenKind::Handle => 35,
+        TokenKind::With => 36,
+        TokenKind::Restart => 37,
     }
 }
 
@@ -485,6 +488,10 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'*' => {
                 pos += 1;
                 TokenKind::Star
+            }
+            b'=' if bytes.get(pos + 1) == Some(&b'>') => {
+                pos += 2;
+                TokenKind::Arrow
             }
             b'=' => {
                 pos += 1;
@@ -851,6 +858,10 @@ impl<'source> Parser<'source> {
             &mut children,
             "expected `)` after parameters",
         );
+        if self.at(TokenKind::Arrow) {
+            self.expect(TokenKind::Arrow, &mut children, "expected `=>`");
+            self.parse_type_annotation(&mut children, "expected function return type");
+        }
         children.push(CstElement::Node(self.parse_body()));
         self.expect(
             TokenKind::End,
@@ -874,11 +885,7 @@ impl<'source> Parser<'source> {
             self.expect(TokenKind::Ident, &mut children, "expected parameter name");
             if self.at(TokenKind::DoubleColon) {
                 self.expect(TokenKind::DoubleColon, &mut children, "expected `::`");
-                self.expect(
-                    TokenKind::TypeName,
-                    &mut children,
-                    "expected parameter type",
-                );
+                self.parse_type_annotation(&mut children, "expected parameter type");
             }
             if !self.at(TokenKind::Comma) {
                 break;
@@ -887,6 +894,13 @@ impl<'source> Parser<'source> {
         }
 
         self.node(CstKind::ParameterList, children, start)
+    }
+
+    fn parse_type_annotation(&mut self, children: &mut Vec<CstElement>, message: &str) {
+        if self.at(TokenKind::Class) {
+            self.expect(TokenKind::Class, children, "expected `class`");
+        }
+        self.expect(TokenKind::TypeName, children, message);
     }
 
     fn parse_body(&mut self) -> CstNode {
@@ -1245,12 +1259,24 @@ mod tests {
 
     #[test]
     fn parse_function_with_let_and_call() {
-        let tree = parse("define function main()\n  let x = 40;\n  add(x, 2)\nend;");
+        let tree = parse(
+            "define function main(klass :: class <circle>, x :: <integer>) => <integer>\n  let y = 40;\n  add(y, x)\nend;",
+        );
         assert_eq!(tree.diagnostics, Vec::new());
         let functions: Vec<_> = tree.root.child_nodes(CstKind::Function).collect();
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].child_nodes(CstKind::Body).count(), 1);
         assert!(tree.tokens.iter().any(|token| token.kind == TokenKind::Let));
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Arrow)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Class)
+        );
     }
 
     #[test]
