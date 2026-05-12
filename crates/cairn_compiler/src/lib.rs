@@ -1,8 +1,8 @@
 //! Milestone-0 Cairn compiler frontend.
 //!
 //! This crate intentionally implements only the first vertical slice from the
-//! repository design: a tiny Dylan-like syntax lowered to direct
-//! `execution_tape` functions.
+//! repository design: a tiny Dylan-like syntax lowered through a small
+//! executable IR to `execution_tape` functions.
 
 #![no_std]
 
@@ -19,6 +19,8 @@ pub mod diagnostic;
 pub mod driver;
 /// Thin query invalidation shell for compiler artifacts.
 pub mod incremental;
+/// Backend-neutral executable IR lowered from semantic IR.
+pub mod lower;
 /// Runtime host support for generated `execution_tape` programs.
 pub mod runtime;
 /// Semantic IR with resolved direct calls and locals.

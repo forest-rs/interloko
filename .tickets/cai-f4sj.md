@@ -1,8 +1,8 @@
 ---
 id: cai-f4sj
-status: open
+status: closed
 deps: []
-links: []
+links: [cai-uv89]
 created: 2026-05-11T14:49:13Z
 type: task
 priority: 3
@@ -20,3 +20,9 @@ Keep execution_tape emission as an adapter over lowered IR. Do not expose high-l
 
 A lowered IR dump exists, tape emission consumes it, and existing milestone-0 programs still run through main() => 42.
 
+
+## Notes
+
+**2026-05-11T15:35:39Z**
+
+Implemented by cai-uv89: lower::Module now owns backend-neutral executable IR and tape::emit consumes lowered IR rather than semantic expressions.

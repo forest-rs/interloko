@@ -10,7 +10,7 @@ use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::Diagnostic;
 use crate::runtime::CairnHost;
-use crate::{ast, sem, syntax, tape};
+use crate::{ast, lower, sem, syntax, tape};
 
 /// End-to-end compiler or runtime error.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +19,11 @@ pub enum CompileError {
     Diagnostics {
         /// Diagnostics to report.
         diagnostics: Vec<Diagnostic>,
+    },
+    /// Lowered IR emission failed.
+    Lower {
+        /// Lowering error.
+        error: lower::LowerError,
     },
     /// Tape emission failed.
     Tape {
@@ -47,8 +52,27 @@ pub struct CompiledModule {
     pub ast: ast::Module,
     /// Semantic IR.
     pub sem: sem::Module,
+    /// Lowered executable IR.
+    pub lowered: lower::Module,
     /// Verified tape program.
     pub tape: tape::TapeModule,
+}
+
+impl CompiledModule {
+    /// Returns a stable, human-readable lowered IR dump.
+    #[must_use]
+    pub fn dump_lowered(&self) -> String {
+        self.lowered.dump()
+    }
+
+    /// Returns a human-readable `execution_tape` disassembly.
+    #[must_use]
+    pub fn dump_tape(&self) -> String {
+        format!(
+            "{}",
+            execution_tape::disasm::disassemble_verified(&self.tape.program)
+        )
+    }
 }
 
 /// Compiles source through syntax, AST, semantic IR, and tape emission.
@@ -61,11 +85,13 @@ pub fn compile(source: &str) -> Result<CompiledModule, CompileError> {
             diagnostics: sem.diagnostics.clone(),
         });
     }
-    let tape = tape::emit(&sem).map_err(|error| CompileError::Tape { error })?;
+    let lowered = lower::lower(&sem).map_err(|error| CompileError::Lower { error })?;
+    let tape = tape::emit(&lowered).map_err(|error| CompileError::Tape { error })?;
     Ok(CompiledModule {
         syntax,
         ast,
         sem,
+        lowered,
         tape,
     })
 }
@@ -126,5 +152,24 @@ mod tests {
         )
         .expect("program should compile and run");
         assert_eq!(value, 100);
+    }
+
+    #[test]
+    fn compiled_module_exposes_lowered_and_tape_dumps() {
+        let compiled = compile(
+            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function main()\n  area(make(<circle>, radius: 10))\nend;",
+        )
+        .expect("program should compile");
+
+        let lowered = compiled.dump_lowered();
+        assert!(lowered.contains("area#dispatch"));
+        assert!(lowered.contains("slot.read"));
+
+        let tape = compiled.dump_tape();
+        assert!(tape.contains("; program=\"cairn\""));
+        assert!(tape.contains("name=\"area#dispatch\""));
     }
 }
