@@ -1,5 +1,61 @@
 # Plans
 
+## Build Initialization-Plan Substrate For Dylan-Style Initialize
+
+### Goal
+
+Make object construction use explicit class initialization plans and init-argument
+records. Preserve today's slot-initialization behavior, but represent it as a
+computed MOP fact that future Dylan-style `make`/`initialize` can consume.
+
+### Fence
+
+Semantic lowering owns computed initialization plans as MOP facts derived from
+finalized effective slots. Lowering and runtime construction consume those
+plans. This slice explicitly does not own user-defined `initialize`, overridable
+`make`, custom allocation, init-arg forwarding, `next-method`, method
+combination, reinitialization, class redefinition, slot setters, multiple
+inheritance, sealed optimization, or new execution_tape opcodes.
+
+### Invariants
+
+- Direct slots are source facts.
+- Effective slots are finalized class facts.
+- Initialization plans are computed class/MOP facts.
+- Init-argument records are semantic call-site facts for `make`.
+- Runtime construction follows the initialization plan.
+- `execution_tape` still sees ordinary object construction/runtime calls.
+- Inspection must say user-defined `initialize` is deliberately deferred, not
+  rejected as a direction.
+
+### Steps
+
+1. Add semantic `InitializationPlan`, plan-step, and init-argument records.
+2. Refactor `make` validation so explicit args, defaults, required checks, and
+   diagnostics are classified through the plan.
+3. Add semantic tests for inherited order, explicit overrides, required
+   inherited keywords, unknown/duplicate keywords, explicit/default type
+   mismatch, and stable plan facts across trivia edits.
+4. Commit the compiler/session model and validation cleanup.
+5. Change lowered object construction to consume initialization-plan field order
+   instead of iterating class effective slots ad hoc.
+6. Add lowering/runtime tests for construction order and artifact changes after
+   init metadata edits, then commit the lowering slice.
+7. Add MOP/EOP/class inspection output for initialization plans, accepted
+   keywords, defaults, required args, and override behavior.
+8. Update docs and progress notes with the Dylan `make`/`initialize` boundary,
+   then run final gates and examples.
+
+### Risks
+
+- The plan should not duplicate source slot facts so heavily that future
+  metaclass work has two authorities.
+- Diagnostics must stay specific enough for existing corpus expectations while
+  separating unknown, duplicate, missing, explicit type, and default type
+  failures.
+- Dynamic class-object construction must still work when the class is statically
+  known through `class <T>` values.
+
 ## Build Explainable Generic Dispatch-Site Inspection
 
 ### Goal

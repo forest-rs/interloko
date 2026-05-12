@@ -1,4 +1,4 @@
-// expect: diagnostic contains slot `valid?` expects <boolean> but init-value has <integer>
+// expect: diagnostic contains slot `valid?` expects <boolean> but default init-value has <integer>
 
 define class <flag> (<object>)
   slot valid? :: <boolean>, init-value: 1;

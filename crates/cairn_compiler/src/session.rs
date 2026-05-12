@@ -3629,6 +3629,7 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::MakeObject {
             class,
             class_id,
+            init_args,
             fields,
             ..
         } => {
@@ -3636,9 +3637,23 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             indent_line(out, indent + 2);
             let _ = writeln!(out, "class");
             dump_sem_expr(out, class, indent + 4);
+            if !init_args.is_empty() {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "init-args");
+                for arg in init_args {
+                    indent_line(out, indent + 4);
+                    let _ = writeln!(out, "{}: -> s{}", arg.keyword, arg.slot.0);
+                    dump_sem_expr(out, &arg.value, indent + 6);
+                }
+            }
             for field in fields {
                 indent_line(out, indent + 2);
-                let _ = writeln!(out, "field s{}", field.slot.0);
+                let _ = writeln!(
+                    out,
+                    "field s{} source={}",
+                    field.slot.0,
+                    sem_field_init_source_label(field.source)
+                );
                 dump_sem_expr(out, &field.value, indent + 4);
             }
         }
@@ -4158,6 +4173,7 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::MakeObject {
             class,
             class_id,
+            init_args,
             fields,
             ..
         } => {
@@ -4168,6 +4184,12 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             let _ = write!(out, "make({definition}:");
             fingerprint_sem_expr(module, class, out);
             out.push(':');
+            for arg in init_args {
+                let _ = write!(out, "arg{}:slot{}=", arg.keyword, arg.slot.0);
+                fingerprint_sem_expr(module, &arg.value, out);
+                out.push(',');
+            }
+            out.push(':');
             for field in fields {
                 let kind = module
                     .classes
@@ -4176,7 +4198,12 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                     .map_or(String::from("error"), |slot| {
                         sem_kind_fingerprint(module, slot.kind)
                     });
-                let _ = write!(out, "slot{}:{kind}=", field.slot.0);
+                let _ = write!(
+                    out,
+                    "slot{}:{}:{kind}=",
+                    field.slot.0,
+                    sem_field_init_source_label(field.source)
+                );
                 fingerprint_sem_expr(module, &field.value, out);
                 out.push(',');
             }
@@ -4286,6 +4313,13 @@ fn artifact_label(artifact: QueryArtifact) -> String {
         QueryArtifact::LoweredModule => "lowered-module".into(),
         QueryArtifact::TapeProgram => "tape-program".into(),
         QueryArtifact::RuntimeResult => "runtime-result".into(),
+    }
+}
+
+fn sem_field_init_source_label(source: sem::FieldInitSource) -> &'static str {
+    match source {
+        sem::FieldInitSource::Explicit => "explicit",
+        sem::FieldInitSource::Default => "default",
     }
 }
 
@@ -5227,6 +5261,15 @@ mod tests {
         assert!(diff.preserved.iter().any(|definition| {
             definition.kind == DefinitionKind::Slot && definition.name == "<circle>.radius"
         }));
+        assert_eq!(
+            before.sem.classes[0].initialization_plan,
+            after.sem.classes[0].initialization_plan
+        );
+        assert!(
+            after
+                .dump_stage(DumpStage::Sem)
+                .contains("field s0 source=default")
+        );
     }
 
     #[test]

@@ -426,6 +426,8 @@ pub struct Class {
     pub direct_slots: Vec<Slot>,
     /// Computed effective slots in deterministic instance-layout order.
     pub effective_slots: Vec<EffectiveSlot>,
+    /// Computed initialization plan derived from finalized effective slots.
+    pub initialization_plan: InitializationPlan,
     /// Source span.
     pub span: Span,
 }
@@ -502,6 +504,51 @@ pub struct EffectiveSlot {
     pub mutability: SlotMutability,
     /// Source span of the original direct slot.
     pub span: Span,
+}
+
+/// Computed class initialization plan.
+///
+/// This is a MOP fact derived from finalized effective slots. It describes the
+/// slot initialization order and accepted construction keywords. User-defined
+/// `initialize` methods are intentionally not part of this record yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitializationPlan {
+    /// Class initialized by this plan.
+    pub class: ClassId,
+    /// Slot initialization steps in deterministic layout order.
+    pub steps: Vec<InitializationStep>,
+}
+
+impl Default for InitializationPlan {
+    fn default() -> Self {
+        Self {
+            class: ClassId(u32::MAX),
+            steps: Vec::new(),
+        }
+    }
+}
+
+/// One slot step in a class initialization plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitializationStep {
+    /// Slot filled by this step.
+    pub slot: SlotId,
+    /// Class that originally introduced this slot.
+    pub source_class: ClassId,
+    /// Direct slot id on `source_class`.
+    pub source_slot: SlotId,
+    /// External construction keyword without the trailing colon.
+    pub init_keyword: String,
+    /// Slot value category.
+    pub kind: ValueKind,
+    /// Declared source type name.
+    pub type_name: String,
+    /// Whether this step came from a parent effective slot.
+    pub inherited: bool,
+    /// Whether an explicit initializer is required when no default exists.
+    pub required_init_keyword: bool,
+    /// Whether this step has a default `init-value:`.
+    pub has_default: bool,
 }
 
 /// Getter accessor defined by a slot declaration.
@@ -644,6 +691,30 @@ pub struct FieldInit {
     /// Resolved slot.
     pub slot: SlotId,
     /// Field value.
+    pub value: Expr,
+    /// Source of this field value.
+    pub source: FieldInitSource,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Source for one planned object field value.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FieldInitSource {
+    /// The value came from an explicit `make` keyword argument.
+    Explicit,
+    /// The value came from the slot's default `init-value:`.
+    Default,
+}
+
+/// Explicit keyword argument supplied to `make`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitArg {
+    /// Keyword without the trailing colon.
+    pub keyword: String,
+    /// Resolved slot receiving this argument.
+    pub slot: SlotId,
+    /// Argument value.
     pub value: Expr,
     /// Source span.
     pub span: Span,
@@ -799,7 +870,9 @@ pub enum Expr {
         class: Box<Expr>,
         /// Statically known nominal class to instantiate.
         class_id: ClassId,
-        /// Field initializers.
+        /// Explicit init arguments in source order.
+        init_args: Vec<InitArg>,
+        /// Planned field initializers in initialization-plan order.
         fields: Vec<FieldInit>,
         /// Source span.
         span: Span,
@@ -1116,6 +1189,7 @@ impl Lowering {
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
+                initialization_plan: InitializationPlan::default(),
                 span: class.span,
             });
         }
@@ -1233,6 +1307,7 @@ impl Lowering {
                 finalized: false,
                 direct_slots: slots,
                 effective_slots: Vec::new(),
+                initialization_plan: InitializationPlan::default(),
                 span: Span::default(),
             });
         }
@@ -1309,7 +1384,7 @@ impl Lowering {
                     self.diagnostics.push(Diagnostic::error(
                         init_value.span(),
                         format!(
-                            "slot `{}` expects {} but init-value has {}",
+                            "slot `{}` expects {} but default init-value has {}",
                             slot.name,
                             self.kind_name(slot_kind),
                             self.kind_name(value_kind)
@@ -1378,11 +1453,33 @@ impl Lowering {
         }
 
         self.check_duplicate_effective_slots(class_index, &effective_slots);
+        let initialization_plan = Self::initialization_plan(owner, &effective_slots);
         if let Some(class) = self.classes.get_mut(class_index) {
             class.effective_slots = effective_slots;
+            class.initialization_plan = initialization_plan;
             class.finalized = true;
         }
         states[class_index] = FinalizeState::Done;
+    }
+
+    fn initialization_plan(owner: ClassId, slots: &[EffectiveSlot]) -> InitializationPlan {
+        InitializationPlan {
+            class: owner,
+            steps: slots
+                .iter()
+                .map(|slot| InitializationStep {
+                    slot: slot.id,
+                    source_class: slot.source_class,
+                    source_slot: slot.source_slot,
+                    init_keyword: slot.init_keyword.clone(),
+                    kind: slot.kind,
+                    type_name: slot.type_name.clone(),
+                    inherited: slot.source_class != owner,
+                    required_init_keyword: slot.required_init_keyword,
+                    has_default: slot.init_value.is_some(),
+                })
+                .collect(),
+        }
     }
 
     fn direct_effective_slot(owner: ClassId, id: SlotId, slot: &Slot) -> EffectiveSlot {
@@ -2499,11 +2596,12 @@ impl Lowering {
             return Expr::Error { span };
         }
 
-        let mut resolved = Vec::new();
+        let mut init_args = Vec::new();
         for field in fields {
-            if resolved.iter().any(|resolved: &FieldInit| {
-                class.effective_slots[resolved.slot.0 as usize].init_keyword == field.name
-            }) {
+            if init_args
+                .iter()
+                .any(|arg: &InitArg| arg.keyword == field.name)
+            {
                 ctx.diagnostics.push(Diagnostic::error(
                     field.span,
                     format!("duplicate initializer for keyword `{}:`", field.name),
@@ -2537,22 +2635,33 @@ impl Lowering {
                     ),
                 ));
             }
-            resolved.push(FieldInit {
+            init_args.push(InitArg {
+                keyword: field.name.clone(),
                 slot: slot.id,
                 value,
                 span: field.span,
             });
         }
 
-        for slot in &class.effective_slots {
-            if !resolved.iter().any(|field| field.slot == slot.id) {
+        let mut resolved = Vec::new();
+        for step in &class.initialization_plan.steps {
+            let slot = &class.effective_slots[step.slot.0 as usize];
+            if let Some(arg) = init_args.iter().find(|arg| arg.slot == step.slot) {
+                resolved.push(FieldInit {
+                    slot: step.slot,
+                    value: arg.value.clone(),
+                    source: FieldInitSource::Explicit,
+                    span: arg.span,
+                });
+            } else {
                 if let Some(init_value) = &slot.init_value {
                     resolved.push(FieldInit {
-                        slot: slot.id,
+                        slot: step.slot,
                         value: init_value.clone(),
+                        source: FieldInitSource::Default,
                         span: init_value.span(),
                     });
-                } else if slot.required_init_keyword {
+                } else if step.required_init_keyword {
                     ctx.diagnostics.push(Diagnostic::error(
                         span,
                         format!(
@@ -2572,6 +2681,7 @@ impl Lowering {
         Expr::MakeObject {
             class: Box::new(class_expr),
             class_id,
+            init_args,
             fields: resolved,
             span,
         }
@@ -3131,6 +3241,17 @@ mod tests {
             module.classes[1].effective_slots[1].source_class,
             ClassId(1)
         );
+        let plan = &module.classes[1].initialization_plan;
+        assert_eq!(plan.class, ClassId(1));
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].slot, SlotId(0));
+        assert_eq!(plan.steps[0].init_keyword, "x");
+        assert!(plan.steps[0].inherited);
+        assert!(plan.steps[0].required_init_keyword);
+        assert_eq!(plan.steps[1].slot, SlotId(1));
+        assert_eq!(plan.steps[1].init_keyword, "y");
+        assert!(!plan.steps[1].inherited);
+        assert!(plan.steps[1].required_init_keyword);
 
         let Expr::AccessorCall { class, slot, .. } = &module.functions[0].body.result else {
             panic!("expected inherited slot read");
@@ -3567,6 +3688,34 @@ mod tests {
         assert!(module.classes[0].direct_slots[0].required_init_keyword);
         assert_eq!(module.classes[0].direct_slots[1].init_keyword, "payload");
         assert!(!module.classes[0].direct_slots[1].required_init_keyword);
+        assert_eq!(module.classes[0].initialization_plan.steps.len(), 2);
+        assert_eq!(
+            module.classes[0].initialization_plan.steps[0].init_keyword,
+            "r"
+        );
+        assert_eq!(
+            module.classes[0].initialization_plan.steps[1].init_keyword,
+            "payload"
+        );
+        let Expr::AccessorCall { receiver, .. } = &module.functions[0].body.result else {
+            panic!("expected accessor call");
+        };
+        let Expr::MakeObject {
+            init_args, fields, ..
+        } = receiver.as_ref()
+        else {
+            panic!("expected make");
+        };
+        assert_eq!(init_args.len(), 2);
+        assert_eq!(init_args[0].keyword, "r");
+        assert_eq!(init_args[0].slot, SlotId(0));
+        assert_eq!(init_args[1].keyword, "payload");
+        assert_eq!(init_args[1].slot, SlotId(1));
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].slot, SlotId(0));
+        assert_eq!(fields[0].source, FieldInitSource::Explicit);
+        assert_eq!(fields[1].slot, SlotId(1));
+        assert_eq!(fields[1].source, FieldInitSource::Explicit);
         assert_eq!(module.functions[0].result_kind, ValueKind::I64);
     }
 
@@ -3594,19 +3743,61 @@ mod tests {
             cached.init_value,
             Some(Expr::ConstBool { value: true, .. })
         ));
+        let plan = &module.classes[0].initialization_plan;
+        assert_eq!(plan.steps.len(), 2);
+        assert!(plan.steps[0].required_init_keyword);
+        assert!(plan.steps[0].has_default);
+        assert!(!plan.steps[1].required_init_keyword);
+        assert!(plan.steps[1].has_default);
 
         let Expr::AccessorCall { receiver, .. } = &module.functions[0].body.result else {
             panic!("expected accessor call");
         };
-        let Expr::MakeObject { fields, .. } = receiver.as_ref() else {
+        let Expr::MakeObject {
+            init_args, fields, ..
+        } = receiver.as_ref()
+        else {
             panic!("expected defaulted make");
         };
+        assert!(init_args.is_empty());
         assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].source, FieldInitSource::Default);
         assert!(matches!(fields[0].value, Expr::ConstI64 { value: 10, .. }));
+        assert_eq!(fields[1].source, FieldInitSource::Default);
         assert!(matches!(
             fields[1].value,
             Expr::ConstBool { value: true, .. }
         ));
+    }
+
+    #[test]
+    fn make_records_init_args_and_explicit_overrides() {
+        let module = lower_source(
+            "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  make(<point>, x: 7).x\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::AccessorCall { receiver, .. } = &module.functions[0].body.result else {
+            panic!("expected accessor call");
+        };
+        let Expr::MakeObject {
+            init_args, fields, ..
+        } = receiver.as_ref()
+        else {
+            panic!("expected make");
+        };
+        assert_eq!(init_args.len(), 1);
+        assert_eq!(init_args[0].keyword, "x");
+        assert_eq!(init_args[0].slot, SlotId(0));
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].slot, SlotId(0));
+        assert_eq!(fields[0].source, FieldInitSource::Explicit);
+        assert!(matches!(fields[0].value, Expr::ConstI64 { value: 7, .. }));
+        assert_eq!(fields[1].slot, SlotId(1));
+        assert_eq!(fields[1].source, FieldInitSource::Default);
+        assert!(matches!(fields[1].value, Expr::ConstI64 { value: 2, .. }));
     }
 
     #[test]
@@ -3643,7 +3834,7 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message
-                    == "slot `valid?` expects <boolean> but init-value has <integer>")
+                    == "slot `valid?` expects <boolean> but default init-value has <integer>")
         );
     }
 
@@ -3660,6 +3851,15 @@ mod tests {
                 .any(|diagnostic| diagnostic.message
                     == "missing required init keyword `r:` for slot `radius`")
         );
+
+        let inherited_missing = lower_source(
+            "define class <shape> (<object>)\n  slot x :: <integer>, required-init-keyword: x:;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  make(<point>)\nend;",
+        );
+        assert!(inherited_missing.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "missing required init keyword `x:` for slot `x`"
+        }));
 
         let unknown = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>, init-keyword: r:;\nend;\n\

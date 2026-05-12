@@ -228,7 +228,8 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
-    /// Runtime object construction with fields already ordered by slot id.
+    /// Runtime object construction with fields already ordered by the class
+    /// initialization plan.
     MakeObject {
         /// Destination register.
         dst: Register,
@@ -930,6 +931,7 @@ impl<'module> BodyLowering<'module> {
                 class_id,
                 fields,
                 span,
+                ..
             } => {
                 let _ = self.lower_expr(class)?;
                 let class_info = self
@@ -937,9 +939,13 @@ impl<'module> BodyLowering<'module> {
                     .classes
                     .get(class_id.0 as usize)
                     .ok_or_else(|| invalid_semantic("class id is out of range"))?;
-                let mut field_regs = Vec::with_capacity(class_info.effective_slots.len());
-                for slot in &class_info.effective_slots {
-                    let Some(field) = fields.iter().find(|field| field.slot == slot.id) else {
+                let mut field_regs = Vec::with_capacity(class_info.initialization_plan.steps.len());
+                for step in &class_info.initialization_plan.steps {
+                    let slot = class_info
+                        .effective_slots
+                        .get(step.slot.0 as usize)
+                        .ok_or_else(|| invalid_semantic("initialization slot is out of range"))?;
+                    let Some(field) = fields.iter().find(|field| field.slot == step.slot) else {
                         return Err(invalid_semantic("missing object field"));
                     };
                     let value = self.lower_expr(&field.value)?;
@@ -1725,6 +1731,34 @@ mod tests {
     }
 
     #[test]
+    fn lowers_object_construction_in_initialization_plan_order() {
+        let module = lower_source(
+            "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  make(<point>, x: 7).y\nend;",
+        );
+        let main = module
+            .function(module.main.expect("main should exist"))
+            .expect("main should be lowered");
+        let make = main
+            .instructions
+            .iter()
+            .find_map(|instr| {
+                if let Instr::MakeObject { class, fields, .. } = instr {
+                    Some((*class, fields.as_slice()))
+                } else {
+                    None
+                }
+            })
+            .expect("make should be lowered");
+
+        assert_eq!(make.0, sem::ClassId(1));
+        assert_eq!(make.1.len(), 2);
+        assert_eq!(const_i64(main, make.1[0]), Some(7));
+        assert_eq!(const_i64(main, make.1[1]), Some(2));
+    }
+
+    #[test]
     fn lowers_typed_generic_contracts_and_boxes_dispatcher_results() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
@@ -1868,5 +1902,12 @@ mod tests {
         assert!(dump.contains("slot.read %r"));
         assert!(dump.contains("<bad>.fallback"));
         assert!(dump.contains(" = mov "));
+    }
+
+    fn const_i64(function: &Function, reg: Register) -> Option<i64> {
+        function.instructions.iter().find_map(|instr| match instr {
+            Instr::ConstI64 { dst, value, .. } if *dst == reg => Some(*value),
+            _ => None,
+        })
     }
 }
