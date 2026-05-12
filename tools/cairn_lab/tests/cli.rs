@@ -99,6 +99,8 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(native_out.contains("origin=native"));
     assert!(native_out.contains("runtime=native"));
     assert!(native_out.contains("accessor"));
+    assert!(native_out.contains("initialization-plan:"));
+    assert!(native_out.contains("initialize-methods=deferred"));
     assert!(native_out.contains("g0 area"));
     assert!(native_out.contains("m0 specializer=c0 <circle> origin=native"));
 
@@ -209,6 +211,10 @@ fn inspect_reports_inherited_effective_slots() {
     assert!(class.contains("finalized=true"));
     assert!(class.contains("direct-slots=1"));
     assert!(class.contains("effective-slots=2"));
+    assert!(class.contains("init-plan=[s0:x:inherited:required"));
+    assert!(class.contains("accepted-keywords=[x:,y:]"));
+    assert!(class.contains("initialize-methods=deferred"));
+    assert!(class.contains("override=explicit-init-args-over-defaults"));
 
     let inherited = run_lab(&["inspect", path, "slot:c1.s0"]);
     assert!(inherited.contains("source=inherited"));

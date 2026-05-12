@@ -2439,14 +2439,15 @@ fn dump_sem(module: &sem::Module) -> String {
         let superclass_chain = sem_superclass_chain_label(module, class.id);
         let _ = writeln!(
             out,
-            "class c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={}",
+            "class c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={}",
             class.id.0,
             class.definition,
             class.name,
             sem_class_origin_label(class.origin),
             class.finalized,
             class.direct_slots.len(),
-            class.effective_slots.len()
+            class.effective_slots.len(),
+            sem_initialization_plan_summary(module, class)
         );
         for slot in &class.direct_slots {
             let _ = writeln!(
@@ -2500,6 +2501,15 @@ fn dump_sem(module: &sem::Module) -> String {
                 sem_slot_allocation_label(slot.allocation),
                 sem_slot_mutability_label(slot.mutability),
                 sem_runtime_repr(slot.kind)
+            );
+        }
+        let _ = writeln!(out, "  initialization plan");
+        for step in &class.initialization_plan.steps {
+            let _ = writeln!(
+                out,
+                "    step s{} {}",
+                step.slot.0,
+                sem_initialization_step_detail(module, class, step)
             );
         }
     }
@@ -2584,14 +2594,15 @@ fn dump_mop(module: &sem::Module) -> String {
         let superclass_chain = sem_superclass_chain_label(module, class.id);
         let _ = writeln!(
             out,
-            "  c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
+            "  c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={} runtime={runtime_kind}",
             class.id.0,
             class.definition,
             class.name,
             sem_class_origin_label(class.origin),
             class.finalized,
             class.direct_slots.len(),
-            class.effective_slots.len()
+            class.effective_slots.len(),
+            sem_initialization_plan_summary(module, class)
         );
         let _ = writeln!(out, "    direct-slots:");
         for slot in &class.direct_slots {
@@ -2674,6 +2685,21 @@ fn dump_mop(module: &sem::Module) -> String {
                 sem_kind_label(module, slot.accessor.result_kind),
                 slot.accessor.class.0,
                 slot.accessor.slot.0
+            );
+        }
+        let _ = writeln!(out, "    initialization-plan:");
+        let _ = writeln!(
+            out,
+            "      accepted-keywords={}",
+            sem_initialization_keywords(class)
+        );
+        let _ = writeln!(out, "      initialize-methods=deferred");
+        for step in &class.initialization_plan.steps {
+            let _ = writeln!(
+                out,
+                "      step s{} {}",
+                step.slot.0,
+                sem_initialization_step_detail(module, class, step)
             );
         }
     }
@@ -2974,12 +3000,14 @@ fn project_environment_class(
         ]),
         execution: None,
         inspection: format!(
-            "definition={} class-id=c{} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
+            "definition={} class-id=c{} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={} accepted-keywords={} initialize-methods=deferred override=explicit-init-args-over-defaults runtime={runtime_kind}",
             class.definition,
             class.id.0,
             class.finalized,
             class.direct_slots.len(),
-            class.effective_slots.len()
+            class.effective_slots.len(),
+            sem_initialization_plan_summary(module, class),
+            sem_initialization_keywords(class)
         ),
     }));
 
@@ -3776,6 +3804,80 @@ fn sem_effective_slot_source_label(class: &sem::Class, slot: &sem::EffectiveSlot
     )
 }
 
+fn sem_initialization_plan_summary(module: &sem::Module, class: &sem::Class) -> String {
+    let steps = class
+        .initialization_plan
+        .steps
+        .iter()
+        .map(|step| sem_initialization_step_summary(module, step))
+        .collect::<Vec<_>>();
+    format!("[{}]", steps.join(","))
+}
+
+fn sem_initialization_keywords(class: &sem::Class) -> String {
+    let keywords = class
+        .initialization_plan
+        .steps
+        .iter()
+        .map(|step| format!("{}:", step.init_keyword))
+        .collect::<Vec<_>>();
+    format!("[{}]", keywords.join(","))
+}
+
+fn sem_initialization_step_summary(module: &sem::Module, step: &sem::InitializationStep) -> String {
+    format!(
+        "s{}:{}:{}:{}:default={}:{}",
+        step.slot.0,
+        step.init_keyword,
+        sem_initialization_source_label(step),
+        sem_initialization_required_label(step),
+        yes_no(step.has_default),
+        sem_kind_label(module, step.kind)
+    )
+}
+
+fn sem_initialization_step_detail(
+    module: &sem::Module,
+    class: &sem::Class,
+    step: &sem::InitializationStep,
+) -> String {
+    let slot_name = class
+        .effective_slots
+        .get(step.slot.0 as usize)
+        .map_or("<missing>", |slot| slot.name.as_str());
+    format!(
+        "slot={slot_name} keyword={}: source={} c{}.s{} kind={} type={} required={} default={} override=explicit-init-arg",
+        step.init_keyword,
+        sem_initialization_source_label(step),
+        step.source_class.0,
+        step.source_slot.0,
+        sem_kind_label(module, step.kind),
+        step.type_name,
+        yes_no(step.required_init_keyword),
+        yes_no(step.has_default)
+    )
+}
+
+fn sem_initialization_source_label(step: &sem::InitializationStep) -> &'static str {
+    if step.inherited {
+        "inherited"
+    } else {
+        "direct"
+    }
+}
+
+fn sem_initialization_required_label(step: &sem::InitializationStep) -> &'static str {
+    if step.required_init_keyword {
+        "required"
+    } else {
+        "optional"
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
 fn sem_dispatch_applicability_label(module: &sem::Module, specializer: sem::ClassId) -> String {
     let applicable = module
         .classes
@@ -4445,6 +4547,8 @@ mod tests {
         assert!(mop.contains("classes:"));
         assert!(mop.contains("origin=native"));
         assert!(mop.contains("runtime=native"));
+        assert!(mop.contains("initialization-plan:"));
+        assert!(mop.contains("initialize-methods=deferred"));
         assert!(mop.contains("dispatch table:"));
         let eop = artifacts.dump_stage(DumpStage::Eop);
         assert!(eop.contains("eop"));
@@ -4726,6 +4830,19 @@ mod tests {
             class
                 .affordances
                 .contains(EnvironmentAffordance::ShowRuntimeLayout)
+        );
+        assert!(class.inspection.detail.contains("init-plan=[s0:radius"));
+        assert!(
+            class
+                .inspection
+                .detail
+                .contains("accepted-keywords=[radius:]")
+        );
+        assert!(
+            class
+                .inspection
+                .detail
+                .contains("initialize-methods=deferred")
         );
 
         let slot = eop_object(&objects, "slot:c0.s0");
