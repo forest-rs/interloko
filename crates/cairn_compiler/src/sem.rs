@@ -113,12 +113,29 @@ pub struct Slot {
     pub type_name: String,
     /// Declared slot value category.
     pub kind: ValueKind,
+    /// Getter accessor defined by this slot.
+    pub accessor: Accessor,
     /// External construction keyword without the trailing colon.
     pub init_keyword: String,
     /// Whether the slot declared `required-init-keyword:`.
     pub required_init_keyword: bool,
     /// Source span.
     pub span: Span,
+}
+
+/// Getter accessor defined by a slot declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Accessor {
+    /// Stable accessor identity. This is the slot definition identity.
+    pub definition: DefinitionId,
+    /// Accessor call name.
+    pub name: String,
+    /// Owning class.
+    pub class: ClassId,
+    /// Slot read by this accessor.
+    pub slot: SlotId,
+    /// Accessor result category.
+    pub result_kind: ValueKind,
 }
 
 /// Generic function declaration.
@@ -338,8 +355,10 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Runtime object slot read.
-    SlotRead {
+    /// Getter accessor call.
+    AccessorCall {
+        /// Stable accessor identity.
+        accessor: DefinitionId,
         /// Receiver expression.
         receiver: Box<Expr>,
         /// Receiver class.
@@ -412,7 +431,7 @@ impl Expr {
             | Self::GenericCall { span, .. }
             | Self::Signal { span, .. }
             | Self::MakeObject { span, .. }
-            | Self::SlotRead { span, .. }
+            | Self::AccessorCall { span, .. }
             | Self::Binary { span, .. }
             | Self::Compare { span, .. }
             | Self::If { span, .. }
@@ -472,6 +491,12 @@ struct FunctionContext {
 struct ActiveRestart {
     specializer: ClassId,
     result_kind: ValueKind,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AccessorSyntax {
+    Slot,
+    Call,
 }
 
 impl FunctionContext {
@@ -594,18 +619,29 @@ impl Lowering {
                 .slots
                 .iter()
                 .enumerate()
-                .map(|(slot_index, slot)| Slot {
-                    id: SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX)),
-                    definition: slot.definition,
-                    name: slot.name.clone(),
-                    type_name: slot.type_name.clone().unwrap_or_else(|| "<object>".into()),
-                    kind: self.resolve_slot_kind(slot.type_name.as_deref(), slot.type_span),
-                    init_keyword: slot
-                        .init_keyword
-                        .clone()
-                        .unwrap_or_else(|| slot.name.clone()),
-                    required_init_keyword: slot.required_init_keyword,
-                    span: slot.span,
+                .map(|(slot_index, slot)| {
+                    let id = SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX));
+                    let kind = self.resolve_slot_kind(slot.type_name.as_deref(), slot.type_span);
+                    Slot {
+                        id,
+                        definition: slot.definition,
+                        name: slot.name.clone(),
+                        type_name: slot.type_name.clone().unwrap_or_else(|| "<object>".into()),
+                        kind,
+                        accessor: Accessor {
+                            definition: slot.definition,
+                            name: slot.name.clone(),
+                            class: ClassId(u32::try_from(class_index).unwrap_or(u32::MAX)),
+                            slot: id,
+                            result_kind: kind,
+                        },
+                        init_keyword: slot
+                            .init_keyword
+                            .clone()
+                            .unwrap_or_else(|| slot.name.clone()),
+                        required_init_keyword: slot.required_init_keyword,
+                        span: slot.span,
+                    }
                 })
                 .collect::<Vec<_>>();
             self.check_duplicate_init_keywords(class, &slots);
@@ -889,6 +925,26 @@ impl Lowering {
                         format!(
                             "generic `{callee}` expects {} arguments but got {}",
                             symbol.arity,
+                            args.len()
+                        ),
+                    ));
+                    return Expr::Error { span: *span };
+                }
+                if self.has_accessor(callee) {
+                    if args.len() == 1 {
+                        let receiver = lowered_args.into_iter().next().expect("arity was checked");
+                        return self.lower_accessor_call(
+                            ctx,
+                            receiver,
+                            callee,
+                            *span,
+                            AccessorSyntax::Call,
+                        );
+                    }
+                    ctx.diagnostics.push(Diagnostic::error(
+                        *span,
+                        format!(
+                            "accessor `{callee}` expects 1 argument but got {}",
                             args.len()
                         ),
                     ));
@@ -1207,28 +1263,51 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let receiver = self.lower_expr(ctx, receiver);
+        self.lower_accessor_call(ctx, receiver, slot_name, span, AccessorSyntax::Slot)
+    }
+
+    fn lower_accessor_call(
+        &self,
+        ctx: &mut FunctionContext,
+        receiver: Expr,
+        accessor_name: &str,
+        span: Span,
+        syntax: AccessorSyntax,
+    ) -> Expr {
         let ValueKind::Object(class_id) = self.expr_kind(ctx, &receiver) else {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                "slot read receiver does not have a known object class",
-            ));
+            let message = match syntax {
+                AccessorSyntax::Slot => {
+                    "slot read receiver does not have a known object class".to_string()
+                }
+                AccessorSyntax::Call => {
+                    format!(
+                        "accessor `{accessor_name}` receiver does not have a known object class"
+                    )
+                }
+            };
+            ctx.diagnostics.push(Diagnostic::error(span, message));
             return Expr::Error { span };
         };
         let Some(class) = self.classes.get(class_id.0 as usize) else {
             return Expr::Error { span };
         };
-        let Some(slot) = class.slots.iter().find(|slot| slot.name == slot_name) else {
+        let Some(slot) = class
+            .slots
+            .iter()
+            .find(|slot| slot.accessor.name == accessor_name)
+        else {
             ctx.diagnostics.push(Diagnostic::error(
                 span,
-                format!("class `{}` has no slot `{slot_name}`", class.name),
+                format!("class `{}` has no slot `{accessor_name}`", class.name),
             ));
             return Expr::Error { span };
         };
-        Expr::SlotRead {
+        Expr::AccessorCall {
+            accessor: slot.accessor.definition,
             receiver: Box::new(receiver),
             class: class_id,
             slot: slot.id,
-            result_kind: slot.kind,
+            result_kind: slot.accessor.result_kind,
             span,
         }
     }
@@ -1238,7 +1317,7 @@ impl Lowering {
             Expr::ConstI64 { .. } | Expr::GenericCall { .. } | Expr::Binary { .. } => {
                 ValueKind::I64
             }
-            Expr::SlotRead { result_kind, .. } => *result_kind,
+            Expr::AccessorCall { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. } | Expr::Compare { .. } => ValueKind::Bool,
             Expr::Local { local, .. } => ctx.local_kind(*local),
             Expr::Signal { result_kind, .. } => *result_kind,
@@ -1267,6 +1346,12 @@ impl Lowering {
 
     fn resolve_class(&self, name: &str) -> Option<&Class> {
         self.classes.iter().find(|class| class.name == name)
+    }
+
+    fn has_accessor(&self, name: &str) -> bool {
+        self.classes
+            .iter()
+            .any(|class| class.slots.iter().any(|slot| slot.accessor.name == name))
     }
 
     fn resolve_slot_kind(&mut self, type_name: Option<&str>, span: Span) -> ValueKind {
@@ -1379,6 +1464,10 @@ mod tests {
         assert_eq!(module.classes[0].id, ClassId(0));
         assert_eq!(module.classes[0].slots[0].id, SlotId(0));
         assert_eq!(module.classes[0].slots[0].kind, ValueKind::I64);
+        assert_eq!(
+            module.classes[0].slots[0].accessor.definition,
+            module.classes[0].slots[0].definition
+        );
         assert_eq!(module.generics[0].id, GenericFunctionId(0));
         assert_eq!(module.methods[0].id, MethodId(0));
         assert_eq!(module.methods[0].generic, GenericFunctionId(0));
@@ -1399,12 +1488,36 @@ mod tests {
         };
         assert!(matches!(
             lhs.as_ref(),
-            Expr::SlotRead {
+            Expr::AccessorCall {
                 class: ClassId(0),
                 slot: SlotId(0),
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resolves_explicit_slot_accessor_calls() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let c = make(<circle>, radius: 7);\n  radius(c)\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::AccessorCall {
+            accessor,
+            class,
+            slot,
+            result_kind,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected accessor call");
+        };
+        assert_eq!(*accessor, module.classes[0].slots[0].definition);
+        assert_eq!(*class, ClassId(0));
+        assert_eq!(*slot, SlotId(0));
+        assert_eq!(*result_kind, ValueKind::I64);
     }
 
     #[test]
@@ -1590,7 +1703,7 @@ mod tests {
         );
         assert!(matches!(
             restart.body.as_ref(),
-            Expr::SlotRead {
+            Expr::AccessorCall {
                 receiver,
                 class: ClassId(0),
                 slot: SlotId(0),

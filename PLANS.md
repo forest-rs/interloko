@@ -1,5 +1,53 @@
 # Plans
 
+## Make Object Model More Dylan-Shaped
+
+### Goal
+
+Make two narrow object-model moves without implying a full Dylan object system:
+slot reads become semantic accessor calls, and class names become semantic class
+object values. Keep runtime lowering pragmatic: known accessors still become the
+existing slot-read path, and known class objects still become class IDs.
+
+### Non-Goals
+
+- No metaclasses, user-defined classes of classes, or reflection.
+- No setters, slot mutation, slot defaults, or full init protocol.
+- No real inheritance semantics or parametric types.
+- No first-class generic function values.
+- No dynamic `make` for unknown class objects.
+- No expanded effects/restarts or Cranelift.
+
+### Fence
+
+The semantic layer owns Dylan meaning. A slot access is a call through accessor
+metadata, and a class name is a value. Lowering and runtime own representation:
+known accessors become optimized slot reads, known class objects become class
+IDs, and generic dispatch may keep using runtime class IDs internally.
+
+### Steps
+
+1. Add accessor metadata to slots with identity tied to the slot definition.
+2. Rewrite semantic `c.radius` to accessor-call IR and add the same meaning for
+   explicit `radius(c)` when it is unambiguous.
+3. Lower accessor calls through the existing lowered `slot.read` instruction,
+   update dumps, fingerprints, corpus, and incremental tests.
+4. Make `<circle>` an AST and semantic class-object expression.
+5. Change `make` to consume a known class-object expression and support simple
+   local flow such as `let c = <circle>; make(c, radius: 10)`.
+6. Add semantic `class-of(x)` returning a class-object value while lowering
+   through existing class-id machinery.
+7. Update progress notes and run fmt, clippy, workspace tests, docs, examples,
+   `cairn_lab`, and `cairn_corpus`.
+
+### Risks
+
+- Accessor syntax must not shadow existing direct functions or generics.
+- Class-object values should stay distinct from runtime instances even though
+  known class objects lower to integer class IDs.
+- The visible dumps need to show semantic meaning and representation lowering
+  separately so this does not look more dynamic than it is.
+
 ## Make Slots Dylan-Shaped
 
 Ticket: `cai-lnet`

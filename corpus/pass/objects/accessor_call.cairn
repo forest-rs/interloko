@@ -1,0 +1,13 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump sem contains accessor-call
+// expect: dump lowered contains slot.read
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let c = make(<circle>, radius: 7);
+  radius(c)
+end;

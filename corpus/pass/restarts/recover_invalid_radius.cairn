@@ -3,7 +3,7 @@
 // expect: dump ast contains handle
 // expect: dump sem contains signal
 // expect: dump sem contains condition=l
-// expect: dump sem contains slot-read c1.s0
+// expect: dump sem contains accessor-call
 // expect: dump lowered contains jmp
 
 define class <circle> (<object>)

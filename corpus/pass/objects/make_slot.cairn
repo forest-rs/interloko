@@ -1,6 +1,6 @@
 // expect: run 7
 // expect: diagnostics 0
-// expect: dump sem contains slot-read
+// expect: dump sem contains accessor-call
 
 define class <circle> (<object>)
   slot radius :: <integer>;

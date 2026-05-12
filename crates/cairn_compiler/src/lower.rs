@@ -794,12 +794,13 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
-            sem::Expr::SlotRead {
+            sem::Expr::AccessorCall {
                 receiver,
                 class,
                 slot,
                 result_kind,
                 span,
+                ..
             } => {
                 let receiver = self.lower_expr(receiver)?;
                 let kind = value_kind(*result_kind)?;

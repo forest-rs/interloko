@@ -1157,11 +1157,12 @@ fn dump_sem(module: &sem::Module) -> String {
         for slot in &class.slots {
             let _ = writeln!(
                 out,
-                "  slot s{} {} {} :: {} init-keyword: {}:{} runtime={}",
+                "  slot s{} {} {} :: {} accessor {} init-keyword: {}:{} runtime={}",
                 slot.id.0,
                 slot.definition,
                 slot.name,
                 slot.type_name,
+                slot.accessor.definition,
                 slot.init_keyword,
                 if slot.required_init_keyword {
                     " required"
@@ -1290,7 +1291,8 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 dump_sem_expr(out, &field.value, indent + 4);
             }
         }
-        sem::Expr::SlotRead {
+        sem::Expr::AccessorCall {
+            accessor,
             receiver,
             class,
             slot,
@@ -1299,7 +1301,7 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         } => {
             let _ = writeln!(
                 out,
-                "slot-read c{}.s{} result={result_kind:?}",
+                "accessor-call {accessor} c{}.s{} result={result_kind:?}",
                 class.0, slot.0
             );
             dump_sem_expr(out, receiver, indent + 2);
@@ -1456,9 +1458,10 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     .slots
                     .iter()
                     .map(|slot| format!(
-                        "{}={}:{}:{}",
+                        "{}={}:accessor={}:{}:{}",
                         slot.name,
                         sem_kind_fingerprint(module, slot.kind),
+                        slot.accessor.definition.raw(),
                         slot.init_keyword,
                         slot.required_init_keyword
                     ))
@@ -1474,10 +1477,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     name: format!("{}.{}", class.name, slot.name),
                 },
                 fingerprint: format!(
-                    "slot:{}:{}:{}:{}:{}",
+                    "slot:{}:{}:{}:accessor={}:{}:{}",
                     class.name,
                     slot.name,
                     sem_kind_fingerprint(module, slot.kind),
+                    slot.accessor.definition.raw(),
                     slot.init_keyword,
                     slot.required_init_keyword
                 ),
@@ -1608,7 +1612,8 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             }
             out.push(')');
         }
-        sem::Expr::SlotRead {
+        sem::Expr::AccessorCall {
+            accessor,
             receiver,
             class,
             slot,
@@ -1625,7 +1630,13 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .and_then(|class| class.slots.get(slot.0 as usize))
                 .map_or(0, |slot| slot.definition.raw());
             let result = sem_kind_fingerprint(module, *result_kind);
-            let _ = write!(out, "slot({class_definition}.{slot_definition}:{result}:");
+            let _ = write!(
+                out,
+                "accessor({}:{}.{}:{result}:",
+                accessor.raw(),
+                class_definition,
+                slot_definition
+            );
             fingerprint_sem_expr(module, receiver, out);
             out.push(')');
         }
@@ -1755,8 +1766,18 @@ mod tests {
         );
         assert!(
             artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("accessor-call")
+        );
+        assert!(
+            artifacts
                 .dump_stage(DumpStage::Lowered)
                 .contains("area#dispatch")
+        );
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Lowered)
+                .contains("slot.read")
         );
         assert!(
             artifacts

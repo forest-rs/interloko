@@ -386,6 +386,31 @@
 - The boxed-any representation is a first runtime ABI, not a claim about future
   object identity, primitive boxing policy, or optimized layout.
 
+## Implemented: Slot Accessors As Calls
+
+- Each semantic slot now defines a getter accessor whose identity is the slot's
+  stable definition ID. This keeps accessor identity stable across harmless
+  edits and ties accessor metadata to the slot declaration that created it.
+- Surface `receiver.slot` now lowers to semantic `AccessorCall` IR. The semantic
+  layer no longer treats slot access as a primitive slot-read expression.
+- The explicit accessor spelling `slot-name(receiver)` is supported when no
+  direct function or generic with that name takes precedence. `receiver.slot`
+  and `slot-name(receiver)` resolve through the same accessor metadata.
+- Lowering recognizes known semantic accessor calls and still emits the existing
+  lowered `slot.read` instruction. The tape/runtime path is unchanged: this is a
+  semantic cleanup plus an inspectable lowering boundary, not a new bytecode
+  feature.
+- Semantic dumps show `accessor-call` and accessor IDs; lowered dumps continue
+  to show optimized `slot.read`.
+- Corpus coverage includes both `c.radius` and `radius(c)`, and the incremental
+  slot metadata tests now fingerprint accessor metadata through the slot.
+
+### Deferred Accessor Design
+
+- Setters, mutation, inherited accessors, generic function objects, reflective
+  accessor enumeration, and optimizer choices beyond direct slot-read lowering
+  remain deferred.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
