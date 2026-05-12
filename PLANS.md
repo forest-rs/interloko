@@ -1,5 +1,51 @@
 # Plans
 
+## Build Richer Dylan-Shaped Slots
+
+### Goal
+
+Extend slots from simple typed fields into explicit object-model facts with
+construction keywords, default initializer expressions, and constant-slot
+metadata, while keeping the existing construction and slot-read lowering path.
+
+### Fence
+
+Syntax/AST/semantic lowering own slot declaration meaning. Lowering/runtime own
+the existing representation path for construction and reads. This slice
+explicitly does not own setters, inherited slots, full Dylan initialization,
+allocation variants beyond instance slots, persistence, or new tape opcodes.
+
+### Invariants
+
+- Untyped slots still normalize to `<object>`.
+- Slot options are checked semantically before lowered IR is emitted.
+- `constant slot` is metadata plus construction-time assignment only.
+- Missing slot values are supplied only by explicit `init-value`; there is no
+  implicit unbound value.
+- Text dumps, EOP records, and workbench inspection are views over semantic
+  slot facts.
+
+### Steps
+
+1. Extend syntax and AST for `constant slot` and `init-value: <expr>`.
+2. Add semantic allocation/mutability/default metadata to slots.
+3. Fill omitted construction fields from slot `init-value` expressions and
+   type-check explicit/default initializers.
+4. Update semantic, MOP, EOP, fingerprints, and workbench-visible inspection
+   details.
+5. Add corpus, unit, incremental, and CLI coverage for renamed keywords,
+   defaults, required slots, object-top defaults, constant slots, and errors.
+6. Update progress notes and run fmt, clippy, workspace tests, docs, examples,
+   and corpus.
+
+### Risks
+
+- Default expressions should not imply a full init protocol or method hooks.
+- Constant-slot metadata should not imply setter/mutation enforcement before
+  setters exist.
+- Slot fingerprinting must include defaults and metadata so incremental reports
+  do not claim reuse after semantic slot changes.
+
 ## Make EOP Workbench Commands Usable
 
 ### Goal

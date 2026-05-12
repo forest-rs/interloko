@@ -1,0 +1,9 @@
+// expect: diagnostic contains slot `valid?` expects <boolean> but init-value has <integer>
+
+define class <flag> (<object>)
+  slot valid? :: <boolean>, init-value: 1;
+end;
+
+define function main()
+  make(<flag>)
+end;

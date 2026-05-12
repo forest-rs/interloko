@@ -380,9 +380,10 @@
 - There is no unboxing operation for top `<object>` values yet, so a read from an
   untyped slot has kind `<object>` and cannot be used as an integer without
   future type tests, casts, or flow typing.
-- Default values, `init-value:`, `init-function:`, setters, `constant slot`,
-  allocation variants, inherited slot specs, and the full Dylan initialization
-  protocol remain deferred.
+- `init-function:`, setters, allocation variants beyond instance slots,
+  inherited slot specs, and the full Dylan initialization protocol remain
+  deferred. `init-value:` and `constant slot` metadata are now implemented in
+  the richer slot slice below.
 - The boxed-any representation is a first runtime ABI, not a claim about future
   object identity, primitive boxing policy, or optimized layout.
 
@@ -804,6 +805,50 @@
 - EOP remains structured protocol vocabulary. There is still no Portolan bridge,
   Understory inspector, persistent image, capability policy, mutation
   transaction model, or Cairn-level EOP generic function protocol.
+
+## Implemented: Richer Dylan-Shaped Slots
+
+- Slot declarations now support:
+  - untyped slots defaulting to `<object>`;
+  - typed slots such as `slot radius :: <integer>;`;
+  - renamed init keywords such as `init-keyword: r:`;
+  - required init keywords such as `required-init-keyword: radius:`;
+  - default initializer expressions with `init-value: <expr>`;
+  - `constant slot` metadata.
+- Semantic slots now record declared type, normalized value category, init
+  keyword, required flag, optional default initializer expression, instance
+  allocation metadata, mutability metadata, origin, and stable accessor
+  identity.
+- Object construction now fills omitted slots from `init-value:` expressions.
+  Explicit keyword values override defaults. Required init keywords may be
+  omitted only when a default exists.
+- Construction diagnostics cover unknown init keywords, duplicate init
+  keywords, missing required keywords, missing non-defaulted slot initializers,
+  explicit initializer type mismatches, and `init-value:` type mismatches.
+- `constant slot` is metadata only in this slice. It records construction-time
+  assignment intent, but reads lower through the same accessor/slot-read path
+  as mutable slots because setters and mutation are not implemented yet.
+- MOP dumps, EOP records, and `cairn_lab inspect ... slot:*` now show slot
+  type, init keyword, required/default status, allocation, mutability, runtime
+  representation, and accessor relationship.
+- Incremental fingerprints include slot defaults and slot metadata. Tests cover
+  harmless slot declaration trivia preserving definition IDs, init keyword edits
+  reusing executable artifacts when layout is unchanged, default-value edits
+  recomputing lowered/tape artifacts, and mutability metadata edits reusing
+  lowered/tape artifacts.
+- The corpus includes pass cases for renamed keywords, `init-value:`, default
+  override, required keywords with defaults, object-top defaults, and constant
+  slots, plus a failing `init-value:` type mismatch case.
+- `docs/slot_model.md` documents supported slot syntax, construction behavior,
+  workbench inspection, and deferred full initialization/mutation design.
+
+### Deferred Slot Design
+
+- Slot writes/setters, inherited slots, class allocation, each-subclass
+  allocation, virtual/computed slots, full Dylan initialization protocol hooks,
+  before/after/around init methods, sealed slot optimization, persistence/image
+  storage, host-backed construction, and generalized mutability enforcement are
+  still deferred.
 
 ## Intentionally Deferred
 

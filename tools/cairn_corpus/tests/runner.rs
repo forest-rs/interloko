@@ -80,7 +80,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/diagnostics/host_backed_make.cairn"));
     assert!(out.contains("fail/diagnostics/host_backed_bad_slot.cairn"));
     assert!(out.contains("fail/diagnostics/host_backed_bad_cast.cairn"));
-    assert!(out.contains("corpus: 65 passed, 0 failed, 65 total"));
+    assert!(out.contains("corpus: 71 passed, 0 failed, 71 total"));
 }
 
 #[test]
