@@ -404,13 +404,14 @@ impl<'module> Lowering<'module> {
 
     fn lower_function(&self, function: &sem::Function) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_function(self.module, &self.ids, function)?;
-        body.lower_block(&function.body)?;
+        let ret = value_kind(function.result_kind)?;
+        body.lower_block(&function.body, ret)?;
         Ok(Function {
             id: self.lower_function_id(function.id)?,
             name: function.name.clone(),
             kind: FunctionKind::Function(function.id),
             params: body.params,
-            ret: value_kind(function.result_kind)?,
+            ret,
             locals: body.locals,
             instructions: body.instructions,
             span: function.span,
@@ -419,7 +420,8 @@ impl<'module> Lowering<'module> {
 
     fn lower_method(&self, method: &sem::Method) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_method(self.module, &self.ids, method)?;
-        body.lower_block(&method.body)?;
+        let ret = value_kind(method.result_kind)?;
+        body.lower_block(&method.body, ret)?;
         let generic = self
             .module
             .generics
@@ -430,7 +432,7 @@ impl<'module> Lowering<'module> {
             name: format!("{}#method{}", generic.name, method.id.0),
             kind: FunctionKind::Method(method.id),
             params: body.params,
-            ret: value_kind(method.result_kind)?,
+            ret,
             locals: body.locals,
             instructions: body.instructions,
             span: method.span,
@@ -611,7 +613,7 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    fn lower_block(&mut self, block: &sem::Block) -> Result<(), LowerError> {
+    fn lower_block(&mut self, block: &sem::Block, expected: ValueKind) -> Result<(), LowerError> {
         for let_binding in &block.lets {
             let value = self.lower_expr(&let_binding.value)?;
             self.set_local(let_binding.local, value)?;
@@ -627,6 +629,7 @@ impl<'module> BodyLowering<'module> {
         }
 
         let result = self.lower_expr(&block.result)?;
+        let result = self.coerce_value(result, expected, block.result.span())?;
         self.instructions.push(Instr::Return {
             value: result.reg,
             span: block.result.span(),
@@ -736,12 +739,12 @@ impl<'module> BodyLowering<'module> {
                 args,
                 span,
             } => {
-                let args = self.lower_args(args)?;
                 let function_info = self
                     .module
                     .functions
                     .get(function.0 as usize)
                     .ok_or_else(|| invalid_semantic("function id is out of range"))?;
+                let args = self.lower_args_with_expected(args, &function_info.param_kinds)?;
                 let result = self.alloc(value_kind(function_info.result_kind)?);
                 self.instructions.push(Instr::Call {
                     dst: result.reg,
@@ -1069,6 +1072,38 @@ impl<'module> BodyLowering<'module> {
             lowered.push(self.lower_expr(arg)?.reg);
         }
         Ok(lowered)
+    }
+
+    fn lower_args_with_expected(
+        &mut self,
+        args: &[sem::Expr],
+        expected: &[sem::ValueKind],
+    ) -> Result<Vec<Register>, LowerError> {
+        let mut lowered = Vec::with_capacity(args.len());
+        for (arg, expected) in args.iter().zip(expected) {
+            let value = self.lower_expr(arg)?;
+            let expected = value_kind(*expected)?;
+            let value = self.coerce_value(value, expected, arg.span())?;
+            lowered.push(value.reg);
+        }
+        Ok(lowered)
+    }
+
+    fn coerce_value(
+        &mut self,
+        value: Value,
+        expected: ValueKind,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        if value.kind == expected {
+            return Ok(value);
+        }
+        if expected == ValueKind::Any {
+            return self.box_any(value, span);
+        }
+        Err(invalid_semantic(
+            "semantic type checking allowed an invalid lowered coercion",
+        ))
     }
 
     fn box_any(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
@@ -1511,6 +1546,37 @@ mod tests {
         assert!(dump.contains("class_of"));
         assert!(dump.contains("local l1 klass = %r"));
         assert!(dump.contains("class(<circle>)"));
+    }
+
+    #[test]
+    fn lowers_typed_direct_function_signatures() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function pass(c :: <circle>) => <circle>\n  c\nend;\n\
+             define function circle-class() => class <circle>\n  <circle>\nend;\n\
+             define function build(klass :: class <circle>, radius :: <integer>) => <circle>\n  make(klass, radius: radius)\nend;\n\
+             define function main()\n  build(circle-class(), pass(make(<circle>, radius: 5)).radius).radius\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("fn l0 pass(%r1 c: object(<circle>)) -> object(<circle>)"));
+        assert!(dump.contains("fn l1 circle-class() -> class(<circle>)"));
+        assert!(dump.contains("klass: class(<circle>)"));
+        assert!(dump.contains("make <circle>"));
+    }
+
+    #[test]
+    fn lowers_object_top_function_boundaries_with_boxing() {
+        let module = lower_source(
+            "define function hold(x :: <object>) => <object>\n  x\nend;\n\
+             define function number-object() => <object>\n  7\nend;\n\
+             define function main()\n  let ignored = hold(7);\n  let also = number-object();\n  42\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("fn l0 hold(%r1 x: any) -> any"));
+        assert!(dump.contains("fn l1 number-object() -> any"));
+        assert!(dump.matches("box.any").count() >= 2);
     }
 
     #[test]

@@ -1219,15 +1219,49 @@ fn dump_sem(module: &sem::Module) -> String {
         dump_sem_block(&mut out, &method.body, 2);
     }
     for function in &module.functions {
+        let params = function
+            .params
+            .iter()
+            .zip(&function.param_kinds)
+            .map(|(local, kind)| {
+                let name = function
+                    .locals
+                    .get(local.0 as usize)
+                    .map_or("?", |local| local.name.as_str());
+                format!("{name}:{}", sem_kind_label(module, *kind))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let return_annotation = function.return_annotation.map_or_else(
+            || "inferred".to_string(),
+            |kind| sem_kind_label(module, kind),
+        );
         let _ = writeln!(
             out,
-            "function f{} {} {} result={:?}",
+            "function f{} {} {}({params}) result={:?} return={return_annotation}",
             function.id.0, function.definition, function.name, function.result_kind
         );
         dump_sem_locals(&mut out, &function.locals, 2);
         dump_sem_block(&mut out, &function.body, 2);
     }
     out
+}
+
+fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
+    match kind {
+        sem::ValueKind::Any => "object-top".into(),
+        sem::ValueKind::I64 => "integer".into(),
+        sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Object(class) => module.classes.get(class.0 as usize).map_or_else(
+            || format!("class#{}", class.0),
+            |class| format!("object({})", class.name),
+        ),
+        sem::ValueKind::ClassObject(class) => module.classes.get(class.0 as usize).map_or_else(
+            || format!("class-object#{}", class.0),
+            |class| format!("class-object({})", class.name),
+        ),
+        sem::ValueKind::Error => "error".into(),
+    }
 }
 
 fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
@@ -1572,9 +1606,19 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 name: function.name.clone(),
             },
             fingerprint: format!(
-                "function:{}:{}:{}",
+                "function:{}:{}:{}:{}:{}",
                 function.name,
                 function.params.len(),
+                function
+                    .param_kinds
+                    .iter()
+                    .map(|kind| sem_kind_fingerprint(module, *kind))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                function.return_annotation.map_or_else(
+                    || "inferred".into(),
+                    |kind| sem_kind_fingerprint(module, kind)
+                ),
                 fingerprint_sem_block(module, &function.body)
             ),
         });
@@ -2314,6 +2358,78 @@ mod tests {
                 .artifacts
                 .dump_stage(DumpStage::Sem)
                 .contains("class-object c1")
+        );
+    }
+
+    #[test]
+    fn incremental_function_signature_edit_recomputes_callers_without_method_recompute() {
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+                      define generic area(x);\n\
+                      define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                      define function hold(x)\n  x\nend;\n\
+                      define function main()\n  let ignored = hold(7);\n  area(make(<circle>, radius: 10))\nend;";
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                     define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+                     define generic area(x);\n\
+                     define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+                     define method area(s :: <square>)\n  s.side * s.side\nend;\n\
+                     define function hold(x :: <object>) => <object>\n  x\nend;\n\
+                     define function main()\n  let ignored = hold(7);\n  area(make(<circle>, radius: 10))\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("area.cairn", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let circle = first.artifacts.sem.methods[0].definition;
+        let square = first.artifacts.sem.methods[1].definition;
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Function
+                && change.definition.name == "hold"
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(circle)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(circle)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(square)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("hold(x:object-top) result=Any return=object-top")
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Lowered)
+                .contains("box.any")
         );
     }
 

@@ -189,12 +189,16 @@ pub struct Function {
     pub name: String,
     /// Parameter local IDs in source order.
     pub params: Vec<LocalId>,
+    /// Resolved parameter value categories in source order.
+    pub param_kinds: Vec<ValueKind>,
     /// Local table containing parameters followed by `let` bindings.
     pub locals: Vec<Local>,
     /// Function body.
     pub body: Block,
     /// Result value category.
     pub result_kind: ValueKind,
+    /// Explicit declared result category, when present.
+    pub return_annotation: Option<ValueKind>,
     /// Source span.
     pub span: Span,
 }
@@ -489,9 +493,16 @@ pub fn lower(module: &ast::Module) -> Module {
 struct FunctionSymbol {
     name: String,
     id: FunctionId,
-    arity: usize,
+    param_kinds: Vec<ValueKind>,
     return_kind: ValueKind,
+    return_annotation: Option<ValueKind>,
     span: Span,
+}
+
+impl FunctionSymbol {
+    fn arity(&self) -> usize {
+        self.param_kinds.len()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -737,11 +748,23 @@ impl Lowering {
                     ),
                 ));
             }
+            let param_kinds = function
+                .params
+                .iter()
+                .map(|param| {
+                    self.resolve_function_type(param.type_annotation.as_ref(), ValueKind::I64)
+                })
+                .collect::<Vec<_>>();
+            let return_annotation = function
+                .return_type
+                .as_ref()
+                .map(|annotation| self.resolve_type_annotation(annotation));
             self.functions.push(FunctionSymbol {
                 name: function.name.clone(),
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
-                arity: function.params.len(),
-                return_kind: ValueKind::I64,
+                param_kinds,
+                return_kind: return_annotation.unwrap_or(ValueKind::I64),
+                return_annotation,
                 span: function.span,
             });
         }
@@ -826,25 +849,48 @@ impl Lowering {
     fn lower_function(&mut self, id: FunctionId, function: &ast::Function) -> Function {
         let mut ctx = FunctionContext::new();
         let mut params = Vec::new();
+        let symbol = self.functions.get(id.0 as usize).cloned();
 
-        for param in &function.params {
+        for (index, param) in function.params.iter().enumerate() {
             if ctx.find_local(&param.name).is_some() {
                 ctx.diagnostics.push(Diagnostic::error(
                     param.span,
                     format!("parameter `{}` is already defined", param.name),
                 ));
             }
+            let kind = symbol
+                .as_ref()
+                .and_then(|symbol| symbol.param_kinds.get(index))
+                .copied()
+                .unwrap_or(ValueKind::Error);
             params.push(ctx.add_local(
                 self.local_definition(function.definition, &param.name),
                 param.name.clone(),
-                ValueKind::I64,
+                kind,
                 param.span,
             ));
         }
 
         let body = self.lower_block(&mut ctx, &function.body);
-        let result_kind = self.expr_kind(&ctx, &body.result);
-        if let Some(symbol) = self.functions.get_mut(id.0 as usize) {
+        let body_kind = self.expr_kind(&ctx, &body.result);
+        let return_annotation = symbol.as_ref().and_then(|symbol| symbol.return_annotation);
+        let result_kind = return_annotation.unwrap_or(body_kind);
+        if let Some(expected) = return_annotation
+            && !self.kinds_match(expected, body_kind)
+        {
+            ctx.diagnostics.push(Diagnostic::error(
+                body.result.span(),
+                format!(
+                    "function `{}` returns {} but body has {}",
+                    function.name,
+                    self.kind_name(expected),
+                    self.kind_name(body_kind)
+                ),
+            ));
+        }
+        if let Some(symbol) = self.functions.get_mut(id.0 as usize)
+            && symbol.return_annotation.is_none()
+        {
             symbol.return_kind = result_kind;
         }
         self.diagnostics.extend(ctx.diagnostics);
@@ -854,9 +900,11 @@ impl Lowering {
             definition: function.definition,
             name: function.name.clone(),
             params,
+            param_kinds: symbol.map_or_else(Vec::new, |symbol| symbol.param_kinds),
             locals: ctx.locals,
             body,
             result_kind,
+            return_annotation,
             span: function.span,
         }
     }
@@ -931,7 +979,23 @@ impl Lowering {
                     return Expr::Error { span: *span };
                 }
                 if let Some(symbol) = self.resolve_function(callee) {
-                    if symbol.arity == args.len() {
+                    if symbol.arity() == args.len() {
+                        for (index, (arg, expected)) in
+                            lowered_args.iter().zip(&symbol.param_kinds).enumerate()
+                        {
+                            let actual = self.expr_kind(ctx, arg);
+                            if !self.kinds_match(*expected, actual) {
+                                ctx.diagnostics.push(Diagnostic::error(
+                                    arg.span(),
+                                    format!(
+                                        "function `{callee}` argument {} expects {} but got {}",
+                                        index + 1,
+                                        self.kind_name(*expected),
+                                        self.kind_name(actual)
+                                    ),
+                                ));
+                            }
+                        }
                         return Expr::DirectCall {
                             function: symbol.id,
                             args: lowered_args,
@@ -942,7 +1006,7 @@ impl Lowering {
                         *span,
                         format!(
                             "function `{callee}` expects {} arguments but got {}",
-                            symbol.arity,
+                            symbol.arity(),
                             args.len()
                         ),
                     ));
@@ -1437,6 +1501,36 @@ impl Lowering {
         let Some(type_name) = type_name else {
             return ValueKind::Any;
         };
+        self.resolve_type_name(type_name, false, span)
+    }
+
+    fn resolve_function_type(
+        &mut self,
+        annotation: Option<&ast::TypeAnnotation>,
+        default: ValueKind,
+    ) -> ValueKind {
+        annotation.map_or(default, |annotation| {
+            self.resolve_type_annotation(annotation)
+        })
+    }
+
+    fn resolve_type_annotation(&mut self, annotation: &ast::TypeAnnotation) -> ValueKind {
+        self.resolve_type_name(&annotation.name, annotation.class_object, annotation.span)
+    }
+
+    fn resolve_type_name(&mut self, type_name: &str, class_object: bool, span: Span) -> ValueKind {
+        if class_object {
+            return self
+                .resolve_class(type_name)
+                .map(|class| ValueKind::ClassObject(class.id))
+                .unwrap_or_else(|| {
+                    self.diagnostics.push(Diagnostic::error(
+                        span,
+                        format!("unresolved class-object type `{type_name}`"),
+                    ));
+                    ValueKind::Error
+                });
+        }
         match type_name {
             "<object>" => ValueKind::Any,
             "<integer>" => ValueKind::I64,
@@ -1634,6 +1728,45 @@ mod tests {
             panic!("expected class-of expression");
         };
         assert_eq!(*class, ClassId(0));
+    }
+
+    #[test]
+    fn resolves_typed_direct_function_signatures() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function keep?(flag :: <boolean>) => <boolean>\n  flag\nend;\n\
+             define function build(klass :: class <circle>, radius :: <integer>) => <circle>\n  make(klass, radius: radius)\nend;\n\
+             define function main()\n  if keep?(#t) then build(<circle>, 4).radius else 0 end\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.functions[0].param_kinds, [ValueKind::Bool]);
+        assert_eq!(module.functions[0].return_annotation, Some(ValueKind::Bool));
+        assert_eq!(
+            module.functions[1].param_kinds,
+            [ValueKind::ClassObject(ClassId(0)), ValueKind::I64]
+        );
+        assert_eq!(
+            module.functions[1].return_annotation,
+            Some(ValueKind::Object(ClassId(0)))
+        );
+        assert_eq!(module.functions[2].result_kind, ValueKind::I64);
+    }
+
+    #[test]
+    fn reports_typed_direct_function_mismatches() {
+        let argument = lower_source(
+            "define function keep?(flag :: <boolean>) => <boolean>\n  flag\nend;\n\
+             define function main()\n  keep?(1)\nend;",
+        );
+        assert!(argument.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "function `keep?` argument 1 expects <boolean> but got <integer>"
+        }));
+
+        let result = lower_source("define function bad() => <boolean>\n  1\nend;");
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "function `bad` returns <boolean> but body has <integer>"
+        }));
     }
 
     #[test]
