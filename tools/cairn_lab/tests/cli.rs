@@ -132,6 +132,8 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("object method:m0"));
     assert!(out.contains("participates-in=generic:g0"));
     assert!(out.contains("object function:f0"));
+    assert!(out.contains("object dispatch:d0"));
+    assert!(out.contains("kind=dispatch-site"));
     assert!(out.contains("object runtime-class:c0"));
     assert!(out.contains("object artifact:"));
 }
@@ -152,6 +154,7 @@ fn inspect_reports_structured_environment_objects() {
         ("generic:g0", "kind: generic"),
         ("method:m0", "kind: method"),
         ("function:f0", "kind: function"),
+        ("dispatch:d0", "kind: dispatch-site"),
         ("runtime-class:c0", "kind: runtime-layout-row"),
         ("runtime-slot:c0.s0", "class: <runtime-slot>"),
         (artifact_id.as_str(), "kind: artifact"),
@@ -236,6 +239,37 @@ fn mop_reports_dispatch_applicability_for_inheritance() {
 }
 
 #[test]
+fn dispatch_command_lists_and_explains_dispatch_sites() {
+    let file = fixture("inherited_dispatch.cairn");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let list = run_lab(&["dispatch", path]);
+    assert!(list.contains("dispatch sites for"));
+    assert!(list.contains("dispatch:d0"));
+    assert!(list.contains("owner=function main"));
+    assert!(list.contains("generic=g0:score"));
+    assert!(list.contains("static-arg=object(<circle>)"));
+    assert!(list.contains("selected=m1:score(c1:<circle>)"));
+
+    let explanation = run_lab(&["dispatch", path, "dispatch:d0"]);
+    assert!(explanation.contains("dispatch dispatch:d0"));
+    assert!(explanation.contains("owner: function main"));
+    assert!(explanation.contains("contract=score(x:object(<shape>)) -> integer"));
+    assert!(explanation.contains("static-kind: object(<circle>)"));
+    assert!(explanation.contains("m1:score(c1:<circle>)"));
+    assert!(explanation.contains("selected"));
+    assert!(explanation.contains("m0:score(c0:<shape>)"));
+    assert!(explanation.contains("shadowed"));
+    assert!(explanation.contains("dispatcher: score#dispatch"));
+    assert!(explanation.contains("generic-dispatcher"));
+    assert!(explanation.contains("tape-program"));
+
+    let err = run_lab_failure(&["dispatch", path, "dispatch:missing"]);
+    assert!(err.contains("unknown dispatch site `dispatch:missing`"));
+    assert!(err.contains("available dispatch sites: dispatch:d0"));
+}
+
+#[test]
 fn affordances_lists_stable_object_actions_and_unknown_ids_fail() {
     let file = fixture("generic_area.cairn");
     let path = file.to_str().expect("fixture path should be utf8");
@@ -267,6 +301,10 @@ fn invoke_affordance_runs_read_only_views() {
     let dispatch = run_lab(&["invoke-affordance", path, "generic:g0", "show-dispatch"]);
     assert!(dispatch.contains("dispatch table:"));
     assert!(dispatch.contains("g0 area"));
+
+    let dispatch_site = run_lab(&["invoke-affordance", path, "dispatch:d0", "show-dispatch"]);
+    assert!(dispatch_site.contains("dispatch dispatch:d0"));
+    assert!(dispatch_site.contains("dispatcher: area#dispatch"));
 
     let runtime = run_lab(&["invoke-affordance", path, "class:c0", "show-runtime-layout"]);
     assert!(runtime.contains("runtime layout:"));

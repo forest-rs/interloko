@@ -63,6 +63,17 @@ fn run(args: Vec<String>) -> Result<()> {
             print!("{}", workbench.dump_eop());
             Ok(())
         }
+        "dispatch" => {
+            let (file, dispatch_id) = dispatch_args(&args)?;
+            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&artifacts.diagnostics);
+            if let Some(dispatch_id) = dispatch_id {
+                print!("{}", dispatch_explanation(&artifacts, dispatch_id)?);
+            } else {
+                print!("{}", artifacts.dump_dispatch_sites());
+            }
+            Ok(())
+        }
         "inspect" => {
             let (file, object_id) = object_args(&args)?;
             let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
@@ -182,6 +193,16 @@ fn object_args(args: &[String]) -> Result<(&str, &str)> {
         )));
     }
     Ok((&args[1], &args[2]))
+}
+
+fn dispatch_args(args: &[String]) -> Result<(&str, Option<&str>)> {
+    match args.len() {
+        2 => Ok((&args[1], None)),
+        3 => Ok((&args[1], Some(args[2].as_str()))),
+        _ => Err(LabError::Usage(
+            "usage: cairn_lab dispatch <file.cairn> [dispatch-site-id]".into(),
+        )),
+    }
 }
 
 fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance)> {
@@ -454,10 +475,17 @@ fn invoke_affordance(file: &str, object_id: &str, affordance: EnvironmentAfforda
             affordance,
         ),
         EnvironmentAffordance::ShowDispatch => {
-            print!(
-                "{}",
-                mop_section(&workbench.artifacts, "dispatch table:", "runtime layout:")
-            );
+            if object.id.as_str().starts_with("dispatch:") {
+                print!(
+                    "{}",
+                    dispatch_explanation(&workbench.artifacts, object.id.as_str())?
+                );
+            } else {
+                print!(
+                    "{}",
+                    mop_section(&workbench.artifacts, "dispatch table:", "runtime layout:")
+                );
+            }
             Ok(())
         }
         EnvironmentAffordance::ShowRuntimeLayout => {
@@ -476,6 +504,19 @@ fn invoke_affordance(file: &str, object_id: &str, affordance: EnvironmentAfforda
             name: affordance.as_str().into(),
         }),
     }
+}
+
+fn dispatch_explanation(artifacts: &SessionArtifacts, dispatch_id: &str) -> Result<String> {
+    artifacts
+        .explain_dispatch_site(dispatch_id)
+        .ok_or_else(|| LabError::UnknownDispatchSite {
+            id: dispatch_id.into(),
+            available: artifacts
+                .dispatch_sites()
+                .iter()
+                .map(|site| site.id.clone())
+                .collect(),
+        })
 }
 
 fn ensure_object_has_affordance(
@@ -728,7 +769,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "cairn_lab".into());
     format!(
-        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
+        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} dispatch <file.cairn> [dispatch-site-id]\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
     )
 }
 
@@ -753,6 +794,10 @@ enum LabError {
         id: String,
         available: Vec<String>,
     },
+    UnknownDispatchSite {
+        id: String,
+        available: Vec<String>,
+    },
     UnknownAffordance {
         name: String,
     },
@@ -773,6 +818,7 @@ impl LabError {
             | Self::InvalidHeader { .. }
             | Self::InvalidHostEopHeader { .. }
             | Self::UnknownObject { .. }
+            | Self::UnknownDispatchSite { .. }
             | Self::UnknownAffordance { .. }
             | Self::AffordanceUnavailable { .. }
             | Self::UnsupportedAffordance { .. } => 2,
@@ -804,6 +850,13 @@ impl fmt::Display for LabError {
                 write!(f, "unknown object id `{id}`")?;
                 if !available.is_empty() {
                     write!(f, "; available object ids: {}", available.join(", "))?;
+                }
+                Ok(())
+            }
+            Self::UnknownDispatchSite { id, available } => {
+                write!(f, "unknown dispatch site `{id}`")?;
+                if !available.is_empty() {
+                    write!(f, "; available dispatch sites: {}", available.join(", "))?;
                 }
                 Ok(())
             }

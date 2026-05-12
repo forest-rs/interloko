@@ -139,6 +139,8 @@ pub enum EnvironmentKind {
     Method,
     /// A direct function definition.
     Function,
+    /// A semantic generic dispatch-site object.
+    DispatchSite,
     /// A compiler diagnostic.
     Diagnostic,
     /// A runtime layout row.
@@ -161,6 +163,7 @@ impl EnvironmentKind {
             Self::Generic => "generic",
             Self::Method => "method",
             Self::Function => "function",
+            Self::DispatchSite => "dispatch-site",
             Self::Diagnostic => "diagnostic",
             Self::RuntimeLayoutRow => "runtime-layout-row",
             Self::Artifact => "artifact",
@@ -2904,6 +2907,9 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     for function in &module.functions {
         project_environment_function(module, sink, function);
     }
+    for site in artifacts.dispatch_sites() {
+        project_environment_dispatch_site(module, sink, &site);
+    }
     for (index, diagnostic) in artifacts.diagnostics.iter().enumerate() {
         sink.emit(environment_object(EnvironmentObjectParts {
             id: format!("diagnostic:d{index}"),
@@ -3215,6 +3221,67 @@ fn project_environment_function(
         inspection: format!(
             "definition={} function-id=f{}",
             function.definition, function.id.0
+        ),
+    }));
+}
+
+fn project_environment_dispatch_site(
+    module: &sem::Module,
+    sink: &mut dyn EnvironmentObjectSink,
+    site: &DispatchSiteRecord,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let generic = generic_label(module, site.generic);
+    let static_kind = site
+        .static_argument_kind
+        .map_or_else(|| "missing".into(), |kind| sem_kind_label(module, kind));
+    let exact_class = site
+        .exact_static_class
+        .map_or_else(|| "unknown".into(), |class| class_label(module, class));
+    let selected = site.selected_method.map_or_else(
+        || "runtime-needed".into(),
+        |method| method_label(module, method),
+    );
+    let artifact_keys = site
+        .related_artifacts
+        .iter()
+        .map(|report| report.key.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: site.id.clone(),
+        kind: EnvironmentKind::DispatchSite,
+        meta_class: "<dispatch-site>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: format!("{generic} in {}", site.owner.name),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::ShowDispatch,
+            Aff::ShowDependencies,
+            Aff::DumpLowered,
+            Aff::DumpTape,
+            Aff::DumpEop,
+            Aff::OpenSource,
+        ]),
+        execution: Some(format!(
+            "dispatcher={} runtime-needed={} selected={selected}",
+            site.lowered_dispatcher, site.runtime_needed
+        )),
+        inspection: format!(
+            "key={} owner={} {} span={}..{} generic={} contract={} static-arg={} exact-class={} applicable={} rejected={} artifacts={artifact_keys}",
+            site.key,
+            site.owner.kind.as_str(),
+            site.owner.name,
+            site.span.start,
+            site.span.end,
+            generic,
+            generic_contract_label(module, site.generic),
+            static_kind,
+            exact_class,
+            site.applicable.len(),
+            site.rejected.len()
         ),
     }));
 }
@@ -4663,6 +4730,15 @@ mod tests {
         let function = eop_object(&objects, "function:f0");
         assert_eq!(function.kind, EnvironmentKind::Function);
         assert!(function.affordances.contains(EnvironmentAffordance::Run));
+
+        let dispatch = eop_object(&objects, "dispatch:d0");
+        assert_eq!(dispatch.kind, EnvironmentKind::DispatchSite);
+        assert!(
+            dispatch
+                .affordances
+                .contains(EnvironmentAffordance::ShowDispatch)
+        );
+        assert!(dispatch.inspection.detail.contains("generic=g0:area"));
 
         let runtime_class = eop_object(&objects, "runtime-class:c0");
         assert_eq!(runtime_class.kind, EnvironmentKind::RuntimeLayoutRow);
