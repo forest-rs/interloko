@@ -97,12 +97,16 @@ image:
 * MOP dumps show compiler-known object-system facts: classes, slots,
   accessors, generics, methods, dispatch rows, class origins, and runtime
   layout.
-* EOP dumps project those facts into environment-object records with `kind`,
-  `class`, `origin`, `storage`, `presentation`, `affordances`, `execution`,
-  and `inspection` fields.
+* EOP projection turns those facts into typed environment-object records with
+  `kind`, `class`, `origin`, `storage`, `presentation`, `affordances`,
+  `execution`, and `inspection` facets. Text dumps are rendered views over
+  those records.
 * Host-backed objects prove the boundary between Cairn semantic classes and
   Rust-owned values: the host supplies handles and adapters; Cairn supplies the
   nominal object model and dispatch semantics.
+* Host-owned environment objects can be projected explicitly by Rust adapters.
+  This is opt-in projection, not automatic host reflection or runtime heap
+  enumeration.
 * `execution_tape` remains the ordinary lowered execution target. There are no
   MOP-specific, EOP-specific, or host-backed-specific tape opcodes.
 

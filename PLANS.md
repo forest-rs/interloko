@@ -1,5 +1,52 @@
 # Plans
 
+## Build Structured EOP Records and Host Projection Seam
+
+### Goal
+
+Turn the Environment Object Protocol from a text-only dump into typed compiler
+records that tools can inspect directly. Keep the existing `cairn_lab eop` and
+`cairn_corpus` behavior by rendering the text dump from those records.
+
+### Fence
+
+The compiler/session layer owns structured projection of compiler-known
+environment facts. It explicitly does not own persistent world state, automatic
+host discovery, runtime heap enumeration, Portolan subjects, Understory views,
+or authorization policy.
+
+### Invariants
+
+- EOP records describe facts that already exist in the compiler, runtime layout,
+  host metadata, diagnostics, and query graph.
+- Text dumps are views over typed records; tests should not need to parse text
+  to verify the protocol.
+- `CairnHost` remains an execution host, not an environment registry.
+- Host projection is explicit and adapter-owned.
+- MOP answers object-system questions. EOP answers environment/tooling
+  questions.
+
+### Steps
+
+1. Add public EOP record types, stable affordance names, a sink API, and session
+   projection entry points.
+2. Refactor the existing EOP dump to render from structured records while
+   preserving CLI/corpus output.
+3. Add an explicit host projection trait and a test provider that contributes
+   host-owned environment objects without heap enumeration.
+4. Add direct structured-record tests for native compiler records, host-backed
+   compiler records, and host-projected records.
+5. Update progress/design notes and run fmt, clippy, workspace tests, docs,
+   `cairn_lab`, and `cairn_corpus`.
+
+### Risks
+
+- If host projection reaches into `CairnHost`, EOP becomes runtime enumeration
+  rather than adapter-owned projection.
+- If records imply a stable serialized schema, this slice will overpromise.
+- If affordance names are just ad hoc strings, downstream tools will have to
+  parse fragile text.
+
 ## Build Host-Backed Metaobject Foundation
 
 ### Goal

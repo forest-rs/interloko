@@ -702,13 +702,17 @@
   `DumpStage` must handle it.
 - CLI stage lists now include `mop`.
 
-## Implemented: Environment Object Protocol Dump
+## Implemented: Structured Environment Object Protocol Records
 
 - `DESIGN.md` now frames Cairn as a Dylan-shaped semantic kernel for
   executable object systems inside a larger human/agent workspace, with clear
   boundaries around persistence, search, UI, and scheduling.
-- `SessionArtifacts::dump_stage(DumpStage::Eop)` renders a first environment
-  object protocol view over the current compilation artifacts.
+- `SessionArtifacts::environment_objects()` returns typed EOP records for the
+  current compilation artifacts.
+- `SessionArtifacts::project_environment()` emits those records through an
+  `EnvironmentObjectSink` so tools do not need to parse text dumps.
+- `SessionArtifacts::dump_stage(DumpStage::Eop)` renders its text from the
+  typed records, preserving the existing workbench/corpus dump behavior.
 - The EOP dump is intentionally descriptive. It does not add persistence,
   permissions, UI rendering, search, scheduling, mutation, or a new runtime.
 - EOP objects currently cover:
@@ -726,6 +730,14 @@
   - `affordances`;
   - `execution` when applicable;
   - `inspection`.
+- Stable affordance names are modeled by `EnvironmentAffordance`, including
+  `inspect`, `dump-syntax`, `dump-ast`, `dump-sem`, `dump-mop`, `dump-eop`,
+  `dump-lowered`, `dump-tape`, `show-dispatch`, `show-runtime-layout`,
+  `show-dependencies`, `show-accessor`, `show-slot`, `run`, `edit-body`, and
+  `add-method`.
+- `HostEnvironmentProvider` is an explicit host projection seam. Host adapters
+  can contribute host-owned environment records into the same sink without
+  making `CairnHost` a world registry or enumerating the runtime heap.
 - `cairn_lab dump <file> --stage eop` and `cairn_lab eop <file>` print the EOP
   summary. The workbench still understands leading `// host-class:` metadata so
   host-backed objects are visible in the environment view.
@@ -743,20 +755,26 @@
   render.
 - **Affordance:** a named action that a human, agent, or Portolan subject can
   discover and request.
+- **Host projection:** an opt-in Rust adapter hook that contributes host-owned
+  environment records. It is not runtime heap discovery.
 
 ### Deferred EOP Design
 
-- EOP records are text dumps only. There is no stable serialized schema,
+- EOP records are Rust structs, not a stable serialized schema. There is no
   Portolan subject bridge, Understory inspector, persistent image, capability
   policy, transaction model, or agent provenance model yet.
-- Future EOP work should turn this vocabulary into structured records before
-  wiring it into search, presentation, or persistence.
+- Future Cairn-level generic functions may mirror these projection protocols,
+  but this slice keeps projection at the Rust/session API boundary.
 
 ### Migration Notes
 
 - `DumpStage` gained a public `Eop` variant. Exhaustive downstream matches on
   `DumpStage` must handle it.
-- CLI stage lists now include `eop`.
+- The session API now exposes `EnvironmentObject`, `EnvironmentObjectId`,
+  `EnvironmentKind`, `EnvironmentOrigin`, `EnvironmentStorage`,
+  `PresentationFacet`, `AffordanceFacet`, `ExecutionFacet`, `InspectionFacet`,
+  `EnvironmentObjectSink`, and `HostEnvironmentProvider`.
+- CLI stage lists still include `eop`.
 
 ## Intentionally Deferred
 
