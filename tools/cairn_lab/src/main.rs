@@ -2,14 +2,17 @@
 
 use std::env;
 use std::error::Error;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::path::Path;
 
 use cairn_compiler::identity::SourceFileId;
 use cairn_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use cairn_compiler::session::{
-    CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
+    AffordanceFacet, CompilerSession, DumpStage, EnvironmentAffordance, EnvironmentKind,
+    EnvironmentObject, EnvironmentObjectId, EnvironmentObjectSink, EnvironmentOrigin,
+    EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession, InspectionFacet,
+    PresentationFacet, RuntimeMode, RuntimeResult, SessionArtifacts,
 };
 
 type Result<T> = std::result::Result<T, LabError>;
@@ -41,9 +44,9 @@ fn run(args: Vec<String>) -> Result<()> {
         }
         "dump" => {
             let (file, stage) = dump_args(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics);
-            print!("{}", artifacts.dump_stage(stage));
+            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&workbench.artifacts.diagnostics);
+            print!("{}", workbench.dump_stage(stage));
             Ok(())
         }
         "mop" => {
@@ -55,9 +58,30 @@ fn run(args: Vec<String>) -> Result<()> {
         }
         "eop" => {
             let file = single_file_arg(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics);
-            print!("{}", artifacts.dump_stage(DumpStage::Eop));
+            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&workbench.artifacts.diagnostics);
+            print!("{}", workbench.dump_eop());
+            Ok(())
+        }
+        "inspect" => {
+            let (file, object_id) = object_args(&args)?;
+            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&workbench.artifacts.diagnostics);
+            let object = workbench.object(object_id)?;
+            print!("{}", format_environment_object(&object));
+            Ok(())
+        }
+        "affordances" => {
+            let (file, object_id) = object_args(&args)?;
+            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&workbench.artifacts.diagnostics);
+            let object = workbench.object(object_id)?;
+            print!("{}", format_affordances(&object));
+            Ok(())
+        }
+        "invoke-affordance" => {
+            let (file, object_id, affordance) = invoke_args(&args)?;
+            invoke_affordance(file, object_id, affordance)?;
             Ok(())
         }
         "artifacts" => {
@@ -91,15 +115,20 @@ fn run(args: Vec<String>) -> Result<()> {
     }
 }
 
-fn compile_path(
-    path: &str,
-    mode: RuntimeMode,
-) -> Result<cairn_compiler::session::SessionArtifacts> {
+fn compile_path(path: &str, mode: RuntimeMode) -> Result<SessionArtifacts> {
+    Ok(compile_workbench_path(path, mode)?.artifacts)
+}
+
+fn compile_workbench_path(path: &str, mode: RuntimeMode) -> Result<CompiledWorkbench> {
     let source = read_path(path)?;
     let registry = parse_host_registry(Path::new(path), &source)?;
-    Ok(CompilerSession::compile_source_with_host_registry(
-        path, &source, mode, &registry,
-    ))
+    let host_environment = parse_host_environment(Path::new(path), &source)?;
+    let artifacts =
+        CompilerSession::compile_source_with_host_registry(path, &source, mode, &registry);
+    Ok(CompiledWorkbench {
+        artifacts,
+        host_environment,
+    })
 }
 
 fn read_path(path: &str) -> Result<String> {
@@ -145,6 +174,367 @@ fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
     Ok((&args[1], stage))
 }
 
+fn object_args(args: &[String]) -> Result<(&str, &str)> {
+    if args.len() != 3 {
+        return Err(LabError::Usage(format!(
+            "usage: cairn_lab {} <file.cairn> <object-id>",
+            args.first().map_or("COMMAND", String::as_str)
+        )));
+    }
+    Ok((&args[1], &args[2]))
+}
+
+fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance)> {
+    if args.len() != 4 {
+        return Err(LabError::Usage(
+            "usage: cairn_lab invoke-affordance <file.cairn> <object-id> <affordance>".into(),
+        ));
+    }
+    let affordance = parse_affordance(&args[3]).ok_or_else(|| LabError::UnknownAffordance {
+        name: args[3].clone(),
+    })?;
+    Ok((&args[1], &args[2], affordance))
+}
+
+fn parse_affordance(input: &str) -> Option<EnvironmentAffordance> {
+    all_affordances()
+        .iter()
+        .copied()
+        .find(|affordance| affordance.as_str() == input)
+}
+
+fn all_affordances() -> &'static [EnvironmentAffordance] {
+    use EnvironmentAffordance as Aff;
+
+    &[
+        Aff::Inspect,
+        Aff::DumpSyntax,
+        Aff::DumpAst,
+        Aff::DumpSem,
+        Aff::DumpMop,
+        Aff::DumpEop,
+        Aff::DumpLowered,
+        Aff::DumpTape,
+        Aff::ShowDispatch,
+        Aff::ShowRuntimeLayout,
+        Aff::ShowDependencies,
+        Aff::ShowAccessor,
+        Aff::ShowSlot,
+        Aff::Run,
+        Aff::EditBody,
+        Aff::AddMethod,
+        Aff::Artifacts,
+        Aff::Diff,
+        Aff::OpenSource,
+        Aff::DumpArtifacts,
+        Aff::ShowSlots,
+    ]
+}
+
+#[derive(Clone, Debug, Default)]
+struct WorkbenchHostEnvironment {
+    objects: Vec<EnvironmentObject>,
+}
+
+impl WorkbenchHostEnvironment {
+    fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    fn add(&mut self, object: EnvironmentObject) {
+        self.objects.push(object);
+    }
+}
+
+impl HostEnvironmentProvider for WorkbenchHostEnvironment {
+    fn project_environment(&self, sink: &mut dyn EnvironmentObjectSink) {
+        for object in &self.objects {
+            sink.emit(object.clone());
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompiledWorkbench {
+    artifacts: SessionArtifacts,
+    host_environment: WorkbenchHostEnvironment,
+}
+
+impl CompiledWorkbench {
+    fn environment_objects(&self) -> Vec<EnvironmentObject> {
+        if self.host_environment.is_empty() {
+            self.artifacts.environment_objects()
+        } else {
+            self.artifacts
+                .environment_objects_with_host(&self.host_environment)
+        }
+    }
+
+    fn object(&self, object_id: &str) -> Result<EnvironmentObject> {
+        let objects = self.environment_objects();
+        objects
+            .iter()
+            .find(|object| object.id.as_str() == object_id)
+            .cloned()
+            .ok_or_else(|| LabError::UnknownObject {
+                id: object_id.into(),
+                available: objects
+                    .iter()
+                    .map(|object| object.id.as_str().to_string())
+                    .collect(),
+            })
+    }
+
+    fn dump_stage(&self, stage: DumpStage) -> String {
+        match stage {
+            DumpStage::Eop => self.dump_eop(),
+            DumpStage::All => self.dump_all(),
+            _ => self.artifacts.dump_stage(stage),
+        }
+    }
+
+    fn dump_all(&self) -> String {
+        let mut out = String::new();
+        for stage in [
+            DumpStage::Syntax,
+            DumpStage::Ast,
+            DumpStage::Sem,
+            DumpStage::Mop,
+            DumpStage::Eop,
+            DumpStage::Lowered,
+            DumpStage::Tape,
+        ] {
+            let _ = writeln!(out, "== {stage:?} ==");
+            out.push_str(&self.dump_stage(stage));
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn dump_eop(&self) -> String {
+        render_eop(&self.artifacts, &self.environment_objects())
+    }
+}
+
+fn render_eop(artifacts: &SessionArtifacts, objects: &[EnvironmentObject]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "eop {} {}", artifacts.source.id, artifacts.source.name);
+    let _ = writeln!(out, "objects:");
+    for object in objects {
+        let _ = write!(out, "{}", render_eop_object(object));
+    }
+    out
+}
+
+fn render_eop_object(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "  object {}", object.id);
+    let _ = writeln!(
+        out,
+        "    kind={} class={} origin={} storage={}",
+        object.kind.as_str(),
+        object.meta_class,
+        object.origin.as_str(),
+        object.storage.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "    presentation title=\"{}\"",
+        object.presentation.title
+    );
+    let _ = writeln!(out, "    affordances {}", affordance_csv(object));
+    if let Some(execution) = &object.execution {
+        let _ = writeln!(out, "    execution {}", execution.detail);
+    }
+    let _ = writeln!(out, "    inspection {}", object.inspection.detail);
+    out
+}
+
+fn format_environment_object(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "object {}", object.id);
+    let _ = writeln!(out, "kind: {}", object.kind.as_str());
+    let _ = writeln!(out, "class: {}", object.meta_class);
+    let _ = writeln!(out, "origin: {}", object.origin.as_str());
+    let _ = writeln!(out, "storage: {}", object.storage.as_str());
+    let _ = writeln!(out, "presentation:");
+    let _ = writeln!(out, "  title: {}", object.presentation.title);
+    let _ = writeln!(out, "affordances:");
+    for affordance in &object.affordances.names {
+        let _ = writeln!(out, "  {}", affordance.as_str());
+    }
+    let _ = writeln!(out, "execution:");
+    if let Some(execution) = &object.execution {
+        let _ = writeln!(out, "  {}", execution.detail);
+    } else {
+        let _ = writeln!(out, "  <none>");
+    }
+    let _ = writeln!(out, "inspection:");
+    let _ = writeln!(out, "  {}", object.inspection.detail);
+    out
+}
+
+fn format_affordances(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "affordances {}", object.id);
+    for affordance in &object.affordances.names {
+        let _ = writeln!(out, "{}", affordance.as_str());
+    }
+    out
+}
+
+fn affordance_csv(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    for (index, affordance) in object.affordances.names.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(affordance.as_str());
+    }
+    out
+}
+
+fn invoke_affordance(file: &str, object_id: &str, affordance: EnvironmentAffordance) -> Result<()> {
+    if affordance == EnvironmentAffordance::Run {
+        let workbench = compile_workbench_path(file, RuntimeMode::RunMain)?;
+        print_diagnostics(&workbench.artifacts.diagnostics);
+        let object = workbench.object(object_id)?;
+        ensure_object_has_affordance(&object, affordance)?;
+        return print_runtime_result(&workbench.artifacts);
+    }
+
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&workbench.artifacts.diagnostics);
+    let object = workbench.object(object_id)?;
+    ensure_object_has_affordance(&object, affordance)?;
+    match affordance {
+        EnvironmentAffordance::DumpSyntax => {
+            print!("{}", workbench.dump_stage(DumpStage::Syntax));
+            Ok(())
+        }
+        EnvironmentAffordance::DumpAst => {
+            print!("{}", workbench.dump_stage(DumpStage::Ast));
+            Ok(())
+        }
+        EnvironmentAffordance::DumpSem => {
+            print!("{}", workbench.dump_stage(DumpStage::Sem));
+            Ok(())
+        }
+        EnvironmentAffordance::DumpMop => {
+            print!("{}", workbench.dump_stage(DumpStage::Mop));
+            Ok(())
+        }
+        EnvironmentAffordance::DumpEop => {
+            print!("{}", workbench.dump_stage(DumpStage::Eop));
+            Ok(())
+        }
+        EnvironmentAffordance::DumpLowered => {
+            print!("{}", workbench.dump_stage(DumpStage::Lowered));
+            Ok(())
+        }
+        EnvironmentAffordance::DumpTape => {
+            print!("{}", workbench.dump_stage(DumpStage::Tape));
+            Ok(())
+        }
+        EnvironmentAffordance::ShowSlot => print_linked_object(
+            &workbench,
+            object.id.as_str(),
+            "accessor:",
+            "slot:",
+            affordance,
+        ),
+        EnvironmentAffordance::ShowAccessor => print_linked_object(
+            &workbench,
+            object.id.as_str(),
+            "slot:",
+            "accessor:",
+            affordance,
+        ),
+        EnvironmentAffordance::ShowDispatch => {
+            print!(
+                "{}",
+                mop_section(&workbench.artifacts, "dispatch table:", "runtime layout:")
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowRuntimeLayout => {
+            print!(
+                "{}",
+                mop_section(&workbench.artifacts, "runtime layout:", "")
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowDependencies => {
+            print!("{}", workbench.artifacts.dump_artifact_graph());
+            Ok(())
+        }
+        EnvironmentAffordance::Run => unreachable!("run handled before compile-only path"),
+        _ => Err(LabError::UnsupportedAffordance {
+            name: affordance.as_str().into(),
+        }),
+    }
+}
+
+fn ensure_object_has_affordance(
+    object: &EnvironmentObject,
+    affordance: EnvironmentAffordance,
+) -> Result<()> {
+    if object.affordances.contains(affordance) {
+        Ok(())
+    } else {
+        Err(LabError::AffordanceUnavailable {
+            id: object.id.as_str().into(),
+            name: affordance.as_str().into(),
+        })
+    }
+}
+
+fn print_runtime_result(artifacts: &SessionArtifacts) -> Result<()> {
+    match &artifacts.runtime_result {
+        Some(RuntimeResult::ReturnedI64(value)) => {
+            println!("{value}");
+            Ok(())
+        }
+        Some(result) => Err(LabError::Runtime(format!("{result:?}"))),
+        None => Err(LabError::Runtime("runtime was not requested".into())),
+    }
+}
+
+fn print_linked_object(
+    workbench: &CompiledWorkbench,
+    object_id: &str,
+    from_prefix: &str,
+    to_prefix: &str,
+    affordance: EnvironmentAffordance,
+) -> Result<()> {
+    let suffix =
+        object_id
+            .strip_prefix(from_prefix)
+            .ok_or_else(|| LabError::UnsupportedAffordance {
+                name: affordance.as_str().into(),
+            })?;
+    let linked = workbench.object(&format!("{to_prefix}{suffix}"))?;
+    print!("{}", format_environment_object(&linked));
+    Ok(())
+}
+
+fn mop_section(artifacts: &SessionArtifacts, start: &str, end: &str) -> String {
+    let dump = artifacts.dump_stage(DumpStage::Mop);
+    let Some(start_index) = dump.find(start) else {
+        return dump;
+    };
+    let section = &dump[start_index..];
+    if end.is_empty() {
+        return section.into();
+    }
+    section
+        .find(end)
+        .map_or_else(|| section.into(), |end_index| section[..end_index].into())
+}
+
 fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
     let mut host_registry = HostMetaRegistry::new();
     for (index, line) in source.lines().enumerate() {
@@ -158,6 +548,23 @@ fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
         break;
     }
     Ok(host_registry)
+}
+
+fn parse_host_environment(path: &Path, source: &str) -> Result<WorkbenchHostEnvironment> {
+    let mut environment = WorkbenchHostEnvironment::default();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// host-eop-class:") {
+                environment.add(parse_host_eop_class(path, index + 1, rest.trim())?);
+            } else if let Some(rest) = trimmed.strip_prefix("// host-eop-instance:") {
+                environment.add(parse_host_eop_instance(path, index + 1, rest.trim())?);
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(environment)
 }
 
 fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> {
@@ -187,6 +594,88 @@ fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> 
     Ok(class)
 }
 
+fn parse_host_eop_class(path: &Path, line: usize, input: &str) -> Result<EnvironmentObject> {
+    let mut parts = input.split_whitespace();
+    let host_id = parts
+        .next()
+        .ok_or_else(|| invalid_host_eop_header(path, line, "host-eop-class requires an id"))?;
+    let class_name = parts.next().ok_or_else(|| {
+        invalid_host_eop_header(path, line, "host-eop-class requires a class name")
+    })?;
+    if !class_name.starts_with('<') || !class_name.ends_with('>') {
+        return Err(invalid_host_eop_header(
+            path,
+            line,
+            "host-eop-class class name must be a Cairn class name",
+        ));
+    }
+    if parts.next().is_some() {
+        return Err(invalid_host_eop_header(
+            path,
+            line,
+            "host-eop-class supports `id <class-name>`",
+        ));
+    }
+    Ok(host_environment_object(
+        format!("host-class:{host_id}"),
+        "<host-class>",
+        format!("host class {class_name}"),
+        format!("provider=fixture host-id={host_id} class={class_name}"),
+    ))
+}
+
+fn parse_host_eop_instance(path: &Path, line: usize, input: &str) -> Result<EnvironmentObject> {
+    let mut parts = input.split_whitespace();
+    let host_id = parts
+        .next()
+        .ok_or_else(|| invalid_host_eop_header(path, line, "host-eop-instance requires an id"))?;
+    let class_name = parts.next().ok_or_else(|| {
+        invalid_host_eop_header(path, line, "host-eop-instance requires a class name")
+    })?;
+    if !class_name.starts_with('<') || !class_name.ends_with('>') {
+        return Err(invalid_host_eop_header(
+            path,
+            line,
+            "host-eop-instance class name must be a Cairn class name",
+        ));
+    }
+    let facts = parts.collect::<Vec<_>>().join(" ");
+    let inspection = if facts.is_empty() {
+        format!("provider=fixture host-id={host_id} class={class_name}")
+    } else {
+        format!("provider=fixture host-id={host_id} class={class_name} facts={facts}")
+    };
+    Ok(host_environment_object(
+        format!("host-instance:{host_id}"),
+        "<host-instance>",
+        format!("host instance {host_id} :: {class_name}"),
+        inspection,
+    ))
+}
+
+fn host_environment_object(
+    id: String,
+    meta_class: &str,
+    title: String,
+    inspection: String,
+) -> EnvironmentObject {
+    EnvironmentObject {
+        id: EnvironmentObjectId::new(id),
+        kind: EnvironmentKind::HostObject,
+        meta_class: meta_class.into(),
+        origin: EnvironmentOrigin::HostProvided,
+        storage: EnvironmentStorage::HostOwned,
+        presentation: PresentationFacet::new(title),
+        affordances: AffordanceFacet::new(vec![
+            EnvironmentAffordance::Inspect,
+            EnvironmentAffordance::DumpEop,
+            EnvironmentAffordance::ShowRuntimeLayout,
+        ]),
+        execution: None,
+        inspection: InspectionFacet::new(inspection),
+    }
+}
+
 fn parse_host_slot_kind(path: &Path, line: usize, input: &str) -> Result<ValueKind> {
     match input {
         "<object>" => Ok(ValueKind::Any),
@@ -202,6 +691,14 @@ fn parse_host_slot_kind(path: &Path, line: usize, input: &str) -> Result<ValueKi
 
 fn invalid_header(path: &Path, line: usize, message: &str) -> LabError {
     LabError::InvalidHeader {
+        path: path.display().to_string(),
+        line,
+        message: message.into(),
+    }
+}
+
+fn invalid_host_eop_header(path: &Path, line: usize, message: &str) -> LabError {
+    LabError::InvalidHostEopHeader {
         path: path.display().to_string(),
         line,
         message: message.into(),
@@ -231,7 +728,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "cairn_lab".into());
     format!(
-        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
+        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
     )
 }
 
@@ -247,13 +744,38 @@ enum LabError {
         line: usize,
         message: String,
     },
+    InvalidHostEopHeader {
+        path: String,
+        line: usize,
+        message: String,
+    },
+    UnknownObject {
+        id: String,
+        available: Vec<String>,
+    },
+    UnknownAffordance {
+        name: String,
+    },
+    AffordanceUnavailable {
+        id: String,
+        name: String,
+    },
+    UnsupportedAffordance {
+        name: String,
+    },
     Runtime(String),
 }
 
 impl LabError {
     const fn exit_code(&self) -> i32 {
         match self {
-            Self::Usage(_) | Self::InvalidHeader { .. } => 2,
+            Self::Usage(_)
+            | Self::InvalidHeader { .. }
+            | Self::InvalidHostEopHeader { .. }
+            | Self::UnknownObject { .. }
+            | Self::UnknownAffordance { .. }
+            | Self::AffordanceUnavailable { .. }
+            | Self::UnsupportedAffordance { .. } => 2,
             Self::Io { .. } | Self::Runtime(_) => 1,
         }
     }
@@ -270,6 +792,30 @@ impl fmt::Display for LabError {
                 message,
             } => {
                 write!(f, "{path}:{line}: invalid host-class header: {message}")
+            }
+            Self::InvalidHostEopHeader {
+                path,
+                line,
+                message,
+            } => {
+                write!(f, "{path}:{line}: invalid host-eop header: {message}")
+            }
+            Self::UnknownObject { id, available } => {
+                write!(f, "unknown object id `{id}`")?;
+                if !available.is_empty() {
+                    write!(f, "; available object ids: {}", available.join(", "))?;
+                }
+                Ok(())
+            }
+            Self::UnknownAffordance { name } => write!(f, "unknown affordance `{name}`"),
+            Self::AffordanceUnavailable { id, name } => {
+                write!(f, "object `{id}` does not expose affordance `{name}`")
+            }
+            Self::UnsupportedAffordance { name } => {
+                write!(
+                    f,
+                    "affordance `{name}` is not executable by cairn_lab in this slice"
+                )
             }
             Self::Runtime(message) => write!(f, "runtime failed: {message}"),
         }

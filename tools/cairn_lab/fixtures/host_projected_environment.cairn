@@ -1,0 +1,5 @@
+// host-eop-class: rust-shape <rust-shape>
+// host-eop-instance: circle-10 <rust-shape> radius=10
+define function main()
+  42
+end;
