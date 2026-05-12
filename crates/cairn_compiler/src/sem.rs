@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ast;
@@ -324,8 +325,14 @@ pub struct Class {
     pub name: String,
     /// Native or host-backed class origin.
     pub origin: ClassOrigin,
-    /// Declared slots.
+    /// Resolved direct superclass, or `None` for the `<object>` root/default.
+    pub superclass: Option<ClassId>,
+    /// Whether effective slot finalization completed for this class.
+    pub finalized: bool,
+    /// Declared source slots.
     pub slots: Vec<Slot>,
+    /// Computed effective slots in deterministic instance-layout order.
+    pub effective_slots: Vec<EffectiveSlot>,
     /// Source span.
     pub span: Span,
 }
@@ -359,6 +366,48 @@ pub struct Slot {
     /// Mutability metadata.
     pub mutability: SlotMutability,
     /// Source span.
+    pub span: Span,
+}
+
+/// Computed slot definition after class finalization.
+///
+/// Direct [`Slot`] values are source facts. Effective slots are computed MOP
+/// facts: inherited parent slots come first, followed by the class's own direct
+/// slots. The `id` and `accessor.slot` fields are class-local layout positions;
+/// `definition`, `source_class`, `source_slot`, and `accessor.definition`
+/// preserve the original source slot/accessor identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectiveSlot {
+    /// Layout slot identifier within the finalized class.
+    pub id: SlotId,
+    /// Stable identity of the original direct slot definition.
+    pub definition: DefinitionId,
+    /// Slot name.
+    pub name: String,
+    /// Declared source type name, with missing declarations normalized to
+    /// `<object>`.
+    pub type_name: String,
+    /// Slot value category.
+    pub kind: ValueKind,
+    /// Native or host-backed slot origin.
+    pub origin: SlotOrigin,
+    /// Class that originally introduced this slot.
+    pub source_class: ClassId,
+    /// Direct slot id on `source_class`.
+    pub source_slot: SlotId,
+    /// Getter accessor for this effective slot on the finalized class.
+    pub accessor: Accessor,
+    /// External construction keyword without the trailing colon.
+    pub init_keyword: String,
+    /// Whether the original slot declared `required-init-keyword:`.
+    pub required_init_keyword: bool,
+    /// Optional default initializer used when construction omits this slot.
+    pub init_value: Option<Expr>,
+    /// Allocation policy.
+    pub allocation: SlotAllocation,
+    /// Mutability metadata.
+    pub mutability: SlotMutability,
+    /// Source span of the original direct slot.
     pub span: Span,
 }
 
@@ -841,6 +890,13 @@ enum AccessorResolution {
     Ambiguous,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum FinalizeState {
+    Unvisited,
+    Visiting,
+    Done,
+}
+
 impl FunctionContext {
     fn new() -> Self {
         Self {
@@ -943,6 +999,7 @@ impl Lowering {
         lowering.collect_generics(module);
         lowering.collect_functions(module);
         lowering.collect_slot_init_values(module);
+        lowering.finalize_classes();
         lowering
     }
 
@@ -962,7 +1019,10 @@ impl Lowering {
                 definition: class.definition,
                 name: class.name.clone(),
                 origin: ClassOrigin::Native,
+                superclass: None,
+                finalized: false,
                 slots: Vec::new(),
+                effective_slots: Vec::new(),
                 span: class.span,
             });
         }
@@ -1076,9 +1136,63 @@ impl Lowering {
                 origin: ClassOrigin::HostBacked {
                     host_class: host_class_id,
                 },
+                superclass: None,
+                finalized: false,
                 slots,
+                effective_slots: Vec::new(),
                 span: Span::default(),
             });
+        }
+
+        self.resolve_superclasses(module);
+    }
+
+    fn resolve_superclasses(&mut self, module: &ast::Module) {
+        for (class_index, class) in module.classes.iter().enumerate() {
+            let Some(superclass) = class.superclass.as_deref() else {
+                continue;
+            };
+            if superclass == "<object>" {
+                continue;
+            }
+            if matches!(superclass, "<integer>" | "<boolean>") {
+                self.diagnostics.push(Diagnostic::error(
+                    class.superclass_span,
+                    format!(
+                        "class `{}` cannot inherit from primitive `{superclass}`",
+                        class.name
+                    ),
+                ));
+                continue;
+            }
+            let Some((parent_id, parent_origin)) = self
+                .classes
+                .iter()
+                .find(|candidate| candidate.name == superclass)
+                .map(|parent| (parent.id, parent.origin))
+            else {
+                self.diagnostics.push(Diagnostic::error(
+                    class.superclass_span,
+                    format!(
+                        "unresolved superclass `{superclass}` for class `{}`",
+                        class.name
+                    ),
+                ));
+                continue;
+            };
+            if matches!(parent_origin, ClassOrigin::HostBacked { .. }) {
+                self.diagnostics.push(Diagnostic::error(
+                    class.superclass_span,
+                    format!(
+                        "class `{}` cannot inherit from host-backed class `{superclass}`",
+                        class.name
+                    ),
+                ));
+                continue;
+            }
+            if let Some(lowered_class) = self.classes.get_mut(class_index) {
+                lowered_class.superclass = Some(parent_id);
+            }
         }
     }
 
@@ -1120,6 +1234,136 @@ impl Lowering {
                 .and_then(|class| class.slots.get_mut(slot_index))
             {
                 slot.init_value = Some(value);
+            }
+        }
+    }
+
+    fn finalize_classes(&mut self) {
+        let mut states = vec![FinalizeState::Unvisited; self.classes.len()];
+        for class_index in 0..self.classes.len() {
+            self.finalize_class(class_index, &mut states);
+        }
+    }
+
+    fn finalize_class(&mut self, class_index: usize, states: &mut [FinalizeState]) {
+        match states.get(class_index).copied() {
+            Some(FinalizeState::Done) => return,
+            Some(FinalizeState::Visiting) => {
+                let class = &self.classes[class_index];
+                self.diagnostics.push(Diagnostic::error(
+                    class.span,
+                    format!("class inheritance cycle involving `{}`", class.name),
+                ));
+                return;
+            }
+            Some(FinalizeState::Unvisited) => {}
+            None => return,
+        }
+
+        states[class_index] = FinalizeState::Visiting;
+        let parent_slots = self.classes[class_index].superclass.and_then(|parent| {
+            let parent_index = parent.0 as usize;
+            self.finalize_class(parent_index, states);
+            self.classes
+                .get(parent_index)
+                .map(|class| class.effective_slots.clone())
+        });
+
+        let owner = self.classes[class_index].id;
+        let mut effective_slots = Vec::new();
+        if let Some(parent_slots) = parent_slots {
+            for slot in &parent_slots {
+                let id = SlotId(u32::try_from(effective_slots.len()).unwrap_or(u32::MAX));
+                effective_slots.push(Self::inherited_effective_slot(owner, id, slot));
+            }
+        }
+
+        let direct_slots = self.classes[class_index].slots.clone();
+        for slot in &direct_slots {
+            let id = SlotId(u32::try_from(effective_slots.len()).unwrap_or(u32::MAX));
+            effective_slots.push(Self::direct_effective_slot(owner, id, slot));
+        }
+
+        self.check_duplicate_effective_slots(class_index, &effective_slots);
+        if let Some(class) = self.classes.get_mut(class_index) {
+            class.effective_slots = effective_slots;
+            class.finalized = true;
+        }
+        states[class_index] = FinalizeState::Done;
+    }
+
+    fn direct_effective_slot(owner: ClassId, id: SlotId, slot: &Slot) -> EffectiveSlot {
+        EffectiveSlot {
+            id,
+            definition: slot.definition,
+            name: slot.name.clone(),
+            type_name: slot.type_name.clone(),
+            kind: slot.kind,
+            origin: slot.origin,
+            source_class: owner,
+            source_slot: slot.id,
+            accessor: Accessor {
+                definition: slot.accessor.definition,
+                name: slot.accessor.name.clone(),
+                class: owner,
+                slot: id,
+                result_kind: slot.accessor.result_kind,
+            },
+            init_keyword: slot.init_keyword.clone(),
+            required_init_keyword: slot.required_init_keyword,
+            init_value: slot.init_value.clone(),
+            allocation: slot.allocation,
+            mutability: slot.mutability,
+            span: slot.span,
+        }
+    }
+
+    fn inherited_effective_slot(owner: ClassId, id: SlotId, slot: &EffectiveSlot) -> EffectiveSlot {
+        let mut inherited = slot.clone();
+        inherited.id = id;
+        inherited.accessor.class = owner;
+        inherited.accessor.slot = id;
+        inherited
+    }
+
+    fn check_duplicate_effective_slots(&mut self, class_index: usize, slots: &[EffectiveSlot]) {
+        let class_name = self.classes[class_index].name.clone();
+        for (index, slot) in slots.iter().enumerate() {
+            if slots[..index]
+                .iter()
+                .any(|previous| previous.name == slot.name)
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    slot.span,
+                    format!(
+                        "class `{class_name}` has duplicate effective slot `{}`",
+                        slot.name
+                    ),
+                ));
+            }
+            if slots[..index]
+                .iter()
+                .any(|previous| previous.init_keyword == slot.init_keyword)
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    slot.span,
+                    format!(
+                        "class `{class_name}` has duplicate effective init keyword `{}:`",
+                        slot.init_keyword
+                    ),
+                ));
+            }
+            if slots[..index]
+                .iter()
+                .any(|previous| previous.accessor.name == slot.accessor.name)
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    slot.span,
+                    format!(
+                        "class `{class_name}` has duplicate effective accessor `{}`",
+                        slot.accessor.name
+                    ),
+                ));
             }
         }
     }
@@ -2163,7 +2407,7 @@ impl Lowering {
         let mut resolved = Vec::new();
         for field in fields {
             if resolved.iter().any(|resolved: &FieldInit| {
-                class.slots[resolved.slot.0 as usize].init_keyword == field.name
+                class.effective_slots[resolved.slot.0 as usize].init_keyword == field.name
             }) {
                 ctx.diagnostics.push(Diagnostic::error(
                     field.span,
@@ -2172,7 +2416,7 @@ impl Lowering {
                 continue;
             }
             let Some(slot) = class
-                .slots
+                .effective_slots
                 .iter()
                 .find(|slot| slot.init_keyword == field.name)
             else {
@@ -2205,7 +2449,7 @@ impl Lowering {
             });
         }
 
-        for slot in &class.slots {
+        for slot in &class.effective_slots {
             if !resolved.iter().any(|field| field.slot == slot.id) {
                 if let Some(init_value) = &slot.init_value {
                     resolved.push(FieldInit {
@@ -2275,7 +2519,7 @@ impl Lowering {
             return Expr::Error { span };
         };
         let Some(slot) = class
-            .slots
+            .effective_slots
             .iter()
             .find(|slot| slot.accessor.name == accessor_name)
         else {
@@ -2366,10 +2610,17 @@ impl Lowering {
                 if slot.accessor.name != name {
                     continue;
                 }
+                let effective_slot = class
+                    .effective_slots
+                    .iter()
+                    .find(|effective| {
+                        effective.source_class == class.id && effective.source_slot == slot.id
+                    })
+                    .map_or(slot.id, |effective| effective.id);
                 let callable = KnownCallable::SlotAccessor {
                     accessor: slot.accessor.definition,
                     class: class.id,
-                    slot: slot.id,
+                    slot: effective_slot,
                 };
                 if found.replace(callable).is_some() {
                     return AccessorResolution::Ambiguous;
@@ -2495,7 +2746,7 @@ impl Lowering {
             KnownCallable::SlotAccessor { class, slot, .. } => self
                 .classes
                 .get(class.0 as usize)
-                .and_then(|class| class.slots.get(slot.0 as usize))
+                .and_then(|class| class.effective_slots.get(slot.0 as usize))
                 .map_or_else(
                     || format!("accessor#{}.{}", class.0, slot.0),
                     |slot| format!("accessor `{}`", slot.accessor.name),
@@ -2734,6 +2985,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn finalizes_inherited_slots_before_direct_slots() {
+        let module = lower_source(
+            "define class <shape> (<object>)\n  slot x :: <integer>, required-init-keyword: x:;\nend;\n\
+             define class <point> (<shape>)\n  slot y :: <integer>, required-init-keyword: y:;\nend;\n\
+             define function main()\n  make(<point>, x: 2, y: 3).x\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes[1].superclass, Some(ClassId(0)));
+        assert!(module.classes[1].finalized);
+        assert_eq!(module.classes[1].slots.len(), 1);
+        assert_eq!(module.classes[1].effective_slots.len(), 2);
+        assert_eq!(module.classes[1].effective_slots[0].name, "x");
+        assert_eq!(
+            module.classes[1].effective_slots[0].source_class,
+            ClassId(0)
+        );
+        assert_eq!(module.classes[1].effective_slots[0].source_slot, SlotId(0));
+        assert_eq!(module.classes[1].effective_slots[1].name, "y");
+        assert_eq!(
+            module.classes[1].effective_slots[1].source_class,
+            ClassId(1)
+        );
+
+        let Expr::AccessorCall { class, slot, .. } = &module.functions[0].body.result else {
+            panic!("expected inherited slot read");
+        };
+        assert_eq!(*class, ClassId(1));
+        assert_eq!(*slot, SlotId(0));
+    }
+
+    #[test]
+    fn reports_bad_superclasses_and_effective_slot_conflicts() {
+        let unknown = lower_source(
+            "define class <child> (<missing>)\nend;\n\
+             define function main()\n  0\nend;",
+        );
+        assert!(unknown.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "unresolved superclass `<missing>` for class `<child>`"
+        }));
+
+        let primitive = lower_source(
+            "define class <bad> (<boolean>)\nend;\n\
+             define function main()\n  0\nend;",
+        );
+        assert!(primitive.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "class `<bad>` cannot inherit from primitive `<boolean>`"
+        }));
+
+        let duplicate = lower_source(
+            "define class <shape> (<object>)\n  slot radius :: <integer>, init-value: 1;\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
+             define function main()\n  0\nend;",
+        );
+        assert!(duplicate.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "class `<circle>` has duplicate effective slot `radius`"
+        }));
+        assert!(duplicate.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "class `<circle>` has duplicate effective accessor `radius`"
+        }));
     }
 
     #[test]

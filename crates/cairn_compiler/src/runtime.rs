@@ -93,7 +93,7 @@ impl RuntimeLayout {
                         sem::ClassOrigin::HostBacked { .. } => HostObjectKind::HostBacked,
                     },
                     slots: class
-                        .slots
+                        .effective_slots
                         .iter()
                         .map(|slot| RuntimeSlot {
                             name: slot.name.clone(),

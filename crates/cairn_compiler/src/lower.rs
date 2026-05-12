@@ -904,8 +904,8 @@ impl<'module> BodyLowering<'module> {
                     .classes
                     .get(class_id.0 as usize)
                     .ok_or_else(|| invalid_semantic("class id is out of range"))?;
-                let mut field_regs = Vec::with_capacity(class_info.slots.len());
-                for slot in &class_info.slots {
+                let mut field_regs = Vec::with_capacity(class_info.effective_slots.len());
+                for slot in &class_info.effective_slots {
                     let Some(field) = fields.iter().find(|field| field.slot == slot.id) else {
                         return Err(invalid_semantic("missing object field"));
                     };

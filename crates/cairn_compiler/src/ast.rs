@@ -78,6 +78,14 @@ pub struct Class {
     pub definition: DefinitionId,
     /// Class name, including Dylan-style angle brackets.
     pub name: String,
+    /// Explicit superclass name, including Dylan-style angle brackets.
+    ///
+    /// `None` means the source omitted a superclass list; semantic lowering
+    /// normalizes that to the `<object>` root.
+    pub superclass: Option<String>,
+    /// Source span for the explicit superclass name, or the class name span
+    /// when no superclass was written.
+    pub superclass_span: Span,
     /// Slot declarations in source order.
     pub slots: Vec<Slot>,
     /// Source span.
@@ -543,9 +551,13 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_class(&mut self, node: &CstNode) -> Class {
-        let name = self
-            .first_token_text(node, TokenKind::TypeName)
-            .map_or_else(String::new, |(_, text)| text.to_string());
+        let type_names = self.token_texts(node, TokenKind::TypeName);
+        let name_span = type_names.first().map_or(node.span, |(span, _)| *span);
+        let name = type_names
+            .first()
+            .map_or_else(String::new, |(_, text)| (*text).to_string());
+        let superclass = type_names.get(1).map(|(_, text)| (*text).to_string());
+        let superclass_span = type_names.get(1).map_or(name_span, |(span, _)| *span);
         let mut slots = Vec::new();
         for slot in node.child_nodes(CstKind::SlotDecl) {
             slots.push(self.lower_slot(&name, slot));
@@ -554,6 +566,8 @@ impl<'tree> Lowering<'tree> {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Class, &name, ""),
             name,
+            superclass,
+            superclass_span,
             slots,
             span: node.span,
         }
@@ -1468,6 +1482,19 @@ impl<'tree> Lowering<'tree> {
         })
     }
 
+    fn token_texts(&self, node: &CstNode, kind: TokenKind) -> Vec<(Span, &'tree str)> {
+        node.children
+            .iter()
+            .filter_map(|child| match child {
+                CstElement::Token(index) if self.tree.tokens[*index].kind == kind => {
+                    let token = self.tree.tokens[*index];
+                    Some((token.span, token.text(&self.tree.source)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn has_token(&self, node: &CstNode, kind: TokenKind) -> bool {
         node.children.iter().any(|child| match child {
             CstElement::Token(index) => self.tree.tokens[*index].kind == kind,
@@ -1662,6 +1689,7 @@ mod tests {
         let module = lower(&tree);
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.classes[0].name, "<circle>");
+        assert_eq!(module.classes[0].superclass.as_deref(), Some("<object>"));
         assert_eq!(module.classes[0].slots[0].name, "radius");
         assert_eq!(
             module.classes[0].slots[0].type_name.as_deref(),
