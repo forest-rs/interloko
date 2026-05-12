@@ -1,0 +1,7 @@
+define function forty-two()
+  40 + 2
+end;
+
+define function main()
+  forty-two()
+end;

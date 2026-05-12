@@ -1,0 +1,12 @@
+[package]
+name = "cairn_compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Milestone-0 Cairn compiler frontend prototype."
+
+[dependencies]
+execution_tape = { path = "../../../execution/execution_tape" }
+
+[lints]
+workspace = true

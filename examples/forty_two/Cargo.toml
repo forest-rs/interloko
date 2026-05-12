@@ -1,0 +1,12 @@
+[package]
+name = "cairn_forty_two_example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+cairn_compiler = { path = "../../crates/cairn_compiler" }
+
+[lints]
+workspace = true
