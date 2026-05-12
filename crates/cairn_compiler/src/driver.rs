@@ -165,6 +165,17 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_mixed_typed_slots() {
+        let value = compile_and_run_main(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <box> (<object>)\n  slot item :: <circle>;\n  slot valid? :: <boolean>;\nend;\n\
+             define function main()\n  let b = make(<box>, item: make(<circle>, radius: 7), valid?: #t);\n  if b.valid? then b.item.radius else 0 end\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 7);
+    }
+
+    #[test]
     fn compiled_module_exposes_lowered_and_tape_dumps() {
         let compiled = compile(
             "define class <circle> (<object>)\n  slot radius;\nend;\n\

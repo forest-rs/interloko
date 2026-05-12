@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic contains unresolved slot type `<missing>`
+
+define class <bad> (<object>)
+  slot cause :: <missing>;
+end;
+
+define function main()
+  1
+end;

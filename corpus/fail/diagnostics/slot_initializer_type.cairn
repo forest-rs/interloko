@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic contains slot `valid?` expects <boolean> but initializer has <integer>
+// expect: dump sem contains valid? :: <boolean>
+
+define class <flag> (<object>)
+  slot valid? :: <boolean>;
+end;
+
+define function main()
+  make(<flag>, valid?: 1)
+end;

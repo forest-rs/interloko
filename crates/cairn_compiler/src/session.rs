@@ -982,7 +982,12 @@ fn dump_ast(module: &ast::Module) -> String {
             class.id, class.definition, class.name
         );
         for slot in &class.slots {
-            let _ = writeln!(out, "  slot {} {} {}", slot.id, slot.definition, slot.name);
+            let type_name = slot.type_name.as_deref().unwrap_or("<integer>");
+            let _ = writeln!(
+                out,
+                "  slot {} {} {} :: {}",
+                slot.id, slot.definition, slot.name, type_name
+            );
         }
     }
     for generic in &module.generics {
@@ -1146,8 +1151,11 @@ fn dump_sem(module: &sem::Module) -> String {
         for slot in &class.slots {
             let _ = writeln!(
                 out,
-                "  slot s{} {} {}",
-                slot.id.0, slot.definition, slot.name
+                "  slot s{} {} {} :: {}",
+                slot.id.0,
+                slot.definition,
+                slot.name,
+                sem_kind_name(module, slot.kind)
             );
         }
     }
@@ -1181,6 +1189,30 @@ fn dump_sem(module: &sem::Module) -> String {
         dump_sem_block(&mut out, &function.body, 2);
     }
     out
+}
+
+fn sem_kind_name(module: &sem::Module, kind: sem::ValueKind) -> String {
+    match kind {
+        sem::ValueKind::I64 => "<integer>".into(),
+        sem::ValueKind::Bool => "<boolean>".into(),
+        sem::ValueKind::Object(class) => module
+            .classes
+            .get(class.0 as usize)
+            .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
+        sem::ValueKind::Error => "<error>".into(),
+    }
+}
+
+fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
+    match kind {
+        sem::ValueKind::I64 => "integer".into(),
+        sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Object(class) => module.classes.get(class.0 as usize).map_or_else(
+            || format!("class#{}", class.0),
+            |class| format!("object#{}", class.definition.raw()),
+        ),
+        sem::ValueKind::Error => "error".into(),
+    }
 }
 
 fn dump_sem_locals(out: &mut String, locals: &[sem::Local], indent: usize) {
@@ -1250,9 +1282,14 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             receiver,
             class,
             slot,
+            result_kind,
             ..
         } => {
-            let _ = writeln!(out, "slot-read c{}.s{}", class.0, slot.0);
+            let _ = writeln!(
+                out,
+                "slot-read c{}.s{} result={result_kind:?}",
+                class.0, slot.0
+            );
             dump_sem_expr(out, receiver, indent + 2);
         }
         sem::Expr::Binary { op, lhs, rhs, .. } => {
@@ -1400,7 +1437,20 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Class,
                 name: class.name.clone(),
             },
-            fingerprint: format!("class:{}:{}", class.name, class.slots.len()),
+            fingerprint: format!(
+                "class:{}:{}",
+                class.name,
+                class
+                    .slots
+                    .iter()
+                    .map(|slot| format!(
+                        "{}={}",
+                        slot.name,
+                        sem_kind_fingerprint(module, slot.kind)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
         });
         for slot in &class.slots {
             definitions.push(DefinitionFingerprint {
@@ -1409,7 +1459,12 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     kind: DefinitionKind::Slot,
                     name: format!("{}.{}", class.name, slot.name),
                 },
-                fingerprint: format!("slot:{}:{}", class.name, slot.name),
+                fingerprint: format!(
+                    "slot:{}:{}:{}",
+                    class.name,
+                    slot.name,
+                    sem_kind_fingerprint(module, slot.kind)
+                ),
             });
         }
     }
@@ -1524,7 +1579,14 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "make({definition}:");
             for field in fields {
-                let _ = write!(out, "slot{}=", field.slot.0);
+                let kind = module
+                    .classes
+                    .get(class.0 as usize)
+                    .and_then(|class| class.slots.get(field.slot.0 as usize))
+                    .map_or(String::from("error"), |slot| {
+                        sem_kind_fingerprint(module, slot.kind)
+                    });
+                let _ = write!(out, "slot{}:{kind}=", field.slot.0);
                 fingerprint_sem_expr(module, &field.value, out);
                 out.push(',');
             }
@@ -1534,6 +1596,7 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             receiver,
             class,
             slot,
+            result_kind,
             ..
         } => {
             let class_definition = module
@@ -1545,7 +1608,8 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .get(class.0 as usize)
                 .and_then(|class| class.slots.get(slot.0 as usize))
                 .map_or(0, |slot| slot.definition.raw());
-            let _ = write!(out, "slot({class_definition}.{slot_definition}:");
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(out, "slot({class_definition}.{slot_definition}:{result}:");
             fingerprint_sem_expr(module, receiver, out);
             out.push(')');
         }
@@ -1657,6 +1721,17 @@ mod tests {
         );
         assert!(artifacts.dump_stage(DumpStage::Syntax).contains("Function"));
         assert!(artifacts.dump_stage(DumpStage::Ast).contains("function"));
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Ast)
+                .contains("radius :: <integer>")
+        );
+        assert!(artifacts.dump_stage(DumpStage::Sem).contains("slot s0"));
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains(":: <integer>")
+        );
         assert!(
             artifacts
                 .dump_stage(DumpStage::Sem)
@@ -1942,6 +2017,56 @@ mod tests {
         assert_eq!(
             cache_action(&update, QueryArtifact::TapeProgram),
             Some(CacheAction::Recomputed)
+        );
+    }
+
+    #[test]
+    fn incremental_slot_type_edit_recomputes_dependent_artifacts() {
+        let before = "define class <flag> (<object>)\n  slot value :: <boolean>;\nend;\n\
+                      define generic score(x);\n\
+                      define method score(f :: <flag>)\n  if f.value then 1 else 0 end\nend;\n\
+                      define function main()\n  score(make(<flag>, value: #t))\nend;";
+        let after = "define class <flag> (<object>)\n  slot value :: <integer>;\nend;\n\
+                     define generic score(x);\n\
+                     define method score(f :: <flag>)\n  f.value\nend;\n\
+                     define function main()\n  score(make(<flag>, value: 1))\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("flag.cairn", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let method = first.artifacts.sem.methods[0].definition;
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Slot
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(method)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(method)),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("value :: <integer>")
         );
     }
 

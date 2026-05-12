@@ -1,0 +1,20 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump ast contains valid? :: <boolean>
+// expect: dump sem contains item :: <circle>
+// expect: dump lowered contains <flag>.valid?: bool
+// expect: dump tape contains cairn.slot_get
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <flag> (<object>)
+  slot item :: <circle>;
+  slot valid? :: <boolean>;
+end;
+
+define function main()
+  let flag = make(<flag>, item: make(<circle>, radius: 7), valid?: #t);
+  if flag.valid? then flag.item.radius else 0 end
+end;

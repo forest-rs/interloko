@@ -5,7 +5,7 @@
 // expect: dump lowered contains make <negative-input>
 
 define class <negative-input> (<object>)
-  slot fallback;
+  slot fallback :: <integer>;
 end;
 
 define function checked-double(x)

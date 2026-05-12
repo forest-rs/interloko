@@ -215,7 +215,7 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
-    /// Runtime integer slot read.
+    /// Runtime slot read.
     ReadSlot {
         /// Destination register.
         dst: Register,
@@ -225,6 +225,8 @@ pub enum Instr {
         class: sem::ClassId,
         /// Slot to read.
         slot: sem::SlotId,
+        /// Slot value category.
+        kind: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -777,15 +779,18 @@ impl<'module> BodyLowering<'module> {
                 receiver,
                 class,
                 slot,
+                result_kind,
                 span,
             } => {
                 let receiver = self.lower_expr(receiver)?;
-                let result = self.alloc(ValueKind::I64);
+                let kind = value_kind(*result_kind)?;
+                let result = self.alloc(kind);
                 self.instructions.push(Instr::ReadSlot {
                     dst: result.reg,
                     receiver: receiver.reg,
                     class: *class,
                     slot: *slot,
+                    kind,
                     span: *span,
                 });
                 Ok(result)
@@ -1198,10 +1203,13 @@ impl Module {
                 receiver,
                 class,
                 slot,
+                kind,
                 span,
             } => {
                 write!(f, "  {dst} = slot.read {receiver}, ")?;
                 self.fmt_slot(f, *class, *slot)?;
+                write!(f, ": ")?;
+                self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
             Instr::ClassOf { dst, object, span } => {
@@ -1281,7 +1289,7 @@ impl Module {
             .get(class.0 as usize)
             .and_then(|class_info| class_info.slots.get(slot.0 as usize))
         {
-            write!(f, "{slot_info}")
+            write!(f, "{}", slot_info.name)
         } else {
             write!(f, "slot#{}", slot.0)
         }
@@ -1345,10 +1353,23 @@ mod tests {
         assert_eq!(module.main, Some(FunctionId(0)));
         let dump = module.dump();
         assert!(dump.contains("make <circle>(%r1)"));
-        assert!(dump.contains("slot.read %r1, <circle>.radius"));
+        assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
         assert!(dump.contains("fn l2 area#dispatch(%r1 object: object) -> i64"));
         assert!(dump.contains("class_of %r1"));
         assert!(dump.contains("br %r4, bb0, bb1"));
+    }
+
+    #[test]
+    fn lowers_typed_runtime_slot_reads() {
+        let module = lower_source(
+            "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
+             define function main()\n  if make(<flag>, valid?: #t).valid? then 1 else 0 end\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("make <flag>(%r"));
+        assert!(dump.contains("slot.read %r"));
+        assert!(dump.contains("<flag>.valid?: bool"));
     }
 
     #[test]

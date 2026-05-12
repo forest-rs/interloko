@@ -1,5 +1,73 @@
 # Plans
 
+## Build Richer Slot Type Model
+
+Ticket: `cai-kf0d`
+
+### Goal
+
+Make class slot declarations carry a small explicit value kind and thread that
+kind through object construction, slot reads, lowered IR, tape host signatures,
+runtime object storage, dumps, corpus, and incremental reporting.
+
+The intended surface shape is:
+
+```text
+define class <invalid-radius> (<object>)
+  slot fallback :: <integer>;
+  slot retry? :: <boolean>;
+  slot cause :: <some-class>;
+end;
+```
+
+This is a runtime-managed object model. It is not a general type system and it
+does not add tape-native structs.
+
+### Non-Goals
+
+- No tape-native structs or aggregate opcodes.
+- No sealed/value-class representation optimization.
+- No inheritance-aware slot overriding.
+- No parametric, union, intersection, nullable, or inferred types.
+- No cross-function conditions, async, effect handlers, or Cranelift.
+
+### Fence
+
+The compiler owns slot declaration parsing, slot kind resolution, initializer
+checking, and typed slot-read IR. The runtime owns storing and returning mixed
+slot values for runtime-managed Cairn objects. Neither side owns native aggregate
+layout in this slice.
+
+### Invariants
+
+- Untyped legacy `slot name;` declarations remain accepted and default to
+  `<integer>` during migration.
+- Explicit primitive slot types are limited to `<integer>` and `<boolean>`.
+- Explicit nominal slot types refer to already-declared or source-declared Cairn
+  classes by name.
+- `make(<class>, slot: value)` checks each initializer against the slot's
+  declared value kind.
+- Slot reads return the slot's declared value kind instead of a hard-coded
+  integer.
+- Tape emission continues to use host/runtime calls; only host signatures and
+  runtime value storage become mixed-kind.
+
+### Steps
+
+1. Extend syntax and AST for optional `:: <type>` on slot declarations.
+2. Add semantic slot kinds and resolve `<integer>`, `<boolean>`, and nominal
+   object slot types while collecting classes.
+3. Check object initializer kinds and make slot reads carry/read the declared
+   kind.
+4. Lower typed slot reads and update tape host signatures for per-class
+   construction and per-slot read return types.
+5. Store runtime object slots as `execution_tape::value::Value` so integers,
+   booleans, and object handles round-trip through host calls.
+6. Update AST/semantic/lowered/tape dumps, fingerprints, corpus fixtures, and
+   incremental slot-type edit tests.
+7. Update progress notes with the runtime-managed object ABI and deferred
+   native-aggregate design, then run the full gates.
+
 ## Bind Restart Condition Objects
 
 Ticket: `cai-240w`

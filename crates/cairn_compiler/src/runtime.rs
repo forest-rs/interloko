@@ -17,7 +17,7 @@ pub const CAIRN_OBJECT_TYPE: HostTypeId = HostTypeId(0x4341_4952_4e5f_4f42);
 pub const MAKE_OBJECT: &str = "cairn.make_object";
 /// Host-call symbol for reading an object's class id.
 pub const CLASS_OF: &str = "cairn.class_of";
-/// Host-call symbol for reading an integer slot.
+/// Host-call symbol for reading a typed runtime-managed slot.
 pub const SLOT_GET: &str = "cairn.slot_get";
 
 /// Returns the `execution_tape` value type for Cairn objects.
@@ -31,8 +31,17 @@ pub const fn object_type() -> ValueType {
 pub struct RuntimeClass {
     /// Class name for diagnostics and inspection.
     pub name: String,
-    /// Slot names in semantic slot order.
-    pub slots: Vec<String>,
+    /// Slots in semantic slot order.
+    pub slots: Vec<RuntimeSlot>,
+}
+
+/// Runtime slot layout needed by host object operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSlot {
+    /// Slot name for diagnostics and inspection.
+    pub name: String,
+    /// Slot value category.
+    pub kind: sem::ValueKind,
 }
 
 /// Runtime layout emitted alongside a tape program.
@@ -52,21 +61,28 @@ impl RuntimeLayout {
                 .iter()
                 .map(|class| RuntimeClass {
                     name: class.name.clone(),
-                    slots: class.slots.iter().map(|slot| slot.name.clone()).collect(),
+                    slots: class
+                        .slots
+                        .iter()
+                        .map(|slot| RuntimeSlot {
+                            name: slot.name.clone(),
+                            kind: slot.kind,
+                        })
+                        .collect(),
                 })
                 .collect(),
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RuntimeObject {
     class: sem::ClassId,
-    slots: Vec<i64>,
+    slots: Vec<Value>,
 }
 
 /// Host implementation for Cairn runtime object operations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CairnHost {
     layout: RuntimeLayout,
     objects: Vec<RuntimeObject>,
@@ -118,11 +134,8 @@ impl Host for CairnHost {
                     return Err(HostError::Failed);
                 }
                 let mut slots = Vec::with_capacity(class.slots.len());
-                for arg in &args[1..] {
-                    let ValueRef::I64(value) = arg else {
-                        return Err(HostError::Failed);
-                    };
-                    slots.push(*value);
+                for (arg, slot) in args[1..].iter().zip(&class.slots) {
+                    slots.push(self.value_for_slot(*arg, slot.kind)?);
                 }
                 let handle = ObjHandle(u64::try_from(self.objects.len() + 1).unwrap_or(u64::MAX));
                 self.objects.push(RuntimeObject {
@@ -152,9 +165,9 @@ impl Host for CairnHost {
                 let value = object
                     .slots
                     .get(slot_index)
-                    .copied()
+                    .cloned()
                     .ok_or(HostError::Failed)?;
-                rets[0] = Value::I64(value);
+                rets[0] = value;
                 Ok(0)
             }
             _ => Err(HostError::UnknownSymbol),
@@ -162,15 +175,39 @@ impl Host for CairnHost {
     }
 }
 
-/// Host signature for object construction for a class with `slot_count` integer slots.
+impl CairnHost {
+    fn value_for_slot(
+        &self,
+        value: ValueRef<'_>,
+        kind: sem::ValueKind,
+    ) -> Result<Value, HostError> {
+        match (kind, value) {
+            (sem::ValueKind::I64, ValueRef::I64(value)) => Ok(Value::I64(value)),
+            (sem::ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
+            (sem::ValueKind::Object(expected_class), ValueRef::Obj(obj)) => {
+                let object = self.object(obj)?;
+                if object.class == expected_class {
+                    Ok(Value::Obj(obj))
+                } else {
+                    Err(HostError::Failed)
+                }
+            }
+            _ => Err(HostError::Failed),
+        }
+    }
+}
+
+/// Host signature for object construction for a runtime class.
 #[must_use]
-pub fn make_object_signature(slot_count: usize) -> execution_tape::host::HostSig {
+pub fn make_object_signature(class: &RuntimeClass) -> Option<execution_tape::host::HostSig> {
     let mut args = vec![ValueType::U64];
-    args.resize(slot_count + 1, ValueType::I64);
-    execution_tape::host::HostSig {
+    for slot in &class.slots {
+        args.push(value_type(slot.kind)?);
+    }
+    Some(execution_tape::host::HostSig {
         args,
         rets: vec![object_type()],
-    }
+    })
 }
 
 /// Host signature for `class_of`.
@@ -184,9 +221,18 @@ pub fn class_of_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for `slot_get`.
 #[must_use]
-pub fn slot_get_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn slot_get_signature(kind: sem::ValueKind) -> Option<execution_tape::host::HostSig> {
+    Some(execution_tape::host::HostSig {
         args: vec![object_type(), ValueType::U64],
-        rets: vec![ValueType::I64],
+        rets: vec![value_type(kind)?],
+    })
+}
+
+fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
+    match kind {
+        sem::ValueKind::I64 => Some(ValueType::I64),
+        sem::ValueKind::Bool => Some(ValueType::Bool),
+        sem::ValueKind::Object(_) => Some(object_type()),
+        sem::ValueKind::Error => None,
     }
 }

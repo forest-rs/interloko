@@ -274,6 +274,63 @@
 - `ast::Restart` now records an optional condition binding name, and
   `sem::Restart` records the optional bound condition local.
 
+## Implemented: Richer Runtime Slot Type Model
+
+- Slot declarations may now include an explicit type:
+  - `slot radius :: <integer>;`
+  - `slot valid? :: <boolean>;`
+  - `slot cause :: <some-class>;`
+- Legacy untyped `slot name;` declarations remain accepted and semantically
+  default to `<integer>` for the current corpus and examples.
+- The implemented slot value categories are intentionally small:
+  - primitive signed integer;
+  - primitive boolean;
+  - nominal Cairn runtime object with an exact class id.
+- Object construction checks each keyword initializer against the declared slot
+  kind. Mismatches produce diagnostics such as `slot valid? expects <boolean>
+  but initializer has <integer>`.
+- Slot reads now return the declared slot kind in semantic IR. `e.fallback`
+  returns `<integer>` because the `fallback` slot says so, while `flag.valid?`
+  returns `<boolean>` and object-reference slots return the referenced nominal
+  object kind.
+- Lowered IR still uses runtime object construction and `slot.read`
+  instructions, but `slot.read` now records and dumps the returned value kind.
+- `execution_tape` emission still uses host calls, not native aggregate opcodes:
+  - `cairn.make_object` has per-class host signatures with mixed slot argument
+    types;
+  - `cairn.slot_get` has per-slot host signatures whose return type matches the
+    declared slot kind;
+  - `cairn.class_of` remains the runtime support used by generic dispatch.
+- The runtime object heap now stores slot payloads as `execution_tape::Value`
+  values, so integers, booleans, and Cairn object handles round-trip through the
+  host boundary.
+- AST, semantic, lowered, and tape dumps expose enough of the model to see
+  typed slots and typed slot reads in the workbench.
+- Corpus coverage now includes mixed typed slots, object-reference slots, typed
+  condition payloads, initializer type mismatches, and unresolved slot types.
+- Incremental tests cover slot type edits and verify dependent method/lowered/
+  tape artifacts recompute.
+
+### Runtime Object ABI Notes
+
+- Cairn objects are still runtime-managed host objects identified by
+  `CAIRN_OBJECT_TYPE`.
+- Object construction passes a class id followed by slot payload registers in
+  semantic slot order.
+- Slot reads pass an object handle and slot id to the host and receive a value
+  whose tape type is determined by the slot declaration.
+- This ABI is deliberately compatible with Rust/Cairn interop and dynamic
+  language features, but it is not a tape-native struct representation.
+
+### Deferred Native-Aggregate Design
+
+- Tape-native structs, sealed/value classes, aggregate layout selection, and
+  object representation optimization remain deferred.
+- There is still no inheritance-aware slot overriding, parametric slot types,
+  union/intersection types, nullable/object optionality, or full type inference.
+- Generic function declarations still do not carry explicit return types; this
+  slice only makes slot reads and object construction typed.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
@@ -283,9 +340,10 @@
 - Macros.
 - Cranelift.
 - Full module system.
-- General type checking beyond the current `I64` and nominal object value categories.
+- General type checking beyond the current primitive, nominal object, and slot
+  value categories.
 - Multi-argument/multi-method dispatch beyond one nominal object argument.
-- Runtime mutation and non-integer slots.
+- Runtime mutation.
 - Persistent caches or scheduling; the invalidation shell models dependencies only.
 - Watch mode, LSP, and persistent on-disk workbench caches.
 - Full multi-file module sessions beyond compiling named source files independently.

@@ -43,9 +43,11 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/generics/two_class_dispatch.cairn"));
     assert!(out.contains("pass/restarts/recover_invalid_radius.cairn"));
     assert!(out.contains("fail/control_flow/invalid_if_condition.cairn"));
+    assert!(out.contains("fail/diagnostics/slot_initializer_type.cairn"));
     assert!(out.contains("fail/diagnostics/unresolved_local.cairn"));
     assert!(out.contains("fail/restarts/signal_without_restart.cairn"));
-    assert!(out.contains("corpus: 28 passed, 0 failed, 28 total"));
+    assert!(out.contains("pass/objects/typed_slots.cairn"));
+    assert!(out.contains("corpus: 31 passed, 0 failed, 31 total"));
 }
 
 #[test]

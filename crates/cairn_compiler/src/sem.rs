@@ -106,6 +106,8 @@ pub struct Slot {
     pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
+    /// Declared slot value category.
+    pub kind: ValueKind,
     /// Source span.
     pub span: Span,
 }
@@ -335,6 +337,8 @@ pub enum Expr {
         class: ClassId,
         /// Slot being read.
         slot: SlotId,
+        /// Slot value category.
+        result_kind: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -567,6 +571,16 @@ impl Lowering {
                     ),
                 ));
             }
+            self.classes.push(Class {
+                id: ClassId(u32::try_from(index).unwrap_or(u32::MAX)),
+                definition: class.definition,
+                name: class.name.clone(),
+                slots: Vec::new(),
+                span: class.span,
+            });
+        }
+
+        for (class_index, class) in module.classes.iter().enumerate() {
             let slots = class
                 .slots
                 .iter()
@@ -575,16 +589,13 @@ impl Lowering {
                     id: SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX)),
                     definition: slot.definition,
                     name: slot.name.clone(),
+                    kind: self.resolve_slot_kind(slot.type_name.as_deref(), slot.type_span),
                     span: slot.span,
                 })
                 .collect();
-            self.classes.push(Class {
-                id: ClassId(u32::try_from(index).unwrap_or(u32::MAX)),
-                definition: class.definition,
-                name: class.name.clone(),
-                slots,
-                span: class.span,
-            });
+            if let Some(lowered_class) = self.classes.get_mut(class_index) {
+                lowered_class.slots = slots;
+            }
         }
     }
 
@@ -1093,9 +1104,22 @@ impl Lowering {
                 ));
                 continue;
             };
+            let value = self.lower_expr(ctx, &field.value);
+            let value_kind = self.expr_kind(ctx, &value);
+            if !self.kinds_match(slot.kind, value_kind) {
+                ctx.diagnostics.push(Diagnostic::error(
+                    field.span,
+                    format!(
+                        "slot `{}` expects {} but initializer has {}",
+                        slot.name,
+                        self.kind_name(slot.kind),
+                        self.kind_name(value_kind)
+                    ),
+                ));
+            }
             resolved.push(FieldInit {
                 slot: slot.id,
-                value: self.lower_expr(ctx, &field.value),
+                value,
                 span: field.span,
             });
         }
@@ -1145,16 +1169,17 @@ impl Lowering {
             receiver: Box::new(receiver),
             class: class_id,
             slot: slot.id,
+            result_kind: slot.kind,
             span,
         }
     }
 
     fn expr_kind(&self, ctx: &FunctionContext, expr: &Expr) -> ValueKind {
         match expr {
-            Expr::ConstI64 { .. }
-            | Expr::GenericCall { .. }
-            | Expr::SlotRead { .. }
-            | Expr::Binary { .. } => ValueKind::I64,
+            Expr::ConstI64 { .. } | Expr::GenericCall { .. } | Expr::Binary { .. } => {
+                ValueKind::I64
+            }
+            Expr::SlotRead { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. } | Expr::Compare { .. } => ValueKind::Bool,
             Expr::Local { local, .. } => ctx.local_kind(*local),
             Expr::Signal { result_kind, .. } => *result_kind,
@@ -1183,6 +1208,44 @@ impl Lowering {
 
     fn resolve_class(&self, name: &str) -> Option<&Class> {
         self.classes.iter().find(|class| class.name == name)
+    }
+
+    fn resolve_slot_kind(&mut self, type_name: Option<&str>, span: Span) -> ValueKind {
+        let Some(type_name) = type_name else {
+            return ValueKind::I64;
+        };
+        match type_name {
+            "<integer>" => ValueKind::I64,
+            "<boolean>" => ValueKind::Bool,
+            name => self
+                .resolve_class(name)
+                .map(|class| ValueKind::Object(class.id))
+                .unwrap_or_else(|| {
+                    self.diagnostics.push(Diagnostic::error(
+                        span,
+                        format!("unresolved slot type `{name}`"),
+                    ));
+                    ValueKind::Error
+                }),
+        }
+    }
+
+    fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
+        expected == actual
+            || matches!(expected, ValueKind::Error)
+            || matches!(actual, ValueKind::Error)
+    }
+
+    fn kind_name(&self, kind: ValueKind) -> String {
+        match kind {
+            ValueKind::I64 => "<integer>".into(),
+            ValueKind::Bool => "<boolean>".into(),
+            ValueKind::Object(class) => self
+                .classes
+                .get(class.0 as usize)
+                .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
+            ValueKind::Error => "<error>".into(),
+        }
     }
 
     fn resolve_function(&self, name: &str) -> Option<&FunctionSymbol> {
@@ -1253,6 +1316,7 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.classes[0].id, ClassId(0));
         assert_eq!(module.classes[0].slots[0].id, SlotId(0));
+        assert_eq!(module.classes[0].slots[0].kind, ValueKind::I64);
         assert_eq!(module.generics[0].id, GenericFunctionId(0));
         assert_eq!(module.methods[0].id, MethodId(0));
         assert_eq!(module.methods[0].generic, GenericFunctionId(0));
@@ -1279,6 +1343,50 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resolves_typed_slots_and_checks_initializers() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <box> (<object>)\n  slot item :: <circle>;\n  slot valid? :: <boolean>;\nend;\n\
+             define function main()\n  if make(<box>, item: make(<circle>, radius: 7), valid?: #t).valid? then make(<box>, item: make(<circle>, radius: 7), valid?: #t).item.radius else 0 end\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes[0].slots[0].kind, ValueKind::I64);
+        assert_eq!(
+            module.classes[1].slots[0].kind,
+            ValueKind::Object(ClassId(0))
+        );
+        assert_eq!(module.classes[1].slots[1].kind, ValueKind::Bool);
+        assert_eq!(module.functions[0].result_kind, ValueKind::I64);
+    }
+
+    #[test]
+    fn reports_slot_type_errors() {
+        let mismatch = lower_source(
+            "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
+             define function main()\n  make(<flag>, valid?: 1)\nend;",
+        );
+        assert!(
+            mismatch
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message
+                    == "slot `valid?` expects <boolean> but initializer has <integer>")
+        );
+
+        let unresolved = lower_source(
+            "define class <bad> (<object>)\n  slot cause :: <missing>;\nend;\n\
+             define function main()\n  1\nend;",
+        );
+        assert!(
+            unresolved
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "unresolved slot type `<missing>`")
+        );
     }
 
     #[test]

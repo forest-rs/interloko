@@ -7,11 +7,11 @@
 // expect: dump lowered contains jmp
 
 define class <circle> (<object>)
-  slot radius;
+  slot radius :: <integer>;
 end;
 
 define class <invalid-radius> (<object>)
-  slot fallback;
+  slot fallback :: <integer>;
 end;
 
 define generic area(x);

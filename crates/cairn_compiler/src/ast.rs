@@ -66,6 +66,14 @@ pub struct Slot {
     pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
+    /// Optional declared slot type name.
+    ///
+    /// Missing types are accepted for legacy fixtures and default to
+    /// `<integer>` during semantic lowering.
+    pub type_name: Option<String>,
+    /// Source span for the optional slot type, or the slot name span when the
+    /// declaration is untyped.
+    pub type_span: Span,
     /// Source span.
     pub span: Span,
 }
@@ -444,14 +452,19 @@ impl<'tree> Lowering<'tree> {
                 id: self.ast_id(node),
                 definition: self.definition(DefinitionKind::Slot, "", class_name),
                 name: String::new(),
+                type_name: None,
+                type_span: node.span,
                 span: node.span,
             };
         };
         let name = text.to_string();
+        let slot_type = self.first_token_text(node, TokenKind::TypeName);
         Slot {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Slot, &name, class_name),
             name,
+            type_name: slot_type.map(|(_, text)| text.to_string()),
+            type_span: slot_type.map_or(span, |(span, _)| span),
             span,
         }
     }
@@ -1157,15 +1170,24 @@ mod tests {
     #[test]
     fn lowers_classes_generics_methods_make_and_slot_reads() {
         let tree = syntax::parse(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\n  slot valid? :: <boolean>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
-             define function main()\n  area(make(<circle>, radius: 10))\nend;",
+             define function main()\n  area(make(<circle>, radius: 10, valid?: #t))\nend;",
         );
         let module = lower(&tree);
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.classes[0].name, "<circle>");
         assert_eq!(module.classes[0].slots[0].name, "radius");
+        assert_eq!(
+            module.classes[0].slots[0].type_name.as_deref(),
+            Some("<integer>")
+        );
+        assert_eq!(module.classes[0].slots[1].name, "valid?");
+        assert_eq!(
+            module.classes[0].slots[1].type_name.as_deref(),
+            Some("<boolean>")
+        );
         assert_eq!(module.generics[0].name, "area");
         assert_eq!(module.methods[0].name, "area");
         assert_eq!(module.methods[0].param.class_name, "<circle>");

@@ -612,6 +612,7 @@ fn is_ident_continue(bytes: &[u8], pos: usize) -> bool {
     let byte = bytes[pos];
     byte.is_ascii_alphanumeric()
         || byte == b'_'
+        || byte == b'?'
         || (byte == b'-' && bytes.get(pos + 1).is_some_and(|next| is_ident_start(*next)))
 }
 
@@ -733,6 +734,14 @@ impl<'source> Parser<'source> {
         let mut children = Vec::new();
         self.expect(TokenKind::Slot, &mut children, "expected `slot`");
         self.expect(TokenKind::Ident, &mut children, "expected slot name");
+        if self.at(TokenKind::DoubleColon) {
+            self.expect(
+                TokenKind::DoubleColon,
+                &mut children,
+                "expected `::` after slot name",
+            );
+            self.expect(TokenKind::TypeName, &mut children, "expected slot type");
+        }
         self.expect(
             TokenKind::Semicolon,
             &mut children,
@@ -1217,10 +1226,10 @@ mod tests {
     #[test]
     fn parse_class_generic_method_and_object_syntax() {
         let tree = parse(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\n  slot valid? :: <boolean>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
-             define function main()\n  area(make(<circle>, radius: 10))\nend;",
+             define function main()\n  area(make(<circle>, radius: 10, valid?: #t))\nend;",
         );
         assert_eq!(tree.diagnostics, Vec::new());
         assert_eq!(tree.root.child_nodes(CstKind::Class).count(), 1);
@@ -1235,6 +1244,11 @@ mod tests {
             tree.tokens
                 .iter()
                 .any(|token| token.kind == TokenKind::DoubleColon)
+        );
+        assert!(
+            tree.tokens
+                .iter()
+                .any(|token| token.text(&tree.source) == "valid?")
         );
         assert!(tree.tokens.iter().any(|token| token.kind == TokenKind::Dot));
     }

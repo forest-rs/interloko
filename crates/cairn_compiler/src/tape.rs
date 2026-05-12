@@ -60,7 +60,7 @@ pub enum TapeError {
 pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     let mut builder = ProgramBuilder::new();
     builder.set_program_name("cairn");
-    let host_sigs = HostSigs::new(&mut builder, &module.runtime);
+    let host_sigs = HostSigs::new(&mut builder, &module.runtime)?;
 
     let mut ids = TapeIds::default();
     let mut main = None;
@@ -140,28 +140,45 @@ struct TapeIds {
 struct HostSigs {
     make_object: Vec<HostSigId>,
     class_of: HostSigId,
-    slot_get: HostSigId,
+    slot_get: Vec<Vec<HostSigId>>,
 }
 
 impl HostSigs {
-    fn new(builder: &mut ProgramBuilder, runtime: &RuntimeLayout) -> Self {
+    fn new(builder: &mut ProgramBuilder, runtime: &RuntimeLayout) -> Result<Self, TapeError> {
         let make_object = runtime
             .classes
             .iter()
             .map(|class| {
-                builder.host_sig_for(
+                Ok(builder.host_sig_for(
                     runtime::MAKE_OBJECT,
-                    runtime::make_object_signature(class.slots.len()),
-                )
+                    runtime::make_object_signature(class)
+                        .ok_or_else(|| invalid_lowered("runtime class has invalid slot kind"))?,
+                ))
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
+        let slot_get = runtime
+            .classes
+            .iter()
+            .map(|class| {
+                class
+                    .slots
+                    .iter()
+                    .map(|slot| {
+                        Ok(builder.host_sig_for(
+                            runtime::SLOT_GET,
+                            runtime::slot_get_signature(slot.kind)
+                                .ok_or_else(|| invalid_lowered("runtime slot has invalid kind"))?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, TapeError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let class_of = builder.host_sig_for(runtime::CLASS_OF, runtime::class_of_signature());
-        let slot_get = builder.host_sig_for(runtime::SLOT_GET, runtime::slot_get_signature());
-        Self {
+        Ok(Self {
             make_object,
             class_of,
             slot_get,
-        }
+        })
     }
 }
 
@@ -298,20 +315,23 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::ReadSlot {
                 dst,
                 receiver,
+                class,
                 slot,
                 span,
                 ..
             } => {
+                let sig = self
+                    .host_sigs
+                    .slot_get
+                    .get(class.0 as usize)
+                    .and_then(|slots| slots.get(slot.0 as usize))
+                    .copied()
+                    .ok_or_else(|| invalid_lowered("slot_get signature is out of range"))?;
                 let slot_reg = self.alloc_temp();
                 self.set_span(*span);
                 self.asm.const_u64(slot_reg, u64::from(slot.0));
-                self.asm.host_call(
-                    0,
-                    self.host_sigs.slot_get,
-                    0,
-                    &[receiver.0, slot_reg],
-                    &[dst.0],
-                );
+                self.asm
+                    .host_call(0, sig, 0, &[receiver.0, slot_reg], &[dst.0]);
             }
             lower::Instr::ClassOf { dst, object, span } => {
                 self.set_span(*span);
@@ -520,7 +540,8 @@ mod tests {
         let tape = emit(&module).expect("tape emission should succeed");
         assert_eq!(tape.program.program().functions.len(), 3);
         assert_eq!(tape.main, Some(FuncId(0)));
-        assert_eq!(tape.runtime.classes[0].slots, ["radius"]);
+        assert_eq!(tape.runtime.classes[0].slots[0].name, "radius");
+        assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::I64);
     }
 
     #[test]
@@ -542,5 +563,18 @@ mod tests {
 
         assert_eq!(tape.program.program().functions.len(), 1);
         assert_eq!(tape.main, Some(FuncId(0)));
+    }
+
+    #[test]
+    fn emits_verified_tape_for_typed_runtime_slots() {
+        let module = lower_source(
+            "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
+             define function main()\n  if make(<flag>, valid?: #t).valid? then 1 else 0 end\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+
+        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.runtime.classes[0].slots[0].name, "valid?");
+        assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::Bool);
     }
 }
