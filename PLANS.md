@@ -1,5 +1,66 @@
 # Plans
 
+## Build Host-Backed Metaobject Foundation
+
+### Goal
+
+Introduce a narrow host-backed metaobject path so Rust-side adapters can
+declare nominal Cairn classes and expose read-only slots without making Rust
+objects Cairn-native heap objects. Host-backed classes should participate in
+the same semantic class IDs, slot reads, `instance?`, `as`, and generic method
+dispatch as native Cairn classes.
+
+### Fence
+
+Semantic IR owns nominal metaobject facts, class/slot origin, type categories,
+and dispatch meaning. Runtime owns object handles, host-backed object identity,
+and host-call execution. Adapter code owns Rust value access. Facet is deferred:
+it may later populate the same registry, but it does not replace Cairn's MOP.
+
+### Invariants
+
+- The user-facing concept is host-backed, not foreign.
+- Native and host-backed classes share the same `ClassId` space.
+- Host-backed classes cannot be constructed by Cairn `make` in this slice.
+- Host-backed object handles are supplied by the embedding Rust host.
+- Slot access is read-only and adapter-mediated.
+- Lowered IR keeps class tests, casts, and slot reads as explicit model
+  operations before tape emission.
+- Tape emission uses ordinary host calls; no new tape opcodes.
+- No `facet` dependency, automatic reflection, mutation, generic Rust types, or
+  ownership/lifetime generality.
+
+### Steps
+
+1. Add semantic host-backed metaobject declarations:
+   - `HostMetaRegistry`, `HostClass`, `HostSlot`, and IDs;
+   - class/slot origin metadata on semantic classes and slots;
+   - `sem::lower_with_host_registry` and compiler/session entry points that
+     accept a registry.
+2. Teach lowering and runtime layout about class/slot origin:
+   - host-backed classes appear in dumps and runtime layout;
+   - `make` rejects host-backed classes before lowering;
+   - native class behavior stays unchanged.
+3. Add runtime host object support:
+   - public adapter trait for read-only Rust-side slot access;
+   - public API to install a host-backed object handle in `CairnHost`;
+   - `class_of`, `instance?`, `as`, slot reads, and `<object>` boxing work for
+     host-backed handles.
+4. Add execution/testing helpers:
+   - compile with registry;
+   - run named functions with explicit argument values in tests.
+5. Add tests, corpus/fixtures where possible, dumps, fingerprints, and progress
+   notes explaining what is real and how `facet` can later feed the registry.
+
+### Risks
+
+- If host-backed values become constructible too early, runtime ownership and
+  lifetime policy will leak into the compiler.
+- If registry metadata bypasses semantic class IDs, native and host-backed
+  dispatch will split into two systems.
+- Trait-object adapters must stay runtime-only so the core compiler remains
+  no-std-friendly and dependency-light.
+
 ## Make Typed Object/Function Model Compose
 
 ### Goal

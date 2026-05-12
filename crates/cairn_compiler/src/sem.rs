@@ -52,6 +52,27 @@ pub struct LocalId(
     pub u32,
 );
 
+/// Stable class identifier within a [`HostMetaRegistry`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct HostClassId(
+    /// Zero-based host-backed class index.
+    pub u32,
+);
+
+/// Stable slot identifier within a host-backed class declaration.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct HostSlotId(
+    /// Zero-based host-backed slot index within the host class.
+    pub u32,
+);
+
+/// Stable host-backed function identifier within a [`HostMetaRegistry`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct HostFunctionId(
+    /// Zero-based host-backed function index.
+    pub u32,
+);
+
 /// Statically known callable value.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum KnownCallable {
@@ -89,6 +110,152 @@ pub enum ValueKind {
     Error,
 }
 
+/// Registry of host-backed metaobjects supplied by the embedding Rust host.
+///
+/// This registry is intentionally structural and explicit. It does not inspect
+/// Rust values. Later `facet` integration can populate this same registry.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HostMetaRegistry {
+    classes: Vec<HostClass>,
+    functions: Vec<HostFunction>,
+}
+
+impl HostMetaRegistry {
+    /// Creates an empty host-backed metaobject registry.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            classes: Vec::new(),
+            functions: Vec::new(),
+        }
+    }
+
+    /// Adds a host-backed class declaration and returns its registry-local id.
+    pub fn add_class(&mut self, class: HostClass) -> HostClassId {
+        let id = HostClassId(u32::try_from(self.classes.len()).unwrap_or(u32::MAX));
+        self.classes.push(class);
+        id
+    }
+
+    /// Adds a host-backed function declaration and returns its registry-local id.
+    pub fn add_function(&mut self, function: HostFunction) -> HostFunctionId {
+        let id = HostFunctionId(u32::try_from(self.functions.len()).unwrap_or(u32::MAX));
+        self.functions.push(function);
+        id
+    }
+
+    /// Returns registered host-backed classes in registry order.
+    #[must_use]
+    pub fn classes(&self) -> &[HostClass] {
+        &self.classes
+    }
+
+    /// Returns registered host-backed functions in registry order.
+    #[must_use]
+    pub fn functions(&self) -> &[HostFunction] {
+        &self.functions
+    }
+}
+
+/// Host-backed class declaration supplied by a Rust adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostClass {
+    /// Cairn-visible class name, such as `<rust-circle>`.
+    pub name: String,
+    /// Host-backed slots in source-visible slot order.
+    pub slots: Vec<HostSlot>,
+}
+
+impl HostClass {
+    /// Creates an empty host-backed class declaration.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            slots: Vec::new(),
+        }
+    }
+
+    /// Adds a read-only host-backed slot declaration.
+    #[must_use]
+    pub fn with_slot(mut self, slot: HostSlot) -> Self {
+        self.slots.push(slot);
+        self
+    }
+}
+
+/// Host-backed read-only slot declaration supplied by a Rust adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostSlot {
+    /// Cairn-visible slot/accessor name.
+    pub name: String,
+    /// Declared Cairn value category.
+    pub kind: ValueKind,
+    /// Human-readable type name used by dumps.
+    pub type_name: String,
+}
+
+impl HostSlot {
+    /// Creates a host-backed read-only slot declaration.
+    #[must_use]
+    pub fn new(name: &str, kind: ValueKind, type_name: &str) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            type_name: type_name.into(),
+        }
+    }
+}
+
+/// Host-backed function declaration supplied by a Rust adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFunction {
+    /// Cairn-visible function name.
+    pub name: String,
+    /// Declared parameter value categories.
+    pub param_kinds: Vec<ValueKind>,
+    /// Declared result value category.
+    pub result_kind: ValueKind,
+}
+
+impl HostFunction {
+    /// Creates a host-backed function declaration.
+    #[must_use]
+    pub fn new(name: &str, param_kinds: Vec<ValueKind>, result_kind: ValueKind) -> Self {
+        Self {
+            name: name.into(),
+            param_kinds,
+            result_kind,
+        }
+    }
+}
+
+/// Origin of a semantic class metaobject.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClassOrigin {
+    /// Class defined in Cairn source.
+    Native,
+    /// Class declared by the host-backed metaobject registry.
+    HostBacked {
+        /// Registry-local host-backed class id.
+        host_class: HostClassId,
+    },
+}
+
+/// Origin of a semantic slot metaobject.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SlotOrigin {
+    /// Slot defined in Cairn source.
+    Native,
+    /// Slot declared by the host-backed metaobject registry.
+    HostBacked {
+        /// Registry-local host-backed class id.
+        host_class: HostClassId,
+        /// Registry-local host-backed slot id.
+        host_slot: HostSlotId,
+    },
+}
+
 /// Optional generic function parameter contract.
 ///
 /// `None` preserves the legacy unannotated generic behavior; `Some(kind)` is an
@@ -121,6 +288,8 @@ pub struct Class {
     pub definition: DefinitionId,
     /// Source name.
     pub name: String,
+    /// Native or host-backed class origin.
+    pub origin: ClassOrigin,
     /// Declared slots.
     pub slots: Vec<Slot>,
     /// Source span.
@@ -141,6 +310,8 @@ pub struct Slot {
     pub type_name: String,
     /// Declared slot value category.
     pub kind: ValueKind,
+    /// Native or host-backed slot origin.
+    pub origin: SlotOrigin,
     /// Getter accessor defined by this slot.
     pub accessor: Accessor,
     /// External construction keyword without the trailing colon.
@@ -562,7 +733,13 @@ pub struct Restart {
 /// Lowers an AST module to semantic IR.
 #[must_use]
 pub fn lower(module: &ast::Module) -> Module {
-    let mut lowering = Lowering::new(module);
+    lower_with_host_registry(module, &HostMetaRegistry::new())
+}
+
+/// Lowers an AST module with host-backed metaobject declarations.
+#[must_use]
+pub fn lower_with_host_registry(module: &ast::Module, registry: &HostMetaRegistry) -> Module {
+    let mut lowering = Lowering::new(module, registry);
     lowering.lower_module(module)
 }
 
@@ -701,6 +878,7 @@ impl FunctionContext {
 
 struct Lowering {
     source_file: SourceFileId,
+    host_registry: HostMetaRegistry,
     classes: Vec<Class>,
     generics: Vec<GenericFunction>,
     methods: Vec<Method>,
@@ -710,9 +888,10 @@ struct Lowering {
 }
 
 impl Lowering {
-    fn new(module: &ast::Module) -> Self {
+    fn new(module: &ast::Module, registry: &HostMetaRegistry) -> Self {
         let mut lowering = Self {
             source_file: module.source_file,
+            host_registry: registry.clone(),
             classes: Vec::new(),
             generics: Vec::new(),
             methods: Vec::new(),
@@ -741,6 +920,7 @@ impl Lowering {
                 id: ClassId(u32::try_from(index).unwrap_or(u32::MAX)),
                 definition: class.definition,
                 name: class.name.clone(),
+                origin: ClassOrigin::Native,
                 slots: Vec::new(),
                 span: class.span,
             });
@@ -760,6 +940,7 @@ impl Lowering {
                         name: slot.name.clone(),
                         type_name: slot.type_name.clone().unwrap_or_else(|| "<object>".into()),
                         kind,
+                        origin: SlotOrigin::Native,
                         accessor: Accessor {
                             definition: slot.definition,
                             name: slot.name.clone(),
@@ -780,6 +961,77 @@ impl Lowering {
             if let Some(lowered_class) = self.classes.get_mut(class_index) {
                 lowered_class.slots = slots;
             }
+        }
+
+        let host_classes = self.host_registry.classes.clone();
+        for (host_index, host_class) in host_classes.iter().enumerate() {
+            if let Some(previous) = self
+                .classes
+                .iter()
+                .find(|item| item.name == host_class.name)
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    Span::default(),
+                    format!(
+                        "host-backed class `{}` conflicts with class defined at bytes {}..{}",
+                        host_class.name, previous.span.start, previous.span.end
+                    ),
+                ));
+            }
+            let class_id = ClassId(u32::try_from(self.classes.len()).unwrap_or(u32::MAX));
+            let host_class_id = HostClassId(u32::try_from(host_index).unwrap_or(u32::MAX));
+            let class_definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Class,
+                &host_class.name,
+                "host-backed",
+            );
+            let slots = host_class
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(slot_index, host_slot)| {
+                    let id = SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX));
+                    let host_slot_id = HostSlotId(u32::try_from(slot_index).unwrap_or(u32::MAX));
+                    let definition = DefinitionId::new(
+                        self.source_file,
+                        DefinitionKind::Slot,
+                        &host_slot.name,
+                        &format!("host-backed:{}", host_class.name),
+                    );
+                    Slot {
+                        id,
+                        definition,
+                        name: host_slot.name.clone(),
+                        type_name: host_slot.type_name.clone(),
+                        kind: host_slot.kind,
+                        origin: SlotOrigin::HostBacked {
+                            host_class: host_class_id,
+                            host_slot: host_slot_id,
+                        },
+                        accessor: Accessor {
+                            definition,
+                            name: host_slot.name.clone(),
+                            class: class_id,
+                            slot: id,
+                            result_kind: host_slot.kind,
+                        },
+                        init_keyword: host_slot.name.clone(),
+                        required_init_keyword: false,
+                        span: Span::default(),
+                    }
+                })
+                .collect();
+            self.classes.push(Class {
+                id: class_id,
+                definition: class_definition,
+                name: host_class.name.clone(),
+                origin: ClassOrigin::HostBacked {
+                    host_class: host_class_id,
+                },
+                slots,
+                span: Span::default(),
+            });
         }
     }
 
@@ -1808,6 +2060,16 @@ impl Lowering {
         let Some(class) = self.classes.get(class_id.0 as usize) else {
             return Expr::Error { span };
         };
+        if matches!(class.origin, ClassOrigin::HostBacked { .. }) {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                format!(
+                    "host-backed class `{}` cannot be constructed with make",
+                    class.name
+                ),
+            ));
+            return Expr::Error { span };
+        }
 
         let mut resolved = Vec::new();
         for field in fields {
@@ -2186,6 +2448,22 @@ mod tests {
         lower(&ast)
     }
 
+    fn lower_source_with_host_registry(source: &str, registry: &HostMetaRegistry) -> Module {
+        let tree = syntax::parse(source);
+        let ast = ast::lower(&tree);
+        lower_with_host_registry(&ast, registry)
+    }
+
+    fn rust_circle_registry() -> HostMetaRegistry {
+        let mut registry = HostMetaRegistry::new();
+        registry.add_class(HostClass::new("<rust-circle>").with_slot(HostSlot::new(
+            "radius",
+            ValueKind::I64,
+            "<integer>",
+        )));
+        registry
+    }
+
     #[test]
     fn resolves_locals_and_direct_calls() {
         let module = lower_source(
@@ -2273,6 +2551,49 @@ mod tests {
         );
         assert!(accessor.diagnostics.iter().any(|diagnostic| {
             diagnostic.message == "apply does not support slot accessors yet"
+        }));
+    }
+
+    #[test]
+    fn resolves_host_backed_classes_and_methods() {
+        let registry = rust_circle_registry();
+        let module = lower_source_with_host_registry(
+            "define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <rust-circle>) => <integer>\n  c.radius * c.radius\nend;\n\
+             define function radius(c :: <rust-circle>) => <integer>\n  c.radius\nend;",
+            &registry,
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes.len(), 1);
+        assert_eq!(
+            module.classes[0].origin,
+            ClassOrigin::HostBacked {
+                host_class: HostClassId(0),
+            }
+        );
+        assert_eq!(
+            module.classes[0].slots[0].origin,
+            SlotOrigin::HostBacked {
+                host_class: HostClassId(0),
+                host_slot: HostSlotId(0),
+            }
+        );
+        assert_eq!(module.methods[0].specializer, ClassId(0));
+        assert!(matches!(module.methods[0].body.result, Expr::Binary { .. }));
+    }
+
+    #[test]
+    fn rejects_make_for_host_backed_classes() {
+        let registry = rust_circle_registry();
+        let module = lower_source_with_host_registry(
+            "define function main()\n  make(<rust-circle>, radius: 10)\nend;",
+            &registry,
+        );
+
+        assert!(module.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "host-backed class `<rust-circle>` cannot be constructed with make"
         }));
     }
 

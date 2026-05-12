@@ -10,6 +10,7 @@ use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::Diagnostic;
 use crate::runtime::CairnHost;
+use crate::sem::HostMetaRegistry;
 use crate::{ast, lower, sem, syntax, tape};
 
 /// End-to-end compiler or runtime error.
@@ -77,9 +78,17 @@ impl CompiledModule {
 
 /// Compiles source through syntax, AST, semantic IR, and tape emission.
 pub fn compile(source: &str) -> Result<CompiledModule, CompileError> {
+    compile_with_host_registry(source, &HostMetaRegistry::new())
+}
+
+/// Compiles source with host-backed metaobject declarations.
+pub fn compile_with_host_registry(
+    source: &str,
+    registry: &HostMetaRegistry,
+) -> Result<CompiledModule, CompileError> {
     let syntax = syntax::parse(source);
     let ast = ast::lower(&syntax);
-    let sem = sem::lower(&ast);
+    let sem = sem::lower_with_host_registry(&ast, registry);
     if !sem.diagnostics.is_empty() {
         return Err(CompileError::Diagnostics {
             diagnostics: sem.diagnostics.clone(),

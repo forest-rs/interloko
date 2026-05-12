@@ -45,8 +45,19 @@ pub const fn any_type() -> ValueType {
 pub struct RuntimeClass {
     /// Class name for diagnostics and inspection.
     pub name: String,
+    /// Runtime object kind for this class.
+    pub kind: HostObjectKind,
     /// Slots in semantic slot order.
     pub slots: Vec<RuntimeSlot>,
+}
+
+/// Runtime object storage kind for a nominal Cairn class.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HostObjectKind {
+    /// Object is allocated and stored by the Cairn runtime heap.
+    Native,
+    /// Object is supplied by a Rust host adapter.
+    HostBacked,
 }
 
 /// Runtime slot layout needed by host object operations.
@@ -56,6 +67,8 @@ pub struct RuntimeSlot {
     pub name: String,
     /// Slot value category.
     pub kind: sem::ValueKind,
+    /// Whether this slot is read through a Rust host adapter.
+    pub host_backed: bool,
 }
 
 /// Runtime layout emitted alongside a tape program.
@@ -75,12 +88,17 @@ impl RuntimeLayout {
                 .iter()
                 .map(|class| RuntimeClass {
                     name: class.name.clone(),
+                    kind: match class.origin {
+                        sem::ClassOrigin::Native => HostObjectKind::Native,
+                        sem::ClassOrigin::HostBacked { .. } => HostObjectKind::HostBacked,
+                    },
                     slots: class
                         .slots
                         .iter()
                         .map(|slot| RuntimeSlot {
                             name: slot.name.clone(),
                             kind: slot.kind,
+                            host_backed: matches!(slot.origin, sem::SlotOrigin::HostBacked { .. }),
                         })
                         .collect(),
                 })

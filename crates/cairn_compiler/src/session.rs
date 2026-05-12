@@ -315,6 +315,17 @@ impl CompilerSession {
         compile_file(&SourceFile::named(name, source), mode)
     }
 
+    /// Compiles a named source with host-backed metaobject declarations.
+    #[must_use]
+    pub fn compile_source_with_host_registry(
+        name: &str,
+        source: &str,
+        mode: RuntimeMode,
+        registry: &sem::HostMetaRegistry,
+    ) -> SessionArtifacts {
+        compile_file_with_host_registry(&SourceFile::named(name, source), mode, registry)
+    }
+
     /// Compiles source with an explicit source file id without storing it.
     #[must_use]
     pub fn compile_source_with_id(
@@ -324,6 +335,18 @@ impl CompilerSession {
         mode: RuntimeMode,
     ) -> SessionArtifacts {
         compile_file(&SourceFile::with_id(id, name, source), mode)
+    }
+
+    /// Compiles source with an explicit source file id and host-backed registry.
+    #[must_use]
+    pub fn compile_source_with_id_and_host_registry(
+        id: SourceFileId,
+        name: &str,
+        source: &str,
+        mode: RuntimeMode,
+        registry: &sem::HostMetaRegistry,
+    ) -> SessionArtifacts {
+        compile_file_with_host_registry(&SourceFile::with_id(id, name, source), mode, registry)
     }
 
     /// Diffs two source versions.
@@ -877,9 +900,17 @@ fn usize_to_u64(value: usize) -> u64 {
 }
 
 fn compile_file(file: &SourceFile, mode: RuntimeMode) -> SessionArtifacts {
+    compile_file_with_host_registry(file, mode, &sem::HostMetaRegistry::new())
+}
+
+fn compile_file_with_host_registry(
+    file: &SourceFile,
+    mode: RuntimeMode,
+    registry: &sem::HostMetaRegistry,
+) -> SessionArtifacts {
     let syntax = syntax::parse_file(file.id, &file.source);
     let ast = ast::lower(&syntax);
-    let sem = sem::lower(&ast);
+    let sem = sem::lower_with_host_registry(&ast, registry);
     let diagnostics = sem.diagnostics.clone();
     let invalidation = QueryInvalidation::for_module(&sem);
 
@@ -1224,17 +1255,21 @@ fn dump_sem(module: &sem::Module) -> String {
     for class in &module.classes {
         let _ = writeln!(
             out,
-            "class c{} {} {}",
-            class.id.0, class.definition, class.name
+            "class c{} {} {} origin={}",
+            class.id.0,
+            class.definition,
+            class.name,
+            sem_class_origin_label(class.origin)
         );
         for slot in &class.slots {
             let _ = writeln!(
                 out,
-                "  slot s{} {} {} :: {} accessor {} init-keyword: {}:{} runtime={}",
+                "  slot s{} {} {} :: {} origin={} accessor {} init-keyword: {}:{} runtime={}",
                 slot.id.0,
                 slot.definition,
                 slot.name,
                 slot.type_name,
+                sem_slot_origin_label(slot.origin),
                 slot.accessor.definition,
                 slot.init_keyword,
                 if slot.required_init_keyword {
@@ -1627,6 +1662,25 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
     }
 }
 
+fn sem_class_origin_label(origin: sem::ClassOrigin) -> String {
+    match origin {
+        sem::ClassOrigin::Native => "native".into(),
+        sem::ClassOrigin::HostBacked { host_class } => {
+            format!("host-backed(hc{})", host_class.0)
+        }
+    }
+}
+
+fn sem_slot_origin_label(origin: sem::SlotOrigin) -> String {
+    match origin {
+        sem::SlotOrigin::Native => "native".into(),
+        sem::SlotOrigin::HostBacked {
+            host_class,
+            host_slot,
+        } => format!("host-backed(hc{}.hs{})", host_class.0, host_slot.0),
+    }
+}
+
 fn diff_artifacts(before: &SessionArtifacts, after: &SessionArtifacts) -> SessionDiff {
     let before_defs = definitions(&before.sem);
     let after_defs = definitions(&after.sem);
@@ -1724,15 +1778,17 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 name: class.name.clone(),
             },
             fingerprint: format!(
-                "class:{}:{}",
+                "class:{}:{}:{}",
                 class.name,
+                sem_class_origin_label(class.origin),
                 class
                     .slots
                     .iter()
                     .map(|slot| format!(
-                        "{}={}:accessor={}:{}:{}",
+                        "{}={}:{}:accessor={}:{}:{}",
                         slot.name,
                         sem_kind_fingerprint(module, slot.kind),
+                        sem_slot_origin_label(slot.origin),
                         slot.accessor.definition.raw(),
                         slot.init_keyword,
                         slot.required_init_keyword
@@ -1749,10 +1805,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     name: format!("{}.{}", class.name, slot.name),
                 },
                 fingerprint: format!(
-                    "slot:{}:{}:{}:accessor={}:{}:{}",
+                    "slot:{}:{}:{}:{}:accessor={}:{}:{}",
                     class.name,
                     slot.name,
                     sem_kind_fingerprint(module, slot.kind),
+                    sem_slot_origin_label(slot.origin),
                     slot.accessor.definition.raw(),
                     slot.init_keyword,
                     slot.required_init_keyword
@@ -2146,6 +2203,32 @@ mod tests {
                 .contains("program=\"cairn\"")
         );
         assert!(artifacts.dump_artifact_graph().contains("dependencies:"));
+    }
+
+    #[test]
+    fn session_dumps_host_backed_metaobjects() {
+        let mut registry = sem::HostMetaRegistry::new();
+        registry.add_class(
+            sem::HostClass::new("<rust-circle>").with_slot(sem::HostSlot::new(
+                "radius",
+                sem::ValueKind::I64,
+                "<integer>",
+            )),
+        );
+        let artifacts = CompilerSession::compile_source_with_host_registry(
+            "host.cairn",
+            "define generic area(x :: <object>) => <integer>;\n\
+             define method area(c :: <rust-circle>) => <integer>\n  c.radius * c.radius\nend;",
+            RuntimeMode::CompileOnly,
+            &registry,
+        );
+
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let sem = artifacts.dump_stage(DumpStage::Sem);
+        assert!(sem.contains("class c0"));
+        assert!(sem.contains("origin=host-backed(hc0)"));
+        assert!(sem.contains("slot s0"));
+        assert!(sem.contains("origin=host-backed(hc0.hs0)"));
     }
 
     #[test]
