@@ -69,6 +69,25 @@ define function main()
 end;
 ```
 
+A slot typed as a parent class accepts subclass instances:
+
+```cairn
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 10;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <holder> (<object>)
+  slot item :: <shape>;
+end;
+
+define function main()
+  make(<holder>, item: make(<circle>)).item.size
+end;
+```
+
 ## Semantics
 
 - Slot type metadata is normalized during semantic lowering. Missing type
@@ -85,7 +104,8 @@ end;
   diagnostics.
 - Required keywords may be omitted when the slot has an `init-value:`.
 - Explicit construction values and `init-value:` expressions are type-checked
-  against the slot type.
+  against the slot type. For nominal object slots, that check accepts the
+  declared class or any subclass.
 - Slot allocation metadata is currently always `instance`.
 - Accessor identity remains the slot definition identity, so stable IDs survive
   harmless declaration trivia edits.
@@ -99,13 +119,17 @@ Use the workbench to inspect the semantic facts:
 cargo run -p cairn_lab -- dump corpus/pass/objects/constant_slot.cairn --stage mop
 cargo run -p cairn_lab -- dump corpus/pass/objects/constant_slot.cairn --stage eop
 cargo run -p cairn_lab -- dump corpus/pass/objects/inherited_parent_child_slots.cairn --stage mop
+cargo run -p cairn_lab -- dump tools/cairn_lab/fixtures/inherited_dispatch.cairn --stage mop
 cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/slot_defaults.cairn slot:c0.s0
+cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_point.cairn class:c1
 ```
 
 The slot records show the declared type, init keyword, required/default status,
 allocation, mutability, runtime representation, accessor relationship, and
 direct/inherited source. For inherited slots, `source-slot=class:cN.sM` points
-back to the direct slot that introduced the effective slot.
+back to the direct slot that introduced the effective slot. MOP runtime layout
+rows repeat the direct/inherited source so it is clear which effective slot
+storage came from which direct declaration.
 
 ## Deferred Design
 

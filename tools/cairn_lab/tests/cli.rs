@@ -100,7 +100,7 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(native_out.contains("runtime=native"));
     assert!(native_out.contains("accessor"));
     assert!(native_out.contains("g0 area"));
-    assert!(native_out.contains("c0 <circle> origin=native -> m0"));
+    assert!(native_out.contains("m0 specializer=c0 <circle> origin=native"));
 
     let host = fixture("host_backed_area.cairn");
     let host_out = run_lab(&["mop", host.to_str().expect("fixture path should be utf8")]);
@@ -109,8 +109,8 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(host_out.contains("runtime=host-backed"));
     assert!(host_out.contains("slot s0"));
     assert!(host_out.contains("storage=host-backed"));
-    assert!(host_out.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
-    assert!(host_out.contains("c1 <rust-square> origin=host-backed(hc1) -> m1"));
+    assert!(host_out.contains("m0 specializer=c0 <rust-circle> origin=host-backed(hc0)"));
+    assert!(host_out.contains("m1 specializer=c1 <rust-square> origin=host-backed(hc1)"));
 }
 
 #[test]
@@ -194,11 +194,15 @@ fn inspect_reports_inherited_effective_slots() {
     let mop = run_lab(&["dump", path, "--stage", "mop"]);
     assert!(mop.contains("<point>"));
     assert!(mop.contains("superclass=c0:<shape>"));
+    assert!(mop.contains("chain=c1:<point> -> c0:<shape> -> <object>"));
     assert!(mop.contains("effective-slots=2"));
     assert!(mop.contains("source=inherited c0.s0"));
+    assert!(mop.contains("c1 <point> kind=native superclass=c0:<shape>"));
+    assert!(mop.contains("s0 x kind=integer storage=native source=inherited source-slot=c0.s0"));
 
     let class = run_lab(&["inspect", path, "class:c1"]);
     assert!(class.contains("superclass=c0:<shape>"));
+    assert!(class.contains("chain=c1:<point> -> c0:<shape> -> <object>"));
     assert!(class.contains("finalized=true"));
     assert!(class.contains("direct-slots=1"));
     assert!(class.contains("effective-slots=2"));
@@ -207,6 +211,28 @@ fn inspect_reports_inherited_effective_slots() {
     assert!(inherited.contains("source=inherited"));
     assert!(inherited.contains("source-slot=class:c0.s0"));
     assert!(inherited.contains("init-keyword=x: required"));
+}
+
+#[test]
+fn mop_reports_dispatch_applicability_for_inheritance() {
+    let file = fixture("inherited_dispatch.cairn");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let mop = run_lab(&["mop", path]);
+    assert!(mop.contains("method m0"));
+    assert!(mop.contains("applicable=[c0:<shape>@0,c1:<circle>@1]"));
+    assert!(mop.contains("method m1"));
+    assert!(mop.contains("applicable=[c1:<circle>@0]"));
+    assert!(mop.contains("m1 specializer=c1 <circle> origin=native applies-to=[c1:<circle>@0]"));
+    assert!(mop.contains(
+        "m0 specializer=c0 <shape> origin=native applies-to=[c0:<shape>@0,c1:<circle>@1]"
+    ));
+
+    let generic = run_lab(&["inspect", path, "generic:g0"]);
+    assert!(generic.contains("dispatch=m1=>[c1:<circle>@0];m0=>[c0:<shape>@0,c1:<circle>@1]"));
+
+    let method = run_lab(&["inspect", path, "method:m0"]);
+    assert!(method.contains("applies-to=[c0:<shape>@0,c1:<circle>@1]"));
 }
 
 #[test]
@@ -357,5 +383,23 @@ fn diff_reports_preserved_and_focused_method_changes() {
     assert!(changed.contains("Modified"));
     assert!(changed.contains("Method"));
     assert!(changed.contains("method-lookup"));
+    assert!(changed.contains("tape-program"));
+}
+
+#[test]
+fn diff_reports_parent_slot_edit_affecting_child_artifacts() {
+    let before = fixture("inherited_point_parent_before.cairn");
+    let after = fixture("inherited_point_parent_after.cairn");
+
+    let changed = run_lab(&[
+        "diff",
+        before.to_str().expect("fixture path should be utf8"),
+        after.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    assert!(changed.contains("Modified"));
+    assert!(changed.contains("Slot <shape>.x"));
+    assert!(changed.contains("Class <point>"));
+    assert!(changed.contains("lowered-module"));
     assert!(changed.contains("tape-program"));
 }

@@ -1,5 +1,58 @@
 # Plans
 
+## Make Inheritance Semantically Real And Inspectable
+
+### Goal
+
+Make Cairn's existing single-inheritance class finalization affect semantic type
+checks, runtime predicates/casts, generic dispatch, and workbench inspection,
+without changing effective slot layout or adding inheritance-specific tape
+operations.
+
+### Fence
+
+Semantic lowering owns nominal subtype facts and static compatibility checks.
+Runtime layout and lowering consume those facts for existing predicates, casts,
+slot access, calls, and dispatch. This slice does not own multiple inheritance,
+method combination, sealed dispatch optimization, parametric types, host-backed
+inheritance, or new execution_tape opcodes.
+
+### Invariants
+
+- `ast::Class::slots` remains source syntax.
+- `sem::Class::direct_slots` remains resolved direct source facts.
+- `sem::Class::effective_slots` remains finalized layout facts.
+- Runtime layout still comes from effective slots.
+- Subtyping is nominal and follows one superclass chain.
+- Generic dispatch uses ordinary lowered control flow and calls.
+- Host-backed classes remain non-constructible and not inheritance parents.
+
+### Steps
+
+1. Add semantic same-or-subclass helpers and regression tests for parent/child
+   compatibility.
+2. Teach static checks for slots, direct calls, returns, generics, casts,
+   `instance?`, and restarts to use the helper where it is semantically valid.
+3. Teach runtime predicates/casts/slot checks and lowered generic dispatch to
+   use most-specific single-inheritance applicability.
+4. Add unit, driver, corpus, and incremental coverage for the new subtype
+   behavior and impossible sibling cases.
+5. Commit the semantic/runtime/lowering slice.
+6. Improve dumps for superclass chains, direct/effective/runtime slots, dispatch
+   applicability, and inheritance-related artifact propagation.
+7. Add workbench fixtures/tests and update docs/progress notes, then commit the
+   inspection slice.
+8. Run fmt, clippy, workspace tests, docs, corpus, and examples.
+
+### Risks
+
+- Static subtype acceptance must not accidentally allow arbitrary downcasts or
+  unrelated classes.
+- The dispatcher must pick the child method before a parent method without
+  implying method combination.
+- Dumps should expose useful propagation facts without creating a new CLI shape
+  unless the existing commands cannot carry the information.
+
 ## Build AMOP-Informed Class Finalization And Inherited Slots
 
 ### Goal

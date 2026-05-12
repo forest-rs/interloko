@@ -1,0 +1,11 @@
+define class <shape> (<object>)
+  slot x :: <integer>, init-value: 3;
+end;
+
+define class <point> (<shape>)
+  slot y :: <integer>, init-value: 2;
+end;
+
+define function main()
+  make(<point>).x
+end;

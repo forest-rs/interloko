@@ -17,6 +17,8 @@ claiming CLOS compatibility.
   is the original slot definition identity.
 - **Finalization** computes superclass facts, effective slots, and deterministic
   runtime layout from source-authored class facts.
+- **Nominal subtyping** follows the single superclass chain. A subclass instance
+  is acceptable where its parent class is expected.
 - **Runtime layout** is the executable storage view consumed by lowered IR and
   `execution_tape` host calls.
 
@@ -85,11 +87,36 @@ construction. Explicit keyword values override defaults.
 slot on the receiver class. The lowered IR and tape path still use ordinary
 runtime calls. No inheritance-specific tape opcode exists.
 
+## Nominal Subtyping And Dispatch
+
+Single inheritance is now a semantic subtype relation:
+
+- `instance?(make(<child>), <parent>)` is true;
+- `as(<parent>, make(<child>))` is accepted as an upcast;
+- `<parent>`-typed slots can hold child instances;
+- direct function parameters and returns accept child values where a parent is
+  expected;
+- generic parameter contracts accept subclass method specializers and subclass
+  call arguments;
+- restart handlers specialized on a parent condition class can receive subclass
+  condition instances.
+
+Generic dispatch is still single-argument nominal dispatch. The lowered
+dispatcher checks runtime class IDs and chooses the most-specific applicable
+method in the superclass chain. This is ordinary lowered control flow plus
+ordinary calls; execution_tape still does not know about generic dispatch or
+inheritance as special opcodes.
+
+Sibling classes remain unrelated. `instance?` and `as` between unrelated
+classes still produce impossible-test/cast diagnostics when the static classes
+are disjoint.
+
 ## Dumps And EOP
 
 MOP and semantic dumps show:
 
 - superclass;
+- full superclass chain;
 - finalization status;
 - direct slot count and effective slot count;
 - direct slots as source facts;
@@ -97,11 +124,24 @@ MOP and semantic dumps show:
 - direct vs inherited effective-slot source;
 - source class/source slot for inherited slots;
 - effective layout order.
+- runtime layout rows with superclass and slot source;
+- dispatch applicability for each method, including subclass classes that can
+  select a parent-specialized method.
 
 EOP inspection exposes class and slot records from those same facts. A
 `slot:c1.s0` record names the effective slot at layout position `s0` on class
 `c1`, while its inspection text points back to the source slot that introduced
-it.
+it. Generic and method records include the dispatch applicability summary used
+by the lowered dispatcher.
+
+Useful workbench commands:
+
+```sh
+cargo run -p cairn_lab -- dump tools/cairn_lab/fixtures/inherited_point.cairn --stage mop
+cargo run -p cairn_lab -- dump tools/cairn_lab/fixtures/inherited_dispatch.cairn --stage mop
+cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_dispatch.cairn generic:g0
+cargo run -p cairn_lab -- diff tools/cairn_lab/fixtures/inherited_point_parent_before.cairn tools/cairn_lab/fixtures/inherited_point_parent_after.cairn
+```
 
 ## Surface Syntax As Future Metaobject Construction
 
@@ -128,7 +168,7 @@ place to land.
 - multiple inheritance and class precedence lists;
 - Dylan inherited slot specifications;
 - initialization argument specifications and init methods;
-- method combination or inheritance-aware generic dispatch;
+- method combination;
 - slot setters/writers and mutation enforcement;
 - sealed slot optimization;
 - persistence/image storage;

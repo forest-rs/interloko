@@ -1664,9 +1664,10 @@ fn dump_sem(module: &sem::Module) -> String {
     let _ = writeln!(out, "sem {}", module.source_file);
     for class in &module.classes {
         let superclass = sem_superclass_label(module, class.superclass);
+        let superclass_chain = sem_superclass_chain_label(module, class.id);
         let _ = writeln!(
             out,
-            "class c{} {} {} origin={} superclass={superclass} finalized={} direct-slots={} effective-slots={}",
+            "class c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={}",
             class.id.0,
             class.definition,
             class.name,
@@ -1808,9 +1809,10 @@ fn dump_mop(module: &sem::Module) -> String {
         let runtime_kind =
             runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
         let superclass = sem_superclass_label(module, class.superclass);
+        let superclass_chain = sem_superclass_chain_label(module, class.id);
         let _ = writeln!(
             out,
-            "  c{} {} {} origin={} superclass={superclass} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
+            "  c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
             class.id.0,
             class.definition,
             class.name,
@@ -1937,13 +1939,14 @@ fn dump_mop(module: &sem::Module) -> String {
             );
             let _ = writeln!(
                 out,
-                "    method m{} {} specializer=c{} {} origin={} -> {}",
+                "    method m{} {} specializer=c{} {} origin={} -> {} applicable={}",
                 method.id.0,
                 method.definition,
                 method.specializer.0,
                 class_name,
                 class_origin,
-                sem_kind_label(module, method.result_kind)
+                sem_kind_label(module, method.result_kind),
+                sem_dispatch_applicability_label(module, method.specializer)
             );
         }
     }
@@ -1951,11 +1954,7 @@ fn dump_mop(module: &sem::Module) -> String {
     let _ = writeln!(out, "dispatch table:");
     for generic in &module.generics {
         let _ = writeln!(out, "  g{} {}", generic.id.0, generic.name);
-        for method in module
-            .methods
-            .iter()
-            .filter(|method| method.generic == generic.id)
-        {
+        for method in dispatch_methods(module, generic.id) {
             let class = module.classes.get(method.specializer.0 as usize);
             let class_name = class.map_or("<?>", |class| class.name.as_str());
             let class_origin = class.map_or_else(
@@ -1964,17 +1963,23 @@ fn dump_mop(module: &sem::Module) -> String {
             );
             let _ = writeln!(
                 out,
-                "    c{} {} origin={} -> m{}",
-                method.specializer.0, class_name, class_origin, method.id.0
+                "    m{} specializer=c{} {} origin={} applies-to={}",
+                method.id.0,
+                method.specializer.0,
+                class_name,
+                class_origin,
+                sem_dispatch_applicability_label(module, method.specializer)
             );
         }
     }
 
     let _ = writeln!(out, "runtime layout:");
     for (index, class) in runtime.classes.iter().enumerate() {
+        let sem_class = module.classes.get(index);
+        let superclass = sem_superclass_label(module, class.superclass);
         let _ = writeln!(
             out,
-            "  c{index} {} kind={}",
+            "  c{index} {} kind={} superclass={superclass}",
             class.name,
             runtime_object_kind_label(class.kind)
         );
@@ -1984,9 +1989,17 @@ fn dump_mop(module: &sem::Module) -> String {
             } else {
                 "native"
             };
+            let source = sem_class
+                .and_then(|sem_class| {
+                    sem_class
+                        .effective_slots
+                        .get(slot_index)
+                        .map(|effective| sem_effective_slot_source_label(sem_class, effective))
+                })
+                .unwrap_or_else(|| "source=missing".into());
             let _ = writeln!(
                 out,
-                "    s{slot_index} {} kind={} storage={} runtime={}",
+                "    s{slot_index} {} kind={} storage={} {source} runtime={}",
                 slot.name,
                 sem_kind_label(module, slot.kind),
                 storage,
@@ -2169,6 +2182,7 @@ fn project_environment_class(
     let runtime_kind =
         runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
     let superclass = sem_superclass_label(module, class.superclass);
+    let superclass_chain = sem_superclass_chain_label(module, class.id);
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("class:c{}", class.id.0),
         kind: EnvironmentKind::Class,
@@ -2185,7 +2199,7 @@ fn project_environment_class(
         ]),
         execution: None,
         inspection: format!(
-            "definition={} class-id=c{} superclass={superclass} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
+            "definition={} class-id=c{} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} runtime={runtime_kind}",
             class.definition,
             class.id.0,
             class.finalized,
@@ -2301,6 +2315,17 @@ fn project_environment_generic(
         .iter()
         .filter(|method| method.generic == generic.id)
         .count();
+    let dispatch = dispatch_methods(module, generic.id)
+        .iter()
+        .map(|method| {
+            format!(
+                "m{}=>{}",
+                method.id.0,
+                sem_dispatch_applicability_label(module, method.specializer)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("generic:g{}", generic.id.0),
         kind: EnvironmentKind::Generic,
@@ -2324,7 +2349,7 @@ fn project_environment_generic(
             generic.arity
         )),
         inspection: format!(
-            "definition={} generic-id=g{}",
+            "definition={} generic-id=g{} dispatch={dispatch}",
             generic.definition, generic.id.0
         ),
     }));
@@ -2345,6 +2370,7 @@ fn project_environment_method(
         || "missing".into(),
         |class| sem_class_origin_label(class.origin),
     );
+    let applicable = sem_dispatch_applicability_label(module, method.specializer);
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("method:m{}", method.id.0),
         kind: EnvironmentKind::Method,
@@ -2369,7 +2395,7 @@ fn project_environment_method(
             method.generic.0, method.specializer.0
         )),
         inspection: format!(
-            "definition={} method-id=m{} specializer-origin={class_origin}",
+            "definition={} method-id=m{} specializer-origin={class_origin} applies-to={applicable}",
             method.definition, method.id.0
         ),
     }));
@@ -2432,6 +2458,7 @@ fn project_environment_runtime_class(
 ) {
     use EnvironmentAffordance as Aff;
 
+    let superclass = sem_superclass_label(module, class.superclass);
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("runtime-class:c{index}"),
         kind: EnvironmentKind::RuntimeLayoutRow,
@@ -2442,7 +2469,7 @@ fn project_environment_runtime_class(
         affordances: Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::DumpTape]),
         execution: None,
         inspection: format!(
-            "class-id=c{index} storage-kind={} slots={}",
+            "class-id=c{index} storage-kind={} superclass={superclass} slots={}",
             runtime_object_kind_label(class.kind),
             class.slots.len()
         ),
@@ -2453,6 +2480,16 @@ fn project_environment_runtime_class(
         } else {
             "native"
         };
+        let source = module
+            .classes
+            .get(index)
+            .and_then(|sem_class| {
+                sem_class
+                    .effective_slots
+                    .get(slot_index)
+                    .map(|effective| sem_effective_slot_source_label(sem_class, effective))
+            })
+            .unwrap_or_else(|| "source=missing".into());
         sink.emit(environment_object(EnvironmentObjectParts {
             id: format!("runtime-slot:c{index}.s{slot_index}"),
             kind: EnvironmentKind::RuntimeLayoutRow,
@@ -2463,7 +2500,7 @@ fn project_environment_runtime_class(
             affordances: Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::DumpTape]),
             execution: None,
             inspection: format!(
-                "class-id=c{index} slot-id=s{slot_index} storage={} kind={} runtime={}",
+                "class-id=c{index} slot-id=s{slot_index} storage={} kind={} {source} runtime={}",
                 storage,
                 sem_kind_label(module, slot.kind),
                 sem_runtime_repr(slot.kind)
@@ -2862,6 +2899,58 @@ fn sem_superclass_label(module: &sem::Module, superclass: Option<sem::ClassId>) 
             )
         },
     )
+}
+
+fn sem_superclass_chain_label(module: &sem::Module, class: sem::ClassId) -> String {
+    let mut parts = Vec::new();
+    for class_id in module.superclass_chain(class) {
+        parts.push(module.classes.get(class_id.0 as usize).map_or_else(
+            || format!("c{}:<missing>", class_id.0),
+            |class| format!("c{}:{}", class.id.0, class.name),
+        ));
+    }
+    parts.push("<object>".into());
+    parts.join(" -> ")
+}
+
+fn sem_effective_slot_source_label(class: &sem::Class, slot: &sem::EffectiveSlot) -> String {
+    let source = if slot.source_class == class.id {
+        "direct"
+    } else {
+        "inherited"
+    };
+    format!(
+        "source={source} source-slot=c{}.s{}",
+        slot.source_class.0, slot.source_slot.0
+    )
+}
+
+fn sem_dispatch_applicability_label(module: &sem::Module, specializer: sem::ClassId) -> String {
+    let applicable = module
+        .classes
+        .iter()
+        .filter_map(|class| {
+            module
+                .inheritance_distance(class.id, specializer)
+                .map(|distance| format!("c{}:{}@{distance}", class.id.0, class.name))
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", applicable.join(","))
+}
+
+fn dispatch_methods(module: &sem::Module, generic: sem::GenericFunctionId) -> Vec<&sem::Method> {
+    let mut methods = module
+        .methods
+        .iter()
+        .filter(|method| method.generic == generic)
+        .collect::<Vec<_>>();
+    methods.sort_by(|left, right| {
+        module
+            .class_depth(right.specializer)
+            .cmp(&module.class_depth(left.specializer))
+            .then_with(|| left.id.0.cmp(&right.id.0))
+    });
+    methods
 }
 
 fn sem_slot_origin_label(origin: sem::SlotOrigin) -> String {
@@ -3596,7 +3685,7 @@ mod tests {
         assert!(mop.contains("<rust-circle> origin=host-backed(hc0)"));
         assert!(mop.contains("runtime=host-backed"));
         assert!(mop.contains("storage=host-backed"));
-        assert!(mop.contains("c0 <rust-circle> origin=host-backed(hc0) -> m0"));
+        assert!(mop.contains("m0 specializer=c0 <rust-circle> origin=host-backed(hc0)"));
         let eop = artifacts.dump_stage(DumpStage::Eop);
         assert!(eop.contains("object class:c0"));
         assert!(eop.contains("origin=host-backed storage=host-registry"));

@@ -4,7 +4,7 @@
 // expect: dump sem contains method m0
 // expect: dump mop contains <rust-circle> origin=host-backed(hc0)
 // expect: dump mop contains runtime=host-backed
-// expect: dump mop contains c0 <rust-circle> origin=host-backed(hc0) -> m0
+// expect: dump mop contains m0 specializer=c0 <rust-circle> origin=host-backed(hc0)
 // expect: dump eop contains object class:c0
 // expect: dump eop contains kind=class class=<class> origin=host-backed storage=host-registry
 // expect: dump eop contains affordances inspect,dump-mop,dump-eop,show-dispatch,add-method

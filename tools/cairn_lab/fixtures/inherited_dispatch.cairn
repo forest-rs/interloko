@@ -1,0 +1,21 @@
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 2;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 7;
+end;
+
+define generic score(x :: <shape>) => <integer>;
+
+define method score(s :: <shape>) => <integer>
+  s.size
+end;
+
+define method score(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function main()
+  score(make(<circle>))
+end;

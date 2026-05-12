@@ -527,9 +527,9 @@
 ### Deferred Generic Contract Design
 
 - Generic dispatch is still one-argument nominal dispatch. Multi-argument
-  dispatch, inheritance-aware subtype checks, primitive specializers, sealed
-  dispatch optimization, method combination, overload resolution, and full
-  generic function type objects remain deferred.
+  dispatch, primitive specializers, sealed dispatch optimization, method
+  combination, overload resolution, and full generic function type objects
+  remain deferred.
 - `<object>` generic parameters mean "known runtime object accepted by this
   dispatcher" in this slice, not "any boxed first-slice value". Boxed top values
   require explicit refinement/cast support before they can feed dispatch.
@@ -568,8 +568,9 @@
   across function calls, and generalized local type inference remain deferred.
 - `as` is a runtime checked cast from top or nominal object values. It is not a
   general unboxing mechanism for primitive values stored in `<object>`.
-- Runtime class tests are exact nominal checks. Inheritance-aware `instance?`
-  behavior is deferred until the class model has an explicit subtype relation.
+- Runtime class tests now follow the single nominal superclass chain.
+  Generalized refinement across function calls and compound control flow remains
+  deferred.
 
 ## Implemented: First-Class Known Callable Objects
 
@@ -898,15 +899,48 @@
   init methods, and full initialization protocol hooks remain deferred.
 - Multiple inheritance, class precedence lists, public metaclass protocols,
   user-defined metaclasses, class redefinition, instance obsolescence, method
-  combination, inheritance-aware generic dispatch, setters, sealed slot
-  optimization, persistence, host-backed construction, and generalized
-  mutability enforcement remain deferred.
+  combination, setters, sealed slot optimization, persistence, host-backed
+  construction, and generalized mutability enforcement remain deferred.
 
 ### Migration Notes
 
 - `sem::Class::slots` was renamed to `sem::Class::direct_slots`. Code that
   wants source-authored slot declarations should use `direct_slots`; code that
   wants construction/read/runtime layout should use `effective_slots`.
+
+## Implemented: Nominal Inheritance Semantics And Inspection
+
+- Single inheritance now acts as a nominal subtype relation. Semantic checking
+  accepts subclass instances where a parent object is expected for slot
+  initialization, direct function parameters/returns, generic call arguments,
+  generic method specializers, casts to a parent, and `instance?` tests against
+  a parent.
+- Restart matching now uses the same relation when a signaled condition is a
+  subclass of the active restart condition class. The restart condition binding
+  keeps the restart's parent-specializer type.
+- Runtime `instance?`, `as`, and object slot storage checks use the emitted
+  runtime superclass chain, so parent-typed values work after lowering to tape.
+- Generic dispatch now emits ordinary lowered control flow that checks runtime
+  class IDs and selects the most-specific applicable method in the single
+  superclass chain. There are still no inheritance-specific execution_tape
+  opcodes.
+- Disjoint sibling classes remain incompatible for statically known
+  `instance?` and `as` operations.
+- Incremental fingerprints for generic dispatchers include dispatch order and
+  method applicability, so adding or editing subtype-relevant definitions
+  affects the right artifacts.
+- Corpus coverage now includes parent-typed slots with child values, direct
+  calls that upcast child values, parent-specialized methods handling child
+  instances, most-specific subclass dispatch, subclass condition restarts, and
+  sibling impossible-test/cast diagnostics.
+- MOP, semantic, EOP, and runtime-layout inspection now report superclass
+  chains, direct/effective/runtime slot source, and dispatch applicability. The
+  workbench fixtures `inherited_point.cairn`, `inherited_dispatch.cairn`, and
+  the inherited parent-slot diff fixtures show how to inspect inherited
+  behavior and incremental propagation.
+- `docs/mop_class_finalization.md` and `docs/slot_model.md` describe the
+  subtype semantics, inspection commands, artifact propagation, and the
+  remaining deferred design.
 
 ## Intentionally Deferred
 
@@ -920,6 +954,8 @@
 - General type checking beyond the current primitive, top object, nominal
   object, and slot value categories.
 - Multi-argument/multi-method dispatch beyond one nominal object argument.
+- Multiple inheritance, method combination, sealed dispatch optimization, and
+  parametric types.
 - Runtime mutation.
 - Persistent caches or scheduling; the invalidation shell models dependencies only.
 - Watch mode, LSP, and persistent on-disk workbench caches.
