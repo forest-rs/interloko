@@ -52,6 +52,24 @@ pub struct LocalId(
     pub u32,
 );
 
+/// Statically known callable value.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum KnownCallable {
+    /// A direct source function.
+    DirectFunction(FunctionId),
+    /// A generic function dispatcher.
+    GenericFunction(GenericFunctionId),
+    /// A getter accessor introduced by a slot declaration.
+    SlotAccessor {
+        /// Stable accessor identity.
+        accessor: DefinitionId,
+        /// Owning class.
+        class: ClassId,
+        /// Slot read by this accessor.
+        slot: SlotId,
+    },
+}
+
 /// Semantic value category for this slice.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ValueKind {
@@ -65,6 +83,8 @@ pub enum ValueKind {
     Object(ClassId),
     /// Class object naming a statically known nominal class.
     ClassObject(ClassId),
+    /// Compile-time-known callable object.
+    KnownCallable(KnownCallable),
     /// Invalid or unknown value.
     Error,
 }
@@ -357,6 +377,13 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Compile-time-known callable value.
+    KnownCallable {
+        /// Known callable identity.
+        callable: KnownCallable,
+        /// Source span.
+        span: Span,
+    },
     /// Resolved direct function call.
     DirectCall {
         /// Callee function.
@@ -499,6 +526,7 @@ impl Expr {
             | Self::ConstBool { span, .. }
             | Self::Local { span, .. }
             | Self::ClassObject { span, .. }
+            | Self::KnownCallable { span, .. }
             | Self::DirectCall { span, .. }
             | Self::GenericCall { span, .. }
             | Self::Signal { span, .. }
@@ -587,6 +615,13 @@ struct ActiveRestart {
 enum AccessorSyntax {
     Slot,
     Call,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AccessorResolution {
+    None,
+    One(KnownCallable),
+    Ambiguous,
 }
 
 impl FunctionContext {
@@ -1111,13 +1146,7 @@ impl Lowering {
                     result_kind: ctx.local_kind(local),
                     span: *span,
                 },
-                None => {
-                    ctx.diagnostics.push(Diagnostic::error(
-                        *span,
-                        format!("unresolved local `{name}`"),
-                    ));
-                    Expr::Error { span: *span }
-                }
+                None => self.lower_known_name(ctx, name, *span),
             },
             ast::Expr::ClassName {
                 class_name, span, ..
@@ -1137,6 +1166,9 @@ impl Lowering {
             ast::Expr::Call {
                 callee, args, span, ..
             } => {
+                if callee == "apply" {
+                    return self.lower_apply(ctx, args, *span);
+                }
                 let lowered_args: Vec<_> =
                     args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
                 if callee == "class-of" {
@@ -1335,6 +1367,170 @@ impl Lowering {
                 ..
             } => self.lower_handle(ctx, body, restart, *span),
             ast::Expr::Error { span, .. } => Expr::Error { span: *span },
+        }
+    }
+
+    fn lower_known_name(&self, ctx: &mut FunctionContext, name: &str, span: Span) -> Expr {
+        if let Some(symbol) = self.resolve_function(name) {
+            return Expr::KnownCallable {
+                callable: KnownCallable::DirectFunction(symbol.id),
+                span,
+            };
+        }
+        if let Some(symbol) = self.resolve_generic(name) {
+            return Expr::KnownCallable {
+                callable: KnownCallable::GenericFunction(symbol.id),
+                span,
+            };
+        }
+        match self.resolve_accessor_callable(name) {
+            AccessorResolution::One(callable) => Expr::KnownCallable { callable, span },
+            AccessorResolution::Ambiguous => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    span,
+                    format!("accessor `{name}` is ambiguous as a value"),
+                ));
+                Expr::Error { span }
+            }
+            AccessorResolution::None => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    span,
+                    format!("unresolved local `{name}`"),
+                ));
+                Expr::Error { span }
+            }
+        }
+    }
+
+    fn lower_apply(&self, ctx: &mut FunctionContext, args: &[ast::Expr], span: Span) -> Expr {
+        let Some((target, args)) = args.split_first() else {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                "apply expects a callable and arguments",
+            ));
+            return Expr::Error { span };
+        };
+        let target = self.lower_expr(ctx, target);
+        let lowered_args = args
+            .iter()
+            .map(|arg| self.lower_expr(ctx, arg))
+            .collect::<Vec<_>>();
+        match self.expr_kind(&target) {
+            ValueKind::KnownCallable(KnownCallable::DirectFunction(function)) => {
+                self.lower_applied_direct_call(ctx, function, lowered_args, span)
+            }
+            ValueKind::KnownCallable(KnownCallable::GenericFunction(generic)) => {
+                self.lower_applied_generic_call(ctx, generic, lowered_args, span)
+            }
+            ValueKind::KnownCallable(KnownCallable::SlotAccessor { .. }) => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    target.span(),
+                    "apply does not support slot accessors yet",
+                ));
+                Expr::Error { span }
+            }
+            ValueKind::Error => Expr::Error { span },
+            actual => {
+                ctx.diagnostics.push(Diagnostic::error(
+                    target.span(),
+                    format!(
+                        "apply target must be a known direct or generic function, got {}",
+                        self.kind_name(actual)
+                    ),
+                ));
+                Expr::Error { span }
+            }
+        }
+    }
+
+    fn lower_applied_direct_call(
+        &self,
+        ctx: &mut FunctionContext,
+        function: FunctionId,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        let Some(symbol) = self.functions.get(function.0 as usize) else {
+            return Expr::Error { span };
+        };
+        if symbol.arity() != args.len() {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                format!(
+                    "function `{}` expects {} arguments but apply got {}",
+                    symbol.name,
+                    symbol.arity(),
+                    args.len()
+                ),
+            ));
+            return Expr::Error { span };
+        }
+        for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
+            let actual = self.expr_kind(arg);
+            if !self.kinds_match(*expected, actual) {
+                ctx.diagnostics.push(Diagnostic::error(
+                    arg.span(),
+                    format!(
+                        "function `{}` argument {} expects {} but got {}",
+                        symbol.name,
+                        index + 1,
+                        self.kind_name(*expected),
+                        self.kind_name(actual)
+                    ),
+                ));
+            }
+        }
+        Expr::DirectCall {
+            function,
+            args,
+            span,
+        }
+    }
+
+    fn lower_applied_generic_call(
+        &self,
+        ctx: &mut FunctionContext,
+        generic: GenericFunctionId,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        let Some(symbol) = self.generic_symbols.get(generic.0 as usize) else {
+            return Expr::Error { span };
+        };
+        if symbol.arity() != args.len() {
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                format!(
+                    "generic `{}` expects {} arguments but apply got {}",
+                    symbol.name,
+                    symbol.arity(),
+                    args.len()
+                ),
+            ));
+            return Expr::Error { span };
+        }
+        for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
+            let Some(expected) = *expected else {
+                continue;
+            };
+            let actual = self.expr_kind(arg);
+            if !self.generic_argument_matches(expected, actual) {
+                ctx.diagnostics.push(Diagnostic::error(
+                    arg.span(),
+                    format!(
+                        "generic `{}` argument {} expects {} but got {}",
+                        symbol.name,
+                        index + 1,
+                        self.kind_name(expected),
+                        self.kind_name(actual)
+                    ),
+                ));
+            }
+        }
+        Expr::GenericCall {
+            generic,
+            args,
+            span,
         }
     }
 
@@ -1765,6 +1961,7 @@ impl Lowering {
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
             }
+            Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
             Expr::AccessorCall { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. } | Expr::Compare { .. } | Expr::InstanceOf { .. } => {
                 ValueKind::Bool
@@ -1803,6 +2000,26 @@ impl Lowering {
         self.classes
             .iter()
             .any(|class| class.slots.iter().any(|slot| slot.accessor.name == name))
+    }
+
+    fn resolve_accessor_callable(&self, name: &str) -> AccessorResolution {
+        let mut found = None;
+        for class in &self.classes {
+            for slot in &class.slots {
+                if slot.accessor.name != name {
+                    continue;
+                }
+                let callable = KnownCallable::SlotAccessor {
+                    accessor: slot.accessor.definition,
+                    class: class.id,
+                    slot: slot.id,
+                };
+                if found.replace(callable).is_some() {
+                    return AccessorResolution::Ambiguous;
+                }
+            }
+        }
+        found.map_or(AccessorResolution::None, AccessorResolution::One)
     }
 
     fn resolve_slot_kind(&mut self, type_name: Option<&str>, span: Span) -> ValueKind {
@@ -1857,7 +2074,7 @@ impl Lowering {
     }
 
     fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
-        matches!(expected, ValueKind::Any)
+        (matches!(expected, ValueKind::Any) && !matches!(actual, ValueKind::KnownCallable(_)))
             || expected == actual
             || matches!(expected, ValueKind::Error)
             || matches!(actual, ValueKind::Error)
@@ -1867,7 +2084,10 @@ impl Lowering {
         match expected {
             ValueKind::Any | ValueKind::Error => true,
             ValueKind::Object(class) => class == specializer,
-            ValueKind::I64 | ValueKind::Bool | ValueKind::ClassObject(_) => false,
+            ValueKind::I64
+            | ValueKind::Bool
+            | ValueKind::ClassObject(_)
+            | ValueKind::KnownCallable(_) => false,
         }
     }
 
@@ -1876,7 +2096,10 @@ impl Lowering {
             ValueKind::Any => matches!(actual, ValueKind::Object(_) | ValueKind::Error),
             ValueKind::Object(_) => expected == actual || matches!(actual, ValueKind::Error),
             ValueKind::Error => true,
-            ValueKind::I64 | ValueKind::Bool | ValueKind::ClassObject(_) => expected == actual,
+            ValueKind::I64
+            | ValueKind::Bool
+            | ValueKind::ClassObject(_)
+            | ValueKind::KnownCallable(_) => expected == actual,
         }
     }
 
@@ -1893,7 +2116,33 @@ impl Lowering {
                 || format!("class-object#{}", class.0),
                 |class| format!("class object {}", class.name),
             ),
+            ValueKind::KnownCallable(callable) => self.callable_name(callable),
             ValueKind::Error => "<error>".into(),
+        }
+    }
+
+    fn callable_name(&self, callable: KnownCallable) -> String {
+        match callable {
+            KnownCallable::DirectFunction(function) => {
+                self.functions.get(function.0 as usize).map_or_else(
+                    || format!("function#{}", function.0),
+                    |symbol| format!("function `{}`", symbol.name),
+                )
+            }
+            KnownCallable::GenericFunction(generic) => {
+                self.generic_symbols.get(generic.0 as usize).map_or_else(
+                    || format!("generic#{}", generic.0),
+                    |symbol| format!("generic `{}`", symbol.name),
+                )
+            }
+            KnownCallable::SlotAccessor { class, slot, .. } => self
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.slots.get(slot.0 as usize))
+                .map_or_else(
+                    || format!("accessor#{}.{}", class.0, slot.0),
+                    |slot| format!("accessor `{}`", slot.accessor.name),
+                ),
         }
     }
 
@@ -1952,6 +2201,79 @@ mod tests {
         };
         assert_eq!(*function, FunctionId(0));
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn resolves_known_callable_values_and_apply() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function inc(x)\n  x + 1\nend;\n\
+             define function main()\n  let f = inc;\n  let g = area;\n  apply(f, 2) + apply(g, make(<circle>, radius: 3))\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(
+            module.functions[1].locals[0].kind,
+            ValueKind::KnownCallable(KnownCallable::DirectFunction(FunctionId(0)))
+        );
+        assert_eq!(
+            module.functions[1].locals[1].kind,
+            ValueKind::KnownCallable(KnownCallable::GenericFunction(GenericFunctionId(0)))
+        );
+        let Expr::Binary { lhs, rhs, .. } = &module.functions[1].body.result else {
+            panic!("expected binary result");
+        };
+        assert!(matches!(
+            lhs.as_ref(),
+            Expr::DirectCall {
+                function: FunctionId(0),
+                ..
+            }
+        ));
+        assert!(matches!(
+            rhs.as_ref(),
+            Expr::GenericCall {
+                generic: GenericFunctionId(0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolves_slot_accessor_values_without_applying_them() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let getter = radius;\n  1\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(
+            module.functions[0].locals[0].kind,
+            ValueKind::KnownCallable(KnownCallable::SlotAccessor {
+                accessor: module.classes[0].slots[0].accessor.definition,
+                class: ClassId(0),
+                slot: SlotId(0),
+            })
+        );
+    }
+
+    #[test]
+    fn reports_invalid_apply_targets() {
+        let non_callable = lower_source("define function main()\n  apply(1, 2)\nend;");
+        assert!(non_callable.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "apply target must be a known direct or generic function, got <integer>"
+        }));
+
+        let accessor = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  apply(radius, make(<circle>, radius: 3))\nend;",
+        );
+        assert!(accessor.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "apply does not support slot accessors yet"
+        }));
     }
 
     #[test]

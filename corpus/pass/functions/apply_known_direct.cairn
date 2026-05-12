@@ -1,0 +1,14 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains known-callable function f0
+// expect: dump sem contains direct-call f0
+// expect: dump lowered contains call l0
+
+define function inc(x)
+  x + 1
+end;
+
+define function main()
+  let f = inc;
+  apply(f, 41)
+end;

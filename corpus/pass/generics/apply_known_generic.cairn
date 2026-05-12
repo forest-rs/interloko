@@ -1,0 +1,20 @@
+// expect: run 25
+// expect: diagnostics 0
+// expect: dump sem contains known-callable generic g0
+// expect: dump sem contains generic-call g0
+// expect: dump lowered contains area#dispatch
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define function main()
+  let g = area;
+  apply(g, make(<circle>, radius: 5))
+end;

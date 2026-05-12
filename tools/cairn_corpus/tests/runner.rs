@@ -65,12 +65,17 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/diagnostics/generic_argument_type.cairn"));
     assert!(out.contains("fail/diagnostics/generic_method_return_type.cairn"));
     assert!(out.contains("fail/diagnostics/generic_method_specializer_type.cairn"));
+    assert!(out.contains("pass/functions/apply_known_direct.cairn"));
+    assert!(out.contains("pass/generics/apply_known_generic.cairn"));
+    assert!(out.contains("pass/objects/accessor_callable_identity.cairn"));
+    assert!(out.contains("fail/diagnostics/apply_accessor_unsupported.cairn"));
+    assert!(out.contains("fail/diagnostics/apply_non_callable.cairn"));
     assert!(out.contains("pass/objects/instance_refinement.cairn"));
     assert!(out.contains("pass/objects/cast_object_slot.cairn"));
     assert!(out.contains("fail/diagnostics/impossible_instance_test.cairn"));
     assert!(out.contains("fail/diagnostics/impossible_cast.cairn"));
     assert!(out.contains("fail/diagnostics/primitive_instance_test.cairn"));
-    assert!(out.contains("corpus: 55 passed, 0 failed, 55 total"));
+    assert!(out.contains("corpus: 60 passed, 0 failed, 60 total"));
 }
 
 #[test]

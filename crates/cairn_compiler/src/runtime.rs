@@ -281,6 +281,7 @@ impl CairnHost {
                     Err(HostError::Failed)
                 }
             }
+            (sem::ValueKind::KnownCallable(_), _) => Err(HostError::Failed),
             _ => Err(HostError::Failed),
         }
     }
@@ -351,7 +352,7 @@ fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
         sem::ValueKind::Bool => Some(ValueType::Bool),
         sem::ValueKind::Object(_) => Some(object_type()),
         sem::ValueKind::ClassObject(_) => Some(ValueType::U64),
-        sem::ValueKind::Error => None,
+        sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => None,
     }
 }
 

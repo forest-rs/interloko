@@ -1281,7 +1281,7 @@ fn dump_sem(module: &sem::Module) -> String {
             method.specializer.0,
             method.result_kind
         );
-        dump_sem_locals(&mut out, &method.locals, 2);
+        dump_sem_locals(module, &mut out, &method.locals, 2);
         dump_sem_block(&mut out, &method.body, 2);
     }
     for function in &module.functions {
@@ -1307,7 +1307,7 @@ fn dump_sem(module: &sem::Module) -> String {
             "function f{} {} {}({params}) result={:?} return={return_annotation}",
             function.id.0, function.definition, function.name, function.result_kind
         );
-        dump_sem_locals(&mut out, &function.locals, 2);
+        dump_sem_locals(module, &mut out, &function.locals, 2);
         dump_sem_block(&mut out, &function.body, 2);
     }
     out
@@ -1326,6 +1326,9 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
             || format!("class-object#{}", class.0),
             |class| format!("class-object({})", class.name),
         ),
+        sem::ValueKind::KnownCallable(callable) => {
+            format!("known-callable({})", sem_callable_label(module, callable))
+        }
         sem::ValueKind::Error => "error".into(),
     }
 }
@@ -1337,6 +1340,9 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Object(class) => format!("object(c{})", class.0),
         sem::ValueKind::ClassObject(class) => format!("class-object(c{})", class.0),
+        sem::ValueKind::KnownCallable(callable) => {
+            format!("known-callable({})", sem_callable_label_for_expr(callable))
+        }
         sem::ValueKind::Error => "error".into(),
     }
 }
@@ -1354,6 +1360,7 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
             || format!("class-object#{}", class.0),
             |class| format!("class-object#{}", class.definition.raw()),
         ),
+        sem::ValueKind::KnownCallable(callable) => sem_callable_fingerprint(module, callable),
         sem::ValueKind::Error => "error".into(),
     }
 }
@@ -1365,17 +1372,94 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::Bool => "bool",
         sem::ValueKind::Object(_) => "object-handle",
         sem::ValueKind::ClassObject(_) => "class-id",
+        sem::ValueKind::KnownCallable(_) => "compile-time-callable",
         sem::ValueKind::Error => "error",
     }
 }
 
-fn dump_sem_locals(out: &mut String, locals: &[sem::Local], indent: usize) {
+fn sem_callable_label(module: &sem::Module, callable: sem::KnownCallable) -> String {
+    match callable {
+        sem::KnownCallable::DirectFunction(function) => {
+            module.functions.get(function.0 as usize).map_or_else(
+                || format!("function#{}", function.0),
+                |function| format!("function {}", function.name),
+            )
+        }
+        sem::KnownCallable::GenericFunction(generic) => {
+            module.generics.get(generic.0 as usize).map_or_else(
+                || format!("generic#{}", generic.0),
+                |generic| format!("generic {}", generic.name),
+            )
+        }
+        sem::KnownCallable::SlotAccessor { class, slot, .. } => module
+            .classes
+            .get(class.0 as usize)
+            .and_then(|class| {
+                class
+                    .slots
+                    .get(slot.0 as usize)
+                    .map(|slot| format!("accessor {}.{}", class.name, slot.name))
+            })
+            .unwrap_or_else(|| format!("accessor c{}.s{}", class.0, slot.0)),
+    }
+}
+
+fn sem_callable_label_for_expr(callable: sem::KnownCallable) -> String {
+    match callable {
+        sem::KnownCallable::DirectFunction(function) => format!("function f{}", function.0),
+        sem::KnownCallable::GenericFunction(generic) => format!("generic g{}", generic.0),
+        sem::KnownCallable::SlotAccessor { class, slot, .. } => {
+            format!("accessor c{}.s{}", class.0, slot.0)
+        }
+    }
+}
+
+fn sem_callable_fingerprint(module: &sem::Module, callable: sem::KnownCallable) -> String {
+    match callable {
+        sem::KnownCallable::DirectFunction(function) => {
+            module.functions.get(function.0 as usize).map_or_else(
+                || format!("function#{}", function.0),
+                |function| format!("function#{}", function.definition.raw()),
+            )
+        }
+        sem::KnownCallable::GenericFunction(generic) => {
+            module.generics.get(generic.0 as usize).map_or_else(
+                || format!("generic#{}", generic.0),
+                |generic| format!("generic#{}", generic.definition.raw()),
+            )
+        }
+        sem::KnownCallable::SlotAccessor {
+            accessor,
+            class,
+            slot,
+        } => {
+            let class_definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let slot_definition = module
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.slots.get(slot.0 as usize))
+                .map_or(0, |slot| slot.definition.raw());
+            format!(
+                "accessor#{}:{class_definition}.{slot_definition}",
+                accessor.raw()
+            )
+        }
+    }
+}
+
+fn dump_sem_locals(module: &sem::Module, out: &mut String, locals: &[sem::Local], indent: usize) {
     for local in locals {
         indent_line(out, indent);
         let _ = writeln!(
             out,
-            "local l{} {} {} {:?}",
-            local.id.0, local.definition, local.name, local.kind
+            "local l{} {} {} {}",
+            local.id.0,
+            local.definition,
+            local.name,
+            sem_kind_label(module, local.kind)
         );
     }
 }
@@ -1412,6 +1496,13 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         }
         sem::Expr::ClassObject { class, .. } => {
             let _ = writeln!(out, "class-object c{}", class.0);
+        }
+        sem::Expr::KnownCallable { callable, .. } => {
+            let _ = writeln!(
+                out,
+                "known-callable {}",
+                sem_callable_label_for_expr(*callable)
+            );
         }
         sem::Expr::DirectCall { function, args, .. } => {
             let _ = writeln!(out, "direct-call f{}", function.0);
@@ -1781,6 +1872,10 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .get(class.0 as usize)
                 .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "class-object({definition})");
+        }
+        sem::Expr::KnownCallable { callable, .. } => {
+            let fingerprint = sem_callable_fingerprint(module, *callable);
+            let _ = write!(out, "known-callable({fingerprint})");
         }
         sem::Expr::DirectCall { function, args, .. } => {
             let definition = module
@@ -2507,6 +2602,61 @@ mod tests {
                 .artifacts
                 .dump_stage(DumpStage::Sem)
                 .contains("class-object c1")
+        );
+    }
+
+    #[test]
+    fn incremental_callable_target_edit_recomputes_only_function_artifacts() {
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define generic area(x);\n\
+                      define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+                      define function inc(x)\n  x + 1\nend;\n\
+                      define function dec(x)\n  x - 1\nend;\n\
+                      define function main()\n  let f = inc;\n  apply(f, 10) + area(make(<circle>, radius: 2))\nend;";
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                     define generic area(x);\n\
+                     define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+                     define function inc(x)\n  x + 1\nend;\n\
+                     define function dec(x)\n  x - 1\nend;\n\
+                     define function main()\n  let f = dec;\n  apply(f, 10) + area(make(<circle>, radius: 2))\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("callable.cairn", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let method = first.artifacts.sem.methods[0].definition;
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Function
+                && change.definition.name == "main"
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(method)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodTape(method)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Recomputed)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("known-callable function f1")
         );
     }
 

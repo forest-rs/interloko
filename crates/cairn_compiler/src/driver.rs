@@ -198,6 +198,19 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_known_callable_apply() {
+        let value = compile_and_run_main(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function inc(x)\n  x + 1\nend;\n\
+             define function main()\n  let f = inc;\n  let g = area;\n  apply(f, 2) + apply(g, make(<circle>, radius: 4))\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 19);
+    }
+
+    #[test]
     fn compiled_module_exposes_lowered_and_tape_dumps() {
         let compiled = compile(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\

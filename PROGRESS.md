@@ -570,6 +570,47 @@
 - Runtime class tests are exact nominal checks. Inheritance-aware `instance?`
   behavior is deferred until the class model has an explicit subtype relation.
 
+## Implemented: First-Class Known Callable Objects
+
+- Bare references to direct functions, generic functions, and unambiguous slot
+  accessors now lower to semantic known-callable values when no local shadows
+  the name.
+- Known callables are represented in semantic value categories, so `let`
+  bindings can carry identities such as:
+  - `function f0`;
+  - `generic g0`;
+  - `accessor c0.s0`.
+- `apply(callable, ...)` is recognized as a narrow built-in call form.
+- Applying a known direct function value resolves back to the existing
+  semantic `DirectCall` path, including arity and argument-kind checks.
+- Applying a known generic function value resolves back to the existing
+  semantic `GenericCall` path, including generic contract checks.
+- Slot accessor identities are exposed as known callable values, but applying
+  them is intentionally diagnosed for now.
+- Known callable locals are compile-time-only in lowering. They do not allocate
+  lowered registers and do not create runtime `execution_tape` values.
+- Lowered IR and tape emission remain unchanged for successful `apply` forms:
+  the emitted code is the ordinary direct call or generated generic dispatcher
+  call that Cairn already used.
+- Semantic dumps and fingerprints expose known-callable identities, including
+  local bindings. Incremental coverage shows that changing a callable target in
+  one function recomputes the function-level lowered/tape artifacts while
+  reusing unrelated method artifacts.
+- Corpus coverage includes direct-function `apply`, generic-function `apply`,
+  accessor identity as a value, non-callable apply diagnostics, and accessor
+  apply diagnostics.
+
+### Deferred Callable Object Design
+
+- There is still no runtime representation for unknown function objects,
+  closures, captured environments, dynamic invocation, or accessor invocation
+  through `apply`.
+- Known callable values cannot cross an ABI boundary or be returned as runtime
+  values. They are local compile-time facts consumed by semantic lowering.
+- Multi-argument direct-function `apply` is structurally supported by the
+  semantic path, but generic dispatch remains limited by the current
+  one-argument dispatcher model.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.

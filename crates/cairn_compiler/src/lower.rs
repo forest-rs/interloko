@@ -649,14 +649,20 @@ impl<'module> BodyLowering<'module> {
 
     fn lower_block(&mut self, block: &sem::Block, expected: ValueKind) -> Result<(), LowerError> {
         for let_binding in &block.lets {
+            let (local_name, local_kind) = {
+                let local = self
+                    .current_local(let_binding.local)
+                    .ok_or_else(|| invalid_semantic("local id is out of range"))?;
+                (local.name.clone(), local.kind)
+            };
+            if is_compile_time_only(local_kind) {
+                continue;
+            }
             let value = self.lower_expr(&let_binding.value)?;
             self.set_local(let_binding.local, value)?;
-            let local = self
-                .current_local(let_binding.local)
-                .ok_or_else(|| invalid_semantic("local id is out of range"))?;
             self.locals.push(Local {
                 source: let_binding.local,
-                name: local.name.clone(),
+                name: local_name,
                 kind: value.kind,
                 reg: value.reg,
             });
@@ -777,6 +783,9 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::KnownCallable { .. } => Err(invalid_semantic(
+                "known callable values have no runtime representation",
+            )),
             sem::Expr::DirectCall {
                 function,
                 args,
@@ -1259,8 +1268,14 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::Object(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::ClassObject(class) => Ok(ValueKind::ClassObject(Some(class))),
-        sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
+        sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => {
+            Err(invalid_semantic("semantic value kind is invalid"))
+        }
     }
+}
+
+fn is_compile_time_only(kind: sem::ValueKind) -> bool {
+    matches!(kind, sem::ValueKind::KnownCallable(_))
 }
 
 fn dispatcher_param_kind(generic: &sem::GenericFunction) -> ValueKind {
@@ -1604,6 +1619,25 @@ mod tests {
         assert!(dump.contains("local l2 c = %r3: i64"));
         assert!(dump.contains("%r3 = i64.add %r1, %r2"));
         assert!(dump.contains("call l0(%r1, %r2)"));
+    }
+
+    #[test]
+    fn lowers_known_callable_apply_to_existing_calls() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function inc(x)\n  x + 1\nend;\n\
+             define function main()\n  let f = inc;\n  let g = area;\n  apply(f, 2) + apply(g, make(<circle>, radius: 3))\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("fn l0 inc"));
+        assert!(dump.contains("fn l1 main"));
+        assert!(dump.contains("call l0("));
+        assert!(dump.contains("call l3("));
+        assert!(!dump.contains("local l0 f"));
+        assert!(!dump.contains("local l1 g"));
     }
 
     #[test]

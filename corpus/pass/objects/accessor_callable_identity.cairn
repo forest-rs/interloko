@@ -1,0 +1,13 @@
+// expect: run 1
+// expect: diagnostics 0
+// expect: dump sem contains known-callable accessor c0.s0
+// expect: dump sem contains known-callable(accessor <circle>.radius)
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let getter = radius;
+  1
+end;
