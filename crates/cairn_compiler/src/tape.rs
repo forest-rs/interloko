@@ -118,6 +118,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
 
 fn value_type(kind: lower::ValueKind) -> ValueType {
     match kind {
+        lower::ValueKind::Any => runtime::any_type(),
         lower::ValueKind::I64 => ValueType::I64,
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
@@ -141,6 +142,9 @@ struct HostSigs {
     make_object: Vec<HostSigId>,
     class_of: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
+    box_i64: HostSigId,
+    box_bool: HostSigId,
+    box_object: HostSigId,
 }
 
 impl HostSigs {
@@ -174,10 +178,25 @@ impl HostSigs {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let class_of = builder.host_sig_for(runtime::CLASS_OF, runtime::class_of_signature());
+        let box_i64 = builder.host_sig_for(
+            runtime::BOX_VALUE,
+            runtime::box_value_signature(ValueType::I64),
+        );
+        let box_bool = builder.host_sig_for(
+            runtime::BOX_VALUE,
+            runtime::box_value_signature(ValueType::Bool),
+        );
+        let box_object = builder.host_sig_for(
+            runtime::BOX_VALUE,
+            runtime::box_value_signature(runtime::object_type()),
+        );
         Ok(Self {
             make_object,
             class_of,
             slot_get,
+            box_i64,
+            box_bool,
+            box_object,
         })
     }
 }
@@ -229,6 +248,23 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::ConstU64 { dst, value, span } => {
                 self.set_span(*span);
                 self.asm.const_u64(dst.0, *value);
+            }
+            lower::Instr::BoxValue {
+                dst,
+                src,
+                from,
+                span,
+            } => {
+                let sig = match from {
+                    lower::ValueKind::I64 => self.host_sigs.box_i64,
+                    lower::ValueKind::Bool => self.host_sigs.box_bool,
+                    lower::ValueKind::Object(_) => self.host_sigs.box_object,
+                    lower::ValueKind::Any | lower::ValueKind::U64 => {
+                        return Err(invalid_lowered("invalid boxed value input kind"));
+                    }
+                };
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[src.0], &[dst.0]);
             }
             lower::Instr::I64Binary {
                 dst,
@@ -445,6 +481,10 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         | lower::Instr::ConstU64 { dst, .. } => {
             note_register(*dst, max);
         }
+        lower::Instr::BoxValue { dst, src, .. } => {
+            note_register(*dst, max);
+            note_register(*src, max);
+        }
         lower::Instr::I64Binary { dst, lhs, rhs, .. }
         | lower::Instr::I64Compare { dst, lhs, rhs, .. }
         | lower::Instr::EqU64 { dst, lhs, rhs, .. } => {
@@ -532,7 +572,7 @@ mod tests {
     #[test]
     fn emits_verified_tape_with_generic_dispatcher() {
         let module = lower_source(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
@@ -556,7 +596,7 @@ mod tests {
     #[test]
     fn emits_verified_tape_for_signal_handle_restart() {
         let module = lower_source(
-            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+            "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  handle signal(make(<bad>, fallback: 42)) with restart e :: <bad> e.fallback end\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
@@ -576,5 +616,18 @@ mod tests {
         assert_eq!(tape.program.program().functions.len(), 1);
         assert_eq!(tape.runtime.classes[0].slots[0].name, "valid?");
         assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::Bool);
+    }
+
+    #[test]
+    fn emits_verified_tape_for_object_top_slots() {
+        let module = lower_source(
+            "define class <box> (<object>)\n  slot value;\nend;\n\
+             define function main()\n  make(<box>, value: 7).value\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+
+        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.runtime.classes[0].slots[0].name, "value");
+        assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::Any);
     }
 }

@@ -1,0 +1,13 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump ast contains init-keyword: payload:
+// expect: dump sem contains init-keyword: r: required
+
+define class <circle> (<object>)
+  slot radius :: <integer>, required-init-keyword: r:;
+  slot cached, init-keyword: payload:;
+end;
+
+define function main()
+  make(<circle>, r: 10, payload: #t).radius
+end;

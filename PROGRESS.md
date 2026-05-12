@@ -280,8 +280,8 @@
   - `slot radius :: <integer>;`
   - `slot valid? :: <boolean>;`
   - `slot cause :: <some-class>;`
-- Legacy untyped `slot name;` declarations remain accepted and semantically
-  default to `<integer>` for the current corpus and examples.
+- Untyped `slot name;` declarations remain accepted. They now default to
+  Dylan-shaped `<object>` in the current slot-initialization model below.
 - The implemented slot value categories are intentionally small:
   - primitive signed integer;
   - primitive boolean;
@@ -331,6 +331,61 @@
 - Generic function declarations still do not carry explicit return types; this
   slice only makes slot reads and object construction typed.
 
+## Implemented: Dylan-Shaped Slot Initialization
+
+- Untyped slot declarations now default to `<object>`:
+  - `slot value;`
+  - `slot value :: <object>;`
+- Semantic IR distinguishes the top `<object>` value category from nominal
+  object handles:
+  - `ValueKind::Any` means any first-slice Cairn value;
+  - `ValueKind::Object(ClassId)` means a runtime-managed object with a known
+    nominal class.
+- Existing integer-like examples and corpus programs now spell integer slots
+  explicitly, for example `slot radius :: <integer>;`.
+- Slot declarations support the first narrow Dylan-style construction keyword
+  options:
+  - `init-keyword: external-name:`
+  - `required-init-keyword: external-name:`
+- A slot's construction keyword defaults to `slot-name:`. Renaming the init
+  keyword changes object construction, not the slot read name.
+- Object construction now diagnoses:
+  - missing ordinary slot initializers;
+  - missing required init keywords;
+  - unknown construction keywords;
+  - duplicate construction keywords;
+  - initializer type mismatches.
+- AST and semantic dumps show declared type, effective init keyword,
+  requiredness, and runtime representation. Semantic fingerprints include slot
+  type, keyword, and requiredness so the session diff can report metadata
+  changes.
+- Lowering uses a boxed top-value representation for `<object>` slots rather
+  than treating them as nominal object handles:
+  - concrete integers, booleans, and nominal object handles are boxed with
+    `cairn.box_value`;
+  - boxed top values use the host object type `CAIRN_VALUE_TYPE`;
+  - nominal instances still use `CAIRN_OBJECT_TYPE`;
+  - `cairn.make_object` and `cairn.slot_get` use boxed-any signatures for
+    `<object>` slots.
+- Incremental coverage now distinguishes two slot metadata cases:
+  - slot type edits affect runtime layout and recompute lowered/tape artifacts;
+  - init-keyword-only edits change bind-level metadata but can reuse lowered IR
+    and tape when the runtime layout is unchanged.
+- Corpus coverage includes untyped `<object>` slots, required init keywords,
+  renamed init keywords, duplicate keyword diagnostics, missing required keyword
+  diagnostics, and the existing primitive/nominal typed slot cases.
+
+### Deferred Slot Initialization Design
+
+- There is no unboxing operation for top `<object>` values yet, so a read from an
+  untyped slot has kind `<object>` and cannot be used as an integer without
+  future type tests, casts, or flow typing.
+- Default values, `init-value:`, `init-function:`, setters, `constant slot`,
+  allocation variants, inherited slot specs, and the full Dylan initialization
+  protocol remain deferred.
+- The boxed-any representation is a first runtime ABI, not a claim about future
+  object identity, primitive boxing policy, or optimized layout.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.
@@ -340,8 +395,8 @@
 - Macros.
 - Cranelift.
 - Full module system.
-- General type checking beyond the current primitive, nominal object, and slot
-  value categories.
+- General type checking beyond the current primitive, top object, nominal
+  object, and slot value categories.
 - Multi-argument/multi-method dispatch beyond one nominal object argument.
 - Runtime mutation.
 - Persistent caches or scheduling; the invalidation shell models dependencies only.

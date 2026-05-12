@@ -1,6 +1,7 @@
 //! Surface AST lowered from the milestone-0 CST.
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -68,12 +69,22 @@ pub struct Slot {
     pub name: String,
     /// Optional declared slot type name.
     ///
-    /// Missing types are accepted for legacy fixtures and default to
-    /// `<integer>` during semantic lowering.
+    /// Missing types default to Dylan's top `<object>` value category during
+    /// semantic lowering.
     pub type_name: Option<String>,
     /// Source span for the optional slot type, or the slot name span when the
     /// declaration is untyped.
     pub type_span: Span,
+    /// Optional external construction keyword without the trailing colon.
+    ///
+    /// Missing keywords default to the slot name.
+    pub init_keyword: Option<String>,
+    /// Source span for the optional construction keyword, or the slot name span
+    /// when the declaration uses the default keyword.
+    pub init_keyword_span: Span,
+    /// Whether the construction keyword was declared with
+    /// `required-init-keyword:`.
+    pub required_init_keyword: bool,
     /// Source span.
     pub span: Span,
 }
@@ -433,10 +444,10 @@ impl<'tree> Lowering<'tree> {
         let name = self
             .first_token_text(node, TokenKind::TypeName)
             .map_or_else(String::new, |(_, text)| text.to_string());
-        let slots = node
-            .child_nodes(CstKind::SlotDecl)
-            .map(|slot| self.lower_slot(&name, slot))
-            .collect();
+        let mut slots = Vec::new();
+        for slot in node.child_nodes(CstKind::SlotDecl) {
+            slots.push(self.lower_slot(&name, slot));
+        }
         Class {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Class, &name, ""),
@@ -446,7 +457,7 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
-    fn lower_slot(&self, class_name: &str, node: &CstNode) -> Slot {
+    fn lower_slot(&mut self, class_name: &str, node: &CstNode) -> Slot {
         let Some((span, text)) = self.first_token_text(node, TokenKind::Ident) else {
             return Slot {
                 id: self.ast_id(node),
@@ -454,19 +465,69 @@ impl<'tree> Lowering<'tree> {
                 name: String::new(),
                 type_name: None,
                 type_span: node.span,
+                init_keyword: None,
+                init_keyword_span: node.span,
+                required_init_keyword: false,
                 span: node.span,
             };
         };
         let name = text.to_string();
         let slot_type = self.first_token_text(node, TokenKind::TypeName);
+        let mut init_keyword = None;
+        let mut init_keyword_span = span;
+        let mut required_init_keyword = false;
+        for option in node.child_nodes(CstKind::SlotOption) {
+            let idents = self.ident_tokens(option);
+            let Some((option_span, option_name)) = idents.first() else {
+                continue;
+            };
+            let Some((keyword_span, keyword_name)) = idents.get(1) else {
+                self.diagnostics.push(Diagnostic::error(
+                    *option_span,
+                    format!("slot option `{option_name}:` requires a keyword value"),
+                ));
+                continue;
+            };
+            match *option_name {
+                "init-keyword" => {
+                    init_keyword = Some((*keyword_name).to_string());
+                    init_keyword_span = *keyword_span;
+                }
+                "required-init-keyword" => {
+                    init_keyword = Some((*keyword_name).to_string());
+                    init_keyword_span = *keyword_span;
+                    required_init_keyword = true;
+                }
+                _ => self.diagnostics.push(Diagnostic::error(
+                    *option_span,
+                    format!("unsupported slot option `{option_name}:`"),
+                )),
+            }
+        }
         Slot {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Slot, &name, class_name),
             name,
             type_name: slot_type.map(|(_, text)| text.to_string()),
             type_span: slot_type.map_or(span, |(span, _)| span),
+            init_keyword,
+            init_keyword_span,
+            required_init_keyword,
             span,
         }
+    }
+
+    fn ident_tokens<'a>(&'a self, node: &'a CstNode) -> Vec<(Span, &'a str)> {
+        node.children
+            .iter()
+            .filter_map(|child| match child {
+                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Ident => {
+                    let token = self.tree.tokens[*index];
+                    Some((token.span, token.text(&self.tree.source)))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn lower_generic(&mut self, node: &CstNode) -> Generic {
@@ -1170,10 +1231,10 @@ mod tests {
     #[test]
     fn lowers_classes_generics_methods_make_and_slot_reads() {
         let tree = syntax::parse(
-            "define class <circle> (<object>)\n  slot radius :: <integer>;\n  slot valid? :: <boolean>;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
-             define function main()\n  area(make(<circle>, radius: 10, valid?: #t))\nend;",
+             define function main()\n  area(make(<circle>, radius: 10, enabled?: #t))\nend;",
         );
         let module = lower(&tree);
         assert_eq!(module.diagnostics, Vec::new());
@@ -1183,11 +1244,21 @@ mod tests {
             module.classes[0].slots[0].type_name.as_deref(),
             Some("<integer>")
         );
+        assert_eq!(
+            module.classes[0].slots[0].init_keyword.as_deref(),
+            Some("radius")
+        );
+        assert!(module.classes[0].slots[0].required_init_keyword);
         assert_eq!(module.classes[0].slots[1].name, "valid?");
         assert_eq!(
             module.classes[0].slots[1].type_name.as_deref(),
             Some("<boolean>")
         );
+        assert_eq!(
+            module.classes[0].slots[1].init_keyword.as_deref(),
+            Some("enabled?")
+        );
+        assert!(!module.classes[0].slots[1].required_init_keyword);
         assert_eq!(module.generics[0].name, "area");
         assert_eq!(module.methods[0].name, "area");
         assert_eq!(module.methods[0].param.class_name, "<circle>");

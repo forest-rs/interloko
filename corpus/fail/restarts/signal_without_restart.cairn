@@ -3,7 +3,7 @@
 // expect: dump sem contains signal
 
 define class <bad-input> (<object>)
-  slot fallback;
+  slot fallback :: <integer>;
 end;
 
 define function main()

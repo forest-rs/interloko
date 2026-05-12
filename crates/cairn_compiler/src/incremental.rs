@@ -278,8 +278,8 @@ mod tests {
     #[test]
     fn method_change_invalidates_only_related_lookup_lowering_and_tape() {
         let module = lower_source(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
-             define class <square> (<object>)\n  slot side;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define method area(s :: <square>)\n  s.side * s.side\nend;",
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn source_change_reaches_parse_bind_methods_and_tape() {
         let module = lower_source(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;",
         );
@@ -331,14 +331,14 @@ mod tests {
         let source_file = SourceFileId::from_path("examples/area.cairn");
         let before = lower_file(
             source_file,
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;",
         );
         let edited = lower_file(
             source_file,
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
-             define class <square> (<object>)\n  slot side;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(s :: <square>)\n  s.side * s.side\nend;\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;",

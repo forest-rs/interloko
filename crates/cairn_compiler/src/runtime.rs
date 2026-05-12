@@ -12,6 +12,8 @@ use crate::sem;
 
 /// Host object type used for Cairn runtime objects.
 pub const CAIRN_OBJECT_TYPE: HostTypeId = HostTypeId(0x4341_4952_4e5f_4f42);
+/// Host object type used for boxed top `<object>` values.
+pub const CAIRN_VALUE_TYPE: HostTypeId = HostTypeId(0x4341_4952_4e5f_5641);
 
 /// Host-call symbol for object construction.
 pub const MAKE_OBJECT: &str = "cairn.make_object";
@@ -19,11 +21,19 @@ pub const MAKE_OBJECT: &str = "cairn.make_object";
 pub const CLASS_OF: &str = "cairn.class_of";
 /// Host-call symbol for reading a typed runtime-managed slot.
 pub const SLOT_GET: &str = "cairn.slot_get";
+/// Host-call symbol for boxing a concrete value as the top `<object>` value.
+pub const BOX_VALUE: &str = "cairn.box_value";
 
 /// Returns the `execution_tape` value type for Cairn objects.
 #[must_use]
 pub const fn object_type() -> ValueType {
     ValueType::Obj(CAIRN_OBJECT_TYPE)
+}
+
+/// Returns the `execution_tape` value type for boxed top `<object>` values.
+#[must_use]
+pub const fn any_type() -> ValueType {
+    ValueType::Obj(CAIRN_VALUE_TYPE)
 }
 
 /// Runtime class layout needed by the host object heap.
@@ -86,6 +96,7 @@ struct RuntimeObject {
 pub struct CairnHost {
     layout: RuntimeLayout,
     objects: Vec<RuntimeObject>,
+    values: Vec<Value>,
 }
 
 impl CairnHost {
@@ -95,6 +106,7 @@ impl CairnHost {
         Self {
             layout,
             objects: Vec::new(),
+            values: Vec::new(),
         }
     }
 
@@ -107,6 +119,26 @@ impl CairnHost {
             .and_then(|raw| raw.checked_sub(1))
             .ok_or(HostError::Failed)?;
         self.objects.get(index).ok_or(HostError::Failed)
+    }
+
+    fn boxed_value(&self, obj: Obj) -> Result<&Value, HostError> {
+        if obj.host_type != CAIRN_VALUE_TYPE {
+            return Err(HostError::SignatureMismatch);
+        }
+        let index = usize::try_from(obj.handle.0)
+            .ok()
+            .and_then(|raw| raw.checked_sub(1))
+            .ok_or(HostError::Failed)?;
+        self.values.get(index).ok_or(HostError::Failed)
+    }
+
+    fn push_boxed_value(&mut self, value: Value) -> Value {
+        let handle = ObjHandle(u64::try_from(self.values.len() + 1).unwrap_or(u64::MAX));
+        self.values.push(value);
+        Value::Obj(Obj {
+            host_type: CAIRN_VALUE_TYPE,
+            handle,
+        })
     }
 }
 
@@ -170,6 +202,16 @@ impl Host for CairnHost {
                 rets[0] = value;
                 Ok(0)
             }
+            BOX_VALUE => {
+                let value = match args {
+                    [ValueRef::I64(value)] => Value::I64(*value),
+                    [ValueRef::Bool(value)] => Value::Bool(*value),
+                    [ValueRef::Obj(obj)] if obj.host_type == CAIRN_OBJECT_TYPE => Value::Obj(*obj),
+                    _ => return Err(HostError::Failed),
+                };
+                rets[0] = self.push_boxed_value(value);
+                Ok(0)
+            }
             _ => Err(HostError::UnknownSymbol),
         }
     }
@@ -182,6 +224,10 @@ impl CairnHost {
         kind: sem::ValueKind,
     ) -> Result<Value, HostError> {
         match (kind, value) {
+            (sem::ValueKind::Any, ValueRef::Obj(obj)) => {
+                let _ = self.boxed_value(obj)?;
+                Ok(Value::Obj(obj))
+            }
             (sem::ValueKind::I64, ValueRef::I64(value)) => Ok(Value::I64(value)),
             (sem::ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
             (sem::ValueKind::Object(expected_class), ValueRef::Obj(obj)) => {
@@ -228,8 +274,18 @@ pub fn slot_get_signature(kind: sem::ValueKind) -> Option<execution_tape::host::
     })
 }
 
+/// Host signature for boxing a concrete value as top `<object>`.
+#[must_use]
+pub fn box_value_signature(input: ValueType) -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![input],
+        rets: vec![any_type()],
+    }
+}
+
 fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
     match kind {
+        sem::ValueKind::Any => Some(any_type()),
         sem::ValueKind::I64 => Some(ValueType::I64),
         sem::ValueKind::Bool => Some(ValueType::Bool),
         sem::ValueKind::Object(_) => Some(object_type()),

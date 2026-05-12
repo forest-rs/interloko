@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn compiles_and_runs_generic_area_dispatch() {
         let value = compile_and_run_main(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn compiles_and_runs_recoverable_restart() {
         let value = compile_and_run_main(
-            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+            "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  handle signal(make(<bad>, fallback: 42)) with restart e :: <bad> e.fallback end\nend;",
         )
         .expect("program should compile and run");
@@ -176,9 +176,19 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_object_top_slot_reads() {
+        let error = compile_and_run_main(
+            "define class <box> (<object>)\n  slot value;\nend;\n\
+             define function main()\n  make(<box>, value: 7).value\nend;",
+        )
+        .expect_err("main returns a boxed <object>, not an integer");
+        assert_eq!(error, CompileError::MainReturnedNonI64);
+    }
+
+    #[test]
     fn compiled_module_exposes_lowered_and_tape_dumps() {
         let compiled = compile(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",

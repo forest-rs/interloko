@@ -1,0 +1,9 @@
+// expect: diagnostic contains missing required init keyword `r:` for slot `radius`
+
+define class <circle> (<object>)
+  slot radius :: <integer>, required-init-keyword: r:;
+end;
+
+define function main()
+  make(<circle>)
+end;

@@ -39,6 +39,8 @@ pub struct LabelId(
 /// Lowered value category.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ValueKind {
+    /// Boxed top Cairn value corresponding to source `<object>`.
+    Any,
     /// Signed integer value.
     I64,
     /// Unsigned integer value used by runtime metadata.
@@ -164,6 +166,17 @@ pub enum Instr {
         dst: Register,
         /// Constant value.
         value: u64,
+        /// Source span.
+        span: Span,
+    },
+    /// Boxes a concrete value into the top `<object>` runtime value.
+    BoxValue {
+        /// Destination register.
+        dst: Register,
+        /// Source register.
+        src: Register,
+        /// Source value category.
+        from: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -764,7 +777,13 @@ impl<'module> BodyLowering<'module> {
                     let Some(field) = fields.iter().find(|field| field.slot == slot.id) else {
                         return Err(invalid_semantic("missing object field"));
                     };
-                    field_regs.push(self.lower_expr(&field.value)?.reg);
+                    let value = self.lower_expr(&field.value)?;
+                    let value = if slot.kind == sem::ValueKind::Any {
+                        self.box_any(value, field.span)?
+                    } else {
+                        value
+                    };
+                    field_regs.push(value.reg);
                 }
                 let result = self.alloc(ValueKind::Object(Some(*class)));
                 self.instructions.push(Instr::MakeObject {
@@ -1015,6 +1034,25 @@ impl<'module> BodyLowering<'module> {
         Ok(lowered)
     }
 
+    fn box_any(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
+        if value.kind == ValueKind::Any {
+            return Ok(value);
+        }
+        if value.kind == ValueKind::U64 {
+            return Err(invalid_semantic(
+                "runtime metadata cannot be boxed as <object>",
+            ));
+        }
+        let boxed = self.alloc(ValueKind::Any);
+        self.instructions.push(Instr::BoxValue {
+            dst: boxed.reg,
+            src: value.reg,
+            from: value.kind,
+            span,
+        });
+        Ok(boxed)
+    }
+
     fn alloc(&mut self, kind: ValueKind) -> Value {
         let value = Value {
             reg: Register(self.next_reg),
@@ -1046,6 +1084,7 @@ impl<'module> BodyLowering<'module> {
 
 fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
     match kind {
+        sem::ValueKind::Any => Ok(ValueKind::Any),
         sem::ValueKind::I64 => Ok(ValueKind::I64),
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::Object(class) => Ok(ValueKind::Object(Some(class))),
@@ -1143,6 +1182,16 @@ impl Module {
             }
             Instr::ConstU64 { dst, value, span } => {
                 write!(f, "  {dst} = const.u64 {value}")?;
+                fmt_span(f, *span)
+            }
+            Instr::BoxValue {
+                dst,
+                src,
+                from,
+                span,
+            } => {
+                write!(f, "  {dst} = box.any {src}: ")?;
+                self.fmt_kind(f, *from)?;
                 fmt_span(f, *span)
             }
             Instr::I64Binary {
@@ -1255,6 +1304,7 @@ impl Module {
 
     fn fmt_kind(&self, f: &mut fmt::Formatter<'_>, kind: ValueKind) -> fmt::Result {
         match kind {
+            ValueKind::Any => write!(f, "any"),
             ValueKind::I64 => write!(f, "i64"),
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
@@ -1344,7 +1394,7 @@ mod tests {
     #[test]
     fn lowers_generic_dispatch_object_construction_and_slots() {
         let module = lower_source(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
@@ -1373,6 +1423,19 @@ mod tests {
     }
 
     #[test]
+    fn lowers_object_top_slots_with_boxing() {
+        let module = lower_source(
+            "define class <box> (<object>)\n  slot value;\nend;\n\
+             define function main()\n  make(<box>, value: 7).value\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("box.any"));
+        assert!(dump.contains("<box>.value: any"));
+        assert_eq!(module.runtime.classes[0].slots[0].kind, sem::ValueKind::Any);
+    }
+
+    #[test]
     fn lowers_booleans_comparisons_and_if_join() {
         let module = lower_source(
             "define function check()\n  #t\nend;\n\
@@ -1391,7 +1454,7 @@ mod tests {
     #[test]
     fn lowers_signal_handle_and_restart_join() {
         let module = lower_source(
-            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+            "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  handle signal(make(<bad>, fallback: 42)) with restart e :: <bad> e.fallback end\nend;",
         );
 

@@ -150,6 +150,8 @@ pub enum CstKind {
     Class,
     /// Slot declaration.
     SlotDecl,
+    /// Slot option such as `init-keyword: radius:`.
+    SlotOption,
     /// Generic function declaration.
     Generic,
     /// Method definition.
@@ -275,6 +277,7 @@ fn syntax_node_id(
             mix_token_text(&mut builder, children, tokens, source, TokenKind::TypeName);
         }
         CstKind::SlotDecl
+        | CstKind::SlotOption
         | CstKind::LetStmt
         | CstKind::KeywordArg
         | CstKind::NameExpr
@@ -388,6 +391,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::IfExpr => 20,
         CstKind::HandleExpr => 21,
         CstKind::RestartClause => 22,
+        CstKind::SlotOption => 23,
     }
 }
 
@@ -742,12 +746,38 @@ impl<'source> Parser<'source> {
             );
             self.expect(TokenKind::TypeName, &mut children, "expected slot type");
         }
+        while self.at(TokenKind::Comma) {
+            self.expect(TokenKind::Comma, &mut children, "expected `,`");
+            children.push(CstElement::Node(self.parse_slot_option()));
+        }
         self.expect(
             TokenKind::Semicolon,
             &mut children,
             "expected `;` after slot declaration",
         );
         self.node(CstKind::SlotDecl, children, start)
+    }
+
+    fn parse_slot_option(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::Ident, &mut children, "expected slot option name");
+        self.expect(
+            TokenKind::Colon,
+            &mut children,
+            "expected `:` after slot option name",
+        );
+        self.expect(
+            TokenKind::Ident,
+            &mut children,
+            "expected slot keyword name",
+        );
+        self.expect(
+            TokenKind::Colon,
+            &mut children,
+            "expected `:` after slot keyword name",
+        );
+        self.node(CstKind::SlotOption, children, start)
     }
 
     fn parse_generic(&mut self) -> CstNode {
@@ -1226,13 +1256,23 @@ mod tests {
     #[test]
     fn parse_class_generic_method_and_object_syntax() {
         let tree = parse(
-            "define class <circle> (<object>)\n  slot radius :: <integer>;\n  slot valid? :: <boolean>;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
-             define function main()\n  area(make(<circle>, radius: 10, valid?: #t))\nend;",
+             define function main()\n  area(make(<circle>, radius: 10, enabled?: #t))\nend;",
         );
         assert_eq!(tree.diagnostics, Vec::new());
         assert_eq!(tree.root.child_nodes(CstKind::Class).count(), 1);
+        assert_eq!(
+            tree.root
+                .child_nodes(CstKind::Class)
+                .next()
+                .expect("class should parse")
+                .child_nodes(CstKind::SlotDecl)
+                .flat_map(|slot| slot.child_nodes(CstKind::SlotOption))
+                .count(),
+            2
+        );
         assert_eq!(tree.root.child_nodes(CstKind::Generic).count(), 1);
         assert_eq!(tree.root.child_nodes(CstKind::Method).count(), 1);
         assert!(

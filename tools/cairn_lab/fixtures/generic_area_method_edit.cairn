@@ -1,5 +1,5 @@
 define class <circle> (<object>)
-  slot radius;
+  slot radius :: <integer>;
 end;
 
 define generic area(x);

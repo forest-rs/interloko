@@ -2,11 +2,11 @@
 // expect: diagnostic contains signal condition is not handled by the active restart
 
 define class <bad-input> (<object>)
-  slot fallback;
+  slot fallback :: <integer>;
 end;
 
 define class <other-input> (<object>)
-  slot fallback;
+  slot fallback :: <integer>;
 end;
 
 define function main()

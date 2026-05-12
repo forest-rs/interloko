@@ -1,5 +1,106 @@
 # Plans
 
+## Make Slots Dylan-Shaped
+
+Ticket: `cai-lnet`
+
+### Goal
+
+Make Cairn slot declarations follow the useful part of Dylan's slot shape:
+untyped slots default to `<object>`, slots can declare required or renamed
+construction keywords, and object construction reports focused diagnostics for
+bad keyword initialization.
+
+The intended surface shape is:
+
+```text
+define class <circle> (<object>)
+  slot radius :: <integer>, required-init-keyword: radius:;
+  slot cached :: <object>, init-keyword: cached-value:;
+end;
+```
+
+The important semantic distinction is:
+
+```text
+<object>             => top Cairn value category
+nominal <some-class> => runtime-managed object handle specialized to a class
+```
+
+### Non-Goals
+
+- No default slot values, `init-value:`, or `init-function:`.
+- No setters, `constant slot`, or setter naming.
+- No `instance`, `class`, `each-subclass`, or `virtual` allocation variants.
+- No inherited slot specifications.
+- No parametric slot types.
+- No full Dylan class initialization protocol.
+- No sealed dispatch optimization or Cranelift.
+
+### Fence
+
+The compiler owns slot declaration metadata, top-value slot typing,
+construction-keyword validation, semantic/lowered/tape artifact identity, and
+dumps. The runtime owns carrying slot payload values through existing
+host-call object operations. This slice does not own native aggregate layout,
+boxed primitive identity, Dylan initialization methods, or optimization.
+
+### Invariants
+
+- Missing slot types resolve to the top `<object>` value category.
+- `<object>` accepts integers, booleans, and nominal runtime object handles.
+- Nominal class slot types still require a matching runtime object handle.
+- A slot's construction keyword defaults to `slot-name:`.
+- `init-keyword:` changes only the external construction keyword, not the slot
+  read name.
+- `required-init-keyword:` marks the slot as required and, when present,
+  supplies the external construction keyword.
+- In this slice, every slot still needs an initializer because defaults are not
+  implemented; diagnostics should phrase required-keyword failures in keyword
+  terms and ordinary missing initializers in slot terms.
+- Duplicate, unknown, missing, and type-incompatible construction keywords
+  produce diagnostics without panics.
+- Lowering and tape emission continue to use ordinary calls and runtime host
+  calls, not new generic or aggregate opcodes.
+
+### Steps
+
+1. Add parser and AST support for slot options:
+   - `, init-keyword: keyword:`
+   - `, required-init-keyword: keyword:`
+2. Extend semantic slot metadata with declared type, effective value category,
+   construction keyword, and requiredness.
+3. Split value categories so top `<object>` is distinct from nominal class
+   object handles.
+4. Validate object construction by construction keyword, including duplicate
+   keyword detection and focused missing/unknown/type diagnostics.
+5. Update lowered IR and tape/runtime host-call signatures so top-value slots
+   can store and return any first-slice Cairn value.
+6. Update CST/AST/semantic/lowered/tape dumps, fingerprints, and artifact
+   reporting to include declared type, keyword, requiredness, and runtime
+   representation.
+7. Add corpus fixtures for:
+   - untyped `<object>` slots;
+   - explicit primitive and nominal typed slots;
+   - required init keywords;
+   - renamed init keywords;
+   - missing, unknown, duplicate, and type-incompatible construction keywords.
+8. Add incremental tests proving slot metadata edits invalidate the affected
+   class/layout/construction/lowered/tape artifacts without broad recompute.
+9. Update progress notes with implemented semantics and deferred Dylan slot
+   features, then run the full gates.
+
+### Risks
+
+- `execution_tape` host signatures are statically typed. Returning top
+  `<object>` values requires a deliberate representation, likely a single
+  runtime value handle for the first slice rather than pretending the value is a
+  nominal object handle.
+- Existing examples that relied on untyped integer slots should become explicit
+  `:: <integer>` slots when their reads participate in arithmetic.
+- The slot option syntax should stay narrow so it does not imply default values,
+  setters, allocation variants, or inherited slot behavior.
+
 ## Build Richer Slot Type Model
 
 Ticket: `cai-kf0d`
@@ -40,8 +141,9 @@ layout in this slice.
 
 ### Invariants
 
-- Untyped legacy `slot name;` declarations remain accepted and default to
-  `<integer>` during migration.
+- Untyped legacy `slot name;` declarations remained accepted in this slice.
+  The later `cai-lnet` slot-initialization slice changed their default to
+  `<object>`.
 - Explicit primitive slot types are limited to `<integer>` and `<boolean>`.
 - Explicit nominal slot types refer to already-declared or source-declared Cairn
   classes by name.

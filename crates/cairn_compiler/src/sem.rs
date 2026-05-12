@@ -55,6 +55,8 @@ pub struct LocalId(
 /// Semantic value category for this slice.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ValueKind {
+    /// Top Cairn value category corresponding to source `<object>`.
+    Any,
     /// Signed integer value.
     I64,
     /// Boolean value.
@@ -106,8 +108,15 @@ pub struct Slot {
     pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
+    /// Declared source type name, with missing declarations normalized to
+    /// `<object>`.
+    pub type_name: String,
     /// Declared slot value category.
     pub kind: ValueKind,
+    /// External construction keyword without the trailing colon.
+    pub init_keyword: String,
+    /// Whether the slot declared `required-init-keyword:`.
+    pub required_init_keyword: bool,
     /// Source span.
     pub span: Span,
 }
@@ -589,12 +598,36 @@ impl Lowering {
                     id: SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX)),
                     definition: slot.definition,
                     name: slot.name.clone(),
+                    type_name: slot.type_name.clone().unwrap_or_else(|| "<object>".into()),
                     kind: self.resolve_slot_kind(slot.type_name.as_deref(), slot.type_span),
+                    init_keyword: slot
+                        .init_keyword
+                        .clone()
+                        .unwrap_or_else(|| slot.name.clone()),
+                    required_init_keyword: slot.required_init_keyword,
                     span: slot.span,
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            self.check_duplicate_init_keywords(class, &slots);
             if let Some(lowered_class) = self.classes.get_mut(class_index) {
                 lowered_class.slots = slots;
+            }
+        }
+    }
+
+    fn check_duplicate_init_keywords(&mut self, class: &ast::Class, slots: &[Slot]) {
+        for (index, slot) in slots.iter().enumerate() {
+            if slots[..index]
+                .iter()
+                .any(|previous| previous.init_keyword == slot.init_keyword)
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    class.span,
+                    format!(
+                        "class `{}` has duplicate init keyword `{}:`",
+                        class.name, slot.init_keyword
+                    ),
+                ));
             }
         }
     }
@@ -1097,10 +1130,26 @@ impl Lowering {
 
         let mut resolved = Vec::new();
         for field in fields {
-            let Some(slot) = class.slots.iter().find(|slot| slot.name == field.name) else {
+            if resolved.iter().any(|resolved: &FieldInit| {
+                class.slots[resolved.slot.0 as usize].init_keyword == field.name
+            }) {
                 ctx.diagnostics.push(Diagnostic::error(
                     field.span,
-                    format!("class `{}` has no slot `{}`", class.name, field.name),
+                    format!("duplicate initializer for keyword `{}:`", field.name),
+                ));
+                continue;
+            }
+            let Some(slot) = class
+                .slots
+                .iter()
+                .find(|slot| slot.init_keyword == field.name)
+            else {
+                ctx.diagnostics.push(Diagnostic::error(
+                    field.span,
+                    format!(
+                        "class `{}` has no init keyword `{}:`",
+                        class.name, field.name
+                    ),
                 ));
                 continue;
             };
@@ -1126,10 +1175,20 @@ impl Lowering {
 
         for slot in &class.slots {
             if !resolved.iter().any(|field| field.slot == slot.id) {
-                ctx.diagnostics.push(Diagnostic::error(
-                    span,
-                    format!("missing initializer for slot `{}`", slot.name),
-                ));
+                if slot.required_init_keyword {
+                    ctx.diagnostics.push(Diagnostic::error(
+                        span,
+                        format!(
+                            "missing required init keyword `{}:` for slot `{}`",
+                            slot.init_keyword, slot.name
+                        ),
+                    ));
+                } else {
+                    ctx.diagnostics.push(Diagnostic::error(
+                        span,
+                        format!("missing initializer for slot `{}`", slot.name),
+                    ));
+                }
             }
         }
 
@@ -1212,9 +1271,10 @@ impl Lowering {
 
     fn resolve_slot_kind(&mut self, type_name: Option<&str>, span: Span) -> ValueKind {
         let Some(type_name) = type_name else {
-            return ValueKind::I64;
+            return ValueKind::Any;
         };
         match type_name {
+            "<object>" => ValueKind::Any,
             "<integer>" => ValueKind::I64,
             "<boolean>" => ValueKind::Bool,
             name => self
@@ -1231,13 +1291,15 @@ impl Lowering {
     }
 
     fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
-        expected == actual
+        matches!(expected, ValueKind::Any)
+            || expected == actual
             || matches!(expected, ValueKind::Error)
             || matches!(actual, ValueKind::Error)
     }
 
     fn kind_name(&self, kind: ValueKind) -> String {
         match kind {
+            ValueKind::Any => "<object>".into(),
             ValueKind::I64 => "<integer>".into(),
             ValueKind::Bool => "<boolean>".into(),
             ValueKind::Object(class) => self
@@ -1308,7 +1370,7 @@ mod tests {
     #[test]
     fn resolves_classes_methods_slots_and_generic_calls() {
         let module = lower_source(
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
@@ -1364,6 +1426,37 @@ mod tests {
     }
 
     #[test]
+    fn untyped_slots_default_to_object_top() {
+        let module = lower_source(
+            "define class <box> (<object>)\n  slot value;\n  slot flag;\nend;\n\
+             define function main()\n  make(<box>, value: 7, flag: #t).value\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes[0].slots[0].type_name, "<object>");
+        assert_eq!(module.classes[0].slots[0].kind, ValueKind::Any);
+        assert_eq!(module.classes[0].slots[0].init_keyword, "value");
+        assert!(!module.classes[0].slots[0].required_init_keyword);
+        assert_eq!(module.classes[0].slots[1].kind, ValueKind::Any);
+        assert_eq!(module.functions[0].result_kind, ValueKind::Any);
+    }
+
+    #[test]
+    fn resolves_slot_init_keywords_and_required_keywords() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: r:;\n  slot cached, init-keyword: payload:;\nend;\n\
+             define function main()\n  make(<circle>, r: 10, payload: #f).radius\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes[0].slots[0].init_keyword, "r");
+        assert!(module.classes[0].slots[0].required_init_keyword);
+        assert_eq!(module.classes[0].slots[1].init_keyword, "payload");
+        assert!(!module.classes[0].slots[1].required_init_keyword);
+        assert_eq!(module.functions[0].result_kind, ValueKind::I64);
+    }
+
+    #[test]
     fn reports_slot_type_errors() {
         let mismatch = lower_source(
             "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
@@ -1386,6 +1479,41 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message == "unresolved slot type `<missing>`")
+        );
+    }
+
+    #[test]
+    fn reports_slot_keyword_construction_errors() {
+        let missing = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: r:;\nend;\n\
+             define function main()\n  make(<circle>)\nend;",
+        );
+        assert!(
+            missing
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message
+                    == "missing required init keyword `r:` for slot `radius`")
+        );
+
+        let unknown = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>, init-keyword: r:;\nend;\n\
+             define function main()\n  make(<circle>, radius: 10)\nend;",
+        );
+        assert!(unknown.diagnostics.iter().any(
+            |diagnostic| diagnostic.message == "class `<circle>` has no init keyword `radius:`"
+        ));
+
+        let duplicate = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  make(<circle>, radius: 10, radius: 11)\nend;",
+        );
+        assert!(
+            duplicate
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message
+                    == "duplicate initializer for keyword `radius:`")
         );
     }
 
@@ -1442,7 +1570,7 @@ mod tests {
     #[test]
     fn resolves_signal_handle_and_restart() {
         let module = lower_source(
-            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+            "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  handle signal(make(<bad>, fallback: 42)) with restart e :: <bad> e.fallback end\nend;",
         );
 
@@ -1482,7 +1610,7 @@ mod tests {
     #[test]
     fn restart_condition_binding_is_handler_scoped() {
         let module = lower_source(
-            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+            "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  let recovered = handle signal(make(<bad>, fallback: 0)) with restart e :: <bad> e.fallback end;\n  e.fallback\nend;",
         );
 
@@ -1497,7 +1625,7 @@ mod tests {
     #[test]
     fn reports_invalid_signal_and_restart_uses() {
         let uncaught = lower_source(
-            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+            "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  signal(make(<bad>, fallback: 0))\nend;",
         );
         assert!(
@@ -1508,7 +1636,7 @@ mod tests {
         );
 
         let mismatched_restart = lower_source(
-            "define class <bad> (<object>)\n  slot fallback;\nend;\n\
+            "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  handle 1 with restart <bad> #f end\nend;",
         );
         assert!(

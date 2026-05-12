@@ -3,8 +3,8 @@
 // expect: dump sem contains make c0
 
 define class <rectangle> (<object>)
-  slot width;
-  slot height;
+  slot width :: <integer>;
+  slot height :: <integer>;
 end;
 
 define function main()

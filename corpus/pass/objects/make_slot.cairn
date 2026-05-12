@@ -3,7 +3,7 @@
 // expect: dump sem contains slot-read
 
 define class <circle> (<object>)
-  slot radius;
+  slot radius :: <integer>;
 end;
 
 define function main()

@@ -4,11 +4,11 @@
 // expect: dump tape contains program="cairn"
 
 define class <circle> (<object>)
-  slot radius;
+  slot radius :: <integer>;
 end;
 
 define class <square> (<object>)
-  slot side;
+  slot side :: <integer>;
 end;
 
 define generic area(x);

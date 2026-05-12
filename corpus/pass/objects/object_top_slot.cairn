@@ -1,0 +1,13 @@
+// expect: diagnostics 0
+// expect: dump sem contains value :: <object>
+// expect: dump sem contains runtime=boxed-any
+// expect: dump lowered contains box.any
+// expect: dump tape contains cairn.box_value
+
+define class <box> (<object>)
+  slot value;
+end;
+
+define function main()
+  make(<box>, value: 7).value
+end;

@@ -2,7 +2,7 @@
 // expect: diagnostic contains handle body and restart must have matching result kinds
 
 define class <bad-input> (<object>)
-  slot fallback;
+  slot fallback :: <integer>;
 end;
 
 define function main()

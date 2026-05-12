@@ -1,0 +1,9 @@
+// expect: diagnostic contains duplicate initializer for keyword `radius:`
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  make(<circle>, radius: 10, radius: 11)
+end;

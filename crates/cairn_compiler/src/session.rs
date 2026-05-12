@@ -982,11 +982,17 @@ fn dump_ast(module: &ast::Module) -> String {
             class.id, class.definition, class.name
         );
         for slot in &class.slots {
-            let type_name = slot.type_name.as_deref().unwrap_or("<integer>");
+            let type_name = slot.type_name.as_deref().unwrap_or("<object>");
+            let init_keyword = slot.init_keyword.as_deref().unwrap_or(&slot.name);
+            let required = if slot.required_init_keyword {
+                " required"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
-                "  slot {} {} {} :: {}",
-                slot.id, slot.definition, slot.name, type_name
+                "  slot {} {} {} :: {} init-keyword: {}:{}",
+                slot.id, slot.definition, slot.name, type_name, init_keyword, required
             );
         }
     }
@@ -1151,11 +1157,18 @@ fn dump_sem(module: &sem::Module) -> String {
         for slot in &class.slots {
             let _ = writeln!(
                 out,
-                "  slot s{} {} {} :: {}",
+                "  slot s{} {} {} :: {} init-keyword: {}:{} runtime={}",
                 slot.id.0,
                 slot.definition,
                 slot.name,
-                sem_kind_name(module, slot.kind)
+                slot.type_name,
+                slot.init_keyword,
+                if slot.required_init_keyword {
+                    " required"
+                } else {
+                    ""
+                },
+                sem_runtime_repr(slot.kind)
             );
         }
     }
@@ -1191,20 +1204,9 @@ fn dump_sem(module: &sem::Module) -> String {
     out
 }
 
-fn sem_kind_name(module: &sem::Module, kind: sem::ValueKind) -> String {
-    match kind {
-        sem::ValueKind::I64 => "<integer>".into(),
-        sem::ValueKind::Bool => "<boolean>".into(),
-        sem::ValueKind::Object(class) => module
-            .classes
-            .get(class.0 as usize)
-            .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
-        sem::ValueKind::Error => "<error>".into(),
-    }
-}
-
 fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
     match kind {
+        sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Object(class) => module.classes.get(class.0 as usize).map_or_else(
@@ -1212,6 +1214,16 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
             |class| format!("object#{}", class.definition.raw()),
         ),
         sem::ValueKind::Error => "error".into(),
+    }
+}
+
+fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
+    match kind {
+        sem::ValueKind::Any => "boxed-any",
+        sem::ValueKind::I64 => "i64",
+        sem::ValueKind::Bool => "bool",
+        sem::ValueKind::Object(_) => "object-handle",
+        sem::ValueKind::Error => "error",
     }
 }
 
@@ -1444,9 +1456,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     .slots
                     .iter()
                     .map(|slot| format!(
-                        "{}={}",
+                        "{}={}:{}:{}",
                         slot.name,
-                        sem_kind_fingerprint(module, slot.kind)
+                        sem_kind_fingerprint(module, slot.kind),
+                        slot.init_keyword,
+                        slot.required_init_keyword
                     ))
                     .collect::<Vec<_>>()
                     .join(",")
@@ -1460,10 +1474,12 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     name: format!("{}.{}", class.name, slot.name),
                 },
                 fingerprint: format!(
-                    "slot:{}:{}:{}",
+                    "slot:{}:{}:{}:{}:{}",
                     class.name,
                     slot.name,
-                    sem_kind_fingerprint(module, slot.kind)
+                    sem_kind_fingerprint(module, slot.kind),
+                    slot.init_keyword,
+                    slot.required_init_keyword
                 ),
             });
         }
@@ -1697,7 +1713,7 @@ fn indent_line(out: &mut String, indent: usize) {
 mod tests {
     use super::*;
 
-    const AREA: &str = "define class <circle> (<object>)\n  slot radius;\nend;\n\
+    const AREA: &str = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                         define generic area(x);\n\
                         define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                         define function main()\n  area(make(<circle>, radius: 10))\nend;";
@@ -1756,7 +1772,7 @@ mod tests {
         let after = CompilerSession::compile_source(
             "area.cairn",
             "\n// same program with trivia edits\n\
-             define class <circle> (<object>)\n  slot radius;\nend;\n\
+             define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius   *   c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
@@ -1778,7 +1794,7 @@ mod tests {
         let before = CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
         let after = CompilerSession::compile_source(
             "area.cairn",
-            "define class <circle> (<object>)\n  slot radius;\nend;\n\
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius + c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
@@ -1838,7 +1854,7 @@ mod tests {
             .edit_and_compile(
                 file,
                 "\n// same definitions, with harmless trivia changes\n\
-                 define class <circle> (<object>)\n  slot radius;\nend;\n\
+                 define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                  define generic area(x);\n\
                  define method area(c :: <circle>)\n  c.radius   *   c.radius\nend;\n\
                  define function main()\n  area(make(<circle>, radius: 10))\nend;",
@@ -1868,14 +1884,14 @@ mod tests {
 
     #[test]
     fn incremental_method_body_edit_preserves_unrelated_method_artifacts() {
-        let before = "define class <circle> (<object>)\n  slot radius;\nend;\n\
-                      define class <square> (<object>)\n  slot side;\nend;\n\
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                       define generic area(x);\n\
                       define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                       define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                       define function main()\n  area(make(<circle>, radius: 10))\nend;";
-        let after = "define class <circle> (<object>)\n  slot radius;\nend;\n\
-                     define class <square> (<object>)\n  slot side;\nend;\n\
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                     define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                      define generic area(x);\n\
                      define method area(c :: <circle>)\n  c.radius + c.radius\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
@@ -1916,14 +1932,14 @@ mod tests {
 
     #[test]
     fn incremental_branch_edit_recomputes_only_affected_method_artifacts() {
-        let before = "define class <circle> (<object>)\n  slot radius;\nend;\n\
-                      define class <square> (<object>)\n  slot side;\nend;\n\
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                       define generic area(x);\n\
                       define method area(c :: <circle>)\n  if c.radius > 0 then c.radius * c.radius else 0 end\nend;\n\
                       define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                       define function main()\n  area(make(<circle>, radius: 10))\nend;";
-        let after = "define class <circle> (<object>)\n  slot radius;\nend;\n\
-                     define class <square> (<object>)\n  slot side;\nend;\n\
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                     define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                      define generic area(x);\n\
                      define method area(c :: <circle>)\n  if c.radius > 0 then c.radius + c.radius else 0 end\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
@@ -1968,16 +1984,16 @@ mod tests {
 
     #[test]
     fn incremental_restart_handler_edit_recomputes_only_affected_method_artifacts() {
-        let before = "define class <circle> (<object>)\n  slot radius;\nend;\n\
-                      define class <square> (<object>)\n  slot side;\nend;\n\
-                      define class <invalid-radius> (<object>)\n  slot fallback;\nend;\n\
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+                      define class <invalid-radius> (<object>)\n  slot fallback :: <integer>;\nend;\n\
                       define generic area(x);\n\
                       define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback end\nend;\n\
                       define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                       define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
-        let after = "define class <circle> (<object>)\n  slot radius;\nend;\n\
-                     define class <square> (<object>)\n  slot side;\nend;\n\
-                     define class <invalid-radius> (<object>)\n  slot fallback;\nend;\n\
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                     define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+                     define class <invalid-radius> (<object>)\n  slot fallback :: <integer>;\nend;\n\
                      define generic area(x);\n\
                      define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback + 1 end\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
@@ -2071,13 +2087,54 @@ mod tests {
     }
 
     #[test]
+    fn incremental_slot_keyword_edit_reuses_lowering_when_runtime_layout_is_unchanged() {
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>, init-keyword: radius:;\nend;\n\
+                      define function main()\n  make(<circle>, radius: 10).radius\nend;";
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>, init-keyword: r:;\nend;\n\
+                     define function main()\n  make(<circle>, r: 10).radius\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("circle.cairn", before);
+        let _ = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+
+        let update = session
+            .edit_and_compile(file, after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.kind == DefinitionKind::Slot
+                && change.change == DefinitionChangeKind::Modified
+        }));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::Bind),
+            Some(CacheAction::Recomputed)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::LoweredModule),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::TapeProgram),
+            Some(CacheAction::Reused)
+        );
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("init-keyword: r:")
+        );
+    }
+
+    #[test]
     fn incremental_definition_edit_marks_broad_dependents_affected() {
-        let before = "define class <circle> (<object>)\n  slot radius;\nend;\n\
+        let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                       define generic area(x);\n\
                       define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                       define function main()\n  area(make(<circle>, radius: 10))\nend;";
-        let after = "define class <circle> (<object>)\n  slot radius;\nend;\n\
-                     define class <square> (<object>)\n  slot side;\nend;\n\
+        let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                     define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                      define generic area(x);\n\
                      define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
