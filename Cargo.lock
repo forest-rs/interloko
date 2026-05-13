@@ -110,6 +110,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn_rich_values_example"
+version = "0.1.0"
+dependencies = [
+ "cairn_compiler",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"

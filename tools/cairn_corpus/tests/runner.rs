@@ -93,8 +93,10 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/diagnostics/unknown_superclass.cairn"));
     assert!(out.contains("fail/diagnostics/duplicate_inherited_slot.cairn"));
     assert!(out.contains("fail/diagnostics/signal_arity.cairn"));
+    assert!(out.contains("pass/values/typed_slots_and_dispatch.cairn"));
+    assert!(out.contains("fail/values/malformed_string.cairn"));
     assert!(out.contains("fail/syntax/expected_expression.cairn"));
-    assert!(out.contains("corpus: 92 passed, 0 failed, 92 total"));
+    assert!(out.contains("corpus: 98 passed, 0 failed, 98 total"));
 }
 
 #[test]

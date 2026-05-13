@@ -1,0 +1,4 @@
+// expect: diagnostic code ast.malformed-string-literal
+define function main()
+  "unterminated
+end;

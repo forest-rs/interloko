@@ -1,0 +1,27 @@
+// expect: run 10
+// expect: dump eop contains <string>
+// expect: dump sem contains generic-call
+define class <sample> (<object>)
+  slot label :: <string>;
+  slot tag :: <symbol>;
+  slot option :: <keyword>;
+  slot items :: <vector>;
+end;
+
+define generic score(x :: <object>) => <integer>;
+
+define method score(x :: <string>) => <integer>
+  if x = "direct" then 4 else 0 end
+end;
+
+define method score(x :: <sample>) => <integer>
+  let label-score = if x.label = "box" then 3 else 0 end;
+  let tag-score = if x.tag = #ready then 2 else 0 end;
+  let keyword-score = if x.option = #:fallback then 1 else 0 end;
+  label-score + tag-score + keyword-score
+end;
+
+define function main()
+  let sample = make(<sample>, label: "box", tag: #ready, option: #:fallback, items: [1, 2]);
+  score("direct") + score(sample)
+end;

@@ -1,0 +1,10 @@
+// expect: run 1
+// expect: dump sem contains literal.vector
+// expect: dump lowered contains literal.vector
+define function vector?(value :: <vector>) => <boolean>
+  instance?(value, <vector>)
+end;
+
+define function main()
+  if vector?([1, "two", #three, #:four]) then 1 else 0 end
+end;

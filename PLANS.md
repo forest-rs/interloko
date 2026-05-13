@@ -1,5 +1,52 @@
 # Plans
 
+## Add Richer Value Types
+
+### Goal
+
+Add Cairn's first non-numeric language values: strings, symbols, keywords, and
+simple immutable vectors. These values must flow through syntax, AST, semantic
+IR, lowered IR, tape/runtime execution, dumps, examples, corpus, and
+diagnostics.
+
+### Fence
+
+`cairn_compiler` owns source syntax, semantic value kinds, lowered value
+operations, runtime representation, and tape emission for these values. It
+explicitly does not own general collection libraries, mutable sequence
+operations, persistent cross-session interning, package-qualified symbols,
+string interpolation, locale semantics, or optimizer work.
+
+### Invariants
+
+- String escape decoding is explicit and diagnosed for malformed literals.
+- Symbols and keyword values have stable per-session identity and are distinct
+  from function/generic keyword arguments.
+- Vectors are immutable ordered values in this slice.
+- Slot storage and function/generic contracts use the same `ValueKind`
+  machinery as existing integers, booleans, objects, and classes.
+- Tape lowering uses ordinary constants/runtime calls/host calls, not new
+  special-purpose generic opcodes.
+
+### Steps
+
+1. Extend lexer/parser/AST for strings, symbols, keywords, and vector literals
+   with focused diagnostics.
+2. Extend semantic value kinds, type annotations, slot/function/generic
+   checking, equality rules, and dumps.
+3. Extend lowered IR and tape/runtime representation for executable values.
+4. Add corpus, examples, session/REPL/workbench coverage, and progress notes.
+5. Keep commits coherent: syntax/AST, sem/diagnostics, lower/runtime, docs/tests.
+
+### Risks
+
+- Vectors can easily become a general sequence library; this pass only needs
+  literals, storage, passing, returning, and display/dumps.
+- Equality should be conservative: only define cases with clear identity/value
+  semantics.
+- Keep interning deterministic inside a compiled module/session, not globally
+  persistent.
+
 ## Add Initial Cairn REPL Tool
 
 ### Goal

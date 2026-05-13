@@ -4,6 +4,7 @@ members = [
     "examples/forty_two",
     "examples/generic_area",
     "examples/host_backed_area",
+    "examples/rich_values",
     "tools/cairn_corpus",
     "tools/cairn_diagnostics",
     "tools/cairn_lab",

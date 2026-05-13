@@ -98,3 +98,18 @@ fn dispatch_sites_can_be_listed_and_explained() {
     assert!(stdout.contains("dispatch dispatch:d0"));
     assert!(stdout.contains("generic: g0:area"));
 }
+
+#[test]
+fn rich_values_work_in_expressions_and_dumps() {
+    let (stdout, stderr) = run_repl(
+        "define function same-message(a :: <string>, b :: <string>) => <boolean>\n  a = b\nend;\n\
+         if same-message(\"hello\", \"hello\") then 7 else 0 end\n\
+         :dump sem\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "7"));
+    assert!(stdout.contains("literal.string"));
+    assert!(stdout.contains("value-eq"));
+}

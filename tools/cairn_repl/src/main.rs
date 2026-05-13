@@ -765,11 +765,17 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Restart
         | TokenKind::End => keyword_highlight_style(),
         TokenKind::TypeName => type_highlight_style(),
-        TokenKind::Number | TokenKind::Bool => literal_highlight_style(),
+        TokenKind::Number
+        | TokenKind::Bool
+        | TokenKind::String
+        | TokenKind::Symbol
+        | TokenKind::Keyword => literal_highlight_style(),
         TokenKind::Comment => comment_highlight_style(),
         TokenKind::Error => error_highlight_style(),
         TokenKind::LParen
         | TokenKind::RParen
+        | TokenKind::LBracket
+        | TokenKind::RBracket
         | TokenKind::Comma
         | TokenKind::Plus
         | TokenKind::Minus

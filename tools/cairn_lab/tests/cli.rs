@@ -173,6 +173,29 @@ fn run_executes_main() {
 }
 
 #[test]
+fn rich_values_run_and_dump_through_lab() {
+    let file = fixture("rich_values.cairn");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let out = run_lab(&["run", path]);
+    assert_eq!(out.trim(), "10");
+
+    let sem = run_lab(&["dump", path, "--stage", "sem"]);
+    assert!(sem.contains("literal.string"));
+    assert!(sem.contains("literal.symbol"));
+    assert!(sem.contains("literal.keyword"));
+    assert!(sem.contains("literal.vector"));
+
+    let lowered = run_lab(&["dump", path, "--stage", "lowered"]);
+    assert!(lowered.contains("value.eq"));
+    assert!(lowered.contains("literal.vector"));
+
+    let eop = run_lab(&["dump", path, "--stage", "eop"]);
+    assert!(eop.contains("<string>"));
+    assert!(eop.contains("builtin-value"));
+}
+
+#[test]
 fn dump_exposes_stages() {
     let file = fixture("generic_area.cairn");
     let path = file.to_str().expect("fixture path should be utf8");

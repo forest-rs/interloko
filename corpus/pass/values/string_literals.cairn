@@ -1,0 +1,10 @@
+// expect: run 1
+// expect: dump sem contains literal.string
+// expect: dump lowered contains literal.string
+define function same-message(a :: <string>, b :: <string>) => <boolean>
+  a = b
+end;
+
+define function main()
+  if same-message("hello\nworld", "hello\nworld") then 1 else 0 end
+end;
