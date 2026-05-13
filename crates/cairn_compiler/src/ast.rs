@@ -391,6 +391,19 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Object slot assignment through `receiver.slot := value`.
+    SlotAssign {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Receiver expression.
+        receiver: Box<Expr>,
+        /// Slot name.
+        slot: String,
+        /// Assigned value expression.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Binary expression.
     Binary {
         /// Stable-ish AST node identity.
@@ -477,6 +490,7 @@ impl Expr {
             | Self::Signal { id, .. }
             | Self::MakeObject { id, .. }
             | Self::SlotRead { id, .. }
+            | Self::SlotAssign { id, .. }
             | Self::Binary { id, .. }
             | Self::UnaryMinus { id, .. }
             | Self::Compare { id, .. }
@@ -503,6 +517,7 @@ impl Expr {
             | Self::Signal { span, .. }
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
+            | Self::SlotAssign { span, .. }
             | Self::Binary { span, .. }
             | Self::UnaryMinus { span, .. }
             | Self::Compare { span, .. }
@@ -1056,6 +1071,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::TypeExpr => self.lower_class_name(node),
             CstKind::CallExpr => self.lower_call(node),
             CstKind::SlotExpr => self.lower_slot_read(node),
+            CstKind::SlotAssignExpr => self.lower_slot_assign(node),
             CstKind::UnaryExpr => self.lower_unary(node),
             CstKind::BinaryExpr => self.lower_binary(node),
             CstKind::IfExpr => self.lower_if(node),
@@ -1490,6 +1506,44 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             })),
             slot: slot.unwrap_or_default(),
+            span: node.span,
+        }
+    }
+
+    fn lower_slot_assign(&mut self, node: &CstNode) -> Expr {
+        let mut child_nodes = node.children.iter().filter_map(|child| match child {
+            CstElement::Node(expr) => Some(expr),
+            CstElement::Token(_) => None,
+        });
+        let target = child_nodes
+            .next()
+            .map(|expr| self.lower_expr(expr))
+            .unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            });
+        let value = child_nodes
+            .next()
+            .map(|expr| self.lower_expr(expr))
+            .unwrap_or(Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            });
+        let Expr::SlotRead { receiver, slot, .. } = target else {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                DiagnosticCode::AstInvalidSlotAssignment,
+            ));
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::SlotAssign {
+            id: self.ast_id(node),
+            receiver,
+            slot,
+            value: Box::new(value),
             span: node.span,
         }
     }

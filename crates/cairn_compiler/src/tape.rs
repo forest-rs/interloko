@@ -1,9 +1,9 @@
 //! Adapter from lowered Cairn IR to `execution_tape`.
 //!
 //! This module owns only bytecode emission for already-lowered Cairn functions.
-//! Generic dispatch, object construction, and slot reads arrive here as lowered
-//! instructions and are encoded with ordinary calls, branches, constants, and
-//! host calls.
+//! Generic dispatch, object construction, slot reads, and slot writes arrive
+//! here as lowered instructions and are encoded with ordinary calls, branches,
+//! constants, and host calls.
 
 use alloc::format;
 use alloc::string::String;
@@ -158,6 +158,7 @@ struct HostSigs {
     make_object: Vec<HostSigId>,
     class_of: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
+    slot_set: Vec<Vec<HostSigId>>,
     string_literals: Vec<(String, HostSigId)>,
     symbol_literals: Vec<(String, HostSigId)>,
     vector_literals: Vec<(usize, HostSigId)>,
@@ -198,6 +199,24 @@ impl HostSigs {
                         Ok(builder.host_sig_for(
                             runtime::SLOT_GET,
                             runtime::slot_get_signature(slot.kind)
+                                .ok_or_else(|| invalid_lowered("runtime slot has invalid kind"))?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, TapeError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let slot_set = module
+            .runtime
+            .classes
+            .iter()
+            .map(|class| {
+                class
+                    .slots
+                    .iter()
+                    .map(|slot| {
+                        Ok(builder.host_sig_for(
+                            runtime::SLOT_SET,
+                            runtime::slot_set_signature(slot.kind)
                                 .ok_or_else(|| invalid_lowered("runtime slot has invalid kind"))?,
                         ))
                     })
@@ -261,6 +280,7 @@ impl HostSigs {
             make_object,
             class_of,
             slot_get,
+            slot_set,
             string_literals,
             symbol_literals,
             vector_literals,
@@ -557,6 +577,28 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .host_call(0, sig, 0, &[receiver.0, slot_reg], &[dst.0]);
             }
+            lower::Instr::WriteSlot {
+                dst,
+                receiver,
+                value,
+                class,
+                slot,
+                span,
+                ..
+            } => {
+                let sig = self
+                    .host_sigs
+                    .slot_set
+                    .get(class.0 as usize)
+                    .and_then(|slots| slots.get(slot.0 as usize))
+                    .copied()
+                    .ok_or_else(|| invalid_lowered("slot_set signature is out of range"))?;
+                let slot_reg = self.alloc_temp();
+                self.set_span(*span);
+                self.asm.const_u64(slot_reg, u64::from(slot.0));
+                self.asm
+                    .host_call(0, sig, 0, &[receiver.0, slot_reg, value.0], &[dst.0]);
+            }
             lower::Instr::ClassOf { dst, object, span } => {
                 self.set_span(*span);
                 self.asm
@@ -744,6 +786,16 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
             note_register(*dst, max);
             note_register(*receiver, max);
         }
+        lower::Instr::WriteSlot {
+            dst,
+            receiver,
+            value,
+            ..
+        } => {
+            note_register(*dst, max);
+            note_register(*receiver, max);
+            note_register(*value, max);
+        }
         lower::Instr::ClassOf { dst, object, .. } => {
             note_register(*dst, max);
             note_register(*object, max);
@@ -823,7 +875,7 @@ mod tests {
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        assert_eq!(tape.program.program().functions.len(), 3);
+        assert_eq!(tape.program.program().functions.len(), 5);
         assert_eq!(tape.main, Some(FuncId(0)));
         assert_eq!(tape.runtime.classes[0].slots[0].name, "radius");
         assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::I64);
@@ -846,7 +898,7 @@ mod tests {
         );
         let tape = emit(&module).expect("tape emission should succeed");
 
-        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.program.program().functions.len(), 3);
         assert_eq!(tape.main, Some(FuncId(0)));
     }
 
@@ -858,7 +910,7 @@ mod tests {
         );
         let tape = emit(&module).expect("tape emission should succeed");
 
-        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.program.program().functions.len(), 3);
         assert_eq!(tape.runtime.classes[0].slots[0].name, "valid?");
         assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::Bool);
     }
@@ -871,7 +923,7 @@ mod tests {
         );
         let tape = emit(&module).expect("tape emission should succeed");
 
-        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.program.program().functions.len(), 3);
         assert_eq!(tape.runtime.classes[0].slots[0].name, "value");
         assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::Any);
     }

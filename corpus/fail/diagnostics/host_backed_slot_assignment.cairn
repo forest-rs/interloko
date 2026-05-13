@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// host-class: <rust-circle> radius:<integer>
+// expect: diagnostic code sem.slot-assignment-read-only
+// expect: diagnostic contains slot `radius` on `<rust-circle>` is read-only (host-backed)
+
+define function set_radius(c :: <rust-circle>) => <integer>
+  c.radius := 10
+end;

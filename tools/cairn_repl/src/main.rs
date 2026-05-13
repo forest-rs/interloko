@@ -788,6 +788,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Greater
         | TokenKind::GreaterEqual
         | TokenKind::Colon
+        | TokenKind::Assign
         | TokenKind::DoubleColon
         | TokenKind::Dot
         | TokenKind::Semicolon => punctuation_highlight_style(),

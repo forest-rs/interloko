@@ -1,0 +1,17 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump ast contains slot-assign radius
+// expect: dump sem contains radius-setter
+// expect: dump sem contains slot-write
+// expect: dump lowered contains slot.write
+// expect: dump tape contains cairn.slot_set
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let c = make(<circle>, radius: 5);
+  let ignored = c.radius := 10;
+  c.radius
+end;

@@ -1,5 +1,57 @@
 # Plans
 
+## Add Dylan-Style Writable Slot Assignment
+
+### Goal
+
+Add `obj.slot := value` as Dylan-style setter sugar backed by compiler-generated
+slot setter generics and methods. Mutable native slots become writable through
+the same generic-call surface users can inspect and call explicitly.
+
+### Fence
+
+Syntax owns recognition of the `:=` surface form. Semantic lowering owns setter
+protocol facts and diagnostics. Lowered IR, tape emission, and runtime host
+support own mutation of native object storage. This slice explicitly does not
+own generalized setter places, user-defined setter methods, writable
+host-backed slots, transactions, persistence, or optimizer removal of setter
+generic overhead.
+
+### Invariants
+
+- Getter accessors keep their current behavior.
+- A mutable native slot synthesizes a visible setter generic named `<slot>-setter` with
+  `(new-value, object)` argument order and a setter method returning
+  `new-value`.
+- Constant slots and host-backed slots remain read-only.
+- Assignment and explicit setter-call spelling share the same semantic path.
+- Tape uses ordinary host calls for slot writes; no special tape opcode is
+  introduced.
+
+### Steps
+
+1. Extend syntax/AST for `obj.slot := value` while leaving generalized setter
+   syntax deferred.
+2. Synthesize setter metaobjects during semantic collection/finalization and
+   route assignment/calls through them.
+3. Add semantic diagnostics for read-only, unknown, non-object, host-backed, and
+   value-type mismatch writes.
+4. Lower native slot writes, emit a runtime `slot_set` host call, and mutate
+   native object storage.
+5. Expose setter protocol facts in dumps/EOP enough to inspect them.
+6. Add corpus and unit/CLI coverage, update progress notes, then run final
+   gates and commit.
+
+### Risks
+
+- Existing generic dispatch is first-argument dispatch only; setter lowering
+  must preserve the user-visible generic shape without pretending full
+  multi-argument dispatch exists.
+- Mutable runtime storage must reject boxed/top values and typed values with the
+  same value-kind checks used for construction.
+- MOP visibility should be honest about compiler-synthesized setters and
+  deferred user-defined setter methods.
+
 ## Add Richer Value Types
 
 ### Goal

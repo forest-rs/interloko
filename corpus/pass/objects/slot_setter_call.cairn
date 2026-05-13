@@ -1,0 +1,14 @@
+// expect: run 20
+// expect: diagnostics 0
+// expect: dump sem contains generic-call
+// expect: dump sem contains radius-setter
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let c = make(<circle>, radius: 5);
+  let assigned = radius-setter(10, c);
+  assigned + c.radius
+end;

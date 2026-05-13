@@ -169,6 +169,10 @@ impl BuiltinValueClass {
     }
 }
 
+fn slot_setter_name(slot_name: &str) -> String {
+    format!("{slot_name}-setter")
+}
+
 /// Registry of host-backed metaobjects supplied by the embedding Rust host.
 ///
 /// This registry is intentionally structural and explicit. It does not inspect
@@ -359,6 +363,20 @@ impl From<ast::SlotMutability> for SlotMutability {
 /// `None` preserves the legacy unannotated generic behavior; `Some(kind)` is an
 /// explicit source contract.
 pub type GenericParamKind = Option<ValueKind>;
+
+/// Origin of a semantic generic function metaobject.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum GenericFunctionOrigin {
+    /// Generic declared directly in Cairn source.
+    Source,
+    /// Compiler-synthesized generic for a writable native slot setter.
+    SlotSetter {
+        /// Class that introduced the writable slot.
+        class: ClassId,
+        /// Effective slot written by the setter method.
+        slot: SlotId,
+    },
+}
 
 /// Semantic module with resolved nominal IDs and calls.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -644,12 +662,30 @@ pub struct GenericFunction {
     pub param_kinds: Vec<GenericParamKind>,
     /// Arity.
     pub arity: usize,
+    /// Zero-based parameter index used for nominal method dispatch.
+    pub dispatch_param: usize,
     /// Result value category.
     pub result_kind: ValueKind,
     /// Explicit declared result category, when present.
     pub return_annotation: Option<ValueKind>,
     /// Source span.
     pub span: Span,
+    /// Source or synthesized origin.
+    pub origin: GenericFunctionOrigin,
+}
+
+/// Origin of a semantic method metaobject.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MethodOrigin {
+    /// Method declared directly in Cairn source.
+    Source,
+    /// Compiler-synthesized method for a writable native slot setter.
+    SlotSetter {
+        /// Class that introduced the writable slot.
+        class: ClassId,
+        /// Effective slot written by the setter method.
+        slot: SlotId,
+    },
 }
 
 /// Method definition specialized on one nominal class.
@@ -663,8 +699,10 @@ pub struct Method {
     pub generic: GenericFunctionId,
     /// Specialized class for the first argument.
     pub specializer: ClassId,
-    /// Parameter local.
+    /// Dispatch parameter local.
     pub param: LocalId,
+    /// Parameter local IDs in call order.
+    pub params: Vec<LocalId>,
     /// Local table.
     pub locals: Vec<Local>,
     /// Method body.
@@ -675,6 +713,8 @@ pub struct Method {
     pub return_annotation: Option<ValueKind>,
     /// Source span.
     pub span: Span,
+    /// Source or synthesized origin.
+    pub origin: MethodOrigin,
 }
 
 /// Semantic function body and local table.
@@ -982,6 +1022,23 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Native slot write performed by a synthesized setter method.
+    SlotWrite {
+        /// Stable setter method identity.
+        setter: DefinitionId,
+        /// Receiver expression.
+        receiver: Box<Expr>,
+        /// Assigned value expression.
+        value: Box<Expr>,
+        /// Receiver class.
+        class: ClassId,
+        /// Slot being written.
+        slot: SlotId,
+        /// Slot value category.
+        result_kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Binary expression.
     Binary {
         /// Operator.
@@ -1065,6 +1122,7 @@ impl Expr {
             | Self::Cast { span, .. }
             | Self::MakeObject { span, .. }
             | Self::AccessorCall { span, .. }
+            | Self::SlotWrite { span, .. }
             | Self::Binary { span, .. }
             | Self::Compare { span, .. }
             | Self::ValueEqual { span, .. }
@@ -1126,6 +1184,7 @@ struct GenericSymbol {
     param_kinds: Vec<GenericParamKind>,
     return_kind: ValueKind,
     return_annotation: Option<ValueKind>,
+    dispatch_param: usize,
     span: Span,
 }
 
@@ -1265,6 +1324,7 @@ impl Lowering {
         lowering.collect_functions(module);
         lowering.collect_slot_init_values(module);
         lowering.finalize_classes();
+        lowering.collect_slot_setter_generics();
         lowering
     }
 
@@ -1797,6 +1857,7 @@ impl Lowering {
                 param_kinds: param_kinds.clone(),
                 return_kind: return_annotation.unwrap_or(ValueKind::I64),
                 return_annotation,
+                dispatch_param: 0,
                 span: generic.span,
             });
             self.generics.push(GenericFunction {
@@ -1810,9 +1871,173 @@ impl Lowering {
                     .collect(),
                 param_kinds,
                 arity: generic.params.len(),
+                dispatch_param: 0,
                 result_kind: return_annotation.unwrap_or(ValueKind::I64),
                 return_annotation,
                 span: generic.span,
+                origin: GenericFunctionOrigin::Source,
+            });
+        }
+    }
+
+    fn collect_slot_setter_generics(&mut self) {
+        let slots = self
+            .classes
+            .iter()
+            .filter(|class| matches!(class.origin, ClassOrigin::Native))
+            .flat_map(|class| {
+                class.effective_slots.iter().filter_map(move |slot| {
+                    if slot.source_class != class.id
+                        || !matches!(slot.origin, SlotOrigin::Native)
+                        || !matches!(slot.mutability, SlotMutability::Mutable)
+                    {
+                        return None;
+                    }
+                    Some((
+                        class.id,
+                        slot.id,
+                        slot.definition,
+                        slot.name.clone(),
+                        slot.kind,
+                        slot.span,
+                    ))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for (class, slot, slot_definition, slot_name, slot_kind, slot_span) in slots {
+            let setter_name = slot_setter_name(&slot_name);
+            if self
+                .generic_symbols
+                .iter()
+                .any(|symbol| symbol.name == setter_name)
+            {
+                continue;
+            }
+            let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
+            let definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Generic,
+                &setter_name,
+                &format!("slot-setter:{}", slot_definition.raw()),
+            );
+            let param_kinds = vec![Some(slot_kind), Some(ValueKind::Any)];
+            let origin = GenericFunctionOrigin::SlotSetter { class, slot };
+            self.generic_symbols.push(GenericSymbol {
+                name: setter_name.clone(),
+                id,
+                param_kinds: param_kinds.clone(),
+                return_kind: slot_kind,
+                return_annotation: Some(slot_kind),
+                dispatch_param: 1,
+                span: slot_span,
+            });
+            self.generics.push(GenericFunction {
+                id,
+                definition,
+                name: setter_name,
+                params: vec!["new-value".into(), "object".into()],
+                param_kinds,
+                arity: 2,
+                dispatch_param: 1,
+                result_kind: slot_kind,
+                return_annotation: Some(slot_kind),
+                span: slot_span,
+                origin,
+            });
+        }
+    }
+
+    fn collect_slot_setter_methods(&mut self) {
+        let slots = self
+            .classes
+            .iter()
+            .filter(|class| matches!(class.origin, ClassOrigin::Native))
+            .flat_map(|class| {
+                class.effective_slots.iter().filter_map(move |slot| {
+                    if slot.source_class != class.id
+                        || !matches!(slot.origin, SlotOrigin::Native)
+                        || !matches!(slot.mutability, SlotMutability::Mutable)
+                    {
+                        return None;
+                    }
+                    Some((class.id, slot.clone()))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for (class, slot) in slots {
+            let setter_name = slot_setter_name(&slot.name);
+            let Some(generic) = self.resolve_generic(&setter_name).map(|symbol| symbol.id) else {
+                continue;
+            };
+            let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+            let definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Method,
+                &setter_name,
+                &format!("slot-setter:{}", slot.definition.raw()),
+            );
+            let mut ctx = FunctionContext::new();
+            let value_param = ctx.add_local(
+                DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Local,
+                    "new-value",
+                    &format!("slot-setter:{}:value", slot.definition.raw()),
+                ),
+                "new-value".into(),
+                slot.kind,
+                slot.span,
+            );
+            let object_param = ctx.add_local(
+                DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Local,
+                    "object",
+                    &format!("slot-setter:{}:object", slot.definition.raw()),
+                ),
+                "object".into(),
+                ValueKind::Object(class),
+                slot.span,
+            );
+            let body = Block {
+                lets: Vec::new(),
+                result: Expr::SlotWrite {
+                    setter: definition,
+                    receiver: Box::new(Expr::Local {
+                        local: object_param,
+                        result_kind: ValueKind::Object(class),
+                        span: slot.span,
+                    }),
+                    value: Box::new(Expr::Local {
+                        local: value_param,
+                        result_kind: slot.kind,
+                        span: slot.span,
+                    }),
+                    class,
+                    slot: slot.id,
+                    result_kind: slot.kind,
+                    span: slot.span,
+                },
+                span: slot.span,
+            };
+            self.methods.push(Method {
+                id,
+                definition,
+                generic,
+                specializer: class,
+                param: object_param,
+                params: vec![value_param, object_param],
+                locals: ctx.locals,
+                body,
+                result_kind: slot.kind,
+                return_annotation: Some(slot.kind),
+                span: slot.span,
+                origin: MethodOrigin::SlotSetter {
+                    class,
+                    slot: slot.id,
+                },
             });
         }
     }
@@ -1861,14 +2086,13 @@ impl Lowering {
     }
 
     fn lower_module(&mut self, module: &ast::Module) -> Module {
-        self.methods = module
-            .methods
-            .iter()
-            .enumerate()
-            .map(|(index, method)| {
-                self.lower_method(MethodId(u32::try_from(index).unwrap_or(u32::MAX)), method)
-            })
-            .collect();
+        self.methods.clear();
+        for method in &module.methods {
+            let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+            let method = self.lower_method(id, method);
+            self.methods.push(method);
+        }
+        self.collect_slot_setter_methods();
 
         let functions = module
             .functions
@@ -1917,7 +2141,11 @@ impl Lowering {
                 ClassId(u32::MAX)
             });
         if let Some(symbol) = &generic_symbol
-            && let Some(expected) = symbol.param_kinds.first().copied().flatten()
+            && let Some(expected) = symbol
+                .param_kinds
+                .get(symbol.dispatch_param)
+                .copied()
+                .flatten()
             && !self.generic_specializer_matches(expected, specializer)
         {
             ctx.diagnostics.push(
@@ -1978,11 +2206,13 @@ impl Lowering {
             generic,
             specializer,
             param,
+            params: vec![param],
             locals: ctx.locals,
             body,
             result_kind,
             return_annotation,
             span: method.span,
+            origin: MethodOrigin::Source,
         }
     }
 
@@ -2294,6 +2524,13 @@ impl Lowering {
                 span,
                 ..
             } => self.lower_slot_read(ctx, receiver, slot, *span),
+            ast::Expr::SlotAssign {
+                receiver,
+                slot,
+                value,
+                span,
+                ..
+            } => self.lower_slot_assign(ctx, receiver, slot, value, *span),
             ast::Expr::Binary {
                 op, lhs, rhs, span, ..
             } => {
@@ -3046,6 +3283,89 @@ impl Lowering {
         self.lower_accessor_call(ctx, receiver, slot_name, span)
     }
 
+    fn lower_slot_assign(
+        &self,
+        ctx: &mut FunctionContext,
+        receiver: &ast::Expr,
+        slot_name: &str,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Expr {
+        let receiver = self.lower_expr(ctx, receiver);
+        let value = self.lower_expr(ctx, value);
+        let receiver_kind = self.expr_kind(&receiver);
+        let ValueKind::Object(class_id) = receiver_kind else {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::SlotReceiverTypeMismatch)
+                    .with_arg(DiagnosticArg::text("accessor", slot_name))
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(receiver_kind))),
+            );
+            return Expr::Error { span };
+        };
+        let Some(class) = self.classes.get(class_id.0 as usize) else {
+            return Expr::Error { span };
+        };
+        if matches!(class.origin, ClassOrigin::HostBacked { .. }) {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::SlotAssignmentReadOnly)
+                    .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                    .with_arg(DiagnosticArg::text("slot", slot_name))
+                    .with_arg(DiagnosticArg::text("reason", "host-backed")),
+            );
+            return Expr::Error { span };
+        }
+        let Some(slot) = class
+            .effective_slots
+            .iter()
+            .find(|slot| slot.name == slot_name || slot.accessor.name == slot_name)
+        else {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::UnknownSlot)
+                    .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                    .with_arg(DiagnosticArg::text("slot", slot_name)),
+            );
+            return Expr::Error { span };
+        };
+        if !matches!(slot.origin, SlotOrigin::Native)
+            || !matches!(slot.mutability, SlotMutability::Mutable)
+        {
+            let reason = if matches!(slot.origin, SlotOrigin::HostBacked { .. }) {
+                "host-backed"
+            } else {
+                "constant"
+            };
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::SlotAssignmentReadOnly)
+                    .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                    .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                    .with_arg(DiagnosticArg::text("reason", reason)),
+            );
+            return Expr::Error { span };
+        }
+        let value_kind = self.expr_kind(&value);
+        if !self.kinds_match(slot.kind, value_kind) {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::SlotAssignmentTypeMismatch)
+                    .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                    .with_arg(DiagnosticArg::text("expected", self.kind_name(slot.kind)))
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(value_kind))),
+            );
+        }
+        let setter_name = slot_setter_name(&slot.name);
+        let Some(setter) = self.resolve_generic(&setter_name) else {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::UnresolvedGeneric)
+                    .with_arg(DiagnosticArg::text("generic", setter_name)),
+            );
+            return Expr::Error { span };
+        };
+        Expr::GenericCall {
+            generic: setter.id,
+            args: vec![value, receiver],
+            span,
+        }
+    }
+
     fn lower_accessor_call(
         &self,
         ctx: &mut FunctionContext,
@@ -3127,6 +3447,7 @@ impl Lowering {
             }
             Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
             Expr::AccessorCall { result_kind, .. } => *result_kind,
+            Expr::SlotWrite { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. }
             | Expr::Compare { .. }
             | Expr::ValueEqual { .. }

@@ -1,5 +1,34 @@
 # Cairn Progress
 
+## Implemented: Writable Native Slot Setters
+
+- Surface syntax now accepts `object.slot := value`.
+- Assignment is semantic sugar for the compiler-synthesized setter generic named
+  `<slot>-setter`, called as `(new-value, object)`.
+- Mutable native slots synthesize:
+  - a visible setter generic;
+  - a setter method specialized on the slot owner class;
+  - semantic `SlotWrite` in the generated method body.
+- Setter calls return the assigned value, so assignment is an expression.
+- Explicit setter-call spelling such as `radius-setter(10, circle)` works for
+  synthesized mutable native slots.
+- Constant slots, unknown slots, non-object receivers, host-backed slots, and
+  wrong assigned value types produce structured diagnostics.
+- Lowered IR now has typed `slot.write` instructions, and tape emission lowers
+  them to ordinary runtime host calls (`cairn.slot_set`), not special bytecode.
+- Runtime native object storage mutates the selected slot and returns the stored
+  value.
+- MOP/EOP/session dumps expose generated setter generics and methods as
+  compiler-generated metaobjects with `slot-setter(cX.sY)` origin labels.
+
+Deferred:
+
+- Generalized Dylan setter places such as `radius(obj) := value`.
+- User-defined setter methods and method combination.
+- Writable host-backed slots.
+- Transactions, persistence, slot deletion/unbinding, and optimizer removal of
+  setter generic overhead.
+
 ## Implemented: Milestone 0
 
 - Workspace scaffold with a `no_std + alloc` compiler crate and a separate runnable example crate.

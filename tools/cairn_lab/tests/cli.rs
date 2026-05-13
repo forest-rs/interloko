@@ -239,7 +239,10 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(native_out.contains("initialization-plan:"));
     assert!(native_out.contains("initialize-methods=deferred"));
     assert!(native_out.contains("g0 area"));
-    assert!(native_out.contains("m0 specializer=c0 <circle> origin=native"));
+    assert!(
+        native_out
+            .contains("m0 specializer=c0 <circle> specializer-origin=native method-origin=source")
+    );
 
     let host = fixture("host_backed_area.cairn");
     let host_out = run_lab(&["mop", host.to_str().expect("fixture path should be utf8")]);
@@ -248,8 +251,12 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(host_out.contains("runtime=host-backed"));
     assert!(host_out.contains("slot s0"));
     assert!(host_out.contains("storage=host-backed"));
-    assert!(host_out.contains("m0 specializer=c0 <rust-circle> origin=host-backed(hc0)"));
-    assert!(host_out.contains("m1 specializer=c1 <rust-square> origin=host-backed(hc1)"));
+    assert!(host_out.contains(
+        "m0 specializer=c0 <rust-circle> specializer-origin=host-backed(hc0) method-origin=source"
+    ));
+    assert!(host_out.contains(
+        "m1 specializer=c1 <rust-square> specializer-origin=host-backed(hc1) method-origin=source"
+    ));
 }
 
 #[test]
@@ -371,9 +378,11 @@ fn mop_reports_dispatch_applicability_for_inheritance() {
     assert!(mop.contains("applicable=[c0:<shape>@0,c1:<circle>@1]"));
     assert!(mop.contains("method m1"));
     assert!(mop.contains("applicable=[c1:<circle>@0]"));
-    assert!(mop.contains("m1 specializer=c1 <circle> origin=native applies-to=[c1:<circle>@0]"));
     assert!(mop.contains(
-        "m0 specializer=c0 <shape> origin=native applies-to=[c0:<shape>@0,c1:<circle>@1]"
+        "m1 specializer=c1 <circle> specializer-origin=native method-origin=source applies-to=[c1:<circle>@0]"
+    ));
+    assert!(mop.contains(
+        "m0 specializer=c0 <shape> specializer-origin=native method-origin=source applies-to=[c0:<shape>@0,c1:<circle>@1]"
     ));
 
     let generic = run_lab(&["inspect", path, "generic:g0"]);

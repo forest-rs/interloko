@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.slot-assignment-read-only
+// expect: diagnostic contains slot `radius` on `<circle>` is read-only (constant)
+
+define class <circle> (<object>)
+  constant slot radius :: <integer>;
+end;
+
+define function main()
+  let c = make(<circle>, radius: 5);
+  c.radius := 10
+end;

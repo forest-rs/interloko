@@ -42,6 +42,8 @@ pub enum DiagnosticCode {
     AstInvalidCast,
     /// `signal` has the wrong syntactic argument shape.
     AstInvalidSignal,
+    /// `:=` was used with something other than an object slot target.
+    AstInvalidSlotAssignment,
     /// A source definition duplicates an existing definition.
     DuplicateDefinition,
     /// A class inherits from an unknown superclass.
@@ -132,6 +134,10 @@ pub enum DiagnosticCode {
     UnknownInitKeyword,
     /// A slot initializer has the wrong type.
     SlotInitializerTypeMismatch,
+    /// A slot assignment has the wrong type.
+    SlotAssignmentTypeMismatch,
+    /// A slot assignment targets a read-only slot.
+    SlotAssignmentReadOnly,
     /// A slot default `init-value:` has the wrong type.
     SlotDefaultTypeMismatch,
     /// A required init keyword is missing.
@@ -183,6 +189,7 @@ impl DiagnosticCode {
         Self::AstInvalidInstanceOf,
         Self::AstInvalidCast,
         Self::AstInvalidSignal,
+        Self::AstInvalidSlotAssignment,
         Self::DuplicateDefinition,
         Self::UnresolvedSuperclass,
         Self::InvalidPrimitiveSuperclass,
@@ -228,6 +235,8 @@ impl DiagnosticCode {
         Self::DuplicateInitKeyword,
         Self::UnknownInitKeyword,
         Self::SlotInitializerTypeMismatch,
+        Self::SlotAssignmentTypeMismatch,
+        Self::SlotAssignmentReadOnly,
         Self::SlotDefaultTypeMismatch,
         Self::MissingRequiredInitKeyword,
         Self::MissingSlotInitializer,
@@ -263,6 +272,7 @@ impl DiagnosticCode {
             Self::AstInvalidInstanceOf => "ast.invalid-instance-of",
             Self::AstInvalidCast => "ast.invalid-cast",
             Self::AstInvalidSignal => "ast.invalid-signal",
+            Self::AstInvalidSlotAssignment => "ast.invalid-slot-assignment",
             Self::DuplicateDefinition => "sem.duplicate-definition",
             Self::UnresolvedSuperclass => "sem.unresolved-superclass",
             Self::InvalidPrimitiveSuperclass => "sem.invalid-primitive-superclass",
@@ -310,6 +320,8 @@ impl DiagnosticCode {
             Self::DuplicateInitKeyword => "sem.duplicate-init-keyword",
             Self::UnknownInitKeyword => "sem.unknown-init-keyword",
             Self::SlotInitializerTypeMismatch => "sem.slot-initializer-type-mismatch",
+            Self::SlotAssignmentTypeMismatch => "sem.slot-assignment-type-mismatch",
+            Self::SlotAssignmentReadOnly => "sem.slot-assignment-read-only",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::MissingRequiredInitKeyword => "sem.missing-required-init-keyword",
             Self::MissingSlotInitializer => "sem.missing-slot-initializer",
@@ -346,6 +358,7 @@ impl DiagnosticCode {
             "ast.invalid-instance-of" => Self::AstInvalidInstanceOf,
             "ast.invalid-cast" => Self::AstInvalidCast,
             "ast.invalid-signal" => Self::AstInvalidSignal,
+            "ast.invalid-slot-assignment" => Self::AstInvalidSlotAssignment,
             "sem.duplicate-definition" => Self::DuplicateDefinition,
             "sem.unresolved-superclass" => Self::UnresolvedSuperclass,
             "sem.invalid-primitive-superclass" => Self::InvalidPrimitiveSuperclass,
@@ -393,6 +406,8 @@ impl DiagnosticCode {
             "sem.duplicate-init-keyword" => Self::DuplicateInitKeyword,
             "sem.unknown-init-keyword" => Self::UnknownInitKeyword,
             "sem.slot-initializer-type-mismatch" => Self::SlotInitializerTypeMismatch,
+            "sem.slot-assignment-type-mismatch" => Self::SlotAssignmentTypeMismatch,
+            "sem.slot-assignment-read-only" => Self::SlotAssignmentReadOnly,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.missing-required-init-keyword" => Self::MissingRequiredInitKeyword,
             "sem.missing-slot-initializer" => Self::MissingSlotInitializer,

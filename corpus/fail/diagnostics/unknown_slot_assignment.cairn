@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unknown-slot
+// expect: diagnostic contains class `<circle>` has no slot `diameter`
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let c = make(<circle>, radius: 5);
+  c.diameter := 10
+end;

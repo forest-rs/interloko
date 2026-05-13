@@ -44,6 +44,11 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/restarts/recover_invalid_radius.cairn"));
     assert!(out.contains("fail/control_flow/invalid_if_condition.cairn"));
     assert!(out.contains("fail/diagnostics/slot_initializer_type.cairn"));
+    assert!(out.contains("fail/diagnostics/constant_slot_assignment.cairn"));
+    assert!(out.contains("fail/diagnostics/unknown_slot_assignment.cairn"));
+    assert!(out.contains("fail/diagnostics/slot_assignment_type.cairn"));
+    assert!(out.contains("fail/diagnostics/host_backed_slot_assignment.cairn"));
+    assert!(out.contains("fail/diagnostics/non_object_slot_assignment.cairn"));
     assert!(out.contains("fail/diagnostics/duplicate_slot_initializer.cairn"));
     assert!(out.contains("fail/diagnostics/unresolved_local.cairn"));
     assert!(out.contains("fail/restarts/signal_without_restart.cairn"));
@@ -54,6 +59,9 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/objects/class_of_make.cairn"));
     assert!(out.contains("pass/objects/object_top_slot.cairn"));
     assert!(out.contains("pass/objects/typed_slots.cairn"));
+    assert!(out.contains("pass/objects/slot_assignment_write_read.cairn"));
+    assert!(out.contains("pass/objects/slot_assignment_returns_value.cairn"));
+    assert!(out.contains("pass/objects/slot_setter_call.cairn"));
     assert!(out.contains("pass/objects/inherited_slot_read.cairn"));
     assert!(out.contains("pass/objects/inherited_parent_child_slots.cairn"));
     assert!(out.contains("pass/objects/subtype_instance_cast.cairn"));
@@ -96,7 +104,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/typed_slots_and_dispatch.cairn"));
     assert!(out.contains("fail/values/malformed_string.cairn"));
     assert!(out.contains("fail/syntax/expected_expression.cairn"));
-    assert!(out.contains("corpus: 102 passed, 0 failed, 102 total"));
+    assert!(out.contains("corpus: 111 passed, 0 failed, 111 total"));
 }
 
 #[test]

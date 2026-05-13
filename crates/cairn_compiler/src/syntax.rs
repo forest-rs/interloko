@@ -118,6 +118,8 @@ pub enum TokenKind {
     GreaterEqual,
     /// `:`.
     Colon,
+    /// `:=`.
+    Assign,
     /// `::`.
     DoubleColon,
     /// `.`.
@@ -186,6 +188,8 @@ pub enum CstKind {
     CallExpr,
     /// Object slot read expression.
     SlotExpr,
+    /// Object slot assignment expression.
+    SlotAssignExpr,
     /// Call argument list.
     ArgList,
     /// Keyword argument.
@@ -416,6 +420,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::BinaryExpr => 10,
         CstKind::CallExpr => 11,
         CstKind::SlotExpr => 12,
+        CstKind::SlotAssignExpr => 29,
         CstKind::ArgList => 13,
         CstKind::KeywordArg => 14,
         CstKind::NameExpr => 15,
@@ -457,6 +462,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Equal => 18,
         TokenKind::Arrow => 19,
         TokenKind::Colon => 20,
+        TokenKind::Assign => 45,
         TokenKind::DoubleColon => 21,
         TokenKind::Dot => 22,
         TokenKind::Semicolon => 23,
@@ -569,6 +575,10 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'>' => {
                 pos += 1;
                 TokenKind::Greater
+            }
+            b':' if bytes.get(pos + 1) == Some(&b'=') => {
+                pos += 2;
+                TokenKind::Assign
             }
             b':' if bytes.get(pos + 1) == Some(&b':') => {
                 pos += 2;
@@ -1062,7 +1072,7 @@ impl<'source> Parser<'source> {
     fn parse_if(&mut self) -> CstNode {
         let start = self.current_span();
         if !self.at(TokenKind::If) {
-            return self.parse_compare();
+            return self.parse_assignment();
         }
 
         let mut children = Vec::new();
@@ -1074,6 +1084,18 @@ impl<'source> Parser<'source> {
         children.push(CstElement::Node(self.parse_expr()));
         self.expect(TokenKind::End, &mut children, "`end` after `if`");
         self.node(CstKind::IfExpr, children, start)
+    }
+
+    fn parse_assignment(&mut self) -> CstNode {
+        let mut node = self.parse_compare();
+        if self.at(TokenKind::Assign) {
+            let start = node.span;
+            let mut children = vec![CstElement::Node(node)];
+            self.expect(TokenKind::Assign, &mut children, "`:=`");
+            children.push(CstElement::Node(self.parse_expr()));
+            node = self.node(CstKind::SlotAssignExpr, children, start);
+        }
+        node
     }
 
     fn parse_compare(&mut self) -> CstNode {

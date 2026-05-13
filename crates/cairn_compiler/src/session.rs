@@ -1612,6 +1612,12 @@ fn collect_dispatch_sites_in_expr(
         sem::Expr::AccessorCall { receiver, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, receiver, owner_index, sites);
         }
+        sem::Expr::SlotWrite {
+            receiver, value, ..
+        } => {
+            collect_dispatch_sites_in_expr(artifacts, owner.clone(), receiver, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
+        }
         sem::Expr::Binary { lhs, rhs, .. } | sem::Expr::Compare { lhs, rhs, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
@@ -2057,6 +2063,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
             class_id: class, ..
         } => sem::ValueKind::Object(*class),
         sem::Expr::AccessorCall { result_kind, .. } => *result_kind,
+        sem::Expr::SlotWrite { result_kind, .. } => *result_kind,
         sem::Expr::If {
             then_branch,
             else_branch,
@@ -2557,6 +2564,17 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             let _ = writeln!(out, "{id} slot {slot}");
             dump_ast_expr(out, receiver, indent + 2);
         }
+        ast::Expr::SlotAssign {
+            id,
+            receiver,
+            slot,
+            value,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} slot-assign {slot}");
+            dump_ast_expr(out, receiver, indent + 2);
+            dump_ast_expr(out, value, indent + 2);
+        }
         ast::Expr::Binary {
             id, op, lhs, rhs, ..
         } => {
@@ -2717,8 +2735,13 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "generic g{} {} {}({params}) result={:?} return={return_annotation}",
-            generic.id.0, generic.definition, generic.name, generic.result_kind
+            "generic g{} {} {}({params}) result={:?} return={return_annotation} dispatch-param={} origin={}",
+            generic.id.0,
+            generic.definition,
+            generic.name,
+            generic.result_kind,
+            generic.dispatch_param + 1,
+            sem_generic_origin_label(generic.origin)
         );
     }
     for method in &module.methods {
@@ -2728,12 +2751,13 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "method m{} {} generic=g{} class=c{} result={:?} return={return_annotation}",
+            "method m{} {} generic=g{} class=c{} result={:?} return={return_annotation} origin={}",
             method.id.0,
             method.definition,
             method.generic.0,
             method.specializer.0,
-            method.result_kind
+            method.result_kind,
+            sem_method_origin_label(method.origin)
         );
         dump_sem_locals(module, &mut out, &method.locals, 2);
         dump_sem_block(&mut out, &method.body, 2);
@@ -2905,11 +2929,13 @@ fn dump_mop(module: &sem::Module) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "  g{} {} {}({params}) -> {}",
+            "  g{} {} {}({params}) -> {} dispatch-param={} origin={}",
             generic.id.0,
             generic.definition,
             generic.name,
-            sem_kind_label(module, generic.result_kind)
+            sem_kind_label(module, generic.result_kind),
+            generic.dispatch_param + 1,
+            sem_generic_origin_label(generic.origin)
         );
         for method in module
             .methods
@@ -2924,12 +2950,13 @@ fn dump_mop(module: &sem::Module) -> String {
             );
             let _ = writeln!(
                 out,
-                "    method m{} {} specializer=c{} {} origin={} -> {} applicable={}",
+                "    method m{} {} specializer=c{} {} specializer-origin={} method-origin={} -> {} applicable={}",
                 method.id.0,
                 method.definition,
                 method.specializer.0,
                 class_name,
                 class_origin,
+                sem_method_origin_label(method.origin),
                 sem_kind_label(module, method.result_kind),
                 sem_dispatch_applicability_label(module, method.specializer)
             );
@@ -2948,11 +2975,12 @@ fn dump_mop(module: &sem::Module) -> String {
             );
             let _ = writeln!(
                 out,
-                "    m{} specializer=c{} {} origin={} applies-to={}",
+                "    m{} specializer=c{} {} specializer-origin={} method-origin={} applies-to={}",
                 method.id.0,
                 method.specializer.0,
                 class_name,
                 class_origin,
+                sem_method_origin_label(method.origin),
                 sem_dispatch_applicability_label(module, method.specializer)
             );
         }
@@ -3355,31 +3383,41 @@ fn project_environment_generic(
         })
         .collect::<Vec<_>>()
         .join(";");
+    let generated = !matches!(generic.origin, sem::GenericFunctionOrigin::Source);
+    let mut affordances = Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::ShowDispatch]);
+    if !generated {
+        affordances.push(Aff::AddMethod);
+    }
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("generic:g{}", generic.id.0),
         kind: EnvironmentKind::Generic,
         meta_class: "<generic-function>",
-        origin: EnvironmentOrigin::SourceAuthored,
-        storage: EnvironmentStorage::SourceDefined,
+        origin: if generated {
+            EnvironmentOrigin::CompilerGenerated
+        } else {
+            EnvironmentOrigin::SourceAuthored
+        },
+        storage: if generated {
+            EnvironmentStorage::CachedArtifact
+        } else {
+            EnvironmentStorage::SourceDefined
+        },
         title: format!(
             "{}({params}) -> {}",
             generic.name,
             sem_kind_label(module, generic.result_kind)
         ),
-        affordances: Vec::from([
-            Aff::Inspect,
-            Aff::DumpMop,
-            Aff::DumpEop,
-            Aff::ShowDispatch,
-            Aff::AddMethod,
-        ]),
+        affordances,
         execution: Some(format!(
-            "callable=generic arity={} methods={method_count}",
-            generic.arity
+            "callable=generic arity={} dispatch-param={} methods={method_count}",
+            generic.arity,
+            generic.dispatch_param + 1
         )),
         inspection: format!(
-            "definition={} generic-id=g{} dispatch={dispatch}",
-            generic.definition, generic.id.0
+            "definition={} generic-id=g{} origin={} dispatch={dispatch}",
+            generic.definition,
+            generic.id.0,
+            sem_generic_origin_label(generic.origin)
         ),
     }));
 }
@@ -3400,32 +3438,46 @@ fn project_environment_method(
         |class| sem_class_origin_label(class.origin),
     );
     let applicable = sem_dispatch_applicability_label(module, method.specializer);
+    let generated = !matches!(method.origin, sem::MethodOrigin::Source);
+    let mut affordances = Vec::from([
+        Aff::Inspect,
+        Aff::DumpSem,
+        Aff::DumpLowered,
+        Aff::DumpTape,
+        Aff::DumpEop,
+        Aff::ShowDependencies,
+    ]);
+    if !generated {
+        affordances.push(Aff::EditBody);
+    }
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("method:m{}", method.id.0),
         kind: EnvironmentKind::Method,
         meta_class: "<method>",
-        origin: EnvironmentOrigin::SourceAuthored,
-        storage: EnvironmentStorage::SourceDefined,
+        origin: if generated {
+            EnvironmentOrigin::CompilerGenerated
+        } else {
+            EnvironmentOrigin::SourceAuthored
+        },
+        storage: if generated {
+            EnvironmentStorage::CachedArtifact
+        } else {
+            EnvironmentStorage::SourceDefined
+        },
         title: format!(
             "{generic_name}({class_name}) -> {}",
             sem_kind_label(module, method.result_kind)
         ),
-        affordances: Vec::from([
-            Aff::Inspect,
-            Aff::DumpSem,
-            Aff::DumpLowered,
-            Aff::DumpTape,
-            Aff::DumpEop,
-            Aff::ShowDependencies,
-            Aff::EditBody,
-        ]),
+        affordances,
         execution: Some(format!(
             "callable=method participates-in=generic:g{} specializer=class:c{}",
             method.generic.0, method.specializer.0
         )),
         inspection: format!(
-            "definition={} method-id=m{} specializer-origin={class_origin} applies-to={applicable}",
-            method.definition, method.id.0
+            "definition={} method-id=m{} method-origin={} specializer-origin={class_origin} applies-to={applicable}",
+            method.definition,
+            method.id.0,
+            sem_method_origin_label(method.origin)
         ),
     }));
 }
@@ -3973,6 +4025,23 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             );
             dump_sem_expr(out, receiver, indent + 2);
         }
+        sem::Expr::SlotWrite {
+            setter,
+            receiver,
+            value,
+            class,
+            slot,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "slot-write {setter} c{}.s{} result={result_kind:?}",
+                class.0, slot.0
+            );
+            dump_sem_expr(out, receiver, indent + 2);
+            dump_sem_expr(out, value, indent + 2);
+        }
         sem::Expr::Binary { op, lhs, rhs, .. } => {
             let _ = writeln!(out, "binary {op:?}");
             dump_sem_expr(out, lhs, indent + 2);
@@ -4043,6 +4112,24 @@ fn sem_class_origin_label(origin: sem::ClassOrigin) -> String {
         sem::ClassOrigin::BuiltinValue { kind } => format!("builtin-value({})", kind.name()),
         sem::ClassOrigin::HostBacked { host_class } => {
             format!("host-backed(hc{})", host_class.0)
+        }
+    }
+}
+
+fn sem_generic_origin_label(origin: sem::GenericFunctionOrigin) -> String {
+    match origin {
+        sem::GenericFunctionOrigin::Source => "source".into(),
+        sem::GenericFunctionOrigin::SlotSetter { class, slot } => {
+            format!("slot-setter(c{}.s{})", class.0, slot.0)
+        }
+    }
+}
+
+fn sem_method_origin_label(origin: sem::MethodOrigin) -> String {
+    match origin {
+        sem::MethodOrigin::Source => "source".into(),
+        sem::MethodOrigin::SlotSetter { class, slot } => {
+            format!("slot-setter(c{}.s{})", class.0, slot.0)
         }
     }
 }
@@ -4641,6 +4728,37 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 slot_definition
             );
             fingerprint_sem_expr(module, receiver, out);
+            out.push(')');
+        }
+        sem::Expr::SlotWrite {
+            setter,
+            receiver,
+            value,
+            class,
+            slot,
+            result_kind,
+            ..
+        } => {
+            let class_definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let slot_definition = module
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.effective_slots.get(slot.0 as usize))
+                .map_or(0, |slot| slot.definition.raw());
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(
+                out,
+                "slot-write({}:{}.{}:{result}:",
+                setter.raw(),
+                class_definition,
+                slot_definition
+            );
+            fingerprint_sem_expr(module, receiver, out);
+            out.push(',');
+            fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
         sem::Expr::Binary { op, lhs, rhs, .. } => {
@@ -5284,7 +5402,9 @@ mod tests {
         assert!(mop.contains("<rust-circle> origin=host-backed(hc0)"));
         assert!(mop.contains("runtime=host-backed"));
         assert!(mop.contains("storage=host-backed"));
-        assert!(mop.contains("m0 specializer=c0 <rust-circle> origin=host-backed(hc0)"));
+        assert!(mop.contains(
+            "m0 specializer=c0 <rust-circle> specializer-origin=host-backed(hc0) method-origin=source"
+        ));
         let eop = artifacts.dump_stage(DumpStage::Eop);
         assert!(eop.contains("object class:c0"));
         assert!(eop.contains("origin=host-backed storage=host-registry"));
@@ -6000,7 +6120,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_slot_mutability_edit_reuses_executable_artifacts() {
+    fn incremental_slot_mutability_edit_recomputes_executable_artifacts() {
         let before = "define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 10;\nend;\n\
                       define function main()\n  make(<circle>).radius\nend;";
         let after = "define class <circle> (<object>)\n  constant slot radius :: <integer>, init-value: 10;\nend;\n\
@@ -6026,11 +6146,11 @@ mod tests {
         );
         assert_eq!(
             cache_action(&update, QueryArtifact::LoweredModule),
-            Some(CacheAction::Reused)
+            Some(CacheAction::Recomputed)
         );
         assert_eq!(
             cache_action(&update, QueryArtifact::TapeProgram),
-            Some(CacheAction::Reused)
+            Some(CacheAction::Recomputed)
         );
         assert!(
             update

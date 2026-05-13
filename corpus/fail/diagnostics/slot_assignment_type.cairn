@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.slot-assignment-type-mismatch
+// expect: diagnostic contains slot `radius` expects <integer> but assigned value has <symbol>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  let c = make(<circle>, radius: 5);
+  c.radius := #bad
+end;

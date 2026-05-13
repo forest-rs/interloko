@@ -21,6 +21,8 @@ pub const MAKE_OBJECT: &str = "cairn.make_object";
 pub const CLASS_OF: &str = "cairn.class_of";
 /// Host-call symbol for reading a typed runtime-managed slot.
 pub const SLOT_GET: &str = "cairn.slot_get";
+/// Host-call symbol for writing a typed runtime-managed slot.
+pub const SLOT_SET: &str = "cairn.slot_set";
 /// Host-call symbol for boxing a concrete value as the top `<object>` value.
 pub const BOX_VALUE: &str = "cairn.box_value";
 /// Host-call symbol for testing whether a value is an instance of a class.
@@ -258,6 +260,17 @@ impl CairnHost {
         self.objects.get(index).ok_or(HostError::Failed)
     }
 
+    fn object_mut(&mut self, obj: Obj) -> Result<&mut RuntimeObject, HostError> {
+        if obj.host_type != CAIRN_OBJECT_TYPE {
+            return Err(HostError::SignatureMismatch);
+        }
+        let index = usize::try_from(obj.handle.0)
+            .ok()
+            .and_then(|raw| raw.checked_sub(1))
+            .ok_or(HostError::Failed)?;
+        self.objects.get_mut(index).ok_or(HostError::Failed)
+    }
+
     fn boxed_value(&self, obj: Obj) -> Result<&Value, HostError> {
         if obj.host_type != CAIRN_VALUE_TYPE {
             return Err(HostError::SignatureMismatch);
@@ -389,6 +402,31 @@ impl Host for CairnHost {
                         adapter.read_slot(slot, slot_info.kind)?
                     }
                 };
+                Ok(0)
+            }
+            SLOT_SET => {
+                let [ValueRef::Obj(obj), ValueRef::U64(slot_raw), value] = args else {
+                    return Err(HostError::Failed);
+                };
+                let object_class = self.object(*obj)?.class;
+                let slot_index = usize::try_from(*slot_raw).map_err(|_| HostError::Failed)?;
+                let slot_info = self
+                    .layout
+                    .classes
+                    .get(object_class.0 as usize)
+                    .and_then(|class| class.slots.get(slot_index))
+                    .ok_or(HostError::Failed)?;
+                if slot_info.host_backed {
+                    return Err(HostError::Failed);
+                }
+                let value = self.value_for_slot(*value, slot_info.kind)?;
+                let object = self.object_mut(*obj)?;
+                let RuntimeObjectStorage::Native { slots } = &mut object.storage else {
+                    return Err(HostError::Failed);
+                };
+                let target = slots.get_mut(slot_index).ok_or(HostError::Failed)?;
+                *target = value.clone();
+                rets[0] = value;
                 Ok(0)
             }
             BOX_VALUE => {
@@ -565,6 +603,15 @@ pub fn class_of_signature() -> execution_tape::host::HostSig {
 pub fn slot_get_signature(kind: sem::ValueKind) -> Option<execution_tape::host::HostSig> {
     Some(execution_tape::host::HostSig {
         args: vec![object_type(), ValueType::U64],
+        rets: vec![value_type(kind)?],
+    })
+}
+
+/// Host signature for `slot_set`.
+#[must_use]
+pub fn slot_set_signature(kind: sem::ValueKind) -> Option<execution_tape::host::HostSig> {
+    Some(execution_tape::host::HostSig {
+        args: vec![object_type(), ValueType::U64, value_type(kind)?],
         rets: vec![value_type(kind)?],
     })
 }

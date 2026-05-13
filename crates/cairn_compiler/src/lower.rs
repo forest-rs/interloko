@@ -83,7 +83,7 @@ impl Module {
 pub enum FunctionKind {
     /// A source `define function`.
     Function(sem::FunctionId),
-    /// A source `define method`.
+    /// A semantic method, either source-authored or compiler-synthesized.
     Method(sem::MethodId),
     /// A generated runtime dispatcher for a generic function.
     Dispatcher(sem::GenericFunctionId),
@@ -295,6 +295,23 @@ pub enum Instr {
         /// Statically known receiver class.
         class: sem::ClassId,
         /// Slot to read.
+        slot: sem::SlotId,
+        /// Slot value category.
+        kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime native slot write.
+    WriteSlot {
+        /// Destination register receiving the assigned value.
+        dst: Register,
+        /// Receiver object register.
+        receiver: Register,
+        /// Assigned value register.
+        value: Register,
+        /// Statically known receiver class.
+        class: sem::ClassId,
+        /// Slot to write.
         slot: sem::SlotId,
         /// Slot value category.
         kind: ValueKind,
@@ -524,9 +541,9 @@ impl<'module> Lowering<'module> {
     }
 
     fn lower_dispatcher(&self, generic: &sem::GenericFunction) -> Result<Function, LowerError> {
-        if generic.arity != 1 {
+        if generic.dispatch_param >= generic.arity {
             return Err(invalid_semantic(
-                "only one-argument generics can be dispatched",
+                "generic dispatch parameter is out of range",
             ));
         }
 
@@ -618,12 +635,11 @@ impl<'module> BodyLowering<'module> {
         method: &'module sem::Method,
     ) -> Result<Self, LowerError> {
         let mut this = Self::new(module, ids, &method.locals);
-        this.bind_param(
-            method.locals.get(method.param.0 as usize),
-            method.param,
-            Register(1),
-        )?;
-        this.next_reg = 2;
+        for (index, local_id) in method.params.iter().copied().enumerate() {
+            let reg = input_register(index);
+            this.bind_param(method.locals.get(local_id.0 as usize), local_id, reg)?;
+        }
+        this.next_reg = next_after_inputs(method.params.len());
         Ok(this)
     }
 
@@ -632,25 +648,27 @@ impl<'module> BodyLowering<'module> {
         ids: &'module LowerIds,
         generic: &'module sem::GenericFunction,
     ) -> Self {
+        let params = generic
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, name)| Param {
+                source: None,
+                name: name.clone(),
+                kind: dispatcher_param_kind(generic, index),
+                reg: input_register(index),
+            })
+            .collect();
         Self {
             module,
             ids,
             source_locals: &[],
-            params: vec![Param {
-                source: None,
-                name: generic
-                    .params
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "object".into()),
-                kind: dispatcher_param_kind(generic),
-                reg: Register(1),
-            }],
+            params,
             locals: Vec::new(),
             instructions: Vec::new(),
             local_regs: Vec::new(),
             active_restarts: Vec::new(),
-            next_reg: 2,
+            next_reg: next_after_inputs(generic.arity),
             next_label: 0,
         }
     }
@@ -737,13 +755,17 @@ impl<'module> BodyLowering<'module> {
 
     fn lower_dispatcher(&mut self, generic: &sem::GenericFunction) -> Result<(), LowerError> {
         if matches!(
-            generic.param_kinds.first().copied().flatten(),
+            generic
+                .param_kinds
+                .get(generic.dispatch_param)
+                .copied()
+                .flatten(),
             Some(sem::ValueKind::I64)
         ) {
             return self.lower_exact_dispatcher(generic, is_integer_value_class);
         }
 
-        let object = Register(1);
+        let object = input_register(generic.dispatch_param);
         let class_reg = self.alloc(ValueKind::U64);
         self.instructions.push(Instr::ClassOf {
             dst: class_reg.reg,
@@ -817,7 +839,7 @@ impl<'module> BodyLowering<'module> {
                     .get(method.id.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_semantic("method id is out of range"))?,
-                args: vec![object],
+                args: (0..generic.arity).map(input_register).collect(),
                 span: method.span,
             });
             let result =
@@ -861,7 +883,7 @@ impl<'module> BodyLowering<'module> {
                 .get(method.id.0 as usize)
                 .copied()
                 .ok_or_else(|| invalid_semantic("method id is out of range"))?,
-            args: vec![Register(1)],
+            args: (0..generic.arity).map(input_register).collect(),
             span: method.span,
         });
         let result =
@@ -1009,7 +1031,7 @@ impl<'module> BodyLowering<'module> {
                     .generics
                     .get(generic.0 as usize)
                     .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
-                let args = self.lower_args(args)?;
+                let args = self.lower_generic_args(args, generic_info)?;
                 let result = self.alloc(value_kind(generic_info.result_kind)?);
                 self.instructions.push(Instr::Call {
                     dst: result.reg,
@@ -1157,6 +1179,31 @@ impl<'module> BodyLowering<'module> {
                 self.instructions.push(Instr::ReadSlot {
                     dst: result.reg,
                     receiver: receiver.reg,
+                    class: *class,
+                    slot: *slot,
+                    kind,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::SlotWrite {
+                receiver,
+                value,
+                class,
+                slot,
+                result_kind,
+                span,
+                ..
+            } => {
+                let receiver = self.lower_expr(receiver)?;
+                let value = self.lower_expr(value)?;
+                let kind = value_kind(*result_kind)?;
+                let value = self.coerce_value(value, kind, *span)?;
+                let result = self.alloc(kind);
+                self.instructions.push(Instr::WriteSlot {
+                    dst: result.reg,
+                    receiver: receiver.reg,
+                    value: value.reg,
                     class: *class,
                     slot: *slot,
                     kind,
@@ -1401,14 +1448,6 @@ impl<'module> BodyLowering<'module> {
         Ok(result)
     }
 
-    fn lower_args(&mut self, args: &[sem::Expr]) -> Result<Vec<Register>, LowerError> {
-        let mut lowered = Vec::with_capacity(args.len());
-        for arg in args {
-            lowered.push(self.lower_expr(arg)?.reg);
-        }
-        Ok(lowered)
-    }
-
     fn lower_args_with_expected(
         &mut self,
         args: &[sem::Expr],
@@ -1419,6 +1458,30 @@ impl<'module> BodyLowering<'module> {
             let value = self.lower_expr(arg)?;
             let expected = value_kind(*expected)?;
             let value = self.coerce_value(value, expected, arg.span())?;
+            lowered.push(value.reg);
+        }
+        Ok(lowered)
+    }
+
+    fn lower_generic_args(
+        &mut self,
+        args: &[sem::Expr],
+        generic: &sem::GenericFunction,
+    ) -> Result<Vec<Register>, LowerError> {
+        let mut lowered = Vec::with_capacity(args.len());
+        for (index, (arg, expected)) in args.iter().zip(&generic.param_kinds).enumerate() {
+            let value = self.lower_expr(arg)?;
+            let value = if let Some(expected) = *expected {
+                let expected = if expected == sem::ValueKind::Any && index == generic.dispatch_param
+                {
+                    ValueKind::Object(None)
+                } else {
+                    value_kind(expected)?
+                };
+                self.coerce_value(value, expected, arg.span())?
+            } else {
+                value
+            };
             lowered.push(value.reg);
         }
         Ok(lowered)
@@ -1437,6 +1500,15 @@ impl<'module> BodyLowering<'module> {
             (value.kind, expected)
             && self.module.is_same_or_subclass(actual, expected_class)
         {
+            return Ok(Value {
+                kind: expected,
+                ..value
+            });
+        }
+        if matches!(
+            (value.kind, expected),
+            (ValueKind::Object(Some(_)), ValueKind::Object(None))
+        ) {
             return Ok(Value {
                 kind: expected,
                 ..value
@@ -1531,8 +1603,10 @@ fn is_compile_time_only(kind: sem::ValueKind) -> bool {
     matches!(kind, sem::ValueKind::KnownCallable(_))
 }
 
-fn dispatcher_param_kind(generic: &sem::GenericFunction) -> ValueKind {
-    match generic.param_kinds.first().copied().flatten() {
+fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueKind {
+    match generic.param_kinds.get(index).copied().flatten() {
+        Some(sem::ValueKind::Any) if index == generic.dispatch_param => ValueKind::Object(None),
+        Some(sem::ValueKind::Any) => ValueKind::Any,
         Some(
             sem::ValueKind::Object(class)
             | sem::ValueKind::String(class)
@@ -1540,7 +1614,10 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction) -> ValueKind {
             | sem::ValueKind::Vector(class),
         ) => ValueKind::Object(Some(class)),
         Some(sem::ValueKind::I64) => ValueKind::I64,
-        _ => ValueKind::Object(None),
+        Some(sem::ValueKind::Bool) => ValueKind::Bool,
+        None if index == generic.dispatch_param => ValueKind::Object(None),
+        None => ValueKind::Any,
+        Some(_) => ValueKind::Object(None),
     }
 }
 
@@ -1628,7 +1705,7 @@ impl Module {
     fn fmt_kind_comment(&self, f: &mut fmt::Formatter<'_>, kind: FunctionKind) -> fmt::Result {
         match kind {
             FunctionKind::Function(id) => writeln!(f, " ; source function {}", id.0),
-            FunctionKind::Method(id) => writeln!(f, " ; source method {}", id.0),
+            FunctionKind::Method(id) => writeln!(f, " ; method {}", id.0),
             FunctionKind::Dispatcher(id) => writeln!(f, " ; dispatcher for generic {}", id.0),
         }
     }
@@ -1771,6 +1848,21 @@ impl Module {
                 write!(f, "  {dst} = slot.read {receiver}, ")?;
                 self.fmt_slot(f, *class, *slot)?;
                 write!(f, ": ")?;
+                self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
+            Instr::WriteSlot {
+                dst,
+                receiver,
+                value,
+                class,
+                slot,
+                kind,
+                span,
+            } => {
+                write!(f, "  {dst} = slot.write {receiver}, ")?;
+                self.fmt_slot(f, *class, *slot)?;
+                write!(f, ", {value}: ")?;
                 self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
@@ -1977,13 +2069,13 @@ mod tests {
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
         );
-        assert_eq!(module.functions.len(), 3);
+        assert_eq!(module.functions.len(), 5);
         assert_eq!(module.main, Some(FunctionId(0)));
         let dump = module.dump();
         assert!(dump.contains("const.class <circle>"));
         assert!(dump.contains("make <circle>(%r"));
         assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
-        assert!(dump.contains("fn l2 area#dispatch(%r1 x: object) -> i64"));
+        assert!(dump.contains("area#dispatch(%r1 x: object) -> i64"));
         assert!(dump.contains("class_of %r1"));
         assert!(dump.contains("br %r"));
     }
@@ -1999,7 +2091,7 @@ mod tests {
         );
 
         let dump = module.dump();
-        assert!(dump.contains("fn l2 score#dispatch(%r1 x: object(<shape>)) -> i64"));
+        assert!(dump.contains("score#dispatch(%r1 x: object(<shape>)) -> i64"));
         assert!(dump.contains("const.u64 0"));
         assert!(dump.contains("const.u64 1"));
         assert!(dump.contains("call l1(%r1)"));
@@ -2044,7 +2136,7 @@ mod tests {
 
         let dump = module.dump();
         assert!(dump.contains("fn l1 keep#method0(%r1 c: object(<circle>)) -> object(<circle>)"));
-        assert!(dump.contains("fn l2 keep#dispatch(%r1 x: object) -> any"));
+        assert!(dump.contains("keep#dispatch(%r1 x: object) -> any"));
         assert!(dump.contains("box.any"));
     }
 
