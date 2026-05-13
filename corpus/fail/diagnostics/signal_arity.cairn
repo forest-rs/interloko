@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.invalid-signal
+// expect: diagnostic contains signal expects exactly one condition
+define function main()
+  signal()
+end;

@@ -1,3 +1,4 @@
+// expect: diagnostic code sem.slot-default-type-mismatch
 // expect: diagnostic contains slot `valid?` expects <boolean> but default init-value has <integer>
 
 define class <flag> (<object>)

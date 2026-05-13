@@ -1,4 +1,5 @@
 // expect: diagnostics 1
+// expect: diagnostic code sem.apply-accessor-unsupported
 // expect: diagnostic contains apply does not support slot accessors yet
 
 define class <circle> (<object>)

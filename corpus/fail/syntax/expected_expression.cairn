@@ -1,0 +1,5 @@
+// expect: diagnostics 1
+// expect: diagnostic code syntax.expected-expression
+// expect: diagnostic contains expected expression
+define function main()
+end;

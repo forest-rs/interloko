@@ -1,3 +1,5 @@
+// expect: diagnostic code sem.unknown-init-keyword
+// expect: diagnostic code sem.missing-slot-initializer
 // expect: diagnostic contains class `<circle>` has no init keyword `diameter:`
 // expect: diagnostic contains missing initializer for slot `radius`
 

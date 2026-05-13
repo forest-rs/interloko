@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::runtime::RuntimeLayout;
 use crate::sem;
 use crate::syntax::Span;
@@ -357,6 +357,17 @@ pub enum LowerError {
         /// Error details.
         message: String,
     },
+}
+
+impl LowerError {
+    /// Stable error code for this lowering failure.
+    #[must_use]
+    pub const fn code(&self) -> DiagnosticCode {
+        match self {
+            Self::Diagnostics { .. } => DiagnosticCode::LowerBlockedByDiagnostics,
+            Self::InvalidSemantic { .. } => DiagnosticCode::LowerInvalidSemantic,
+        }
+    }
 }
 
 /// Lowers semantic IR to executable backend-neutral IR.

@@ -1,4 +1,5 @@
 // expect: diagnostics 1
+// expect: diagnostic code sem.slot-initializer-type-mismatch
 // expect: diagnostic contains slot `valid?` expects <boolean> but initializer has <integer>
 // expect: dump sem contains valid? :: <boolean>
 

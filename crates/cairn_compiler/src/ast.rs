@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
 
@@ -606,10 +606,13 @@ impl<'tree> Lowering<'tree> {
             match option_name.as_str() {
                 "init-keyword" => {
                     let Some((keyword_span, keyword_name)) = idents.get(1) else {
-                        self.diagnostics.push(Diagnostic::error(
-                            option_span,
-                            format!("slot option `{option_name}:` requires a keyword value"),
-                        ));
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                option_span,
+                                DiagnosticCode::AstSlotOptionRequiresKeyword,
+                            )
+                            .with_arg(DiagnosticArg::text("option", format!("{option_name}:"))),
+                        );
                         continue;
                     };
                     init_keyword = Some((*keyword_name).to_string());
@@ -617,10 +620,13 @@ impl<'tree> Lowering<'tree> {
                 }
                 "required-init-keyword" => {
                     let Some((keyword_span, keyword_name)) = idents.get(1) else {
-                        self.diagnostics.push(Diagnostic::error(
-                            option_span,
-                            format!("slot option `{option_name}:` requires a keyword value"),
-                        ));
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                option_span,
+                                DiagnosticCode::AstSlotOptionRequiresKeyword,
+                            )
+                            .with_arg(DiagnosticArg::text("option", format!("{option_name}:"))),
+                        );
                         continue;
                     };
                     init_keyword = Some((*keyword_name).to_string());
@@ -632,18 +638,21 @@ impl<'tree> Lowering<'tree> {
                         CstElement::Node(expr) => Some(self.lower_expr(expr)),
                         CstElement::Token(_) => None,
                     }) else {
-                        self.diagnostics.push(Diagnostic::error(
-                            option_span,
-                            "slot option `init-value:` requires an expression",
-                        ));
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                option_span,
+                                DiagnosticCode::AstSlotInitValueRequiresExpression,
+                            )
+                            .with_arg(DiagnosticArg::text("option", "init-value:")),
+                        );
                         continue;
                     };
                     init_value = Some(expr);
                 }
-                _ => self.diagnostics.push(Diagnostic::error(
-                    option_span,
-                    format!("unsupported slot option `{option_name}:`"),
-                )),
+                _ => self.diagnostics.push(
+                    Diagnostic::error(option_span, DiagnosticCode::AstUnsupportedSlotOption)
+                        .with_arg(DiagnosticArg::text("option", format!("{option_name}:"))),
+                ),
             }
         }
         Slot {
@@ -731,10 +740,14 @@ impl<'tree> Lowering<'tree> {
             }
         }
         if params.len() != 1 {
-            self.diagnostics.push(Diagnostic::error(
-                node.span,
-                "milestone generic dispatch methods require exactly one specialized parameter",
-            ));
+            self.diagnostics.push(
+                Diagnostic::error(node.span, DiagnosticCode::AstInvalidMethodSpecializer).with_arg(
+                    DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(params.len()).unwrap_or(u64::MAX),
+                    ),
+                ),
+            );
         }
         let body = node
             .child_nodes(CstKind::Body)
@@ -1033,8 +1046,10 @@ impl<'tree> Lowering<'tree> {
                 span,
             },
             Err(_) => {
-                self.diagnostics
-                    .push(Diagnostic::error(span, "integer literal is out of range"));
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    DiagnosticCode::AstIntegerLiteralOutOfRange,
+                ));
                 Expr::Error {
                     id: self.ast_id(node),
                     span,
@@ -1112,10 +1127,14 @@ impl<'tree> Lowering<'tree> {
     fn lower_instance_of(&mut self, node: &CstNode) -> Expr {
         let args = self.lower_regular_args(node);
         if args.len() != 2 {
-            self.diagnostics.push(Diagnostic::error(
-                node.span,
-                "instance? expects a value and class",
-            ));
+            self.diagnostics.push(
+                Diagnostic::error(node.span, DiagnosticCode::AstInvalidInstanceOf)
+                    .with_arg(DiagnosticArg::unsigned("expected_count", 2))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1127,7 +1146,7 @@ impl<'tree> Lowering<'tree> {
         let Expr::ClassName { class_name, .. } = class else {
             self.diagnostics.push(Diagnostic::error(
                 node.span,
-                "instance? class must be a class name",
+                DiagnosticCode::AstInvalidInstanceOf,
             ));
             return Expr::Error {
                 id: self.ast_id(node),
@@ -1145,8 +1164,14 @@ impl<'tree> Lowering<'tree> {
     fn lower_cast(&mut self, node: &CstNode) -> Expr {
         let args = self.lower_regular_args(node);
         if args.len() != 2 {
-            self.diagnostics
-                .push(Diagnostic::error(node.span, "as expects a class and value"));
+            self.diagnostics.push(
+                Diagnostic::error(node.span, DiagnosticCode::AstInvalidCast)
+                    .with_arg(DiagnosticArg::unsigned("expected_count", 2))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1156,10 +1181,8 @@ impl<'tree> Lowering<'tree> {
         let class = args.next().expect("arity was checked");
         let value = args.next().expect("arity was checked");
         let Expr::ClassName { class_name, .. } = class else {
-            self.diagnostics.push(Diagnostic::error(
-                node.span,
-                "as target must be a class name",
-            ));
+            self.diagnostics
+                .push(Diagnostic::error(node.span, DiagnosticCode::AstInvalidCast));
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1176,10 +1199,14 @@ impl<'tree> Lowering<'tree> {
     fn lower_signal(&mut self, node: &CstNode) -> Expr {
         let args = self.lower_regular_args(node);
         if args.len() != 1 {
-            self.diagnostics.push(Diagnostic::error(
-                node.span,
-                "signal expects exactly one condition",
-            ));
+            self.diagnostics.push(
+                Diagnostic::error(node.span, DiagnosticCode::AstInvalidSignal)
+                    .with_arg(DiagnosticArg::unsigned("expected_count", 1))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,

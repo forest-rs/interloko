@@ -9,7 +9,7 @@ use execution_tape::value::FuncId;
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::runtime::CairnHost;
 use crate::sem::HostMetaRegistry;
 use crate::{ast, lower, sem, syntax, tape};
@@ -53,6 +53,24 @@ pub enum CompileError {
         /// Requested function name.
         name: String,
     },
+}
+
+impl CompileError {
+    /// Stable error code for this driver/runtime failure.
+    #[must_use]
+    pub const fn code(&self) -> DiagnosticCode {
+        match self {
+            Self::Diagnostics { .. } => DiagnosticCode::Uncategorized,
+            Self::Lower { error } => error.code(),
+            Self::Tape { error } => error.code(),
+            Self::MissingMain => DiagnosticCode::RuntimeMissingMain,
+            Self::MissingFunction { .. } => DiagnosticCode::RuntimeMissingFunction,
+            Self::MainHasParameters => DiagnosticCode::RuntimeMainHasParameters,
+            Self::Runtime { .. } => DiagnosticCode::RuntimeTrap,
+            Self::MainReturnedNonI64 => DiagnosticCode::RuntimeMainReturnedNonI64,
+            Self::FunctionReturnedNonI64 { .. } => DiagnosticCode::RuntimeFunctionReturnedNonI64,
+        }
+    }
 }
 
 /// Fully compiled milestone-0 module.
@@ -473,7 +491,15 @@ mod tests {
         assert!(matches!(
             bad_slot,
             CompileError::Diagnostics { diagnostics }
-                if diagnostics.iter().any(|diagnostic| diagnostic.message == "class `<rust-circle>` has no slot `side`")
+                if diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == DiagnosticCode::UnknownSlot
+                        && diagnostic.args.iter().any(|arg| {
+                            arg.name == "class" && arg.value.render() == "<rust-circle>"
+                        })
+                        && diagnostic.args.iter().any(|arg| {
+                            arg.name == "slot" && arg.value.render() == "side"
+                        })
+                })
         ));
 
         let bad_cast = compile_with_host_registry(
@@ -484,7 +510,15 @@ mod tests {
         assert!(matches!(
             bad_cast,
             CompileError::Diagnostics { diagnostics }
-                if diagnostics.iter().any(|diagnostic| diagnostic.message == "cast is impossible: <rust-square> is not <rust-circle>")
+                if diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == DiagnosticCode::CastImpossible
+                        && diagnostic.args.iter().any(|arg| {
+                            arg.name == "actual" && arg.value.render() == "<rust-square>"
+                        })
+                        && diagnostic.args.iter().any(|arg| {
+                            arg.name == "expected" && arg.value.render() == "<rust-circle>"
+                        })
+                })
         ));
     }
 

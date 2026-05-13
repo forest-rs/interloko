@@ -6,10 +6,12 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cairn_compiler::diagnostic::DiagnosticCode;
 use cairn_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use cairn_compiler::session::{
     CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
 };
+use cairn_diagnostics::DiagnosticRenderer;
 
 type Result<T> = std::result::Result<T, CorpusError>;
 
@@ -243,6 +245,14 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
         }
     }
 
+    for prefix in ["diagnostic code ", "diagnostics code "] {
+        if let Some(code) = input.strip_prefix(prefix) {
+            let code = DiagnosticCode::parse(code)
+                .ok_or_else(|| invalid_header(path, line, "unknown diagnostic code"))?;
+            return Ok(Expectation::DiagnosticCode(code));
+        }
+    }
+
     if let Some(rest) = input.strip_prefix("dump ") {
         let Some((stage, text)) = rest.split_once(" contains ") else {
             return Err(invalid_header(
@@ -279,6 +289,7 @@ fn check_case(case: &Case) -> Vec<String> {
     };
     let artifacts = compile_case(case, mode);
     let mut failures = Vec::new();
+    let renderer = DiagnosticRenderer::english();
 
     for expectation in &case.expectations {
         match expectation {
@@ -298,12 +309,37 @@ fn check_case(case: &Case) -> Vec<String> {
                 }
             }
             Expectation::DiagnosticContains(text) => {
+                let Ok(renderer) = &renderer else {
+                    failures.push("failed to compile English diagnostic catalog".into());
+                    continue;
+                };
+                let mut found = false;
+                for diagnostic in &artifacts.diagnostics {
+                    match renderer.render(diagnostic) {
+                        Ok(rendered) if rendered.contains(text) => {
+                            found = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            failures.push(format!(
+                                "failed to render diagnostic `{}`: {error}",
+                                diagnostic.code
+                            ));
+                        }
+                    }
+                }
+                if !found {
+                    failures.push(format!("expected diagnostic containing `{text}`"));
+                }
+            }
+            Expectation::DiagnosticCode(code) => {
                 if !artifacts
                     .diagnostics
                     .iter()
-                    .any(|diagnostic| diagnostic.message.contains(text))
+                    .any(|diagnostic| diagnostic.code == *code)
                 {
-                    failures.push(format!("expected diagnostic containing `{text}`"));
+                    failures.push(format!("expected diagnostic code `{code}`"));
                 }
             }
             Expectation::DumpContains { stage, text } => {
@@ -407,6 +443,7 @@ enum Expectation {
     Run(i64),
     Diagnostics(usize),
     DiagnosticContains(String),
+    DiagnosticCode(DiagnosticCode),
     DumpContains { stage: DumpStage, text: String },
 }
 

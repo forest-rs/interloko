@@ -1,5 +1,5 @@
 // expect: diagnostics 1
-// expect: diagnostic contains unresolved slot type `<missing>`
+// expect: diagnostic contains unresolved class `<missing>`
 
 define class <bad> (<object>)
   slot cause :: <missing>;

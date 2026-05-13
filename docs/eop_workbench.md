@@ -60,6 +60,10 @@ Diagnostics are environment objects too:
 cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
 ```
 
+Diagnostic inspection reports structured facts, not only prose: stable code,
+severity, source span, labels, args, and the default English rendering. Tools
+should use the code and args for behavior; the rendered message is presentation.
+
 Class inspection includes initialization facts derived from the class's
 finalized effective slots:
 

@@ -1,4 +1,5 @@
 // expect: diagnostics 1
+// expect: diagnostic code sem.if-condition-type-mismatch
 // expect: diagnostic contains if condition must be bool
 
 define function main()

@@ -1,3 +1,4 @@
+// expect: diagnostic code sem.missing-required-init-keyword
 // expect: diagnostic contains missing required init keyword `r:` for slot `radius`
 
 define class <circle> (<object>)

@@ -4,7 +4,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{SourceFileId, StableIdBuilder, SyntaxNodeId};
 
 /// A byte span in a source file.
@@ -668,7 +668,7 @@ impl<'source> Parser<'source> {
         while !self.at_end() {
             if !self.at(TokenKind::Define) {
                 if let Some(index) = self.bump() {
-                    self.error_at(index, "expected definition");
+                    self.error_at(index, DiagnosticCode::SyntaxExpectedToken, "definition");
                     children.push(CstElement::Token(index));
                 }
                 continue;
@@ -681,7 +681,11 @@ impl<'source> Parser<'source> {
                 Some(TokenKind::Method) => children.push(CstElement::Node(self.parse_method())),
                 _ if self.at(TokenKind::Define) => {
                     let index = self.bump().expect("define token must exist");
-                    self.error_at(index, "expected definition kind after `define`");
+                    self.error_at(
+                        index,
+                        DiagnosticCode::SyntaxExpectedToken,
+                        "definition kind after `define`",
+                    );
                     children.push(CstElement::Token(index));
                 }
                 _ => {}
@@ -713,33 +717,29 @@ impl<'source> Parser<'source> {
     fn parse_class(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::Define, &mut children, "expected `define`");
-        self.expect(TokenKind::Class, &mut children, "expected `class`");
-        self.expect(TokenKind::TypeName, &mut children, "expected class name");
+        self.expect(TokenKind::Define, &mut children, "`define`");
+        self.expect(TokenKind::Class, &mut children, "`class`");
+        self.expect(TokenKind::TypeName, &mut children, "class name");
         if self.at(TokenKind::LParen) {
-            self.expect(TokenKind::LParen, &mut children, "expected `(`");
-            self.expect(
-                TokenKind::TypeName,
-                &mut children,
-                "expected superclass name",
-            );
-            self.expect(TokenKind::RParen, &mut children, "expected `)`");
+            self.expect(TokenKind::LParen, &mut children, "`(`");
+            self.expect(TokenKind::TypeName, &mut children, "superclass name");
+            self.expect(TokenKind::RParen, &mut children, "`)`");
         }
         while !self.at(TokenKind::End) && !self.at_end() {
             if self.at(TokenKind::Slot) || self.at(TokenKind::Constant) {
                 children.push(CstElement::Node(self.parse_slot_decl()));
             } else if let Some(index) = self.bump() {
-                self.error_at(index, "expected `slot`, `constant slot`, or `end`");
+                self.error_at(
+                    index,
+                    DiagnosticCode::SyntaxExpectedToken,
+                    "`slot`, `constant slot`, or `end`",
+                );
                 children.push(CstElement::Token(index));
             }
         }
-        self.expect(
-            TokenKind::End,
-            &mut children,
-            "expected `end` after class body",
-        );
+        self.expect(TokenKind::End, &mut children, "`end` after class body");
         if self.at(TokenKind::Semicolon) {
-            self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
+            self.expect(TokenKind::Semicolon, &mut children, "`;`");
         }
         self.node(CstKind::Class, children, start)
     }
@@ -748,26 +748,26 @@ impl<'source> Parser<'source> {
         let start = self.current_span();
         let mut children = Vec::new();
         if self.at(TokenKind::Constant) {
-            self.expect(TokenKind::Constant, &mut children, "expected `constant`");
+            self.expect(TokenKind::Constant, &mut children, "`constant`");
         }
-        self.expect(TokenKind::Slot, &mut children, "expected `slot`");
-        self.expect(TokenKind::Ident, &mut children, "expected slot name");
+        self.expect(TokenKind::Slot, &mut children, "`slot`");
+        self.expect(TokenKind::Ident, &mut children, "slot name");
         if self.at(TokenKind::DoubleColon) {
             self.expect(
                 TokenKind::DoubleColon,
                 &mut children,
-                "expected `::` after slot name",
+                "`::` after slot name",
             );
-            self.expect(TokenKind::TypeName, &mut children, "expected slot type");
+            self.expect(TokenKind::TypeName, &mut children, "slot type");
         }
         while self.at(TokenKind::Comma) {
-            self.expect(TokenKind::Comma, &mut children, "expected `,`");
+            self.expect(TokenKind::Comma, &mut children, "`,`");
             children.push(CstElement::Node(self.parse_slot_option()));
         }
         self.expect(
             TokenKind::Semicolon,
             &mut children,
-            "expected `;` after slot declaration",
+            "`;` after slot declaration",
         );
         self.node(CstKind::SlotDecl, children, start)
     }
@@ -776,25 +776,21 @@ impl<'source> Parser<'source> {
         let start = self.current_span();
         let mut children = Vec::new();
         let option = self.peek().map(|(_, token)| token);
-        self.expect(TokenKind::Ident, &mut children, "expected slot option name");
+        self.expect(TokenKind::Ident, &mut children, "slot option name");
         self.expect(
             TokenKind::Colon,
             &mut children,
-            "expected `:` after slot option name",
+            "`:` after slot option name",
         );
         if option.is_some_and(|token| token.text(self.source) == "init-value") {
             children.push(CstElement::Node(self.parse_expr()));
             return self.node(CstKind::SlotOption, children, start);
         }
-        self.expect(
-            TokenKind::Ident,
-            &mut children,
-            "expected slot keyword name",
-        );
+        self.expect(TokenKind::Ident, &mut children, "slot keyword name");
         self.expect(
             TokenKind::Colon,
             &mut children,
-            "expected `:` after slot keyword name",
+            "`:` after slot keyword name",
         );
         self.node(CstKind::SlotOption, children, start)
     }
@@ -802,28 +798,20 @@ impl<'source> Parser<'source> {
     fn parse_generic(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::Define, &mut children, "expected `define`");
-        self.expect(TokenKind::Generic, &mut children, "expected `generic`");
-        self.expect(TokenKind::Ident, &mut children, "expected generic name");
-        self.expect(
-            TokenKind::LParen,
-            &mut children,
-            "expected `(` after generic name",
-        );
+        self.expect(TokenKind::Define, &mut children, "`define`");
+        self.expect(TokenKind::Generic, &mut children, "`generic`");
+        self.expect(TokenKind::Ident, &mut children, "generic name");
+        self.expect(TokenKind::LParen, &mut children, "`(` after generic name");
         children.push(CstElement::Node(self.parse_parameter_list()));
-        self.expect(
-            TokenKind::RParen,
-            &mut children,
-            "expected `)` after parameters",
-        );
+        self.expect(TokenKind::RParen, &mut children, "`)` after parameters");
         if self.at(TokenKind::Arrow) {
-            self.expect(TokenKind::Arrow, &mut children, "expected `=>`");
-            self.parse_type_annotation(&mut children, "expected generic return type");
+            self.expect(TokenKind::Arrow, &mut children, "`=>`");
+            self.parse_type_annotation(&mut children, "generic return type");
         }
         self.expect(
             TokenKind::Semicolon,
             &mut children,
-            "expected `;` after generic declaration",
+            "`;` after generic declaration",
         );
         self.node(CstKind::Generic, children, start)
     }
@@ -831,32 +819,20 @@ impl<'source> Parser<'source> {
     fn parse_method(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::Define, &mut children, "expected `define`");
-        self.expect(TokenKind::Method, &mut children, "expected `method`");
-        self.expect(TokenKind::Ident, &mut children, "expected method name");
-        self.expect(
-            TokenKind::LParen,
-            &mut children,
-            "expected `(` after method name",
-        );
+        self.expect(TokenKind::Define, &mut children, "`define`");
+        self.expect(TokenKind::Method, &mut children, "`method`");
+        self.expect(TokenKind::Ident, &mut children, "method name");
+        self.expect(TokenKind::LParen, &mut children, "`(` after method name");
         children.push(CstElement::Node(self.parse_parameter_list()));
-        self.expect(
-            TokenKind::RParen,
-            &mut children,
-            "expected `)` after parameters",
-        );
+        self.expect(TokenKind::RParen, &mut children, "`)` after parameters");
         if self.at(TokenKind::Arrow) {
-            self.expect(TokenKind::Arrow, &mut children, "expected `=>`");
-            self.parse_type_annotation(&mut children, "expected method return type");
+            self.expect(TokenKind::Arrow, &mut children, "`=>`");
+            self.parse_type_annotation(&mut children, "method return type");
         }
         children.push(CstElement::Node(self.parse_body()));
-        self.expect(
-            TokenKind::End,
-            &mut children,
-            "expected `end` after method body",
-        );
+        self.expect(TokenKind::End, &mut children, "`end` after method body");
         if self.at(TokenKind::Semicolon) {
-            self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
+            self.expect(TokenKind::Semicolon, &mut children, "`;`");
         }
         self.node(CstKind::Method, children, start)
     }
@@ -864,32 +840,20 @@ impl<'source> Parser<'source> {
     fn parse_function(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::Define, &mut children, "expected `define`");
-        self.expect(TokenKind::Function, &mut children, "expected `function`");
-        self.expect(TokenKind::Ident, &mut children, "expected function name");
-        self.expect(
-            TokenKind::LParen,
-            &mut children,
-            "expected `(` after function name",
-        );
+        self.expect(TokenKind::Define, &mut children, "`define`");
+        self.expect(TokenKind::Function, &mut children, "`function`");
+        self.expect(TokenKind::Ident, &mut children, "function name");
+        self.expect(TokenKind::LParen, &mut children, "`(` after function name");
         children.push(CstElement::Node(self.parse_parameter_list()));
-        self.expect(
-            TokenKind::RParen,
-            &mut children,
-            "expected `)` after parameters",
-        );
+        self.expect(TokenKind::RParen, &mut children, "`)` after parameters");
         if self.at(TokenKind::Arrow) {
-            self.expect(TokenKind::Arrow, &mut children, "expected `=>`");
-            self.parse_type_annotation(&mut children, "expected function return type");
+            self.expect(TokenKind::Arrow, &mut children, "`=>`");
+            self.parse_type_annotation(&mut children, "function return type");
         }
         children.push(CstElement::Node(self.parse_body()));
-        self.expect(
-            TokenKind::End,
-            &mut children,
-            "expected `end` after function body",
-        );
+        self.expect(TokenKind::End, &mut children, "`end` after function body");
         if self.at(TokenKind::Semicolon) {
-            self.expect(TokenKind::Semicolon, &mut children, "expected `;`");
+            self.expect(TokenKind::Semicolon, &mut children, "`;`");
         }
         self.node(CstKind::Function, children, start)
     }
@@ -902,15 +866,15 @@ impl<'source> Parser<'source> {
         }
 
         loop {
-            self.expect(TokenKind::Ident, &mut children, "expected parameter name");
+            self.expect(TokenKind::Ident, &mut children, "parameter name");
             if self.at(TokenKind::DoubleColon) {
-                self.expect(TokenKind::DoubleColon, &mut children, "expected `::`");
-                self.parse_type_annotation(&mut children, "expected parameter type");
+                self.expect(TokenKind::DoubleColon, &mut children, "`::`");
+                self.parse_type_annotation(&mut children, "parameter type");
             }
             if !self.at(TokenKind::Comma) {
                 break;
             }
-            self.expect(TokenKind::Comma, &mut children, "expected `,`");
+            self.expect(TokenKind::Comma, &mut children, "`,`");
         }
 
         self.node(CstKind::ParameterList, children, start)
@@ -918,7 +882,7 @@ impl<'source> Parser<'source> {
 
     fn parse_type_annotation(&mut self, children: &mut Vec<CstElement>, message: &str) {
         if self.at(TokenKind::Class) {
-            self.expect(TokenKind::Class, children, "expected `class`");
+            self.expect(TokenKind::Class, children, "`class`");
         }
         self.expect(TokenKind::TypeName, children, message);
     }
@@ -934,8 +898,10 @@ impl<'source> Parser<'source> {
             children.push(CstElement::Node(self.parse_expr()));
         } else {
             let span = self.current_span();
-            self.diagnostics
-                .push(Diagnostic::error(span, "expected expression"));
+            self.diagnostics.push(Diagnostic::error(
+                span,
+                DiagnosticCode::SyntaxExpectedExpression,
+            ));
         }
 
         self.node(CstKind::Body, children, start)
@@ -944,18 +910,14 @@ impl<'source> Parser<'source> {
     fn parse_let(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::Let, &mut children, "expected `let`");
-        self.expect(TokenKind::Ident, &mut children, "expected local name");
-        self.expect(
-            TokenKind::Equal,
-            &mut children,
-            "expected `=` after local name",
-        );
+        self.expect(TokenKind::Let, &mut children, "`let`");
+        self.expect(TokenKind::Ident, &mut children, "local name");
+        self.expect(TokenKind::Equal, &mut children, "`=` after local name");
         children.push(CstElement::Node(self.parse_expr()));
         self.expect(
             TokenKind::Semicolon,
             &mut children,
-            "expected `;` after local binding",
+            "`;` after local binding",
         );
         self.node(CstKind::LetStmt, children, start)
     }
@@ -971,42 +933,34 @@ impl<'source> Parser<'source> {
         }
 
         let mut children = Vec::new();
-        self.expect(TokenKind::Handle, &mut children, "expected `handle`");
+        self.expect(TokenKind::Handle, &mut children, "`handle`");
         children.push(CstElement::Node(self.parse_expr()));
-        self.expect(TokenKind::With, &mut children, "expected `with`");
+        self.expect(TokenKind::With, &mut children, "`with`");
         children.push(CstElement::Node(self.parse_restart_clause()));
-        self.expect(
-            TokenKind::End,
-            &mut children,
-            "expected `end` after `handle`",
-        );
+        self.expect(TokenKind::End, &mut children, "`end` after `handle`");
         self.node(CstKind::HandleExpr, children, start)
     }
 
     fn parse_restart_clause(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::Restart, &mut children, "expected `restart`");
+        self.expect(TokenKind::Restart, &mut children, "`restart`");
         if self.at(TokenKind::Ident)
             && self
                 .peek_non_trivia(1)
                 .is_some_and(|(_, token)| token.kind == TokenKind::DoubleColon)
         {
-            self.expect(
-                TokenKind::Ident,
-                &mut children,
-                "expected restart condition name",
-            );
+            self.expect(TokenKind::Ident, &mut children, "restart condition name");
             self.expect(
                 TokenKind::DoubleColon,
                 &mut children,
-                "expected `::` after restart condition name",
+                "`::` after restart condition name",
             );
         }
         self.expect(
             TokenKind::TypeName,
             &mut children,
-            "expected restart condition class",
+            "restart condition class",
         );
         children.push(CstElement::Node(self.parse_expr()));
         self.node(CstKind::RestartClause, children, start)
@@ -1019,13 +973,13 @@ impl<'source> Parser<'source> {
         }
 
         let mut children = Vec::new();
-        self.expect(TokenKind::If, &mut children, "expected `if`");
+        self.expect(TokenKind::If, &mut children, "`if`");
         children.push(CstElement::Node(self.parse_expr()));
-        self.expect(TokenKind::Then, &mut children, "expected `then`");
+        self.expect(TokenKind::Then, &mut children, "`then`");
         children.push(CstElement::Node(self.parse_expr()));
-        self.expect(TokenKind::Else, &mut children, "expected `else`");
+        self.expect(TokenKind::Else, &mut children, "`else`");
         children.push(CstElement::Node(self.parse_expr()));
-        self.expect(TokenKind::End, &mut children, "expected `end` after `if`");
+        self.expect(TokenKind::End, &mut children, "`end` after `if`");
         self.node(CstKind::IfExpr, children, start)
     }
 
@@ -1082,8 +1036,8 @@ impl<'source> Parser<'source> {
         while self.at(TokenKind::Dot) {
             let start = node.span;
             let mut children = vec![CstElement::Node(node)];
-            self.expect(TokenKind::Dot, &mut children, "expected `.`");
-            self.expect(TokenKind::Ident, &mut children, "expected slot name");
+            self.expect(TokenKind::Dot, &mut children, "`.`");
+            self.expect(TokenKind::Ident, &mut children, "slot name");
             node = self.node(CstKind::SlotExpr, children, start);
         }
         node
@@ -1093,19 +1047,19 @@ impl<'source> Parser<'source> {
         let start = self.current_span();
         if self.at(TokenKind::Number) {
             let mut children = Vec::new();
-            self.expect(TokenKind::Number, &mut children, "expected number");
+            self.expect(TokenKind::Number, &mut children, "number");
             return self.node(CstKind::NumberExpr, children, start);
         }
 
         if self.at(TokenKind::Bool) {
             let mut children = Vec::new();
-            self.expect(TokenKind::Bool, &mut children, "expected boolean literal");
+            self.expect(TokenKind::Bool, &mut children, "boolean literal");
             return self.node(CstKind::BoolExpr, children, start);
         }
 
         if self.at(TokenKind::TypeName) {
             let mut children = Vec::new();
-            self.expect(TokenKind::TypeName, &mut children, "expected type name");
+            self.expect(TokenKind::TypeName, &mut children, "type name");
             return self.node(CstKind::TypeExpr, children, start);
         }
 
@@ -1115,13 +1069,9 @@ impl<'source> Parser<'source> {
             };
             if self.at(TokenKind::LParen) {
                 let mut children = vec![CstElement::Token(name)];
-                self.expect(TokenKind::LParen, &mut children, "expected `(`");
+                self.expect(TokenKind::LParen, &mut children, "`(`");
                 children.push(CstElement::Node(self.parse_arg_list()));
-                self.expect(
-                    TokenKind::RParen,
-                    &mut children,
-                    "expected `)` after arguments",
-                );
+                self.expect(TokenKind::RParen, &mut children, "`)` after arguments");
                 return self.node(CstKind::CallExpr, children, start);
             }
             return self.node(CstKind::NameExpr, vec![CstElement::Token(name)], start);
@@ -1131,17 +1081,23 @@ impl<'source> Parser<'source> {
             let _ = self.bump();
             let node = self.parse_expr();
             let mut ignored = Vec::new();
-            self.expect(TokenKind::RParen, &mut ignored, "expected `)`");
+            self.expect(TokenKind::RParen, &mut ignored, "`)`");
             return node;
         }
 
         if let Some(index) = self.bump() {
-            self.error_at(index, "expected expression");
+            self.error_at(
+                index,
+                DiagnosticCode::SyntaxExpectedExpression,
+                "expression",
+            );
             return self.node(CstKind::Error, vec![CstElement::Token(index)], start);
         }
 
-        self.diagnostics
-            .push(Diagnostic::error(start, "expected expression"));
+        self.diagnostics.push(Diagnostic::error(
+            start,
+            DiagnosticCode::SyntaxExpectedExpression,
+        ));
         self.node(CstKind::Error, Vec::new(), start)
     }
 
@@ -1165,7 +1121,7 @@ impl<'source> Parser<'source> {
             if !self.at(TokenKind::Comma) {
                 break;
             }
-            self.expect(TokenKind::Comma, &mut children, "expected `,`");
+            self.expect(TokenKind::Comma, &mut children, "`,`");
         }
 
         self.node(CstKind::ArgList, children, start)
@@ -1174,12 +1130,8 @@ impl<'source> Parser<'source> {
     fn parse_keyword_arg(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::Ident, &mut children, "expected keyword name");
-        self.expect(
-            TokenKind::Colon,
-            &mut children,
-            "expected `:` after keyword name",
-        );
+        self.expect(TokenKind::Ident, &mut children, "keyword name");
+        self.expect(TokenKind::Colon, &mut children, "`:` after keyword name");
         children.push(CstElement::Node(self.parse_expr()));
         self.node(CstKind::KeywordArg, children, start)
     }
@@ -1193,7 +1145,10 @@ impl<'source> Parser<'source> {
         }
 
         let span = self.current_span();
-        self.diagnostics.push(Diagnostic::error(span, message));
+        self.diagnostics.push(
+            Diagnostic::error(span, DiagnosticCode::SyntaxExpectedToken)
+                .with_arg(DiagnosticArg::text("expected", message)),
+        );
     }
 
     fn at(&mut self, kind: TokenKind) -> bool {
@@ -1254,9 +1209,12 @@ impl<'source> Parser<'source> {
         )
     }
 
-    fn error_at(&mut self, index: usize, message: &str) {
-        self.diagnostics
-            .push(Diagnostic::error(self.tokens[index].span, message));
+    fn error_at(&mut self, index: usize, code: DiagnosticCode, message: &str) {
+        let mut diagnostic = Diagnostic::error(self.tokens[index].span, code);
+        if code == DiagnosticCode::SyntaxExpectedToken {
+            diagnostic = diagnostic.with_arg(DiagnosticArg::text("expected", message));
+        }
+        self.diagnostics.push(diagnostic);
     }
 }
 

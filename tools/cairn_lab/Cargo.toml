@@ -7,6 +7,7 @@ description = "CLI workbench for inspecting Cairn compiler sessions."
 
 [dependencies]
 cairn_compiler = { path = "../../crates/cairn_compiler" }
+cairn_diagnostics = { path = "../cairn_diagnostics" }
 
 [lints]
 workspace = true

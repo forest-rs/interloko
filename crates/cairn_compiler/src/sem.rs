@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ast;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::Span;
 
@@ -1044,12 +1044,6 @@ struct ActiveRestart {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum AccessorSyntax {
-    Slot,
-    Call,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum AccessorResolution {
     None,
     One(KnownCallable),
@@ -1172,13 +1166,19 @@ impl Lowering {
     fn collect_classes(&mut self, module: &ast::Module) {
         for (index, class) in module.classes.iter().enumerate() {
             if let Some(previous) = self.classes.iter().find(|item| item.name == class.name) {
-                self.diagnostics.push(Diagnostic::error(
-                    class.span,
-                    format!(
-                        "class `{}` is already defined at bytes {}..{}",
-                        class.name, previous.span.start, previous.span.end
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(class.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "class"))
+                        .with_arg(DiagnosticArg::text("name", class.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
             }
             self.classes.push(Class {
                 id: ClassId(u32::try_from(index).unwrap_or(u32::MAX)),
@@ -1241,13 +1241,18 @@ impl Lowering {
                 .iter()
                 .find(|item| item.name == host_class.name)
             {
-                self.diagnostics.push(Diagnostic::error(
-                    Span::default(),
-                    format!(
-                        "host-backed class `{}` conflicts with class defined at bytes {}..{}",
-                        host_class.name, previous.span.start, previous.span.end
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(Span::default(), DiagnosticCode::HostClassConflict)
+                        .with_arg(DiagnosticArg::text("class", host_class.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
             }
             let class_id = ClassId(u32::try_from(self.classes.len()).unwrap_or(u32::MAX));
             let host_class_id = HostClassId(u32::try_from(host_index).unwrap_or(u32::MAX));
@@ -1324,13 +1329,14 @@ impl Lowering {
                 continue;
             }
             if matches!(superclass, "<integer>" | "<boolean>") {
-                self.diagnostics.push(Diagnostic::error(
-                    class.superclass_span,
-                    format!(
-                        "class `{}` cannot inherit from primitive `{superclass}`",
-                        class.name
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        class.superclass_span,
+                        DiagnosticCode::InvalidPrimitiveSuperclass,
+                    )
+                    .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                    .with_arg(DiagnosticArg::text("superclass", superclass)),
+                );
                 continue;
             }
             let Some((parent_id, parent_origin)) = self
@@ -1339,23 +1345,22 @@ impl Lowering {
                 .find(|candidate| candidate.name == superclass)
                 .map(|parent| (parent.id, parent.origin))
             else {
-                self.diagnostics.push(Diagnostic::error(
-                    class.superclass_span,
-                    format!(
-                        "unresolved superclass `{superclass}` for class `{}`",
-                        class.name
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(class.superclass_span, DiagnosticCode::UnresolvedSuperclass)
+                        .with_arg(DiagnosticArg::text("superclass", superclass))
+                        .with_arg(DiagnosticArg::text("class", class.name.clone())),
+                );
                 continue;
             };
             if matches!(parent_origin, ClassOrigin::HostBacked { .. }) {
-                self.diagnostics.push(Diagnostic::error(
-                    class.superclass_span,
-                    format!(
-                        "class `{}` cannot inherit from host-backed class `{superclass}`",
-                        class.name
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        class.superclass_span,
+                        DiagnosticCode::InvalidHostBackedSuperclass,
+                    )
+                    .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                    .with_arg(DiagnosticArg::text("superclass", superclass)),
+                );
                 continue;
             }
             if let Some(lowered_class) = self.classes.get_mut(class_index) {
@@ -1381,15 +1386,15 @@ impl Lowering {
                     .map_or(ValueKind::Error, |slot| slot.kind);
                 let value_kind = self.expr_kind(&value);
                 if !self.kinds_match(slot_kind, value_kind) {
-                    self.diagnostics.push(Diagnostic::error(
-                        init_value.span(),
-                        format!(
-                            "slot `{}` expects {} but default init-value has {}",
-                            slot.name,
-                            self.kind_name(slot_kind),
-                            self.kind_name(value_kind)
-                        ),
-                    ));
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            init_value.span(),
+                            DiagnosticCode::SlotDefaultTypeMismatch,
+                        )
+                        .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                        .with_arg(DiagnosticArg::text("expected", self.kind_name(slot_kind)))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(value_kind))),
+                    );
                 }
                 lowered_values.push((class_index, slot_index, value));
             }
@@ -1418,10 +1423,10 @@ impl Lowering {
             Some(FinalizeState::Done) => return,
             Some(FinalizeState::Visiting) => {
                 let class = &self.classes[class_index];
-                self.diagnostics.push(Diagnostic::error(
-                    class.span,
-                    format!("class inheritance cycle involving `{}`", class.name),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(class.span, DiagnosticCode::ClassInheritanceCycle)
+                        .with_arg(DiagnosticArg::text("class", class.name.clone())),
+                );
                 return;
             }
             Some(FinalizeState::Unvisited) => {}
@@ -1523,37 +1528,34 @@ impl Lowering {
                 .iter()
                 .any(|previous| previous.name == slot.name)
             {
-                self.diagnostics.push(Diagnostic::error(
-                    slot.span,
-                    format!(
-                        "class `{class_name}` has duplicate effective slot `{}`",
-                        slot.name
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(slot.span, DiagnosticCode::DuplicateEffectiveSlot)
+                        .with_arg(DiagnosticArg::text("class", class_name.clone()))
+                        .with_arg(DiagnosticArg::text("slot", slot.name.clone())),
+                );
             }
             if slots[..index]
                 .iter()
                 .any(|previous| previous.init_keyword == slot.init_keyword)
             {
-                self.diagnostics.push(Diagnostic::error(
-                    slot.span,
-                    format!(
-                        "class `{class_name}` has duplicate effective init keyword `{}:`",
-                        slot.init_keyword
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(slot.span, DiagnosticCode::DuplicateEffectiveInitKeyword)
+                        .with_arg(DiagnosticArg::text("class", class_name.clone()))
+                        .with_arg(DiagnosticArg::text(
+                            "keyword",
+                            format!("{}:", slot.init_keyword),
+                        )),
+                );
             }
             if slots[..index]
                 .iter()
                 .any(|previous| previous.accessor.name == slot.accessor.name)
             {
-                self.diagnostics.push(Diagnostic::error(
-                    slot.span,
-                    format!(
-                        "class `{class_name}` has duplicate effective accessor `{}`",
-                        slot.accessor.name
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(slot.span, DiagnosticCode::DuplicateEffectiveAccessor)
+                        .with_arg(DiagnosticArg::text("class", class_name.clone()))
+                        .with_arg(DiagnosticArg::text("accessor", slot.accessor.name.clone())),
+                );
             }
         }
     }
@@ -1564,13 +1566,14 @@ impl Lowering {
                 .iter()
                 .any(|previous| previous.init_keyword == slot.init_keyword)
             {
-                self.diagnostics.push(Diagnostic::error(
-                    class.span,
-                    format!(
-                        "class `{}` has duplicate init keyword `{}:`",
-                        class.name, slot.init_keyword
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(class.span, DiagnosticCode::DuplicateSlotInitKeyword)
+                        .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                        .with_arg(DiagnosticArg::text(
+                            "keyword",
+                            format!("{}:", slot.init_keyword),
+                        )),
+                );
             }
         }
     }
@@ -1582,13 +1585,19 @@ impl Lowering {
                 .iter()
                 .find(|symbol| symbol.name == generic.name)
             {
-                self.diagnostics.push(Diagnostic::error(
-                    generic.span,
-                    format!(
-                        "generic `{}` is already defined at bytes {}..{}",
-                        generic.name, previous.span.start, previous.span.end
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(generic.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "generic"))
+                        .with_arg(DiagnosticArg::text("name", generic.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
             }
             let id = GenericFunctionId(u32::try_from(index).unwrap_or(u32::MAX));
             let param_kinds = generic
@@ -1608,17 +1617,22 @@ impl Lowering {
                         ValueKind::Any | ValueKind::Object(_) | ValueKind::Error
                     )
                 {
-                    self.diagnostics.push(Diagnostic::error(
-                        generic
-                            .params
-                            .get(param_index)
-                            .map_or(generic.span, |param| param.span),
-                        format!(
-                            "generic `{}` parameter {} contract must be <object> or a nominal class in this slice",
-                            generic.name,
-                            param_index + 1
-                        ),
-                    ));
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            generic
+                                .params
+                                .get(param_index)
+                                .map_or(generic.span, |param| param.span),
+                            DiagnosticCode::GenericArgumentTypeMismatch,
+                        )
+                        .with_arg(DiagnosticArg::text("generic", generic.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "argument_index",
+                            u64::try_from(param_index + 1).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::text("expected", "<object>"))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(*kind))),
+                    );
                 }
             }
             let return_annotation = generic
@@ -1658,13 +1672,19 @@ impl Lowering {
                 .iter()
                 .find(|symbol| symbol.name == function.name)
             {
-                self.diagnostics.push(Diagnostic::error(
-                    function.span,
-                    format!(
-                        "function `{}` is already defined at bytes {}..{}",
-                        function.name, previous.span.start, previous.span.end
-                    ),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(function.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "function"))
+                        .with_arg(DiagnosticArg::text("name", function.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
             }
             let param_kinds = function
                 .params
@@ -1727,35 +1747,39 @@ impl Lowering {
             .as_ref()
             .map(|symbol| symbol.id)
             .unwrap_or_else(|| {
-                self.diagnostics.push(Diagnostic::error(
-                    method.span,
-                    format!("unresolved generic `{}`", method.name),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(method.span, DiagnosticCode::UnresolvedGeneric)
+                        .with_arg(DiagnosticArg::text("generic", method.name.clone())),
+                );
                 GenericFunctionId(u32::MAX)
             });
         let specializer = self
             .resolve_class(&method.param.class_name)
             .map(|class| class.id)
             .unwrap_or_else(|| {
-                self.diagnostics.push(Diagnostic::error(
-                    method.param.span,
-                    format!("unresolved class `{}`", method.param.class_name),
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(method.param.span, DiagnosticCode::UnresolvedClass).with_arg(
+                        DiagnosticArg::text("class", method.param.class_name.clone()),
+                    ),
+                );
                 ClassId(u32::MAX)
             });
         if let Some(symbol) = &generic_symbol
             && let Some(expected) = symbol.param_kinds.first().copied().flatten()
             && !self.generic_specializer_matches(expected, specializer)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                method.param.span,
-                format!(
-                    "method `{}` specializer {} does not satisfy generic parameter 1 contract {}",
-                    method.name,
+            ctx.diagnostics.push(
+                Diagnostic::error(
+                    method.param.span,
+                    DiagnosticCode::GenericMethodSpecializerTypeMismatch,
+                )
+                .with_arg(DiagnosticArg::text("method", method.name.clone()))
+                .with_arg(DiagnosticArg::text(
+                    "actual",
                     self.kind_name(ValueKind::Object(specializer)),
-                    self.kind_name(expected)
-                ),
-            ));
+                ))
+                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected))),
+            );
         }
         let param = ctx.add_local(
             self.local_definition(method.definition, &method.param.name),
@@ -1773,29 +1797,26 @@ impl Lowering {
         if let Some(expected) = return_annotation
             && !self.kinds_match(expected, body_kind)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                body.result.span(),
-                format!(
-                    "method `{}` returns {} but body has {}",
-                    method.name,
-                    self.kind_name(expected),
-                    self.kind_name(body_kind)
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(body.result.span(), DiagnosticCode::MethodReturnTypeMismatch)
+                    .with_arg(DiagnosticArg::text("method", method.name.clone()))
+                    .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(body_kind))),
+            );
         }
         if let Some(symbol) = &generic_symbol
             && let Some(expected) = symbol.return_annotation
             && !self.kinds_match(expected, result_kind)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                body.result.span(),
-                format!(
-                    "method `{}` result {} does not satisfy generic return {}",
-                    method.name,
-                    self.kind_name(result_kind),
-                    self.kind_name(expected)
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(
+                    body.result.span(),
+                    DiagnosticCode::GenericMethodResultTypeMismatch,
+                )
+                .with_arg(DiagnosticArg::text("method", method.name.clone()))
+                .with_arg(DiagnosticArg::text("actual", self.kind_name(result_kind)))
+                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected))),
+            );
         }
         self.diagnostics.extend(ctx.diagnostics);
         Method {
@@ -1819,10 +1840,10 @@ impl Lowering {
 
         for (index, param) in function.params.iter().enumerate() {
             if ctx.find_local(&param.name).is_some() {
-                ctx.diagnostics.push(Diagnostic::error(
-                    param.span,
-                    format!("parameter `{}` is already defined", param.name),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(param.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("local", param.name.clone())),
+                );
             }
             let kind = symbol
                 .as_ref()
@@ -1844,15 +1865,15 @@ impl Lowering {
         if let Some(expected) = return_annotation
             && !self.kinds_match(expected, body_kind)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                body.result.span(),
-                format!(
-                    "function `{}` returns {} but body has {}",
-                    function.name,
-                    self.kind_name(expected),
-                    self.kind_name(body_kind)
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(
+                    body.result.span(),
+                    DiagnosticCode::FunctionReturnTypeMismatch,
+                )
+                .with_arg(DiagnosticArg::text("function", function.name.clone()))
+                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                .with_arg(DiagnosticArg::text("actual", self.kind_name(body_kind))),
+            );
         }
         if let Some(symbol) = self.functions.get_mut(id.0 as usize)
             && symbol.return_annotation.is_none()
@@ -1880,10 +1901,10 @@ impl Lowering {
         for local in &block.lets {
             let value = self.lower_expr(ctx, &local.value);
             if ctx.find_local(&local.name).is_some() {
-                ctx.diagnostics.push(Diagnostic::error(
-                    local.span,
-                    format!("local `{}` is already defined", local.name),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(local.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("local", local.name.clone())),
+                );
             }
             let id = ctx.add_local(
                 self.local_definition(local.definition, &local.name),
@@ -1951,10 +1972,15 @@ impl Lowering {
                         let object = lowered_args.into_iter().next().expect("arity was checked");
                         return self.lower_class_of(ctx, object, *span);
                     }
-                    ctx.diagnostics.push(Diagnostic::error(
-                        *span,
-                        format!("class-of expects 1 argument but got {}", args.len()),
-                    ));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
+                            .with_arg(DiagnosticArg::text("callee", "class-of"))
+                            .with_arg(DiagnosticArg::unsigned("expected_count", 1))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "actual_count",
+                                u64::try_from(args.len()).unwrap_or(u64::MAX),
+                            )),
+                    );
                     return Expr::Error { span: *span };
                 }
                 if let Some(symbol) = self.resolve_function(callee) {
@@ -1964,15 +1990,24 @@ impl Lowering {
                         {
                             let actual = self.expr_kind(arg);
                             if !self.kinds_match(*expected, actual) {
-                                ctx.diagnostics.push(Diagnostic::error(
-                                    arg.span(),
-                                    format!(
-                                        "function `{callee}` argument {} expects {} but got {}",
-                                        index + 1,
+                                ctx.diagnostics.push(
+                                    Diagnostic::error(
+                                        arg.span(),
+                                        DiagnosticCode::FunctionArgumentTypeMismatch,
+                                    )
+                                    .with_arg(DiagnosticArg::text("function", callee.clone()))
+                                    .with_arg(DiagnosticArg::unsigned(
+                                        "argument_index",
+                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
+                                    ))
+                                    .with_arg(DiagnosticArg::text(
+                                        "expected",
                                         self.kind_name(*expected),
-                                        self.kind_name(actual)
+                                    ))
+                                    .with_arg(
+                                        DiagnosticArg::text("actual", self.kind_name(actual)),
                                     ),
-                                ));
+                                );
                             }
                         }
                         return Expr::DirectCall {
@@ -1981,14 +2016,18 @@ impl Lowering {
                             span: *span,
                         };
                     }
-                    ctx.diagnostics.push(Diagnostic::error(
-                        *span,
-                        format!(
-                            "function `{callee}` expects {} arguments but got {}",
-                            symbol.arity(),
-                            args.len()
-                        ),
-                    ));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
+                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "expected_count",
+                                u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "actual_count",
+                                u64::try_from(args.len()).unwrap_or(u64::MAX),
+                            )),
+                    );
                     return Expr::Error { span: *span };
                 }
                 if let Some(symbol) = self.resolve_generic(callee) {
@@ -2001,15 +2040,24 @@ impl Lowering {
                             };
                             let actual = self.expr_kind(arg);
                             if !self.generic_argument_matches(expected, actual) {
-                                ctx.diagnostics.push(Diagnostic::error(
-                                    arg.span(),
-                                    format!(
-                                        "generic `{callee}` argument {} expects {} but got {}",
-                                        index + 1,
+                                ctx.diagnostics.push(
+                                    Diagnostic::error(
+                                        arg.span(),
+                                        DiagnosticCode::GenericArgumentTypeMismatch,
+                                    )
+                                    .with_arg(DiagnosticArg::text("generic", callee.clone()))
+                                    .with_arg(DiagnosticArg::unsigned(
+                                        "argument_index",
+                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
+                                    ))
+                                    .with_arg(DiagnosticArg::text(
+                                        "expected",
                                         self.kind_name(expected),
-                                        self.kind_name(actual)
+                                    ))
+                                    .with_arg(
+                                        DiagnosticArg::text("actual", self.kind_name(actual)),
                                     ),
-                                ));
+                                );
                             }
                         }
                         return Expr::GenericCall {
@@ -2018,40 +2066,40 @@ impl Lowering {
                             span: *span,
                         };
                     }
-                    ctx.diagnostics.push(Diagnostic::error(
-                        *span,
-                        format!(
-                            "generic `{callee}` expects {} arguments but got {}",
-                            symbol.arity(),
-                            args.len()
-                        ),
-                    ));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
+                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "expected_count",
+                                u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "actual_count",
+                                u64::try_from(args.len()).unwrap_or(u64::MAX),
+                            )),
+                    );
                     return Expr::Error { span: *span };
                 }
                 if self.has_accessor(callee) {
                     if args.len() == 1 {
                         let receiver = lowered_args.into_iter().next().expect("arity was checked");
-                        return self.lower_accessor_call(
-                            ctx,
-                            receiver,
-                            callee,
-                            *span,
-                            AccessorSyntax::Call,
-                        );
+                        return self.lower_accessor_call(ctx, receiver, callee, *span);
                     }
-                    ctx.diagnostics.push(Diagnostic::error(
-                        *span,
-                        format!(
-                            "accessor `{callee}` expects 1 argument but got {}",
-                            args.len()
-                        ),
-                    ));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
+                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
+                            .with_arg(DiagnosticArg::unsigned("expected_count", 1))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "actual_count",
+                                u64::try_from(args.len()).unwrap_or(u64::MAX),
+                            )),
+                    );
                     return Expr::Error { span: *span };
                 }
-                ctx.diagnostics.push(Diagnostic::error(
-                    *span,
-                    format!("unresolved function or generic `{callee}`"),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(*span, DiagnosticCode::UnresolvedFunctionOrGeneric)
+                        .with_arg(DiagnosticArg::text("callee", callee.clone())),
+                );
                 Expr::Error { span: *span }
             }
             ast::Expr::Signal {
@@ -2074,7 +2122,13 @@ impl Lowering {
             } => {
                 let lhs = self.lower_expr(ctx, lhs);
                 let rhs = self.lower_expr(ctx, rhs);
-                self.expect_i64_operands(ctx, *span, &lhs, &rhs, "arithmetic operands must be i64");
+                self.expect_i64_operands(
+                    ctx,
+                    *span,
+                    &lhs,
+                    &rhs,
+                    DiagnosticCode::ArithmeticOperandTypeMismatch,
+                );
                 Expr::Binary {
                     op: (*op).into(),
                     lhs: Box::new(lhs),
@@ -2087,7 +2141,13 @@ impl Lowering {
             } => {
                 let lhs = self.lower_expr(ctx, lhs);
                 let rhs = self.lower_expr(ctx, rhs);
-                self.expect_i64_operands(ctx, *span, &lhs, &rhs, "comparison operands must be i64");
+                self.expect_i64_operands(
+                    ctx,
+                    *span,
+                    &lhs,
+                    &rhs,
+                    DiagnosticCode::ComparisonOperandTypeMismatch,
+                );
                 Expr::Compare {
                     op: (*op).into(),
                     lhs: Box::new(lhs),
@@ -2113,8 +2173,14 @@ impl Lowering {
                 let else_branch = self.lower_expr(ctx, else_branch);
                 let condition_kind = self.expr_kind(&condition);
                 if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
-                    ctx.diagnostics
-                        .push(Diagnostic::error(*span, "if condition must be bool"));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(*span, DiagnosticCode::IfConditionTypeMismatch)
+                            .with_arg(DiagnosticArg::text("expected", "<boolean>"))
+                            .with_arg(DiagnosticArg::text(
+                                "actual",
+                                self.kind_name(condition_kind),
+                            )),
+                    );
                 }
                 let then_kind = self.expr_kind(&then_branch);
                 let else_kind = self.expr_kind(&else_branch);
@@ -2122,10 +2188,11 @@ impl Lowering {
                     && !matches!(then_kind, ValueKind::Error)
                     && !matches!(else_kind, ValueKind::Error)
                 {
-                    ctx.diagnostics.push(Diagnostic::error(
-                        *span,
-                        "if branches must have matching result kinds",
-                    ));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(*span, DiagnosticCode::IfBranchTypeMismatch)
+                            .with_arg(DiagnosticArg::text("then", self.kind_name(then_kind)))
+                            .with_arg(DiagnosticArg::text("else", self.kind_name(else_kind))),
+                    );
                 }
                 Expr::If {
                     condition: Box::new(condition),
@@ -2161,17 +2228,17 @@ impl Lowering {
         match self.resolve_accessor_callable(name) {
             AccessorResolution::One(callable) => Expr::KnownCallable { callable, span },
             AccessorResolution::Ambiguous => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    span,
-                    format!("accessor `{name}` is ambiguous as a value"),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::AmbiguousCallable)
+                        .with_arg(DiagnosticArg::text("accessor", name)),
+                );
                 Expr::Error { span }
             }
             AccessorResolution::None => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    span,
-                    format!("unresolved local `{name}`"),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::UnresolvedLocal)
+                        .with_arg(DiagnosticArg::text("local", name)),
+                );
                 Expr::Error { span }
             }
         }
@@ -2179,10 +2246,8 @@ impl Lowering {
 
     fn lower_apply(&self, ctx: &mut FunctionContext, args: &[ast::Expr], span: Span) -> Expr {
         let Some((target, args)) = args.split_first() else {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                "apply expects a callable and arguments",
-            ));
+            ctx.diagnostics
+                .push(Diagnostic::error(span, DiagnosticCode::ApplyArityMismatch));
             return Expr::Error { span };
         };
         let target = self.lower_expr(ctx, target);
@@ -2200,19 +2265,20 @@ impl Lowering {
             ValueKind::KnownCallable(KnownCallable::SlotAccessor { .. }) => {
                 ctx.diagnostics.push(Diagnostic::error(
                     target.span(),
-                    "apply does not support slot accessors yet",
+                    DiagnosticCode::ApplyAccessorUnsupported,
                 ));
                 Expr::Error { span }
             }
             ValueKind::Error => Expr::Error { span },
             actual => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    target.span(),
-                    format!(
-                        "apply target must be a known direct or generic function, got {}",
-                        self.kind_name(actual)
-                    ),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
+                        .with_arg(DiagnosticArg::text(
+                            "expected",
+                            "known direct or generic function",
+                        ))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
                 Expr::Error { span }
             }
         }
@@ -2229,30 +2295,33 @@ impl Lowering {
             return Expr::Error { span };
         };
         if symbol.arity() != args.len() {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!(
-                    "function `{}` expects {} arguments but apply got {}",
-                    symbol.name,
-                    symbol.arity(),
-                    args.len()
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                    .with_arg(DiagnosticArg::text("callee", symbol.name.clone()))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "expected_count",
+                        u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
             return Expr::Error { span };
         }
         for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
             let actual = self.expr_kind(arg);
             if !self.kinds_match(*expected, actual) {
-                ctx.diagnostics.push(Diagnostic::error(
-                    arg.span(),
-                    format!(
-                        "function `{}` argument {} expects {} but got {}",
-                        symbol.name,
-                        index + 1,
-                        self.kind_name(*expected),
-                        self.kind_name(actual)
-                    ),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                        .with_arg(DiagnosticArg::text("function", symbol.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "argument_index",
+                            u64::try_from(index + 1).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::text("expected", self.kind_name(*expected)))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
             }
         }
         Expr::DirectCall {
@@ -2273,15 +2342,18 @@ impl Lowering {
             return Expr::Error { span };
         };
         if symbol.arity() != args.len() {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!(
-                    "generic `{}` expects {} arguments but apply got {}",
-                    symbol.name,
-                    symbol.arity(),
-                    args.len()
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                    .with_arg(DiagnosticArg::text("callee", symbol.name.clone()))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "expected_count",
+                        u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
             return Expr::Error { span };
         }
         for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
@@ -2290,16 +2362,16 @@ impl Lowering {
             };
             let actual = self.expr_kind(arg);
             if !self.generic_argument_matches(expected, actual) {
-                ctx.diagnostics.push(Diagnostic::error(
-                    arg.span(),
-                    format!(
-                        "generic `{}` argument {} expects {} but got {}",
-                        symbol.name,
-                        index + 1,
-                        self.kind_name(expected),
-                        self.kind_name(actual)
-                    ),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(arg.span(), DiagnosticCode::GenericArgumentTypeMismatch)
+                        .with_arg(DiagnosticArg::text("generic", symbol.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "argument_index",
+                            u64::try_from(index + 1).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
             }
         }
         Expr::GenericCall {
@@ -2315,16 +2387,19 @@ impl Lowering {
             ValueKind::Object(class) => class,
             ValueKind::Error => ClassId(u32::MAX),
             _ => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    span,
-                    "signal condition must be a known object",
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::SignalConditionTypeMismatch).with_arg(
+                        DiagnosticArg::text("actual", self.kind_name(self.expr_kind(&condition))),
+                    ),
+                );
                 ClassId(u32::MAX)
             }
         };
         let Some(active) = ctx.active_restart() else {
-            ctx.diagnostics
-                .push(Diagnostic::error(span, "signal requires an active restart"));
+            ctx.diagnostics.push(Diagnostic::error(
+                span,
+                DiagnosticCode::SignalRequiresRestart,
+            ));
             return Expr::Signal {
                 condition: Box::new(condition),
                 condition_class,
@@ -2335,10 +2410,17 @@ impl Lowering {
         if condition_class != ClassId(u32::MAX)
             && !self.is_same_or_subclass(condition_class, active.specializer)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                "signal condition is not handled by the active restart",
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::SignalRestartMismatch)
+                    .with_arg(DiagnosticArg::text(
+                        "condition_class",
+                        self.kind_name(ValueKind::Object(condition_class)),
+                    ))
+                    .with_arg(DiagnosticArg::text(
+                        "restart_class",
+                        self.kind_name(ValueKind::Object(active.specializer)),
+                    )),
+            );
             return Expr::Signal {
                 condition: Box::new(condition),
                 condition_class,
@@ -2365,20 +2447,20 @@ impl Lowering {
             .resolve_class(&restart.class_name)
             .map(|class| class.id)
             .unwrap_or_else(|| {
-                ctx.diagnostics.push(Diagnostic::error(
-                    restart.span,
-                    format!("unresolved class `{}`", restart.class_name),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(restart.span, DiagnosticCode::UnresolvedClass)
+                        .with_arg(DiagnosticArg::text("class", restart.class_name.clone())),
+                );
                 ClassId(u32::MAX)
             });
 
         let scope_start = ctx.scope_start();
         let condition_local = restart.condition_name.as_ref().map(|name| {
             if ctx.find_local(name).is_some() {
-                ctx.diagnostics.push(Diagnostic::error(
-                    restart.condition_span,
-                    format!("restart condition `{name}` is already defined"),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(restart.condition_span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("local", name.clone())),
+                );
             }
             ctx.add_local(
                 self.restart_condition_definition(restart, name),
@@ -2403,10 +2485,11 @@ impl Lowering {
             && !matches!(body_kind, ValueKind::Error)
             && !matches!(restart_kind, ValueKind::Error)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                "handle body and restart must have matching result kinds",
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::HandleRestartResultMismatch)
+                    .with_arg(DiagnosticArg::text("body", self.kind_name(body_kind)))
+                    .with_arg(DiagnosticArg::text("restart", self.kind_name(restart_kind))),
+            );
         }
 
         Expr::Handle {
@@ -2428,7 +2511,7 @@ impl Lowering {
         span: Span,
         lhs: &Expr,
         rhs: &Expr,
-        message: &str,
+        code: DiagnosticCode,
     ) {
         let lhs_kind = self.expr_kind(lhs);
         let rhs_kind = self.expr_kind(rhs);
@@ -2437,15 +2520,19 @@ impl Lowering {
         {
             return;
         }
-        ctx.diagnostics.push(Diagnostic::error(span, message));
+        ctx.diagnostics.push(
+            Diagnostic::error(span, code)
+                .with_arg(DiagnosticArg::text("lhs", self.kind_name(lhs_kind)))
+                .with_arg(DiagnosticArg::text("rhs", self.kind_name(rhs_kind))),
+        );
     }
 
     fn lower_class_object(&self, ctx: &mut FunctionContext, class_name: &str, span: Span) -> Expr {
         let Some(class) = self.resolve_class(class_name) else {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!("unresolved class `{class_name}`"),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
+                    .with_arg(DiagnosticArg::text("class", class_name)),
+            );
             return Expr::Error { span };
         };
         Expr::ClassObject {
@@ -2459,8 +2546,11 @@ impl Lowering {
             ValueKind::Object(class) => class,
             ValueKind::Error => return Expr::Error { span },
             _ => {
-                ctx.diagnostics
-                    .push(Diagnostic::error(span, "class-of requires a known object"));
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::ClassOfTypeMismatch).with_arg(
+                        DiagnosticArg::text("actual", self.kind_name(self.expr_kind(&object))),
+                    ),
+                );
                 return Expr::Error { span };
             }
         };
@@ -2479,36 +2569,37 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let Some(class) = self.resolve_class(class_name) else {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!("unresolved class `{class_name}`"),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
+                    .with_arg(DiagnosticArg::text("class", class_name)),
+            );
             return Expr::Error { span };
         };
         let value = self.lower_expr(ctx, value);
         match self.expr_kind(&value) {
             ValueKind::Any | ValueKind::Object(_) | ValueKind::Error => {}
             actual => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    span,
-                    format!(
-                        "instance? expects <object> or a known object, got {}",
-                        self.kind_name(actual)
-                    ),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::InstanceOfTypeMismatch)
+                        .with_arg(DiagnosticArg::text("expected", "<object>"))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
             }
         }
         if let ValueKind::Object(actual) = self.expr_kind(&value)
             && !self.classes_may_overlap(actual, class.id)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!(
-                    "instance? test is impossible: {} is not {}",
-                    self.kind_name(ValueKind::Object(actual)),
-                    self.kind_name(ValueKind::Object(class.id))
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::InstanceOfImpossible)
+                    .with_arg(DiagnosticArg::text(
+                        "actual",
+                        self.kind_name(ValueKind::Object(actual)),
+                    ))
+                    .with_arg(DiagnosticArg::text(
+                        "expected",
+                        self.kind_name(ValueKind::Object(class.id)),
+                    )),
+            );
         }
         Expr::InstanceOf {
             value: Box::new(value),
@@ -2525,36 +2616,37 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let Some(class) = self.resolve_class(class_name) else {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!("unresolved class `{class_name}`"),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
+                    .with_arg(DiagnosticArg::text("class", class_name)),
+            );
             return Expr::Error { span };
         };
         let value = self.lower_expr(ctx, value);
         match self.expr_kind(&value) {
             ValueKind::Any | ValueKind::Object(_) | ValueKind::Error => {}
             actual => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    span,
-                    format!(
-                        "as expects <object> or a known object, got {}",
-                        self.kind_name(actual)
-                    ),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::CastTypeMismatch)
+                        .with_arg(DiagnosticArg::text("expected", "<object>"))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
             }
         }
         if let ValueKind::Object(actual) = self.expr_kind(&value)
             && !self.classes_may_overlap(actual, class.id)
         {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!(
-                    "cast is impossible: {} is not {}",
-                    self.kind_name(ValueKind::Object(actual)),
-                    self.kind_name(ValueKind::Object(class.id))
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::CastImpossible)
+                    .with_arg(DiagnosticArg::text(
+                        "actual",
+                        self.kind_name(ValueKind::Object(actual)),
+                    ))
+                    .with_arg(DiagnosticArg::text(
+                        "expected",
+                        self.kind_name(ValueKind::Object(class.id)),
+                    )),
+            );
         }
         Expr::Cast {
             value: Box::new(value),
@@ -2575,10 +2667,16 @@ impl Lowering {
             ValueKind::ClassObject(class_id) => class_id,
             ValueKind::Error => return Expr::Error { span },
             _ => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    class_expr.span(),
-                    "make class argument must be a known class object",
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(
+                        class_expr.span(),
+                        DiagnosticCode::MakeClassArgumentTypeMismatch,
+                    )
+                    .with_arg(DiagnosticArg::text(
+                        "actual",
+                        self.kind_name(self.expr_kind(&class_expr)),
+                    )),
+                );
                 return Expr::Error { span };
             }
         };
@@ -2586,13 +2684,10 @@ impl Lowering {
             return Expr::Error { span };
         };
         if matches!(class.origin, ClassOrigin::HostBacked { .. }) {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!(
-                    "host-backed class `{}` cannot be constructed with make",
-                    class.name
-                ),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::HostBackedMake)
+                    .with_arg(DiagnosticArg::text("class", class.name.clone())),
+            );
             return Expr::Error { span };
         }
 
@@ -2602,10 +2697,10 @@ impl Lowering {
                 .iter()
                 .any(|arg: &InitArg| arg.keyword == field.name)
             {
-                ctx.diagnostics.push(Diagnostic::error(
-                    field.span,
-                    format!("duplicate initializer for keyword `{}:`", field.name),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(field.span, DiagnosticCode::DuplicateInitKeyword)
+                        .with_arg(DiagnosticArg::text("keyword", format!("{}:", field.name))),
+                );
                 continue;
             }
             let Some(slot) = class
@@ -2613,27 +2708,22 @@ impl Lowering {
                 .iter()
                 .find(|slot| slot.init_keyword == field.name)
             else {
-                ctx.diagnostics.push(Diagnostic::error(
-                    field.span,
-                    format!(
-                        "class `{}` has no init keyword `{}:`",
-                        class.name, field.name
-                    ),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(field.span, DiagnosticCode::UnknownInitKeyword)
+                        .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                        .with_arg(DiagnosticArg::text("keyword", format!("{}:", field.name))),
+                );
                 continue;
             };
             let value = self.lower_expr(ctx, &field.value);
             let value_kind = self.expr_kind(&value);
             if !self.kinds_match(slot.kind, value_kind) {
-                ctx.diagnostics.push(Diagnostic::error(
-                    field.span,
-                    format!(
-                        "slot `{}` expects {} but initializer has {}",
-                        slot.name,
-                        self.kind_name(slot.kind),
-                        self.kind_name(value_kind)
-                    ),
-                ));
+                ctx.diagnostics.push(
+                    Diagnostic::error(field.span, DiagnosticCode::SlotInitializerTypeMismatch)
+                        .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                        .with_arg(DiagnosticArg::text("expected", self.kind_name(slot.kind)))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(value_kind))),
+                );
             }
             init_args.push(InitArg {
                 keyword: field.name.clone(),
@@ -2662,18 +2752,19 @@ impl Lowering {
                         span: init_value.span(),
                     });
                 } else if step.required_init_keyword {
-                    ctx.diagnostics.push(Diagnostic::error(
-                        span,
-                        format!(
-                            "missing required init keyword `{}:` for slot `{}`",
-                            slot.init_keyword, slot.name
-                        ),
-                    ));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(span, DiagnosticCode::MissingRequiredInitKeyword)
+                            .with_arg(DiagnosticArg::text(
+                                "keyword",
+                                format!("{}:", slot.init_keyword),
+                            ))
+                            .with_arg(DiagnosticArg::text("slot", slot.name.clone())),
+                    );
                 } else {
-                    ctx.diagnostics.push(Diagnostic::error(
-                        span,
-                        format!("missing initializer for slot `{}`", slot.name),
-                    ));
+                    ctx.diagnostics.push(
+                        Diagnostic::error(span, DiagnosticCode::MissingSlotInitializer)
+                            .with_arg(DiagnosticArg::text("slot", slot.name.clone())),
+                    );
                 }
             }
         }
@@ -2695,7 +2786,7 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let receiver = self.lower_expr(ctx, receiver);
-        self.lower_accessor_call(ctx, receiver, slot_name, span, AccessorSyntax::Slot)
+        self.lower_accessor_call(ctx, receiver, slot_name, span)
     }
 
     fn lower_accessor_call(
@@ -2704,20 +2795,16 @@ impl Lowering {
         receiver: Expr,
         accessor_name: &str,
         span: Span,
-        syntax: AccessorSyntax,
     ) -> Expr {
         let ValueKind::Object(class_id) = self.expr_kind(&receiver) else {
-            let message = match syntax {
-                AccessorSyntax::Slot => {
-                    "slot read receiver does not have a known object class".to_string()
-                }
-                AccessorSyntax::Call => {
-                    format!(
-                        "accessor `{accessor_name}` receiver does not have a known object class"
-                    )
-                }
-            };
-            ctx.diagnostics.push(Diagnostic::error(span, message));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::SlotReceiverTypeMismatch)
+                    .with_arg(DiagnosticArg::text("accessor", accessor_name))
+                    .with_arg(DiagnosticArg::text(
+                        "actual",
+                        self.kind_name(self.expr_kind(&receiver)),
+                    )),
+            );
             return Expr::Error { span };
         };
         let Some(class) = self.classes.get(class_id.0 as usize) else {
@@ -2728,10 +2815,11 @@ impl Lowering {
             .iter()
             .find(|slot| slot.accessor.name == accessor_name)
         else {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                format!("class `{}` has no slot `{accessor_name}`", class.name),
-            ));
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::UnknownSlot)
+                    .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                    .with_arg(DiagnosticArg::text("slot", accessor_name)),
+            );
             return Expr::Error { span };
         };
         Expr::AccessorCall {
@@ -2875,10 +2963,10 @@ impl Lowering {
                 .resolve_class(type_name)
                 .map(|class| ValueKind::ClassObject(class.id))
                 .unwrap_or_else(|| {
-                    self.diagnostics.push(Diagnostic::error(
-                        span,
-                        format!("unresolved class-object type `{type_name}`"),
-                    ));
+                    self.diagnostics.push(
+                        Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
+                            .with_arg(DiagnosticArg::text("class", type_name)),
+                    );
                     ValueKind::Error
                 });
         }
@@ -2890,10 +2978,10 @@ impl Lowering {
                 .resolve_class(name)
                 .map(|class| ValueKind::Object(class.id))
                 .unwrap_or_else(|| {
-                    self.diagnostics.push(Diagnostic::error(
-                        span,
-                        format!("unresolved slot type `{name}`"),
-                    ));
+                    self.diagnostics.push(
+                        Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
+                            .with_arg(DiagnosticArg::text("class", name)),
+                    );
                     ValueKind::Error
                 }),
         }
@@ -3040,6 +3128,18 @@ mod tests {
         registry
     }
 
+    fn has_diagnostic(module: &Module, code: DiagnosticCode, args: &[(&str, &str)]) -> bool {
+        module.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == code
+                && args.iter().all(|(name, value)| {
+                    diagnostic
+                        .args
+                        .iter()
+                        .any(|arg| arg.name == *name && arg.value.render() == *value)
+                })
+        })
+    }
+
     #[test]
     fn resolves_locals_and_direct_calls() {
         let module = lower_source(
@@ -3116,18 +3216,21 @@ mod tests {
     #[test]
     fn reports_invalid_apply_targets() {
         let non_callable = lower_source("define function main()\n  apply(1, 2)\nend;");
-        assert!(non_callable.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message
-                == "apply target must be a known direct or generic function, got <integer>"
-        }));
+        assert!(has_diagnostic(
+            &non_callable,
+            DiagnosticCode::ApplyTargetTypeMismatch,
+            &[("actual", "<integer>")]
+        ));
 
         let accessor = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function main()\n  apply(radius, make(<circle>, radius: 3))\nend;",
         );
-        assert!(accessor.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "apply does not support slot accessors yet"
-        }));
+        assert!(has_diagnostic(
+            &accessor,
+            DiagnosticCode::ApplyAccessorUnsupported,
+            &[]
+        ));
     }
 
     #[test]
@@ -3167,10 +3270,11 @@ mod tests {
             &registry,
         );
 
-        assert!(module.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message
-                == "host-backed class `<rust-circle>` cannot be constructed with make"
-        }));
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::HostBackedMake,
+            &[("class", "<rust-circle>")]
+        ));
     }
 
     #[test]
@@ -3353,9 +3457,11 @@ mod tests {
              define class <square> (<shape>)\nend;\n\
              define function main()\n  instance?(make(<square>), <circle>)\nend;",
         );
-        assert!(instance.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "instance? test is impossible: <square> is not <circle>"
-        }));
+        assert!(has_diagnostic(
+            &instance,
+            DiagnosticCode::InstanceOfImpossible,
+            &[("actual", "<square>"), ("expected", "<circle>")]
+        ));
 
         let cast = lower_source(
             "define class <shape> (<object>)\nend;\n\
@@ -3363,9 +3469,11 @@ mod tests {
              define class <square> (<shape>)\nend;\n\
              define function main()\n  as(<circle>, make(<square>)).radius\nend;",
         );
-        assert!(cast.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "cast is impossible: <square> is not <circle>"
-        }));
+        assert!(has_diagnostic(
+            &cast,
+            DiagnosticCode::CastImpossible,
+            &[("actual", "<square>"), ("expected", "<circle>")]
+        ));
     }
 
     #[test]
@@ -3374,29 +3482,37 @@ mod tests {
             "define class <child> (<missing>)\nend;\n\
              define function main()\n  0\nend;",
         );
-        assert!(unknown.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "unresolved superclass `<missing>` for class `<child>`"
-        }));
+        assert!(has_diagnostic(
+            &unknown,
+            DiagnosticCode::UnresolvedSuperclass,
+            &[("superclass", "<missing>"), ("class", "<child>")]
+        ));
 
         let primitive = lower_source(
             "define class <bad> (<boolean>)\nend;\n\
              define function main()\n  0\nend;",
         );
-        assert!(primitive.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "class `<bad>` cannot inherit from primitive `<boolean>`"
-        }));
+        assert!(has_diagnostic(
+            &primitive,
+            DiagnosticCode::InvalidPrimitiveSuperclass,
+            &[("class", "<bad>"), ("superclass", "<boolean>")]
+        ));
 
         let duplicate = lower_source(
             "define class <shape> (<object>)\n  slot radius :: <integer>, init-value: 1;\nend;\n\
              define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
              define function main()\n  0\nend;",
         );
-        assert!(duplicate.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "class `<circle>` has duplicate effective slot `radius`"
-        }));
-        assert!(duplicate.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "class `<circle>` has duplicate effective accessor `radius`"
-        }));
+        assert!(has_diagnostic(
+            &duplicate,
+            DiagnosticCode::DuplicateEffectiveSlot,
+            &[("class", "<circle>"), ("slot", "radius")]
+        ));
+        assert!(has_diagnostic(
+            &duplicate,
+            DiagnosticCode::DuplicateEffectiveAccessor,
+            &[("class", "<circle>"), ("accessor", "radius")]
+        ));
     }
 
     #[test]
@@ -3427,28 +3543,46 @@ mod tests {
             "define generic area(x :: <object>) => <integer>;\n\
              define function main()\n  area(1)\nend;",
         );
-        assert!(bad_call.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "generic `area` argument 1 expects <object> but got <integer>"
-        }));
+        assert!(has_diagnostic(
+            &bad_call,
+            DiagnosticCode::GenericArgumentTypeMismatch,
+            &[
+                ("generic", "area"),
+                ("argument_index", "1"),
+                ("expected", "<object>"),
+                ("actual", "<integer>")
+            ]
+        ));
 
         let bad_method_return = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x :: <object>) => <integer>;\n\
              define method area(c :: <circle>) => <boolean>\n  #t\nend;",
         );
-        assert!(bad_method_return.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message
-                == "method `area` result <boolean> does not satisfy generic return <integer>"
-        }));
+        assert!(has_diagnostic(
+            &bad_method_return,
+            DiagnosticCode::GenericMethodResultTypeMismatch,
+            &[
+                ("method", "area"),
+                ("actual", "<boolean>"),
+                ("expected", "<integer>")
+            ]
+        ));
 
         let bad_body = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x :: <object>) => <integer>;\n\
              define method area(c :: <circle>) => <integer>\n  #t\nend;",
         );
-        assert!(bad_body.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "method `area` returns <integer> but body has <boolean>"
-        }));
+        assert!(has_diagnostic(
+            &bad_body,
+            DiagnosticCode::MethodReturnTypeMismatch,
+            &[
+                ("method", "area"),
+                ("expected", "<integer>"),
+                ("actual", "<boolean>")
+            ]
+        ));
 
         let bad_specializer = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
@@ -3456,10 +3590,15 @@ mod tests {
              define generic area(x :: <circle>) => <integer>;\n\
              define method area(s :: <square>) => <integer>\n  s.side * s.side\nend;",
         );
-        assert!(bad_specializer.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message
-                == "method `area` specializer <square> does not satisfy generic parameter 1 contract <circle>"
-        }));
+        assert!(has_diagnostic(
+            &bad_specializer,
+            DiagnosticCode::GenericMethodSpecializerTypeMismatch,
+            &[
+                ("method", "area"),
+                ("actual", "<square>"),
+                ("expected", "<circle>")
+            ]
+        ));
     }
 
     #[test]
@@ -3548,14 +3687,27 @@ mod tests {
             "define function keep?(flag :: <boolean>) => <boolean>\n  flag\nend;\n\
              define function main()\n  keep?(1)\nend;",
         );
-        assert!(argument.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "function `keep?` argument 1 expects <boolean> but got <integer>"
-        }));
+        assert!(has_diagnostic(
+            &argument,
+            DiagnosticCode::FunctionArgumentTypeMismatch,
+            &[
+                ("function", "keep?"),
+                ("argument_index", "1"),
+                ("expected", "<boolean>"),
+                ("actual", "<integer>")
+            ]
+        ));
 
         let result = lower_source("define function bad() => <boolean>\n  1\nend;");
-        assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "function `bad` returns <boolean> but body has <integer>"
-        }));
+        assert!(has_diagnostic(
+            &result,
+            DiagnosticCode::FunctionReturnTypeMismatch,
+            &[
+                ("function", "bad"),
+                ("expected", "<boolean>"),
+                ("actual", "<integer>")
+            ]
+        ));
     }
 
     #[test]
@@ -3620,26 +3772,32 @@ mod tests {
              define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
              define function main()\n  if instance?(make(<square>, side: 2), <circle>) then 1 else 0 end\nend;",
         );
-        assert!(instance.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "instance? test is impossible: <square> is not <circle>"
-        }));
+        assert!(has_diagnostic(
+            &instance,
+            DiagnosticCode::InstanceOfImpossible,
+            &[("actual", "<square>"), ("expected", "<circle>")]
+        ));
 
         let cast = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
              define function main()\n  as(<circle>, make(<square>, side: 2)).radius\nend;",
         );
-        assert!(cast.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "cast is impossible: <square> is not <circle>"
-        }));
+        assert!(has_diagnostic(
+            &cast,
+            DiagnosticCode::CastImpossible,
+            &[("actual", "<square>"), ("expected", "<circle>")]
+        ));
 
         let primitive = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function main()\n  instance?(1, <circle>)\nend;",
         );
-        assert!(primitive.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "instance? expects <object> or a known object, got <integer>"
-        }));
+        assert!(has_diagnostic(
+            &primitive,
+            DiagnosticCode::InstanceOfTypeMismatch,
+            &[("expected", "<object>"), ("actual", "<integer>")]
+        ));
     }
 
     #[test]
@@ -3806,36 +3964,39 @@ mod tests {
             "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
              define function main()\n  make(<flag>, valid?: 1)\nend;",
         );
-        assert!(
-            mismatch
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message
-                    == "slot `valid?` expects <boolean> but initializer has <integer>")
-        );
+        assert!(has_diagnostic(
+            &mismatch,
+            DiagnosticCode::SlotInitializerTypeMismatch,
+            &[
+                ("slot", "valid?"),
+                ("expected", "<boolean>"),
+                ("actual", "<integer>")
+            ]
+        ));
 
         let unresolved = lower_source(
             "define class <bad> (<object>)\n  slot cause :: <missing>;\nend;\n\
              define function main()\n  1\nend;",
         );
-        assert!(
-            unresolved
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message == "unresolved slot type `<missing>`")
-        );
+        assert!(has_diagnostic(
+            &unresolved,
+            DiagnosticCode::UnresolvedClass,
+            &[("class", "<missing>")]
+        ));
 
         let bad_default = lower_source(
             "define class <flag> (<object>)\n  slot valid? :: <boolean>, init-value: 1;\nend;\n\
              define function main()\n  make(<flag>)\nend;",
         );
-        assert!(
-            bad_default
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message
-                    == "slot `valid?` expects <boolean> but default init-value has <integer>")
-        );
+        assert!(has_diagnostic(
+            &bad_default,
+            DiagnosticCode::SlotDefaultTypeMismatch,
+            &[
+                ("slot", "valid?"),
+                ("expected", "<boolean>"),
+                ("actual", "<integer>")
+            ]
+        ));
     }
 
     #[test]
@@ -3844,42 +4005,42 @@ mod tests {
             "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: r:;\nend;\n\
              define function main()\n  make(<circle>)\nend;",
         );
-        assert!(
-            missing
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message
-                    == "missing required init keyword `r:` for slot `radius`")
-        );
+        assert!(has_diagnostic(
+            &missing,
+            DiagnosticCode::MissingRequiredInitKeyword,
+            &[("keyword", "r:"), ("slot", "radius")]
+        ));
 
         let inherited_missing = lower_source(
             "define class <shape> (<object>)\n  slot x :: <integer>, required-init-keyword: x:;\nend;\n\
              define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
              define function main()\n  make(<point>)\nend;",
         );
-        assert!(inherited_missing.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "missing required init keyword `x:` for slot `x`"
-        }));
+        assert!(has_diagnostic(
+            &inherited_missing,
+            DiagnosticCode::MissingRequiredInitKeyword,
+            &[("keyword", "x:"), ("slot", "x")]
+        ));
 
         let unknown = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>, init-keyword: r:;\nend;\n\
              define function main()\n  make(<circle>, radius: 10)\nend;",
         );
-        assert!(unknown.diagnostics.iter().any(
-            |diagnostic| diagnostic.message == "class `<circle>` has no init keyword `radius:`"
+        assert!(has_diagnostic(
+            &unknown,
+            DiagnosticCode::UnknownInitKeyword,
+            &[("class", "<circle>"), ("keyword", "radius:")]
         ));
 
         let duplicate = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function main()\n  make(<circle>, radius: 10, radius: 11)\nend;",
         );
-        assert!(
-            duplicate
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message
-                    == "duplicate initializer for keyword `radius:`")
-        );
+        assert!(has_diagnostic(
+            &duplicate,
+            DiagnosticCode::DuplicateInitKeyword,
+            &[("keyword", "radius:")]
+        ));
     }
 
     #[test]
@@ -3914,22 +4075,19 @@ mod tests {
     fn reports_invalid_if_condition_and_branch_mismatch() {
         let invalid_condition =
             lower_source("define function main()\n  if 1 then 2 else 3 end\nend;");
-        assert!(
-            invalid_condition
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message == "if condition must be bool")
-        );
+        assert!(has_diagnostic(
+            &invalid_condition,
+            DiagnosticCode::IfConditionTypeMismatch,
+            &[("expected", "<boolean>"), ("actual", "<integer>")]
+        ));
 
         let mismatched_branches =
             lower_source("define function main(x)\n  if x = 0 then #t else 3 end\nend;");
-        assert!(
-            mismatched_branches
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message
-                    == "if branches must have matching result kinds")
-        );
+        assert!(has_diagnostic(
+            &mismatched_branches,
+            DiagnosticCode::IfBranchTypeMismatch,
+            &[("then", "<boolean>"), ("else", "<integer>")]
+        ));
     }
 
     #[test]
@@ -3979,12 +4137,11 @@ mod tests {
              define function main()\n  let recovered = handle signal(make(<bad>, fallback: 0)) with restart e :: <bad> e.fallback end;\n  e.fallback\nend;",
         );
 
-        assert!(
-            module
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message == "unresolved local `e`")
-        );
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::UnresolvedLocal,
+            &[("local", "e")]
+        ));
     }
 
     #[test]
@@ -3993,41 +4150,36 @@ mod tests {
             "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  signal(make(<bad>, fallback: 0))\nend;",
         );
-        assert!(
-            uncaught
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message == "signal requires an active restart")
-        );
+        assert!(has_diagnostic(
+            &uncaught,
+            DiagnosticCode::SignalRequiresRestart,
+            &[]
+        ));
 
         let mismatched_restart = lower_source(
             "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  handle 1 with restart <bad> #f end\nend;",
         );
-        assert!(
-            mismatched_restart
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message
-                    == "handle body and restart must have matching result kinds")
-        );
+        assert!(has_diagnostic(
+            &mismatched_restart,
+            DiagnosticCode::HandleRestartResultMismatch,
+            &[("body", "<integer>"), ("restart", "<boolean>")]
+        ));
     }
 
     #[test]
     fn reports_unresolved_names() {
         let module = lower_source("define function main()\n  missing(x)\nend;");
         assert_eq!(module.diagnostics.len(), 2);
-        assert!(
-            module
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("unresolved function"))
-        );
-        assert!(
-            module
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("unresolved local"))
-        );
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::UnresolvedFunctionOrGeneric,
+            &[("callee", "missing")]
+        ));
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::UnresolvedLocal,
+            &[("local", "x")]
+        ));
     }
 }

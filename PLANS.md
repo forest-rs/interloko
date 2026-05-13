@@ -1,5 +1,104 @@
 # Plans
 
+## Make Diagnostics Catalog-First
+
+### Goal
+
+Finish the diagnostic localization boundary by making compiler diagnostics
+language-neutral facts only. User-facing wording moves to MessageFormat
+catalogs loaded by presentation tools.
+
+### Fence
+
+`cairn_compiler` owns diagnostic codes, arguments, spans, labels, notes, and
+artifact identity. It explicitly does not own MessageFormat compilation, TOML
+resource loading, selected language/catalog state, or fallback English text.
+`cairn_diagnostics` owns catalog-backed rendering for tools such as
+`cairn_lab` and `cairn_corpus`.
+
+### Invariants
+
+- `Diagnostic` has no embedded rendered message.
+- Producer sites emit a stable `DiagnosticCode` plus structured args.
+- Rendered wording is never part of artifact fingerprints.
+- Missing catalog entries, missing args, and formatting failures are hard
+  presentation errors.
+- English and pseudo catalogs both cover every stable diagnostic code.
+- EOP diagnostic records expose facts, not pre-rendered text.
+
+### Steps
+
+1. Remove `Diagnostic::message` and migrate producer callsites to code/arg
+   constructors.
+2. Update session fingerprints, work counters, EOP diagnostic projection, and
+   corpus checks so they use diagnostic facts and catalog rendering where text
+   is intentionally tested.
+3. Make `cairn_diagnostics` strict, add pseudo catalog coverage, and expose
+   explicit catalog/locale selection for `cairn_lab`.
+4. Add tests for code/arg-only rendering, loud missing catalog/arg failures,
+   pseudo rendering, and language-independent artifact identity.
+5. Update docs, then run fmt, clippy, workspace tests, and docs.
+
+### Risks
+
+- Some existing tests assert English strings directly; migrate them to codes
+  and args unless the test is specifically about presentation.
+- Syntax diagnostics may still carry syntactic fragments as args, but not full
+  fallback sentences.
+- Keep `message-format` out of compiler crates.
+
+## Build Structured Diagnostics And MF2 Localization Boundary
+
+### Goal
+
+Replace string-only compiler diagnostics with stable diagnostic facts that can
+still render the current English messages. Prepare a clean boundary for a later
+MessageFormat 2 renderer without adding `message-format` as a core compiler
+dependency.
+
+### Fence
+
+`cairn_compiler::diagnostic` owns diagnostic identity, spans, labels, arguments,
+and the default English rendering contract. It explicitly does not own localized
+catalog loading, terminal snippet styling, LSP adaptation, fix-it edits, or
+MessageFormat 2 runtime integration.
+
+### Invariants
+
+- Diagnostic codes are stable enough for tests, corpus expectations, EOP
+  records, and tools.
+- This earlier migration kept `Diagnostic::message` temporarily; the later
+  catalog-first plan above removes it.
+- Structured arguments use named values rather than parsing prose.
+- Labels describe source spans; the primary label remains the diagnostic span.
+- EOP diagnostic objects expose both facts and rendered text.
+- `cairn_compiler` must remain free of a production dependency on
+  `../message-format`.
+
+### Steps
+
+1. Add `DiagnosticCode`, diagnostic args, labels, notes, and render helpers in
+   `cairn_compiler::diagnostic`.
+2. Provide constructors/builders so new diagnostics can be structured while old
+   string callers still compile.
+3. Migrate syntax, AST, semantic, lowering, tape, runtime/session diagnostic
+   creation to stable codes and structured args.
+4. Teach diagnostic fingerprints, work counters, EOP projection, dumps, and
+   `cairn_lab` output to include codes and structured facts.
+5. Extend `cairn_corpus` to support `// expect: diagnostic code ...` while
+   keeping `diagnostic contains ...`.
+6. Add focused unit/CLI/corpus coverage for code expectations, args, labels,
+   rendered compatibility text, and EOP diagnostic records.
+7. Document diagnostic facts vs presentation and the future MF2 renderer/catalog
+   boundary, then run all final gates and examples.
+
+### Risks
+
+- Migrating every diagnostic in one pass can become noisy; keep helper
+  constructors small and mechanical.
+- Codes must be named semantically, not after current English wording.
+- The MF2 boundary should stay documented, not implemented, in this slice.
+
 ## Build Initialization-Plan Substrate For Dylan-Style Initialize
 
 ### Goal

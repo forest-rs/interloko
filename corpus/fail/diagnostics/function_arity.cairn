@@ -1,3 +1,4 @@
+// expect: diagnostic code sem.function-arity-mismatch
 // expect: diagnostic contains function `add` expects 2 arguments but got 1
 // expect: dump sem contains error
 

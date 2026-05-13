@@ -14,6 +14,7 @@ use cairn_compiler::session::{
     EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession, InspectionFacet,
     PresentationFacet, RuntimeMode, RuntimeResult, SessionArtifacts,
 };
+use cairn_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 
 type Result<T> = std::result::Result<T, LabError>;
 
@@ -32,7 +33,7 @@ fn run(args: Vec<String>) -> Result<()> {
         "run" => {
             let file = single_file_arg(&args)?;
             let artifacts = compile_path(file, RuntimeMode::RunMain)?;
-            print_diagnostics(&artifacts.diagnostics);
+            print_diagnostics(&artifacts.diagnostics)?;
             match artifacts.runtime_result {
                 Some(RuntimeResult::ReturnedI64(value)) => {
                     println!("{value}");
@@ -45,28 +46,28 @@ fn run(args: Vec<String>) -> Result<()> {
         "dump" => {
             let (file, stage) = dump_args(&args)?;
             let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics);
+            print_diagnostics(&workbench.artifacts.diagnostics)?;
             print!("{}", workbench.dump_stage(stage));
             Ok(())
         }
         "mop" => {
             let file = single_file_arg(&args)?;
             let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics);
+            print_diagnostics(&artifacts.diagnostics)?;
             print!("{}", artifacts.dump_stage(DumpStage::Mop));
             Ok(())
         }
         "eop" => {
             let file = single_file_arg(&args)?;
             let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics);
+            print_diagnostics(&workbench.artifacts.diagnostics)?;
             print!("{}", workbench.dump_eop());
             Ok(())
         }
         "dispatch" => {
             let (file, dispatch_id) = dispatch_args(&args)?;
             let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics);
+            print_diagnostics(&artifacts.diagnostics)?;
             if let Some(dispatch_id) = dispatch_id {
                 print!("{}", dispatch_explanation(&artifacts, dispatch_id)?);
             } else {
@@ -77,7 +78,7 @@ fn run(args: Vec<String>) -> Result<()> {
         "inspect" => {
             let (file, object_id) = object_args(&args)?;
             let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics);
+            print_diagnostics(&workbench.artifacts.diagnostics)?;
             let object = workbench.object(object_id)?;
             print!("{}", format_environment_object(&object));
             Ok(())
@@ -85,7 +86,7 @@ fn run(args: Vec<String>) -> Result<()> {
         "affordances" => {
             let (file, object_id) = object_args(&args)?;
             let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics);
+            print_diagnostics(&workbench.artifacts.diagnostics)?;
             let object = workbench.object(object_id)?;
             print!("{}", format_affordances(&object));
             Ok(())
@@ -421,14 +422,14 @@ fn affordance_csv(object: &EnvironmentObject) -> String {
 fn invoke_affordance(file: &str, object_id: &str, affordance: EnvironmentAffordance) -> Result<()> {
     if affordance == EnvironmentAffordance::Run {
         let workbench = compile_workbench_path(file, RuntimeMode::RunMain)?;
-        print_diagnostics(&workbench.artifacts.diagnostics);
+        print_diagnostics(&workbench.artifacts.diagnostics)?;
         let object = workbench.object(object_id)?;
         ensure_object_has_affordance(&object, affordance)?;
         return print_runtime_result(&workbench.artifacts);
     }
 
     let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-    print_diagnostics(&workbench.artifacts.diagnostics);
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
     let object = workbench.object(object_id)?;
     ensure_object_has_affordance(&object, affordance)?;
     match affordance {
@@ -746,17 +747,51 @@ fn invalid_host_eop_header(path: &Path, line: usize, message: &str) -> LabError 
     }
 }
 
-fn print_diagnostics(diagnostics: &[cairn_compiler::diagnostic::Diagnostic]) {
-    if diagnostics.is_empty() {
-        return;
+fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
+    if let Ok(path) = env::var("CAIRN_DIAGNOSTIC_CATALOG") {
+        let source = fs::read_to_string(&path).map_err(|error| LabError::Io {
+            path: path.clone(),
+            error,
+        })?;
+        let catalog = DiagnosticCatalog::from_toml_source(path, &source)
+            .map_err(|error| LabError::DiagnosticCatalog(error.to_string()))?;
+        return Ok(DiagnosticRenderer::new(catalog));
     }
+
+    match env::var("CAIRN_DIAGNOSTIC_LOCALE")
+        .unwrap_or_else(|_| "en".into())
+        .as_str()
+    {
+        "en" => DiagnosticRenderer::english(),
+        "pseudo" => DiagnosticRenderer::pseudo(),
+        locale => {
+            return Err(LabError::DiagnosticCatalog(format!(
+                "unsupported diagnostic locale `{locale}`"
+            )));
+        }
+    }
+    .map_err(|error| LabError::DiagnosticCatalog(error.to_string()))
+}
+
+fn print_diagnostics(diagnostics: &[cairn_compiler::diagnostic::Diagnostic]) -> Result<()> {
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let renderer = diagnostic_renderer()?;
     eprintln!("diagnostics:");
     for diagnostic in diagnostics {
         eprintln!(
-            "  {:?} {}..{} {}",
-            diagnostic.severity, diagnostic.span.start, diagnostic.span.end, diagnostic.message
+            "  {:?} {} {}..{} {}",
+            diagnostic.severity,
+            diagnostic.code,
+            diagnostic.span.start,
+            diagnostic.span.end,
+            renderer
+                .render(diagnostic)
+                .map_err(|error| LabError::DiagnosticCatalog(error.to_string()))?
         );
     }
+    Ok(())
 }
 
 fn usage() -> String {
@@ -769,7 +804,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "cairn_lab".into());
     format!(
-        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} dispatch <file.cairn> [dispatch-site-id]\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>"
+        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} dispatch <file.cairn> [dispatch-site-id]\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>\n\ndiagnostics:\n  CAIRN_DIAGNOSTIC_LOCALE=en|pseudo\n  CAIRN_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 
@@ -809,6 +844,7 @@ enum LabError {
         name: String,
     },
     Runtime(String),
+    DiagnosticCatalog(String),
 }
 
 impl LabError {
@@ -822,7 +858,7 @@ impl LabError {
             | Self::UnknownAffordance { .. }
             | Self::AffordanceUnavailable { .. }
             | Self::UnsupportedAffordance { .. } => 2,
-            Self::Io { .. } | Self::Runtime(_) => 1,
+            Self::Io { .. } | Self::Runtime(_) | Self::DiagnosticCatalog(_) => 1,
         }
     }
 }
@@ -871,6 +907,7 @@ impl fmt::Display for LabError {
                 )
             }
             Self::Runtime(message) => write!(f, "runtime failed: {message}"),
+            Self::DiagnosticCatalog(message) => write!(f, "diagnostic catalog failed: {message}"),
         }
     }
 }

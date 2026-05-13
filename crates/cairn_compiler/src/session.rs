@@ -14,7 +14,7 @@ use execution_tape::trace::TraceMask;
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
 use crate::runtime::{CairnHost, HostObjectKind, RuntimeLayout};
@@ -75,6 +75,20 @@ pub enum RuntimeResult {
     },
     /// `main` returned a non-integer result.
     MainReturnedNonI64,
+}
+
+impl RuntimeResult {
+    /// Stable code for non-successful runtime/session outcomes.
+    #[must_use]
+    pub const fn code(&self) -> Option<DiagnosticCode> {
+        match self {
+            Self::ReturnedI64(_) => None,
+            Self::MissingMain => Some(DiagnosticCode::RuntimeMissingMain),
+            Self::MainHasParameters => Some(DiagnosticCode::RuntimeMainHasParameters),
+            Self::Trap { .. } => Some(DiagnosticCode::RuntimeTrap),
+            Self::MainReturnedNonI64 => Some(DiagnosticCode::RuntimeMainReturnedNonI64),
+        }
+    }
 }
 
 /// Stage that can be rendered as a text dump.
@@ -1273,9 +1287,22 @@ fn artifact_fingerprint(
 fn mix_diagnostics(builder: &mut StableIdBuilder, diagnostics: &[Diagnostic]) {
     builder.mix_u64(u64::try_from(diagnostics.len()).unwrap_or(u64::MAX));
     for diagnostic in diagnostics {
-        builder.mix_str(&diagnostic.message);
+        builder.mix_str(diagnostic.code.as_str());
         builder.mix_u64(u64::try_from(diagnostic.span.start).unwrap_or(u64::MAX));
         builder.mix_u64(u64::try_from(diagnostic.span.end).unwrap_or(u64::MAX));
+        builder.mix_u64(u64::try_from(diagnostic.args.len()).unwrap_or(u64::MAX));
+        for arg in &diagnostic.args {
+            builder.mix_str(&arg.name);
+            builder.mix_str(&arg.value.render());
+        }
+        builder.mix_u64(u64::try_from(diagnostic.labels.len()).unwrap_or(u64::MAX));
+        for label in &diagnostic.labels {
+            builder.mix_u64(u64::try_from(label.span.start).unwrap_or(u64::MAX));
+            builder.mix_u64(u64::try_from(label.span.end).unwrap_or(u64::MAX));
+            if let Some(message) = &label.message {
+                builder.mix_str(message);
+            }
+        }
     }
 }
 
@@ -1392,7 +1419,12 @@ fn artifact_work_units(artifact: QueryArtifact, artifacts: &SessionArtifacts) ->
         QueryArtifact::Diagnostics => artifacts
             .diagnostics
             .iter()
-            .map(|diagnostic| usize_to_u64(diagnostic.message.len()).saturating_add(1))
+            .map(|diagnostic| {
+                usize_to_u64(diagnostic.code.as_str().len())
+                    .saturating_add(usize_to_u64(diagnostic.args.len()))
+                    .saturating_add(usize_to_u64(diagnostic.labels.len()))
+                    .saturating_add(1)
+            })
             .sum(),
         QueryArtifact::MethodLookup(method) => {
             usize_to_u64(fingerprint_method_lookup(&artifacts.sem, method).len())
@@ -2863,6 +2895,39 @@ fn render_affordances(affordances: &AffordanceFacet) -> String {
     out
 }
 
+fn render_diagnostic_labels(diagnostic: &Diagnostic) -> String {
+    let mut out = String::new();
+    out.push('[');
+    for (index, label) in diagnostic.labels.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let style = match label.style {
+            crate::diagnostic::DiagnosticLabelStyle::Primary => "primary",
+            crate::diagnostic::DiagnosticLabelStyle::Secondary => "secondary",
+        };
+        let _ = write!(out, "{style}:{}..{}", label.span.start, label.span.end);
+        if let Some(message) = &label.message {
+            let _ = write!(out, ":\"{message}\"");
+        }
+    }
+    out.push(']');
+    out
+}
+
+fn render_diagnostic_args(diagnostic: &Diagnostic) -> String {
+    let mut out = String::new();
+    out.push('[');
+    for (index, arg) in diagnostic.args.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{}={}", arg.name, arg.value.render());
+    }
+    out.push(']');
+    out
+}
+
 struct EnvironmentObjectParts {
     id: String,
     kind: EnvironmentKind,
@@ -2943,12 +3008,17 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             meta_class: "<diagnostic>",
             origin: EnvironmentOrigin::CompilerGenerated,
             storage: EnvironmentStorage::CachedArtifact,
-            title: diagnostic.message.clone(),
+            title: diagnostic.code.to_string(),
             affordances: Vec::from([Aff::Inspect, Aff::OpenSource, Aff::DumpSem, Aff::DumpEop]),
             execution: None,
             inspection: format!(
-                "severity={:?} span={}..{}",
-                diagnostic.severity, diagnostic.span.start, diagnostic.span.end
+                "code={} severity={:?} span={}..{} labels={} args={}",
+                diagnostic.code,
+                diagnostic.severity,
+                diagnostic.span.start,
+                diagnostic.span.end,
+                render_diagnostic_labels(diagnostic),
+                render_diagnostic_args(diagnostic)
             ),
         }));
     }
@@ -4993,6 +5063,47 @@ mod tests {
                 .iter()
                 .any(|object| object.id.as_str() == "class:c0")
         );
+    }
+
+    #[test]
+    fn session_projects_structured_diagnostic_records() {
+        let artifacts = CompilerSession::compile_source(
+            "bad.cairn",
+            "define function main()\n  missing\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics.len(), 1);
+        let diagnostic = &artifacts.diagnostics[0];
+        assert_eq!(diagnostic.code, DiagnosticCode::UnresolvedLocal);
+        assert!(
+            diagnostic
+                .args
+                .iter()
+                .any(|arg| arg.name == "local" && arg.value.render() == "missing")
+        );
+
+        let objects = artifacts.environment_objects();
+        let diagnostic_object = eop_object(&objects, "diagnostic:d0");
+        assert_eq!(diagnostic_object.kind, EnvironmentKind::Diagnostic);
+        assert!(
+            diagnostic_object
+                .presentation
+                .title
+                .contains("sem.unresolved-local")
+        );
+        assert!(
+            diagnostic_object
+                .inspection
+                .detail
+                .contains("code=sem.unresolved-local")
+        );
+        assert!(
+            diagnostic_object
+                .inspection
+                .detail
+                .contains("args=[local=missing]")
+        );
+        assert!(!diagnostic_object.inspection.detail.contains("rendered="));
     }
 
     #[test]

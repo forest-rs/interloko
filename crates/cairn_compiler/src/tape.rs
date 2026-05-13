@@ -15,7 +15,7 @@ use execution_tape::program::{HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::lower;
 use crate::runtime::{self, RuntimeLayout};
 use crate::sem;
@@ -52,6 +52,18 @@ pub enum TapeError {
         /// Builder or verifier details.
         message: String,
     },
+}
+
+impl TapeError {
+    /// Stable error code for this tape emission failure.
+    #[must_use]
+    pub const fn code(&self) -> DiagnosticCode {
+        match self {
+            Self::Diagnostics { .. } => DiagnosticCode::TapeBlockedByDiagnostics,
+            Self::InvalidLowered { .. } => DiagnosticCode::TapeInvalidLowered,
+            Self::Build { .. } => DiagnosticCode::TapeBuildError,
+        }
+    }
 }
 
 /// Emits a verified `execution_tape` program for a lowered module.

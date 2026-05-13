@@ -1,4 +1,5 @@
 // expect: diagnostics 1
+// expect: diagnostic code sem.signal-restart-mismatch
 // expect: diagnostic contains signal condition is not handled by the active restart
 
 define class <bad-input> (<object>)

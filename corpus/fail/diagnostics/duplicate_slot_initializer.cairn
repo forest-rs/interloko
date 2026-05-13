@@ -1,3 +1,4 @@
+// expect: diagnostic code sem.duplicate-init-keyword
 // expect: diagnostic contains duplicate initializer for keyword `radius:`
 
 define class <circle> (<object>)

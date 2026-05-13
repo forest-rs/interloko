@@ -1,3 +1,4 @@
+// expect: diagnostic code sem.unresolved-local
 // expect: diagnostic contains unresolved local `missing`
 // expect: dump sem contains error
 

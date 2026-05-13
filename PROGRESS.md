@@ -1032,6 +1032,42 @@
   interaction with setters/mutation, and how initialization participates in MOP
   inspection and incremental invalidation.
 
+## Implemented: Catalog-First Diagnostic Model
+
+- `cairn_compiler::diagnostic::Diagnostic` now carries stable diagnostic facts:
+  code, severity, span, labels, structured args, and notes. It does not carry a
+  rendered English message.
+- `DiagnosticCode` provides stable code strings such as
+  `sem.unresolved-local`, `sem.missing-required-init-keyword`,
+  `sem.slot-initializer-type-mismatch`, `syntax.expected-expression`,
+  `lower.invalid-semantic`, `tape.build-error`, and `runtime.trap`.
+- Lowering, tape emission, driver/runtime, and session runtime outcomes expose
+  stable error codes for non-source diagnostic failures.
+- Diagnostic fingerprints and logical work counters now include structured
+  code/arg/label facts instead of rendered prose.
+- EOP diagnostic records expose code, severity, span, labels, and args, without
+  rendered text. `cairn_lab inspect <file> diagnostic:dN` shows those fields,
+  and CLI diagnostic printing includes the code beside catalog-rendered text.
+- `tools/cairn_diagnostics` owns MessageFormat catalog loading and rendering.
+  Rendering is strict: missing catalog entries, missing required args, and
+  MessageFormat failures are presentation errors rather than silent fallbacks.
+- Built-in English and pseudo catalogs cover every stable diagnostic code.
+  `cairn_lab` selects them with `CAIRN_DIAGNOSTIC_LOCALE=en|pseudo`, or loads an
+  override TOML resource through `CAIRN_DIAGNOSTIC_CATALOG`.
+- `cairn_corpus` supports `// expect: diagnostic code ...` while keeping
+  `diagnostic contains ...` expectations for catalog-rendered English checks.
+- Corpus coverage now includes representative code expectations for syntax,
+  AST, semantic, control-flow, restart, and initialization diagnostics.
+- `docs/diagnostics.md` explains the boundary between diagnostic facts and
+  presentation, how to add/override catalogs, and why artifact identity is
+  language-neutral.
+
+### Deferred Diagnostic Design
+
+- Full localization beyond English and pseudo, a `message-format` dependency in
+  `cairn_compiler`, terminal snippet rendering, LSP adaptation, fix-it edits,
+  warning severities, and generated diagnostic schemas remain deferred.
+
 ## Intentionally Deferred
 
 - Sealed dispatch optimization.

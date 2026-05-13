@@ -1,5 +1,6 @@
 //! CLI fixture tests for `cairn_lab`.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,11 +28,63 @@ fn run_lab(args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
+fn run_lab_success(args: &[&str]) -> (String, String) {
+    let output = Command::new(bin())
+        .args(args)
+        .output()
+        .expect("cairn_lab should run");
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        String::from_utf8(output.stderr).expect("stderr should be utf8"),
+    )
+}
+
+fn run_lab_success_with_env(args: &[&str], envs: &[(&str, &str)]) -> (String, String) {
+    let mut command = Command::new(bin());
+    command.args(args);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    let output = command.output().expect("cairn_lab should run");
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        String::from_utf8(output.stderr).expect("stderr should be utf8"),
+    )
+}
+
 fn run_lab_failure(args: &[&str]) -> String {
     let output = Command::new(bin())
         .args(args)
         .output()
         .expect("cairn_lab should run");
+    assert!(
+        !output.status.success(),
+        "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stderr).expect("stderr should be utf8")
+}
+
+fn run_lab_failure_with_env(args: &[&str], envs: &[(&str, &str)]) -> String {
+    let mut command = Command::new(bin());
+    command.args(args);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    let output = command.output().expect("cairn_lab should run");
     assert!(
         !output.status.success(),
         "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
@@ -47,6 +100,68 @@ fn object_id_with_prefix(eop: &str, prefix: &str) -> String {
         .find(|id| id.starts_with(prefix))
         .expect("object id should exist")
         .to_string()
+}
+
+#[test]
+fn diagnostics_are_rendered_through_message_format_catalog() {
+    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let path = diagnostic.to_str().expect("fixture path should be utf8");
+    let (_stdout, stderr) = run_lab_success(&["dump", path, "--stage", "sem"]);
+
+    assert!(stderr.contains("sem.unresolved-local"));
+    assert!(stderr.contains("unresolved local `missing_value`"));
+}
+
+#[test]
+fn diagnostics_can_use_pseudo_catalog() {
+    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let path = diagnostic.to_str().expect("fixture path should be utf8");
+    let (_stdout, stderr) = run_lab_success_with_env(
+        &["dump", path, "--stage", "sem"],
+        &[("CAIRN_DIAGNOSTIC_LOCALE", "pseudo")],
+    );
+
+    assert!(stderr.contains("sem.unresolved-local"));
+    assert!(stderr.contains("[ps] local not found: missing"));
+    assert!(!stderr.contains("unresolved local `missing`"));
+}
+
+#[test]
+fn diagnostics_fail_for_missing_catalog_entries() {
+    let catalog_path = std::env::temp_dir().join(format!(
+        "cairn-partial-diagnostics-{}.mf2.toml",
+        std::process::id()
+    ));
+    fs::write(
+        &catalog_path,
+        "[messages]\n\"sem.unresolved-class\" = \"class { $class }\"\n",
+    )
+    .expect("partial catalog should be written");
+    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let path = diagnostic.to_str().expect("fixture path should be utf8");
+    let catalog = catalog_path.to_str().expect("catalog path should be utf8");
+
+    let stderr = run_lab_failure_with_env(
+        &["dump", path, "--stage", "sem"],
+        &[("CAIRN_DIAGNOSTIC_CATALOG", catalog)],
+    );
+    let _ = fs::remove_file(catalog_path);
+
+    assert!(stderr.contains("diagnostic catalog failed"));
+    assert!(stderr.contains("sem.unresolved-local"));
+}
+
+#[test]
+fn artifact_output_is_independent_of_diagnostic_locale() {
+    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let path = diagnostic.to_str().expect("fixture path should be utf8");
+    let english = run_lab(&["artifacts", path]);
+    let (pseudo, _stderr) = run_lab_success_with_env(
+        &["artifacts", path],
+        &[("CAIRN_DIAGNOSTIC_LOCALE", "pseudo")],
+    );
+
+    assert_eq!(english, pseudo);
 }
 
 #[test]
@@ -174,7 +289,9 @@ fn inspect_reports_structured_environment_objects() {
     let out = run_lab(&["inspect", diagnostic_path, "diagnostic:d0"]);
     assert!(out.contains("object diagnostic:d0"));
     assert!(out.contains("kind: diagnostic"));
-    assert!(out.contains("unresolved local"));
+    assert!(out.contains("sem.unresolved-local"));
+    assert!(out.contains("args=[local=missing_value]"));
+    assert!(!out.contains("rendered="));
 }
 
 #[test]
