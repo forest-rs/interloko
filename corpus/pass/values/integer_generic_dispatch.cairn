@@ -1,0 +1,12 @@
+// expect: run 42
+// expect: dump sem contains <integer>
+// expect: dump lowered contains score#dispatch
+define generic score(x :: <integer>) => <integer>;
+
+define method score(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function main()
+  score(41)
+end;

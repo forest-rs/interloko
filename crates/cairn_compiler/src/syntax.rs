@@ -82,8 +82,10 @@ pub enum TokenKind {
     String,
     /// Symbol literal such as `#name`.
     Symbol,
-    /// Keyword value literal such as `#:name`.
+    /// Legacy keyword-style symbol literal such as `#:name`.
     Keyword,
+    /// Vector literal opener `#[`.
+    VectorStart,
     /// Nominal type/class name such as `<circle>`.
     TypeName,
     /// `(`.
@@ -196,7 +198,7 @@ pub enum CstKind {
     StringExpr,
     /// Symbol literal expression.
     SymbolExpr,
-    /// Keyword value literal expression.
+    /// Legacy keyword-style symbol literal expression.
     KeywordExpr,
     /// Vector literal expression.
     VectorExpr,
@@ -475,6 +477,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Keyword => 41,
         TokenKind::LBracket => 42,
         TokenKind::RBracket => 43,
+        TokenKind::VectorStart => 44,
     }
 }
 
@@ -598,6 +601,10 @@ pub fn lex(source: &str) -> Vec<Token> {
                     }
                 }
                 TokenKind::String
+            }
+            b'#' if bytes.get(pos + 1) == Some(&b'[') => {
+                pos += 2;
+                TokenKind::VectorStart
             }
             b'#' if matches!(bytes.get(pos + 1), Some(b't' | b'f'))
                 && bytes
@@ -1154,7 +1161,11 @@ impl<'source> Parser<'source> {
 
         if self.at(TokenKind::Keyword) {
             let mut children = Vec::new();
-            self.expect(TokenKind::Keyword, &mut children, "keyword literal");
+            self.expect(
+                TokenKind::Keyword,
+                &mut children,
+                "keyword-style symbol literal",
+            );
             return self.node(CstKind::KeywordExpr, children, start);
         }
 
@@ -1168,6 +1179,11 @@ impl<'source> Parser<'source> {
             let Some(name) = self.bump() else {
                 return self.node(CstKind::Error, Vec::new(), start);
             };
+            if self.at(TokenKind::Colon) {
+                let mut children = vec![CstElement::Token(name)];
+                self.expect(TokenKind::Colon, &mut children, "`:` after keyword symbol");
+                return self.node(CstKind::SymbolExpr, children, start);
+            }
             if self.at(TokenKind::LParen) {
                 let mut children = vec![CstElement::Token(name)];
                 self.expect(TokenKind::LParen, &mut children, "`(`");
@@ -1186,7 +1202,7 @@ impl<'source> Parser<'source> {
             return node;
         }
 
-        if self.at(TokenKind::LBracket) {
+        if self.at(TokenKind::VectorStart) {
             return self.parse_vector_literal();
         }
 
@@ -1209,7 +1225,7 @@ impl<'source> Parser<'source> {
     fn parse_vector_literal(&mut self) -> CstNode {
         let start = self.current_span();
         let mut children = Vec::new();
-        self.expect(TokenKind::LBracket, &mut children, "`[`");
+        self.expect(TokenKind::VectorStart, &mut children, "`#[`");
         if !self.at(TokenKind::RBracket) {
             loop {
                 children.push(CstElement::Node(self.parse_expr()));
@@ -1242,6 +1258,9 @@ impl<'source> Parser<'source> {
                 && self
                     .peek_non_trivia(1)
                     .is_some_and(|(_, token)| token.kind == TokenKind::Colon)
+                && self.peek_non_trivia(2).is_some_and(|(_, token)| {
+                    !matches!(token.kind, TokenKind::Comma | TokenKind::RParen)
+                })
             {
                 children.push(CstElement::Node(self.parse_keyword_arg()));
             } else {

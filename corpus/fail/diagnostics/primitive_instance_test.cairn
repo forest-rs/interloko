@@ -1,5 +1,5 @@
 // expect: diagnostics 1
-// expect: diagnostic contains instance? expects <object> or a known object, got <integer>
+// expect: diagnostic contains instance? test is impossible: <integer> is not <circle>
 
 define class <circle> (<object>)
   slot radius :: <integer>;

@@ -300,15 +300,6 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Keyword value literal.
-    Keyword {
-        /// Stable-ish AST node identity.
-        id: AstNodeId,
-        /// Keyword name without the leading `#:`.
-        name: String,
-        /// Source span.
-        span: Span,
-    },
     /// Immutable vector literal.
     Vector {
         /// Stable-ish AST node identity.
@@ -468,7 +459,6 @@ impl Expr {
             | Self::Bool { id, .. }
             | Self::String { id, .. }
             | Self::Symbol { id, .. }
-            | Self::Keyword { id, .. }
             | Self::Vector { id, .. }
             | Self::Name { id, .. }
             | Self::ClassName { id, .. }
@@ -494,7 +484,6 @@ impl Expr {
             | Self::Bool { span, .. }
             | Self::String { span, .. }
             | Self::Symbol { span, .. }
-            | Self::Keyword { span, .. }
             | Self::Vector { span, .. }
             | Self::Name { span, .. }
             | Self::ClassName { span, .. }
@@ -1133,7 +1122,14 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_symbol(&self, node: &CstNode) -> Expr {
-        let Some((span, text)) = self.first_token_text(node, TokenKind::Symbol) else {
+        let symbol = self
+            .first_token_text(node, TokenKind::Symbol)
+            .map(|(span, text)| (span, text[1..].to_string()))
+            .or_else(|| {
+                self.first_token_text(node, TokenKind::Ident)
+                    .map(|(span, text)| (span, text.to_string()))
+            });
+        let Some((span, name)) = symbol else {
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1141,7 +1137,7 @@ impl<'tree> Lowering<'tree> {
         };
         Expr::Symbol {
             id: self.ast_id(node),
-            name: text[1..].to_string(),
+            name,
             span,
         }
     }
@@ -1153,7 +1149,7 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             };
         };
-        Expr::Keyword {
+        Expr::Symbol {
             id: self.ast_id(node),
             name: text[2..].to_string(),
             span,

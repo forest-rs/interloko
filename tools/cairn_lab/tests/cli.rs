@@ -183,7 +183,6 @@ fn rich_values_run_and_dump_through_lab() {
     let sem = run_lab(&["dump", path, "--stage", "sem"]);
     assert!(sem.contains("literal.string"));
     assert!(sem.contains("literal.symbol"));
-    assert!(sem.contains("literal.keyword"));
     assert!(sem.contains("literal.vector"));
 
     let lowered = run_lab(&["dump", path, "--stage", "lowered"]);

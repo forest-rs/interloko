@@ -1070,30 +1070,31 @@
 
 ## Implemented: First Richer Value Types
 
-- Cairn now parses and lowers string, symbol, keyword, and immutable vector
+- Cairn now parses and lowers string, symbol, integer, and immutable vector
   literals:
   - strings use `"..."` with `\n`, `\t`, `\"`, and `\\` escapes;
   - symbols use `#name`;
-  - keyword values use `#:name`, keeping them distinct from call/init keyword
-    arguments such as `name:`;
-  - vectors use `[a, b, c]`.
+  - keyword-style values use Dylan-style `name:` and lower to symbols; the
+    older `#:name` spelling remains accepted as a legacy symbol spelling;
+  - vectors use Dylan-style `#[a, b, c]`.
 - Semantic IR has explicit `ValueKind` coverage for `<string>`, `<symbol>`,
-  `<keyword>`, and `<vector>`, backed by built-in value classes so generic
-  dispatch and `instance?` can treat them as object values.
-- Symbols and keywords are interned by the runtime host for stable per-session
-  identity. Strings are runtime objects compared by content. Vectors are
-  immutable ordered runtime objects; general sequence operations remain
-  deferred.
+  raw integers, and `<vector>`. `<string>`, `<symbol>`, `<integer>`, and
+  `<vector>` have built-in class metaobjects; `<integer>` still lowers as a raw
+  `i64` at the execution boundary.
+- Symbols are interned by the runtime host for stable per-session identity.
+  Strings are runtime objects compared by content. Vectors are immutable ordered
+  runtime objects; general sequence operations remain deferred.
 - Lowered IR contains inspectable literal instructions and runtime value
   equality. Tape emission still uses ordinary constants, calls, and host calls;
   there are no special value-type opcodes.
 - Slots, direct functions, generic contracts, and method specializers can use
-  `<string>`, `<symbol>`, `<keyword>`, and `<vector>` annotations.
+  `<string>`, `<symbol>`, `<integer>`, and `<vector>` annotations.
 - Session, MOP, EOP, lowered, and tape dumps expose the new built-in value
   classes and literal forms.
 - `examples/rich_values`, `tools/cairn_lab/fixtures/rich_values.cairn`, REPL
   transcript coverage, and corpus programs demonstrate strings, symbols,
-  keywords, vectors, typed slots/functions, and generic dispatch.
+  keyword-style symbols, vectors, typed slots/functions, integer specializers,
+  and generic dispatch.
 - Diagnostics cover malformed string literals and unsupported vector equality
   through structured diagnostic codes.
 

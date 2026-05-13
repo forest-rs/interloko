@@ -160,7 +160,6 @@ struct HostSigs {
     slot_get: Vec<Vec<HostSigId>>,
     string_literals: Vec<(String, HostSigId)>,
     symbol_literals: Vec<(String, HostSigId)>,
-    keyword_literals: Vec<(String, HostSigId)>,
     vector_literals: Vec<(usize, HostSigId)>,
     value_eq: HostSigId,
     box_i64: HostSigId,
@@ -256,15 +255,6 @@ impl HostSigs {
             },
             runtime::SYMBOL_LITERAL_PREFIX,
         );
-        let keyword_literals = literal_sigs(
-            builder,
-            module,
-            |instr| match instr {
-                lower::Instr::KeywordLiteral { name, .. } => Some(name.as_str()),
-                _ => None,
-            },
-            runtime::KEYWORD_LITERAL_PREFIX,
-        );
         let vector_literals = vector_literal_sigs(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         Ok(Self {
@@ -273,7 +263,6 @@ impl HostSigs {
             slot_get,
             string_literals,
             symbol_literals,
-            keyword_literals,
             vector_literals,
             value_eq,
             box_i64,
@@ -301,14 +290,6 @@ impl HostSigs {
             .find(|(literal, _)| literal == name)
             .map(|(_, sig)| *sig)
             .ok_or_else(|| invalid_lowered("symbol literal signature is missing"))
-    }
-
-    fn keyword_literal(&self, name: &str) -> Result<HostSigId, TapeError> {
-        self.keyword_literals
-            .iter()
-            .find(|(literal, _)| literal == name)
-            .map(|(_, sig)| *sig)
-            .ok_or_else(|| invalid_lowered("keyword literal signature is missing"))
     }
 
     fn vector_literal(&self, arity: usize) -> Result<HostSigId, TapeError> {
@@ -422,13 +403,6 @@ impl<'a> FunctionEmitter<'a> {
                 dst, name, span, ..
             } => {
                 let sig = self.host_sigs.symbol_literal(name)?;
-                self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
-            }
-            lower::Instr::KeywordLiteral {
-                dst, name, span, ..
-            } => {
-                let sig = self.host_sigs.keyword_literal(name)?;
                 self.set_span(*span);
                 self.asm.host_call(0, sig, 0, &[], &[dst.0]);
             }
@@ -738,7 +712,6 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         | lower::Instr::ConstBool { dst, .. }
         | lower::Instr::StringLiteral { dst, .. }
         | lower::Instr::SymbolLiteral { dst, .. }
-        | lower::Instr::KeywordLiteral { dst, .. }
         | lower::Instr::ConstU64 { dst, .. }
         | lower::Instr::ConstClass { dst, .. } => {
             note_register(*dst, max);

@@ -1,16 +1,11 @@
 // expect: run 3
 // expect: dump sem contains literal.symbol
-// expect: dump sem contains literal.keyword
 define function same-symbol(a :: <symbol>, b :: <symbol>) => <boolean>
   a = b
 end;
 
-define function same-keyword(a :: <keyword>, b :: <keyword>) => <boolean>
-  a = b
-end;
-
 define function main()
-  let symbol-score = if same-symbol(#ready, #ready) then 1 else 0 end;
-  let keyword-score = if same-keyword(#:fallback, #:fallback) then 2 else 0 end;
-  symbol-score + keyword-score
+  let hash-symbol-score = if same-symbol(#ready, #ready) then 1 else 0 end;
+  let keyword-symbol-score = if same-symbol(fallback:, fallback:) then 2 else 0 end;
+  hash-symbol-score + keyword-symbol-score
 end;

@@ -31,8 +31,6 @@ pub const CAST_OBJECT: &str = "cairn.cast_object";
 pub const STRING_LITERAL_PREFIX: &str = "cairn.literal.string:";
 /// Host-call symbol prefix for symbol literals.
 pub const SYMBOL_LITERAL_PREFIX: &str = "cairn.literal.symbol:";
-/// Host-call symbol prefix for keyword literals.
-pub const KEYWORD_LITERAL_PREFIX: &str = "cairn.literal.keyword:";
 /// Host-call symbol for immutable vector literals.
 pub const VECTOR_LITERAL: &str = "cairn.literal.vector";
 /// Host-call symbol for runtime value equality.
@@ -173,9 +171,6 @@ enum RuntimeObjectStorage {
     Symbol {
         name: String,
     },
-    Keyword {
-        name: String,
-    },
     Vector {
         elements: Vec<Value>,
     },
@@ -204,7 +199,6 @@ pub struct CairnHost {
     objects: Vec<RuntimeObject>,
     values: Vec<Value>,
     symbols: Vec<InternedObject>,
-    keywords: Vec<InternedObject>,
 }
 
 impl CairnHost {
@@ -216,7 +210,6 @@ impl CairnHost {
             objects: Vec::new(),
             values: Vec::new(),
             symbols: Vec::new(),
-            keywords: Vec::new(),
         }
     }
 
@@ -319,11 +312,6 @@ impl Host for CairnHost {
                 rets[0] = self.intern_symbol(name)?;
                 Ok(0)
             }
-            _ if symbol.starts_with(KEYWORD_LITERAL_PREFIX) => {
-                let name = decode_literal_suffix(symbol, KEYWORD_LITERAL_PREFIX)?;
-                rets[0] = self.intern_keyword(name)?;
-                Ok(0)
-            }
             VECTOR_LITERAL => {
                 let class = self.builtin_class(sem::BuiltinValueClass::Vector)?;
                 let mut elements = Vec::with_capacity(args.len());
@@ -396,7 +384,6 @@ impl Host for CairnHost {
                     }
                     RuntimeObjectStorage::String { .. }
                     | RuntimeObjectStorage::Symbol { .. }
-                    | RuntimeObjectStorage::Keyword { .. }
                     | RuntimeObjectStorage::Vector { .. } => return Err(HostError::Failed),
                     RuntimeObjectStorage::HostBacked { adapter } => {
                         adapter.read_slot(slot, slot_info.kind)?
@@ -465,22 +452,6 @@ impl CairnHost {
         Ok(value)
     }
 
-    fn intern_keyword(&mut self, name: String) -> Result<Value, HostError> {
-        if let Some(entry) = self.keywords.iter().find(|entry| entry.name == name) {
-            return Ok(Value::Obj(entry.object));
-        }
-        let class = self.builtin_class(sem::BuiltinValueClass::Keyword)?;
-        let value = self.push_object(RuntimeObject {
-            class,
-            storage: RuntimeObjectStorage::Keyword { name: name.clone() },
-        });
-        let Value::Obj(object) = value else {
-            return Err(HostError::Failed);
-        };
-        self.keywords.push(InternedObject { name, object });
-        Ok(value)
-    }
-
     fn value_for_any(&self, value: ValueRef<'_>) -> Result<Value, HostError> {
         let ValueRef::Obj(obj) = value else {
             return Err(HostError::Failed);
@@ -503,10 +474,6 @@ impl CairnHost {
             (
                 RuntimeObjectStorage::Symbol { name: left },
                 RuntimeObjectStorage::Symbol { name: right },
-            )
-            | (
-                RuntimeObjectStorage::Keyword { name: left },
-                RuntimeObjectStorage::Keyword { name: right },
             ) => left == right,
             (
                 RuntimeObjectStorage::Vector { elements: left },
@@ -552,7 +519,6 @@ impl CairnHost {
                 sem::ValueKind::Object(expected_class)
                 | sem::ValueKind::String(expected_class)
                 | sem::ValueKind::Symbol(expected_class)
-                | sem::ValueKind::Keyword(expected_class)
                 | sem::ValueKind::Vector(expected_class),
                 ValueRef::Obj(obj),
             ) => {
@@ -664,7 +630,6 @@ fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
         sem::ValueKind::Bool => Some(ValueType::Bool),
         sem::ValueKind::String(_)
         | sem::ValueKind::Symbol(_)
-        | sem::ValueKind::Keyword(_)
         | sem::ValueKind::Vector(_)
         | sem::ValueKind::Object(_) => Some(object_type()),
         sem::ValueKind::ClassObject(_) => Some(ValueType::U64),

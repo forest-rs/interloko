@@ -776,6 +776,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::RParen
         | TokenKind::LBracket
         | TokenKind::RBracket
+        | TokenKind::VectorStart
         | TokenKind::Comma
         | TokenKind::Plus
         | TokenKind::Minus

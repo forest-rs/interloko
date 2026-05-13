@@ -105,8 +105,6 @@ pub enum ValueKind {
     String(ClassId),
     /// Runtime interned symbol object.
     Symbol(ClassId),
-    /// Runtime interned keyword object.
-    Keyword(ClassId),
     /// Runtime immutable vector object.
     Vector(ClassId),
     /// Runtime object with statically known nominal class.
@@ -126,8 +124,8 @@ pub enum BuiltinValueClass {
     String,
     /// The built-in `<symbol>` class.
     Symbol,
-    /// The built-in `<keyword>` class.
-    Keyword,
+    /// The built-in `<integer>` class.
+    Integer,
     /// The built-in `<vector>` class.
     Vector,
 }
@@ -136,7 +134,7 @@ impl BuiltinValueClass {
     const ALL: &'static [(Self, &'static str)] = &[
         (Self::String, "<string>"),
         (Self::Symbol, "<symbol>"),
-        (Self::Keyword, "<keyword>"),
+        (Self::Integer, "<integer>"),
         (Self::Vector, "<vector>"),
     ];
 
@@ -146,7 +144,7 @@ impl BuiltinValueClass {
         match self {
             Self::String => "<string>",
             Self::Symbol => "<symbol>",
-            Self::Keyword => "<keyword>",
+            Self::Integer => "<integer>",
             Self::Vector => "<vector>",
         }
     }
@@ -155,7 +153,7 @@ impl BuiltinValueClass {
         match name {
             "<string>" => Some(Self::String),
             "<symbol>" => Some(Self::Symbol),
-            "<keyword>" => Some(Self::Keyword),
+            "<integer>" => Some(Self::Integer),
             "<vector>" => Some(Self::Vector),
             _ => None,
         }
@@ -165,7 +163,7 @@ impl BuiltinValueClass {
         match self {
             Self::String => 0,
             Self::Symbol => 1,
-            Self::Keyword => 2,
+            Self::Integer => 2,
             Self::Vector => 3,
         }
     }
@@ -868,15 +866,6 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Keyword value literal.
-    KeywordLiteral {
-        /// Interned keyword name.
-        name: String,
-        /// Built-in keyword class.
-        class: ClassId,
-        /// Source span.
-        span: Span,
-    },
     /// Immutable vector literal.
     VectorLiteral {
         /// Ordered element expressions.
@@ -1064,7 +1053,6 @@ impl Expr {
             | Self::ConstBool { span, .. }
             | Self::StringLiteral { span, .. }
             | Self::SymbolLiteral { span, .. }
-            | Self::KeywordLiteral { span, .. }
             | Self::VectorLiteral { span, .. }
             | Self::Local { span, .. }
             | Self::ClassObject { span, .. }
@@ -1776,7 +1764,7 @@ impl Lowering {
                             | ValueKind::Object(_)
                             | ValueKind::String(_)
                             | ValueKind::Symbol(_)
-                            | ValueKind::Keyword(_)
+                            | ValueKind::I64
                             | ValueKind::Vector(_)
                             | ValueKind::Error
                     )
@@ -2112,13 +2100,6 @@ impl Lowering {
                 name: name.clone(),
                 class: self
                     .builtin_value_class(BuiltinValueClass::Symbol)
-                    .unwrap_or(ClassId(u32::MAX)),
-                span: *span,
-            },
-            ast::Expr::Keyword { name, span, .. } => Expr::KeywordLiteral {
-                name: name.clone(),
-                class: self
-                    .builtin_value_class(BuiltinValueClass::Keyword)
                     .unwrap_or(ClassId(u32::MAX)),
                 span: *span,
             },
@@ -2747,12 +2728,7 @@ impl Lowering {
                 span,
             };
         }
-        if lhs_kind == rhs_kind
-            && matches!(
-                lhs_kind,
-                ValueKind::String(_) | ValueKind::Symbol(_) | ValueKind::Keyword(_)
-            )
-        {
+        if lhs_kind == rhs_kind && matches!(lhs_kind, ValueKind::String(_) | ValueKind::Symbol(_)) {
             return Expr::ValueEqual {
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
@@ -2823,8 +2799,8 @@ impl Lowering {
             | ValueKind::Object(_)
             | ValueKind::String(_)
             | ValueKind::Symbol(_)
-            | ValueKind::Keyword(_)
             | ValueKind::Vector(_)
+            | ValueKind::I64
             | ValueKind::Error => {}
             actual => {
                 ctx.diagnostics.push(
@@ -2876,8 +2852,8 @@ impl Lowering {
             | ValueKind::Object(_)
             | ValueKind::String(_)
             | ValueKind::Symbol(_)
-            | ValueKind::Keyword(_)
             | ValueKind::Vector(_)
+            | ValueKind::I64
             | ValueKind::Error => {}
             actual => {
                 ctx.diagnostics.push(
@@ -3121,7 +3097,6 @@ impl Lowering {
             Expr::ConstI64 { .. } | Expr::Binary { .. } => ValueKind::I64,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
-            Expr::KeywordLiteral { class, .. } => ValueKind::Keyword(*class),
             Expr::VectorLiteral { class, .. } => ValueKind::Vector(*class),
             Expr::GenericCall { generic, .. } => self
                 .generic_symbols
@@ -3137,7 +3112,9 @@ impl Lowering {
             | Expr::ValueEqual { .. }
             | Expr::InstanceOf { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,
-            Expr::Cast { class, .. } => ValueKind::Object(*class),
+            Expr::Cast { class, .. } => self
+                .kind_for_builtin_class(*class)
+                .unwrap_or(ValueKind::Object(*class)),
             Expr::Signal { result_kind, .. } => *result_kind,
             Expr::DirectCall { function, .. } => self
                 .functions
@@ -3201,8 +3178,8 @@ impl Lowering {
                 kind: BuiltinValueClass::Symbol,
             } => Some(ValueKind::Symbol(class)),
             ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Keyword,
-            } => Some(ValueKind::Keyword(class)),
+                kind: BuiltinValueClass::Integer,
+            } => Some(ValueKind::I64),
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
             } => Some(ValueKind::Vector(class)),
@@ -3212,13 +3189,12 @@ impl Lowering {
 
     fn value_kind_class(&self, kind: ValueKind) -> Option<ClassId> {
         match kind {
-            ValueKind::String(class)
-            | ValueKind::Symbol(class)
-            | ValueKind::Keyword(class)
-            | ValueKind::Vector(class)
-            | ValueKind::Object(class) => Some(class),
+            ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
+                Some(class)
+            }
+            ValueKind::I64 => self.builtin_value_class(BuiltinValueClass::Integer),
+            ValueKind::Object(class) => Some(class),
             ValueKind::Any
-            | ValueKind::I64
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
             | ValueKind::KnownCallable(_)
@@ -3298,7 +3274,6 @@ impl Lowering {
         }
         match type_name {
             "<object>" => ValueKind::Any,
-            "<integer>" => ValueKind::I64,
             "<boolean>" => ValueKind::Bool,
             "<string>" => self
                 .builtin_value_class(BuiltinValueClass::String)
@@ -3306,9 +3281,7 @@ impl Lowering {
             "<symbol>" => self
                 .builtin_value_class(BuiltinValueClass::Symbol)
                 .map_or(ValueKind::Error, ValueKind::Symbol),
-            "<keyword>" => self
-                .builtin_value_class(BuiltinValueClass::Keyword)
-                .map_or(ValueKind::Error, ValueKind::Keyword),
+            "<integer>" => ValueKind::I64,
             "<vector>" => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
@@ -3340,14 +3313,13 @@ impl Lowering {
         match expected {
             ValueKind::Any | ValueKind::Error => true,
             ValueKind::Object(class) => self.is_same_or_subclass(specializer, class),
-            ValueKind::String(class)
-            | ValueKind::Symbol(class)
-            | ValueKind::Keyword(class)
-            | ValueKind::Vector(class) => self.is_same_or_subclass(specializer, class),
-            ValueKind::I64
-            | ValueKind::Bool
-            | ValueKind::ClassObject(_)
-            | ValueKind::KnownCallable(_) => false,
+            ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
+                self.is_same_or_subclass(specializer, class)
+            }
+            ValueKind::I64 => self
+                .kind_for_builtin_class(specializer)
+                .is_some_and(|kind| kind == ValueKind::I64),
+            ValueKind::Bool | ValueKind::ClassObject(_) | ValueKind::KnownCallable(_) => false,
         }
     }
 
@@ -3358,7 +3330,6 @@ impl Lowering {
                 ValueKind::Object(_)
                     | ValueKind::String(_)
                     | ValueKind::Symbol(_)
-                    | ValueKind::Keyword(_)
                     | ValueKind::Vector(_)
                     | ValueKind::Error
             ),
@@ -3369,7 +3340,6 @@ impl Lowering {
             }
             ValueKind::String(expected)
             | ValueKind::Symbol(expected)
-            | ValueKind::Keyword(expected)
             | ValueKind::Vector(expected) => {
                 self.value_kind_class(actual)
                     .is_some_and(|actual| self.is_same_or_subclass(actual, expected))
@@ -3398,7 +3368,6 @@ impl Lowering {
             ValueKind::Bool => "<boolean>".into(),
             ValueKind::String(_) => "<string>".into(),
             ValueKind::Symbol(_) => "<symbol>".into(),
-            ValueKind::Keyword(_) => "<keyword>".into(),
             ValueKind::Vector(_) => "<vector>".into(),
             ValueKind::Object(class) => self
                 .classes
@@ -4161,8 +4130,15 @@ mod tests {
         );
         assert!(has_diagnostic(
             &primitive,
+            DiagnosticCode::InstanceOfImpossible,
+            &[("actual", "<integer>"), ("expected", "<circle>")]
+        ));
+
+        let integer = lower_source("define function main()\n  instance?(1, <integer>)\nend;");
+        assert!(!has_diagnostic(
+            &integer,
             DiagnosticCode::InstanceOfTypeMismatch,
-            &[("expected", "<object>"), ("actual", "<integer>")]
+            &[]
         ));
     }
 

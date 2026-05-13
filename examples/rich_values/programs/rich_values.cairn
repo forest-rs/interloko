@@ -1,7 +1,7 @@
 define class <sample> (<object>)
   slot label :: <string>;
   slot tag :: <symbol>;
-  slot option :: <keyword>;
+  slot option :: <symbol>;
   slot items :: <vector>;
 end;
 
@@ -14,11 +14,11 @@ end;
 define method score(x :: <sample>) => <integer>
   let label-score = if x.label = "box" then 3 else 0 end;
   let tag-score = if x.tag = #ready then 2 else 0 end;
-  let keyword-score = if x.option = #:fallback then 1 else 0 end;
-  label-score + tag-score + keyword-score
+  let option-score = if x.option = fallback: then 1 else 0 end;
+  label-score + tag-score + option-score
 end;
 
 define function main()
-  let sample = make(<sample>, label: "box", tag: #ready, option: #:fallback, items: [1, 2]);
+  let sample = make(<sample>, label: "box", tag: #ready, option: fallback:, items: #[1, 2]);
   score("direct") + score(sample)
 end;

@@ -528,7 +528,7 @@ mod tests {
             "define class <sample> (<object>)\n\
                slot label :: <string>;\n\
                slot tag :: <symbol>;\n\
-               slot option :: <keyword>;\n\
+               slot option :: <symbol>;\n\
                slot items :: <vector>;\n\
              end;\n\
              define generic score(x :: <object>) => <integer>;\n\
@@ -538,17 +538,33 @@ mod tests {
              define method score(x :: <sample>) => <integer>\n\
                let label-score = if x.label = \"box\" then 3 else 0 end;\n\
                let tag-score = if x.tag = #ready then 2 else 0 end;\n\
-               let keyword-score = if x.option = #:fallback then 1 else 0 end;\n\
-               label-score + tag-score + keyword-score\n\
+               let option-score = if x.option = fallback: then 1 else 0 end;\n\
+               label-score + tag-score + option-score\n\
              end;\n\
              define function main()\n\
-               let sample = make(<sample>, label: \"box\", tag: #ready, option: #:fallback, items: [1, 2]);\n\
+               let sample = make(<sample>, label: \"box\", tag: #ready, option: fallback:, items: #[1, 2]);\n\
                score(\"direct\") + score(sample)\n\
              end;",
         )
         .expect("rich value program should run");
 
         assert_eq!(value, 10);
+    }
+
+    #[test]
+    fn compiles_and_runs_integer_generic_dispatch() {
+        let value = compile_and_run_main(
+            "define generic score(x :: <integer>) => <integer>;\n\
+             define method score(x :: <integer>) => <integer>\n\
+               x + 1\n\
+             end;\n\
+             define function main()\n\
+               score(41)\n\
+             end;",
+        )
+        .expect("integer generic program should run");
+
+        assert_eq!(value, 42);
     }
 
     #[test]
@@ -563,7 +579,7 @@ mod tests {
                     .any(|diagnostic| diagnostic.code == DiagnosticCode::AstMalformedStringLiteral)
         ));
 
-        let vector_eq = compile("define function main()\n  [1, 2] = [1, 2]\nend;")
+        let vector_eq = compile("define function main()\n  #[1, 2] = #[1, 2]\nend;")
             .expect_err("vector equality should be rejected");
         assert!(matches!(
             vector_eq,

@@ -184,17 +184,6 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
-    /// Runtime keyword literal.
-    KeywordLiteral {
-        /// Destination register.
-        dst: Register,
-        /// Keyword name.
-        name: String,
-        /// Built-in keyword class.
-        class: sem::ClassId,
-        /// Source span.
-        span: Span,
-    },
     /// Unsigned integer constant.
     ConstU64 {
         /// Destination register.
@@ -747,6 +736,13 @@ impl<'module> BodyLowering<'module> {
     }
 
     fn lower_dispatcher(&mut self, generic: &sem::GenericFunction) -> Result<(), LowerError> {
+        if matches!(
+            generic.param_kinds.first().copied().flatten(),
+            Some(sem::ValueKind::I64)
+        ) {
+            return self.lower_exact_dispatcher(generic, is_integer_value_class);
+        }
+
         let object = Register(1);
         let class_reg = self.alloc(ValueKind::U64);
         self.instructions.push(Instr::ClassOf {
@@ -840,6 +836,59 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
+    fn lower_exact_dispatcher(
+        &mut self,
+        generic: &sem::GenericFunction,
+        accepts: fn(&sem::Module, sem::ClassId) -> bool,
+    ) -> Result<(), LowerError> {
+        let Some(method) = self
+            .sorted_methods(generic)
+            .into_iter()
+            .find(|method| accepts(self.module, method.specializer))
+        else {
+            self.instructions.push(Instr::Trap {
+                code: 1,
+                span: generic.span,
+            });
+            return Ok(());
+        };
+        let method_result = self.alloc(value_kind(method.result_kind)?);
+        self.instructions.push(Instr::Call {
+            dst: method_result.reg,
+            callee: self
+                .ids
+                .methods
+                .get(method.id.0 as usize)
+                .copied()
+                .ok_or_else(|| invalid_semantic("method id is out of range"))?,
+            args: vec![Register(1)],
+            span: method.span,
+        });
+        let result =
+            self.coerce_value(method_result, value_kind(generic.result_kind)?, method.span)?;
+        self.instructions.push(Instr::Return {
+            value: result.reg,
+            span: method.span,
+        });
+        Ok(())
+    }
+
+    fn sorted_methods(&self, generic: &sem::GenericFunction) -> Vec<&'module sem::Method> {
+        let mut methods: Vec<_> = self
+            .module
+            .methods
+            .iter()
+            .filter(|method| method.generic == generic.id)
+            .collect();
+        methods.sort_by(|left, right| {
+            self.module
+                .class_depth(right.specializer)
+                .cmp(&self.module.class_depth(left.specializer))
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+        methods
+    }
+
     fn lower_expr(&mut self, expr: &sem::Expr) -> Result<Value, LowerError> {
         match expr {
             sem::Expr::ConstI64 { value, span } => {
@@ -873,16 +922,6 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::SymbolLiteral { name, class, span } => {
                 let result = self.alloc(ValueKind::Object(Some(*class)));
                 self.instructions.push(Instr::SymbolLiteral {
-                    dst: result.reg,
-                    name: name.clone(),
-                    class: *class,
-                    span: *span,
-                });
-                Ok(result)
-            }
-            sem::Expr::KeywordLiteral { name, class, span } => {
-                let result = self.alloc(ValueKind::Object(Some(*class)));
-                self.instructions.push(Instr::KeywordLiteral {
                     dst: result.reg,
                     name: name.clone(),
                     class: *class,
@@ -998,15 +1037,32 @@ impl<'module> BodyLowering<'module> {
             } => {
                 let object = self.lower_expr(object)?;
                 let result = self.alloc(ValueKind::ClassObject(Some(*class)));
-                self.instructions.push(Instr::ClassOf {
-                    dst: result.reg,
-                    object: object.reg,
-                    span: *span,
-                });
+                if object.kind == ValueKind::I64 {
+                    self.instructions.push(Instr::ConstClass {
+                        dst: result.reg,
+                        class: *class,
+                        span: *span,
+                    });
+                } else {
+                    self.instructions.push(Instr::ClassOf {
+                        dst: result.reg,
+                        object: object.reg,
+                        span: *span,
+                    });
+                }
                 Ok(result)
             }
             sem::Expr::InstanceOf { value, class, span } => {
                 let value = self.lower_expr(value)?;
+                if value.kind == ValueKind::I64 {
+                    let result = self.alloc(ValueKind::Bool);
+                    self.instructions.push(Instr::ConstBool {
+                        dst: result.reg,
+                        value: is_integer_value_class(self.module, *class),
+                        span: *span,
+                    });
+                    return Ok(result);
+                }
                 if let ValueKind::Object(Some(actual)) = value.kind
                     && self.module.is_same_or_subclass(actual, *class)
                 {
@@ -1030,6 +1086,9 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::Cast { value, class, span } => {
                 let value = self.lower_expr(value)?;
+                if value.kind == ValueKind::I64 && is_integer_value_class(self.module, *class) {
+                    return Ok(value);
+                }
                 if let ValueKind::Object(Some(actual)) = value.kind
                     && self.module.is_same_or_subclass(actual, *class)
                 {
@@ -1459,7 +1518,6 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::String(class)
         | sem::ValueKind::Symbol(class)
-        | sem::ValueKind::Keyword(class)
         | sem::ValueKind::Vector(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::Object(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::ClassObject(class) => Ok(ValueKind::ClassObject(Some(class))),
@@ -1479,11 +1537,23 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction) -> ValueKind {
             sem::ValueKind::Object(class)
             | sem::ValueKind::String(class)
             | sem::ValueKind::Symbol(class)
-            | sem::ValueKind::Keyword(class)
             | sem::ValueKind::Vector(class),
         ) => ValueKind::Object(Some(class)),
+        Some(sem::ValueKind::I64) => ValueKind::I64,
         _ => ValueKind::Object(None),
     }
+}
+
+fn is_integer_value_class(module: &sem::Module, class: sem::ClassId) -> bool {
+    matches!(
+        module
+            .classes
+            .get(class.0 as usize)
+            .map(|class| class.origin),
+        Some(sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::Integer,
+        })
+    )
 }
 
 fn input_register(index: usize) -> Register {
@@ -1593,16 +1663,6 @@ impl Module {
                 span,
             } => {
                 write!(f, "  {dst} = literal.symbol #{name}: ")?;
-                self.fmt_class(f, *class)?;
-                fmt_span(f, *span)
-            }
-            Instr::KeywordLiteral {
-                dst,
-                name,
-                class,
-                span,
-            } => {
-                write!(f, "  {dst} = literal.keyword #:{name}: ")?;
                 self.fmt_class(f, *class)?;
                 fmt_span(f, *span)
             }
