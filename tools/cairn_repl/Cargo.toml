@@ -1,0 +1,13 @@
+[package]
+name = "cairn_repl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Plain-stdio REPL for Cairn compiler sessions."
+
+[dependencies]
+cairn_compiler = { path = "../../crates/cairn_compiler" }
+cairn_diagnostics = { path = "../cairn_diagnostics" }
+
+[lints]
+workspace = true

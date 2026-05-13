@@ -1,5 +1,55 @@
 # Plans
 
+## Add Initial Cairn REPL Tool
+
+### Goal
+
+Add a plain-stdio `cairn_repl` tool that drives the existing incremental
+session API, supports durable definitions plus generated scratch expressions,
+and exposes the same stage/artifact/MOP/EOP inspection surfaces as the
+workbench.
+
+### Fence
+
+`cairn_repl` owns terminal interaction, input buffering, scratch-source
+generation, and command routing. It explicitly does not own parsing, binding,
+runtime dispatch, diagnostics rendering policy, MOP/EOP construction, artifact
+graph logic, persistent image state, or language semantics.
+
+### Invariants
+
+- Definitions append to one durable in-memory source buffer with a stable
+  `SourceFileId`.
+- Expression input compiles durable source plus one generated scratch function;
+  scratch definitions are replaced each time.
+- All compilation still flows through source -> syntax -> AST -> semantic IR ->
+  lowered IR -> tape.
+- Named scratch execution uses a small compiler/session runtime API, not a
+  fake `main`.
+- REPL diagnostics render through `cairn_diagnostics`.
+- The first slice uses plain stdin/stdout, with no line-editing dependency.
+
+### Steps
+
+1. Add a compiler/session API for running a named zero-argument function from
+   existing `SessionArtifacts`.
+2. Add `tools/cairn_repl` to the workspace with a small state machine for
+   durable source, pending multiline definitions, scratch expressions, and
+   colon commands.
+3. Reuse `SessionArtifacts` dumps, dispatch inspection, artifact reports, and
+   environment objects for commands.
+4. Add transcript-style CLI coverage for definitions, expression evaluation,
+   source/dump/artifact commands, and quit/clear behavior.
+5. Document the workflow and current limits, then run fmt, clippy, and tests.
+
+### Risks
+
+- Do not accidentally treat expression evaluation as top-level mutation.
+- Do not duplicate `cairn_lab` rendering logic beyond small text formatting
+  helpers.
+- Keep result printing honest: integer results print directly; non-integer or
+  missing-function cases report runtime errors.
+
 ## Make Diagnostics Catalog-First
 
 ### Goal

@@ -7,6 +7,7 @@ members = [
     "tools/cairn_corpus",
     "tools/cairn_diagnostics",
     "tools/cairn_lab",
+    "tools/cairn_repl",
 ]
 resolver = "3"
 
