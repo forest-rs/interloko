@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::{Arc, Mutex};
 
 use cairn_compiler::diagnostic::Diagnostic;
 use cairn_compiler::identity::SourceFileId;
@@ -13,49 +14,69 @@ use cairn_compiler::session::{
     SessionArtifacts,
 };
 use cairn_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
+use reedline::{
+    ColumnarMenu, Completer, EditCommand, Emacs, KeyCode, KeyModifiers, Keybindings, MenuBuilder,
+    Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline,
+    ReedlineError, ReedlineEvent, ReedlineMenu, Signal, Span, Suggestion,
+    default_emacs_keybindings,
+};
 
 type Result<T> = std::result::Result<T, ReplError>;
 
 const SOURCE_NAME: &str = "repl.cairn";
 const SCRATCH_FUNCTION: &str = "__cairn_repl_expr";
+const COMMANDS: &[&str] = &[
+    ":help",
+    ":quit",
+    ":source",
+    ":clear",
+    ":dump",
+    ":mop",
+    ":eop",
+    ":artifacts",
+    ":dispatch",
+    ":inspect",
+    ":affordances",
+];
+const DUMP_STAGES: &[&str] = &[
+    "syntax", "ast", "sem", "mop", "eop", "lowered", "tape", "all",
+];
 
 fn main() {
     let stdin = io::stdin();
-    let interactive = stdin.is_terminal();
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
+    let stdout_is_terminal = stdout.is_terminal();
+    let stderr_is_terminal = stderr.is_terminal();
+    let interactive = stdin.is_terminal() && stdout_is_terminal;
+    let style = if stdout_is_terminal && stderr_is_terminal {
+        OutputStyle::Ansi
+    } else {
+        OutputStyle::Plain
+    };
 
-    if let Err(error) = run_repl(stdin.lock(), &mut stdout, &mut stderr, interactive) {
+    let result = if interactive {
+        run_interactive_repl(&mut stdout, &mut stderr, style)
+    } else {
+        run_repl(stdin.lock(), &mut stdout, &mut stderr)
+    };
+
+    if let Err(error) = result {
         let _ = writeln!(stderr, "{error}");
         std::process::exit(1);
     }
 }
 
-fn run_repl<R, W, E>(input: R, stdout: &mut W, stderr: &mut E, interactive: bool) -> Result<()>
+fn run_repl<R, W, E>(input: R, stdout: &mut W, stderr: &mut E) -> Result<()>
 where
     R: BufRead,
     W: Write,
     E: Write,
 {
-    let mut repl = Repl::new()?;
-    if interactive {
-        writeln!(stdout, "cairn_repl")?;
-        writeln!(stdout, "type :help for commands")?;
-    }
+    let mut repl = Repl::new(OutputStyle::Plain)?;
 
-    let mut lines = input.lines();
-    loop {
-        if interactive {
-            if repl.has_pending_definition() {
-                write!(stdout, "... ")?;
-            } else {
-                write!(stdout, "> ")?;
-            }
-            stdout.flush()?;
-        }
-        let Some(line) = lines.next() else {
-            break;
-        };
+    let lines = input.lines();
+    for line in lines {
         let line = line?;
         if !repl.handle_line(&line, stdout, stderr)? {
             break;
@@ -69,6 +90,77 @@ where
     Ok(())
 }
 
+fn run_interactive_repl<W, E>(stdout: &mut W, stderr: &mut E, style: OutputStyle) -> Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    let mut repl = Repl::new(style)?;
+    let completion_state = Arc::new(Mutex::new(CompletionState::default()));
+    let mut line_editor = reedline_editor(completion_state.clone());
+
+    writeln!(stdout, "cairn_repl")?;
+    writeln!(stdout, "type :help for commands, Ctrl-D to quit")?;
+    stdout.flush()?;
+
+    loop {
+        refresh_completion_state(&completion_state, &repl);
+        let prompt = CairnPrompt {
+            pending_definition: repl.has_pending_definition(),
+        };
+        match line_editor.read_line(&prompt)? {
+            Signal::Success(line) if !repl.handle_line(&line, stdout, stderr)? => {
+                break;
+            }
+            Signal::Success(_) => {}
+            Signal::CtrlD => break,
+            Signal::CtrlC => {
+                if repl.cancel_pending_definition() {
+                    writeln!(stderr, "cancelled definition")?;
+                } else {
+                    writeln!(stderr, "cancelled")?;
+                }
+            }
+            Signal::ExternalBreak(_) => {}
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn reedline_editor(completion_state: Arc<Mutex<CompletionState>>) -> Reedline {
+    let completion_menu = ColumnarMenu::default()
+        .with_name("completion_menu")
+        .with_columns(4)
+        .with_column_padding(2);
+    let mut keybindings = default_emacs_keybindings();
+    add_menu_keybindings(&mut keybindings);
+
+    Reedline::create()
+        .with_completer(Box::new(CairnCompleter::new(completion_state)))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu)))
+        .with_edit_mode(Box::new(Emacs::new(keybindings)))
+        .with_quick_completions(true)
+        .with_partial_completions(true)
+}
+
+fn add_menu_keybindings(keybindings: &mut Keybindings) {
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_string()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keybindings.add_binding(
+        KeyModifiers::ALT,
+        KeyCode::Enter,
+        ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+    );
+}
+
 struct Repl {
     session: IncrementalCompilerSession,
     source_file: SourceFileId,
@@ -76,10 +168,11 @@ struct Repl {
     pending_definition: String,
     last_artifacts: Option<SessionArtifacts>,
     renderer: DiagnosticRenderer,
+    style: OutputStyle,
 }
 
 impl Repl {
-    fn new() -> Result<Self> {
+    fn new(style: OutputStyle) -> Result<Self> {
         let source_file = SourceFileId::from_path(SOURCE_NAME);
         let mut session = IncrementalCompilerSession::new();
         session.add_source_with_id(source_file, SOURCE_NAME, "");
@@ -90,11 +183,20 @@ impl Repl {
             pending_definition: String::new(),
             last_artifacts: None,
             renderer: diagnostic_renderer()?,
+            style,
         })
     }
 
     fn has_pending_definition(&self) -> bool {
         !self.pending_definition.is_empty()
+    }
+
+    fn cancel_pending_definition(&mut self) -> bool {
+        if self.pending_definition.is_empty() {
+            return false;
+        }
+        self.pending_definition.clear();
+        true
     }
 
     fn handle_line<W, E>(&mut self, line: &str, stdout: &mut W, stderr: &mut E) -> Result<bool>
@@ -202,7 +304,7 @@ impl Repl {
         if artifacts.diagnostics.is_empty() {
             self.durable_source = candidate_source;
             self.last_artifacts = Some(artifacts);
-            writeln!(stdout, "ok")?;
+            writeln!(stdout, "{}", self.style.status("ok"))?;
         } else {
             self.restore_durable_cache()?;
         }
@@ -226,8 +328,15 @@ impl Repl {
         }
 
         match artifacts.run_zero_arg_function_i64(SCRATCH_FUNCTION) {
-            FunctionRunResult::ReturnedI64(value) => writeln!(stdout, "{value}")?,
-            result => writeln!(stderr, "runtime error: {}", function_run_message(&result))?,
+            FunctionRunResult::ReturnedI64(value) => {
+                writeln!(stdout, "{}", self.style.value(value))?
+            }
+            result => writeln!(
+                stderr,
+                "{} {}",
+                self.style.error_label("runtime error:"),
+                function_run_message(&result)
+            )?,
         }
         Ok(())
     }
@@ -293,12 +402,13 @@ impl Repl {
         if diagnostics.is_empty() {
             return Ok(());
         }
-        writeln!(stderr, "diagnostics:")?;
+        writeln!(stderr, "{}", self.style.error_label("diagnostics:"))?;
         for diagnostic in diagnostics {
+            let severity = format!("{:?}", diagnostic.severity);
             writeln!(
                 stderr,
-                "  {:?} {} {}..{} {}",
-                diagnostic.severity,
+                "  {} {} {}..{} {}",
+                self.style.severity(&severity),
                 diagnostic.code,
                 diagnostic.span.start,
                 diagnostic.span.end,
@@ -540,12 +650,194 @@ fn help_text() -> &'static str {
   :affordances <object-id>"
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum OutputStyle {
+    Plain,
+    Ansi,
+}
+
+impl OutputStyle {
+    fn status(self, value: &str) -> String {
+        match self {
+            Self::Plain => value.to_string(),
+            Self::Ansi => format!("\x1b[32m{value}\x1b[0m"),
+        }
+    }
+
+    fn value(self, value: i64) -> String {
+        match self {
+            Self::Plain => value.to_string(),
+            Self::Ansi => format!("\x1b[36m{value}\x1b[0m"),
+        }
+    }
+
+    fn severity(self, value: &str) -> String {
+        match self {
+            Self::Plain => value.to_string(),
+            Self::Ansi => format!("\x1b[31m{value}\x1b[0m"),
+        }
+    }
+
+    fn error_label(self, value: &str) -> String {
+        match self {
+            Self::Plain => value.to_string(),
+            Self::Ansi => format!("\x1b[31m{value}\x1b[0m"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CompletionState {
+    object_ids: Vec<String>,
+    dispatch_ids: Vec<String>,
+}
+
+impl CompletionState {
+    fn from_repl(repl: &Repl) -> Self {
+        let mut object_ids = Vec::new();
+        let mut dispatch_ids = Vec::new();
+        if let Some(artifacts) = &repl.last_artifacts {
+            object_ids = artifacts
+                .environment_objects()
+                .into_iter()
+                .map(|object| object.id.as_str().to_string())
+                .collect();
+            object_ids.sort();
+            object_ids.dedup();
+
+            dispatch_ids = artifacts
+                .dispatch_sites()
+                .into_iter()
+                .map(|site| site.id)
+                .collect();
+        }
+        Self {
+            object_ids,
+            dispatch_ids,
+        }
+    }
+}
+
+fn refresh_completion_state(state: &Arc<Mutex<CompletionState>>, repl: &Repl) {
+    if let Ok(mut state) = state.lock() {
+        *state = CompletionState::from_repl(repl);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CairnCompleter {
+    state: Arc<Mutex<CompletionState>>,
+}
+
+impl CairnCompleter {
+    fn new(state: Arc<Mutex<CompletionState>>) -> Self {
+        Self { state }
+    }
+}
+
+impl Completer for CairnCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        let before_cursor = line.get(..pos).unwrap_or(line);
+        if !before_cursor.starts_with(':') {
+            return Vec::new();
+        }
+
+        let (token_start, token) = completion_token(before_cursor, pos);
+        let command = before_cursor.split_whitespace().next().unwrap_or_default();
+        let candidates: Vec<String> = if !before_cursor[..token_start].contains(char::is_whitespace)
+        {
+            COMMANDS
+                .iter()
+                .map(|command| (*command).to_string())
+                .collect()
+        } else {
+            match command {
+                ":dump" => DUMP_STAGES
+                    .iter()
+                    .map(|stage| (*stage).to_string())
+                    .collect(),
+                ":dispatch" => self
+                    .state
+                    .lock()
+                    .map(|state| state.dispatch_ids.clone())
+                    .unwrap_or_default(),
+                ":inspect" | ":affordances" => self
+                    .state
+                    .lock()
+                    .map(|state| state.object_ids.clone())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            }
+        };
+
+        candidates
+            .into_iter()
+            .filter(|candidate| candidate.starts_with(token))
+            .map(|candidate| Suggestion {
+                value: candidate,
+                span: Span::new(token_start, pos),
+                append_whitespace: true,
+                ..Default::default()
+            })
+            .collect()
+    }
+}
+
+fn completion_token(before_cursor: &str, pos: usize) -> (usize, &str) {
+    let token_start = before_cursor
+        .rfind(char::is_whitespace)
+        .map_or(0, |index| index + 1);
+    (token_start, &before_cursor[token_start..pos])
+}
+
+struct CairnPrompt {
+    pending_definition: bool,
+}
+
+impl Prompt for CairnPrompt {
+    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
+        if self.pending_definition {
+            "define".into()
+        } else {
+            "cairn".into()
+        }
+    }
+
+    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+
+    fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> std::borrow::Cow<'_, str> {
+        if self.pending_definition {
+            "... ".into()
+        } else {
+            "> ".into()
+        }
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
+        "  | ".into()
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: PromptHistorySearch,
+    ) -> std::borrow::Cow<'_, str> {
+        let status = match history_search.status {
+            PromptHistorySearchStatus::Passing => "history",
+            PromptHistorySearchStatus::Failing => "history?",
+        };
+        format!("({status}: {}) ", history_search.term).into()
+    }
+}
+
 #[derive(Debug)]
 enum ReplError {
     Io { path: String, error: io::Error },
     Stdio(io::Error),
     DiagnosticCatalog(cairn_diagnostics::DiagnosticCatalogError),
     DiagnosticRender(cairn_diagnostics::DiagnosticRenderError),
+    LineEditor(ReedlineError),
     UnsupportedLocale(String),
     MissingSource,
 }
@@ -557,6 +849,7 @@ impl fmt::Display for ReplError {
             Self::Stdio(error) => write!(formatter, "{error}"),
             Self::DiagnosticCatalog(error) => write!(formatter, "{error}"),
             Self::DiagnosticRender(error) => write!(formatter, "{error}"),
+            Self::LineEditor(error) => write!(formatter, "{error}"),
             Self::UnsupportedLocale(locale) => {
                 write!(formatter, "unsupported diagnostic locale `{locale}`")
             }
@@ -571,6 +864,7 @@ impl Error for ReplError {
             Self::Io { error, .. } | Self::Stdio(error) => Some(error),
             Self::DiagnosticCatalog(error) => Some(error),
             Self::DiagnosticRender(error) => Some(error),
+            Self::LineEditor(error) => Some(error),
             Self::UnsupportedLocale(_) | Self::MissingSource => None,
         }
     }
@@ -591,5 +885,78 @@ impl From<cairn_diagnostics::DiagnosticCatalogError> for ReplError {
 impl From<cairn_diagnostics::DiagnosticRenderError> for ReplError {
     fn from(error: cairn_diagnostics::DiagnosticRenderError) -> Self {
         Self::DiagnosticRender(error)
+    }
+}
+
+impl From<ReedlineError> for ReplError {
+    fn from(error: ReedlineError) -> Self {
+        Self::LineEditor(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completion_values(completer: &mut CairnCompleter, line: &str) -> Vec<String> {
+        completer
+            .complete(line, line.len())
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect()
+    }
+
+    #[test]
+    fn completes_commands_and_dump_stages() {
+        let state = Arc::new(Mutex::new(CompletionState::default()));
+        let mut completer = CairnCompleter::new(state);
+
+        assert!(completion_values(&mut completer, ":du").contains(&":dump".to_string()));
+        assert!(completion_values(&mut completer, ":dump l").contains(&"lowered".to_string()));
+        assert!(completion_values(&mut completer, "not-a-command").is_empty());
+    }
+
+    #[test]
+    fn completes_object_and_dispatch_ids_from_last_artifacts() {
+        let mut repl = Repl::new(OutputStyle::Plain).expect("create repl");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        for line in [
+            "define class <circle> (<object>)",
+            "  slot radius :: <integer>;",
+            "end;",
+            "define generic area(shape :: <object>) => <integer>;",
+            "define method area(shape :: <circle>) => <integer>",
+            "  shape.radius * shape.radius",
+            "end;",
+            "area(make(<circle>, radius: 3))",
+        ] {
+            assert!(
+                repl.handle_line(line, &mut stdout, &mut stderr)
+                    .expect("handle line")
+            );
+        }
+        assert_eq!(stderr, Vec::<u8>::new());
+
+        let state = CompletionState::from_repl(&repl);
+        assert!(state.object_ids.iter().any(|id| id == "function:f0"));
+        assert!(state.dispatch_ids.iter().any(|id| id == "dispatch:d0"));
+
+        let state = Arc::new(Mutex::new(state));
+        let mut completer = CairnCompleter::new(state);
+        assert!(
+            completion_values(&mut completer, ":inspect function:")
+                .contains(&"function:f0".to_string())
+        );
+        assert!(
+            completion_values(&mut completer, ":dispatch dispatch:")
+                .contains(&"dispatch:d0".to_string())
+        );
+    }
+
+    #[test]
+    fn ansi_style_is_separate_from_plain_transcript_style() {
+        assert_eq!(OutputStyle::Plain.value(42), "42");
+        assert_eq!(OutputStyle::Ansi.value(42), "\x1b[36m42\x1b[0m");
     }
 }

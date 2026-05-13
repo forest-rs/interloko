@@ -55,6 +55,8 @@ fn transcript_definitions_expressions_and_inspection_commands() {
     assert!(stdout.contains("affordances function:f0"));
     assert!(stdout.contains("cleared"));
     assert!(stdout.contains("(empty)"));
+    assert!(!stdout.contains("\u{1b}["));
+    assert!(!stderr.contains("\u{1b}["));
 }
 
 #[test]

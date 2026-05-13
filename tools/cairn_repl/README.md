@@ -1,9 +1,13 @@
 # cairn_repl
 
-`cairn_repl` is a small plain-stdio REPL over the existing Cairn compiler
-session pipeline. It keeps one durable in-memory source buffer for definitions,
-then evaluates expression input by compiling that durable source plus one
-generated zero-argument scratch function.
+`cairn_repl` is a small REPL over the existing Cairn compiler session pipeline.
+Interactive terminal sessions use `reedline` for line editing, local in-memory
+history, Ctrl-C/Ctrl-D handling, and completions. Piped input keeps the plain
+stdio transcript mode used by tests and scripts.
+
+The REPL keeps one durable in-memory source buffer for definitions, then
+evaluates expression input by compiling that durable source plus one generated
+zero-argument scratch function.
 
 Run it with:
 
@@ -30,6 +34,15 @@ Integer results print directly. Diagnostics are rendered through
 `cairn_diagnostics`, using the same `CAIRN_DIAGNOSTIC_LOCALE` and
 `CAIRN_DIAGNOSTIC_CATALOG` environment variables as `cairn_lab`.
 
+Interactive controls:
+
+- Up/Down browse the local history for this process.
+- Tab completes colon commands, `:dump` stages, dispatch IDs, and object IDs
+  from the most recent artifacts.
+- Ctrl-C cancels the current line, and clears a pending multiline definition.
+- Ctrl-D exits.
+- ANSI color is used only for interactive TTY output.
+
 Commands:
 
 ```text
@@ -49,7 +62,7 @@ Commands:
 Current limits:
 
 - no top-level mutation;
-- no modules, macros, persistent image, history, or completion;
+- no modules, macros, persistent image, or persistent history;
 - expression evaluation currently prints integer results and reports
   non-integer runtime results as runtime errors;
 - host-backed declarations are not parsed from REPL comments yet; use
