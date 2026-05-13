@@ -91,6 +91,35 @@ impl RuntimeResult {
     }
 }
 
+/// Result of running a named zero-argument function from compiled artifacts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionRunResult {
+    /// The function returned an integer result.
+    ReturnedI64(i64),
+    /// The requested function was not present in the semantic/tape artifacts.
+    MissingFunction {
+        /// Requested function name.
+        name: String,
+    },
+    /// The requested function exists but expects parameters.
+    FunctionHasParameters {
+        /// Requested function name.
+        name: String,
+    },
+    /// The artifacts do not contain an emitted tape program.
+    TapeUnavailable,
+    /// Runtime trapped.
+    Trap {
+        /// Trap details.
+        message: String,
+    },
+    /// The function returned a non-integer result.
+    FunctionReturnedNonI64 {
+        /// Requested function name.
+        name: String,
+    },
+}
+
 /// Stage that can be rendered as a text dump.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DumpStage {
@@ -490,6 +519,19 @@ impl SessionArtifacts {
     pub fn explain_dispatch_site(&self, id: &str) -> Option<String> {
         self.dispatch_site(id)
             .map(|site| explain_dispatch_site(self, &site))
+    }
+
+    /// Runs a named zero-argument function from this artifact set.
+    ///
+    /// This is intended for workbench and REPL tooling that needs to evaluate a
+    /// generated scratch function without pretending it is `main`.
+    #[must_use]
+    pub fn run_zero_arg_function_i64(&self, function_name: &str) -> FunctionRunResult {
+        self.tape
+            .as_ref()
+            .map_or(FunctionRunResult::TapeUnavailable, |tape| {
+                run_zero_arg_function_i64(&self.sem, tape, function_name)
+            })
     }
 
     /// Returns structured environment objects projected from these artifacts.
@@ -2126,34 +2168,58 @@ fn compile_file_with_host_registry(
 }
 
 fn run_main(module: &sem::Module, tape: &tape::TapeModule) -> RuntimeResult {
-    let Some(main) = tape.main else {
-        return RuntimeResult::MissingMain;
-    };
-    let Some(main_sem) = module
+    match run_zero_arg_function_i64(module, tape, "main") {
+        FunctionRunResult::ReturnedI64(value) => RuntimeResult::ReturnedI64(value),
+        FunctionRunResult::MissingFunction { .. } | FunctionRunResult::TapeUnavailable => {
+            RuntimeResult::MissingMain
+        }
+        FunctionRunResult::FunctionHasParameters { .. } => RuntimeResult::MainHasParameters,
+        FunctionRunResult::Trap { message } => RuntimeResult::Trap { message },
+        FunctionRunResult::FunctionReturnedNonI64 { .. } => RuntimeResult::MainReturnedNonI64,
+    }
+}
+
+fn run_zero_arg_function_i64(
+    module: &sem::Module,
+    tape: &tape::TapeModule,
+    function_name: &str,
+) -> FunctionRunResult {
+    let Some(function) = module
         .functions
         .iter()
-        .find(|function| function.name == "main")
+        .find(|function| function.name == function_name)
     else {
-        return RuntimeResult::MissingMain;
+        return FunctionRunResult::MissingFunction {
+            name: function_name.to_string(),
+        };
     };
-    if !main_sem.params.is_empty() {
-        return RuntimeResult::MainHasParameters;
+    if !function.params.is_empty() {
+        return FunctionRunResult::FunctionHasParameters {
+            name: function_name.to_string(),
+        };
     }
+    let Some(func) = tape.functions.get(function.id.0 as usize).copied() else {
+        return FunctionRunResult::MissingFunction {
+            name: function_name.to_string(),
+        };
+    };
 
     let host = CairnHost::new(tape.runtime.clone());
     let mut vm = Vm::new(host, Limits::default());
-    let output = match vm.run(&tape.program, main, &[], TraceMask::NONE, None) {
+    let output = match vm.run(&tape.program, func, &[], TraceMask::NONE, None) {
         Ok(output) => output,
         Err(trap) => {
-            return RuntimeResult::Trap {
+            return FunctionRunResult::Trap {
                 message: format!("{trap:?}"),
             };
         }
     };
 
     match output.as_slice() {
-        [Value::I64(value)] => RuntimeResult::ReturnedI64(*value),
-        _ => RuntimeResult::MainReturnedNonI64,
+        [Value::I64(value)] => FunctionRunResult::ReturnedI64(*value),
+        _ => FunctionRunResult::FunctionReturnedNonI64 {
+            name: function_name.to_string(),
+        },
     }
 }
 
@@ -4645,6 +4711,42 @@ mod tests {
                 .contains("program=\"cairn\"")
         );
         assert!(artifacts.dump_artifact_graph().contains("dependencies:"));
+    }
+
+    #[test]
+    fn session_runs_named_zero_arg_functions() {
+        let artifacts = CompilerSession::compile_source(
+            "scratch.cairn",
+            "define function helper(x)\n  x + 1\nend;\n\
+             define function __cairn_repl_expr_0()\n  helper(41)\nend;\n\
+             define function object_result()\n  make(<box>, value: 1)\nend;\n\
+             define class <box> (<object>)\n  slot value :: <integer>;\nend;",
+            RuntimeMode::CompileOnly,
+        );
+
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        assert_eq!(
+            artifacts.run_zero_arg_function_i64("__cairn_repl_expr_0"),
+            FunctionRunResult::ReturnedI64(42)
+        );
+        assert_eq!(
+            artifacts.run_zero_arg_function_i64("missing"),
+            FunctionRunResult::MissingFunction {
+                name: "missing".into()
+            }
+        );
+        assert_eq!(
+            artifacts.run_zero_arg_function_i64("helper"),
+            FunctionRunResult::FunctionHasParameters {
+                name: "helper".into()
+            }
+        );
+        assert_eq!(
+            artifacts.run_zero_arg_function_i64("object_result"),
+            FunctionRunResult::FunctionReturnedNonI64 {
+                name: "object_result".into()
+            }
+        );
     }
 
     #[test]
