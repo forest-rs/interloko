@@ -101,6 +101,14 @@ pub enum ValueKind {
     I64,
     /// Boolean value.
     Bool,
+    /// Runtime string object.
+    String(ClassId),
+    /// Runtime interned symbol object.
+    Symbol(ClassId),
+    /// Runtime interned keyword object.
+    Keyword(ClassId),
+    /// Runtime immutable vector object.
+    Vector(ClassId),
     /// Runtime object with statically known nominal class.
     Object(ClassId),
     /// Class object naming a statically known nominal class.
@@ -109,6 +117,58 @@ pub enum ValueKind {
     KnownCallable(KnownCallable),
     /// Invalid or unknown value.
     Error,
+}
+
+/// Built-in value class supplied by the language kernel.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BuiltinValueClass {
+    /// The built-in `<string>` class.
+    String,
+    /// The built-in `<symbol>` class.
+    Symbol,
+    /// The built-in `<keyword>` class.
+    Keyword,
+    /// The built-in `<vector>` class.
+    Vector,
+}
+
+impl BuiltinValueClass {
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::String, "<string>"),
+        (Self::Symbol, "<symbol>"),
+        (Self::Keyword, "<keyword>"),
+        (Self::Vector, "<vector>"),
+    ];
+
+    /// Returns the Cairn-visible class name for this built-in value class.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::String => "<string>",
+            Self::Symbol => "<symbol>",
+            Self::Keyword => "<keyword>",
+            Self::Vector => "<vector>",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "<string>" => Some(Self::String),
+            "<symbol>" => Some(Self::Symbol),
+            "<keyword>" => Some(Self::Keyword),
+            "<vector>" => Some(Self::Vector),
+            _ => None,
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::String => 0,
+            Self::Symbol => 1,
+            Self::Keyword => 2,
+            Self::Vector => 3,
+        }
+    }
 }
 
 /// Registry of host-backed metaobjects supplied by the embedding Rust host.
@@ -236,6 +296,11 @@ impl HostFunction {
 pub enum ClassOrigin {
     /// Class defined in Cairn source.
     Native,
+    /// Built-in value class supplied by the language kernel.
+    BuiltinValue {
+        /// Built-in value kind represented by this class.
+        kind: BuiltinValueClass,
+    },
     /// Class declared by the host-backed metaobject registry.
     HostBacked {
         /// Registry-local host-backed class id.
@@ -785,6 +850,42 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// String literal value.
+    StringLiteral {
+        /// Decoded literal value.
+        value: String,
+        /// Built-in string class.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Symbol literal value.
+    SymbolLiteral {
+        /// Interned symbol name.
+        name: String,
+        /// Built-in symbol class.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Keyword value literal.
+    KeywordLiteral {
+        /// Interned keyword name.
+        name: String,
+        /// Built-in keyword class.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Immutable vector literal.
+    VectorLiteral {
+        /// Ordered element expressions.
+        elements: Vec<Expr>,
+        /// Built-in vector class.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
     /// Resolved local reference.
     Local {
         /// Local identifier.
@@ -914,6 +1015,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Equality for runtime value objects where identity/content equality is defined.
+    ValueEqual {
+        /// Left operand.
+        lhs: Box<Expr>,
+        /// Right operand.
+        rhs: Box<Expr>,
+        /// Operand value category.
+        kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Conditional expression.
     If {
         /// Boolean condition.
@@ -950,6 +1062,10 @@ impl Expr {
         match self {
             Self::ConstI64 { span, .. }
             | Self::ConstBool { span, .. }
+            | Self::StringLiteral { span, .. }
+            | Self::SymbolLiteral { span, .. }
+            | Self::KeywordLiteral { span, .. }
+            | Self::VectorLiteral { span, .. }
             | Self::Local { span, .. }
             | Self::ClassObject { span, .. }
             | Self::KnownCallable { span, .. }
@@ -963,6 +1079,7 @@ impl Expr {
             | Self::AccessorCall { span, .. }
             | Self::Binary { span, .. }
             | Self::Compare { span, .. }
+            | Self::ValueEqual { span, .. }
             | Self::If { span, .. }
             | Self::Handle { span, .. }
             | Self::Error { span } => *span,
@@ -1317,7 +1434,46 @@ impl Lowering {
             });
         }
 
+        self.collect_builtin_value_classes();
         self.resolve_superclasses(module);
+    }
+
+    fn collect_builtin_value_classes(&mut self) {
+        for (kind, name) in BuiltinValueClass::ALL {
+            if let Some(previous) = self.classes.iter().find(|item| item.name == *name) {
+                self.diagnostics.push(
+                    Diagnostic::error(previous.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "class"))
+                        .with_arg(DiagnosticArg::text("name", (*name).to_string()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
+            }
+            let class_id = ClassId(u32::try_from(self.classes.len()).unwrap_or(u32::MAX));
+            self.classes.push(Class {
+                id: class_id,
+                definition: DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Class,
+                    name,
+                    "builtin-value",
+                ),
+                name: (*name).to_string(),
+                origin: ClassOrigin::BuiltinValue { kind: *kind },
+                superclass: None,
+                finalized: false,
+                direct_slots: Vec::new(),
+                effective_slots: Vec::new(),
+                initialization_plan: InitializationPlan::default(),
+                span: Span::default(),
+            });
+        }
     }
 
     fn resolve_superclasses(&mut self, module: &ast::Module) {
@@ -1328,7 +1484,9 @@ impl Lowering {
             if superclass == "<object>" {
                 continue;
             }
-            if matches!(superclass, "<integer>" | "<boolean>") {
+            if matches!(superclass, "<integer>" | "<boolean>")
+                || BuiltinValueClass::from_name(superclass).is_some()
+            {
                 self.diagnostics.push(
                     Diagnostic::error(
                         class.superclass_span,
@@ -1614,7 +1772,13 @@ impl Lowering {
                 if let Some(kind) = kind
                     && !matches!(
                         kind,
-                        ValueKind::Any | ValueKind::Object(_) | ValueKind::Error
+                        ValueKind::Any
+                            | ValueKind::Object(_)
+                            | ValueKind::String(_)
+                            | ValueKind::Symbol(_)
+                            | ValueKind::Keyword(_)
+                            | ValueKind::Vector(_)
+                            | ValueKind::Error
                     )
                 {
                     self.diagnostics.push(
@@ -1784,7 +1948,8 @@ impl Lowering {
         let param = ctx.add_local(
             self.local_definition(method.definition, &method.param.name),
             method.param.name.clone(),
-            ValueKind::Object(specializer),
+            self.kind_for_builtin_class(specializer)
+                .unwrap_or(ValueKind::Object(specializer)),
             method.param.span,
         );
         let body = self.lower_block(&mut ctx, &method.body);
@@ -1934,6 +2099,37 @@ impl Lowering {
             },
             ast::Expr::Bool { value, span, .. } => Expr::ConstBool {
                 value: *value,
+                span: *span,
+            },
+            ast::Expr::String { value, span, .. } => Expr::StringLiteral {
+                value: value.clone(),
+                class: self
+                    .builtin_value_class(BuiltinValueClass::String)
+                    .unwrap_or(ClassId(u32::MAX)),
+                span: *span,
+            },
+            ast::Expr::Symbol { name, span, .. } => Expr::SymbolLiteral {
+                name: name.clone(),
+                class: self
+                    .builtin_value_class(BuiltinValueClass::Symbol)
+                    .unwrap_or(ClassId(u32::MAX)),
+                span: *span,
+            },
+            ast::Expr::Keyword { name, span, .. } => Expr::KeywordLiteral {
+                name: name.clone(),
+                class: self
+                    .builtin_value_class(BuiltinValueClass::Keyword)
+                    .unwrap_or(ClassId(u32::MAX)),
+                span: *span,
+            },
+            ast::Expr::Vector { elements, span, .. } => Expr::VectorLiteral {
+                elements: elements
+                    .iter()
+                    .map(|element| self.lower_expr(ctx, element))
+                    .collect(),
+                class: self
+                    .builtin_value_class(BuiltinValueClass::Vector)
+                    .unwrap_or(ClassId(u32::MAX)),
                 span: *span,
             },
             ast::Expr::Name { name, span, .. } => match ctx.find_local(name) {
@@ -2141,19 +2337,7 @@ impl Lowering {
             } => {
                 let lhs = self.lower_expr(ctx, lhs);
                 let rhs = self.lower_expr(ctx, rhs);
-                self.expect_i64_operands(
-                    ctx,
-                    *span,
-                    &lhs,
-                    &rhs,
-                    DiagnosticCode::ComparisonOperandTypeMismatch,
-                );
-                Expr::Compare {
-                    op: (*op).into(),
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                    span: *span,
-                }
+                self.lower_compare(ctx, *op, lhs, rhs, *span)
             }
             ast::Expr::If {
                 condition,
@@ -2527,6 +2711,64 @@ impl Lowering {
         );
     }
 
+    fn lower_compare(
+        &self,
+        ctx: &mut FunctionContext,
+        op: ast::CompareOp,
+        lhs: Expr,
+        rhs: Expr,
+        span: Span,
+    ) -> Expr {
+        if op != ast::CompareOp::Eq {
+            self.expect_i64_operands(
+                ctx,
+                span,
+                &lhs,
+                &rhs,
+                DiagnosticCode::ComparisonOperandTypeMismatch,
+            );
+            return Expr::Compare {
+                op: op.into(),
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+
+        let lhs_kind = self.expr_kind(&lhs);
+        let rhs_kind = self.expr_kind(&rhs);
+        if matches!(lhs_kind, ValueKind::I64 | ValueKind::Error)
+            && matches!(rhs_kind, ValueKind::I64 | ValueKind::Error)
+        {
+            return Expr::Compare {
+                op: CompareOp::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        if lhs_kind == rhs_kind
+            && matches!(
+                lhs_kind,
+                ValueKind::String(_) | ValueKind::Symbol(_) | ValueKind::Keyword(_)
+            )
+        {
+            return Expr::ValueEqual {
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                kind: lhs_kind,
+                span,
+            };
+        }
+
+        ctx.diagnostics.push(
+            Diagnostic::error(span, DiagnosticCode::ComparisonOperandTypeMismatch)
+                .with_arg(DiagnosticArg::text("lhs", self.kind_name(lhs_kind)))
+                .with_arg(DiagnosticArg::text("rhs", self.kind_name(rhs_kind))),
+        );
+        Expr::Error { span }
+    }
+
     fn lower_class_object(&self, ctx: &mut FunctionContext, class_name: &str, span: Span) -> Expr {
         let Some(class) = self.resolve_class(class_name) else {
             ctx.diagnostics.push(
@@ -2542,10 +2784,10 @@ impl Lowering {
     }
 
     fn lower_class_of(&self, ctx: &mut FunctionContext, object: Expr, span: Span) -> Expr {
-        let class = match self.expr_kind(&object) {
-            ValueKind::Object(class) => class,
-            ValueKind::Error => return Expr::Error { span },
-            _ => {
+        let class = match self.value_kind_class(self.expr_kind(&object)) {
+            Some(class) => class,
+            None if self.expr_kind(&object) == ValueKind::Error => return Expr::Error { span },
+            None => {
                 ctx.diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::ClassOfTypeMismatch).with_arg(
                         DiagnosticArg::text("actual", self.kind_name(self.expr_kind(&object))),
@@ -2577,7 +2819,13 @@ impl Lowering {
         };
         let value = self.lower_expr(ctx, value);
         match self.expr_kind(&value) {
-            ValueKind::Any | ValueKind::Object(_) | ValueKind::Error => {}
+            ValueKind::Any
+            | ValueKind::Object(_)
+            | ValueKind::String(_)
+            | ValueKind::Symbol(_)
+            | ValueKind::Keyword(_)
+            | ValueKind::Vector(_)
+            | ValueKind::Error => {}
             actual => {
                 ctx.diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::InstanceOfTypeMismatch)
@@ -2586,7 +2834,7 @@ impl Lowering {
                 );
             }
         }
-        if let ValueKind::Object(actual) = self.expr_kind(&value)
+        if let Some(actual) = self.value_kind_class(self.expr_kind(&value))
             && !self.classes_may_overlap(actual, class.id)
         {
             ctx.diagnostics.push(
@@ -2624,7 +2872,13 @@ impl Lowering {
         };
         let value = self.lower_expr(ctx, value);
         match self.expr_kind(&value) {
-            ValueKind::Any | ValueKind::Object(_) | ValueKind::Error => {}
+            ValueKind::Any
+            | ValueKind::Object(_)
+            | ValueKind::String(_)
+            | ValueKind::Symbol(_)
+            | ValueKind::Keyword(_)
+            | ValueKind::Vector(_)
+            | ValueKind::Error => {}
             actual => {
                 ctx.diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::CastTypeMismatch)
@@ -2633,7 +2887,7 @@ impl Lowering {
                 );
             }
         }
-        if let ValueKind::Object(actual) = self.expr_kind(&value)
+        if let Some(actual) = self.value_kind_class(self.expr_kind(&value))
             && !self.classes_may_overlap(actual, class.id)
         {
             ctx.diagnostics.push(
@@ -2686,6 +2940,13 @@ impl Lowering {
         if matches!(class.origin, ClassOrigin::HostBacked { .. }) {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::HostBackedMake)
+                    .with_arg(DiagnosticArg::text("class", class.name.clone())),
+            );
+            return Expr::Error { span };
+        }
+        if matches!(class.origin, ClassOrigin::BuiltinValue { .. }) {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::BuiltinValueMake)
                     .with_arg(DiagnosticArg::text("class", class.name.clone())),
             );
             return Expr::Error { span };
@@ -2796,7 +3057,7 @@ impl Lowering {
         accessor_name: &str,
         span: Span,
     ) -> Expr {
-        let ValueKind::Object(class_id) = self.expr_kind(&receiver) else {
+        let Some(class_id) = self.value_kind_class(self.expr_kind(&receiver)) else {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::SlotReceiverTypeMismatch)
                     .with_arg(DiagnosticArg::text("accessor", accessor_name))
@@ -2858,6 +3119,10 @@ impl Lowering {
     fn expr_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
             Expr::ConstI64 { .. } | Expr::Binary { .. } => ValueKind::I64,
+            Expr::StringLiteral { class, .. } => ValueKind::String(*class),
+            Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
+            Expr::KeywordLiteral { class, .. } => ValueKind::Keyword(*class),
+            Expr::VectorLiteral { class, .. } => ValueKind::Vector(*class),
             Expr::GenericCall { generic, .. } => self
                 .generic_symbols
                 .get(generic.0 as usize)
@@ -2867,9 +3132,10 @@ impl Lowering {
             }
             Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
             Expr::AccessorCall { result_kind, .. } => *result_kind,
-            Expr::ConstBool { .. } | Expr::Compare { .. } | Expr::InstanceOf { .. } => {
-                ValueKind::Bool
-            }
+            Expr::ConstBool { .. }
+            | Expr::Compare { .. }
+            | Expr::ValueEqual { .. }
+            | Expr::InstanceOf { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,
             Expr::Cast { class, .. } => ValueKind::Object(*class),
             Expr::Signal { result_kind, .. } => *result_kind,
@@ -2897,7 +3163,67 @@ impl Lowering {
     }
 
     fn resolve_class(&self, name: &str) -> Option<&Class> {
+        if BuiltinValueClass::from_name(name).is_some()
+            && let Some(class) = self.classes.iter().find(|class| {
+                class.name == name && matches!(class.origin, ClassOrigin::BuiltinValue { .. })
+            })
+        {
+            return Some(class);
+        }
         self.classes.iter().find(|class| class.name == name)
+    }
+
+    fn builtin_value_class(&self, kind: BuiltinValueClass) -> Option<ClassId> {
+        self.classes
+            .iter()
+            .find(|class| class.origin == ClassOrigin::BuiltinValue { kind })
+            .map(|class| class.id)
+            .or_else(|| {
+                let source_count = self.classes.len();
+                let host_count = self.host_registry.classes.len();
+                let index = source_count
+                    .checked_add(host_count)?
+                    .checked_add(kind.index())?;
+                Some(ClassId(u32::try_from(index).ok()?))
+            })
+    }
+
+    fn kind_for_builtin_class(&self, class: ClassId) -> Option<ValueKind> {
+        match self
+            .classes
+            .get(class.0 as usize)
+            .map(|class| class.origin)?
+        {
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::String,
+            } => Some(ValueKind::String(class)),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Symbol,
+            } => Some(ValueKind::Symbol(class)),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Keyword,
+            } => Some(ValueKind::Keyword(class)),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Vector,
+            } => Some(ValueKind::Vector(class)),
+            ClassOrigin::Native | ClassOrigin::HostBacked { .. } => None,
+        }
+    }
+
+    fn value_kind_class(&self, kind: ValueKind) -> Option<ClassId> {
+        match kind {
+            ValueKind::String(class)
+            | ValueKind::Symbol(class)
+            | ValueKind::Keyword(class)
+            | ValueKind::Vector(class)
+            | ValueKind::Object(class) => Some(class),
+            ValueKind::Any
+            | ValueKind::I64
+            | ValueKind::Bool
+            | ValueKind::ClassObject(_)
+            | ValueKind::KnownCallable(_)
+            | ValueKind::Error => None,
+        }
     }
 
     fn has_accessor(&self, name: &str) -> bool {
@@ -2974,6 +3300,18 @@ impl Lowering {
             "<object>" => ValueKind::Any,
             "<integer>" => ValueKind::I64,
             "<boolean>" => ValueKind::Bool,
+            "<string>" => self
+                .builtin_value_class(BuiltinValueClass::String)
+                .map_or(ValueKind::Error, ValueKind::String),
+            "<symbol>" => self
+                .builtin_value_class(BuiltinValueClass::Symbol)
+                .map_or(ValueKind::Error, ValueKind::Symbol),
+            "<keyword>" => self
+                .builtin_value_class(BuiltinValueClass::Keyword)
+                .map_or(ValueKind::Error, ValueKind::Keyword),
+            "<vector>" => self
+                .builtin_value_class(BuiltinValueClass::Vector)
+                .map_or(ValueKind::Error, ValueKind::Vector),
             name => self
                 .resolve_class(name)
                 .map(|class| ValueKind::Object(class.id))
@@ -2990,6 +3328,9 @@ impl Lowering {
     fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
         (matches!(expected, ValueKind::Any) && !matches!(actual, ValueKind::KnownCallable(_)))
             || matches!((expected, actual), (ValueKind::Object(expected), ValueKind::Object(actual)) if self.is_same_or_subclass(actual, expected))
+            || self
+                .value_kind_class(actual)
+                .is_some_and(|actual| matches!(expected, ValueKind::Object(expected) if self.is_same_or_subclass(actual, expected)))
             || expected == actual
             || matches!(expected, ValueKind::Error)
             || matches!(actual, ValueKind::Error)
@@ -2999,6 +3340,10 @@ impl Lowering {
         match expected {
             ValueKind::Any | ValueKind::Error => true,
             ValueKind::Object(class) => self.is_same_or_subclass(specializer, class),
+            ValueKind::String(class)
+            | ValueKind::Symbol(class)
+            | ValueKind::Keyword(class)
+            | ValueKind::Vector(class) => self.is_same_or_subclass(specializer, class),
             ValueKind::I64
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
@@ -3008,9 +3353,26 @@ impl Lowering {
 
     fn generic_argument_matches(&self, expected: ValueKind, actual: ValueKind) -> bool {
         match expected {
-            ValueKind::Any => matches!(actual, ValueKind::Object(_) | ValueKind::Error),
+            ValueKind::Any => matches!(
+                actual,
+                ValueKind::Object(_)
+                    | ValueKind::String(_)
+                    | ValueKind::Symbol(_)
+                    | ValueKind::Keyword(_)
+                    | ValueKind::Vector(_)
+                    | ValueKind::Error
+            ),
             ValueKind::Object(expected) => {
-                matches!(actual, ValueKind::Object(actual) if self.is_same_or_subclass(actual, expected))
+                self.value_kind_class(actual)
+                    .is_some_and(|actual| self.is_same_or_subclass(actual, expected))
+                    || matches!(actual, ValueKind::Error)
+            }
+            ValueKind::String(expected)
+            | ValueKind::Symbol(expected)
+            | ValueKind::Keyword(expected)
+            | ValueKind::Vector(expected) => {
+                self.value_kind_class(actual)
+                    .is_some_and(|actual| self.is_same_or_subclass(actual, expected))
                     || matches!(actual, ValueKind::Error)
             }
             ValueKind::Error => true,
@@ -3034,6 +3396,10 @@ impl Lowering {
             ValueKind::Any => "<object>".into(),
             ValueKind::I64 => "<integer>".into(),
             ValueKind::Bool => "<boolean>".into(),
+            ValueKind::String(_) => "<string>".into(),
+            ValueKind::Symbol(_) => "<symbol>".into(),
+            ValueKind::Keyword(_) => "<keyword>".into(),
+            ValueKind::Vector(_) => "<vector>".into(),
             ValueKind::Object(class) => self
                 .classes
                 .get(class.0 as usize)
@@ -3244,7 +3610,7 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes.len(), 1);
+        assert_eq!(module.classes.len(), 5);
         assert_eq!(
             module.classes[0].origin,
             ClassOrigin::HostBacked {

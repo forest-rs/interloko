@@ -282,6 +282,42 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// String literal.
+    String {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Decoded string value.
+        value: String,
+        /// Source span.
+        span: Span,
+    },
+    /// Symbol literal.
+    Symbol {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Symbol name without the leading `#`.
+        name: String,
+        /// Source span.
+        span: Span,
+    },
+    /// Keyword value literal.
+    Keyword {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Keyword name without the leading `#:`.
+        name: String,
+        /// Source span.
+        span: Span,
+    },
+    /// Immutable vector literal.
+    Vector {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Ordered element expressions.
+        elements: Vec<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Name reference.
     Name {
         /// Stable-ish AST node identity.
@@ -430,6 +466,10 @@ impl Expr {
         match self {
             Self::Number { id, .. }
             | Self::Bool { id, .. }
+            | Self::String { id, .. }
+            | Self::Symbol { id, .. }
+            | Self::Keyword { id, .. }
+            | Self::Vector { id, .. }
             | Self::Name { id, .. }
             | Self::ClassName { id, .. }
             | Self::InstanceOf { id, .. }
@@ -452,6 +492,10 @@ impl Expr {
         match self {
             Self::Number { span, .. }
             | Self::Bool { span, .. }
+            | Self::String { span, .. }
+            | Self::Symbol { span, .. }
+            | Self::Keyword { span, .. }
+            | Self::Vector { span, .. }
             | Self::Name { span, .. }
             | Self::ClassName { span, .. }
             | Self::InstanceOf { span, .. }
@@ -1004,6 +1048,10 @@ impl<'tree> Lowering<'tree> {
         match node.kind {
             CstKind::NumberExpr => self.lower_number(node),
             CstKind::BoolExpr => self.lower_bool(node),
+            CstKind::StringExpr => self.lower_string(node),
+            CstKind::SymbolExpr => self.lower_symbol(node),
+            CstKind::KeywordExpr => self.lower_keyword_value(node),
+            CstKind::VectorExpr => self.lower_vector(node),
             CstKind::NameExpr => self.lower_name(node),
             CstKind::TypeExpr => self.lower_class_name(node),
             CstKind::CallExpr => self.lower_call(node),
@@ -1055,6 +1103,76 @@ impl<'tree> Lowering<'tree> {
                     span,
                 }
             }
+        }
+    }
+
+    fn lower_string(&mut self, node: &CstNode) -> Expr {
+        let Some((span, text)) = self.first_token_text(node, TokenKind::String) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        match decode_string_literal(text) {
+            Some(value) => Expr::String {
+                id: self.ast_id(node),
+                value,
+                span,
+            },
+            None => {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    DiagnosticCode::AstMalformedStringLiteral,
+                ));
+                Expr::Error {
+                    id: self.ast_id(node),
+                    span,
+                }
+            }
+        }
+    }
+
+    fn lower_symbol(&self, node: &CstNode) -> Expr {
+        let Some((span, text)) = self.first_token_text(node, TokenKind::Symbol) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::Symbol {
+            id: self.ast_id(node),
+            name: text[1..].to_string(),
+            span,
+        }
+    }
+
+    fn lower_keyword_value(&self, node: &CstNode) -> Expr {
+        let Some((span, text)) = self.first_token_text(node, TokenKind::Keyword) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::Keyword {
+            id: self.ast_id(node),
+            name: text[2..].to_string(),
+            span,
+        }
+    }
+
+    fn lower_vector(&mut self, node: &CstNode) -> Expr {
+        let elements = node
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                CstElement::Token(_) => None,
+            })
+            .collect();
+        Expr::Vector {
+            id: self.ast_id(node),
+            elements,
+            span: node.span,
         }
     }
 
@@ -1607,6 +1725,29 @@ impl<'tree> Lowering<'tree> {
         }
         String::new()
     }
+}
+
+fn decode_string_literal(text: &str) -> Option<String> {
+    if !text.starts_with('"') || !text.ends_with('"') || text.len() < 2 {
+        return None;
+    }
+    let body = &text[1..text.len() - 1];
+    let mut decoded = String::new();
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            'n' => decoded.push('\n'),
+            't' => decoded.push('\t'),
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            _ => return None,
+        }
+    }
+    Some(decoded)
 }
 
 #[cfg(test)]

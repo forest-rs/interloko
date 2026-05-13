@@ -162,6 +162,39 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Runtime string literal.
+    StringLiteral {
+        /// Destination register.
+        dst: Register,
+        /// Decoded string value.
+        value: String,
+        /// Built-in string class.
+        class: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime symbol literal.
+    SymbolLiteral {
+        /// Destination register.
+        dst: Register,
+        /// Symbol name.
+        name: String,
+        /// Built-in symbol class.
+        class: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime keyword literal.
+    KeywordLiteral {
+        /// Destination register.
+        dst: Register,
+        /// Keyword name.
+        name: String,
+        /// Built-in keyword class.
+        class: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
     /// Unsigned integer constant.
     ConstU64 {
         /// Destination register.
@@ -217,6 +250,19 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Runtime value equality.
+    ValueEqual {
+        /// Destination register.
+        dst: Register,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
+        /// Operand value category.
+        kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Ordinary direct call to another lowered function.
     Call {
         /// Destination register.
@@ -237,6 +283,17 @@ pub enum Instr {
         class: sem::ClassId,
         /// Field value registers in slot order.
         fields: Vec<Register>,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime immutable vector construction.
+    VectorLiteral {
+        /// Destination register.
+        dst: Register,
+        /// Boxed element registers in source order.
+        elements: Vec<Register>,
+        /// Built-in vector class.
+        class: sem::ClassId,
         /// Source span.
         span: Span,
     },
@@ -803,6 +860,57 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::StringLiteral { value, class, span } => {
+                let result = self.alloc(ValueKind::Object(Some(*class)));
+                self.instructions.push(Instr::StringLiteral {
+                    dst: result.reg,
+                    value: value.clone(),
+                    class: *class,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::SymbolLiteral { name, class, span } => {
+                let result = self.alloc(ValueKind::Object(Some(*class)));
+                self.instructions.push(Instr::SymbolLiteral {
+                    dst: result.reg,
+                    name: name.clone(),
+                    class: *class,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::KeywordLiteral { name, class, span } => {
+                let result = self.alloc(ValueKind::Object(Some(*class)));
+                self.instructions.push(Instr::KeywordLiteral {
+                    dst: result.reg,
+                    name: name.clone(),
+                    class: *class,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::VectorLiteral {
+                elements,
+                class,
+                span,
+            } => {
+                let mut element_regs = Vec::with_capacity(elements.len());
+                for element in elements {
+                    let element_span = element.span();
+                    let element = self.lower_expr(element)?;
+                    let element = self.box_any(element, element_span)?;
+                    element_regs.push(element.reg);
+                }
+                let result = self.alloc(ValueKind::Object(Some(*class)));
+                self.instructions.push(Instr::VectorLiteral {
+                    dst: result.reg,
+                    elements: element_regs,
+                    class: *class,
+                    span: *span,
+                });
+                Ok(result)
+            }
             sem::Expr::Local {
                 local,
                 result_kind,
@@ -1019,6 +1127,24 @@ impl<'module> BodyLowering<'module> {
                     op: *op,
                     lhs: lhs.reg,
                     rhs: rhs.reg,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::ValueEqual {
+                lhs,
+                rhs,
+                kind,
+                span,
+            } => {
+                let lhs = self.lower_expr(lhs)?;
+                let rhs = self.lower_expr(rhs)?;
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::ValueEqual {
+                    dst: result.reg,
+                    lhs: lhs.reg,
+                    rhs: rhs.reg,
+                    kind: value_kind(*kind)?,
                     span: *span,
                 });
                 Ok(result)
@@ -1331,6 +1457,10 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::Any => Ok(ValueKind::Any),
         sem::ValueKind::I64 => Ok(ValueKind::I64),
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
+        sem::ValueKind::String(class)
+        | sem::ValueKind::Symbol(class)
+        | sem::ValueKind::Keyword(class)
+        | sem::ValueKind::Vector(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::Object(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::ClassObject(class) => Ok(ValueKind::ClassObject(Some(class))),
         sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => {
@@ -1345,7 +1475,13 @@ fn is_compile_time_only(kind: sem::ValueKind) -> bool {
 
 fn dispatcher_param_kind(generic: &sem::GenericFunction) -> ValueKind {
     match generic.param_kinds.first().copied().flatten() {
-        Some(sem::ValueKind::Object(class)) => ValueKind::Object(Some(class)),
+        Some(
+            sem::ValueKind::Object(class)
+            | sem::ValueKind::String(class)
+            | sem::ValueKind::Symbol(class)
+            | sem::ValueKind::Keyword(class)
+            | sem::ValueKind::Vector(class),
+        ) => ValueKind::Object(Some(class)),
         _ => ValueKind::Object(None),
     }
 }
@@ -1438,6 +1574,38 @@ impl Module {
                 write!(f, "  {dst} = const.bool {value}")?;
                 fmt_span(f, *span)
             }
+            Instr::StringLiteral {
+                dst,
+                value,
+                class,
+                span,
+            } => {
+                write!(f, "  {dst} = literal.string ")?;
+                fmt_quoted(f, value)?;
+                write!(f, ": ")?;
+                self.fmt_class(f, *class)?;
+                fmt_span(f, *span)
+            }
+            Instr::SymbolLiteral {
+                dst,
+                name,
+                class,
+                span,
+            } => {
+                write!(f, "  {dst} = literal.symbol #{name}: ")?;
+                self.fmt_class(f, *class)?;
+                fmt_span(f, *span)
+            }
+            Instr::KeywordLiteral {
+                dst,
+                name,
+                class,
+                span,
+            } => {
+                write!(f, "  {dst} = literal.keyword #:{name}: ")?;
+                self.fmt_class(f, *class)?;
+                fmt_span(f, *span)
+            }
             Instr::ConstU64 { dst, value, span } => {
                 write!(f, "  {dst} = const.u64 {value}")?;
                 fmt_span(f, *span)
@@ -1489,6 +1657,17 @@ impl Module {
                 write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
                 fmt_span(f, *span)
             }
+            Instr::ValueEqual {
+                dst,
+                lhs,
+                rhs,
+                kind,
+                span,
+            } => {
+                write!(f, "  {dst} = value.eq {lhs}, {rhs}: ")?;
+                self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
             Instr::Call {
                 dst,
                 callee,
@@ -1508,6 +1687,17 @@ impl Module {
                 write!(f, "  {dst} = make ")?;
                 self.fmt_class(f, *class)?;
                 self.fmt_arg_list(f, fields)?;
+                fmt_span(f, *span)
+            }
+            Instr::VectorLiteral {
+                dst,
+                elements,
+                class,
+                span,
+            } => {
+                write!(f, "  {dst} = literal.vector ")?;
+                self.fmt_class(f, *class)?;
+                self.fmt_arg_list(f, elements)?;
                 fmt_span(f, *span)
             }
             Instr::ReadSlot {
@@ -1658,6 +1848,20 @@ fn fmt_span(f: &mut fmt::Formatter<'_>, span: Span) -> fmt::Result {
     } else {
         writeln!(f, " ; span {}..{}", span.start, span.end)
     }
+}
+
+fn fmt_quoted(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    write!(f, "\"")?;
+    for ch in value.chars() {
+        match ch {
+            '\n' => write!(f, "\\n")?,
+            '\t' => write!(f, "\\t")?,
+            '"' => write!(f, "\\\"")?,
+            '\\' => write!(f, "\\\\")?,
+            ch => write!(f, "{ch}")?,
+        }
+    }
+    write!(f, "\"")
 }
 
 #[cfg(test)]

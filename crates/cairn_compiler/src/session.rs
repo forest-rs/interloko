@@ -1616,6 +1616,21 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
         }
+        sem::Expr::ValueEqual { lhs, rhs, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
+        }
+        sem::Expr::VectorLiteral { elements, .. } => {
+            for element in elements {
+                collect_dispatch_sites_in_expr(
+                    artifacts,
+                    owner.clone(),
+                    element,
+                    owner_index,
+                    sites,
+                );
+            }
+        }
         sem::Expr::If {
             condition,
             then_branch,
@@ -1638,6 +1653,9 @@ fn collect_dispatch_sites_in_expr(
         }
         sem::Expr::ConstI64 { .. }
         | sem::Expr::ConstBool { .. }
+        | sem::Expr::StringLiteral { .. }
+        | sem::Expr::SymbolLiteral { .. }
+        | sem::Expr::KeywordLiteral { .. }
         | sem::Expr::Local { .. }
         | sem::Expr::ClassObject { .. }
         | sem::Expr::KnownCallable { .. }
@@ -1662,10 +1680,9 @@ fn make_dispatch_site(
     let static_argument_kind = args.first().map(|arg| sem_expr_kind(module, arg));
     let exact_static_class = args.first().and_then(exact_static_class);
     let runtime_needed = exact_static_class.is_none()
-        && matches!(
-            static_argument_kind,
-            Some(sem::ValueKind::Any | sem::ValueKind::Object(_))
-        );
+        && static_argument_kind.is_some_and(|kind| {
+            matches!(kind, sem::ValueKind::Any) || sem_value_kind_class(kind).is_some()
+        });
     let (applicable, rejected, selected_method) =
         dispatch_site_methods(module, generic_id, static_argument_kind, exact_static_class);
     let lowered_dispatcher = module.generics.get(generic_id.0 as usize).map_or_else(
@@ -1748,9 +1765,12 @@ fn dispatch_site_methods(
                 specializer: method.specializer,
                 reason: exact_class_rejection_reason(module, actual, method.specializer),
             }),
-            (Some(sem::ValueKind::Object(static_class)), None)
-                if classes_overlap(module, static_class, method.specializer) =>
+            (Some(kind), None)
+                if sem_value_kind_class(kind).is_some_and(|static_class| {
+                    classes_overlap(module, static_class, method.specializer)
+                }) =>
             {
+                let static_class = sem_value_kind_class(kind).expect("class was checked");
                 applicable.push(DispatchMethodCandidate {
                     method: method.id,
                     definition: method.definition,
@@ -1760,7 +1780,8 @@ fn dispatch_site_methods(
                     runtime_only: true,
                 });
             }
-            (Some(sem::ValueKind::Object(static_class)), None) => {
+            (Some(kind), None) if sem_value_kind_class(kind).is_some() => {
+                let static_class = sem_value_kind_class(kind).expect("class was checked");
                 rejected.push(DispatchMethodRejection {
                     method: method.id,
                     definition: method.definition,
@@ -2009,9 +2030,14 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
 fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
     match expr {
         sem::Expr::ConstI64 { .. } | sem::Expr::Binary { .. } => sem::ValueKind::I64,
-        sem::Expr::ConstBool { .. } | sem::Expr::Compare { .. } | sem::Expr::InstanceOf { .. } => {
-            sem::ValueKind::Bool
-        }
+        sem::Expr::ConstBool { .. }
+        | sem::Expr::Compare { .. }
+        | sem::Expr::ValueEqual { .. }
+        | sem::Expr::InstanceOf { .. } => sem::ValueKind::Bool,
+        sem::Expr::StringLiteral { class, .. } => sem::ValueKind::String(*class),
+        sem::Expr::SymbolLiteral { class, .. } => sem::ValueKind::Symbol(*class),
+        sem::Expr::KeywordLiteral { class, .. } => sem::ValueKind::Keyword(*class),
+        sem::Expr::VectorLiteral { class, .. } => sem::ValueKind::Vector(*class),
         sem::Expr::Local { result_kind, .. } => *result_kind,
         sem::Expr::ClassObject { class, .. } | sem::Expr::ClassOf { class, .. } => {
             sem::ValueKind::ClassObject(*class)
@@ -2052,6 +2078,10 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
 fn exact_static_class(expr: &sem::Expr) -> Option<sem::ClassId> {
     match expr {
         sem::Expr::MakeObject { class_id, .. } => Some(*class_id),
+        sem::Expr::StringLiteral { class, .. }
+        | sem::Expr::SymbolLiteral { class, .. }
+        | sem::Expr::KeywordLiteral { class, .. }
+        | sem::Expr::VectorLiteral { class, .. } => Some(*class),
         sem::Expr::Cast { value, .. } => exact_static_class(value),
         sem::Expr::If {
             then_branch,
@@ -2063,6 +2093,22 @@ fn exact_static_class(expr: &sem::Expr) -> Option<sem::ClassId> {
             (then_class == else_class).then_some(then_class)
         }
         _ => None,
+    }
+}
+
+fn sem_value_kind_class(kind: sem::ValueKind) -> Option<sem::ClassId> {
+    match kind {
+        sem::ValueKind::Object(class)
+        | sem::ValueKind::String(class)
+        | sem::ValueKind::Symbol(class)
+        | sem::ValueKind::Keyword(class)
+        | sem::ValueKind::Vector(class) => Some(class),
+        sem::ValueKind::Any
+        | sem::ValueKind::I64
+        | sem::ValueKind::Bool
+        | sem::ValueKind::ClassObject(_)
+        | sem::ValueKind::KnownCallable(_)
+        | sem::ValueKind::Error => None,
     }
 }
 
@@ -2418,6 +2464,21 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         }
         ast::Expr::Bool { id, value, .. } => {
             let _ = writeln!(out, "{id} bool {value}");
+        }
+        ast::Expr::String { id, value, .. } => {
+            let _ = writeln!(out, "{id} string {:?}", value);
+        }
+        ast::Expr::Symbol { id, name, .. } => {
+            let _ = writeln!(out, "{id} symbol #{name}");
+        }
+        ast::Expr::Keyword { id, name, .. } => {
+            let _ = writeln!(out, "{id} keyword #:{name}");
+        }
+        ast::Expr::Vector { id, elements, .. } => {
+            let _ = writeln!(out, "{id} vector elements={}", elements.len());
+            for element in elements {
+                dump_ast_expr(out, element, indent + 2);
+            }
         }
         ast::Expr::Name { id, name, .. } => {
             let _ = writeln!(out, "{id} name {name}");
@@ -2910,6 +2971,7 @@ fn dump_mop(module: &sem::Module) -> String {
 fn runtime_object_kind_label(kind: HostObjectKind) -> &'static str {
     match kind {
         HostObjectKind::Native => "native",
+        HostObjectKind::BuiltinValue { .. } => "builtin-value",
         HostObjectKind::HostBacked => "host-backed",
     }
 }
@@ -3512,6 +3574,7 @@ fn project_environment_runtime_class(
 fn eop_class_origin(origin: sem::ClassOrigin) -> EnvironmentOrigin {
     match origin {
         sem::ClassOrigin::Native => EnvironmentOrigin::SourceAuthored,
+        sem::ClassOrigin::BuiltinValue { .. } => EnvironmentOrigin::CompilerGenerated,
         sem::ClassOrigin::HostBacked { .. } => EnvironmentOrigin::HostBacked,
     }
 }
@@ -3519,6 +3582,7 @@ fn eop_class_origin(origin: sem::ClassOrigin) -> EnvironmentOrigin {
 fn eop_class_storage(origin: sem::ClassOrigin) -> EnvironmentStorage {
     match origin {
         sem::ClassOrigin::Native => EnvironmentStorage::SourceDefined,
+        sem::ClassOrigin::BuiltinValue { .. } => EnvironmentStorage::CachedArtifact,
         sem::ClassOrigin::HostBacked { .. } => EnvironmentStorage::HostRegistry,
     }
 }
@@ -3537,11 +3601,29 @@ fn eop_slot_storage(origin: sem::SlotOrigin) -> EnvironmentStorage {
     }
 }
 
+fn value_class_label(module: &sem::Module, label: &str, class: sem::ClassId) -> String {
+    module.classes.get(class.0 as usize).map_or_else(
+        || format!("{label}(class#{})", class.0),
+        |class| format!("{label}({})", class.name),
+    )
+}
+
+fn value_class_fingerprint(module: &sem::Module, label: &str, class: sem::ClassId) -> String {
+    module.classes.get(class.0 as usize).map_or_else(
+        || format!("{label}#{}", class.0),
+        |class| format!("{label}#{}", class.definition.raw()),
+    )
+}
+
 fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
     match kind {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::String(class) => value_class_label(module, "string", class),
+        sem::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
+        sem::ValueKind::Keyword(class) => value_class_label(module, "keyword", class),
+        sem::ValueKind::Vector(class) => value_class_label(module, "vector", class),
         sem::ValueKind::Object(class) => module.classes.get(class.0 as usize).map_or_else(
             || format!("class#{}", class.0),
             |class| format!("object({})", class.name),
@@ -3562,6 +3644,10 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::String(class) => format!("string(c{})", class.0),
+        sem::ValueKind::Symbol(class) => format!("symbol(c{})", class.0),
+        sem::ValueKind::Keyword(class) => format!("keyword(c{})", class.0),
+        sem::ValueKind::Vector(class) => format!("vector(c{})", class.0),
         sem::ValueKind::Object(class) => format!("object(c{})", class.0),
         sem::ValueKind::ClassObject(class) => format!("class-object(c{})", class.0),
         sem::ValueKind::KnownCallable(callable) => {
@@ -3576,6 +3662,10 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::String(class) => value_class_fingerprint(module, "string", class),
+        sem::ValueKind::Symbol(class) => value_class_fingerprint(module, "symbol", class),
+        sem::ValueKind::Keyword(class) => value_class_fingerprint(module, "keyword", class),
+        sem::ValueKind::Vector(class) => value_class_fingerprint(module, "vector", class),
         sem::ValueKind::Object(class) => module.classes.get(class.0 as usize).map_or_else(
             || format!("class#{}", class.0),
             |class| format!("object#{}", class.definition.raw()),
@@ -3594,7 +3684,11 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::Any => "boxed-any",
         sem::ValueKind::I64 => "i64",
         sem::ValueKind::Bool => "bool",
-        sem::ValueKind::Object(_) => "object-handle",
+        sem::ValueKind::String(_)
+        | sem::ValueKind::Symbol(_)
+        | sem::ValueKind::Keyword(_)
+        | sem::ValueKind::Vector(_)
+        | sem::ValueKind::Object(_) => "object-handle",
         sem::ValueKind::ClassObject(_) => "class-id",
         sem::ValueKind::KnownCallable(_) => "compile-time-callable",
         sem::ValueKind::Error => "error",
@@ -3737,6 +3831,28 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::ConstBool { value, .. } => {
             let _ = writeln!(out, "const.bool {value}");
         }
+        sem::Expr::StringLiteral { value, class, .. } => {
+            let _ = writeln!(out, "literal.string {:?} class=c{}", value, class.0);
+        }
+        sem::Expr::SymbolLiteral { name, class, .. } => {
+            let _ = writeln!(out, "literal.symbol #{name} class=c{}", class.0);
+        }
+        sem::Expr::KeywordLiteral { name, class, .. } => {
+            let _ = writeln!(out, "literal.keyword #:{name} class=c{}", class.0);
+        }
+        sem::Expr::VectorLiteral {
+            elements, class, ..
+        } => {
+            let _ = writeln!(
+                out,
+                "literal.vector class=c{} elements={}",
+                class.0,
+                elements.len()
+            );
+            for element in elements {
+                dump_sem_expr(out, element, indent + 2);
+            }
+        }
         sem::Expr::Local {
             local, result_kind, ..
         } => {
@@ -3846,6 +3962,11 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             dump_sem_expr(out, lhs, indent + 2);
             dump_sem_expr(out, rhs, indent + 2);
         }
+        sem::Expr::ValueEqual { lhs, rhs, kind, .. } => {
+            let _ = writeln!(out, "value-eq {}", sem_kind_label_for_expr(*kind));
+            dump_sem_expr(out, lhs, indent + 2);
+            dump_sem_expr(out, rhs, indent + 2);
+        }
         sem::Expr::If {
             condition,
             refinement,
@@ -3898,6 +4019,7 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
 fn sem_class_origin_label(origin: sem::ClassOrigin) -> String {
     match origin {
         sem::ClassOrigin::Native => "native".into(),
+        sem::ClassOrigin::BuiltinValue { kind } => format!("builtin-value({})", kind.name()),
         sem::ClassOrigin::HostBacked { host_class } => {
             format!("host-backed(hc{})", host_class.0)
         }
@@ -4332,6 +4454,38 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::ConstBool { value, .. } => {
             let _ = write!(out, "bool({value})");
         }
+        sem::Expr::StringLiteral { value, class, .. } => {
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "string({definition}:{value:?})");
+        }
+        sem::Expr::SymbolLiteral { name, class, .. } => {
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "symbol({definition}:#{name})");
+        }
+        sem::Expr::KeywordLiteral { name, class, .. } => {
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "keyword({definition}:#:{name})");
+        }
+        sem::Expr::VectorLiteral {
+            elements, class, ..
+        } => {
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .map_or(0, |class| class.definition.raw());
+            let _ = write!(out, "vector({definition}:");
+            fingerprint_args(module, elements, out);
+            out.push(')');
+        }
         sem::Expr::Local {
             local, result_kind, ..
         } => {
@@ -4484,6 +4638,14 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         }
         sem::Expr::Compare { op, lhs, rhs, .. } => {
             let _ = write!(out, "compare({op:?}:");
+            fingerprint_sem_expr(module, lhs, out);
+            out.push(',');
+            fingerprint_sem_expr(module, rhs, out);
+            out.push(')');
+        }
+        sem::Expr::ValueEqual { lhs, rhs, kind, .. } => {
+            let kind = sem_kind_fingerprint(module, *kind);
+            let _ = write!(out, "value-eq({kind}:");
             fingerprint_sem_expr(module, lhs, out);
             out.push(',');
             fingerprint_sem_expr(module, rhs, out);

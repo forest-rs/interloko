@@ -74,7 +74,7 @@ impl TapeError {
 pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     let mut builder = ProgramBuilder::new();
     builder.set_program_name("cairn");
-    let host_sigs = HostSigs::new(&mut builder, &module.runtime)?;
+    let host_sigs = HostSigs::new(&mut builder, module)?;
 
     let mut ids = TapeIds::default();
     let mut main = None;
@@ -158,6 +158,11 @@ struct HostSigs {
     make_object: Vec<HostSigId>,
     class_of: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
+    string_literals: Vec<(String, HostSigId)>,
+    symbol_literals: Vec<(String, HostSigId)>,
+    keyword_literals: Vec<(String, HostSigId)>,
+    vector_literals: Vec<(usize, HostSigId)>,
+    value_eq: HostSigId,
     box_i64: HostSigId,
     box_bool: HostSigId,
     box_u64: HostSigId,
@@ -169,8 +174,9 @@ struct HostSigs {
 }
 
 impl HostSigs {
-    fn new(builder: &mut ProgramBuilder, runtime: &RuntimeLayout) -> Result<Self, TapeError> {
-        let make_object = runtime
+    fn new(builder: &mut ProgramBuilder, module: &lower::Module) -> Result<Self, TapeError> {
+        let make_object = module
+            .runtime
             .classes
             .iter()
             .map(|class| {
@@ -181,7 +187,8 @@ impl HostSigs {
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let slot_get = runtime
+        let slot_get = module
+            .runtime
             .classes
             .iter()
             .map(|class| {
@@ -231,10 +238,44 @@ impl HostSigs {
             runtime::CAST_OBJECT,
             runtime::cast_object_signature(runtime::object_type()),
         );
+        let string_literals = literal_sigs(
+            builder,
+            module,
+            |instr| match instr {
+                lower::Instr::StringLiteral { value, .. } => Some(value.as_str()),
+                _ => None,
+            },
+            runtime::STRING_LITERAL_PREFIX,
+        );
+        let symbol_literals = literal_sigs(
+            builder,
+            module,
+            |instr| match instr {
+                lower::Instr::SymbolLiteral { name, .. } => Some(name.as_str()),
+                _ => None,
+            },
+            runtime::SYMBOL_LITERAL_PREFIX,
+        );
+        let keyword_literals = literal_sigs(
+            builder,
+            module,
+            |instr| match instr {
+                lower::Instr::KeywordLiteral { name, .. } => Some(name.as_str()),
+                _ => None,
+            },
+            runtime::KEYWORD_LITERAL_PREFIX,
+        );
+        let vector_literals = vector_literal_sigs(builder, module);
+        let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         Ok(Self {
             make_object,
             class_of,
             slot_get,
+            string_literals,
+            symbol_literals,
+            keyword_literals,
+            vector_literals,
+            value_eq,
             box_i64,
             box_bool,
             box_u64,
@@ -245,6 +286,85 @@ impl HostSigs {
             cast_object,
         })
     }
+
+    fn string_literal(&self, value: &str) -> Result<HostSigId, TapeError> {
+        self.string_literals
+            .iter()
+            .find(|(literal, _)| literal == value)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("string literal signature is missing"))
+    }
+
+    fn symbol_literal(&self, name: &str) -> Result<HostSigId, TapeError> {
+        self.symbol_literals
+            .iter()
+            .find(|(literal, _)| literal == name)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("symbol literal signature is missing"))
+    }
+
+    fn keyword_literal(&self, name: &str) -> Result<HostSigId, TapeError> {
+        self.keyword_literals
+            .iter()
+            .find(|(literal, _)| literal == name)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("keyword literal signature is missing"))
+    }
+
+    fn vector_literal(&self, arity: usize) -> Result<HostSigId, TapeError> {
+        self.vector_literals
+            .iter()
+            .find(|(literal_arity, _)| *literal_arity == arity)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("vector literal signature is missing"))
+    }
+}
+
+fn literal_sigs(
+    builder: &mut ProgramBuilder,
+    module: &lower::Module,
+    select: fn(&lower::Instr) -> Option<&str>,
+    prefix: &str,
+) -> Vec<(String, HostSigId)> {
+    let mut literals: Vec<(String, HostSigId)> = Vec::new();
+    for function in &module.functions {
+        for instr in &function.instructions {
+            let Some(value) = select(instr) else {
+                continue;
+            };
+            if literals.iter().any(|(literal, _)| literal == value) {
+                continue;
+            }
+            let symbol = runtime::literal_symbol(prefix, value);
+            let sig = builder.host_sig_for(&symbol, runtime::object_literal_signature());
+            literals.push((value.into(), sig));
+        }
+    }
+    literals
+}
+
+fn vector_literal_sigs(
+    builder: &mut ProgramBuilder,
+    module: &lower::Module,
+) -> Vec<(usize, HostSigId)> {
+    let mut arities = Vec::new();
+    for function in &module.functions {
+        for instr in &function.instructions {
+            let lower::Instr::VectorLiteral { elements, .. } = instr else {
+                continue;
+            };
+            let arity = elements.len();
+            if arities.iter().any(|(existing, _)| *existing == arity) {
+                continue;
+            }
+            let sig = builder.host_sig_for(
+                runtime::VECTOR_LITERAL,
+                runtime::vector_literal_signature(arity),
+            );
+            arities.push((arity, sig));
+        }
+    }
+    arities
 }
 
 struct FunctionEmitter<'a> {
@@ -290,6 +410,27 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::ConstBool { dst, value, span } => {
                 self.set_span(*span);
                 self.asm.const_bool(dst.0, *value);
+            }
+            lower::Instr::StringLiteral {
+                dst, value, span, ..
+            } => {
+                let sig = self.host_sigs.string_literal(value)?;
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
+            }
+            lower::Instr::SymbolLiteral {
+                dst, name, span, ..
+            } => {
+                let sig = self.host_sigs.symbol_literal(name)?;
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
+            }
+            lower::Instr::KeywordLiteral {
+                dst, name, span, ..
+            } => {
+                let sig = self.host_sigs.keyword_literal(name)?;
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
             }
             lower::Instr::ConstU64 { dst, value, span } => {
                 self.set_span(*span);
@@ -363,6 +504,17 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 }
             }
+            lower::Instr::ValueEqual {
+                dst,
+                lhs,
+                rhs,
+                span,
+                ..
+            } => {
+                self.set_span(*span);
+                self.asm
+                    .host_call(0, self.host_sigs.value_eq, 0, &[lhs.0, rhs.0], &[dst.0]);
+            }
             lower::Instr::Call {
                 dst,
                 callee,
@@ -398,6 +550,17 @@ impl<'a> FunctionEmitter<'a> {
                 args.push(class_reg);
                 args.extend(reg_slice(fields));
                 self.asm.host_call(0, sig, 0, &args, &[dst.0]);
+            }
+            lower::Instr::VectorLiteral {
+                dst,
+                elements,
+                span,
+                ..
+            } => {
+                let sig = self.host_sigs.vector_literal(elements.len())?;
+                let elements = reg_slice(elements);
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &elements, &[dst.0]);
             }
             lower::Instr::ReadSlot {
                 dst,
@@ -573,6 +736,9 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         lower::Instr::Label { .. } | lower::Instr::Jump { .. } | lower::Instr::Trap { .. } => {}
         lower::Instr::ConstI64 { dst, .. }
         | lower::Instr::ConstBool { dst, .. }
+        | lower::Instr::StringLiteral { dst, .. }
+        | lower::Instr::SymbolLiteral { dst, .. }
+        | lower::Instr::KeywordLiteral { dst, .. }
         | lower::Instr::ConstU64 { dst, .. }
         | lower::Instr::ConstClass { dst, .. } => {
             note_register(*dst, max);
@@ -583,6 +749,7 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         }
         lower::Instr::I64Binary { dst, lhs, rhs, .. }
         | lower::Instr::I64Compare { dst, lhs, rhs, .. }
+        | lower::Instr::ValueEqual { dst, lhs, rhs, .. }
         | lower::Instr::EqU64 { dst, lhs, rhs, .. } => {
             note_register(*dst, max);
             note_register(*lhs, max);
@@ -595,6 +762,10 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         lower::Instr::MakeObject { dst, fields, .. } => {
             note_register(*dst, max);
             note_registers(fields, max);
+        }
+        lower::Instr::VectorLiteral { dst, elements, .. } => {
+            note_register(*dst, max);
+            note_registers(elements, max);
         }
         lower::Instr::ReadSlot { dst, receiver, .. } => {
             note_register(*dst, max);

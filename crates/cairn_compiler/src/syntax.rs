@@ -78,12 +78,22 @@ pub enum TokenKind {
     Number,
     /// Boolean literal, currently `#t` or `#f`.
     Bool,
+    /// String literal.
+    String,
+    /// Symbol literal such as `#name`.
+    Symbol,
+    /// Keyword value literal such as `#:name`.
+    Keyword,
     /// Nominal type/class name such as `<circle>`.
     TypeName,
     /// `(`.
     LParen,
     /// `)`.
     RParen,
+    /// `[`.
+    LBracket,
+    /// `]`.
+    RBracket,
     /// `,`.
     Comma,
     /// `+`.
@@ -182,6 +192,14 @@ pub enum CstKind {
     NumberExpr,
     /// Boolean literal expression.
     BoolExpr,
+    /// String literal expression.
+    StringExpr,
+    /// Symbol literal expression.
+    SymbolExpr,
+    /// Keyword value literal expression.
+    KeywordExpr,
+    /// Vector literal expression.
+    VectorExpr,
     /// Conditional expression.
     IfExpr,
     /// Recoverable condition handler expression.
@@ -287,6 +305,9 @@ fn syntax_node_id(
         | CstKind::NameExpr
         | CstKind::NumberExpr
         | CstKind::BoolExpr
+        | CstKind::StringExpr
+        | CstKind::SymbolExpr
+        | CstKind::KeywordExpr
         | CstKind::RestartClause
         | CstKind::TypeExpr => {
             mix_first_named_token(&mut builder, children, tokens, source);
@@ -362,7 +383,13 @@ fn mix_first_named_token(
             let token = tokens[*index];
             if matches!(
                 token.kind,
-                TokenKind::Ident | TokenKind::Number | TokenKind::TypeName | TokenKind::Bool
+                TokenKind::Ident
+                    | TokenKind::Number
+                    | TokenKind::TypeName
+                    | TokenKind::Bool
+                    | TokenKind::String
+                    | TokenKind::Symbol
+                    | TokenKind::Keyword
             ) {
                 builder.mix_str(token.text(source));
                 return;
@@ -396,6 +423,10 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::HandleExpr => 21,
         CstKind::RestartClause => 22,
         CstKind::SlotOption => 23,
+        CstKind::StringExpr => 24,
+        CstKind::SymbolExpr => 25,
+        CstKind::KeywordExpr => 26,
+        CstKind::VectorExpr => 27,
     }
 }
 
@@ -439,6 +470,11 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::With => 36,
         TokenKind::Restart => 37,
         TokenKind::Constant => 38,
+        TokenKind::String => 39,
+        TokenKind::Symbol => 40,
+        TokenKind::Keyword => 41,
+        TokenKind::LBracket => 42,
+        TokenKind::RBracket => 43,
     }
 }
 
@@ -475,6 +511,14 @@ pub fn lex(source: &str) -> Vec<Token> {
             b')' => {
                 pos += 1;
                 TokenKind::RParen
+            }
+            b'[' => {
+                pos += 1;
+                TokenKind::LBracket
+            }
+            b']' => {
+                pos += 1;
+                TokenKind::RBracket
             }
             b',' => {
                 pos += 1;
@@ -536,9 +580,48 @@ pub fn lex(source: &str) -> Vec<Token> {
                 pos += 1;
                 TokenKind::Semicolon
             }
-            b'#' if matches!(bytes.get(pos + 1), Some(b't' | b'f')) => {
+            b'"' => {
+                pos += 1;
+                while pos < bytes.len() {
+                    match bytes[pos] {
+                        b'\\' => {
+                            pos += 1;
+                            if pos < bytes.len() {
+                                pos += 1;
+                            }
+                        }
+                        b'"' => {
+                            pos += 1;
+                            break;
+                        }
+                        _ => pos += 1,
+                    }
+                }
+                TokenKind::String
+            }
+            b'#' if matches!(bytes.get(pos + 1), Some(b't' | b'f'))
+                && bytes
+                    .get(pos + 2)
+                    .is_none_or(|_| !is_ident_continue(bytes, pos + 2)) =>
+            {
                 pos += 2;
                 TokenKind::Bool
+            }
+            b'#' if bytes.get(pos + 1) == Some(&b':')
+                && bytes.get(pos + 2).is_some_and(|next| is_ident_start(*next)) =>
+            {
+                pos += 3;
+                while pos < bytes.len() && is_ident_continue(bytes, pos) {
+                    pos += 1;
+                }
+                TokenKind::Keyword
+            }
+            b'#' if bytes.get(pos + 1).is_some_and(|next| is_ident_start(*next)) => {
+                pos += 2;
+                while pos < bytes.len() && is_ident_continue(bytes, pos) {
+                    pos += 1;
+                }
+                TokenKind::Symbol
             }
             b'/' if bytes.get(pos + 1) == Some(&b'/') => {
                 pos += 2;
@@ -1057,6 +1140,24 @@ impl<'source> Parser<'source> {
             return self.node(CstKind::BoolExpr, children, start);
         }
 
+        if self.at(TokenKind::String) {
+            let mut children = Vec::new();
+            self.expect(TokenKind::String, &mut children, "string literal");
+            return self.node(CstKind::StringExpr, children, start);
+        }
+
+        if self.at(TokenKind::Symbol) {
+            let mut children = Vec::new();
+            self.expect(TokenKind::Symbol, &mut children, "symbol literal");
+            return self.node(CstKind::SymbolExpr, children, start);
+        }
+
+        if self.at(TokenKind::Keyword) {
+            let mut children = Vec::new();
+            self.expect(TokenKind::Keyword, &mut children, "keyword literal");
+            return self.node(CstKind::KeywordExpr, children, start);
+        }
+
         if self.at(TokenKind::TypeName) {
             let mut children = Vec::new();
             self.expect(TokenKind::TypeName, &mut children, "type name");
@@ -1085,6 +1186,10 @@ impl<'source> Parser<'source> {
             return node;
         }
 
+        if self.at(TokenKind::LBracket) {
+            return self.parse_vector_literal();
+        }
+
         if let Some(index) = self.bump() {
             self.error_at(
                 index,
@@ -1099,6 +1204,30 @@ impl<'source> Parser<'source> {
             DiagnosticCode::SyntaxExpectedExpression,
         ));
         self.node(CstKind::Error, Vec::new(), start)
+    }
+
+    fn parse_vector_literal(&mut self) -> CstNode {
+        let start = self.current_span();
+        let mut children = Vec::new();
+        self.expect(TokenKind::LBracket, &mut children, "`[`");
+        if !self.at(TokenKind::RBracket) {
+            loop {
+                children.push(CstElement::Node(self.parse_expr()));
+                if !self.at(TokenKind::Comma) {
+                    break;
+                }
+                self.expect(TokenKind::Comma, &mut children, "`,`");
+                if self.at(TokenKind::RBracket) {
+                    break;
+                }
+            }
+        }
+        self.expect(
+            TokenKind::RBracket,
+            &mut children,
+            "`]` after vector literal",
+        );
+        self.node(CstKind::VectorExpr, children, start)
     }
 
     fn parse_arg_list(&mut self) -> CstNode {

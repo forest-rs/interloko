@@ -26,6 +26,8 @@ pub enum DiagnosticCode {
     SyntaxExpectedToken,
     /// An integer literal does not fit in the supported integer range.
     AstIntegerLiteralOutOfRange,
+    /// A string literal is unterminated or contains an unsupported escape.
+    AstMalformedStringLiteral,
     /// A slot option is missing its keyword value.
     AstSlotOptionRequiresKeyword,
     /// A slot `init-value:` option is missing its expression.
@@ -122,6 +124,8 @@ pub enum DiagnosticCode {
     MakeClassArgumentTypeMismatch,
     /// A host-backed class was passed to `make`.
     HostBackedMake,
+    /// A built-in value class was passed to `make`.
+    BuiltinValueMake,
     /// A construction keyword appears more than once.
     DuplicateInitKeyword,
     /// A construction keyword is not accepted by the class.
@@ -171,6 +175,7 @@ impl DiagnosticCode {
         Self::SyntaxExpectedExpression,
         Self::SyntaxExpectedToken,
         Self::AstIntegerLiteralOutOfRange,
+        Self::AstMalformedStringLiteral,
         Self::AstSlotOptionRequiresKeyword,
         Self::AstSlotInitValueRequiresExpression,
         Self::AstUnsupportedSlotOption,
@@ -219,6 +224,7 @@ impl DiagnosticCode {
         Self::CastImpossible,
         Self::MakeClassArgumentTypeMismatch,
         Self::HostBackedMake,
+        Self::BuiltinValueMake,
         Self::DuplicateInitKeyword,
         Self::UnknownInitKeyword,
         Self::SlotInitializerTypeMismatch,
@@ -249,6 +255,7 @@ impl DiagnosticCode {
             Self::SyntaxExpectedExpression => "syntax.expected-expression",
             Self::SyntaxExpectedToken => "syntax.expected-token",
             Self::AstIntegerLiteralOutOfRange => "ast.integer-literal-out-of-range",
+            Self::AstMalformedStringLiteral => "ast.malformed-string-literal",
             Self::AstSlotOptionRequiresKeyword => "ast.slot-option-requires-keyword",
             Self::AstSlotInitValueRequiresExpression => "ast.slot-init-value-requires-expression",
             Self::AstUnsupportedSlotOption => "ast.unsupported-slot-option",
@@ -299,6 +306,7 @@ impl DiagnosticCode {
             Self::CastImpossible => "sem.cast-impossible",
             Self::MakeClassArgumentTypeMismatch => "sem.make-class-argument-type-mismatch",
             Self::HostBackedMake => "sem.host-backed-make",
+            Self::BuiltinValueMake => "sem.builtin-value-make",
             Self::DuplicateInitKeyword => "sem.duplicate-init-keyword",
             Self::UnknownInitKeyword => "sem.unknown-init-keyword",
             Self::SlotInitializerTypeMismatch => "sem.slot-initializer-type-mismatch",
@@ -330,6 +338,7 @@ impl DiagnosticCode {
             "syntax.expected-expression" => Self::SyntaxExpectedExpression,
             "syntax.expected-token" => Self::SyntaxExpectedToken,
             "ast.integer-literal-out-of-range" => Self::AstIntegerLiteralOutOfRange,
+            "ast.malformed-string-literal" => Self::AstMalformedStringLiteral,
             "ast.slot-option-requires-keyword" => Self::AstSlotOptionRequiresKeyword,
             "ast.slot-init-value-requires-expression" => Self::AstSlotInitValueRequiresExpression,
             "ast.unsupported-slot-option" => Self::AstUnsupportedSlotOption,
@@ -380,6 +389,7 @@ impl DiagnosticCode {
             "sem.cast-impossible" => Self::CastImpossible,
             "sem.make-class-argument-type-mismatch" => Self::MakeClassArgumentTypeMismatch,
             "sem.host-backed-make" => Self::HostBackedMake,
+            "sem.builtin-value-make" => Self::BuiltinValueMake,
             "sem.duplicate-init-keyword" => Self::DuplicateInitKeyword,
             "sem.unknown-init-keyword" => Self::UnknownInitKeyword,
             "sem.slot-initializer-type-mismatch" => Self::SlotInitializerTypeMismatch,

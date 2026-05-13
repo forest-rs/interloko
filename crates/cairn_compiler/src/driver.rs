@@ -523,6 +523,58 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_rich_value_literals_slots_and_dispatch() {
+        let value = compile_and_run_main(
+            "define class <sample> (<object>)\n\
+               slot label :: <string>;\n\
+               slot tag :: <symbol>;\n\
+               slot option :: <keyword>;\n\
+               slot items :: <vector>;\n\
+             end;\n\
+             define generic score(x :: <object>) => <integer>;\n\
+             define method score(x :: <string>) => <integer>\n\
+               if x = \"direct\" then 4 else 0 end\n\
+             end;\n\
+             define method score(x :: <sample>) => <integer>\n\
+               let label-score = if x.label = \"box\" then 3 else 0 end;\n\
+               let tag-score = if x.tag = #ready then 2 else 0 end;\n\
+               let keyword-score = if x.option = #:fallback then 1 else 0 end;\n\
+               label-score + tag-score + keyword-score\n\
+             end;\n\
+             define function main()\n\
+               let sample = make(<sample>, label: \"box\", tag: #ready, option: #:fallback, items: [1, 2]);\n\
+               score(\"direct\") + score(sample)\n\
+             end;",
+        )
+        .expect("rich value program should run");
+
+        assert_eq!(value, 10);
+    }
+
+    #[test]
+    fn reports_malformed_strings_and_unsupported_vector_equality() {
+        let malformed = compile("define function main()\n  \"unterminated\nend;")
+            .expect_err("malformed string should fail");
+        assert!(matches!(
+            malformed,
+            CompileError::Diagnostics { diagnostics }
+                if diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == DiagnosticCode::AstMalformedStringLiteral)
+        ));
+
+        let vector_eq = compile("define function main()\n  [1, 2] = [1, 2]\nend;")
+            .expect_err("vector equality should be rejected");
+        assert!(matches!(
+            vector_eq,
+            CompileError::Diagnostics { diagnostics }
+                if diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == DiagnosticCode::ComparisonOperandTypeMismatch
+                })
+        ));
+    }
+
+    #[test]
     fn compiled_module_exposes_lowered_and_tape_dumps() {
         let compiled = compile(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\

@@ -27,6 +27,16 @@ pub const BOX_VALUE: &str = "cairn.box_value";
 pub const INSTANCE_OF: &str = "cairn.instance_of";
 /// Host-call symbol for casting a value to a known runtime object class.
 pub const CAST_OBJECT: &str = "cairn.cast_object";
+/// Host-call symbol prefix for string literals.
+pub const STRING_LITERAL_PREFIX: &str = "cairn.literal.string:";
+/// Host-call symbol prefix for symbol literals.
+pub const SYMBOL_LITERAL_PREFIX: &str = "cairn.literal.symbol:";
+/// Host-call symbol prefix for keyword literals.
+pub const KEYWORD_LITERAL_PREFIX: &str = "cairn.literal.keyword:";
+/// Host-call symbol for immutable vector literals.
+pub const VECTOR_LITERAL: &str = "cairn.literal.vector";
+/// Host-call symbol for runtime value equality.
+pub const VALUE_EQ: &str = "cairn.value_eq";
 
 /// Returns the `execution_tape` value type for Cairn objects.
 #[must_use]
@@ -58,6 +68,11 @@ pub struct RuntimeClass {
 pub enum HostObjectKind {
     /// Object is allocated and stored by the Cairn runtime heap.
     Native,
+    /// Object is a built-in value allocated by the Cairn runtime heap.
+    BuiltinValue {
+        /// Built-in value class represented by this runtime class.
+        kind: sem::BuiltinValueClass,
+    },
     /// Object is supplied by a Rust host adapter.
     HostBacked,
 }
@@ -92,6 +107,9 @@ impl RuntimeLayout {
                     name: class.name.clone(),
                     kind: match class.origin {
                         sem::ClassOrigin::Native => HostObjectKind::Native,
+                        sem::ClassOrigin::BuiltinValue { kind } => {
+                            HostObjectKind::BuiltinValue { kind }
+                        }
                         sem::ClassOrigin::HostBacked { .. } => HostObjectKind::HostBacked,
                     },
                     superclass: class.superclass,
@@ -149,9 +167,26 @@ enum RuntimeObjectStorage {
     Native {
         slots: Vec<Value>,
     },
+    String {
+        value: String,
+    },
+    Symbol {
+        name: String,
+    },
+    Keyword {
+        name: String,
+    },
+    Vector {
+        elements: Vec<Value>,
+    },
     HostBacked {
         adapter: alloc::boxed::Box<dyn HostObjectAdapter>,
     },
+}
+
+struct InternedObject {
+    name: String,
+    object: Obj,
 }
 
 /// Adapter for reading data from a Rust-owned host-backed object.
@@ -168,6 +203,8 @@ pub struct CairnHost {
     layout: RuntimeLayout,
     objects: Vec<RuntimeObject>,
     values: Vec<Value>,
+    symbols: Vec<InternedObject>,
+    keywords: Vec<InternedObject>,
 }
 
 impl CairnHost {
@@ -178,6 +215,8 @@ impl CairnHost {
             layout,
             objects: Vec::new(),
             values: Vec::new(),
+            symbols: Vec::new(),
+            keywords: Vec::new(),
         }
     }
 
@@ -266,6 +305,44 @@ impl Host for CairnHost {
         _access: Option<&mut dyn AccessSink>,
     ) -> Result<u64, HostError> {
         match symbol {
+            _ if symbol.starts_with(STRING_LITERAL_PREFIX) => {
+                let value = decode_literal_suffix(symbol, STRING_LITERAL_PREFIX)?;
+                let class = self.builtin_class(sem::BuiltinValueClass::String)?;
+                rets[0] = self.push_object(RuntimeObject {
+                    class,
+                    storage: RuntimeObjectStorage::String { value },
+                });
+                Ok(0)
+            }
+            _ if symbol.starts_with(SYMBOL_LITERAL_PREFIX) => {
+                let name = decode_literal_suffix(symbol, SYMBOL_LITERAL_PREFIX)?;
+                rets[0] = self.intern_symbol(name)?;
+                Ok(0)
+            }
+            _ if symbol.starts_with(KEYWORD_LITERAL_PREFIX) => {
+                let name = decode_literal_suffix(symbol, KEYWORD_LITERAL_PREFIX)?;
+                rets[0] = self.intern_keyword(name)?;
+                Ok(0)
+            }
+            VECTOR_LITERAL => {
+                let class = self.builtin_class(sem::BuiltinValueClass::Vector)?;
+                let mut elements = Vec::with_capacity(args.len());
+                for arg in args {
+                    elements.push(self.value_for_any(*arg)?);
+                }
+                rets[0] = self.push_object(RuntimeObject {
+                    class,
+                    storage: RuntimeObjectStorage::Vector { elements },
+                });
+                Ok(0)
+            }
+            VALUE_EQ => {
+                let [ValueRef::Obj(lhs), ValueRef::Obj(rhs)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::Bool(self.objects_equal(*lhs, *rhs)?);
+                Ok(0)
+            }
             MAKE_OBJECT => {
                 let Some(ValueRef::U64(class_raw)) = args.first().copied() else {
                     return Err(HostError::Failed);
@@ -317,6 +394,10 @@ impl Host for CairnHost {
                     RuntimeObjectStorage::Native { slots } => {
                         slots.get(slot_index).cloned().ok_or(HostError::Failed)?
                     }
+                    RuntimeObjectStorage::String { .. }
+                    | RuntimeObjectStorage::Symbol { .. }
+                    | RuntimeObjectStorage::Keyword { .. }
+                    | RuntimeObjectStorage::Vector { .. } => return Err(HostError::Failed),
                     RuntimeObjectStorage::HostBacked { adapter } => {
                         adapter.read_slot(slot, slot_info.kind)?
                     }
@@ -364,6 +445,77 @@ impl Host for CairnHost {
 }
 
 impl CairnHost {
+    fn builtin_class(&self, kind: sem::BuiltinValueClass) -> Result<sem::ClassId, HostError> {
+        self.layout.class_id(kind.name()).ok_or(HostError::Failed)
+    }
+
+    fn intern_symbol(&mut self, name: String) -> Result<Value, HostError> {
+        if let Some(entry) = self.symbols.iter().find(|entry| entry.name == name) {
+            return Ok(Value::Obj(entry.object));
+        }
+        let class = self.builtin_class(sem::BuiltinValueClass::Symbol)?;
+        let value = self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::Symbol { name: name.clone() },
+        });
+        let Value::Obj(object) = value else {
+            return Err(HostError::Failed);
+        };
+        self.symbols.push(InternedObject { name, object });
+        Ok(value)
+    }
+
+    fn intern_keyword(&mut self, name: String) -> Result<Value, HostError> {
+        if let Some(entry) = self.keywords.iter().find(|entry| entry.name == name) {
+            return Ok(Value::Obj(entry.object));
+        }
+        let class = self.builtin_class(sem::BuiltinValueClass::Keyword)?;
+        let value = self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::Keyword { name: name.clone() },
+        });
+        let Value::Obj(object) = value else {
+            return Err(HostError::Failed);
+        };
+        self.keywords.push(InternedObject { name, object });
+        Ok(value)
+    }
+
+    fn value_for_any(&self, value: ValueRef<'_>) -> Result<Value, HostError> {
+        let ValueRef::Obj(obj) = value else {
+            return Err(HostError::Failed);
+        };
+        let _ = self.boxed_value(obj)?;
+        Ok(Value::Obj(obj))
+    }
+
+    fn objects_equal(&self, lhs: Obj, rhs: Obj) -> Result<bool, HostError> {
+        if lhs == rhs {
+            return Ok(true);
+        }
+        let lhs = self.object(lhs)?;
+        let rhs = self.object(rhs)?;
+        Ok(match (&lhs.storage, &rhs.storage) {
+            (
+                RuntimeObjectStorage::String { value: left },
+                RuntimeObjectStorage::String { value: right },
+            ) => left == right,
+            (
+                RuntimeObjectStorage::Symbol { name: left },
+                RuntimeObjectStorage::Symbol { name: right },
+            )
+            | (
+                RuntimeObjectStorage::Keyword { name: left },
+                RuntimeObjectStorage::Keyword { name: right },
+            ) => left == right,
+            (
+                RuntimeObjectStorage::Vector { elements: left },
+                RuntimeObjectStorage::Vector { elements: right },
+            ) => left == right,
+            _ => false,
+        })
+    }
+
     fn value_object(&self, value: ValueRef<'_>) -> Option<Obj> {
         match value {
             ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => Some(obj),
@@ -396,7 +548,14 @@ impl CairnHost {
             }
             (sem::ValueKind::I64, ValueRef::I64(value)) => Ok(Value::I64(value)),
             (sem::ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
-            (sem::ValueKind::Object(expected_class), ValueRef::Obj(obj)) => {
+            (
+                sem::ValueKind::Object(expected_class)
+                | sem::ValueKind::String(expected_class)
+                | sem::ValueKind::Symbol(expected_class)
+                | sem::ValueKind::Keyword(expected_class)
+                | sem::ValueKind::Vector(expected_class),
+                ValueRef::Obj(obj),
+            ) => {
                 let object = self.object(obj)?;
                 if self
                     .layout
@@ -471,12 +630,43 @@ pub fn cast_object_signature(input: ValueType) -> execution_tape::host::HostSig 
     }
 }
 
+/// Host signature for a literal host call with no runtime arguments.
+#[must_use]
+pub fn object_literal_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: Vec::new(),
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for a vector literal of `arity` boxed elements.
+#[must_use]
+pub fn vector_literal_signature(arity: usize) -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![any_type(); arity],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for runtime value equality.
+#[must_use]
+pub fn value_eq_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![object_type(), object_type()],
+        rets: vec![ValueType::Bool],
+    }
+}
+
 fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
     match kind {
         sem::ValueKind::Any => Some(any_type()),
         sem::ValueKind::I64 => Some(ValueType::I64),
         sem::ValueKind::Bool => Some(ValueType::Bool),
-        sem::ValueKind::Object(_) => Some(object_type()),
+        sem::ValueKind::String(_)
+        | sem::ValueKind::Symbol(_)
+        | sem::ValueKind::Keyword(_)
+        | sem::ValueKind::Vector(_)
+        | sem::ValueKind::Object(_) => Some(object_type()),
         sem::ValueKind::ClassObject(_) => Some(ValueType::U64),
         sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => None,
     }
@@ -486,4 +676,47 @@ fn runtime_class_id(raw: u64) -> Result<sem::ClassId, HostError> {
     Ok(sem::ClassId(
         u32::try_from(raw).map_err(|_| HostError::Failed)?,
     ))
+}
+
+/// Encodes a string-like literal into a host-call symbol.
+#[must_use]
+pub fn literal_symbol(prefix: &str, value: &str) -> String {
+    let mut symbol = String::with_capacity(prefix.len() + value.len() * 2);
+    symbol.push_str(prefix);
+    for byte in value.as_bytes() {
+        push_hex(&mut symbol, *byte);
+    }
+    symbol
+}
+
+fn decode_literal_suffix(symbol: &str, prefix: &str) -> Result<String, HostError> {
+    let encoded = symbol.strip_prefix(prefix).ok_or(HostError::Failed)?;
+    if encoded.len() % 2 != 0 {
+        return Err(HostError::Failed);
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(encoded.len() / 2);
+    let mut index = 0;
+    while index < bytes.len() {
+        let high = hex_value(bytes[index])?;
+        let low = hex_value(bytes[index + 1])?;
+        decoded.push((high << 4) | low);
+        index += 2;
+    }
+    String::from_utf8(decoded).map_err(|_| HostError::Failed)
+}
+
+fn push_hex(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(char::from(HEX[usize::from(byte >> 4)]));
+    out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+}
+
+fn hex_value(byte: u8) -> Result<u8, HostError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(HostError::Failed),
+    }
 }
