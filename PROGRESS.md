@@ -1076,6 +1076,7 @@
   - symbols use `#name`;
   - keyword-style values use Dylan-style `name:` and lower to symbols; the
     older `#:name` spelling remains accepted as a legacy symbol spelling;
+  - integers support prefix negation, including `i64::MIN`;
   - vectors use Dylan-style `#[a, b, c]`.
 - Semantic IR has explicit `ValueKind` coverage for `<string>`, `<symbol>`,
   raw integers, and `<vector>`. `<string>`, `<symbol>`, `<integer>`, and

@@ -180,6 +180,8 @@ pub enum CstKind {
     LetStmt,
     /// Binary expression.
     BinaryExpr,
+    /// Prefix unary expression.
+    UnaryExpr,
     /// Direct function call expression.
     CallExpr,
     /// Object slot read expression.
@@ -429,6 +431,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::SymbolExpr => 25,
         CstKind::KeywordExpr => 26,
         CstKind::VectorExpr => 27,
+        CstKind::UnaryExpr => 28,
     }
 }
 
@@ -1109,16 +1112,27 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_mul(&mut self) -> CstNode {
-        let mut node = self.parse_postfix();
+        let mut node = self.parse_unary();
         while self.at(TokenKind::Star) {
             let mut children = vec![CstElement::Node(node)];
             if let Some(op) = self.bump() {
                 children.push(CstElement::Token(op));
             }
-            children.push(CstElement::Node(self.parse_postfix()));
+            children.push(CstElement::Node(self.parse_unary()));
             node = self.node(CstKind::BinaryExpr, children, Span::default());
         }
         node
+    }
+
+    fn parse_unary(&mut self) -> CstNode {
+        let start = self.current_span();
+        if self.at(TokenKind::Minus) {
+            let mut children = Vec::new();
+            self.expect(TokenKind::Minus, &mut children, "`-`");
+            children.push(CstElement::Node(self.parse_unary()));
+            return self.node(CstKind::UnaryExpr, children, start);
+        }
+        self.parse_postfix()
     }
 
     fn parse_postfix(&mut self) -> CstNode {

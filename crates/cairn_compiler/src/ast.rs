@@ -404,6 +404,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Prefix integer negation expression.
+    UnaryMinus {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Negated expression.
+        expr: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Integer comparison expression.
     Compare {
         /// Stable-ish AST node identity.
@@ -469,6 +478,7 @@ impl Expr {
             | Self::MakeObject { id, .. }
             | Self::SlotRead { id, .. }
             | Self::Binary { id, .. }
+            | Self::UnaryMinus { id, .. }
             | Self::Compare { id, .. }
             | Self::If { id, .. }
             | Self::Handle { id, .. }
@@ -494,6 +504,7 @@ impl Expr {
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
             | Self::Binary { span, .. }
+            | Self::UnaryMinus { span, .. }
             | Self::Compare { span, .. }
             | Self::If { span, .. }
             | Self::Handle { span, .. }
@@ -1045,6 +1056,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::TypeExpr => self.lower_class_name(node),
             CstKind::CallExpr => self.lower_call(node),
             CstKind::SlotExpr => self.lower_slot_read(node),
+            CstKind::UnaryExpr => self.lower_unary(node),
             CstKind::BinaryExpr => self.lower_binary(node),
             CstKind::IfExpr => self.lower_if(node),
             CstKind::HandleExpr => self.lower_handle(node),
@@ -1052,6 +1064,55 @@ impl<'tree> Lowering<'tree> {
                 id: self.ast_id(node),
                 span: node.span,
             },
+        }
+    }
+
+    fn lower_unary(&mut self, node: &CstNode) -> Expr {
+        let Some(child) = node.children.iter().find_map(|child| match child {
+            CstElement::Node(child) => Some(child),
+            CstElement::Token(_) => None,
+        }) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        if child.kind == CstKind::NumberExpr {
+            return self.lower_negative_number(node, child);
+        }
+        Expr::UnaryMinus {
+            id: self.ast_id(node),
+            expr: Box::new(self.lower_expr(child)),
+            span: node.span,
+        }
+    }
+
+    fn lower_negative_number(&mut self, unary: &CstNode, number: &CstNode) -> Expr {
+        let Some((_, text)) = self.first_token_text(number, TokenKind::Number) else {
+            return Expr::Error {
+                id: self.ast_id(unary),
+                span: unary.span,
+            };
+        };
+        const I64_MIN_MAGNITUDE: u64 = 1_u64 << 63;
+        let value = match text.parse::<u64>() {
+            Ok(I64_MIN_MAGNITUDE) => i64::MIN,
+            Ok(magnitude) if magnitude <= i64::MAX as u64 => -(magnitude as i64),
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    unary.span,
+                    DiagnosticCode::AstIntegerLiteralOutOfRange,
+                ));
+                return Expr::Error {
+                    id: self.ast_id(unary),
+                    span: unary.span,
+                };
+            }
+        };
+        Expr::Number {
+            id: self.ast_id(unary),
+            value,
+            span: unary.span,
         }
     }
 

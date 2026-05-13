@@ -2564,6 +2564,10 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_expr(out, lhs, indent + 2);
             dump_ast_expr(out, rhs, indent + 2);
         }
+        ast::Expr::UnaryMinus { id, expr, .. } => {
+            let _ = writeln!(out, "{id} unary Minus");
+            dump_ast_expr(out, expr, indent + 2);
+        }
         ast::Expr::Compare {
             id, op, lhs, rhs, ..
         } => {

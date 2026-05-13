@@ -2313,6 +2313,26 @@ impl Lowering {
                     span: *span,
                 }
             }
+            ast::Expr::UnaryMinus { expr, span, .. } => {
+                let lhs = Expr::ConstI64 {
+                    value: 0,
+                    span: *span,
+                };
+                let rhs = self.lower_expr(ctx, expr);
+                self.expect_i64_operands(
+                    ctx,
+                    *span,
+                    &lhs,
+                    &rhs,
+                    DiagnosticCode::ArithmeticOperandTypeMismatch,
+                );
+                Expr::Binary {
+                    op: BinaryOp::Sub,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: *span,
+                }
+            }
             ast::Expr::Compare {
                 op, lhs, rhs, span, ..
             } => {

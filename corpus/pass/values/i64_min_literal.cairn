@@ -1,0 +1,4 @@
+// expect: run -9223372036854775808
+define function main()
+  -9223372036854775808
+end;

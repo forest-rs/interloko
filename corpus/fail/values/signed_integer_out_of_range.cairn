@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.integer-literal-out-of-range
+
+define function main()
+  -9223372036854775809
+end;

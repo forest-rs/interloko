@@ -1,0 +1,14 @@
+// expect: run 0
+define generic score(x :: <integer>) => <integer>;
+
+define method score(x :: <integer>) => <integer>
+  x + 10
+end;
+
+define function main()
+  let literal = -1;
+  let infix = 1 + -2;
+  let grouped = -(1 + 2);
+  let dispatched = score(-5);
+  literal + infix + grouped + dispatched
+end;
