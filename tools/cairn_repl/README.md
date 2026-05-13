@@ -39,6 +39,8 @@ Interactive controls:
 - Up/Down browse the local history for this process.
 - Tab completes colon commands, `:dump` stages, dispatch IDs, and object IDs
   from the most recent artifacts.
+- Input is highlighted in the editor: commands, Cairn keywords, class names,
+  literals, comments, punctuation, and unknown tokens get distinct styles.
 - Ctrl-C cancels the current line, and clears a pending multiline definition.
 - Ctrl-D exits.
 - ANSI color is used only for interactive TTY output.

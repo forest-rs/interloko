@@ -8,6 +8,7 @@ description = "Plain-stdio REPL for Cairn compiler sessions."
 [dependencies]
 cairn_compiler = { path = "../../crates/cairn_compiler" }
 cairn_diagnostics = { path = "../cairn_diagnostics" }
+nu-ansi-term = "0.50.3"
 reedline = "0.47.0"
 
 [lints]

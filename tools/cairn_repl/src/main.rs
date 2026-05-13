@@ -13,11 +13,13 @@ use cairn_compiler::session::{
     DumpStage, EnvironmentObject, FunctionRunResult, IncrementalCompilerSession, RuntimeMode,
     SessionArtifacts,
 };
+use cairn_compiler::syntax::{self, TokenKind};
 use cairn_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
+use nu_ansi_term::{Color, Style as AnsiStyle};
 use reedline::{
-    ColumnarMenu, Completer, EditCommand, Emacs, KeyCode, KeyModifiers, Keybindings, MenuBuilder,
-    Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline,
-    ReedlineError, ReedlineEvent, ReedlineMenu, Signal, Span, Suggestion,
+    ColumnarMenu, Completer, EditCommand, Emacs, Highlighter, KeyCode, KeyModifiers, Keybindings,
+    MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline,
+    ReedlineError, ReedlineEvent, ReedlineMenu, Signal, Span, StyledText, Suggestion,
     default_emacs_keybindings,
 };
 
@@ -97,7 +99,7 @@ where
 {
     let mut repl = Repl::new(style)?;
     let completion_state = Arc::new(Mutex::new(CompletionState::default()));
-    let mut line_editor = reedline_editor(completion_state.clone());
+    let mut line_editor = reedline_editor(completion_state.clone(), style);
 
     writeln!(stdout, "cairn_repl")?;
     writeln!(stdout, "type :help for commands, Ctrl-D to quit")?;
@@ -129,7 +131,7 @@ where
     Ok(())
 }
 
-fn reedline_editor(completion_state: Arc<Mutex<CompletionState>>) -> Reedline {
+fn reedline_editor(completion_state: Arc<Mutex<CompletionState>>, style: OutputStyle) -> Reedline {
     let completion_menu = ColumnarMenu::default()
         .with_name("completion_menu")
         .with_columns(4)
@@ -137,12 +139,17 @@ fn reedline_editor(completion_state: Arc<Mutex<CompletionState>>) -> Reedline {
     let mut keybindings = default_emacs_keybindings();
     add_menu_keybindings(&mut keybindings);
 
-    Reedline::create()
+    let editor = Reedline::create()
         .with_completer(Box::new(CairnCompleter::new(completion_state)))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu)))
         .with_edit_mode(Box::new(Emacs::new(keybindings)))
         .with_quick_completions(true)
-        .with_partial_completions(true)
+        .with_partial_completions(true);
+    if style == OutputStyle::Ansi {
+        editor.with_highlighter(Box::new(CairnHighlighter))
+    } else {
+        editor
+    }
 }
 
 fn add_menu_keybindings(keybindings: &mut Keybindings) {
@@ -650,6 +657,169 @@ fn help_text() -> &'static str {
   :affordances <object-id>"
 }
 
+#[derive(Clone, Debug, Default)]
+struct CairnHighlighter;
+
+impl Highlighter for CairnHighlighter {
+    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+        if line.starts_with(':') {
+            return highlight_command_input(line);
+        }
+        highlight_cairn_input(line)
+    }
+}
+
+fn highlight_command_input(line: &str) -> StyledText {
+    let mut styled = StyledText::new();
+    let split = line.find(char::is_whitespace).unwrap_or(line.len());
+    let command = &line[..split];
+    let command_style = if COMMANDS.contains(&command) {
+        command_highlight_style()
+    } else {
+        error_highlight_style()
+    };
+    push_styled(&mut styled, command_style, command);
+    push_command_arguments(&mut styled, &line[split..]);
+    styled
+}
+
+fn push_command_arguments(styled: &mut StyledText, text: &str) {
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let Some((relative_start, _)) = text[cursor..]
+            .char_indices()
+            .find(|(_, value)| !value.is_whitespace())
+        else {
+            push_styled(styled, neutral_highlight_style(), &text[cursor..]);
+            return;
+        };
+        let token_start = cursor + relative_start;
+        push_styled(
+            styled,
+            neutral_highlight_style(),
+            &text[cursor..token_start],
+        );
+
+        let token_end = text[token_start..]
+            .char_indices()
+            .find(|(_, value)| value.is_whitespace())
+            .map_or(text.len(), |(relative_end, _)| token_start + relative_end);
+        let token = &text[token_start..token_end];
+        let style = if DUMP_STAGES.contains(&token) {
+            literal_highlight_style()
+        } else if token.contains(':') {
+            type_highlight_style()
+        } else {
+            neutral_highlight_style()
+        };
+        push_styled(styled, style, token);
+        cursor = token_end;
+    }
+}
+
+fn highlight_cairn_input(line: &str) -> StyledText {
+    let mut styled = StyledText::new();
+    let mut cursor = 0;
+    for token in syntax::lex(line) {
+        if token.span.start > cursor {
+            push_styled(
+                &mut styled,
+                neutral_highlight_style(),
+                &line[cursor..token.span.start],
+            );
+        }
+        push_styled(
+            &mut styled,
+            style_for_token(token.kind),
+            &line[token.span.start..token.span.end],
+        );
+        cursor = token.span.end;
+    }
+    if cursor < line.len() {
+        push_styled(&mut styled, neutral_highlight_style(), &line[cursor..]);
+    }
+    styled
+}
+
+fn push_styled(styled: &mut StyledText, style: AnsiStyle, text: &str) {
+    if !text.is_empty() {
+        styled.push((style, text.to_string()));
+    }
+}
+
+fn style_for_token(kind: TokenKind) -> AnsiStyle {
+    match kind {
+        TokenKind::Define
+        | TokenKind::Function
+        | TokenKind::Class
+        | TokenKind::Slot
+        | TokenKind::Constant
+        | TokenKind::Generic
+        | TokenKind::Method
+        | TokenKind::Let
+        | TokenKind::If
+        | TokenKind::Then
+        | TokenKind::Else
+        | TokenKind::Handle
+        | TokenKind::With
+        | TokenKind::Restart
+        | TokenKind::End => keyword_highlight_style(),
+        TokenKind::TypeName => type_highlight_style(),
+        TokenKind::Number | TokenKind::Bool => literal_highlight_style(),
+        TokenKind::Comment => comment_highlight_style(),
+        TokenKind::Error => error_highlight_style(),
+        TokenKind::LParen
+        | TokenKind::RParen
+        | TokenKind::Comma
+        | TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Equal
+        | TokenKind::Arrow
+        | TokenKind::Less
+        | TokenKind::LessEqual
+        | TokenKind::Greater
+        | TokenKind::GreaterEqual
+        | TokenKind::Colon
+        | TokenKind::DoubleColon
+        | TokenKind::Dot
+        | TokenKind::Semicolon => punctuation_highlight_style(),
+        TokenKind::Ident | TokenKind::Whitespace => neutral_highlight_style(),
+    }
+}
+
+fn neutral_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::White)
+}
+
+fn keyword_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::LightPurple).bold()
+}
+
+fn command_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::LightGreen).bold()
+}
+
+fn type_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::LightCyan).bold()
+}
+
+fn literal_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::LightYellow)
+}
+
+fn punctuation_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::DarkGray)
+}
+
+fn comment_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::DarkGray).italic()
+}
+
+fn error_highlight_style() -> AnsiStyle {
+    AnsiStyle::new().fg(Color::LightRed).bold()
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum OutputStyle {
     Plain,
@@ -906,6 +1076,14 @@ mod tests {
             .collect()
     }
 
+    fn segment_style(styled: &StyledText, text: &str) -> Option<AnsiStyle> {
+        styled
+            .buffer
+            .iter()
+            .find(|(_, segment)| segment == text)
+            .map(|(style, _)| *style)
+    }
+
     #[test]
     fn completes_commands_and_dump_stages() {
         let state = Arc::new(Mutex::new(CompletionState::default()));
@@ -958,5 +1136,37 @@ mod tests {
     fn ansi_style_is_separate_from_plain_transcript_style() {
         assert_eq!(OutputStyle::Plain.value(42), "42");
         assert_eq!(OutputStyle::Ansi.value(42), "\x1b[36m42\x1b[0m");
+    }
+
+    #[test]
+    fn highlighter_styles_cairn_source_tokens() {
+        let highlighted = CairnHighlighter.highlight("define class <circle> // note", 0);
+
+        assert_eq!(
+            segment_style(&highlighted, "define"),
+            Some(keyword_highlight_style())
+        );
+        assert_eq!(
+            segment_style(&highlighted, "<circle>"),
+            Some(type_highlight_style())
+        );
+        assert_eq!(
+            segment_style(&highlighted, "// note"),
+            Some(comment_highlight_style())
+        );
+    }
+
+    #[test]
+    fn highlighter_styles_repl_commands_and_arguments() {
+        let highlighted = CairnHighlighter.highlight(":dump lowered", 0);
+
+        assert_eq!(
+            segment_style(&highlighted, ":dump"),
+            Some(command_highlight_style())
+        );
+        assert_eq!(
+            segment_style(&highlighted, "lowered"),
+            Some(literal_highlight_style())
+        );
     }
 }
