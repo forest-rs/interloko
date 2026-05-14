@@ -11,33 +11,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::Span;
 
-/// Durable class identifier within a semantic module.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ClassId(
-    /// Zero-based class index.
-    pub u32,
-);
-
-/// Durable slot identifier within a semantic class.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct SlotId(
-    /// Zero-based slot index within the class.
-    pub u32,
-);
-
-/// Durable generic function identifier.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct GenericFunctionId(
-    /// Zero-based generic index.
-    pub u32,
-);
-
-/// Durable method identifier.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct MethodId(
-    /// Zero-based method index.
-    pub u32,
-);
+pub use interloko_model::{BuiltinValueClass, ClassId, GenericFunctionId, MethodId, SlotId};
 
 /// Durable direct function identifier within a semantic module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -126,82 +100,6 @@ pub enum ValueKind {
     KnownCallable(KnownCallable),
     /// Invalid or unknown value.
     Error,
-}
-
-/// Built-in value class supplied by the language kernel.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum BuiltinValueClass {
-    /// The built-in `<string>` class.
-    String,
-    /// The built-in `<symbol>` class.
-    Symbol,
-    /// The built-in `<integer>` class.
-    Integer,
-    /// The built-in `<vector>` class.
-    Vector,
-    /// The built-in `<class>` metaobject class.
-    Class,
-    /// The built-in `<generic-function>` metaobject class.
-    GenericFunction,
-    /// The built-in `<method>` metaobject class.
-    Method,
-    /// The built-in `<slot-descriptor>` metaobject class.
-    SlotDescriptor,
-}
-
-impl BuiltinValueClass {
-    const ALL: &'static [(Self, &'static str)] = &[
-        (Self::String, "<string>"),
-        (Self::Symbol, "<symbol>"),
-        (Self::Integer, "<integer>"),
-        (Self::Vector, "<vector>"),
-        (Self::Class, "<class>"),
-        (Self::GenericFunction, "<generic-function>"),
-        (Self::Method, "<method>"),
-        (Self::SlotDescriptor, "<slot-descriptor>"),
-    ];
-
-    /// Returns the Cairn-visible class name for this built-in value class.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::String => "<string>",
-            Self::Symbol => "<symbol>",
-            Self::Integer => "<integer>",
-            Self::Vector => "<vector>",
-            Self::Class => "<class>",
-            Self::GenericFunction => "<generic-function>",
-            Self::Method => "<method>",
-            Self::SlotDescriptor => "<slot-descriptor>",
-        }
-    }
-
-    fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "<string>" => Some(Self::String),
-            "<symbol>" => Some(Self::Symbol),
-            "<integer>" => Some(Self::Integer),
-            "<vector>" => Some(Self::Vector),
-            "<class>" => Some(Self::Class),
-            "<generic-function>" => Some(Self::GenericFunction),
-            "<method>" => Some(Self::Method),
-            "<slot-descriptor>" => Some(Self::SlotDescriptor),
-            _ => None,
-        }
-    }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::String => 0,
-            Self::Symbol => 1,
-            Self::Integer => 2,
-            Self::Vector => 3,
-            Self::Class => 4,
-            Self::GenericFunction => 5,
-            Self::Method => 6,
-            Self::SlotDescriptor => 7,
-        }
-    }
 }
 
 fn slot_setter_name(slot_name: &str) -> String {

@@ -1,5 +1,36 @@
 # Cairn Progress
 
+## Implemented: Interloko Model Boundary
+
+- `docs/interloko_boundary.md` records the naming split:
+  - Interloko is the core substrate for programmable object spaces;
+  - Vivarium is the later collaborative environment/product layer;
+  - Cairn remains the current prototype language/compiler name;
+  - Loko is a possible future language/notation name, not used yet.
+- Added `crates/interloko_model` as the first `no_std` substrate crate.
+- Moved durable shared model identifiers into `interloko_model`:
+  `ClassId`, `SlotId`, `GenericFunctionId`, and `MethodId`.
+- Moved `BuiltinValueClass` into `interloko_model`, including deterministic
+  declaration order, source name lookup, and class name reporting.
+- `cairn_compiler::sem` re-exports the moved types so existing compiler,
+  runtime, examples, and tools can keep their current semantic paths during
+  the extraction.
+- `ValueKind` remains in `cairn_compiler::sem` because it still contains
+  compiler-only callable and error states.
+- Runtime layout records and `CairnHost` remain in `cairn_compiler` until a
+  later `interloko_runtime` extraction can avoid pulling semantic IR ownership
+  across the crate boundary.
+- Crate/package names remain unpublished and provisional.
+
+Deferred:
+
+- Full repo rename.
+- `vivarium_*` crates or collaboration/presence/permission features.
+- Language rename to Loko.
+- Moving runtime host execution out of `cairn_compiler`.
+- Moving semantic IR, lowering, sessions, diagnostics, or tape emission.
+- Publishing any Interloko crate.
+
 ## Implemented: Named Read-Only MOP Protocol
 
 - Cairn code now uses canonical read-only MOP protocol names:

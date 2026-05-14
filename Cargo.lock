@@ -49,6 +49,7 @@ name = "cairn_compiler"
 version = "0.1.0"
 dependencies = [
  "execution_tape",
+ "interloko_model",
  "invalidation",
 ]
 
@@ -438,6 +439,10 @@ dependencies = [
  "equivalent",
  "hashbrown",
 ]
+
+[[package]]
+name = "interloko_model"
+version = "0.1.0"
 
 [[package]]
 name = "invalidation"

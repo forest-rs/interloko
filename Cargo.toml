@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/cairn_compiler",
+    "crates/interloko_model",
     "examples/forty_two",
     "examples/generic_area",
     "examples/host_backed_area",
