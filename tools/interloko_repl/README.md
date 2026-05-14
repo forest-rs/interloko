@@ -1,6 +1,6 @@
-# cairn_repl
+# interloko_repl
 
-`cairn_repl` is a small REPL over the existing Cairn compiler session pipeline.
+`interloko_repl` is a small REPL over the existing Cairn compiler session pipeline.
 Interactive terminal sessions use `reedline` for line editing, local in-memory
 history, Ctrl-C/Ctrl-D handling, and completions. Piped input keeps the plain
 stdio transcript mode used by tests and scripts.
@@ -12,7 +12,7 @@ zero-argument scratch function.
 Run it with:
 
 ```sh
-cargo run -p cairn_repl
+cargo run -p interloko_repl
 ```
 
 Definitions are entered as multiline `define ... end;` forms:
@@ -31,8 +31,8 @@ square(5)
 ```
 
 Integer results print directly. Diagnostics are rendered through
-`cairn_diagnostics`, using the same `CAIRN_DIAGNOSTIC_LOCALE` and
-`CAIRN_DIAGNOSTIC_CATALOG` environment variables as `cairn_lab`.
+`interloko_diagnostics`, using the same `CAIRN_DIAGNOSTIC_LOCALE` and
+`CAIRN_DIAGNOSTIC_CATALOG` environment variables as `interloko_lab`.
 
 Interactive controls:
 
@@ -68,7 +68,7 @@ Current limits:
 - expression evaluation currently prints integer results and reports
   non-integer runtime results as runtime errors;
 - host-backed declarations are not parsed from REPL comments yet; use
-  `cairn_lab` for file-based host registry examples.
+  `interloko_lab` for file-based host registry examples.
 
 The REPL is also a natural future integration point for Portolan-style
 affordances and intents. This crate currently exposes Cairn EOP/MOP objects and

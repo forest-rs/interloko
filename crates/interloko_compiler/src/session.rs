@@ -5398,7 +5398,7 @@ mod tests {
         let artifacts = CompilerSession::compile_source(
             "scratch.cairn",
             "define function helper(x)\n  x + 1\nend;\n\
-             define function __cairn_repl_expr_0()\n  helper(41)\nend;\n\
+             define function __interloko_repl_expr_0()\n  helper(41)\nend;\n\
              define function object_result()\n  make(<box>, value: 1)\nend;\n\
              define class <box> (<object>)\n  slot value :: <integer>;\nend;",
             RuntimeMode::CompileOnly,
@@ -5406,7 +5406,7 @@ mod tests {
 
         assert_eq!(artifacts.diagnostics, Vec::new());
         assert_eq!(
-            artifacts.run_zero_arg_function_i64("__cairn_repl_expr_0"),
+            artifacts.run_zero_arg_function_i64("__interloko_repl_expr_0"),
             FunctionRunResult::ReturnedI64(42)
         );
         assert_eq!(

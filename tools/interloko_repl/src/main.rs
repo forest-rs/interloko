@@ -7,14 +7,14 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 
-use cairn_compiler::diagnostic::Diagnostic;
-use cairn_compiler::identity::SourceFileId;
-use cairn_compiler::session::{
+use interloko_compiler::diagnostic::Diagnostic;
+use interloko_compiler::identity::SourceFileId;
+use interloko_compiler::session::{
     DumpStage, EnvironmentObject, FunctionRunResult, IncrementalCompilerSession, RuntimeMode,
     SessionArtifacts,
 };
-use cairn_compiler::syntax::{self, TokenKind};
-use cairn_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
+use interloko_compiler::syntax::{self, TokenKind};
+use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 use nu_ansi_term::{Color, Style as AnsiStyle};
 use reedline::{
     ColumnarMenu, Completer, EditCommand, Emacs, Highlighter, KeyCode, KeyModifiers, Keybindings,
@@ -26,7 +26,7 @@ use reedline::{
 type Result<T> = std::result::Result<T, ReplError>;
 
 const SOURCE_NAME: &str = "repl.cairn";
-const SCRATCH_FUNCTION: &str = "__cairn_repl_expr";
+const SCRATCH_FUNCTION: &str = "__interloko_repl_expr";
 const COMMANDS: &[&str] = &[
     ":help",
     ":quit",
@@ -101,7 +101,7 @@ where
     let completion_state = Arc::new(Mutex::new(CompletionState::default()));
     let mut line_editor = reedline_editor(completion_state.clone(), style);
 
-    writeln!(stdout, "cairn_repl")?;
+    writeln!(stdout, "interloko_repl")?;
     writeln!(stdout, "type :help for commands, Ctrl-D to quit")?;
     stdout.flush()?;
 
@@ -1013,8 +1013,8 @@ impl Prompt for CairnPrompt {
 enum ReplError {
     Io { path: String, error: io::Error },
     Stdio(io::Error),
-    DiagnosticCatalog(cairn_diagnostics::DiagnosticCatalogError),
-    DiagnosticRender(cairn_diagnostics::DiagnosticRenderError),
+    DiagnosticCatalog(interloko_diagnostics::DiagnosticCatalogError),
+    DiagnosticRender(interloko_diagnostics::DiagnosticRenderError),
     LineEditor(ReedlineError),
     UnsupportedLocale(String),
     MissingSource,
@@ -1054,14 +1054,14 @@ impl From<io::Error> for ReplError {
     }
 }
 
-impl From<cairn_diagnostics::DiagnosticCatalogError> for ReplError {
-    fn from(error: cairn_diagnostics::DiagnosticCatalogError) -> Self {
+impl From<interloko_diagnostics::DiagnosticCatalogError> for ReplError {
+    fn from(error: interloko_diagnostics::DiagnosticCatalogError) -> Self {
         Self::DiagnosticCatalog(error)
     }
 }
 
-impl From<cairn_diagnostics::DiagnosticRenderError> for ReplError {
-    fn from(error: cairn_diagnostics::DiagnosticRenderError) -> Self {
+impl From<interloko_diagnostics::DiagnosticRenderError> for ReplError {
+    fn from(error: interloko_diagnostics::DiagnosticRenderError) -> Self {
         Self::DiagnosticRender(error)
     }
 }

@@ -6,15 +6,15 @@ use std::fmt::{self, Write as _};
 use std::fs;
 use std::path::Path;
 
-use cairn_compiler::identity::SourceFileId;
-use cairn_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
-use cairn_compiler::session::{
+use interloko_compiler::identity::SourceFileId;
+use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
+use interloko_compiler::session::{
     AffordanceFacet, CompilerSession, DumpStage, EnvironmentAffordance, EnvironmentKind,
     EnvironmentObject, EnvironmentObjectId, EnvironmentObjectSink, EnvironmentOrigin,
     EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession, InspectionFacet,
     PresentationFacet, RuntimeMode, RuntimeResult, SessionArtifacts,
 };
-use cairn_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
+use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 
 type Result<T> = std::result::Result<T, LabError>;
 
@@ -105,7 +105,7 @@ fn run(args: Vec<String>) -> Result<()> {
         "diff" => {
             if args.len() != 3 {
                 return Err(LabError::Usage(
-                    "usage: cairn_lab diff <before.cairn> <after.cairn>".into(),
+                    "usage: interloko_lab diff <before.cairn> <after.cairn>".into(),
                 ));
             }
             let source_file = SourceFileId::from_path(&args[1]);
@@ -154,7 +154,7 @@ fn read_path(path: &str) -> Result<String> {
 fn single_file_arg(args: &[String]) -> Result<&str> {
     if args.len() != 2 {
         return Err(LabError::Usage(format!(
-            "usage: cairn_lab {} <file.cairn>",
+            "usage: interloko_lab {} <file.cairn>",
             args.first().map_or("COMMAND", String::as_str)
         )));
     }
@@ -164,7 +164,7 @@ fn single_file_arg(args: &[String]) -> Result<&str> {
 fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
     if args.len() != 4 || args[2] != "--stage" {
         return Err(LabError::Usage(
-            "usage: cairn_lab dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
+            "usage: interloko_lab dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
                 .into(),
         ));
     }
@@ -189,7 +189,7 @@ fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
 fn object_args(args: &[String]) -> Result<(&str, &str)> {
     if args.len() != 3 {
         return Err(LabError::Usage(format!(
-            "usage: cairn_lab {} <file.cairn> <object-id>",
+            "usage: interloko_lab {} <file.cairn> <object-id>",
             args.first().map_or("COMMAND", String::as_str)
         )));
     }
@@ -201,7 +201,7 @@ fn dispatch_args(args: &[String]) -> Result<(&str, Option<&str>)> {
         2 => Ok((&args[1], None)),
         3 => Ok((&args[1], Some(args[2].as_str()))),
         _ => Err(LabError::Usage(
-            "usage: cairn_lab dispatch <file.cairn> [dispatch-site-id]".into(),
+            "usage: interloko_lab dispatch <file.cairn> [dispatch-site-id]".into(),
         )),
     }
 }
@@ -209,7 +209,7 @@ fn dispatch_args(args: &[String]) -> Result<(&str, Option<&str>)> {
 fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance)> {
     if args.len() != 4 {
         return Err(LabError::Usage(
-            "usage: cairn_lab invoke-affordance <file.cairn> <object-id> <affordance>".into(),
+            "usage: interloko_lab invoke-affordance <file.cairn> <object-id> <affordance>".into(),
         ));
     }
     let affordance = parse_affordance(&args[3]).ok_or_else(|| LabError::UnknownAffordance {
@@ -773,7 +773,7 @@ fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
     .map_err(|error| LabError::DiagnosticCatalog(error.to_string()))
 }
 
-fn print_diagnostics(diagnostics: &[cairn_compiler::diagnostic::Diagnostic]) -> Result<()> {
+fn print_diagnostics(diagnostics: &[interloko_compiler::diagnostic::Diagnostic]) -> Result<()> {
     if diagnostics.is_empty() {
         return Ok(());
     }
@@ -802,7 +802,7 @@ fn usage() -> String {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "cairn_lab".into());
+        .unwrap_or_else(|| "interloko_lab".into());
     format!(
         "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} dispatch <file.cairn> [dispatch-site-id]\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>\n\ndiagnostics:\n  CAIRN_DIAGNOSTIC_LOCALE=en|pseudo\n  CAIRN_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
@@ -903,7 +903,7 @@ impl fmt::Display for LabError {
             Self::UnsupportedAffordance { name } => {
                 write!(
                     f,
-                    "affordance `{name}` is not executable by cairn_lab in this slice"
+                    "affordance `{name}` is not executable by interloko_lab in this slice"
                 )
             }
             Self::Runtime(message) => write!(f, "runtime failed: {message}"),

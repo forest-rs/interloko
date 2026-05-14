@@ -1,16 +1,16 @@
 [workspace]
 members = [
-    "crates/cairn_compiler",
+    "crates/interloko_compiler",
     "crates/interloko_model",
     "crates/interloko_runtime",
     "examples/forty_two",
     "examples/generic_area",
     "examples/host_backed_area",
     "examples/rich_values",
-    "tools/cairn_corpus",
-    "tools/cairn_diagnostics",
-    "tools/cairn_lab",
-    "tools/cairn_repl",
+    "tools/interloko_corpus",
+    "tools/interloko_diagnostics",
+    "tools/interloko_lab",
+    "tools/interloko_repl",
 ]
 resolver = "3"
 

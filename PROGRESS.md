@@ -11,11 +11,11 @@
   `RuntimeMethod`, and `HostObjectKind` into `interloko_runtime`.
 - Added a runtime-owned `ValueKind` that covers only executable value
   categories. Compiler-only semantic states such as known callables and errors
-  remain in `cairn_compiler::sem::ValueKind`.
+  remain in `interloko_compiler::sem::ValueKind`.
 - Moved `CairnHost`, native object storage, boxed `<object>` storage, string,
   symbol, vector, metaobject, and host-backed adapter support into
   `interloko_runtime`.
-- `cairn_compiler::runtime` now re-exports `interloko_runtime` for compatibility
+- `interloko_compiler::runtime` now re-exports `interloko_runtime` for compatibility
   and owns `runtime_layout_from_sem`, the sem-to-runtime layout adapter.
 - Lowering builds runtime layout values through the compiler adapter, while
   tape emission imports host symbols/signatures directly from
@@ -28,7 +28,7 @@ Deferred:
 - Persistent runtime/image state.
 - Runtime scheduler, async/effect handler stack, or dispatch caches.
 - Moving semantic IR, lowering, sessions, diagnostics, or tape emission out of
-  `cairn_compiler`.
+  `interloko_compiler`.
 - Renaming the public language/compiler crates away from Cairn.
 
 ## Implemented: Interloko Model Boundary
@@ -43,12 +43,12 @@ Deferred:
   `ClassId`, `SlotId`, `GenericFunctionId`, and `MethodId`.
 - Moved `BuiltinValueClass` into `interloko_model`, including deterministic
   declaration order, source name lookup, and class name reporting.
-- `cairn_compiler::sem` re-exports the moved types so existing compiler,
+- `interloko_compiler::sem` re-exports the moved types so existing compiler,
   runtime, examples, and tools can keep their current semantic paths during
   the extraction.
-- `ValueKind` remains in `cairn_compiler::sem` because it still contains
+- `ValueKind` remains in `interloko_compiler::sem` because it still contains
   compiler-only callable and error states.
-- Runtime layout records and `CairnHost` remain in `cairn_compiler` until a
+- Runtime layout records and `CairnHost` remain in `interloko_compiler` until a
   later `interloko_runtime` extraction can avoid pulling semantic IR ownership
   across the crate boundary.
 - Crate/package names remain unpublished and provisional.
@@ -58,7 +58,7 @@ Deferred:
 - Full repo rename.
 - `vivarium_*` crates or collaboration/presence/permission features.
 - Language rename to Loko.
-- Moving runtime host execution out of `cairn_compiler`.
+- Moving runtime host execution out of `interloko_compiler`.
 - Moving semantic IR, lowering, sessions, diagnostics, or tape emission.
 - Publishing any Interloko crate.
 
@@ -246,7 +246,7 @@ Deferred:
 
 ## Implemented: Lowered Executable IR and Dumps
 
-- Backend-neutral lowered IR in `cairn_compiler::lower`.
+- Backend-neutral lowered IR in `interloko_compiler::lower`.
 - Lowered function IDs, registers, labels, parameters, local-to-register bindings, and typed values.
 - Lowered instructions for:
   - integer constants and runtime metadata constants
@@ -273,11 +273,11 @@ Deferred:
 - Incremental query artifacts expose stable `ArtifactKey` values based on source file, artifact kind, and definition identity.
 - `QueryInvalidation` maps stable artifact keys to dense `invalidation 0.2` keys internally.
 - Tests cover syntax/AST definition ID preservation across whitespace/comment edits and method artifact key preservation across insertion-driven method renumbering.
-- Stability guarantees and non-guarantees are documented in `crates/cairn_compiler/ADR-stable-ids.md`.
+- Stability guarantees and non-guarantees are documented in `crates/interloko_compiler/ADR-stable-ids.md`.
 
 ## Implemented: Compiler Session and Workbench CLI
 
-- `cairn_compiler::session` provides a no-std-friendly compiler session API over named source files.
+- `interloko_compiler::session` provides a no-std-friendly compiler session API over named source files.
 - Session artifacts retain:
   - source file identity and text metadata
   - syntax tree
@@ -295,7 +295,7 @@ Deferred:
   - `execution_tape` disassembly
   - stable artifact graph with dependencies
 - Session diff reports preserved definitions, added/removed/modified definitions, and affected query artifacts.
-- `tools/cairn_lab` provides:
+- `tools/interloko_lab` provides:
   - `run <file>`
   - `dump <file> --stage syntax|ast|sem|mop|eop|lowered|tape|all`
   - `artifacts <file>`
@@ -323,19 +323,19 @@ Deferred:
   - `// expect: dump STAGE contains TEXT`.
 - Dump expectations are intentionally substring-based so they act like small
   semantic landmarks rather than full brittle snapshots.
-- `tools/cairn_corpus` provides:
+- `tools/interloko_corpus` provides:
   - `check [corpus-root]` to compile every corpus program through
-    `cairn_compiler::session`;
+    `interloko_compiler::session`;
   - `list [corpus-root]` to inspect discovered cases;
   - `dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all` for
     snapshot-like stage output without committing generated dumps.
 - Add a new case by placing a `.cairn` file under `corpus/pass` or
   `corpus/fail`, adding at least one `// expect:` header line, and running
-  `cargo run -p cairn_corpus`.
+  `cargo run -p interloko_corpus`.
 
 ## Implemented: In-Memory Incremental Compiler Engine
 
-- `cairn_compiler::session::IncrementalCompilerSession` provides an in-memory
+- `interloko_compiler::session::IncrementalCompilerSession` provides an in-memory
   edit/compile API over named sources with stable `SourceFileId` values.
 - The incremental session retains the latest `SessionArtifacts` snapshot and a
   cache entry for every stable `ArtifactKey` in the current artifact graph.
@@ -360,9 +360,9 @@ Deferred:
 - The core compiler crate remains `no_std + alloc`. Timing is represented as
   logical ticks in the core cache report; wall-clock collection is deferred to a
   later std scheduler or workbench wrapper.
-- `cairn_lab diff <before> <after>` now runs through the incremental session
+- `interloko_lab diff <before> <after>` now runs through the incremental session
   and prints cache status, counters, dependency edges, and the semantic diff.
-- `cairn_corpus check` now compiles each program through
+- `interloko_corpus check` now compiles each program through
   `IncrementalCompilerSession`.
 - Tests cover:
   - initial cache population;
@@ -376,7 +376,7 @@ Deferred:
 
 - `ArtifactKind` and `QueryArtifact` gained public variants for diagnostics,
   whole lowered-module artifacts, and runtime-result artifacts.
-- `cairn_lab diff` output is now an incremental cache report followed by the
+- `interloko_lab diff` output is now an incremental cache report followed by the
   existing preserved/changed/affected definition diff.
 
 ## Implemented: Control Flow, Booleans, and Comparisons
@@ -850,7 +850,7 @@ Deferred:
 - `examples/host_backed_area` is a runnable Rust embedding example. It creates
   Rust-backed circle and square values, installs them into `CairnHost`, and
   runs Cairn generic dispatch over those host-backed object handles.
-- `cairn_corpus` supports `// host-class:` headers for compile/dump fixtures,
+- `interloko_corpus` supports `// host-class:` headers for compile/dump fixtures,
   and the corpus now includes host-backed slot, dispatch, construction, slot,
   and cast cases.
 
@@ -891,10 +891,10 @@ Deferred:
   - generic functions, method specializers, and method result categories;
   - generic dispatch rows from nominal class to method;
   - runtime layout class/slot storage kind.
-- `cairn_lab dump <file> --stage mop` and `cairn_lab mop <file>` print the MOP
+- `interloko_lab dump <file> --stage mop` and `interloko_lab mop <file>` print the MOP
   summary.
-- `cairn_corpus` supports `dump mop contains ...` expectations.
-- `cairn_lab` compile-only paths understand leading `// host-class:` headers
+- `interloko_corpus` supports `dump mop contains ...` expectations.
+- `interloko_lab` compile-only paths understand leading `// host-class:` headers
   as workbench metadata, matching the corpus runner. This remains a tooling
   convention, not Cairn source syntax.
 
@@ -940,10 +940,10 @@ Deferred:
 - `HostEnvironmentProvider` is an explicit host projection seam. Host adapters
   can contribute host-owned environment records into the same sink without
   making `CairnHost` a world registry or enumerating the runtime heap.
-- `cairn_lab dump <file> --stage eop` and `cairn_lab eop <file>` print the EOP
+- `interloko_lab dump <file> --stage eop` and `interloko_lab eop <file>` print the EOP
   summary. The workbench still understands leading `// host-class:` metadata so
   host-backed objects are visible in the environment view.
-- `cairn_corpus` supports `dump eop contains ...` expectations.
+- `interloko_corpus` supports `dump eop contains ...` expectations.
 
 ### EOP Glossary
 
@@ -980,18 +980,18 @@ Deferred:
 
 ## Implemented: EOP Workbench Commands
 
-- `cairn_lab inspect <file> <object-id>` reads structured EOP records and prints
+- `interloko_lab inspect <file> <object-id>` reads structured EOP records and prints
   one object with kind, class, origin, storage, presentation, affordances,
   execution, and inspection facets.
-- `cairn_lab affordances <file> <object-id>` lists the stable affordance names
+- `interloko_lab affordances <file> <object-id>` lists the stable affordance names
   exposed by one object and reports unknown object IDs with available IDs.
-- `cairn_lab invoke-affordance <file> <object-id> <affordance>` executes a
+- `interloko_lab invoke-affordance <file> <object-id> <affordance>` executes a
   read-only workbench action when the object exposes it.
 - Supported read-only invocations map to existing compiler/session views:
   `show-slot`, `show-accessor`, `show-dispatch`, `show-runtime-layout`,
   `show-dependencies`, `dump-syntax`, `dump-ast`, `dump-sem`, `dump-mop`,
   `dump-eop`, `dump-lowered`, `dump-tape`, and `run`.
-- `tools/cairn_lab/fixtures/host_projected_environment.cairn` demonstrates an
+- `tools/interloko_lab/fixtures/host_projected_environment.cairn` demonstrates an
   explicit host projection provider with a class-like host object and an
   instance-like host object. The provider is installed only from explicit
   `// host-eop-*` fixture metadata.
@@ -1000,7 +1000,7 @@ Deferred:
 
 ### Workbench Boundary
 
-- `cairn_lab` is a workbench surface, not the long-term UI.
+- `interloko_lab` is a workbench surface, not the long-term UI.
 - Host projection is adapter-owned and explicit. `CairnHost` does not enumerate
   runtime heap objects.
 - EOP remains structured protocol vocabulary. There is still no Portolan bridge,
@@ -1029,7 +1029,7 @@ Deferred:
 - `constant slot` is metadata only in this slice. It records construction-time
   assignment intent, but reads lower through the same accessor/slot-read path
   as mutable slots because setters and mutation are not implemented yet.
-- MOP dumps, EOP records, and `cairn_lab inspect ... slot:*` now show slot
+- MOP dumps, EOP records, and `interloko_lab inspect ... slot:*` now show slot
   type, init keyword, required/default status, allocation, mutability, runtime
   representation, and accessor relationship.
 - Incremental fingerprints include slot defaults and slot metadata. Tests cover
@@ -1157,8 +1157,8 @@ Deferred:
   the lowered dispatcher name, and related artifact keys.
 - Parent-typed and top-object calls are reported as runtime-needed rather than
   pretending the selected method is statically knowable.
-- `cairn_lab dispatch <file>` lists dispatch sites, and
-  `cairn_lab dispatch <file> dispatch:d0` explains one site.
+- `interloko_lab dispatch <file>` lists dispatch sites, and
+  `interloko_lab dispatch <file> dispatch:d0` explains one site.
 - EOP projection now includes `dispatch:dN` objects. `inspect <file>
   dispatch:d0` shows the structured record, and `invoke-affordance <file>
   dispatch:d0 show-dispatch` prints the same dispatch explanation.
@@ -1205,7 +1205,7 @@ Deferred:
   than iterating effective slots ad hoc. The execution_tape path remains
   ordinary runtime object construction and host calls; no initialization or
   object-aggregate tape opcode was added.
-- Semantic dumps, MOP dumps, EOP class records, and `cairn_lab inspect <file>
+- Semantic dumps, MOP dumps, EOP class records, and `interloko_lab inspect <file>
   class:cN` expose initialization plans, accepted keywords, required/default
   status, slot order, and explicit-argument override behavior.
 - Inspection explicitly reports `initialize-methods=deferred`. This slice is
@@ -1234,7 +1234,7 @@ Deferred:
 
 ## Implemented: Catalog-First Diagnostic Model
 
-- `cairn_compiler::diagnostic::Diagnostic` now carries stable diagnostic facts:
+- `interloko_compiler::diagnostic::Diagnostic` now carries stable diagnostic facts:
   code, severity, span, labels, structured args, and notes. It does not carry a
   rendered English message.
 - `DiagnosticCode` provides stable code strings such as
@@ -1246,15 +1246,15 @@ Deferred:
 - Diagnostic fingerprints and logical work counters now include structured
   code/arg/label facts instead of rendered prose.
 - EOP diagnostic records expose code, severity, span, labels, and args, without
-  rendered text. `cairn_lab inspect <file> diagnostic:dN` shows those fields,
+  rendered text. `interloko_lab inspect <file> diagnostic:dN` shows those fields,
   and CLI diagnostic printing includes the code beside catalog-rendered text.
-- `tools/cairn_diagnostics` owns MessageFormat catalog loading and rendering.
+- `tools/interloko_diagnostics` owns MessageFormat catalog loading and rendering.
   Rendering is strict: missing catalog entries, missing required args, and
   MessageFormat failures are presentation errors rather than silent fallbacks.
 - Built-in English and pseudo catalogs cover every stable diagnostic code.
-  `cairn_lab` selects them with `CAIRN_DIAGNOSTIC_LOCALE=en|pseudo`, or loads an
+  `interloko_lab` selects them with `CAIRN_DIAGNOSTIC_LOCALE=en|pseudo`, or loads an
   override TOML resource through `CAIRN_DIAGNOSTIC_CATALOG`.
-- `cairn_corpus` supports `// expect: diagnostic code ...` while keeping
+- `interloko_corpus` supports `// expect: diagnostic code ...` while keeping
   `diagnostic contains ...` expectations for catalog-rendered English checks.
 - Corpus coverage now includes representative code expectations for syntax,
   AST, semantic, control-flow, restart, and initialization diagnostics.
@@ -1265,7 +1265,7 @@ Deferred:
 ### Deferred Diagnostic Design
 
 - Full localization beyond English and pseudo, a `message-format` dependency in
-  `cairn_compiler`, terminal snippet rendering, LSP adaptation, fix-it edits,
+  `interloko_compiler`, terminal snippet rendering, LSP adaptation, fix-it edits,
   warning severities, and generated diagnostic schemas remain deferred.
 
 ## Implemented: First Richer Value Types
@@ -1292,7 +1292,7 @@ Deferred:
   `<string>`, `<symbol>`, `<integer>`, and `<vector>` annotations.
 - Session, MOP, EOP, lowered, and tape dumps expose the new built-in value
   classes and literal forms.
-- `examples/rich_values`, `tools/cairn_lab/fixtures/rich_values.cairn`, REPL
+- `examples/rich_values`, `tools/interloko_lab/fixtures/rich_values.cairn`, REPL
   transcript coverage, and corpus programs demonstrate strings, symbols,
   keyword-style symbols, vectors, typed slots/functions, integer specializers,
   and generic dispatch.
@@ -1346,7 +1346,7 @@ Deferred:
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
 - `cargo doc --workspace --all-features --no-deps`
-- `cargo run -p cairn_forty_two_example` prints `42`.
-- `cargo run -p cairn_generic_area_example` prints `100`.
-- `cargo run -p cairn_host_backed_area_example` prints `74`.
-- `cargo run -p cairn_corpus` checks the small-program corpus.
+- `cargo run -p interloko_forty_two_example` prints `42`.
+- `cargo run -p interloko_generic_area_example` prints `100`.
+- `cargo run -p interloko_host_backed_area_example` prints `74`.
+- `cargo run -p interloko_corpus` checks the small-program corpus.

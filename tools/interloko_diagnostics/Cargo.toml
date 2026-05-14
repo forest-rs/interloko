@@ -1,12 +1,12 @@
 [package]
-name = "cairn_diagnostics"
+name = "interloko_diagnostics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "MessageFormat-backed diagnostic presentation for Cairn tools."
 
 [dependencies]
-cairn_compiler = { path = "../../crates/cairn_compiler" }
+interloko_compiler = { path = "../../crates/interloko_compiler" }
 message-format = { git = "https://github.com/forest-rs/message-format.git", rev = "d53e0a2", features = ["compile"] }
 message-format-resource-toml = { git = "https://github.com/forest-rs/message-format.git", rev = "d53e0a2" }
 

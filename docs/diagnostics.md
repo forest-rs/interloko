@@ -6,7 +6,7 @@ Cairn diagnostics are facts first. Prose belongs to catalog-backed
 presentation tools.
 
 A diagnostic has a stable code, severity, primary span, source labels,
-structured arguments, and optional notes. `cairn_compiler` does not store a
+structured arguments, and optional notes. `interloko_compiler` does not store a
 rendered English message on `Diagnostic`.
 
 Example:
@@ -21,15 +21,15 @@ args=[keyword=r:,slot=radius]
 The workbench exposes those facts through EOP records:
 
 ```sh
-cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
 ```
 
 The output includes the diagnostic code, labels, and args. It deliberately does
 not include rendered text, so EOP records and artifact fingerprints do not
 change when the selected language or catalog changes.
 
-`cairn_lab` renders command-line diagnostics through the built-in
-MessageFormat catalogs in `tools/cairn_diagnostics/diagnostics/`. The catalog
+`interloko_lab` renders command-line diagnostics through the built-in
+MessageFormat catalogs in `tools/interloko_diagnostics/diagnostics/`. The catalog
 entry ID is the diagnostic code:
 
 ```toml
@@ -39,25 +39,25 @@ entry ID is the diagnostic code:
 
 Rendering is strict: if a catalog has no entry for a code, if an entry refers
 to an argument the diagnostic did not provide, or if MessageFormat formatting
-fails, the renderer returns an error. `cairn_lab` reports that error instead of
+fails, the renderer returns an error. `interloko_lab` reports that error instead of
 silently falling back to English.
 
 Select a built-in diagnostic locale with:
 
 ```sh
-CAIRN_DIAGNOSTIC_LOCALE=pseudo cargo run -p cairn_lab -- run program.cairn
+CAIRN_DIAGNOSTIC_LOCALE=pseudo cargo run -p interloko_lab -- run program.cairn
 ```
 
 Load an override catalog from a MessageFormat resource TOML file with:
 
 ```sh
 CAIRN_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml \
-  cargo run -p cairn_lab -- run program.cairn
+  cargo run -p interloko_lab -- run program.cairn
 ```
 
 ## Second Read
 
-`cairn_compiler::diagnostic` owns the core diagnostic model:
+`interloko_compiler::diagnostic` owns the core diagnostic model:
 
 - `DiagnosticCode` is the stable identity for tests, corpus expectations, EOP
   records, and localized renderers.
@@ -65,7 +65,7 @@ CAIRN_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml \
   `expected`, `actual`, and counts.
 - `DiagnosticLabel` carries primary or secondary source spans.
 
-This slice intentionally keeps `message-format` out of `cairn_compiler`.
+This slice intentionally keeps `message-format` out of `interloko_compiler`.
 Diagnostic production does not know about locale selection, catalog loading,
 UI rendering, terminal color, or LSP adaptation.
 
@@ -73,10 +73,10 @@ The MF2 integration point is a renderer/catalog layer outside the compiler
 core:
 
 ```text
-cairn_compiler
+interloko_compiler
   Diagnostic { code, args, labels, notes }
 
-cairn_diagnostics
+interloko_diagnostics
   MessageFormat catalog loading
   DiagnosticCode + DiagnosticArg -> localized text
 
@@ -95,7 +95,7 @@ resource TOML:
 ```
 
 Tools can add or override a diagnostic catalog by compiling their own resource
-TOML with `cairn_diagnostics::DiagnosticCatalog::from_toml_source` and passing
+TOML with `interloko_diagnostics::DiagnosticCatalog::from_toml_source` and passing
 it to `DiagnosticRenderer::new`. Override catalogs do not change diagnostics,
 artifact identity, or cache behavior; they only change presentation text. A
 partial override can omit entries only if the caller is prepared for rendering
@@ -132,7 +132,7 @@ as compatibility checks for the default English catalog.
 ## Deferred
 
 - Full localization catalogs beyond the built-in English and pseudo catalogs.
-- A `message-format` dependency in `cairn_compiler`; it should remain out of
+- A `message-format` dependency in `interloko_compiler`; it should remain out of
   the compiler core.
 - Terminal snippet and color rendering.
 - LSP diagnostic adaptation.

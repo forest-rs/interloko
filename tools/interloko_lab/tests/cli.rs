@@ -1,11 +1,11 @@
-//! CLI fixture tests for `cairn_lab`.
+//! CLI fixture tests for `interloko_lab`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_cairn_lab")
+    env!("CARGO_BIN_EXE_interloko_lab")
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -18,7 +18,7 @@ fn run_lab(args: &[&str]) -> String {
     let output = Command::new(bin())
         .args(args)
         .output()
-        .expect("cairn_lab should run");
+        .expect("interloko_lab should run");
     assert!(
         output.status.success(),
         "command failed\nstdout:\n{}\nstderr:\n{}",
@@ -32,7 +32,7 @@ fn run_lab_success(args: &[&str]) -> (String, String) {
     let output = Command::new(bin())
         .args(args)
         .output()
-        .expect("cairn_lab should run");
+        .expect("interloko_lab should run");
     assert!(
         output.status.success(),
         "command failed\nstdout:\n{}\nstderr:\n{}",
@@ -51,7 +51,7 @@ fn run_lab_success_with_env(args: &[&str], envs: &[(&str, &str)]) -> (String, St
     for (name, value) in envs {
         command.env(name, value);
     }
-    let output = command.output().expect("cairn_lab should run");
+    let output = command.output().expect("interloko_lab should run");
     assert!(
         output.status.success(),
         "command failed\nstdout:\n{}\nstderr:\n{}",
@@ -68,7 +68,7 @@ fn run_lab_failure(args: &[&str]) -> String {
     let output = Command::new(bin())
         .args(args)
         .output()
-        .expect("cairn_lab should run");
+        .expect("interloko_lab should run");
     assert!(
         !output.status.success(),
         "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
@@ -84,7 +84,7 @@ fn run_lab_failure_with_env(args: &[&str], envs: &[(&str, &str)]) -> String {
     for (name, value) in envs {
         command.env(name, value);
     }
-    let output = command.output().expect("cairn_lab should run");
+    let output = command.output().expect("interloko_lab should run");
     assert!(
         !output.status.success(),
         "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",

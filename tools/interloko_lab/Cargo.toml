@@ -1,13 +1,13 @@
 [package]
-name = "cairn_lab"
+name = "interloko_lab"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "CLI workbench for inspecting Cairn compiler sessions."
 
 [dependencies]
-cairn_compiler = { path = "../../crates/cairn_compiler" }
-cairn_diagnostics = { path = "../cairn_diagnostics" }
+interloko_compiler = { path = "../../crates/interloko_compiler" }
+interloko_diagnostics = { path = "../interloko_diagnostics" }
 
 [lints]
 workspace = true

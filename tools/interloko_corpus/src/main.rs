@@ -6,12 +6,12 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cairn_compiler::diagnostic::DiagnosticCode;
-use cairn_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
-use cairn_compiler::session::{
+use interloko_compiler::diagnostic::DiagnosticCode;
+use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
+use interloko_compiler::session::{
     CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
 };
-use cairn_diagnostics::DiagnosticRenderer;
+use interloko_diagnostics::DiagnosticRenderer;
 
 type Result<T> = std::result::Result<T, CorpusError>;
 
@@ -81,7 +81,7 @@ fn list_command(root: Option<&str>) -> Result<Outcome> {
 fn dump_command(args: &[String]) -> Result<Outcome> {
     if args.len() != 4 || args[2] != "--stage" {
         return Err(CorpusError::Usage(
-            "usage: cairn_corpus dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
+            "usage: interloko_corpus dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
                 .into(),
         ));
     }
@@ -354,7 +354,7 @@ fn check_case(case: &Case) -> Vec<String> {
     failures
 }
 
-fn compile_case(case: &Case, mode: RuntimeMode) -> cairn_compiler::session::SessionArtifacts {
+fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::SessionArtifacts {
     if has_host_registry(&case.host_registry) {
         CompilerSession::compile_source_with_host_registry(
             &case.display_path,
@@ -426,7 +426,7 @@ fn usage() -> String {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "cairn_corpus".into());
+        .unwrap_or_else(|| "interloko_corpus".into());
     format!(
         "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
     )

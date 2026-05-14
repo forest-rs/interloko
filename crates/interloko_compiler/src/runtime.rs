@@ -1,7 +1,7 @@
 //! Compatibility re-exports and semantic-to-runtime layout construction.
 //!
 //! Executable runtime host support now lives in [`interloko_runtime`]. This
-//! module keeps the historical `cairn_compiler::runtime` path available while
+//! module keeps the historical `interloko_compiler::runtime` path available while
 //! the compiler owns the one part that still depends on semantic IR: converting
 //! a resolved [`sem::Module`] into a runtime layout.
 

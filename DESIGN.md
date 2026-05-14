@@ -1009,7 +1009,7 @@ cairn_tape         // execution_tape backend
 cairn_clif         // Cranelift backend
 cairn_runtime      // object model, dispatch, conditions
 cairn_driver       // incremental query driver
-cairn_diagnostics  // diagnostic types/rendering if needed
+interloko_diagnostics  // diagnostic types/rendering if needed
 ```
 
 Follow repository conventions:

@@ -1,6 +1,6 @@
 //! Milestone-0 end-to-end Cairn example.
 
-use cairn_compiler::driver::{CompileError, compile, compile_and_run_main};
+use interloko_compiler::driver::{CompileError, compile, compile_and_run_main};
 
 fn main() -> Result<(), CompileError> {
     let source = include_str!("../programs/forty_two.cairn");
@@ -25,7 +25,7 @@ fn main() -> Result<(), CompileError> {
         }
         Some(_) => {
             eprintln!(
-                "usage: cargo run -p cairn_forty_two_example -- [--dump-lowered|--dump-tape|--dump-all]"
+                "usage: cargo run -p interloko_forty_two_example -- [--dump-lowered|--dump-tape|--dump-all]"
             );
             std::process::exit(2);
         }

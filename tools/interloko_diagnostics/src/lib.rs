@@ -1,13 +1,13 @@
 //! Diagnostic presentation adapters for Cairn tools.
 //!
-//! `cairn_compiler` emits structured diagnostic facts. This crate owns the
+//! `interloko_compiler` emits structured diagnostic facts. This crate owns the
 //! presentation step that turns those facts into user-facing text through
 //! MessageFormat catalogs.
 
 use std::error::Error;
 use std::fmt;
 
-use cairn_compiler::diagnostic::{Diagnostic, DiagnosticArgValue, DiagnosticCode};
+use interloko_compiler::diagnostic::{Diagnostic, DiagnosticArgValue, DiagnosticCode};
 use message_format::{MessageCatalog, runtime};
 use message_format_resource_toml::parse_resource_toml;
 
@@ -213,8 +213,8 @@ fn diagnostic_value(value: &DiagnosticArgValue) -> runtime::Value {
 
 #[cfg(test)]
 mod tests {
-    use cairn_compiler::diagnostic::{DiagnosticArg, DiagnosticCode};
-    use cairn_compiler::syntax::Span;
+    use interloko_compiler::diagnostic::{DiagnosticArg, DiagnosticCode};
+    use interloko_compiler::syntax::Span;
 
     use super::*;
 

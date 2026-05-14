@@ -1,8 +1,8 @@
 //! Host-backed object Cairn example.
 
-use cairn_compiler::driver::{CompileError, compile_with_host_registry};
-use cairn_compiler::runtime::{CairnHost, HostObjectAdapter, ValueKind as RuntimeValueKind};
-use cairn_compiler::sem::{
+use interloko_compiler::driver::{CompileError, compile_with_host_registry};
+use interloko_compiler::runtime::{CairnHost, HostObjectAdapter, ValueKind as RuntimeValueKind};
+use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
 use execution_tape::host::HostError;
@@ -45,7 +45,7 @@ fn main() -> Result<(), CompileError> {
         }
         Some(_) => {
             eprintln!(
-                "usage: cargo run -p cairn_host_backed_area_example -- [--dump-lowered|--dump-tape|--dump-all]"
+                "usage: cargo run -p interloko_host_backed_area_example -- [--dump-lowered|--dump-tape|--dump-all]"
             );
             std::process::exit(2);
         }
@@ -70,7 +70,7 @@ fn host_registry() -> HostMetaRegistry {
 }
 
 fn host_object(
-    compiled: &cairn_compiler::driver::CompiledModule,
+    compiled: &interloko_compiler::driver::CompiledModule,
     host: &mut CairnHost,
     class_name: &str,
     adapter: impl HostObjectAdapter + 'static,

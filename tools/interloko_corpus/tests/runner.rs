@@ -1,10 +1,10 @@
-//! CLI tests for `cairn_corpus`.
+//! CLI tests for `interloko_corpus`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_cairn_corpus")
+    env!("CARGO_BIN_EXE_interloko_corpus")
 }
 
 fn workspace_root() -> PathBuf {
@@ -23,7 +23,7 @@ fn run_corpus(args: &[&str]) -> String {
     let output = Command::new(bin())
         .args(args)
         .output()
-        .expect("cairn_corpus should run");
+        .expect("interloko_corpus should run");
     assert!(
         output.status.success(),
         "command failed\nstdout:\n{}\nstderr:\n{}",

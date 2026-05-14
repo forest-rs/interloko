@@ -1,6 +1,6 @@
 //! Rich value-type Cairn example.
 
-use cairn_compiler::driver::{CompileError, compile, compile_and_run_main};
+use interloko_compiler::driver::{CompileError, compile, compile_and_run_main};
 
 fn main() -> Result<(), CompileError> {
     let source = include_str!("../programs/rich_values.cairn");
@@ -25,7 +25,7 @@ fn main() -> Result<(), CompileError> {
         }
         Some(_) => {
             eprintln!(
-                "usage: cargo run -p cairn_rich_values_example -- [--dump-lowered|--dump-tape|--dump-all]"
+                "usage: cargo run -p interloko_rich_values_example -- [--dump-lowered|--dump-tape|--dump-all]"
             );
             std::process::exit(2);
         }

@@ -56,7 +56,7 @@ The first extraction is deliberately small. `interloko_model` owns:
 - `MethodId`;
 - `BuiltinValueClass`.
 
-`cairn_compiler::sem` re-exports those names so existing code can keep using the
+`interloko_compiler::sem` re-exports those names so existing code can keep using the
 same semantic module path while the dependency direction improves.
 
 `interloko_runtime` owns:
@@ -68,13 +68,13 @@ same semantic module path while the dependency direction improves.
 - `CairnHost`, native object storage, boxed `<object>` values, strings,
   symbols, vectors, metaobjects, and host-backed object adapters.
 
-`cairn_compiler` still owns semantic `ValueKind`, because it contains
+`interloko_compiler` still owns semantic `ValueKind`, because it contains
 compiler-only states such as known callables and errors. The compiler also owns
-the semantic-to-runtime adapter: `cairn_compiler::runtime::runtime_layout_from_sem`.
+the semantic-to-runtime adapter: `interloko_compiler::runtime::runtime_layout_from_sem`.
 That function translates finalized semantic classes, slots, generics, methods,
 and setter metadata into runtime layout values consumed by `interloko_runtime`.
 
-`cairn_compiler::runtime` remains as a compatibility module that re-exports the
+`interloko_compiler::runtime` remains as a compatibility module that re-exports the
 runtime crate plus the semantic layout adapter.
 
 ## Glossary

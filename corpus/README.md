@@ -1,6 +1,6 @@
 # Cairn Small-Program Corpus
 
-This directory contains small `.cairn` programs used by `tools/cairn_corpus`.
+This directory contains small `.cairn` programs used by `tools/interloko_corpus`.
 Each program declares its expectations in leading comments:
 
 ```text

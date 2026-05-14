@@ -4,7 +4,7 @@
 
 ### Goal
 
-Move executable runtime host support out of `cairn_compiler` and into
+Move executable runtime host support out of `interloko_compiler` and into
 `crates/interloko_runtime`, while leaving semantic IR and sem-to-layout
 construction in the compiler.
 
@@ -13,7 +13,7 @@ construction in the compiler.
 `interloko_runtime` owns host-call symbols/signatures, runtime layout data,
 runtime-representable value kinds, `CairnHost`, object storage, boxed top
 values, string/symbol/vector runtime objects, metaobject host calls, and
-host-backed object adapters. `cairn_compiler` owns syntax, semantic IR,
+host-backed object adapters. `interloko_compiler` owns syntax, semantic IR,
 semantic `ValueKind`, lowering, sessions, diagnostics, and the adapter that
 turns `sem::Module` into runtime layout.
 
@@ -25,8 +25,8 @@ turns `sem::Module` into runtime layout.
 3. Add runtime `ValueKind` and convert semantic slot kinds during layout
    construction.
 4. Replace `RuntimeLayout::from_sem` with
-   `cairn_compiler::runtime::runtime_layout_from_sem`.
-5. Keep `cairn_compiler::runtime` as compatibility re-exports plus the
+   `interloko_compiler::runtime::runtime_layout_from_sem`.
+5. Keep `interloko_compiler::runtime` as compatibility re-exports plus the
    sem-layout adapter.
 6. Point tape emission at `interloko_runtime` symbols/signatures.
 7. Update docs/progress, run gates/examples, audit, and commit.
@@ -70,11 +70,11 @@ session orchestration, collaboration, identity, permissions, or persistence.
 2. Create `crates/interloko_model` as a `no_std` substrate crate.
 3. Move durable shared ids (`ClassId`, `SlotId`, `GenericFunctionId`,
    `MethodId`) and `BuiltinValueClass` into `interloko_model`.
-4. Re-export the moved types from `cairn_compiler::sem` so existing call sites
+4. Re-export the moved types from `interloko_compiler::sem` so existing call sites
    remain calm during the extraction.
 5. Keep `ValueKind`, runtime layout records, semantic IR, lowering, tape
    emission, sessions, diagnostics, and runtime host execution in
-   `cairn_compiler`.
+   `interloko_compiler`.
 6. Update progress notes and run all workspace gates, corpus, and examples.
 
 ### Risks
@@ -318,7 +318,7 @@ diagnostics.
 
 ### Fence
 
-`cairn_compiler` owns source syntax, semantic value kinds, lowered value
+`interloko_compiler` owns source syntax, semantic value kinds, lowered value
 operations, runtime representation, and tape emission for these values. It
 explicitly does not own general collection libraries, mutable sequence
 operations, persistent cross-session interning, package-qualified symbols,
@@ -358,14 +358,14 @@ string interpolation, locale semantics, or optimizer work.
 
 ### Goal
 
-Add a plain-stdio `cairn_repl` tool that drives the existing incremental
+Add a plain-stdio `interloko_repl` tool that drives the existing incremental
 session API, supports durable definitions plus generated scratch expressions,
 and exposes the same stage/artifact/MOP/EOP inspection surfaces as the
 workbench.
 
 ### Fence
 
-`cairn_repl` owns terminal interaction, input buffering, scratch-source
+`interloko_repl` owns terminal interaction, input buffering, scratch-source
 generation, and command routing. It explicitly does not own parsing, binding,
 runtime dispatch, diagnostics rendering policy, MOP/EOP construction, artifact
 graph logic, persistent image state, or language semantics.
@@ -380,14 +380,14 @@ graph logic, persistent image state, or language semantics.
   lowered IR -> tape.
 - Named scratch execution uses a small compiler/session runtime API, not a
   fake `main`.
-- REPL diagnostics render through `cairn_diagnostics`.
+- REPL diagnostics render through `interloko_diagnostics`.
 - The first slice uses plain stdin/stdout, with no line-editing dependency.
 
 ### Steps
 
 1. Add a compiler/session API for running a named zero-argument function from
    existing `SessionArtifacts`.
-2. Add `tools/cairn_repl` to the workspace with a small state machine for
+2. Add `tools/interloko_repl` to the workspace with a small state machine for
    durable source, pending multiline definitions, scratch expressions, and
    colon commands.
 3. Reuse `SessionArtifacts` dumps, dispatch inspection, artifact reports, and
@@ -399,7 +399,7 @@ graph logic, persistent image state, or language semantics.
 ### Risks
 
 - Do not accidentally treat expression evaluation as top-level mutation.
-- Do not duplicate `cairn_lab` rendering logic beyond small text formatting
+- Do not duplicate `interloko_lab` rendering logic beyond small text formatting
   helpers.
 - Keep result printing honest: integer results print directly; non-integer or
   missing-function cases report runtime errors.
@@ -414,11 +414,11 @@ catalogs loaded by presentation tools.
 
 ### Fence
 
-`cairn_compiler` owns diagnostic codes, arguments, spans, labels, notes, and
+`interloko_compiler` owns diagnostic codes, arguments, spans, labels, notes, and
 artifact identity. It explicitly does not own MessageFormat compilation, TOML
 resource loading, selected language/catalog state, or fallback English text.
-`cairn_diagnostics` owns catalog-backed rendering for tools such as
-`cairn_lab` and `cairn_corpus`.
+`interloko_diagnostics` owns catalog-backed rendering for tools such as
+`interloko_lab` and `interloko_corpus`.
 
 ### Invariants
 
@@ -437,8 +437,8 @@ resource loading, selected language/catalog state, or fallback English text.
 2. Update session fingerprints, work counters, EOP diagnostic projection, and
    corpus checks so they use diagnostic facts and catalog rendering where text
    is intentionally tested.
-3. Make `cairn_diagnostics` strict, add pseudo catalog coverage, and expose
-   explicit catalog/locale selection for `cairn_lab`.
+3. Make `interloko_diagnostics` strict, add pseudo catalog coverage, and expose
+   explicit catalog/locale selection for `interloko_lab`.
 4. Add tests for code/arg-only rendering, loud missing catalog/arg failures,
    pseudo rendering, and language-independent artifact identity.
 5. Update docs, then run fmt, clippy, workspace tests, and docs.
@@ -462,7 +462,7 @@ dependency.
 
 ### Fence
 
-`cairn_compiler::diagnostic` owns diagnostic identity, spans, labels, arguments,
+`interloko_compiler::diagnostic` owns diagnostic identity, spans, labels, arguments,
 and the default English rendering contract. It explicitly does not own localized
 catalog loading, terminal snippet styling, LSP adaptation, fix-it edits, or
 MessageFormat 2 runtime integration.
@@ -476,20 +476,20 @@ MessageFormat 2 runtime integration.
 - Structured arguments use named values rather than parsing prose.
 - Labels describe source spans; the primary label remains the diagnostic span.
 - EOP diagnostic objects expose both facts and rendered text.
-- `cairn_compiler` must remain free of a production dependency on
+- `interloko_compiler` must remain free of a production dependency on
   `../message-format`.
 
 ### Steps
 
 1. Add `DiagnosticCode`, diagnostic args, labels, notes, and render helpers in
-   `cairn_compiler::diagnostic`.
+   `interloko_compiler::diagnostic`.
 2. Provide constructors/builders so new diagnostics can be structured while old
    string callers still compile.
 3. Migrate syntax, AST, semantic, lowering, tape, runtime/session diagnostic
    creation to stable codes and structured args.
 4. Teach diagnostic fingerprints, work counters, EOP projection, dumps, and
-   `cairn_lab` output to include codes and structured facts.
-5. Extend `cairn_corpus` to support `// expect: diagnostic code ...` while
+   `interloko_lab` output to include codes and structured facts.
+5. Extend `interloko_corpus` to support `// expect: diagnostic code ...` while
    keeping `diagnostic contains ...`.
 6. Add focused unit/CLI/corpus coverage for code expectations, args, labels,
    rendered compatibility text, and EOP diagnostic records.
@@ -598,7 +598,7 @@ multi-argument dispatch, or new execution_tape opcodes.
    runtime dispatch, sibling rejection, stable IDs across trivia, and changed
    method/class facts affecting explanations/artifacts.
 4. Commit the compiler/session model slice.
-5. Add `cairn_lab dispatch <file>` and `cairn_lab dispatch <file> <id>`, plus
+5. Add `interloko_lab dispatch <file>` and `interloko_lab dispatch <file> <id>`, plus
    EOP `dispatch:dN` records and `inspect` support.
 6. Add workbench fixtures/tests and commit the CLI/workbench slice.
 7. Document how to list/inspect dispatch sites in MOP/EOP docs and progress
@@ -767,13 +767,13 @@ allocation variants beyond instance slots, persistence, or new tape opcodes.
 
 ### Goal
 
-Add a small read-only environment workbench surface to `cairn_lab`: inspect one
+Add a small read-only environment workbench surface to `interloko_lab`: inspect one
 EOP object, list its affordances, invoke safe view-producing affordances, and
 demonstrate explicit host projection through a tool fixture.
 
 ### Fence
 
-`cairn_lab` owns interactive/workbench command glue over structured EOP records.
+`interloko_lab` owns interactive/workbench command glue over structured EOP records.
 The compiler owns the records. Host adapters own explicit host projection.
 This slice explicitly does not own Portolan subjects, Understory presentation,
 persistence, automatic host reflection, runtime heap enumeration, mutation, or
@@ -790,7 +790,7 @@ authorization policy.
 
 ### Steps
 
-1. Add a `cairn_lab` workbench wrapper that compiles source and gathers
+1. Add a `interloko_lab` workbench wrapper that compiles source and gathers
    compiler records plus optional host-projected records.
 2. Add `inspect`, `affordances`, and read-only `invoke-affordance` commands.
 3. Add explicit fixture metadata and a provider for host class-like and
@@ -813,8 +813,8 @@ authorization policy.
 ### Goal
 
 Turn the Environment Object Protocol from a text-only dump into typed compiler
-records that tools can inspect directly. Keep the existing `cairn_lab eop` and
-`cairn_corpus` behavior by rendering the text dump from those records.
+records that tools can inspect directly. Keep the existing `interloko_lab eop` and
+`interloko_corpus` behavior by rendering the text dump from those records.
 
 ### Fence
 
@@ -845,7 +845,7 @@ or authorization policy.
 4. Add direct structured-record tests for native compiler records, host-backed
    compiler records, and host-projected records.
 5. Update progress/design notes and run fmt, clippy, workspace tests, docs,
-   `cairn_lab`, and `cairn_corpus`.
+   `interloko_lab`, and `interloko_corpus`.
 
 ### Risks
 
@@ -1017,7 +1017,7 @@ value kinds and representation coercions only.
 5. Update dumps, fingerprints, corpus, and incremental tests for signature
    edits and signature-driven call invalidation.
 6. Update progress notes and run fmt, clippy, workspace tests, docs, examples,
-   `cairn_lab`, and `cairn_corpus`.
+   `interloko_lab`, and `interloko_corpus`.
 
 ### Risks
 
@@ -1066,7 +1066,7 @@ IDs, and generic dispatch may keep using runtime class IDs internally.
 6. Add semantic `class-of(x)` returning a class-object value while lowering
    through existing class-id machinery.
 7. Update progress notes and run fmt, clippy, workspace tests, docs, examples,
-   `cairn_lab`, and `cairn_corpus`.
+   `interloko_lab`, and `interloko_corpus`.
 
 ### Risks
 
@@ -1391,8 +1391,8 @@ ordinary class <invalid-radius>
    - `cargo test --workspace --all-features`;
    - `cargo doc --workspace --all-features --no-deps`;
    - existing examples;
-   - `cairn_lab` fixture tests;
-   - `cairn_corpus`.
+   - `interloko_lab` fixture tests;
+   - `interloko_corpus`.
 
 ### Risks
 
@@ -1478,8 +1478,8 @@ source #t / #f / comparisons / if
    - `cargo test --workspace --all-features`;
    - `cargo doc --workspace --all-features --no-deps`;
    - existing examples;
-   - `cairn_lab` fixture tests;
-   - `cairn_corpus`.
+   - `interloko_lab` fixture tests;
+   - `interloko_corpus`.
 
 ### Risks
 
@@ -1531,7 +1531,7 @@ named source files
   -> one-shot stage builders when a cache entry is missing/stale
   -> per-artifact fingerprints + dependency graph
   -> reuse / recompute / invalidated / affected reports
-  -> cairn_lab edit output + cairn_corpus checks
+  -> interloko_lab edit output + interloko_corpus checks
 ```
 
 ### Invariants
@@ -1575,8 +1575,8 @@ semantics.
    - harmless trivia edits reusing most artifacts;
    - focused method body edits avoiding unrelated method artifacts;
    - definition-changing edits invalidating broad dependents.
-5. Add `cairn_lab` output for edit reports.
-6. Update `cairn_corpus` so corpus checks compile through the incremental
+5. Add `interloko_lab` output for edit reports.
+6. Update `interloko_corpus` so corpus checks compile through the incremental
    engine.
 7. Update progress notes and migration notes.
 8. Run full gates:
@@ -1585,8 +1585,8 @@ semantics.
    - `cargo test --workspace --all-features`;
    - `cargo doc --workspace --all-features --no-deps`;
    - existing examples;
-   - `cairn_lab` fixture commands;
-   - `cairn_corpus` runner.
+   - `interloko_lab` fixture commands;
+   - `interloko_corpus` runner.
 
 ### Risks
 
@@ -1616,7 +1616,7 @@ stability checks without committing large snapshot files.
 - No new production dependencies.
 - No persistent snapshot store.
 - No watch mode or editor integration.
-- No replacement for `tools/cairn_lab`; this runner is batch validation, not an
+- No replacement for `tools/interloko_lab`; this runner is batch validation, not an
   interactive workbench.
 
 ### Fence
@@ -1624,7 +1624,7 @@ stability checks without committing large snapshot files.
 The `corpus/` tree owns source fixtures and declarative expectations; it
 explicitly does not own compiler behavior or dump formatting.
 
-The `tools/cairn_corpus` crate owns filesystem traversal, expectation parsing,
+The `tools/interloko_corpus` crate owns filesystem traversal, expectation parsing,
 session invocation, and human-readable check output; it explicitly does not own
 syntax, semantic, lowering, tape, or runtime rules.
 
@@ -1633,8 +1633,8 @@ syntax, semantic, lowering, tape, or runtime rules.
 ```text
 corpus/**/*.cairn
   -> header expectations
-  -> tools/cairn_corpus
-  -> cairn_compiler::session
+  -> tools/interloko_corpus
+  -> interloko_compiler::session
   -> runtime result / diagnostics / stage dumps
   -> pass/fail report
 ```
@@ -1661,7 +1661,7 @@ The runner treats these as the stable manifest for the file.
    - classes, slots, and object construction;
    - generic dispatch;
    - expected diagnostics.
-2. Add `tools/cairn_corpus` with:
+2. Add `tools/interloko_corpus` with:
    - recursive corpus discovery;
    - header expectation parsing;
    - session compilation;
@@ -1675,8 +1675,8 @@ The runner treats these as the stable manifest for the file.
    - `cargo test --workspace --all-features`;
    - `cargo doc --workspace --all-features --no-deps`;
    - existing examples;
-   - `cairn_lab` fixture commands;
-   - `cairn_corpus` runner.
+   - `interloko_lab` fixture commands;
+   - `interloko_corpus` runner.
 6. Close ticket and commit coherent changes.
 
 ### Risks
@@ -1718,7 +1718,7 @@ stable artifact-key reporting, dumps, and edit comparisons; it explicitly does
 not own language semantics, lowering rules, runtime object storage, or
 `execution_tape` bytecode internals.
 
-The `tools/cairn_lab` crate owns file IO, CLI parsing, process exit behavior,
+The `tools/interloko_lab` crate owns file IO, CLI parsing, process exit behavior,
 and presentation; it explicitly does not own compiler state or semantic
 decisions.
 
@@ -1726,15 +1726,15 @@ decisions.
 
 ```text
 .cairn file(s)
-  -> cairn_compiler::session
+  -> interloko_compiler::session
   -> syntax / ast / sem / lower / tape / runtime
   -> dumps + artifact graph + edit diff
-  -> tools/cairn_lab CLI
+  -> tools/interloko_lab CLI
 ```
 
 ### Steps
 
-1. Add `session` API to `cairn_compiler`:
+1. Add `session` API to `interloko_compiler`:
    - named source files with `SourceFileId`;
    - per-stage artifacts;
    - diagnostics aggregation;
@@ -1746,7 +1746,7 @@ decisions.
    - preserved definitions;
    - changed definitions;
    - affected query artifacts for focused method body edits.
-4. Add `tools/cairn_lab` CLI:
+4. Add `tools/interloko_lab` CLI:
    - `run <file>`;
    - `dump <file> --stage syntax|ast|sem|lowered|tape|all`;
    - `artifacts <file>`;
@@ -1771,4 +1771,4 @@ decisions.
 - `invalidation 0.2` uses dense internal keys. Preserve public `ArtifactKey`
   reporting while keeping dense tracker indexes internal.
 - The compiler crate is `no_std + alloc`. Keep filesystem and CLI concerns in
-  `tools/cairn_lab`.
+  `tools/interloko_lab`.

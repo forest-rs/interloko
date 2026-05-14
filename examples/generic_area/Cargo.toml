@@ -1,12 +1,12 @@
 [package]
-name = "cairn_generic_area_example"
+name = "interloko_generic_area_example"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
-cairn_compiler = { path = "../../crates/cairn_compiler" }
+interloko_compiler = { path = "../../crates/interloko_compiler" }
 
 [lints]
 workspace = true

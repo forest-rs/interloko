@@ -2,7 +2,7 @@
 
 ## Overview
 
-`cairn_lab` can inspect the structured Environment Object Protocol records
+`interloko_lab` can inspect the structured Environment Object Protocol records
 emitted by the compiler session. The workbench answers three questions:
 
 - what environment object is this?
@@ -17,7 +17,7 @@ UI contract, Portolan bridge, or authorization layer.
 Run `eop` to discover object IDs:
 
 ```sh
-cargo run -p cairn_lab -- eop tools/cairn_lab/fixtures/generic_area.cairn
+cargo run -p interloko_lab -- eop tools/interloko_lab/fixtures/generic_area.cairn
 ```
 
 Typical IDs include:
@@ -40,7 +40,7 @@ Typical IDs include:
 Inspect prints one structured EOP record:
 
 ```sh
-cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/generic_area.cairn class:c0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/generic_area.cairn class:c0
 ```
 
 The output includes:
@@ -57,7 +57,7 @@ The output includes:
 Diagnostics are environment objects too:
 
 ```sh
-cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
 ```
 
 Diagnostic inspection reports structured facts, not only prose: stable code,
@@ -68,7 +68,7 @@ Class inspection includes initialization facts derived from the class's
 finalized effective slots:
 
 ```sh
-cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_point.cairn class:c1
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.cairn class:c1
 ```
 
 The `inspection` text names the accepted init keywords, inherited/direct slot
@@ -82,13 +82,13 @@ not user-defined initialization methods themselves.
 List actions exposed by one object:
 
 ```sh
-cargo run -p cairn_lab -- affordances tools/cairn_lab/fixtures/generic_area.cairn generic:g0
+cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_area.cairn generic:g0
 ```
 
 Unknown object IDs fail with a list of available IDs:
 
 ```sh
-cargo run -p cairn_lab -- affordances tools/cairn_lab/fixtures/generic_area.cairn missing:object
+cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_area.cairn missing:object
 ```
 
 ## Read-Only Invocation
@@ -97,14 +97,14 @@ cargo run -p cairn_lab -- affordances tools/cairn_lab/fixtures/generic_area.cair
 existing compiler/session views:
 
 ```sh
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn slot:c0.s0 show-accessor
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn accessor:c0.s0 show-slot
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn generic:g0 show-dispatch
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn dispatch:d0 show-dispatch
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn class:c0 show-runtime-layout
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn method:m0 show-dependencies
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn method:m0 dump-sem
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/generic_area.cairn function:f0 run
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn slot:c0.s0 show-accessor
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn accessor:c0.s0 show-slot
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn generic:g0 show-dispatch
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn dispatch:d0 show-dispatch
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn class:c0 show-runtime-layout
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn method:m0 show-dependencies
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn method:m0 dump-sem
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn function:f0 run
 ```
 
 Supported read-only invocations are:
@@ -124,7 +124,7 @@ Supported read-only invocations are:
 - `run`
 
 Mutation-oriented affordances such as `edit-body` and `add-method` can appear
-in records but are intentionally not executable by `cairn_lab` in this slice.
+in records but are intentionally not executable by `interloko_lab` in this slice.
 
 ## Dispatch Sites
 
@@ -136,20 +136,20 @@ artifact keys.
 List dispatch sites:
 
 ```sh
-cargo run -p cairn_lab -- dispatch tools/cairn_lab/fixtures/inherited_dispatch.cairn
+cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.cairn
 ```
 
 Explain one dispatch site:
 
 ```sh
-cargo run -p cairn_lab -- dispatch tools/cairn_lab/fixtures/inherited_dispatch.cairn dispatch:d0
+cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0
 ```
 
 The same explanation is available through EOP:
 
 ```sh
-cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/inherited_dispatch.cairn dispatch:d0
-cargo run -p cairn_lab -- invoke-affordance tools/cairn_lab/fixtures/inherited_dispatch.cairn dispatch:d0 show-dispatch
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0 show-dispatch
 ```
 
 The explanation is read-only. It describes the current one-argument nominal
@@ -172,9 +172,9 @@ end;
 Run:
 
 ```sh
-cargo run -p cairn_lab -- eop tools/cairn_lab/fixtures/host_projected_environment.cairn
-cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/host_projected_environment.cairn host-class:rust-shape
-cargo run -p cairn_lab -- inspect tools/cairn_lab/fixtures/host_projected_environment.cairn host-instance:circle-10
+cargo run -p interloko_lab -- eop tools/interloko_lab/fixtures/host_projected_environment.cairn
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projected_environment.cairn host-class:rust-shape
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projected_environment.cairn host-instance:circle-10
 ```
 
 These records are host-provided environment objects. They do not make
@@ -190,4 +190,4 @@ and do not create Cairn language semantics.
 - **Host provider:** explicit Rust adapter that contributes host-owned records.
 - **Dispatch site:** a compiler-generated environment object for one semantic
   generic call.
-- **Workbench:** the `cairn_lab` command surface for inspecting records.
+- **Workbench:** the `interloko_lab` command surface for inspecting records.
