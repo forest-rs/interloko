@@ -210,12 +210,20 @@ fn slot_setter_name(slot_name: &str) -> String {
 
 fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
     Some(match name {
+        "object-class" => Intrinsic::ObjectClass,
         "class-name" => Intrinsic::ClassName,
-        "class-superclass" => Intrinsic::ClassSuperclass,
-        "class-slots" => Intrinsic::ClassSlots,
-        "generic-name" => Intrinsic::GenericName,
-        "generic-methods" => Intrinsic::GenericMethods,
-        "method-generic" => Intrinsic::MethodGeneric,
+        "class-direct-superclass" => Intrinsic::ClassDirectSuperclass,
+        "class-direct-slots" => Intrinsic::ClassDirectSlots,
+        "class-effective-slots" => Intrinsic::ClassEffectiveSlots,
+        "slot-name" => Intrinsic::SlotName,
+        "slot-type" => Intrinsic::SlotType,
+        "slot-init-keyword" => Intrinsic::SlotInitKeyword,
+        "slot-mutable?" => Intrinsic::SlotMutable,
+        "slot-getter" => Intrinsic::SlotGetter,
+        "slot-setter" => Intrinsic::SlotSetter,
+        "generic-function-name" => Intrinsic::GenericFunctionName,
+        "generic-function-methods" => Intrinsic::GenericFunctionMethods,
+        "method-generic-function" => Intrinsic::MethodGenericFunction,
         "method-specializers" => Intrinsic::MethodSpecializers,
         "vector-size" => Intrinsic::VectorSize,
         "vector-ref" => Intrinsic::VectorRef,
@@ -225,12 +233,20 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
 
 const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
     match intrinsic {
-        Intrinsic::ClassName
-        | Intrinsic::ClassSuperclass
-        | Intrinsic::ClassSlots
-        | Intrinsic::GenericName
-        | Intrinsic::GenericMethods
-        | Intrinsic::MethodGeneric
+        Intrinsic::ObjectClass
+        | Intrinsic::ClassName
+        | Intrinsic::ClassDirectSuperclass
+        | Intrinsic::ClassDirectSlots
+        | Intrinsic::ClassEffectiveSlots
+        | Intrinsic::SlotName
+        | Intrinsic::SlotType
+        | Intrinsic::SlotInitKeyword
+        | Intrinsic::SlotMutable
+        | Intrinsic::SlotGetter
+        | Intrinsic::SlotSetter
+        | Intrinsic::GenericFunctionName
+        | Intrinsic::GenericFunctionMethods
+        | Intrinsic::MethodGenericFunction
         | Intrinsic::MethodSpecializers
         | Intrinsic::VectorSize => 1,
         Intrinsic::VectorRef => 2,
@@ -239,9 +255,27 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
 
 fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
     match (intrinsic, index) {
-        (Intrinsic::ClassName | Intrinsic::ClassSuperclass | Intrinsic::ClassSlots, 0) => "<class>",
-        (Intrinsic::GenericName | Intrinsic::GenericMethods, 0) => "<generic-function>",
-        (Intrinsic::MethodGeneric | Intrinsic::MethodSpecializers, 0) => "<method>",
+        (Intrinsic::ObjectClass, 0) => "<object>",
+        (
+            Intrinsic::ClassName
+            | Intrinsic::ClassDirectSuperclass
+            | Intrinsic::ClassDirectSlots
+            | Intrinsic::ClassEffectiveSlots,
+            0,
+        ) => "<class>",
+        (
+            Intrinsic::SlotName
+            | Intrinsic::SlotType
+            | Intrinsic::SlotInitKeyword
+            | Intrinsic::SlotMutable
+            | Intrinsic::SlotGetter
+            | Intrinsic::SlotSetter,
+            0,
+        ) => "<slot-descriptor>",
+        (Intrinsic::GenericFunctionName | Intrinsic::GenericFunctionMethods, 0) => {
+            "<generic-function>"
+        }
+        (Intrinsic::MethodGenericFunction | Intrinsic::MethodSpecializers, 0) => "<method>",
         (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => "<vector>",
         (Intrinsic::VectorRef, 1) => "<integer>",
         _ => "<object>",
@@ -1071,18 +1105,34 @@ impl From<ast::CompareOp> for CompareOp {
 /// Built-in read-only runtime operation exposed by the Cairn kernel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Intrinsic {
+    /// Returns a value's runtime class metaobject as `<object>`.
+    ObjectClass,
     /// Returns the name of a class metaobject.
     ClassName,
-    /// Returns the superclass metaobject for a class, or `#f`.
-    ClassSuperclass,
-    /// Returns slot-descriptor metaobjects for a class.
-    ClassSlots,
+    /// Returns the direct superclass metaobject for a class, or `#f`.
+    ClassDirectSuperclass,
+    /// Returns direct slot-descriptor metaobjects for a class.
+    ClassDirectSlots,
+    /// Returns finalized effective slot-descriptor metaobjects for a class.
+    ClassEffectiveSlots,
+    /// Returns a slot descriptor's source name.
+    SlotName,
+    /// Returns a slot descriptor's declared type text.
+    SlotType,
+    /// Returns a slot descriptor's construction init keyword text.
+    SlotInitKeyword,
+    /// Returns whether a slot descriptor names a writable slot.
+    SlotMutable,
+    /// Returns a slot descriptor's getter accessor name.
+    SlotGetter,
+    /// Returns a slot descriptor's setter generic metaobject, or `#f`.
+    SlotSetter,
     /// Returns the name of a generic-function metaobject.
-    GenericName,
+    GenericFunctionName,
     /// Returns method metaobjects attached to a generic function.
-    GenericMethods,
+    GenericFunctionMethods,
     /// Returns the generic-function metaobject implemented by a method.
-    MethodGeneric,
+    MethodGenericFunction,
     /// Returns class metaobjects for a method's specializers.
     MethodSpecializers,
     /// Returns an immutable vector's element count.
@@ -3150,17 +3200,27 @@ impl Lowering {
 
     fn intrinsic_result_kind(&self, intrinsic: Intrinsic) -> ValueKind {
         match intrinsic {
-            Intrinsic::ClassName | Intrinsic::GenericName => self
+            Intrinsic::ClassName
+            | Intrinsic::SlotName
+            | Intrinsic::SlotType
+            | Intrinsic::SlotInitKeyword
+            | Intrinsic::SlotGetter
+            | Intrinsic::GenericFunctionName => self
                 .builtin_value_class(BuiltinValueClass::String)
                 .map_or(ValueKind::Error, ValueKind::String),
-            Intrinsic::ClassSlots | Intrinsic::GenericMethods | Intrinsic::MethodSpecializers => {
-                self.builtin_value_class(BuiltinValueClass::Vector)
-                    .map_or(ValueKind::Error, ValueKind::Vector)
-            }
+            Intrinsic::ClassDirectSlots
+            | Intrinsic::ClassEffectiveSlots
+            | Intrinsic::GenericFunctionMethods
+            | Intrinsic::MethodSpecializers => self
+                .builtin_value_class(BuiltinValueClass::Vector)
+                .map_or(ValueKind::Error, ValueKind::Vector),
+            Intrinsic::SlotMutable => ValueKind::Bool,
             Intrinsic::VectorSize => ValueKind::I64,
-            Intrinsic::ClassSuperclass | Intrinsic::MethodGeneric | Intrinsic::VectorRef => {
-                ValueKind::Any
-            }
+            Intrinsic::ObjectClass
+            | Intrinsic::ClassDirectSuperclass
+            | Intrinsic::SlotSetter
+            | Intrinsic::MethodGenericFunction
+            | Intrinsic::VectorRef => ValueKind::Any,
         }
     }
 
@@ -3169,16 +3229,45 @@ impl Lowering {
             return true;
         }
         match (intrinsic, index) {
-            (Intrinsic::ClassName | Intrinsic::ClassSuperclass | Intrinsic::ClassSlots, 0) => {
-                matches!(actual, ValueKind::ClassObject(_) | ValueKind::Any)
-            }
-            (Intrinsic::GenericName | Intrinsic::GenericMethods, 0) => matches!(
+            (Intrinsic::ObjectClass, 0) => matches!(
+                actual,
+                ValueKind::Any
+                    | ValueKind::I64
+                    | ValueKind::String(_)
+                    | ValueKind::Symbol(_)
+                    | ValueKind::Vector(_)
+                    | ValueKind::Object(_)
+                    | ValueKind::ClassObject(_)
+                    | ValueKind::GenericFunctionObject(_)
+                    | ValueKind::MethodObject(_)
+                    | ValueKind::SlotDescriptorObject { .. }
+            ),
+            (
+                Intrinsic::ClassName
+                | Intrinsic::ClassDirectSuperclass
+                | Intrinsic::ClassDirectSlots
+                | Intrinsic::ClassEffectiveSlots,
+                0,
+            ) => matches!(actual, ValueKind::ClassObject(_) | ValueKind::Any),
+            (
+                Intrinsic::SlotName
+                | Intrinsic::SlotType
+                | Intrinsic::SlotInitKeyword
+                | Intrinsic::SlotMutable
+                | Intrinsic::SlotGetter
+                | Intrinsic::SlotSetter,
+                0,
+            ) => matches!(
+                actual,
+                ValueKind::SlotDescriptorObject { .. } | ValueKind::Any
+            ),
+            (Intrinsic::GenericFunctionName | Intrinsic::GenericFunctionMethods, 0) => matches!(
                 actual,
                 ValueKind::GenericFunctionObject(_)
                     | ValueKind::KnownCallable(KnownCallable::GenericFunction(_))
                     | ValueKind::Any
             ),
-            (Intrinsic::MethodGeneric | Intrinsic::MethodSpecializers, 0) => {
+            (Intrinsic::MethodGenericFunction | Intrinsic::MethodSpecializers, 0) => {
                 matches!(actual, ValueKind::MethodObject(_) | ValueKind::Any)
             }
             (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => {

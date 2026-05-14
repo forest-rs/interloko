@@ -1,5 +1,60 @@
 # Plans
 
+## Name The Read-Only MOP Protocol Surface
+
+### Goal
+
+Turn the first-class metaobject slice into an intentional read-only MOP
+protocol. Cairn code should ask object-system questions through stable protocol
+names such as `object-class`, `class-direct-slots`,
+`class-effective-slots`, `slot-name`, `generic-function-methods`, and
+`method-generic-function`. The old compiler-owned metadata remains the source
+of truth; this slice only exposes it more coherently.
+
+### Non-Goals
+
+- No runtime class, generic, method, or slot mutation.
+- No user-defined metaclasses.
+- No method combination or `next-method`.
+- No dynamic add/remove method protocol.
+- No generalized reflective invocation.
+- No persistent image mutation or capability policy.
+- No optimizer assumptions over reflective protocol calls.
+
+### Fence
+
+`sem` owns stable protocol meaning, static checking, and metaobject identity. It
+explicitly does not own runtime heap representation or live image mutation.
+Runtime owns concrete read-only query execution. Session, MOP, and EOP dumps
+are views over the same semantic/runtime facts, not a parallel protocol model.
+
+### Steps
+
+1. Add canonical protocol names for object, class, slot, generic-function, and
+   method inspection without compatibility aliases for the previous intrinsic
+   names.
+2. Split class slot queries into direct source slots and effective finalized
+   slots.
+3. Add slot descriptor queries for name, declared type text, init keyword,
+   mutability, getter name, and setter generic when one exists.
+4. Add `object-class` as the protocol spelling for asking a runtime value for
+   its class metaobject.
+5. Lower all protocol operations through ordinary runtime host calls and tape
+   host signatures, with no MOP-specific tape opcodes.
+6. Update corpus examples, session dumps, lowered dumps, progress notes, and
+   user-facing docs so Cairn code and workbench inspection tell the same story.
+7. Run fmt, clippy, tests, docs, corpus, examples, then commit coherently.
+
+### Risks
+
+- `slot-type` cannot yet return a first-class type object for `<object>`, so it
+  should expose the declared type text until Cairn has a real type metaobject
+  layer.
+- Getter accessors are not generic functions yet. `slot-getter` should expose
+  the getter name honestly rather than pretending a getter generic exists.
+- Direct/effective slot descriptors must still name effective runtime storage
+  positions so existing slot reads and layout remain simple.
+
 ## Expose First-Class MOP Metaobjects To Cairn Code
 
 ### Goal

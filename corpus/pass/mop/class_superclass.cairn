@@ -1,5 +1,5 @@
 // expect: run 1
-// expect: dump lowered contains runtime.class-superclass
+// expect: dump lowered contains runtime.class-direct-superclass
 
 define class <shape> (<object>)
   slot size :: <integer>, init-value: 1;
@@ -10,5 +10,5 @@ define class <circle> (<shape>)
 end;
 
 define function main() => <integer>
-  if class-name(class-superclass(<circle>)) = "<shape>" then 1 else 0 end
+  if class-name(class-direct-superclass(<circle>)) = "<shape>" then 1 else 0 end
 end;

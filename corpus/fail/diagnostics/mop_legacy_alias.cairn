@@ -1,0 +1,10 @@
+// expect: diagnostic contains unresolved function or generic `class-slots`
+// expect: dump sem contains error
+
+define class <circle> (<object>)
+  slot radius :: <integer>, init-value: 10;
+end;
+
+define function main()
+  class-slots(<circle>)
+end;

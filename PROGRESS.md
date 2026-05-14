@@ -1,5 +1,42 @@
 # Cairn Progress
 
+## Implemented: Named Read-Only MOP Protocol
+
+- Cairn code now uses canonical read-only MOP protocol names:
+  `object-class`, `class-direct-superclass`, `class-direct-slots`,
+  `class-effective-slots`, `slot-name`, `slot-type`,
+  `slot-init-keyword`, `slot-mutable?`, `slot-getter`, `slot-setter`,
+  `generic-function-name`, `generic-function-methods`,
+  `method-generic-function`, and `method-specializers`.
+- The protocol has one visible vocabulary. The older first-slice names such as
+  `class-superclass`, `class-slots`, `generic-name`, `generic-methods`, and
+  `method-generic` are not accepted as aliases.
+- `object-class` returns a class metaobject through the ordinary boxed
+  `<object>` path, so code can ask for the class of native objects, primitive
+  integers, and metaobjects.
+- Class slot queries now distinguish direct source slots from effective
+  finalized slots. Effective slots remain the runtime-layout descriptors used
+  by construction, reads, writes, and inherited slot inspection.
+- Slot descriptors expose source name, declared type text, init keyword,
+  mutability, getter name, and generated setter generic when one exists.
+- Runtime and tape still implement all protocol operations through ordinary host
+  calls such as `runtime.class-effective-slots` and
+  `runtime.generic-function-methods`; there are no MOP-specific tape opcodes.
+- New corpus programs under `corpus/pass/mop` exercise object-class, direct vs
+  effective slot lists, slot descriptor facts, setter protocol lookup, and
+  method-to-generic lookup.
+- `docs/mop_protocol.md` describes how to use the read-only protocol and why
+  `slot-type` and `slot-getter` are intentionally conservative in this slice.
+
+Deferred:
+
+- First-class type metaobjects for `slot-type`.
+- Getter accessor metaobjects or generic getter protocols.
+- Runtime mutation of classes, slots, generics, or methods.
+- Method combination, `next-method`, and user-extensible dispatch protocols.
+- Persistent image mutation, capability policy, and optimizer assumptions over
+  reflective protocol calls.
+
 ## Implemented: First-Class Read-Only MOP Metaobjects
 
 - Class references such as `<circle>` now lower as runtime class metaobjects
@@ -11,13 +48,13 @@
 - The runtime layout now carries generic-function and method metadata alongside
   class layout, so runtime host calls can answer basic MOP queries from the
   same facts used by dumps and dispatch.
-- Cairn code can call read-only MOP intrinsics:
+- Cairn code can call read-only MOP protocol operations:
   - `class-name`;
-  - `class-superclass`;
-  - `class-slots`;
-  - `generic-name`;
-  - `generic-methods`;
-  - `method-generic`;
+  - `class-direct-superclass`;
+  - `class-effective-slots`;
+  - `generic-function-name`;
+  - `generic-function-methods`;
+  - `method-generic-function`;
   - `method-specializers`.
 - Minimal immutable vector inspection is available through `vector-size` and
   `vector-ref`, which lets Cairn code inspect method and slot vectors returned
@@ -27,8 +64,8 @@
 - Host-backed classes participate in the class metaobject path, but this is
   explicit Cairn metadata, not automatic Rust reflection.
 - Lowered IR emits ordinary runtime host calls such as `runtime.class-name`,
-  `runtime.generic-methods`, and `runtime.method-specializers`. Tape still has
-  no MOP-specific opcodes.
+  `runtime.generic-function-methods`, and `runtime.method-specializers`. Tape
+  still has no MOP-specific opcodes.
 - Semantic, lowered, MOP/EOP, and corpus dumps now agree that classes,
   generics, methods, and slot descriptors are object-system metaobjects.
 
@@ -37,8 +74,8 @@ Deferred:
 - Runtime mutation of classes, generics, methods, or slots.
 - User-defined metaclasses and a public AMOP-compatible protocol.
 - Method combination, `next-method`, and extensible dispatch protocols.
-- Rich slot-descriptor operations beyond exposing descriptor objects in
-  `class-slots`.
+- Rich slot-descriptor mutation protocols beyond exposing descriptor objects in
+  `class-effective-slots`.
 - Persistent image identity, permissions, transactions, and automatic host/Rust
   reflection.
 

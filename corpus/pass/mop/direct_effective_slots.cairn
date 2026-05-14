@@ -1,0 +1,21 @@
+// expect: run 3
+// expect: dump lowered contains runtime.class-direct-slots
+// expect: dump lowered contains runtime.class-effective-slots
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 10;
+  slot color :: <string>, init-value: "red";
+end;
+
+define function main() => <integer>
+  let direct = class-direct-slots(<circle>);
+  let effective = class-effective-slots(<circle>);
+  if vector-size(direct) = 2
+  then if vector-size(effective) = 3 then 3 else 0 end
+  else 0
+  end
+end;

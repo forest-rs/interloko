@@ -1,0 +1,12 @@
+// expect: run 1
+// expect: dump lowered contains runtime.slot-setter
+// expect: dump lowered contains runtime.generic-function-name
+
+define class <circle> (<object>)
+  slot radius :: <integer>, init-value: 10;
+end;
+
+define function main() => <integer>
+  let descriptor = vector-ref(class-direct-slots(<circle>), 0);
+  if generic-function-name(slot-setter(descriptor)) = "radius-setter" then 1 else 0 end
+end;

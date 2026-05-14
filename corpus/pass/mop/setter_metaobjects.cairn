@@ -1,14 +1,14 @@
 // expect: run 1
 // expect: dump mop contains radius-setter
-// expect: dump lowered contains runtime.generic-name
+// expect: dump lowered contains runtime.generic-function-name
 
 define class <circle> (<object>)
   slot radius :: <integer>, init-value: 10;
 end;
 
 define function main() => <integer>
-  if generic-name(radius-setter) = "radius-setter"
-  then vector-size(generic-methods(radius-setter))
+  if generic-function-name(radius-setter) = "radius-setter"
+  then vector-size(generic-function-methods(radius-setter))
   else 0
   end
 end;

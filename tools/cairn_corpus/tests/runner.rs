@@ -50,6 +50,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/diagnostics/host_backed_slot_assignment.cairn"));
     assert!(out.contains("fail/diagnostics/non_object_slot_assignment.cairn"));
     assert!(out.contains("fail/diagnostics/duplicate_slot_initializer.cairn"));
+    assert!(out.contains("fail/diagnostics/mop_legacy_alias.cairn"));
     assert!(out.contains("fail/diagnostics/unresolved_local.cairn"));
     assert!(out.contains("fail/restarts/signal_without_restart.cairn"));
     assert!(out.contains("pass/objects/init_keywords.cairn"));
@@ -104,7 +105,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/typed_slots_and_dispatch.cairn"));
     assert!(out.contains("fail/values/malformed_string.cairn"));
     assert!(out.contains("fail/syntax/expected_expression.cairn"));
-    assert!(out.contains("corpus: 123 passed, 0 failed, 123 total"));
+    assert!(out.contains("corpus: 129 passed, 0 failed, 129 total"));
 }
 
 #[test]

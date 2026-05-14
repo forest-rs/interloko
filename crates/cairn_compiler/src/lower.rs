@@ -106,18 +106,34 @@ pub enum RuntimeOp {
     MethodMetaObject,
     /// Builds a slot descriptor metaobject from a class id and slot id.
     SlotDescriptorObject,
+    /// Returns a value's runtime class metaobject as `<object>`.
+    ObjectClass,
     /// Returns the name of a class metaobject.
     ClassName,
-    /// Returns the superclass of a class metaobject, or `#f`.
-    ClassSuperclass,
-    /// Returns a vector of slot descriptor metaobjects.
-    ClassSlots,
+    /// Returns the direct superclass of a class metaobject, or `#f`.
+    ClassDirectSuperclass,
+    /// Returns a vector of direct slot descriptor metaobjects.
+    ClassDirectSlots,
+    /// Returns a vector of effective slot descriptor metaobjects.
+    ClassEffectiveSlots,
+    /// Returns a slot descriptor's source name.
+    SlotName,
+    /// Returns a slot descriptor's declared type text.
+    SlotType,
+    /// Returns a slot descriptor's construction init keyword text.
+    SlotInitKeyword,
+    /// Returns whether a slot descriptor names a writable slot.
+    SlotMutable,
+    /// Returns a slot descriptor's getter accessor name.
+    SlotGetter,
+    /// Returns a slot descriptor's setter generic metaobject, or `#f`.
+    SlotSetter,
     /// Returns the name of a generic-function metaobject.
-    GenericName,
+    GenericFunctionName,
     /// Returns a vector of method metaobjects.
-    GenericMethods,
+    GenericFunctionMethods,
     /// Returns the generic-function metaobject implemented by a method.
-    MethodGeneric,
+    MethodGenericFunction,
     /// Returns a vector of class metaobjects for a method's specializers.
     MethodSpecializers,
     /// Returns vector length.
@@ -1807,12 +1823,20 @@ fn is_compile_time_only(kind: sem::ValueKind) -> bool {
 
 fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
     match intrinsic {
+        sem::Intrinsic::ObjectClass => RuntimeOp::ObjectClass,
         sem::Intrinsic::ClassName => RuntimeOp::ClassName,
-        sem::Intrinsic::ClassSuperclass => RuntimeOp::ClassSuperclass,
-        sem::Intrinsic::ClassSlots => RuntimeOp::ClassSlots,
-        sem::Intrinsic::GenericName => RuntimeOp::GenericName,
-        sem::Intrinsic::GenericMethods => RuntimeOp::GenericMethods,
-        sem::Intrinsic::MethodGeneric => RuntimeOp::MethodGeneric,
+        sem::Intrinsic::ClassDirectSuperclass => RuntimeOp::ClassDirectSuperclass,
+        sem::Intrinsic::ClassDirectSlots => RuntimeOp::ClassDirectSlots,
+        sem::Intrinsic::ClassEffectiveSlots => RuntimeOp::ClassEffectiveSlots,
+        sem::Intrinsic::SlotName => RuntimeOp::SlotName,
+        sem::Intrinsic::SlotType => RuntimeOp::SlotType,
+        sem::Intrinsic::SlotInitKeyword => RuntimeOp::SlotInitKeyword,
+        sem::Intrinsic::SlotMutable => RuntimeOp::SlotMutable,
+        sem::Intrinsic::SlotGetter => RuntimeOp::SlotGetter,
+        sem::Intrinsic::SlotSetter => RuntimeOp::SlotSetter,
+        sem::Intrinsic::GenericFunctionName => RuntimeOp::GenericFunctionName,
+        sem::Intrinsic::GenericFunctionMethods => RuntimeOp::GenericFunctionMethods,
+        sem::Intrinsic::MethodGenericFunction => RuntimeOp::MethodGenericFunction,
         sem::Intrinsic::MethodSpecializers => RuntimeOp::MethodSpecializers,
         sem::Intrinsic::VectorSize => RuntimeOp::VectorSize,
         sem::Intrinsic::VectorRef => RuntimeOp::VectorRef,
@@ -1821,12 +1845,20 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
 
 fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
     match op {
-        RuntimeOp::ClassName
-        | RuntimeOp::ClassSuperclass
-        | RuntimeOp::ClassSlots
-        | RuntimeOp::GenericName
-        | RuntimeOp::GenericMethods
-        | RuntimeOp::MethodGeneric
+        RuntimeOp::ObjectClass
+        | RuntimeOp::ClassName
+        | RuntimeOp::ClassDirectSuperclass
+        | RuntimeOp::ClassDirectSlots
+        | RuntimeOp::ClassEffectiveSlots
+        | RuntimeOp::SlotName
+        | RuntimeOp::SlotType
+        | RuntimeOp::SlotInitKeyword
+        | RuntimeOp::SlotMutable
+        | RuntimeOp::SlotGetter
+        | RuntimeOp::SlotSetter
+        | RuntimeOp::GenericFunctionName
+        | RuntimeOp::GenericFunctionMethods
+        | RuntimeOp::MethodGenericFunction
         | RuntimeOp::MethodSpecializers
         | RuntimeOp::VectorSize => index == 0,
         RuntimeOp::VectorRef => index == 0,
@@ -1916,12 +1948,20 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::GenericMetaObject => "generic-object",
         RuntimeOp::MethodMetaObject => "method-object",
         RuntimeOp::SlotDescriptorObject => "slot-descriptor-object",
+        RuntimeOp::ObjectClass => "object-class",
         RuntimeOp::ClassName => "class-name",
-        RuntimeOp::ClassSuperclass => "class-superclass",
-        RuntimeOp::ClassSlots => "class-slots",
-        RuntimeOp::GenericName => "generic-name",
-        RuntimeOp::GenericMethods => "generic-methods",
-        RuntimeOp::MethodGeneric => "method-generic",
+        RuntimeOp::ClassDirectSuperclass => "class-direct-superclass",
+        RuntimeOp::ClassDirectSlots => "class-direct-slots",
+        RuntimeOp::ClassEffectiveSlots => "class-effective-slots",
+        RuntimeOp::SlotName => "slot-name",
+        RuntimeOp::SlotType => "slot-type",
+        RuntimeOp::SlotInitKeyword => "slot-init-keyword",
+        RuntimeOp::SlotMutable => "slot-mutable?",
+        RuntimeOp::SlotGetter => "slot-getter",
+        RuntimeOp::SlotSetter => "slot-setter",
+        RuntimeOp::GenericFunctionName => "generic-function-name",
+        RuntimeOp::GenericFunctionMethods => "generic-function-methods",
+        RuntimeOp::MethodGenericFunction => "method-generic-function",
         RuntimeOp::MethodSpecializers => "method-specializers",
         RuntimeOp::VectorSize => "vector-size",
         RuntimeOp::VectorRef => "vector-ref",

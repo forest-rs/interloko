@@ -1,5 +1,5 @@
 // expect: run 2
-// expect: dump lowered contains runtime.class-slots
+// expect: dump lowered contains runtime.class-effective-slots
 // expect: dump lowered contains runtime.vector-size
 
 define class <shape> (<object>)
@@ -11,5 +11,5 @@ define class <circle> (<shape>)
 end;
 
 define function main() => <integer>
-  vector-size(class-slots(<circle>))
+  vector-size(class-effective-slots(<circle>))
 end;

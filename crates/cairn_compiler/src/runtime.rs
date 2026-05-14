@@ -45,20 +45,36 @@ pub const META_GENERIC_OBJECT: &str = "cairn.meta.generic_object";
 pub const META_METHOD_OBJECT: &str = "cairn.meta.method_object";
 /// Host-call symbol for creating a slot-descriptor metaobject.
 pub const META_SLOT_DESCRIPTOR_OBJECT: &str = "cairn.meta.slot_descriptor_object";
+/// Host-call symbol for reading a value's runtime class metaobject.
+pub const MOP_OBJECT_CLASS: &str = "cairn.mop.object_class";
 /// Host-call symbol for reading a class metaobject's name.
-pub const META_CLASS_NAME: &str = "cairn.meta.class_name";
-/// Host-call symbol for reading a class metaobject's superclass.
-pub const META_CLASS_SUPERCLASS: &str = "cairn.meta.class_superclass";
-/// Host-call symbol for reading a class metaobject's slot descriptors.
-pub const META_CLASS_SLOTS: &str = "cairn.meta.class_slots";
+pub const MOP_CLASS_NAME: &str = "cairn.mop.class_name";
+/// Host-call symbol for reading a class metaobject's direct superclass.
+pub const MOP_CLASS_DIRECT_SUPERCLASS: &str = "cairn.mop.class_direct_superclass";
+/// Host-call symbol for reading a class metaobject's direct slot descriptors.
+pub const MOP_CLASS_DIRECT_SLOTS: &str = "cairn.mop.class_direct_slots";
+/// Host-call symbol for reading a class metaobject's effective slot descriptors.
+pub const MOP_CLASS_EFFECTIVE_SLOTS: &str = "cairn.mop.class_effective_slots";
+/// Host-call symbol for reading a slot descriptor's source name.
+pub const MOP_SLOT_NAME: &str = "cairn.mop.slot_name";
+/// Host-call symbol for reading a slot descriptor's declared type text.
+pub const MOP_SLOT_TYPE: &str = "cairn.mop.slot_type";
+/// Host-call symbol for reading a slot descriptor's init keyword text.
+pub const MOP_SLOT_INIT_KEYWORD: &str = "cairn.mop.slot_init_keyword";
+/// Host-call symbol for reading a slot descriptor's mutability flag.
+pub const MOP_SLOT_MUTABLE: &str = "cairn.mop.slot_mutable";
+/// Host-call symbol for reading a slot descriptor's getter accessor name.
+pub const MOP_SLOT_GETTER: &str = "cairn.mop.slot_getter";
+/// Host-call symbol for reading a slot descriptor's setter generic.
+pub const MOP_SLOT_SETTER: &str = "cairn.mop.slot_setter";
 /// Host-call symbol for reading a generic-function metaobject's name.
-pub const META_GENERIC_NAME: &str = "cairn.meta.generic_name";
+pub const MOP_GENERIC_FUNCTION_NAME: &str = "cairn.mop.generic_function_name";
 /// Host-call symbol for reading a generic-function metaobject's methods.
-pub const META_GENERIC_METHODS: &str = "cairn.meta.generic_methods";
+pub const MOP_GENERIC_FUNCTION_METHODS: &str = "cairn.mop.generic_function_methods";
 /// Host-call symbol for reading a method metaobject's generic function.
-pub const META_METHOD_GENERIC: &str = "cairn.meta.method_generic";
+pub const MOP_METHOD_GENERIC_FUNCTION: &str = "cairn.mop.method_generic_function";
 /// Host-call symbol for reading a method metaobject's specializers.
-pub const META_METHOD_SPECIALIZERS: &str = "cairn.meta.method_specializers";
+pub const MOP_METHOD_SPECIALIZERS: &str = "cairn.mop.method_specializers";
 /// Host-call symbol for immutable vector length.
 pub const VECTOR_SIZE: &str = "cairn.vector_size";
 /// Host-call symbol for immutable vector indexing.
@@ -108,8 +124,22 @@ pub enum HostObjectKind {
 pub struct RuntimeSlot {
     /// Slot name for diagnostics and inspection.
     pub name: String,
+    /// Declared source type name.
+    pub type_name: String,
     /// Slot value category.
     pub kind: sem::ValueKind,
+    /// Class that introduced this effective slot.
+    pub source_class: sem::ClassId,
+    /// Direct slot id on `source_class`.
+    pub source_slot: sem::SlotId,
+    /// External construction keyword without the trailing colon.
+    pub init_keyword: String,
+    /// Whether this slot is writable through Cairn.
+    pub mutable: bool,
+    /// Getter accessor call name.
+    pub getter: String,
+    /// Generated setter generic, when one exists.
+    pub setter: Option<sem::GenericFunctionId>,
     /// Whether this slot is read through a Rust host adapter.
     pub host_backed: bool,
 }
@@ -166,7 +196,14 @@ impl RuntimeLayout {
                         .iter()
                         .map(|slot| RuntimeSlot {
                             name: slot.name.clone(),
+                            type_name: slot.type_name.clone(),
                             kind: slot.kind,
+                            source_class: slot.source_class,
+                            source_slot: slot.source_slot,
+                            init_keyword: slot.init_keyword.clone(),
+                            mutable: matches!(slot.mutability, sem::SlotMutability::Mutable),
+                            getter: slot.accessor.name.clone(),
+                            setter: setter_generic_for_slot(module, slot),
                             host_backed: matches!(slot.origin, sem::SlotOrigin::HostBacked { .. }),
                         })
                         .collect(),
@@ -225,6 +262,32 @@ impl RuntimeLayout {
         }
         false
     }
+}
+
+fn setter_generic_for_slot(
+    module: &sem::Module,
+    slot: &sem::EffectiveSlot,
+) -> Option<sem::GenericFunctionId> {
+    let source_effective_slot = module
+        .classes
+        .get(slot.source_class.0 as usize)?
+        .effective_slots
+        .iter()
+        .find(|candidate| {
+            candidate.source_class == slot.source_class && candidate.source_slot == slot.source_slot
+        })?
+        .id;
+    module
+        .generics
+        .iter()
+        .find(|generic| {
+            generic.origin
+                == sem::GenericFunctionOrigin::SlotSetter {
+                    class: slot.source_class,
+                    slot: source_effective_slot,
+                }
+        })
+        .map(|generic| generic.id)
 }
 
 struct RuntimeObject {
@@ -457,7 +520,16 @@ impl Host for CairnHost {
                 )?;
                 Ok(0)
             }
-            META_CLASS_NAME => {
+            MOP_OBJECT_CLASS => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = self.class_of_any(*arg)?;
+                let class = self.push_class_meta(class)?;
+                rets[0] = self.push_boxed_value(class);
+                Ok(0)
+            }
+            MOP_CLASS_NAME => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
                 };
@@ -472,7 +544,7 @@ impl Host for CairnHost {
                 rets[0] = self.push_string(name)?;
                 Ok(0)
             }
-            META_CLASS_SUPERCLASS => {
+            MOP_CLASS_DIRECT_SUPERCLASS => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
                 };
@@ -491,28 +563,76 @@ impl Host for CairnHost {
                 };
                 Ok(0)
             }
-            META_CLASS_SLOTS => {
+            MOP_CLASS_DIRECT_SLOTS => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
                 };
                 let class = self.meta_class_from_any(*arg)?;
-                let slot_count = self
-                    .layout
-                    .classes
-                    .get(class.0 as usize)
-                    .ok_or(HostError::Failed)?
-                    .slots
-                    .len();
-                let mut elements = Vec::with_capacity(slot_count);
-                for slot_index in 0..slot_count {
-                    let slot = sem::SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX));
-                    let descriptor = self.push_slot_descriptor(class, slot)?;
-                    elements.push(self.push_boxed_value(descriptor));
-                }
-                rets[0] = self.push_vector(elements)?;
+                rets[0] = self.push_slot_descriptor_vector(class, true)?;
                 Ok(0)
             }
-            META_GENERIC_NAME => {
+            MOP_CLASS_EFFECTIVE_SLOTS => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = self.meta_class_from_any(*arg)?;
+                rets[0] = self.push_slot_descriptor_vector(class, false)?;
+                Ok(0)
+            }
+            MOP_SLOT_NAME => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let slot = self.runtime_slot_from_any(*arg)?;
+                rets[0] = self.push_string(slot.name.clone())?;
+                Ok(0)
+            }
+            MOP_SLOT_TYPE => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let slot = self.runtime_slot_from_any(*arg)?;
+                rets[0] = self.push_string(slot.type_name.clone())?;
+                Ok(0)
+            }
+            MOP_SLOT_INIT_KEYWORD => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let slot = self.runtime_slot_from_any(*arg)?;
+                rets[0] = self.push_string(slot.init_keyword.clone())?;
+                Ok(0)
+            }
+            MOP_SLOT_MUTABLE => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let slot = self.runtime_slot_from_any(*arg)?;
+                rets[0] = Value::Bool(slot.mutable);
+                Ok(0)
+            }
+            MOP_SLOT_GETTER => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let slot = self.runtime_slot_from_any(*arg)?;
+                rets[0] = self.push_string(slot.getter.clone())?;
+                Ok(0)
+            }
+            MOP_SLOT_SETTER => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let setter = self.runtime_slot_from_any(*arg)?.setter;
+                rets[0] = if let Some(setter) = setter {
+                    let setter = self.push_generic_meta(setter)?;
+                    self.push_boxed_value(setter)
+                } else {
+                    self.push_boxed_value(Value::Bool(false))
+                };
+                Ok(0)
+            }
+            MOP_GENERIC_FUNCTION_NAME => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
                 };
@@ -527,7 +647,7 @@ impl Host for CairnHost {
                 rets[0] = self.push_string(name)?;
                 Ok(0)
             }
-            META_GENERIC_METHODS => {
+            MOP_GENERIC_FUNCTION_METHODS => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
                 };
@@ -547,7 +667,7 @@ impl Host for CairnHost {
                 rets[0] = self.push_vector(elements)?;
                 Ok(0)
             }
-            META_METHOD_GENERIC => {
+            MOP_METHOD_GENERIC_FUNCTION => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
                 };
@@ -562,7 +682,7 @@ impl Host for CairnHost {
                 rets[0] = self.push_boxed_value(generic);
                 Ok(0)
             }
-            META_METHOD_SPECIALIZERS => {
+            MOP_METHOD_SPECIALIZERS => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
                 };
@@ -829,6 +949,35 @@ impl CairnHost {
         }))
     }
 
+    fn push_slot_descriptor_vector(
+        &mut self,
+        class: sem::ClassId,
+        direct_only: bool,
+    ) -> Result<Value, HostError> {
+        let slots = self
+            .layout
+            .classes
+            .get(class.0 as usize)
+            .ok_or(HostError::Failed)?
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot_index, slot)| {
+                if !direct_only || slot.source_class == class {
+                    Some(sem::SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX)))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut elements = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let descriptor = self.push_slot_descriptor(class, slot)?;
+            elements.push(self.push_boxed_value(descriptor));
+        }
+        self.push_vector(elements)
+    }
+
     fn object_from_any(&self, value: ValueRef<'_>) -> Result<&RuntimeObject, HostError> {
         let obj = match value {
             ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => obj,
@@ -841,6 +990,23 @@ impl CairnHost {
             _ => return Err(HostError::Failed),
         };
         self.object(obj)
+    }
+
+    fn class_of_any(&self, value: ValueRef<'_>) -> Result<sem::ClassId, HostError> {
+        match value {
+            ValueRef::I64(_) => self.builtin_class(sem::BuiltinValueClass::Integer),
+            ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => Ok(self.object(obj)?.class),
+            ValueRef::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => {
+                match self.boxed_value(obj)? {
+                    Value::I64(_) => self.builtin_class(sem::BuiltinValueClass::Integer),
+                    Value::Obj(boxed) if boxed.host_type == CAIRN_OBJECT_TYPE => {
+                        Ok(self.object(*boxed)?.class)
+                    }
+                    _ => Err(HostError::Failed),
+                }
+            }
+            _ => Err(HostError::Failed),
+        }
     }
 
     fn meta_class_from_any(&self, value: ValueRef<'_>) -> Result<sem::ClassId, HostError> {
@@ -868,6 +1034,26 @@ impl CairnHost {
             RuntimeObjectStorage::MethodMeta { method } => Ok(*method),
             _ => Err(HostError::Failed),
         }
+    }
+
+    fn slot_descriptor_from_any(
+        &self,
+        value: ValueRef<'_>,
+    ) -> Result<(sem::ClassId, sem::SlotId), HostError> {
+        let object = self.object_from_any(value)?;
+        match &object.storage {
+            RuntimeObjectStorage::SlotDescriptor { class, slot } => Ok((*class, *slot)),
+            _ => Err(HostError::Failed),
+        }
+    }
+
+    fn runtime_slot_from_any(&self, value: ValueRef<'_>) -> Result<&RuntimeSlot, HostError> {
+        let (class, slot) = self.slot_descriptor_from_any(value)?;
+        self.layout
+            .classes
+            .get(class.0 as usize)
+            .and_then(|class| class.slots.get(slot.0 as usize))
+            .ok_or(HostError::Failed)
     }
 
     fn vector_elements_from_any(&self, value: ValueRef<'_>) -> Result<&[Value], HostError> {
@@ -1168,6 +1354,15 @@ pub fn meta_query_any_signature() -> execution_tape::host::HostSig {
     execution_tape::host::HostSig {
         args: vec![any_type()],
         rets: vec![any_type()],
+    }
+}
+
+/// Host signature for a one-argument metaobject query returning `<boolean>`.
+#[must_use]
+pub fn meta_query_bool_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![any_type()],
+        rets: vec![ValueType::Bool],
     }
 }
 
