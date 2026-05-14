@@ -1,5 +1,55 @@
 # Plans
 
+## Add True Multi-Argument Generic Dispatch
+
+### Goal
+
+Make generic dispatch consider every required argument, not just the first
+dispatch parameter. Methods carry specializer vectors, dispatchers check all
+specialized arguments, and diagnostics reject ambiguous method sets that have no
+unique most-specific method for a provable runtime class tuple.
+
+### Fence
+
+`sem` owns method specializer vectors, applicability, specificity, and ambiguity
+diagnostics. `lower` owns the executable dispatcher shape. Runtime and tape only
+execute ordinary lowered calls, branches, casts, class checks, and traps. This
+slice does not own method combination, `next-method`, singleton/union dispatch,
+keyword/rest dispatch, dispatch caches, or sealed-domain optimization.
+
+### Invariants
+
+- Single-argument dispatch remains source- and dump-compatible where possible.
+- A method applies when every specialized parameter accepts the actual class.
+- A method is more specific only when it is no less specific in every position
+  and stricter in at least one position.
+- An ambiguous method set is diagnosed before lowering emits a dispatcher.
+- Setter generics keep the `(new-value, object)` call shape and still select the
+  object-specific generated setter method.
+- Tape emission uses ordinary execution-tape functions and host calls; no
+  generic-specific tape opcode is introduced.
+
+### Steps
+
+1. Relax AST method lowering to retain all specialized parameters.
+2. Extend semantic methods with specializer vectors and generic/method arity
+   checks.
+3. Add semantic applicability, specificity, and finite-lattice ambiguity checks.
+4. Lower dispatchers by testing each specialized argument in specificity order.
+5. Update session/MOP/EOP/dispatch dumps to show specializer vectors.
+6. Add corpus/tests for exact pairs, subclass specificity, fallback methods,
+   ambiguity, arity rejection, and setter preservation.
+7. Update progress notes, run final gates, audit, and commit.
+
+### Risks
+
+- `<object>` is currently represented as top value kind rather than a nominal
+  class id, so top method specializers need an explicit representation.
+- Partial specificity order must not silently choose one of two incomparable
+  applicable methods.
+- Existing workbench output has many single-specializer assumptions that need to
+  become vector labels without obscuring the common single-dispatch case.
+
 ## Add Dylan-Style Writable Slot Assignment
 
 ### Goal

@@ -1,5 +1,35 @@
 # Cairn Progress
 
+## Implemented: Multi-Argument Generic Dispatch
+
+- Generic dispatch now considers the full required argument vector instead of
+  only a single dispatch parameter.
+- Source methods retain all specialized parameters in AST and semantic IR.
+- Semantic methods now carry specializer vectors. `None` in that vector
+  represents source `<object>`, because `<object>` is still Cairn's top value
+  category rather than a nominal class id.
+- A method applies when every specialized parameter accepts the runtime
+  argument class.
+- Specificity is a partial order: a method is more specific only when it is at
+  least as specific in every position and strictly more specific in at least one
+  position.
+- The semantic pass diagnoses provably ambiguous overlapping method sets before
+  lowering.
+- Lowered generic dispatchers test all specialized arguments and call methods
+  with ordinary casts/calls/branches. Tape still has no generic-specific opcode.
+- Session, MOP, EOP, and dispatch-site dumps expose specializer vectors,
+  dispatch parameter vectors, and tuple-shaped applicability.
+- Setter generics keep their `(new-value, object)` call shape and generated
+  setter methods participate in vector dispatch.
+
+Deferred:
+
+- `next-method` / `call-next-method`.
+- Method combination.
+- Keyword/rest parameter dispatch.
+- Singleton, union, limited, or sealed-domain dispatch.
+- User-extensible dispatch protocols and dispatch caches.
+
 ## Implemented: Writable Native Slot Setters
 
 - Surface syntax now accepts `object.slot := value`.

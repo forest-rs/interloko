@@ -104,7 +104,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/typed_slots_and_dispatch.cairn"));
     assert!(out.contains("fail/values/malformed_string.cairn"));
     assert!(out.contains("fail/syntax/expected_expression.cairn"));
-    assert!(out.contains("corpus: 111 passed, 0 failed, 111 total"));
+    assert!(out.contains("corpus: 116 passed, 0 failed, 116 total"));
 }
 
 #[test]

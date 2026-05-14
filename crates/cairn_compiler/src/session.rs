@@ -1152,8 +1152,12 @@ pub struct DispatchMethodCandidate {
     pub definition: DefinitionId,
     /// Method specializer class.
     pub specializer: sem::ClassId,
+    /// Method specializers in generic parameter order.
+    pub specializers: Vec<sem::MethodSpecializer>,
     /// Distance from the static exact class to the specializer, if known.
     pub distance: Option<usize>,
+    /// Per-argument distances from exact static classes to specializers.
+    pub distances: Vec<Option<usize>>,
     /// Whether this is the statically selected method.
     pub selected: bool,
     /// Whether this candidate can only be selected by runtime class dispatch.
@@ -1169,6 +1173,8 @@ pub struct DispatchMethodRejection {
     pub definition: DefinitionId,
     /// Method specializer class.
     pub specializer: sem::ClassId,
+    /// Method specializers in generic parameter order.
+    pub specializers: Vec<sem::MethodSpecializer>,
     /// Stable rejection reason.
     pub reason: String,
 }
@@ -1192,9 +1198,13 @@ pub struct DispatchSiteRecord {
     pub generic_definition: DefinitionId,
     /// Static kind of the first dispatch argument, when present.
     pub static_argument_kind: Option<sem::ValueKind>,
+    /// Static kind of each dispatch argument.
+    pub static_argument_kinds: Vec<sem::ValueKind>,
     /// Exact static runtime class, when the call argument is an exact
     /// construction/cast expression.
     pub exact_static_class: Option<sem::ClassId>,
+    /// Exact static runtime classes for dispatch arguments known at compile time.
+    pub exact_static_classes: Vec<Option<sem::ClassId>>,
     /// Whether the runtime class is still needed to choose the method.
     pub runtime_needed: bool,
     /// Statically selected method, when known.
@@ -1356,15 +1366,25 @@ fn fingerprint_method_lookup(module: &sem::Module, method: DefinitionId) -> Stri
         .generics
         .get(method.generic.0 as usize)
         .map_or(0, |generic| generic.definition.raw());
-    let specializer = module
-        .classes
-        .get(method.specializer.0 as usize)
-        .map_or(0, |class| class.definition.raw());
+    let specializers = method
+        .specializers
+        .iter()
+        .map(|specializer| {
+            specializer.map_or(0, |class| {
+                module
+                    .classes
+                    .get(class.0 as usize)
+                    .map_or(0, |class| class.definition.raw())
+            })
+        })
+        .map(|definition| definition.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
         "method-lookup:{}:{}:{}",
         method.definition.raw(),
         generic,
-        specializer
+        specializers
     )
 }
 
@@ -1414,17 +1434,27 @@ fn fingerprint_dispatcher(module: &sem::Module, generic: DefinitionId) -> String
             .then_with(|| left.id.0.cmp(&right.id.0))
     });
     for method in methods {
-        let specializer = module
-            .classes
-            .get(method.specializer.0 as usize)
-            .map_or(0, |class| class.definition.raw());
-        let _ = write!(out, "{}:{specializer}:[", method.definition.raw());
-        for class in module
-            .classes
-            .iter()
-            .filter(|class| module.is_same_or_subclass(class.id, method.specializer))
-        {
-            let _ = write!(out, "{},", class.definition.raw());
+        let _ = write!(out, "{}:", method.definition.raw());
+        for specializer in &method.specializers {
+            match specializer {
+                Some(class) => {
+                    let definition = module
+                        .classes
+                        .get(class.0 as usize)
+                        .map_or(0, |class| class.definition.raw());
+                    let _ = write!(out, "{definition}");
+                }
+                None => out.push_str("object"),
+            }
+            out.push(',');
+        }
+        out.push('[');
+        for class in &module.classes {
+            let tuple =
+                core::iter::repeat_n(class.id, method.specializers.len()).collect::<Vec<_>>();
+            if module.method_applies_to_classes(method, &tuple) {
+                let _ = write!(out, "{},", class.definition.raw());
+            }
         }
         let _ = write!(out, "];");
     }
@@ -1518,11 +1548,13 @@ fn collect_dispatch_sites(artifacts: &SessionArtifacts) -> Vec<DispatchSiteRecor
             .generics
             .get(method.generic.0 as usize)
             .map_or("<?>", |generic| generic.name.as_str());
-        let specializer = class_label(&artifacts.sem, method.specializer);
         let owner = DispatchSiteOwner {
             kind: DispatchSiteOwnerKind::Method,
             definition: method.definition,
-            name: format!("{generic_name}({specializer})"),
+            name: format!(
+                "{generic_name}{}",
+                sem_specializer_vector_label(&artifacts.sem, &method.specializers)
+            ),
         };
         let mut owner_index = 0;
         collect_dispatch_sites_in_block(
@@ -1682,14 +1714,26 @@ fn make_dispatch_site(
         DefinitionId::new(module.source_file, DefinitionKind::Generic, "<missing>", ""),
         |generic| generic.definition,
     );
-    let static_argument_kind = args.first().map(|arg| sem_expr_kind(module, arg));
-    let exact_static_class = args.first().and_then(|arg| exact_static_class(module, arg));
-    let runtime_needed = exact_static_class.is_none()
-        && static_argument_kind.is_some_and(|kind| {
-            matches!(kind, sem::ValueKind::Any) || sem_value_kind_class(module, kind).is_some()
+    let static_argument_kinds = args
+        .iter()
+        .map(|arg| sem_expr_kind(module, arg))
+        .collect::<Vec<_>>();
+    let exact_static_classes = args
+        .iter()
+        .map(|arg| exact_static_class(module, arg))
+        .collect::<Vec<_>>();
+    let static_argument_kind = static_argument_kinds.first().copied();
+    let exact_static_class = exact_static_classes.first().copied().flatten();
+    let runtime_needed = exact_static_classes.iter().any(Option::is_none)
+        && static_argument_kinds.iter().any(|kind| {
+            matches!(kind, sem::ValueKind::Any) || sem_value_kind_class(module, *kind).is_some()
         });
-    let (applicable, rejected, selected_method) =
-        dispatch_site_methods(module, generic_id, static_argument_kind, exact_static_class);
+    let (applicable, rejected, selected_method) = dispatch_site_methods(
+        module,
+        generic_id,
+        &static_argument_kinds,
+        &exact_static_classes,
+    );
     let lowered_dispatcher = module.generics.get(generic_id.0 as usize).map_or_else(
         || format!("g{}#dispatch", generic_id.0),
         |generic| format!("{}#dispatch", generic.name),
@@ -1708,7 +1752,9 @@ fn make_dispatch_site(
         generic: generic_id,
         generic_definition,
         static_argument_kind,
+        static_argument_kinds,
         exact_static_class,
+        exact_static_classes,
         runtime_needed,
         selected_method,
         applicable,
@@ -1735,97 +1781,124 @@ fn dispatch_site_key(
 fn dispatch_site_methods(
     module: &sem::Module,
     generic_id: sem::GenericFunctionId,
-    static_kind: Option<sem::ValueKind>,
-    exact_class: Option<sem::ClassId>,
+    static_kinds: &[sem::ValueKind],
+    exact_classes: &[Option<sem::ClassId>],
 ) -> (
     Vec<DispatchMethodCandidate>,
     Vec<DispatchMethodRejection>,
     Option<sem::MethodId>,
 ) {
     let methods = dispatch_methods(module, generic_id);
-    let selected_method = exact_class.and_then(|actual| {
-        methods
-            .iter()
-            .find(|method| module.is_same_or_subclass(actual, method.specializer))
-            .map(|method| method.id)
+    let exact_tuple = exact_classes.iter().copied().collect::<Option<Vec<_>>>();
+    let selected_method = exact_tuple.as_ref().and_then(|actuals| {
+        match module.select_method_for_classes(generic_id, actuals) {
+            sem::MethodSelection::Selected(method) => Some(method),
+            sem::MethodSelection::None | sem::MethodSelection::Ambiguous => None,
+        }
     });
     let mut applicable = Vec::new();
     let mut rejected = Vec::new();
 
     for method in methods {
-        match (static_kind, exact_class) {
-            (_, Some(actual)) if module.is_same_or_subclass(actual, method.specializer) => {
+        if let Some(actuals) = &exact_tuple {
+            if module.method_applies_to_classes(method, actuals) {
                 applicable.push(DispatchMethodCandidate {
                     method: method.id,
                     definition: method.definition,
                     specializer: method.specializer,
-                    distance: module.inheritance_distance(actual, method.specializer),
+                    specializers: method.specializers.clone(),
+                    distance: first_specializer_distance(module, method, actuals),
+                    distances: specializer_distances(module, method, actuals),
                     selected: selected_method == Some(method.id),
                     runtime_only: false,
                 });
-            }
-            (_, Some(actual)) => rejected.push(DispatchMethodRejection {
-                method: method.id,
-                definition: method.definition,
-                specializer: method.specializer,
-                reason: exact_class_rejection_reason(module, actual, method.specializer),
-            }),
-            (Some(kind), None)
-                if sem_value_kind_class(module, kind).is_some_and(|static_class| {
-                    classes_overlap(module, static_class, method.specializer)
-                }) =>
-            {
-                let static_class = sem_value_kind_class(module, kind).expect("class was checked");
-                applicable.push(DispatchMethodCandidate {
-                    method: method.id,
-                    definition: method.definition,
-                    specializer: method.specializer,
-                    distance: module.inheritance_distance(static_class, method.specializer),
-                    selected: false,
-                    runtime_only: true,
-                });
-            }
-            (Some(kind), None) if sem_value_kind_class(module, kind).is_some() => {
-                let static_class = sem_value_kind_class(module, kind).expect("class was checked");
+            } else {
                 rejected.push(DispatchMethodRejection {
                     method: method.id,
                     definition: method.definition,
                     specializer: method.specializer,
-                    reason: format!(
-                        "disjoint from static argument {}",
-                        class_label(module, static_class)
-                    ),
+                    specializers: method.specializers.clone(),
+                    reason: exact_tuple_rejection_reason(module, actuals, method),
                 });
             }
-            (Some(sem::ValueKind::Any), None) => {
-                applicable.push(DispatchMethodCandidate {
-                    method: method.id,
-                    definition: method.definition,
-                    specializer: method.specializer,
-                    distance: None,
-                    selected: false,
-                    runtime_only: true,
-                });
-            }
-            (Some(kind), None) => rejected.push(DispatchMethodRejection {
+            continue;
+        }
+
+        if method_may_apply_to_static_kinds(module, method, static_kinds) {
+            applicable.push(DispatchMethodCandidate {
                 method: method.id,
                 definition: method.definition,
                 specializer: method.specializer,
-                reason: format!(
-                    "contract mismatch: dispatch argument is {}",
-                    sem_kind_label(module, kind)
-                ),
-            }),
-            (None, None) => rejected.push(DispatchMethodRejection {
+                specializers: method.specializers.clone(),
+                distance: None,
+                distances: Vec::new(),
+                selected: false,
+                runtime_only: true,
+            });
+        } else {
+            rejected.push(DispatchMethodRejection {
                 method: method.id,
                 definition: method.definition,
                 specializer: method.specializer,
-                reason: "contract mismatch: missing dispatch argument".into(),
-            }),
+                specializers: method.specializers.clone(),
+                reason: static_tuple_rejection_reason(module, static_kinds, method),
+            });
         }
     }
 
     (applicable, rejected, selected_method)
+}
+
+fn first_specializer_distance(
+    module: &sem::Module,
+    method: &sem::Method,
+    actuals: &[sem::ClassId],
+) -> Option<usize> {
+    method
+        .specializers
+        .first()
+        .copied()
+        .flatten()
+        .zip(actuals.first().copied())
+        .and_then(|(specializer, actual)| module.inheritance_distance(actual, specializer))
+}
+
+fn specializer_distances(
+    module: &sem::Module,
+    method: &sem::Method,
+    actuals: &[sem::ClassId],
+) -> Vec<Option<usize>> {
+    method
+        .specializers
+        .iter()
+        .zip(actuals)
+        .map(|(specializer, actual)| {
+            specializer.and_then(|specializer| module.inheritance_distance(*actual, specializer))
+        })
+        .collect()
+}
+
+fn method_may_apply_to_static_kinds(
+    module: &sem::Module,
+    method: &sem::Method,
+    static_kinds: &[sem::ValueKind],
+) -> bool {
+    method.specializers.len() == static_kinds.len()
+        && method
+            .specializers
+            .iter()
+            .zip(static_kinds)
+            .all(|(specializer, kind)| {
+                let Some(specializer) = specializer else {
+                    return true;
+                };
+                match *kind {
+                    sem::ValueKind::Any | sem::ValueKind::Error => true,
+                    kind => sem_value_kind_class(module, kind).is_some_and(|static_class| {
+                        classes_overlap(module, static_class, *specializer)
+                    }),
+                }
+            })
 }
 
 fn exact_class_rejection_reason(
@@ -1842,6 +1915,58 @@ fn exact_class_rejection_reason(
     } else {
         format!("disjoint from exact class {}", class_label(module, actual))
     }
+}
+
+fn exact_tuple_rejection_reason(
+    module: &sem::Module,
+    actuals: &[sem::ClassId],
+    method: &sem::Method,
+) -> String {
+    method
+        .specializers
+        .iter()
+        .zip(actuals)
+        .enumerate()
+        .find_map(|(index, (specializer, actual))| {
+            let specializer = (*specializer)?;
+            (!module.is_same_or_subclass(*actual, specializer)).then(|| {
+                format!(
+                    "argument {} {}",
+                    index + 1,
+                    exact_class_rejection_reason(module, *actual, specializer)
+                )
+            })
+        })
+        .unwrap_or_else(|| "not applicable to exact argument tuple".into())
+}
+
+fn static_tuple_rejection_reason(
+    module: &sem::Module,
+    static_kinds: &[sem::ValueKind],
+    method: &sem::Method,
+) -> String {
+    method
+        .specializers
+        .iter()
+        .zip(static_kinds)
+        .enumerate()
+        .find_map(|(index, (specializer, kind))| {
+            let specializer = (*specializer)?;
+            match *kind {
+                sem::ValueKind::Any | sem::ValueKind::Error => None,
+                kind => {
+                    let static_class = sem_value_kind_class(module, kind)?;
+                    (!classes_overlap(module, static_class, specializer)).then(|| {
+                        format!(
+                            "argument {} disjoint from static argument {}",
+                            index + 1,
+                            class_label(module, static_class)
+                        )
+                    })
+                }
+            }
+        })
+        .unwrap_or_else(|| "contract mismatch: dispatch argument tuple".into())
 }
 
 fn classes_overlap(module: &sem::Module, left: sem::ClassId, right: sem::ClassId) -> bool {
@@ -1902,17 +2027,14 @@ fn dump_dispatch_sites(artifacts: &SessionArtifacts) -> String {
     }
     for site in &sites {
         let generic = generic_label(&artifacts.sem, site.generic);
-        let static_kind = site.static_argument_kind.map_or_else(
-            || "missing".into(),
-            |kind| sem_kind_label(&artifacts.sem, kind),
-        );
+        let static_kinds = sem_kind_vector_label(&artifacts.sem, &site.static_argument_kinds);
         let selected = site.selected_method.map_or_else(
             || "runtime".into(),
             |method| method_label(&artifacts.sem, method),
         );
         let _ = writeln!(
             out,
-            "  {} key={} owner={} {} span={}..{} generic={} static-arg={} runtime-needed={} selected={}",
+            "  {} key={} owner={} {} span={}..{} generic={} static-args={} runtime-needed={} selected={}",
             site.id,
             site.key,
             site.owner.kind.as_str(),
@@ -1920,7 +2042,7 @@ fn dump_dispatch_sites(artifacts: &SessionArtifacts) -> String {
             site.span.start,
             site.span.end,
             generic,
-            static_kind,
+            static_kinds,
             site.runtime_needed,
             selected
         );
@@ -1952,19 +2074,15 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
         site.generic_definition,
         generic_contract_label(module, site.generic)
     );
-    let static_kind = site
-        .static_argument_kind
-        .map_or_else(|| "missing".into(), |kind| sem_kind_label(module, kind));
-    let exact_class = site
-        .exact_static_class
-        .map_or_else(|| "unknown".into(), |class| class_label(module, class));
+    let static_kinds = sem_kind_vector_label(module, &site.static_argument_kinds);
+    let exact_classes = exact_class_vector_label(module, &site.exact_static_classes);
     let selected = site.selected_method.map_or_else(
         || "runtime-needed".into(),
         |method| method_label(module, method),
     );
-    let _ = writeln!(out, "  argument:");
-    let _ = writeln!(out, "    static-kind: {static_kind}");
-    let _ = writeln!(out, "    exact-class: {exact_class}");
+    let _ = writeln!(out, "  arguments:");
+    let _ = writeln!(out, "    static-kinds: {static_kinds}");
+    let _ = writeln!(out, "    exact-classes: {exact_classes}");
     let _ = writeln!(out, "    runtime-needed: {}", site.runtime_needed);
     let _ = writeln!(out, "    selected: {selected}");
     let _ = writeln!(out, "  applicable methods:");
@@ -1979,15 +2097,13 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
             } else {
                 "shadowed"
             };
-            let distance = candidate
-                .distance
-                .map_or_else(|| "unknown".into(), |distance| distance.to_string());
+            let distance = distance_vector_label(&candidate.distances);
             let _ = writeln!(
                 out,
-                "    {} definition={} specializer={} distance={} {}",
+                "    {} definition={} specializers={} distances={} {}",
                 method_label(module, candidate.method),
                 candidate.definition,
-                class_label(module, candidate.specializer),
+                sem_specializer_vector_label(module, &candidate.specializers),
                 distance,
                 selection
             );
@@ -2000,10 +2116,10 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
         for rejected in &site.rejected {
             let _ = writeln!(
                 out,
-                "    {} definition={} specializer={} reason={}",
+                "    {} definition={} specializers={} reason={}",
                 method_label(module, rejected.method),
                 rejected.definition,
-                class_label(module, rejected.specializer),
+                sem_specializer_vector_label(module, &rejected.specializers),
                 rejected.reason
             );
         }
@@ -2014,10 +2130,10 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
     for method in dispatch_methods(module, site.generic) {
         let _ = writeln!(
             out,
-            "      {} specializer={} applies-to={}",
+            "      {} specializers={} applies-to={}",
             method_label(module, method.id),
-            class_label(module, method.specializer),
-            sem_dispatch_applicability_label(module, method.specializer)
+            sem_specializer_vector_label(module, &method.specializers),
+            sem_dispatch_applicability_vector_label(module, &method.specializers)
         );
     }
     let _ = writeln!(out, "  related artifacts:");
@@ -2169,10 +2285,10 @@ fn method_label(module: &sem::Module, method_id: sem::MethodId) -> String {
                 .get(method.generic.0 as usize)
                 .map_or("<?>", |generic| generic.name.as_str());
             format!(
-                "m{}:{}({})",
+                "m{}:{}{}",
                 method.id.0,
                 generic,
-                class_label(module, method.specializer)
+                sem_specializer_vector_label(module, &method.specializers)
             )
         },
     )
@@ -2397,10 +2513,16 @@ fn dump_ast(module: &ast::Module) -> String {
         }
     }
     for method in &module.methods {
+        let params = method
+            .params
+            .iter()
+            .map(|param| format!("{} :: {}", param.name, param.class_name))
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             out,
-            "method {} {} {} :: {}",
-            method.id, method.definition, method.name, method.param.class_name
+            "method {} {} {}({params})",
+            method.id, method.definition, method.name
         );
         if let Some(return_type) = &method.return_type {
             indent_line(&mut out, 2);
@@ -2735,12 +2857,12 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "generic g{} {} {}({params}) result={:?} return={return_annotation} dispatch-param={} origin={}",
+            "generic g{} {} {}({params}) result={:?} return={return_annotation} dispatch-params={} origin={}",
             generic.id.0,
             generic.definition,
             generic.name,
             generic.result_kind,
-            generic.dispatch_param + 1,
+            dispatch_params_label(&generic.dispatch_params),
             sem_generic_origin_label(generic.origin)
         );
     }
@@ -2751,11 +2873,11 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "method m{} {} generic=g{} class=c{} result={:?} return={return_annotation} origin={}",
+            "method m{} {} generic=g{} specializers={} result={:?} return={return_annotation} origin={}",
             method.id.0,
             method.definition,
             method.generic.0,
-            method.specializer.0,
+            sem_specializer_vector_label(module, &method.specializers),
             method.result_kind,
             sem_method_origin_label(method.origin)
         );
@@ -2929,12 +3051,12 @@ fn dump_mop(module: &sem::Module) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "  g{} {} {}({params}) -> {} dispatch-param={} origin={}",
+            "  g{} {} {}({params}) -> {} dispatch-params={} origin={}",
             generic.id.0,
             generic.definition,
             generic.name,
             sem_kind_label(module, generic.result_kind),
-            generic.dispatch_param + 1,
+            dispatch_params_label(&generic.dispatch_params),
             sem_generic_origin_label(generic.origin)
         );
         for method in module
@@ -2942,23 +3064,16 @@ fn dump_mop(module: &sem::Module) -> String {
             .iter()
             .filter(|method| method.generic == generic.id)
         {
-            let class = module.classes.get(method.specializer.0 as usize);
-            let class_name = class.map_or("<?>", |class| class.name.as_str());
-            let class_origin = class.map_or_else(
-                || "missing".into(),
-                |class| sem_class_origin_label(class.origin),
-            );
             let _ = writeln!(
                 out,
-                "    method m{} {} specializer=c{} {} specializer-origin={} method-origin={} -> {} applicable={}",
+                "    method m{} {} specializers={} specializer-origins={} method-origin={} -> {} applicable={}",
                 method.id.0,
                 method.definition,
-                method.specializer.0,
-                class_name,
-                class_origin,
+                sem_specializer_vector_label(module, &method.specializers),
+                sem_specializer_origin_vector_label(module, &method.specializers),
                 sem_method_origin_label(method.origin),
                 sem_kind_label(module, method.result_kind),
-                sem_dispatch_applicability_label(module, method.specializer)
+                sem_dispatch_applicability_vector_label(module, &method.specializers)
             );
         }
     }
@@ -2967,21 +3082,14 @@ fn dump_mop(module: &sem::Module) -> String {
     for generic in &module.generics {
         let _ = writeln!(out, "  g{} {}", generic.id.0, generic.name);
         for method in dispatch_methods(module, generic.id) {
-            let class = module.classes.get(method.specializer.0 as usize);
-            let class_name = class.map_or("<?>", |class| class.name.as_str());
-            let class_origin = class.map_or_else(
-                || "missing".into(),
-                |class| sem_class_origin_label(class.origin),
-            );
             let _ = writeln!(
                 out,
-                "    m{} specializer=c{} {} specializer-origin={} method-origin={} applies-to={}",
+                "    m{} specializers={} specializer-origins={} method-origin={} applies-to={}",
                 method.id.0,
-                method.specializer.0,
-                class_name,
-                class_origin,
+                sem_specializer_vector_label(module, &method.specializers),
+                sem_specializer_origin_vector_label(module, &method.specializers),
                 sem_method_origin_label(method.origin),
-                sem_dispatch_applicability_label(module, method.specializer)
+                sem_dispatch_applicability_vector_label(module, &method.specializers)
             );
         }
     }
@@ -3378,7 +3486,7 @@ fn project_environment_generic(
             format!(
                 "m{}=>{}",
                 method.id.0,
-                sem_dispatch_applicability_label(module, method.specializer)
+                sem_dispatch_applicability_vector_label(module, &method.specializers)
             )
         })
         .collect::<Vec<_>>()
@@ -3409,9 +3517,9 @@ fn project_environment_generic(
         ),
         affordances,
         execution: Some(format!(
-            "callable=generic arity={} dispatch-param={} methods={method_count}",
+            "callable=generic arity={} dispatch-params={} methods={method_count}",
             generic.arity,
-            generic.dispatch_param + 1
+            dispatch_params_label(&generic.dispatch_params)
         )),
         inspection: format!(
             "definition={} generic-id=g{} origin={} dispatch={dispatch}",
@@ -3431,13 +3539,9 @@ fn project_environment_method(
 
     let generic = module.generics.get(method.generic.0 as usize);
     let generic_name = generic.map_or("<?>", |generic| generic.name.as_str());
-    let class = module.classes.get(method.specializer.0 as usize);
-    let class_name = class.map_or("<?>", |class| class.name.as_str());
-    let class_origin = class.map_or_else(
-        || "missing".into(),
-        |class| sem_class_origin_label(class.origin),
-    );
-    let applicable = sem_dispatch_applicability_label(module, method.specializer);
+    let specializers = sem_specializer_vector_label(module, &method.specializers);
+    let specializer_origins = sem_specializer_origin_vector_label(module, &method.specializers);
+    let applicable = sem_dispatch_applicability_vector_label(module, &method.specializers);
     let generated = !matches!(method.origin, sem::MethodOrigin::Source);
     let mut affordances = Vec::from([
         Aff::Inspect,
@@ -3465,16 +3569,16 @@ fn project_environment_method(
             EnvironmentStorage::SourceDefined
         },
         title: format!(
-            "{generic_name}({class_name}) -> {}",
+            "{generic_name}{specializers} -> {}",
             sem_kind_label(module, method.result_kind)
         ),
         affordances,
         execution: Some(format!(
-            "callable=method participates-in=generic:g{} specializer=class:c{}",
-            method.generic.0, method.specializer.0
+            "callable=method participates-in=generic:g{} specializers={specializers}",
+            method.generic.0
         )),
         inspection: format!(
-            "definition={} method-id=m{} method-origin={} specializer-origin={class_origin} applies-to={applicable}",
+            "definition={} method-id=m{} method-origin={} specializer-origins={specializer_origins} applies-to={applicable}",
             method.definition,
             method.id.0,
             sem_method_origin_label(method.origin)
@@ -3539,12 +3643,8 @@ fn project_environment_dispatch_site(
     use EnvironmentAffordance as Aff;
 
     let generic = generic_label(module, site.generic);
-    let static_kind = site
-        .static_argument_kind
-        .map_or_else(|| "missing".into(), |kind| sem_kind_label(module, kind));
-    let exact_class = site
-        .exact_static_class
-        .map_or_else(|| "unknown".into(), |class| class_label(module, class));
+    let static_kinds = sem_kind_vector_label(module, &site.static_argument_kinds);
+    let exact_classes = exact_class_vector_label(module, &site.exact_static_classes);
     let selected = site.selected_method.map_or_else(
         || "runtime-needed".into(),
         |method| method_label(module, method),
@@ -3576,7 +3676,7 @@ fn project_environment_dispatch_site(
             site.lowered_dispatcher, site.runtime_needed
         )),
         inspection: format!(
-            "key={} owner={} {} span={}..{} generic={} contract={} static-arg={} exact-class={} applicable={} rejected={} artifacts={artifact_keys}",
+            "key={} owner={} {} span={}..{} generic={} contract={} static-args={} exact-classes={} applicable={} rejected={} artifacts={artifact_keys}",
             site.key,
             site.owner.kind.as_str(),
             site.owner.name,
@@ -3584,8 +3684,8 @@ fn project_environment_dispatch_site(
             site.span.end,
             generic,
             generic_contract_label(module, site.generic),
-            static_kind,
-            exact_class,
+            static_kinds,
+            exact_classes,
             site.applicable.len(),
             site.rejected.len()
         ),
@@ -4244,6 +4344,56 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+fn dispatch_params_label(params: &[usize]) -> String {
+    format!(
+        "({})",
+        params
+            .iter()
+            .map(|index| (index + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn sem_kind_vector_label(module: &sem::Module, kinds: &[sem::ValueKind]) -> String {
+    format!(
+        "({})",
+        kinds
+            .iter()
+            .copied()
+            .map(|kind| sem_kind_label(module, kind))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn exact_class_vector_label(module: &sem::Module, classes: &[Option<sem::ClassId>]) -> String {
+    format!(
+        "({})",
+        classes
+            .iter()
+            .copied()
+            .map(|class| class.map_or_else(|| "unknown".into(), |class| class_label(module, class)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn distance_vector_label(distances: &[Option<usize>]) -> String {
+    if distances.is_empty() {
+        return "unknown".into();
+    }
+    format!(
+        "({})",
+        distances
+            .iter()
+            .map(|distance| distance
+                .map_or_else(|| "unknown".into(), |distance| distance.to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
 fn sem_dispatch_applicability_label(module: &sem::Module, specializer: sem::ClassId) -> String {
     let applicable = module
         .classes
@@ -4257,6 +4407,70 @@ fn sem_dispatch_applicability_label(module: &sem::Module, specializer: sem::Clas
     format!("[{}]", applicable.join(","))
 }
 
+fn sem_specializer_label(module: &sem::Module, specializer: sem::MethodSpecializer) -> String {
+    specializer.map_or_else(|| "<object>".into(), |class| class_label(module, class))
+}
+
+fn sem_specializer_vector_label(
+    module: &sem::Module,
+    specializers: &[sem::MethodSpecializer],
+) -> String {
+    format!(
+        "({})",
+        specializers
+            .iter()
+            .copied()
+            .map(|specializer| sem_specializer_label(module, specializer))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn sem_specializer_origin_vector_label(
+    module: &sem::Module,
+    specializers: &[sem::MethodSpecializer],
+) -> String {
+    format!(
+        "({})",
+        specializers
+            .iter()
+            .copied()
+            .map(|specializer| {
+                specializer.map_or_else(
+                    || "top".into(),
+                    |class| {
+                        module.classes.get(class.0 as usize).map_or_else(
+                            || "missing".into(),
+                            |class| sem_class_origin_label(class.origin),
+                        )
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn sem_dispatch_applicability_vector_label(
+    module: &sem::Module,
+    specializers: &[sem::MethodSpecializer],
+) -> String {
+    format!(
+        "({})",
+        specializers
+            .iter()
+            .copied()
+            .map(|specializer| {
+                specializer.map_or_else(
+                    || "[<object>]".into(),
+                    |class| sem_dispatch_applicability_label(module, class),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 fn dispatch_methods(module: &sem::Module, generic: sem::GenericFunctionId) -> Vec<&sem::Method> {
     let mut methods = module
         .methods
@@ -4264,10 +4478,13 @@ fn dispatch_methods(module: &sem::Module, generic: sem::GenericFunctionId) -> Ve
         .filter(|method| method.generic == generic)
         .collect::<Vec<_>>();
     methods.sort_by(|left, right| {
-        module
-            .class_depth(right.specializer)
-            .cmp(&module.class_depth(left.specializer))
-            .then_with(|| left.id.0.cmp(&right.id.0))
+        if module.method_more_specific(left, right) {
+            core::cmp::Ordering::Less
+        } else if module.method_more_specific(right, left) {
+            core::cmp::Ordering::Greater
+        } else {
+            left.id.0.cmp(&right.id.0)
+        }
     });
     methods
 }
@@ -4476,18 +4693,15 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
             .generics
             .get(method.generic.0 as usize)
             .map_or("?", |generic| generic.name.as_str());
-        let specializer = module
-            .classes
-            .get(method.specializer.0 as usize)
-            .map_or("?", |class| class.name.as_str());
+        let specializers = sem_specializer_vector_label(module, &method.specializers);
         definitions.push(DefinitionFingerprint {
             report: DefinitionReport {
                 id: method.definition,
                 kind: DefinitionKind::Method,
-                name: format!("{generic}({specializer})"),
+                name: format!("{generic}{specializers}"),
             },
             fingerprint: format!(
-                "method:{generic}:{specializer}:{}:{}",
+                "method:{generic}:{specializers}:{}:{}",
                 method.return_annotation.map_or_else(
                     || "inferred".into(),
                     |kind| sem_kind_fingerprint(module, kind)
@@ -5088,13 +5302,13 @@ mod tests {
 
         let list = artifacts.dump_dispatch_sites();
         assert!(list.contains("dispatch:d0"));
-        assert!(list.contains("static-arg=object(<circle>)"));
+        assert!(list.contains("static-args=(object(<circle>))"));
         let explanation = artifacts
             .explain_dispatch_site("dispatch:d0")
             .expect("dispatch site should exist");
         assert!(explanation.contains("owner: function main"));
         assert!(explanation.contains("generic: g0:area"));
-        assert!(explanation.contains("static-kind: object(<circle>)"));
+        assert!(explanation.contains("static-kinds: (object(<circle>))"));
         assert!(explanation.contains("runtime-needed: false"));
         assert!(explanation.contains("selected"));
         assert!(explanation.contains("dispatcher: area#dispatch"));
@@ -5192,7 +5406,7 @@ mod tests {
         let explanation = artifacts.explain_dispatch_site("dispatch:d0").unwrap();
         assert!(explanation.contains("rejected methods:"));
         assert!(explanation.contains("c2:<square>"));
-        assert!(explanation.contains("reason=disjoint"));
+        assert!(explanation.contains("disjoint"));
     }
 
     #[test]
@@ -5403,7 +5617,7 @@ mod tests {
         assert!(mop.contains("runtime=host-backed"));
         assert!(mop.contains("storage=host-backed"));
         assert!(mop.contains(
-            "m0 specializer=c0 <rust-circle> specializer-origin=host-backed(hc0) method-origin=source"
+            "m0 specializers=(c0:<rust-circle>) specializer-origins=(host-backed(hc0)) method-origin=source"
         ));
         let eop = artifacts.dump_stage(DumpStage::Eop);
         assert!(eop.contains("object class:c0"));

@@ -364,6 +364,12 @@ impl From<ast::SlotMutability> for SlotMutability {
 /// explicit source contract.
 pub type GenericParamKind = Option<ValueKind>;
 
+/// One method specializer in parameter order.
+///
+/// `None` represents source `<object>`, which is Cairn's current top value
+/// category rather than a nominal [`ClassId`].
+pub type MethodSpecializer = Option<ClassId>;
+
 /// Origin of a semantic generic function metaobject.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum GenericFunctionOrigin {
@@ -395,6 +401,17 @@ pub struct Module {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Static result of selecting a generic method for exact runtime classes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MethodSelection {
+    /// No method is applicable.
+    None,
+    /// Exactly one most-specific method applies.
+    Selected(MethodId),
+    /// Multiple incomparable applicable methods remain.
+    Ambiguous,
+}
+
 impl Module {
     /// Returns true when `actual` is the same class as `expected` or inherits
     /// from it through Cairn's single nominal superclass chain.
@@ -423,6 +440,35 @@ impl Module {
     #[must_use]
     pub fn superclass_chain(&self, class: ClassId) -> Vec<ClassId> {
         superclass_chain_in_classes(&self.classes, class)
+    }
+
+    /// Returns true when two class specializers can describe at least one
+    /// common runtime class in Cairn's current single-inheritance lattice.
+    #[must_use]
+    pub fn classes_may_overlap(&self, left: ClassId, right: ClassId) -> bool {
+        self.is_same_or_subclass(left, right) || self.is_same_or_subclass(right, left)
+    }
+
+    /// Returns true when `method` is applicable to an exact runtime class tuple.
+    #[must_use]
+    pub fn method_applies_to_classes(&self, method: &Method, actuals: &[ClassId]) -> bool {
+        method_applies_to_classes_in_classes(&self.classes, method, actuals)
+    }
+
+    /// Returns true when `left` is strictly more specific than `right`.
+    #[must_use]
+    pub fn method_more_specific(&self, left: &Method, right: &Method) -> bool {
+        method_more_specific_in_classes(&self.classes, left, right)
+    }
+
+    /// Selects the unique most-specific method for an exact runtime class tuple.
+    #[must_use]
+    pub fn select_method_for_classes(
+        &self,
+        generic: GenericFunctionId,
+        actuals: &[ClassId],
+    ) -> MethodSelection {
+        select_method_for_classes_in_methods(&self.classes, &self.methods, generic, actuals)
     }
 }
 
@@ -486,6 +532,76 @@ fn superclass_chain_in_classes(classes: &[Class], class: ClassId) -> Vec<ClassId
             .and_then(|class| class.superclass);
     }
     chain
+}
+
+fn method_applies_to_classes_in_classes(
+    classes: &[Class],
+    method: &Method,
+    actuals: &[ClassId],
+) -> bool {
+    method.specializers.len() == actuals.len()
+        && method
+            .specializers
+            .iter()
+            .zip(actuals)
+            .all(|(specializer, actual)| {
+                specializer.is_none_or(|expected| {
+                    is_same_or_subclass_in_classes(classes, *actual, expected)
+                })
+            })
+}
+
+fn method_more_specific_in_classes(classes: &[Class], left: &Method, right: &Method) -> bool {
+    if left.specializers.len() != right.specializers.len() {
+        return false;
+    }
+    let mut stricter = false;
+    for (left, right) in left.specializers.iter().zip(&right.specializers) {
+        match (*left, *right) {
+            (Some(left), Some(right)) if left == right => {}
+            (Some(left), Some(right)) if is_same_or_subclass_in_classes(classes, left, right) => {
+                stricter = true;
+            }
+            (Some(_), None) => {
+                stricter = true;
+            }
+            (None, None) => {}
+            _ => return false,
+        }
+    }
+    stricter
+}
+
+fn select_method_for_classes_in_methods(
+    classes: &[Class],
+    methods: &[Method],
+    generic: GenericFunctionId,
+    actuals: &[ClassId],
+) -> MethodSelection {
+    let applicable = methods
+        .iter()
+        .filter(|method| {
+            method.generic == generic
+                && method_applies_to_classes_in_classes(classes, method, actuals)
+        })
+        .collect::<Vec<_>>();
+    if applicable.is_empty() {
+        return MethodSelection::None;
+    }
+    let maximal = applicable
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !applicable.iter().copied().any(|other| {
+                other.id != candidate.id
+                    && method_more_specific_in_classes(classes, other, candidate)
+            })
+        })
+        .collect::<Vec<_>>();
+    match maximal.as_slice() {
+        [method] => MethodSelection::Selected(method.id),
+        _ => MethodSelection::Ambiguous,
+    }
 }
 
 /// Nominal class definition.
@@ -664,6 +780,8 @@ pub struct GenericFunction {
     pub arity: usize,
     /// Zero-based parameter index used for nominal method dispatch.
     pub dispatch_param: usize,
+    /// Zero-based parameter indexes considered by generic dispatch.
+    pub dispatch_params: Vec<usize>,
     /// Result value category.
     pub result_kind: ValueKind,
     /// Explicit declared result category, when present.
@@ -688,7 +806,7 @@ pub enum MethodOrigin {
     },
 }
 
-/// Method definition specialized on one nominal class.
+/// Method definition specialized on one generic parameter vector.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Method {
     /// Method identifier.
@@ -697,9 +815,13 @@ pub struct Method {
     pub definition: DefinitionId,
     /// Implemented generic function.
     pub generic: GenericFunctionId,
-    /// Specialized class for the first argument.
+    /// Specialized class for the first argument, retained as a compatibility
+    /// mirror for older inspection paths.
     pub specializer: ClassId,
-    /// Dispatch parameter local.
+    /// Specialized classes in call order. `None` means source `<object>`.
+    pub specializers: Vec<MethodSpecializer>,
+    /// Dispatch parameter local, retained as a compatibility mirror for older
+    /// single-dispatch paths.
     pub param: LocalId,
     /// Parameter local IDs in call order.
     pub params: Vec<LocalId>,
@@ -1872,6 +1994,7 @@ impl Lowering {
                 param_kinds,
                 arity: generic.params.len(),
                 dispatch_param: 0,
+                dispatch_params: (0..generic.params.len()).collect(),
                 result_kind: return_annotation.unwrap_or(ValueKind::I64),
                 return_annotation,
                 span: generic.span,
@@ -1940,6 +2063,7 @@ impl Lowering {
                 param_kinds,
                 arity: 2,
                 dispatch_param: 1,
+                dispatch_params: vec![0, 1],
                 result_kind: slot_kind,
                 return_annotation: Some(slot_kind),
                 span: slot_span,
@@ -2027,6 +2151,7 @@ impl Lowering {
                 definition,
                 generic,
                 specializer: class,
+                specializers: vec![self.value_kind_class(slot.kind), Some(class)],
                 param: object_param,
                 params: vec![value_param, object_param],
                 locals: ctx.locals,
@@ -2040,6 +2165,118 @@ impl Lowering {
                 },
             });
         }
+    }
+
+    fn check_ambiguous_generic_methods(&mut self) {
+        let mut reported = Vec::new();
+        for generic in &self.generics {
+            let methods = self
+                .methods
+                .iter()
+                .filter(|method| method.generic == generic.id)
+                .collect::<Vec<_>>();
+            for (left_index, left) in methods.iter().enumerate() {
+                for right in methods.iter().skip(left_index + 1) {
+                    let Some(actuals) = self.intersection_actuals(left, right) else {
+                        continue;
+                    };
+                    let MethodSelection::Ambiguous = select_method_for_classes_in_methods(
+                        &self.classes,
+                        &self.methods,
+                        generic.id,
+                        &actuals,
+                    ) else {
+                        continue;
+                    };
+                    let key = format!(
+                        "{}:{}",
+                        generic.id.0,
+                        actuals
+                            .iter()
+                            .map(|class| class.0.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    if reported.iter().any(|seen| seen == &key) {
+                        continue;
+                    }
+                    reported.push(key);
+                    let candidates = self
+                        .methods
+                        .iter()
+                        .filter(|method| {
+                            method.generic == generic.id
+                                && method_applies_to_classes_in_classes(
+                                    &self.classes,
+                                    method,
+                                    &actuals,
+                                )
+                                && !self.methods.iter().any(|other| {
+                                    other.generic == generic.id
+                                        && other.id != method.id
+                                        && method_applies_to_classes_in_classes(
+                                            &self.classes,
+                                            other,
+                                            &actuals,
+                                        )
+                                        && method_more_specific_in_classes(
+                                            &self.classes,
+                                            other,
+                                            method,
+                                        )
+                                })
+                        })
+                        .map(|method| format!("m{}", method.id.0))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            left.span,
+                            DiagnosticCode::AmbiguousGenericMethodDispatch,
+                        )
+                        .with_arg(DiagnosticArg::text("generic", generic.name.clone()))
+                        .with_arg(DiagnosticArg::text(
+                            "actuals",
+                            self.actual_tuple_label(&actuals),
+                        ))
+                        .with_arg(DiagnosticArg::text("candidates", candidates)),
+                    );
+                }
+            }
+        }
+    }
+
+    fn intersection_actuals(&self, left: &Method, right: &Method) -> Option<Vec<ClassId>> {
+        if left.specializers.len() != right.specializers.len() {
+            return None;
+        }
+        let mut actuals = Vec::new();
+        for (left, right) in left.specializers.iter().zip(&right.specializers) {
+            let actual = match (*left, *right) {
+                (Some(left), Some(right)) if left == right => left,
+                (Some(left), Some(right)) if self.is_same_or_subclass(left, right) => left,
+                (Some(left), Some(right)) if self.is_same_or_subclass(right, left) => right,
+                (Some(_), Some(_)) => return None,
+                (Some(class), None) | (None, Some(class)) => class,
+                (None, None) => self
+                    .classes
+                    .first()
+                    .map_or(ClassId(u32::MAX), |class| class.id),
+            };
+            actuals.push(actual);
+        }
+        Some(actuals)
+    }
+
+    fn actual_tuple_label(&self, actuals: &[ClassId]) -> String {
+        format!(
+            "({})",
+            actuals
+                .iter()
+                .map(|class| self.method_specializer_label(Some(*class)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
     fn collect_functions(&mut self, module: &ast::Module) {
@@ -2093,6 +2330,7 @@ impl Lowering {
             self.methods.push(method);
         }
         self.collect_slot_setter_methods();
+        self.check_ambiguous_generic_methods();
 
         let functions = module
             .functions
@@ -2129,45 +2367,76 @@ impl Lowering {
                 );
                 GenericFunctionId(u32::MAX)
             });
-        let specializer = self
-            .resolve_class(&method.param.class_name)
-            .map(|class| class.id)
-            .unwrap_or_else(|| {
-                self.diagnostics.push(
-                    Diagnostic::error(method.param.span, DiagnosticCode::UnresolvedClass).with_arg(
-                        DiagnosticArg::text("class", method.param.class_name.clone()),
-                    ),
-                );
-                ClassId(u32::MAX)
-            });
         if let Some(symbol) = &generic_symbol
-            && let Some(expected) = symbol
-                .param_kinds
-                .get(symbol.dispatch_param)
-                .copied()
-                .flatten()
-            && !self.generic_specializer_matches(expected, specializer)
+            && method.params.len() != symbol.arity()
         {
             ctx.diagnostics.push(
-                Diagnostic::error(
-                    method.param.span,
-                    DiagnosticCode::GenericMethodSpecializerTypeMismatch,
-                )
-                .with_arg(DiagnosticArg::text("method", method.name.clone()))
-                .with_arg(DiagnosticArg::text(
-                    "actual",
-                    self.kind_name(ValueKind::Object(specializer)),
-                ))
-                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected))),
+                Diagnostic::error(method.span, DiagnosticCode::GenericMethodArityMismatch)
+                    .with_arg(DiagnosticArg::text("method", method.name.clone()))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "expected_count",
+                        u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(method.params.len()).unwrap_or(u64::MAX),
+                    )),
             );
         }
-        let param = ctx.add_local(
-            self.local_definition(method.definition, &method.param.name),
-            method.param.name.clone(),
-            self.kind_for_builtin_class(specializer)
-                .unwrap_or(ValueKind::Object(specializer)),
-            method.param.span,
-        );
+
+        let mut params = Vec::new();
+        let mut specializers = Vec::new();
+        for (index, param) in method.params.iter().enumerate() {
+            if ctx.find_local(&param.name).is_some() {
+                ctx.diagnostics.push(
+                    Diagnostic::error(param.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("name", param.name.clone())),
+                );
+            }
+            let (specializer, kind) = self.resolve_method_specializer(param);
+            if let Some(symbol) = &generic_symbol
+                && let Some(expected) = symbol.param_kinds.get(index).copied().flatten()
+                && !self.generic_specializer_matches(expected, specializer)
+            {
+                ctx.diagnostics.push(
+                    Diagnostic::error(
+                        param.span,
+                        DiagnosticCode::GenericMethodSpecializerTypeMismatch,
+                    )
+                    .with_arg(DiagnosticArg::text("method", method.name.clone()))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "argument_index",
+                        u64::try_from(index + 1).unwrap_or(u64::MAX),
+                    ))
+                    .with_arg(DiagnosticArg::text(
+                        "actual",
+                        self.method_specializer_label(specializer),
+                    ))
+                    .with_arg(DiagnosticArg::text("expected", self.kind_name(expected))),
+                );
+            }
+            let local = ctx.add_local(
+                self.local_definition(method.definition, &param.name),
+                param.name.clone(),
+                kind,
+                param.span,
+            );
+            params.push(local);
+            specializers.push(specializer);
+        }
+        let param = generic_symbol
+            .as_ref()
+            .and_then(|symbol| params.get(symbol.dispatch_param))
+            .copied()
+            .or_else(|| params.first().copied())
+            .unwrap_or(LocalId(u32::MAX));
+        let specializer = generic_symbol
+            .as_ref()
+            .and_then(|symbol| specializers.get(symbol.dispatch_param))
+            .copied()
+            .flatten()
+            .or_else(|| specializers.iter().copied().flatten().next())
+            .unwrap_or(ClassId(u32::MAX));
         let body = self.lower_block(&mut ctx, &method.body);
         let body_kind = self.expr_kind(&body.result);
         let return_annotation = method
@@ -2205,8 +2474,9 @@ impl Lowering {
             definition: method.definition,
             generic,
             specializer,
+            specializers,
             param,
-            params: vec![param],
+            params,
             locals: ctx.locals,
             body,
             result_kind,
@@ -3600,6 +3870,26 @@ impl Lowering {
         self.resolve_type_name(&annotation.name, annotation.class_object, annotation.span)
     }
 
+    fn resolve_method_specializer(
+        &mut self,
+        param: &ast::MethodParam,
+    ) -> (MethodSpecializer, ValueKind) {
+        if param.class_name == "<object>" {
+            return (None, ValueKind::Any);
+        }
+        let Some(class) = self.resolve_class(&param.class_name) else {
+            self.diagnostics.push(
+                Diagnostic::error(param.span, DiagnosticCode::UnresolvedClass)
+                    .with_arg(DiagnosticArg::text("class", param.class_name.clone())),
+            );
+            return (Some(ClassId(u32::MAX)), ValueKind::Error);
+        };
+        let kind = self
+            .kind_for_builtin_class(class.id)
+            .unwrap_or(ValueKind::Object(class.id));
+        (Some(class.id), kind)
+    }
+
     fn resolve_type_name(&mut self, type_name: &str, class_object: bool, span: Span) -> ValueKind {
         if class_object {
             return self
@@ -3650,7 +3940,14 @@ impl Lowering {
             || matches!(actual, ValueKind::Error)
     }
 
-    fn generic_specializer_matches(&self, expected: ValueKind, specializer: ClassId) -> bool {
+    fn generic_specializer_matches(
+        &self,
+        expected: ValueKind,
+        specializer: MethodSpecializer,
+    ) -> bool {
+        let Some(specializer) = specializer else {
+            return matches!(expected, ValueKind::Any | ValueKind::Error);
+        };
         match expected {
             ValueKind::Any | ValueKind::Error => true,
             ValueKind::Object(class) => self.is_same_or_subclass(specializer, class),
@@ -3721,6 +4018,17 @@ impl Lowering {
             ValueKind::KnownCallable(callable) => self.callable_name(callable),
             ValueKind::Error => "<error>".into(),
         }
+    }
+
+    fn method_specializer_label(&self, specializer: MethodSpecializer) -> String {
+        specializer.map_or_else(
+            || "<object>".into(),
+            |class| {
+                self.classes
+                    .get(class.0 as usize)
+                    .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone())
+            },
+        )
     }
 
     fn callable_name(&self, callable: KnownCallable) -> String {

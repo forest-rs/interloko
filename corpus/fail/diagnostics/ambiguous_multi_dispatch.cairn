@@ -1,0 +1,25 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.ambiguous-generic-method-dispatch
+// expect: diagnostic contains generic `score` has ambiguous methods for (<circle>, <circle>)
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 2;
+end;
+
+define generic score(a :: <shape>, b :: <shape>) => <integer>;
+
+define method score(a :: <circle>, b :: <shape>) => <integer>
+  1
+end;
+
+define method score(a :: <shape>, b :: <circle>) => <integer>
+  2
+end;
+
+define function main()
+  score(make(<circle>), make(<circle>))
+end;

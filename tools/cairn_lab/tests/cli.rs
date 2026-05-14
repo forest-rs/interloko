@@ -239,10 +239,9 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(native_out.contains("initialization-plan:"));
     assert!(native_out.contains("initialize-methods=deferred"));
     assert!(native_out.contains("g0 area"));
-    assert!(
-        native_out
-            .contains("m0 specializer=c0 <circle> specializer-origin=native method-origin=source")
-    );
+    assert!(native_out.contains(
+        "m0 specializers=(c0:<circle>) specializer-origins=(native) method-origin=source"
+    ));
 
     let host = fixture("host_backed_area.cairn");
     let host_out = run_lab(&["mop", host.to_str().expect("fixture path should be utf8")]);
@@ -252,10 +251,10 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(host_out.contains("slot s0"));
     assert!(host_out.contains("storage=host-backed"));
     assert!(host_out.contains(
-        "m0 specializer=c0 <rust-circle> specializer-origin=host-backed(hc0) method-origin=source"
+        "m0 specializers=(c0:<rust-circle>) specializer-origins=(host-backed(hc0)) method-origin=source"
     ));
     assert!(host_out.contains(
-        "m1 specializer=c1 <rust-square> specializer-origin=host-backed(hc1) method-origin=source"
+        "m1 specializers=(c1:<rust-square>) specializer-origins=(host-backed(hc1)) method-origin=source"
     ));
 }
 
@@ -375,21 +374,21 @@ fn mop_reports_dispatch_applicability_for_inheritance() {
 
     let mop = run_lab(&["mop", path]);
     assert!(mop.contains("method m0"));
-    assert!(mop.contains("applicable=[c0:<shape>@0,c1:<circle>@1]"));
+    assert!(mop.contains("applicable=([c0:<shape>@0,c1:<circle>@1])"));
     assert!(mop.contains("method m1"));
-    assert!(mop.contains("applicable=[c1:<circle>@0]"));
+    assert!(mop.contains("applicable=([c1:<circle>@0])"));
     assert!(mop.contains(
-        "m1 specializer=c1 <circle> specializer-origin=native method-origin=source applies-to=[c1:<circle>@0]"
+        "m1 specializers=(c1:<circle>) specializer-origins=(native) method-origin=source applies-to=([c1:<circle>@0])"
     ));
     assert!(mop.contains(
-        "m0 specializer=c0 <shape> specializer-origin=native method-origin=source applies-to=[c0:<shape>@0,c1:<circle>@1]"
+        "m0 specializers=(c0:<shape>) specializer-origins=(native) method-origin=source applies-to=([c0:<shape>@0,c1:<circle>@1])"
     ));
 
     let generic = run_lab(&["inspect", path, "generic:g0"]);
-    assert!(generic.contains("dispatch=m1=>[c1:<circle>@0];m0=>[c0:<shape>@0,c1:<circle>@1]"));
+    assert!(generic.contains("dispatch=m1=>([c1:<circle>@0]);m0=>([c0:<shape>@0,c1:<circle>@1])"));
 
     let method = run_lab(&["inspect", path, "method:m0"]);
-    assert!(method.contains("applies-to=[c0:<shape>@0,c1:<circle>@1]"));
+    assert!(method.contains("applies-to=([c0:<shape>@0,c1:<circle>@1])"));
 }
 
 #[test]
@@ -402,14 +401,14 @@ fn dispatch_command_lists_and_explains_dispatch_sites() {
     assert!(list.contains("dispatch:d0"));
     assert!(list.contains("owner=function main"));
     assert!(list.contains("generic=g0:score"));
-    assert!(list.contains("static-arg=object(<circle>)"));
+    assert!(list.contains("static-args=(object(<circle>))"));
     assert!(list.contains("selected=m1:score(c1:<circle>)"));
 
     let explanation = run_lab(&["dispatch", path, "dispatch:d0"]);
     assert!(explanation.contains("dispatch dispatch:d0"));
     assert!(explanation.contains("owner: function main"));
     assert!(explanation.contains("contract=score(x:object(<shape>)) -> integer"));
-    assert!(explanation.contains("static-kind: object(<circle>)"));
+    assert!(explanation.contains("static-kinds: (object(<circle>))"));
     assert!(explanation.contains("m1:score(c1:<circle>)"));
     assert!(explanation.contains("selected"));
     assert!(explanation.contains("m0:score(c0:<shape>)"));
@@ -421,6 +420,25 @@ fn dispatch_command_lists_and_explains_dispatch_sites() {
     let err = run_lab_failure(&["dispatch", path, "dispatch:missing"]);
     assert!(err.contains("unknown dispatch site `dispatch:missing`"));
     assert!(err.contains("available dispatch sites: dispatch:d0"));
+}
+
+#[test]
+fn dispatch_command_shows_multi_argument_vectors() {
+    let file = fixture("multi_dispatch.cairn");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let list = run_lab(&["dispatch", path]);
+    assert!(list.contains("generic=g0:collide"));
+    assert!(list.contains("static-args=(object(<circle>), object(<square>))"));
+    assert!(list.contains("selected=m1:collide(c1:<circle>, c2:<square>)"));
+
+    let explanation = run_lab(&["dispatch", path, "dispatch:d0"]);
+    assert!(explanation.contains("static-kinds: (object(<circle>), object(<square>))"));
+    assert!(explanation.contains("exact-classes: (c1:<circle>, c2:<square>)"));
+    assert!(explanation.contains("specializers=(c1:<circle>, c2:<square>)"));
+    assert!(explanation.contains("distances=(0,0) selected"));
+    assert!(explanation.contains("specializers=(c0:<shape>, c0:<shape>)"));
+    assert!(explanation.contains("distances=(1,1) shadowed"));
 }
 
 #[test]

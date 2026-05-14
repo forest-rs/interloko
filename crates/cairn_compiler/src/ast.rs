@@ -175,7 +175,7 @@ pub struct GenericParam {
     pub span: Span,
 }
 
-/// Method definition specialized on a nominal class.
+/// Method definition specialized on nominal classes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Method {
     /// Stable-ish AST node identity.
@@ -184,8 +184,8 @@ pub struct Method {
     pub definition: DefinitionId,
     /// Generic function name this method implements.
     pub name: String,
-    /// Single specialized parameter for this slice.
-    pub param: MethodParam,
+    /// Specialized parameters in call order.
+    pub params: Vec<MethodParam>,
     /// Optional declared method result type.
     pub return_type: Option<TypeAnnotation>,
     /// Method body.
@@ -202,6 +202,9 @@ pub struct MethodParam {
     /// Parameter name.
     pub name: String,
     /// Nominal class specializer.
+    ///
+    /// `<object>` is normalized by semantic lowering because the current
+    /// semantic top value is not a nominal class id.
     pub class_name: String,
     /// Source span.
     pub span: Span,
@@ -798,15 +801,13 @@ impl<'tree> Lowering<'tree> {
                 return_type = self.type_annotation_after(node, *index);
             }
         }
-        if params.len() != 1 {
-            self.diagnostics.push(
-                Diagnostic::error(node.span, DiagnosticCode::AstInvalidMethodSpecializer).with_arg(
-                    DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(params.len()).unwrap_or(u64::MAX),
-                    ),
-                ),
-            );
+        for param in &params {
+            if param.class_name.is_empty() {
+                self.diagnostics.push(
+                    Diagnostic::error(param.span, DiagnosticCode::AstInvalidMethodSpecializer)
+                        .with_arg(DiagnosticArg::unsigned("actual_count", 0)),
+                );
+            }
         }
         let body = node
             .child_nodes(CstKind::Body)
@@ -822,18 +823,17 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             });
         let name = self.definition_name_after(node, TokenKind::Method);
-        let param = params.into_iter().next().unwrap_or(MethodParam {
-            id: AstNodeId::child(node.id, 1, ""),
-            name: String::new(),
-            class_name: String::new(),
-            span: node.span,
-        });
-        let definition = self.definition(DefinitionKind::Method, &name, &param.class_name);
+        let specializers = params
+            .iter()
+            .map(|param| param.class_name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let definition = self.definition(DefinitionKind::Method, &name, &specializers);
         Method {
             id: self.ast_id(node),
             definition,
             name,
-            param,
+            params,
             return_type,
             body,
             span: node.span,
@@ -976,6 +976,13 @@ impl<'tree> Lowering<'tree> {
             let span = self.tree.tokens[name_index].span;
             let class_name = node.children[index + 1..]
                 .iter()
+                .take_while(|child| {
+                    !matches!(
+                        child,
+                        CstElement::Token(token)
+                            if self.tree.tokens[*token].kind == TokenKind::Comma
+                    )
+                })
                 .find_map(|child| match child {
                     CstElement::Token(type_index)
                         if self.tree.tokens[*type_index].kind == TokenKind::TypeName =>
@@ -985,11 +992,6 @@ impl<'tree> Lowering<'tree> {
                                 .text(&self.tree.source)
                                 .to_string(),
                         )
-                    }
-                    CstElement::Token(comma_index)
-                        if self.tree.tokens[*comma_index].kind == TokenKind::Comma =>
-                    {
-                        None
                     }
                     _ => None,
                 })
@@ -2024,7 +2026,7 @@ mod tests {
             Some((false, "<integer>"))
         );
         assert_eq!(module.methods[0].name, "area");
-        assert_eq!(module.methods[0].param.class_name, "<circle>");
+        assert_eq!(module.methods[0].params[0].class_name, "<circle>");
         assert_eq!(
             module.methods[0]
                 .return_type

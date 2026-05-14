@@ -1,0 +1,25 @@
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 2;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>, init-value: 3;
+end;
+
+define generic collide(a :: <shape>, b :: <shape>) => <integer>;
+
+define method collide(a :: <shape>, b :: <shape>) => <integer>
+  1
+end;
+
+define method collide(a :: <circle>, b :: <square>) => <integer>
+  12
+end;
+
+define function main()
+  collide(make(<circle>), make(<square>))
+end;

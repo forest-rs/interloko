@@ -1,5 +1,5 @@
 // expect: diagnostics 1
-// expect: diagnostic contains method `area` specializer <square> does not satisfy generic parameter 1 contract <circle>
+// expect: diagnostic contains method `area` argument 1 specializer <square> does not satisfy generic contract <circle>
 
 define class <circle> (<object>)
   slot radius :: <integer>;

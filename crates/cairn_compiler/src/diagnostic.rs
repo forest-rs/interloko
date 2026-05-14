@@ -84,6 +84,10 @@ pub enum DiagnosticCode {
     FunctionReturnTypeMismatch,
     /// A generic method specializer does not satisfy the generic contract.
     GenericMethodSpecializerTypeMismatch,
+    /// A method definition does not match the generic arity.
+    GenericMethodArityMismatch,
+    /// A generic has overlapping applicable methods with no unique most-specific method.
+    AmbiguousGenericMethodDispatch,
     /// A method result annotation does not satisfy the generic contract.
     GenericMethodResultTypeMismatch,
     /// A method body does not satisfy its result annotation.
@@ -210,6 +214,8 @@ impl DiagnosticCode {
         Self::FunctionArgumentTypeMismatch,
         Self::FunctionReturnTypeMismatch,
         Self::GenericMethodSpecializerTypeMismatch,
+        Self::GenericMethodArityMismatch,
+        Self::AmbiguousGenericMethodDispatch,
         Self::GenericMethodResultTypeMismatch,
         Self::MethodReturnTypeMismatch,
         Self::GenericArgumentTypeMismatch,
@@ -295,6 +301,8 @@ impl DiagnosticCode {
             Self::GenericMethodSpecializerTypeMismatch => {
                 "sem.generic-method-specializer-type-mismatch"
             }
+            Self::GenericMethodArityMismatch => "sem.generic-method-arity-mismatch",
+            Self::AmbiguousGenericMethodDispatch => "sem.ambiguous-generic-method-dispatch",
             Self::GenericMethodResultTypeMismatch => "sem.generic-method-result-type-mismatch",
             Self::MethodReturnTypeMismatch => "sem.method-return-type-mismatch",
             Self::GenericArgumentTypeMismatch => "sem.generic-argument-type-mismatch",
@@ -381,6 +389,8 @@ impl DiagnosticCode {
             "sem.generic-method-specializer-type-mismatch" => {
                 Self::GenericMethodSpecializerTypeMismatch
             }
+            "sem.generic-method-arity-mismatch" => Self::GenericMethodArityMismatch,
+            "sem.ambiguous-generic-method-dispatch" => Self::AmbiguousGenericMethodDispatch,
             "sem.generic-method-result-type-mismatch" => Self::GenericMethodResultTypeMismatch,
             "sem.method-return-type-mismatch" => Self::MethodReturnTypeMismatch,
             "sem.generic-argument-type-mismatch" => Self::GenericArgumentTypeMismatch,

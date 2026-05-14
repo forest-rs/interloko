@@ -1,0 +1,13 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.generic-method-arity-mismatch
+// expect: diagnostic contains method `score` has 1 parameters but generic expects 2
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define generic score(a :: <shape>, b :: <shape>) => <integer>;
+
+define method score(a :: <shape>) => <integer>
+  1
+end;

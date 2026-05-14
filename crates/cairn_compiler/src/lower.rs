@@ -601,6 +601,18 @@ struct ActiveRestart {
     condition: Option<Value>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct MatchScratch {
+    class_const: Register,
+    cond: Register,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct MatchLabels {
+    success: LabelId,
+    failure: LabelId,
+}
+
 struct BodyLowering<'module> {
     module: &'module sem::Module,
     ids: &'module LowerIds,
@@ -754,83 +766,56 @@ impl<'module> BodyLowering<'module> {
     }
 
     fn lower_dispatcher(&mut self, generic: &sem::GenericFunction) -> Result<(), LowerError> {
-        if matches!(
-            generic
-                .param_kinds
-                .get(generic.dispatch_param)
-                .copied()
-                .flatten(),
-            Some(sem::ValueKind::I64)
-        ) {
-            return self.lower_exact_dispatcher(generic, is_integer_value_class);
-        }
-
-        let object = input_register(generic.dispatch_param);
-        let class_reg = self.alloc(ValueKind::U64);
-        self.instructions.push(Instr::ClassOf {
-            dst: class_reg.reg,
-            object,
-            span: generic.span,
-        });
-
-        let mut methods: Vec<_> = self
-            .module
-            .methods
-            .iter()
-            .filter(|method| method.generic == generic.id)
-            .collect();
-        methods.sort_by(|left, right| {
-            self.module
-                .class_depth(right.specializer)
-                .cmp(&self.module.class_depth(left.specializer))
-                .then_with(|| left.id.0.cmp(&right.id.0))
-        });
-
-        for method in methods {
-            let applicable: Vec<_> = self
-                .module
-                .classes
-                .iter()
-                .filter(|class| {
-                    self.module
-                        .is_same_or_subclass(class.id, method.specializer)
-                })
-                .map(|class| class.id)
-                .collect();
-            if applicable.is_empty() {
-                continue;
+        for method in self.sorted_methods(generic) {
+            if method.specializers.len() != generic.arity {
+                return Err(invalid_semantic("method specializer arity is invalid"));
             }
             let class_const = self.alloc(ValueKind::U64);
             let cond = self.alloc(ValueKind::Bool);
             let method_result = self.alloc(value_kind(method.result_kind)?);
             let matched = self.alloc_label();
             let unmatched = self.alloc_label();
-            for class in applicable {
-                let next = self.alloc_label();
-                self.instructions.push(Instr::ConstU64 {
-                    dst: class_const.reg,
-                    value: u64::from(class.0),
-                    span: method.span,
-                });
-                self.instructions.push(Instr::EqU64 {
-                    dst: cond.reg,
-                    lhs: class_reg.reg,
-                    rhs: class_const.reg,
-                    span: method.span,
-                });
-                self.instructions.push(Instr::Branch {
-                    cond: cond.reg,
-                    then_label: matched,
-                    else_label: next,
-                    span: method.span,
-                });
-                self.instructions.push(Instr::Label { label: next });
+
+            for (index, specializer) in method.specializers.iter().copied().enumerate() {
+                let Some(specializer) = specializer else {
+                    continue;
+                };
+                let next_check = self.alloc_label();
+                self.emit_specializer_match(
+                    generic,
+                    index,
+                    specializer,
+                    MatchScratch {
+                        class_const: class_const.reg,
+                        cond: cond.reg,
+                    },
+                    MatchLabels {
+                        success: next_check,
+                        failure: unmatched,
+                    },
+                    method.span,
+                )?;
+                self.instructions.push(Instr::Label { label: next_check });
             }
             self.instructions.push(Instr::Jump {
-                label: unmatched,
+                label: matched,
                 span: method.span,
             });
             self.instructions.push(Instr::Label { label: matched });
+            let mut call_args = Vec::with_capacity(method.params.len());
+            for (index, local_id) in method.params.iter().copied().enumerate() {
+                let local = method
+                    .locals
+                    .get(local_id.0 as usize)
+                    .ok_or_else(|| invalid_semantic("method parameter local id is out of range"))?;
+                let value = Value {
+                    reg: input_register(index),
+                    kind: dispatcher_param_kind(generic, index),
+                    reachable: true,
+                };
+                let value = self.coerce_value(value, value_kind(local.kind)?, method.span)?;
+                call_args.push(value.reg);
+            }
             self.instructions.push(Instr::Call {
                 dst: method_result.reg,
                 callee: self
@@ -839,7 +824,7 @@ impl<'module> BodyLowering<'module> {
                     .get(method.id.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_semantic("method id is out of range"))?,
-                args: (0..generic.arity).map(input_register).collect(),
+                args: call_args,
                 span: method.span,
             });
             let result =
@@ -858,39 +843,73 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    fn lower_exact_dispatcher(
+    fn emit_specializer_match(
         &mut self,
         generic: &sem::GenericFunction,
-        accepts: fn(&sem::Module, sem::ClassId) -> bool,
+        index: usize,
+        specializer: sem::ClassId,
+        scratch: MatchScratch,
+        labels: MatchLabels,
+        span: Span,
     ) -> Result<(), LowerError> {
-        let Some(method) = self
-            .sorted_methods(generic)
-            .into_iter()
-            .find(|method| accepts(self.module, method.specializer))
-        else {
-            self.instructions.push(Instr::Trap {
-                code: 1,
-                span: generic.span,
+        if matches!(
+            generic.param_kinds.get(index).copied().flatten(),
+            Some(sem::ValueKind::I64)
+        ) {
+            let label = if is_integer_value_class(self.module, specializer) {
+                labels.success
+            } else {
+                labels.failure
+            };
+            self.instructions.push(Instr::Jump { label, span });
+            return Ok(());
+        }
+
+        let applicable = self
+            .module
+            .classes
+            .iter()
+            .filter(|class| self.module.is_same_or_subclass(class.id, specializer))
+            .map(|class| class.id)
+            .collect::<Vec<_>>();
+        if applicable.is_empty() {
+            self.instructions.push(Instr::Jump {
+                label: labels.failure,
+                span,
             });
             return Ok(());
-        };
-        let method_result = self.alloc(value_kind(method.result_kind)?);
-        self.instructions.push(Instr::Call {
-            dst: method_result.reg,
-            callee: self
-                .ids
-                .methods
-                .get(method.id.0 as usize)
-                .copied()
-                .ok_or_else(|| invalid_semantic("method id is out of range"))?,
-            args: (0..generic.arity).map(input_register).collect(),
-            span: method.span,
+        }
+
+        let class_reg = self.alloc(ValueKind::U64);
+        self.instructions.push(Instr::ClassOf {
+            dst: class_reg.reg,
+            object: input_register(index),
+            span,
         });
-        let result =
-            self.coerce_value(method_result, value_kind(generic.result_kind)?, method.span)?;
-        self.instructions.push(Instr::Return {
-            value: result.reg,
-            span: method.span,
+        for class in applicable {
+            let next = self.alloc_label();
+            self.instructions.push(Instr::ConstU64 {
+                dst: scratch.class_const,
+                value: u64::from(class.0),
+                span,
+            });
+            self.instructions.push(Instr::EqU64 {
+                dst: scratch.cond,
+                lhs: class_reg.reg,
+                rhs: scratch.class_const,
+                span,
+            });
+            self.instructions.push(Instr::Branch {
+                cond: scratch.cond,
+                then_label: labels.success,
+                else_label: next,
+                span,
+            });
+            self.instructions.push(Instr::Label { label: next });
+        }
+        self.instructions.push(Instr::Jump {
+            label: labels.failure,
+            span,
         });
         Ok(())
     }
@@ -903,10 +922,13 @@ impl<'module> BodyLowering<'module> {
             .filter(|method| method.generic == generic.id)
             .collect();
         methods.sort_by(|left, right| {
-            self.module
-                .class_depth(right.specializer)
-                .cmp(&self.module.class_depth(left.specializer))
-                .then_with(|| left.id.0.cmp(&right.id.0))
+            if self.module.method_more_specific(left, right) {
+                core::cmp::Ordering::Less
+            } else if self.module.method_more_specific(right, left) {
+                core::cmp::Ordering::Greater
+            } else {
+                left.id.0.cmp(&right.id.0)
+            }
         });
         methods
     }
@@ -1472,13 +1494,21 @@ impl<'module> BodyLowering<'module> {
         for (index, (arg, expected)) in args.iter().zip(&generic.param_kinds).enumerate() {
             let value = self.lower_expr(arg)?;
             let value = if let Some(expected) = *expected {
-                let expected = if expected == sem::ValueKind::Any && index == generic.dispatch_param
+                let expected = if expected == sem::ValueKind::Any
+                    && generic.dispatch_params.contains(&index)
                 {
                     ValueKind::Object(None)
                 } else {
                     value_kind(expected)?
                 };
                 self.coerce_value(value, expected, arg.span())?
+            } else if generic.dispatch_params.contains(&index)
+                && matches!(
+                    value.kind,
+                    ValueKind::Object(Some(_)) | ValueKind::Object(None)
+                )
+            {
+                self.coerce_value(value, ValueKind::Object(None), arg.span())?
             } else {
                 value
             };
@@ -1505,6 +1535,20 @@ impl<'module> BodyLowering<'module> {
                 ..value
             });
         }
+        if let (ValueKind::Object(Some(actual)), ValueKind::Object(Some(expected_class))) =
+            (value.kind, expected)
+            && self.module.classes_may_overlap(actual, expected_class)
+        {
+            let casted = self.alloc(expected);
+            self.instructions.push(Instr::CastObject {
+                dst: casted.reg,
+                value: value.reg,
+                input: value.kind,
+                class: expected_class,
+                span,
+            });
+            return Ok(casted);
+        }
         if matches!(
             (value.kind, expected),
             (ValueKind::Object(Some(_)), ValueKind::Object(None))
@@ -1517,7 +1561,7 @@ impl<'module> BodyLowering<'module> {
         if expected == ValueKind::Any {
             return self.box_any(value, span);
         }
-        if value.kind == ValueKind::Any
+        if matches!(value.kind, ValueKind::Any | ValueKind::Object(None))
             && let ValueKind::Object(Some(class)) = expected
         {
             let casted = self.alloc(expected);
@@ -1605,7 +1649,9 @@ fn is_compile_time_only(kind: sem::ValueKind) -> bool {
 
 fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueKind {
     match generic.param_kinds.get(index).copied().flatten() {
-        Some(sem::ValueKind::Any) if index == generic.dispatch_param => ValueKind::Object(None),
+        Some(sem::ValueKind::Any) if generic.dispatch_params.contains(&index) => {
+            ValueKind::Object(None)
+        }
         Some(sem::ValueKind::Any) => ValueKind::Any,
         Some(
             sem::ValueKind::Object(class)
@@ -1615,7 +1661,7 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueK
         ) => ValueKind::Object(Some(class)),
         Some(sem::ValueKind::I64) => ValueKind::I64,
         Some(sem::ValueKind::Bool) => ValueKind::Bool,
-        None if index == generic.dispatch_param => ValueKind::Object(None),
+        None if generic.dispatch_params.contains(&index) => ValueKind::Object(None),
         None => ValueKind::Any,
         Some(_) => ValueKind::Object(None),
     }

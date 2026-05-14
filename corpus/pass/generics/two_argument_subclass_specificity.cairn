@@ -1,0 +1,33 @@
+// expect: run 23
+// expect: diagnostics 0
+// expect: dump mop contains specializers=(c1:<circle>, c2:<filled-circle>)
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 2;
+end;
+
+define class <filled-circle> (<circle>)
+  slot fill :: <integer>, init-value: 3;
+end;
+
+define generic score(a :: <shape>, b :: <shape>) => <integer>;
+
+define method score(a :: <shape>, b :: <shape>) => <integer>
+  1
+end;
+
+define method score(a :: <circle>, b :: <shape>) => <integer>
+  12
+end;
+
+define method score(a :: <circle>, b :: <filled-circle>) => <integer>
+  23
+end;
+
+define function main()
+  score(make(<filled-circle>), make(<filled-circle>))
+end;
