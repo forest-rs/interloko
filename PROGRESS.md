@@ -1,5 +1,44 @@
 # Interloko Progress
 
+## Implemented: Grammar MOP Follow-Up Slices
+
+- Added `DerivedHostEnvironment` and `DerivedHostGrammar` as a trusted
+  read-only grammar fixture that extends `BaseLokoGrammar`.
+- Grammar records now distinguish direct rules from effective rules. The
+  derived fixture overrides `function-definition` and inherits the rest, while
+  still delegating CST construction to the base hand-written parser.
+- Source files carry an explicit `GrammarEnvironmentSelection`, defaulting to
+  `base-loko`. Workbench and corpus files can select `derived-host` with:
+
+  ```text
+  // grammar: derived-host
+  ```
+
+- Incremental cache reports now treat grammar-environment changes as explicit
+  grammar-stack changes. The source text artifact can be reused while grammar
+  stack, grammar parse, and downstream grammar-dependent artifacts are marked
+  recomputed/affected.
+- Parse reports include grammar diagnostic facts that attach syntax
+  diagnostics to the active environment, grammar, activation, effective rule,
+  source span, diagnostic code, and structured expected fragment.
+- `show-parse-trace`, MOP dumps, EOP records, lab fixtures, and corpus cases
+  expose the derived grammar stack, effective-rule resolution, and structured
+  grammar diagnostics.
+- Added `interloko_compiler::source_data`, a small inert structural data model
+  for frontend protocol facts. Grammar rules now carry structured rule data in
+  addition to their human-readable projected expression.
+- `docs/grammar_mop.md` describes derived grammars, grammar headers,
+  structured diagnostic facts, and the source-data boundary.
+
+Deferred:
+
+- Source-authored grammar declarations.
+- Staged parsing over multiple source regions.
+- Semantic actions and macros.
+- Host execution from grammar actions.
+- Capability policy for grammar/action activation.
+- Replacing the hand-written parser.
+
 ## Implemented: Read-Only Grammar MOP Projection
 
 - Added `interloko_compiler::grammar_frontend` as the frontend boundary around

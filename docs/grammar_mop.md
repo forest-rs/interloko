@@ -40,6 +40,7 @@ Each rule records:
 - a stable rule id;
 - the owning grammar id;
 - a projected rule expression;
+- inert source data describing the projected rule in a structured form;
 - projection origin;
 - the parser implementation location, for example
   `syntax.rs:Parser::parse_function`;
@@ -121,6 +122,29 @@ edits look like grammar edits.
 `show-parse-trace` prints grammar diagnostic facts without rendering localized
 diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
+
+## Source Data
+
+`interloko_compiler::source_data` provides a small inert data model:
+
+```text
+symbol
+string
+integer
+boolean
+list
+tagged record
+```
+
+The grammar MOP uses this for rule expression records, for example:
+
+```text
+grammar-rule(name: function-definition, expression: "...", location: "syntax.rs:Parser::parse_function")
+```
+
+This is deliberately not Loko syntax. It is a structural carrier for frontend
+facts so later staged parsing or semantic actions can exchange data-like forms
+without running host code or pretending macros already exist.
 
 ## Deferred Design
 

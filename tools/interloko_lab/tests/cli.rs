@@ -300,6 +300,7 @@ fn grammar_header_selects_derived_host_stack() {
     assert!(eop.contains("object grammar:derived-host"));
     assert!(eop.contains("object grammar-rule:derived-host/function-definition"));
     assert!(eop.contains("origin=host-provided storage=cached-artifact"));
+    assert!(eop.contains("data=host-grammar-rule"));
     assert!(eop.contains("object effective-grammar-rule:derived-host/function-definition"));
     assert!(eop.contains("resolution=override"));
     assert!(eop.contains("object effective-grammar-rule:derived-host/class-definition"));

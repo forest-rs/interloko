@@ -14,6 +14,7 @@ use core::fmt;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::identity::{SourceFileId, StableIdBuilder};
+use crate::source_data::{self, SourceData};
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree};
 
 const DOMAIN_LANGUAGE_ENVIRONMENT: u64 = 0x4c4f_4b4f_5f45_4e56;
@@ -267,6 +268,8 @@ pub struct GrammarRule {
     pub name: String,
     /// Human-readable projected expression.
     pub expression: String,
+    /// Inert structural expression data.
+    pub expression_data: SourceData,
     /// Projection/source location information.
     pub projection: GrammarProjection,
 }
@@ -565,6 +568,14 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
         expression:
             "host-projected override delegates function-definition parsing to BaseLokoGrammar"
                 .to_string(),
+        expression_data: SourceData::record(
+            "host-grammar-rule",
+            vec![
+                source_data::field("name", SourceData::symbol("function-definition")),
+                source_data::field("extends", SourceData::symbol("BaseLokoGrammar")),
+                source_data::field("delegates-to", SourceData::symbol("BaseLokoGrammar")),
+            ],
+        ),
         projection: GrammarProjection {
             origin: "trusted-host-fixture".to_string(),
             location: "host:DerivedHostGrammar/function-definition".to_string(),
@@ -750,6 +761,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             grammar_slug: grammar_slug.to_string(),
             name: (*name).to_string(),
             expression: (*expression).to_string(),
+            expression_data: grammar_rule_expression_data(name, expression, location),
             projection: GrammarProjection {
                 origin: "compiler-projected".to_string(),
                 location: (*location).to_string(),
@@ -757,6 +769,17 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             },
         })
         .collect()
+}
+
+fn grammar_rule_expression_data(name: &str, expression: &str, location: &str) -> SourceData {
+    SourceData::record(
+        "grammar-rule",
+        vec![
+            source_data::field("name", SourceData::symbol(name)),
+            source_data::field("expression", SourceData::string(expression)),
+            source_data::field("location", SourceData::string(location)),
+        ],
+    )
 }
 
 fn direct_effective_rules(
@@ -1061,6 +1084,10 @@ mod tests {
             .find(|rule| rule.grammar == derived_grammar && rule.name == "function-definition")
             .expect("derived direct override");
         assert_eq!(direct_override.projection.origin, "trusted-host-fixture");
+        assert_eq!(
+            source_data::dump(&direct_override.expression_data),
+            "host-grammar-rule(name: function-definition, extends: BaseLokoGrammar, delegates-to: BaseLokoGrammar)"
+        );
 
         let effective_override = records
             .effective_rules

@@ -3273,13 +3273,14 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
     for rule in &artifacts.grammar_parse.rules {
         let _ = writeln!(
             out,
-            "  {} {} grammar={} origin={} location={} expr=\"{}\"",
+            "  {} {} grammar={} origin={} location={} expr=\"{}\" data={}",
             rule.id,
             rule.name,
             rule.grammar,
             rule.projection.origin,
             rule.projection.location,
-            rule.expression
+            rule.expression,
+            rule.expression_data
         );
     }
 
@@ -3654,6 +3655,7 @@ fn explain_grammar_rule(rule: &GrammarRule) -> String {
     let _ = writeln!(out, "origin {}", rule.projection.origin);
     let _ = writeln!(out, "location {}", rule.projection.location);
     let _ = writeln!(out, "expression {}", rule.expression);
+    let _ = writeln!(out, "source-data {}", rule.expression_data);
     if let Some(span) = rule.projection.source_span {
         let _ = writeln!(out, "source-span {}..{}", span.start, span.end);
     } else {
@@ -3984,12 +3986,13 @@ fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule
         ]),
         execution: None,
         inspection: format!(
-            "id={} grammar={} origin={} location={} expression=\"{}\"",
+            "id={} grammar={} origin={} location={} expression=\"{}\" data={}",
             rule.id,
             rule.grammar,
             rule.projection.origin,
             rule.projection.location,
-            rule.expression
+            rule.expression,
+            rule.expression_data
         ),
     }));
 }

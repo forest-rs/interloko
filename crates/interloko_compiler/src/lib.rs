@@ -31,6 +31,8 @@ pub mod runtime;
 pub mod sem;
 /// Compiler session API and inspectable stage artifacts.
 pub mod session;
+/// Inert source/frontend protocol data.
+pub mod source_data;
 /// Syntax and parsing support.
 pub mod syntax;
 /// `execution_tape` emission.
