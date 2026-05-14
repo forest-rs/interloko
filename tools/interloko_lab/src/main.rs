@@ -250,6 +250,9 @@ fn all_affordances() -> &'static [EnvironmentAffordance] {
         Aff::OpenSource,
         Aff::DumpArtifacts,
         Aff::ShowSlots,
+        Aff::ShowGrammarStack,
+        Aff::ShowGrammarRule,
+        Aff::ShowParseTrace,
     ]
 }
 
@@ -498,6 +501,26 @@ fn invoke_affordance(file: &str, object_id: &str, affordance: EnvironmentAfforda
         }
         EnvironmentAffordance::ShowDependencies => {
             print!("{}", workbench.artifacts.dump_artifact_graph());
+            Ok(())
+        }
+        EnvironmentAffordance::ShowGrammarStack => {
+            print!("{}", workbench.artifacts.dump_grammar_stack());
+            Ok(())
+        }
+        EnvironmentAffordance::ShowGrammarRule => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_grammar_rule(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowParseTrace => {
+            print!("{}", workbench.artifacts.dump_parse_trace());
             Ok(())
         }
         EnvironmentAffordance::Run => unreachable!("run handled before compile-only path"),

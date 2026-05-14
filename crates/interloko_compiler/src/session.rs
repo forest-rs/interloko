@@ -15,11 +15,14 @@ use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::grammar_frontend::{
+    self, GrammarActivation, GrammarParseReport, GrammarRule, LanguageEnvironment,
+};
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
 use crate::runtime::{self, HostObjectKind, InterlokoHost, RuntimeLayout};
 use crate::syntax::{CstElement, CstNode, Span, SyntaxTree, TokenKind};
-use crate::{ast, lower, sem, syntax, tape};
+use crate::{ast, lower, sem, tape};
 
 /// Named source file accepted by a compiler session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +173,14 @@ impl fmt::Display for EnvironmentObjectId {
 pub enum EnvironmentKind {
     /// A named source file known to the session.
     SourceFile,
+    /// A language environment metaobject.
+    LanguageEnvironment,
+    /// A grammar metaobject.
+    Grammar,
+    /// A direct grammar rule metaobject.
+    GrammarRule,
+    /// A grammar activation over a parse region.
+    GrammarActivation,
     /// A semantic class metaobject.
     Class,
     /// A semantic slot metaobject.
@@ -200,6 +211,10 @@ impl EnvironmentKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SourceFile => "source-file",
+            Self::LanguageEnvironment => "language-environment",
+            Self::Grammar => "grammar",
+            Self::GrammarRule => "grammar-rule",
+            Self::GrammarActivation => "grammar-activation",
             Self::Class => "class",
             Self::Slot => "slot",
             Self::Accessor => "accessor",
@@ -315,6 +330,12 @@ pub enum EnvironmentAffordance {
     DumpArtifacts,
     /// Show the slots owned by a class.
     ShowSlots,
+    /// Show the resolved grammar stack.
+    ShowGrammarStack,
+    /// Show a projected grammar rule.
+    ShowGrammarRule,
+    /// Show parse provenance and grammar activations.
+    ShowParseTrace,
 }
 
 impl EnvironmentAffordance {
@@ -343,6 +364,9 @@ impl EnvironmentAffordance {
             Self::OpenSource => "open-source",
             Self::DumpArtifacts => "dump-artifacts",
             Self::ShowSlots => "show-slots",
+            Self::ShowGrammarStack => "show-grammar-stack",
+            Self::ShowGrammarRule => "show-grammar-rule",
+            Self::ShowParseTrace => "show-parse-trace",
         }
     }
 }
@@ -470,6 +494,8 @@ pub struct SessionArtifacts {
     pub source: SourceFile,
     /// Parsed syntax tree.
     pub syntax: SyntaxTree,
+    /// Grammar frontend parse report.
+    pub grammar_parse: GrammarParseReport,
     /// Surface AST.
     pub ast: ast::Module,
     /// Semantic IR.
@@ -512,6 +538,28 @@ impl SessionArtifacts {
     #[must_use]
     pub fn dump_dispatch_sites(&self) -> String {
         dump_dispatch_sites(self)
+    }
+
+    /// Dumps the resolved grammar stack.
+    #[must_use]
+    pub fn dump_grammar_stack(&self) -> String {
+        dump_grammar_stack(&self.grammar_parse)
+    }
+
+    /// Dumps parse provenance and grammar activations.
+    #[must_use]
+    pub fn dump_parse_trace(&self) -> String {
+        dump_parse_trace(&self.grammar_parse)
+    }
+
+    /// Explains a grammar rule environment object id.
+    #[must_use]
+    pub fn explain_grammar_rule(&self, id: &str) -> Option<String> {
+        self.grammar_parse
+            .rules
+            .iter()
+            .find(|rule| grammar_frontend::grammar_rule_object_id(rule) == id)
+            .map(explain_grammar_rule)
     }
 
     /// Explains one generic dispatch site by friendly selector id.
@@ -581,7 +629,7 @@ impl SessionArtifacts {
             DumpStage::Syntax => dump_syntax(&self.syntax),
             DumpStage::Ast => dump_ast(&self.ast),
             DumpStage::Sem => dump_sem(&self.sem),
-            DumpStage::Mop => dump_mop(&self.sem),
+            DumpStage::Mop => dump_mop(self),
             DumpStage::Eop => dump_eop(self),
             DumpStage::Lowered => self.lowered.as_ref().map_or_else(
                 || format!("lowered unavailable: {:?}\n", self.lower_error),
@@ -1305,6 +1353,19 @@ fn artifact_fingerprint(
         QueryArtifact::Source | QueryArtifact::Parse => {
             builder.mix_str(&artifacts.source.source);
         }
+        QueryArtifact::EnvironmentResolution => {
+            builder.mix_str(&artifacts.grammar_parse.environment.name);
+            builder.mix_u64(artifacts.grammar_parse.environment.id.raw());
+        }
+        QueryArtifact::GrammarStack => {
+            for grammar in &artifacts.grammar_parse.grammar_stack.grammars {
+                builder.mix_u64(grammar.raw());
+            }
+        }
+        QueryArtifact::GrammarParse => {
+            builder.mix_str(&dump_parse_trace(&artifacts.grammar_parse));
+            builder.mix_str(&artifacts.source.source);
+        }
         QueryArtifact::Ast => {
             builder.mix_str(&dump_ast(&artifacts.ast));
         }
@@ -1484,6 +1545,14 @@ fn strip_span_comments(input: &str) -> String {
 fn artifact_work_units(artifact: QueryArtifact, artifacts: &SessionArtifacts) -> u64 {
     match artifact {
         QueryArtifact::Source => usize_to_u64(artifacts.source.source.len()),
+        QueryArtifact::EnvironmentResolution => 1,
+        QueryArtifact::GrammarStack => {
+            usize_to_u64(artifacts.grammar_parse.grammar_stack.grammars.len())
+        }
+        QueryArtifact::GrammarParse => {
+            usize_to_u64(dump_parse_trace(&artifacts.grammar_parse).len())
+                .saturating_add(usize_to_u64(artifacts.syntax.tokens.len()))
+        }
         QueryArtifact::Parse => usize_to_u64(artifacts.source.source.len())
             .saturating_add(usize_to_u64(artifacts.syntax.tokens.len())),
         QueryArtifact::Ast => usize_to_u64(dump_ast(&artifacts.ast).len()),
@@ -2352,7 +2421,8 @@ fn compile_file_with_host_registry(
     mode: RuntimeMode,
     registry: &sem::HostMetaRegistry,
 ) -> SessionArtifacts {
-    let syntax = syntax::parse_file(file.id, &file.source);
+    let grammar_parse = grammar_frontend::parse_file(file.id, &file.source);
+    let syntax = grammar_parse.syntax.clone();
     let ast = ast::lower(&syntax);
     let sem = sem::lower_with_host_registry(&ast, registry);
     let diagnostics = sem.diagnostics.clone();
@@ -2377,6 +2447,7 @@ fn compile_file_with_host_registry(
     SessionArtifacts {
         source: file.clone(),
         syntax,
+        grammar_parse,
         ast,
         sem,
         lowered,
@@ -2939,10 +3010,75 @@ fn dump_sem(module: &sem::Module) -> String {
     out
 }
 
-fn dump_mop(module: &sem::Module) -> String {
+fn dump_mop(artifacts: &SessionArtifacts) -> String {
+    let module = &artifacts.sem;
     let runtime = runtime::runtime_layout_from_sem(module);
     let mut out = String::new();
     let _ = writeln!(out, "mop {}", module.source_file);
+
+    let _ = writeln!(out, "language environments:");
+    let environment = &artifacts.grammar_parse.environment;
+    let _ = writeln!(
+        out,
+        "  {} {} stack={}",
+        environment.id,
+        environment.name,
+        grammar_stack_label(&artifacts.grammar_parse)
+    );
+
+    let _ = writeln!(out, "grammars:");
+    for grammar in &artifacts.grammar_parse.grammars {
+        let extends = if grammar.extends.is_empty() {
+            "[]".to_string()
+        } else {
+            let mut out = String::from("[");
+            for (index, id) in grammar.extends.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "{id}");
+            }
+            out.push(']');
+            out
+        };
+        let _ = writeln!(
+            out,
+            "  {} {} extends={} direct-rules={}",
+            grammar.id,
+            grammar.name,
+            extends,
+            grammar.direct_rules.len()
+        );
+    }
+
+    let _ = writeln!(out, "grammar rules:");
+    for rule in &artifacts.grammar_parse.rules {
+        let _ = writeln!(
+            out,
+            "  {} {} grammar={} origin={} location={} expr=\"{}\"",
+            rule.id,
+            rule.name,
+            rule.grammar,
+            rule.projection.origin,
+            rule.projection.location,
+            rule.expression
+        );
+    }
+
+    let _ = writeln!(out, "grammar activations:");
+    for activation in &artifacts.grammar_parse.activations {
+        let _ = writeln!(
+            out,
+            "  {} environment={} grammar={} span={}..{} root-rule={} reason=\"{}\"",
+            activation.id,
+            activation.environment,
+            activation.grammar,
+            activation.span.start,
+            activation.span.end,
+            activation.root_rule,
+            activation.reason
+        );
+    }
 
     let _ = writeln!(out, "classes:");
     for class in &module.classes {
@@ -3166,6 +3302,105 @@ fn runtime_object_kind_label(kind: HostObjectKind) -> &'static str {
     }
 }
 
+fn dump_grammar_stack(report: &GrammarParseReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar stack environment={} ({})",
+        report.environment.id, report.environment.name
+    );
+    for (index, grammar_id) in report.grammar_stack.grammars.iter().enumerate() {
+        let name = report
+            .grammars
+            .iter()
+            .find(|grammar| grammar.id == *grammar_id)
+            .map_or("<unknown>", |grammar| grammar.name.as_str());
+        let _ = writeln!(out, "  {index}: {grammar_id} {name}");
+    }
+    out
+}
+
+fn dump_parse_trace(report: &GrammarParseReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "parse trace {} provenance={}",
+        report.source_file, report.provenance.id
+    );
+    let _ = writeln!(
+        out,
+        "environment {} {}",
+        report.environment.id, report.environment.name
+    );
+    let _ = write!(out, "stack");
+    for grammar_id in &report.grammar_stack.grammars {
+        let name = report
+            .grammars
+            .iter()
+            .find(|grammar| grammar.id == *grammar_id)
+            .map_or("<unknown>", |grammar| grammar.name.as_str());
+        let _ = write!(out, " {grammar_id}:{name}");
+    }
+    out.push('\n');
+    let _ = writeln!(out, "activations:");
+    for activation in &report.activations {
+        let _ = writeln!(
+            out,
+            "  {} grammar={} span={}..{} root-rule={} reason=\"{}\"",
+            activation.id,
+            activation.grammar,
+            activation.span.start,
+            activation.span.end,
+            activation.root_rule,
+            activation.reason
+        );
+    }
+    let _ = writeln!(out, "rule provenance:");
+    for rule in &report.provenance.rules {
+        if rule.node_count > 0 {
+            let _ = writeln!(
+                out,
+                "  {} {} nodes={}",
+                rule.rule, rule.rule_name, rule.node_count
+            );
+        }
+    }
+    out
+}
+
+fn explain_grammar_rule(rule: &GrammarRule) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar rule {}",
+        grammar_frontend::grammar_rule_object_id(rule)
+    );
+    let _ = writeln!(out, "id {}", rule.id);
+    let _ = writeln!(out, "name {}", rule.name);
+    let _ = writeln!(out, "grammar {}", rule.grammar);
+    let _ = writeln!(out, "origin {}", rule.projection.origin);
+    let _ = writeln!(out, "location {}", rule.projection.location);
+    let _ = writeln!(out, "expression {}", rule.expression);
+    if let Some(span) = rule.projection.source_span {
+        let _ = writeln!(out, "source-span {}..{}", span.start, span.end);
+    } else {
+        let _ = writeln!(out, "source-span none");
+    }
+    out
+}
+
+fn grammar_stack_label(report: &GrammarParseReport) -> String {
+    let mut out = String::from("[");
+    for (index, grammar_id) in report.grammar_stack.grammars.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{grammar_id}");
+    }
+    out.push(']');
+    out
+}
+
 fn dump_eop(artifacts: &SessionArtifacts) -> String {
     render_environment_objects(&artifacts.source, &artifacts.environment_objects())
 }
@@ -3295,6 +3530,8 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             Aff::DumpTape,
             Aff::Artifacts,
             Aff::Diff,
+            Aff::ShowGrammarStack,
+            Aff::ShowParseTrace,
         ]),
         execution: None,
         inspection: format!(
@@ -3303,6 +3540,8 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             artifacts.source.source.len()
         ),
     }));
+
+    project_environment_grammar(artifacts, sink);
 
     for class in &module.classes {
         project_environment_class(module, &runtime, sink, class);
@@ -3357,6 +3596,138 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             inspection: format!("key={} artifact={artifact}", report.key),
         }));
     }
+}
+
+fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
+    use EnvironmentAffordance as Aff;
+
+    let report = &artifacts.grammar_parse;
+    project_language_environment(sink, &report.environment);
+    for grammar in &report.grammars {
+        let id = grammar_frontend::grammar_object_id(grammar);
+        sink.emit(environment_object(EnvironmentObjectParts {
+            id,
+            kind: EnvironmentKind::Grammar,
+            meta_class: "<grammar>",
+            origin: EnvironmentOrigin::CompilerGenerated,
+            storage: EnvironmentStorage::CachedArtifact,
+            title: grammar.name.clone(),
+            affordances: Vec::from([
+                Aff::Inspect,
+                Aff::DumpMop,
+                Aff::DumpEop,
+                Aff::ShowGrammarStack,
+                Aff::ShowParseTrace,
+            ]),
+            execution: None,
+            inspection: format!(
+                "id={} name={} extends={} direct-rules={}",
+                grammar.id,
+                grammar.name,
+                grammar.extends.len(),
+                grammar.direct_rules.len()
+            ),
+        }));
+    }
+    for rule in &report.rules {
+        project_grammar_rule(sink, rule);
+    }
+    for activation in &report.activations {
+        project_grammar_activation(sink, activation);
+    }
+}
+
+fn project_language_environment(
+    sink: &mut dyn EnvironmentObjectSink,
+    environment: &LanguageEnvironment,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::language_environment_object_id(environment),
+        kind: EnvironmentKind::LanguageEnvironment,
+        meta_class: "<language-environment>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: environment.name.clone(),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarStack,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "id={} name={} grammar-stack={}",
+            environment.id,
+            environment.name,
+            environment.grammar_stack.len()
+        ),
+    }));
+}
+
+fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::grammar_rule_object_id(rule),
+        kind: EnvironmentKind::GrammarRule,
+        meta_class: "<grammar-rule>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: rule.name.clone(),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarRule,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "id={} grammar={} origin={} location={} expression=\"{}\"",
+            rule.id,
+            rule.grammar,
+            rule.projection.origin,
+            rule.projection.location,
+            rule.expression
+        ),
+    }));
+}
+
+fn project_grammar_activation(
+    sink: &mut dyn EnvironmentObjectSink,
+    activation: &GrammarActivation,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::grammar_activation_object_id(activation),
+        kind: EnvironmentKind::GrammarActivation,
+        meta_class: "<grammar-activation>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: "Base Loko parse activation".to_string(),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarStack,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "id={} environment={} grammar={} span={}..{} root-rule={} reason=\"{}\"",
+            activation.id,
+            activation.environment,
+            activation.grammar,
+            activation.span.start,
+            activation.span.end,
+            activation.root_rule,
+            activation.reason
+        ),
+    }));
 }
 
 fn project_environment_class(
@@ -5220,6 +5591,9 @@ fn fingerprint_args(module: &sem::Module, args: &[sem::Expr], out: &mut String) 
 fn artifact_label(artifact: QueryArtifact) -> String {
     match artifact {
         QueryArtifact::Source => "source".into(),
+        QueryArtifact::EnvironmentResolution => "environment-resolution".into(),
+        QueryArtifact::GrammarStack => "grammar-stack".into(),
+        QueryArtifact::GrammarParse => "grammar-parse".into(),
         QueryArtifact::Parse => "parse".into(),
         QueryArtifact::Ast => "ast".into(),
         QueryArtifact::Bind => "bind".into(),
@@ -5306,6 +5680,17 @@ mod tests {
             (EnvironmentAffordance::Run, "run"),
             (EnvironmentAffordance::EditBody, "edit-body"),
             (EnvironmentAffordance::AddMethod, "add-method"),
+            (EnvironmentAffordance::Artifacts, "artifacts"),
+            (EnvironmentAffordance::Diff, "diff"),
+            (EnvironmentAffordance::OpenSource, "open-source"),
+            (EnvironmentAffordance::DumpArtifacts, "dump-artifacts"),
+            (EnvironmentAffordance::ShowSlots, "show-slots"),
+            (
+                EnvironmentAffordance::ShowGrammarStack,
+                "show-grammar-stack",
+            ),
+            (EnvironmentAffordance::ShowGrammarRule, "show-grammar-rule"),
+            (EnvironmentAffordance::ShowParseTrace, "show-parse-trace"),
         ];
 
         for (affordance, name) in names {
@@ -5360,6 +5745,13 @@ mod tests {
         );
         let mop = artifacts.dump_stage(DumpStage::Mop);
         assert!(mop.contains("mop"));
+        assert!(mop.contains("language environments:"));
+        assert!(mop.contains("BaseLokoEnvironment"));
+        assert!(mop.contains("grammars:"));
+        assert!(mop.contains("BaseLokoGrammar"));
+        assert!(mop.contains("grammar rules:"));
+        assert!(mop.contains("function-definition"));
+        assert!(mop.contains("grammar activations:"));
         assert!(mop.contains("classes:"));
         assert!(mop.contains("origin=native"));
         assert!(mop.contains("runtime=native"));
@@ -5370,6 +5762,10 @@ mod tests {
         assert!(eop.contains("eop"));
         assert!(eop.contains("object source:"));
         assert!(eop.contains("kind=source-file"));
+        assert!(eop.contains("object language-environment:base-loko"));
+        assert!(eop.contains("object grammar:base-loko"));
+        assert!(eop.contains("object grammar-rule:base-loko/function-definition"));
+        assert!(eop.contains("object grammar-activation:base-loko/source-file"));
         assert!(eop.contains("object class:c0"));
         assert!(eop.contains("object generic:g0"));
         assert!(eop.contains("object method:m0"));
@@ -5391,6 +5787,52 @@ mod tests {
                 .contains("program=\"interloko\"")
         );
         assert!(artifacts.dump_artifact_graph().contains("dependencies:"));
+        assert!(
+            artifacts
+                .dump_artifact_graph()
+                .contains("grammar-parse <- grammar-stack")
+        );
+        assert!(artifacts.dump_grammar_stack().contains("BaseLokoGrammar"));
+        assert!(artifacts.dump_parse_trace().contains("rule provenance:"));
+        assert!(
+            artifacts
+                .explain_grammar_rule("grammar-rule:base-loko/function-definition")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn grammar_object_ids_survive_harmless_source_edits() {
+        let source_file = SourceFileId::from_path("examples/area.loko");
+        let before = CompilerSession::compile_source_with_id(
+            source_file,
+            "examples/area.loko",
+            AREA,
+            RuntimeMode::CompileOnly,
+        );
+        let after = CompilerSession::compile_source_with_id(
+            source_file,
+            "examples/area.loko",
+            &AREA.replace(
+                "define generic area(x);",
+                "define generic area(x); // harmless",
+            ),
+            RuntimeMode::CompileOnly,
+        );
+
+        let before_objects = before.environment_objects();
+        let after_objects = after.environment_objects();
+        for id in [
+            "language-environment:base-loko",
+            "grammar:base-loko",
+            "grammar-rule:base-loko/function-definition",
+            "grammar-activation:base-loko/source-file",
+        ] {
+            assert_eq!(
+                eop_object(&before_objects, id).id,
+                eop_object(&after_objects, id).id
+            );
+        }
     }
 
     #[test]

@@ -266,6 +266,13 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("object source:"));
     assert!(out.contains("kind=source-file"));
     assert!(out.contains("dump-eop"));
+    assert!(out.contains("object language-environment:base-loko"));
+    assert!(out.contains("kind=language-environment"));
+    assert!(out.contains("object grammar:base-loko"));
+    assert!(out.contains("kind=grammar"));
+    assert!(out.contains("object grammar-rule:base-loko/function-definition"));
+    assert!(out.contains("show-grammar-rule"));
+    assert!(out.contains("object grammar-activation:base-loko/source-file"));
     assert!(out.contains("object class:c0"));
     assert!(out.contains("origin=host-backed storage=host-registry"));
     assert!(out.contains("object slot:c0.s0"));
@@ -300,6 +307,19 @@ fn inspect_reports_structured_environment_objects() {
         ("method:m0", "kind: method"),
         ("function:f0", "kind: function"),
         ("dispatch:d0", "kind: dispatch-site"),
+        (
+            "language-environment:base-loko",
+            "kind: language-environment",
+        ),
+        ("grammar:base-loko", "kind: grammar"),
+        (
+            "grammar-rule:base-loko/function-definition",
+            "kind: grammar-rule",
+        ),
+        (
+            "grammar-activation:base-loko/source-file",
+            "kind: grammar-activation",
+        ),
         ("runtime-class:c0", "kind: runtime-layout-row"),
         ("runtime-slot:c0.s0", "class: <runtime-slot>"),
         (artifact_id.as_str(), "kind: artifact"),
@@ -489,6 +509,33 @@ fn invoke_affordance_runs_read_only_views() {
     let sem = run_lab(&["invoke-affordance", path, "method:m0", "dump-sem"]);
     assert!(sem.contains("sem"));
     assert!(sem.contains("method m0"));
+
+    let grammar_stack = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar:base-loko",
+        "show-grammar-stack",
+    ]);
+    assert!(grammar_stack.contains("grammar stack"));
+    assert!(grammar_stack.contains("BaseLokoGrammar"));
+
+    let grammar_rule = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar-rule:base-loko/function-definition",
+        "show-grammar-rule",
+    ]);
+    assert!(grammar_rule.contains("grammar rule grammar-rule:base-loko/function-definition"));
+    assert!(grammar_rule.contains("syntax.rs:Parser::parse_function"));
+
+    let parse_trace = run_lab(&[
+        "invoke-affordance",
+        path,
+        "language-environment:base-loko",
+        "show-parse-trace",
+    ]);
+    assert!(parse_trace.contains("parse trace"));
+    assert!(parse_trace.contains("rule provenance:"));
 }
 
 #[test]
@@ -561,6 +608,10 @@ fn artifacts_lists_stable_keys_and_edges() {
 
     assert!(out.contains("artifact graph"));
     assert!(out.contains("art"));
+    assert!(out.contains("environment-resolution"));
+    assert!(out.contains("grammar-stack"));
+    assert!(out.contains("grammar-parse"));
+    assert!(out.contains("parse <- grammar-parse"));
     assert!(out.contains("method-lookup"));
     assert!(out.contains("dependencies:"));
 }

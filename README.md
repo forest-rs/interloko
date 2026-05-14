@@ -135,6 +135,8 @@ Useful docs:
   Interloko/Loko/Vivarium naming split.
 - [`docs/mop_protocol.md`](docs/mop_protocol.md) describes read-only MOP
   protocols.
+- [`docs/grammar_mop.md`](docs/grammar_mop.md) describes the read-only grammar
+  projection for the base Loko parser.
 - [`docs/eop_workbench.md`](docs/eop_workbench.md) describes environment object
   records and workbench affordances.
 - [`corpus/README.md`](corpus/README.md) explains corpus expectations.

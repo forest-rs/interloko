@@ -1,5 +1,49 @@
 # Plans
 
+## Add Read-Only Grammar MOP Projection
+
+### Goal
+
+Expose the current hand-written Loko parser as read-only grammar metaobjects
+without changing parser behavior. The first slice should make the base language
+environment, base grammar, projected grammar rules, resolved grammar stack,
+activations, and parse provenance inspectable through the existing session,
+MOP/EOP, artifact, and workbench surfaces.
+
+### Fence
+
+`interloko_compiler::grammar_frontend` owns language-environment identity,
+grammar metaobjects, grammar-stack resolution, parser invocation, parse
+activations, and parse provenance. It explicitly does not own AST lowering,
+semantic lowering, source-authored grammars, macros, semantic actions, host code
+execution, staged parsing, OMeta/Ohm compatibility, or a parser rewrite.
+
+### Steps
+
+1. Add grammar identity and report records in a new `grammar_frontend` module.
+2. Wrap the existing `syntax::parse_file` path and return a
+   `GrammarParseReport` plus the existing `SyntaxTree`.
+3. Add explicit query artifacts for environment resolution, grammar stack, and
+   grammar parse, then thread them through session artifact reports.
+4. Project `BaseLokoEnvironment`, `BaseLokoGrammar`, grammar rules, and
+   activations through MOP/EOP records.
+5. Add `interloko_lab` affordance handling for grammar stack, grammar rule, and
+   parse trace inspection.
+6. Cover stable grammar object IDs across harmless edits and normal
+   source-to-tape compilation through tests.
+7. Document the grammar MOP boundary, deferred staged parsing, and validation
+   results before committing.
+
+### Risks
+
+- Exposing too much parser internals would freeze private implementation
+  details before the grammar protocol earns them.
+- A derived grammar fixture without real parser delegation would be misleading,
+  so this slice only projects the base grammar and reserves overrides for a
+  later goal.
+- Grammar artifacts must stay separate from ordinary method-body edit reports,
+  or incremental output will become noisy and less useful.
+
 ## Extract Interloko Runtime Host Support
 
 ### Goal

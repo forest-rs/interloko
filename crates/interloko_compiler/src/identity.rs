@@ -110,6 +110,14 @@ impl AstNodeId {
 /// Kind of named definition that can receive a stable [`DefinitionId`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum DefinitionKind {
+    /// Language environment definition.
+    LanguageEnvironment,
+    /// Grammar definition.
+    Grammar,
+    /// Grammar rule definition.
+    GrammarRule,
+    /// Semantic action definition.
+    SemanticAction,
     /// Class definition.
     Class,
     /// Slot definition within a class.
@@ -133,6 +141,10 @@ impl DefinitionKind {
             Self::Method => 4,
             Self::Function => 5,
             Self::Local => 6,
+            Self::LanguageEnvironment => 7,
+            Self::Grammar => 8,
+            Self::GrammarRule => 9,
+            Self::SemanticAction => 10,
         }
     }
 }
@@ -176,6 +188,12 @@ impl DefinitionId {
 pub enum ArtifactKind {
     /// Source text input.
     Source,
+    /// Language environment resolution result.
+    EnvironmentResolution,
+    /// Resolved grammar stack result.
+    GrammarStack,
+    /// Grammar frontend parse report.
+    GrammarParse,
     /// Parse/CST result.
     Parse,
     /// AST lowering result.
@@ -215,6 +233,9 @@ impl ArtifactKind {
             Self::LoweredModule => 10,
             Self::TapeProgram => 11,
             Self::RuntimeResult => 12,
+            Self::EnvironmentResolution => 13,
+            Self::GrammarStack => 14,
+            Self::GrammarParse => 15,
         }
     }
 }

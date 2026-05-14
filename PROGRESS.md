@@ -1,5 +1,49 @@
 # Interloko Progress
 
+## Implemented: Read-Only Grammar MOP Projection
+
+- Added `interloko_compiler::grammar_frontend` as the frontend boundary around
+  the existing hand-written Loko parser. It wraps `syntax::parse_file` and
+  returns a `GrammarParseReport` without changing AST, semantic IR, lowering,
+  or tape emission consumers.
+- Projected `BaseLokoEnvironment` and `BaseLokoGrammar` as read-only grammar
+  metaobjects with stable EOP ids:
+  - `language-environment:base-loko`;
+  - `grammar:base-loko`.
+- Added direct compiler-projected grammar-rule records for the current parser
+  surface, including source file, class/function/generic/method definitions,
+  slot declarations/options, expression layers, vector literals, arguments, and
+  keyword arguments.
+- Added grammar activation and parse provenance records. Parse trace output
+  reports the resolved environment, grammar stack, activation span, root rule,
+  and per-rule CST node counts.
+- Added explicit query artifacts and dependency edges:
+
+  ```text
+  source -> environment-resolution -> grammar-stack -> grammar-parse -> parse
+  ```
+
+- MOP and EOP dumps now include language environments, grammars, grammar rules,
+  and grammar activations. `interloko_lab inspect` can inspect
+  `grammar:base-loko` and `language-environment:base-loko`.
+- Added read-only affordances:
+  `show-grammar-stack`, `show-grammar-rule`, and `show-parse-trace`.
+- Tests cover normal source-to-tape compilation through the existing pipeline,
+  lab inspection/invocation of grammar affordances, grammar artifact edges, and
+  stable grammar object ids across harmless source edits.
+- `docs/grammar_mop.md` documents the implemented boundary and deferred staged
+  grammar design.
+
+Deferred:
+
+- Source-authored grammar syntax.
+- Macros and semantic actions.
+- Actual grammar overriding or derived grammar execution.
+- Staged parsing over multiple source regions.
+- OMeta/Ohm compatibility.
+- Arbitrary host execution from grammar actions.
+- Parser rewrite.
+
 ## Implemented: Interloko Runtime Boundary
 
 - Added `crates/interloko_runtime` as the executable runtime crate for the

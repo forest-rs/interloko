@@ -17,6 +17,8 @@ pub mod ast;
 pub mod diagnostic;
 /// End-to-end compile and run helpers.
 pub mod driver;
+/// Read-only grammar frontend projection for the base Loko parser.
+pub mod grammar_frontend;
 /// Stable-ish compiler identities and artifact keys.
 pub mod identity;
 /// Thin query invalidation shell for compiler artifacts.

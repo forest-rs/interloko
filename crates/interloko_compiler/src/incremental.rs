@@ -17,6 +17,12 @@ const COMPILER: Channel = Channel::new(0);
 pub enum QueryArtifact {
     /// Source text input.
     Source,
+    /// Language environment resolution result.
+    EnvironmentResolution,
+    /// Resolved grammar stack result.
+    GrammarStack,
+    /// Grammar frontend parse report.
+    GrammarParse,
     /// Parse/CST result.
     Parse,
     /// AST lowering result.
@@ -65,6 +71,11 @@ impl QueryArtifact {
     pub fn key(self, source_file: SourceFileId) -> ArtifactKey {
         match self {
             Self::Source => ArtifactKey::new(source_file, ArtifactKind::Source, None),
+            Self::EnvironmentResolution => {
+                ArtifactKey::new(source_file, ArtifactKind::EnvironmentResolution, None)
+            }
+            Self::GrammarStack => ArtifactKey::new(source_file, ArtifactKind::GrammarStack, None),
+            Self::GrammarParse => ArtifactKey::new(source_file, ArtifactKind::GrammarParse, None),
             Self::Parse => ArtifactKey::new(source_file, ArtifactKind::Parse, None),
             Self::Ast => ArtifactKey::new(source_file, ArtifactKind::Ast, None),
             Self::Bind => ArtifactKey::new(source_file, ArtifactKind::Bind, None),
@@ -113,7 +124,13 @@ impl QueryInvalidation {
                 .map(|method| method.definition)
                 .collect(),
         };
-        this.add(QueryArtifact::Parse, QueryArtifact::Source);
+        this.add(QueryArtifact::EnvironmentResolution, QueryArtifact::Source);
+        this.add(
+            QueryArtifact::GrammarStack,
+            QueryArtifact::EnvironmentResolution,
+        );
+        this.add(QueryArtifact::GrammarParse, QueryArtifact::GrammarStack);
+        this.add(QueryArtifact::Parse, QueryArtifact::GrammarParse);
         this.add(QueryArtifact::Ast, QueryArtifact::Parse);
         this.add(QueryArtifact::Bind, QueryArtifact::Ast);
         this.add(QueryArtifact::Diagnostics, QueryArtifact::Bind);
