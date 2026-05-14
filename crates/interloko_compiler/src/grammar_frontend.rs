@@ -12,7 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::identity::{SourceFileId, StableIdBuilder};
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree};
 
@@ -354,6 +354,29 @@ pub struct GrammarRuleProvenance {
     pub node_count: usize,
 }
 
+/// Grammar-specific view of one parser diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarDiagnosticFact {
+    /// Zero-based diagnostic index in the parse report.
+    pub diagnostic_index: usize,
+    /// Stable diagnostic code.
+    pub code: DiagnosticCode,
+    /// Primary source span.
+    pub span: Span,
+    /// Language environment active for the diagnostic.
+    pub environment: LanguageEnvironmentId,
+    /// Grammar active for the diagnostic.
+    pub grammar: GrammarId,
+    /// Parse activation active for the diagnostic.
+    pub activation: GrammarActivationId,
+    /// Effective grammar rule active at or nearest the diagnostic span.
+    pub rule: GrammarRuleId,
+    /// Effective rule name active at or nearest the diagnostic span.
+    pub rule_name: String,
+    /// Structured expected fragment, when the syntax diagnostic provides one.
+    pub expected_fragment: Option<String>,
+}
+
 /// Parse provenance for the frontend invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseProvenance {
@@ -369,6 +392,8 @@ pub struct ParseProvenance {
     pub activations: Vec<GrammarActivationId>,
     /// Rule provenance summaries.
     pub rules: Vec<GrammarRuleProvenance>,
+    /// Grammar-specific diagnostic facts.
+    pub diagnostics: Vec<GrammarDiagnosticFact>,
 }
 
 /// Complete report for parsing one source through a grammar frontend.
@@ -390,6 +415,8 @@ pub struct GrammarParseReport {
     pub activations: Vec<GrammarActivation>,
     /// Parse provenance facts.
     pub provenance: ParseProvenance,
+    /// Grammar-specific diagnostic facts.
+    pub grammar_diagnostics: Vec<GrammarDiagnosticFact>,
     /// Syntax diagnostics from the parser.
     pub diagnostics: Vec<Diagnostic>,
     /// Syntax tree produced by the existing parser.
@@ -456,6 +483,12 @@ fn parse_file_with_records(
         .cloned()
         .collect::<Vec<_>>();
     let provenance_rules = rule_provenance(&active_effective_rules, &syntax.root);
+    let grammar_diagnostics = grammar_diagnostic_facts(
+        &syntax.diagnostics,
+        &syntax.root,
+        &activation,
+        &active_effective_rules,
+    );
     let grammar_stack = GrammarStack {
         environment: records.environment.id,
         grammars: records.environment.grammar_stack.clone(),
@@ -467,6 +500,7 @@ fn parse_file_with_records(
         grammar_stack: grammar_stack.clone(),
         activations: vec![activation.id],
         rules: provenance_rules,
+        diagnostics: grammar_diagnostics.clone(),
     };
 
     GrammarParseReport {
@@ -478,6 +512,7 @@ fn parse_file_with_records(
         grammar_stack,
         activations: vec![activation],
         provenance,
+        grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
     }
@@ -831,6 +866,80 @@ fn rule_provenance(rules: &[EffectiveGrammarRule], root: &CstNode) -> Vec<Gramma
         .collect()
 }
 
+fn grammar_diagnostic_facts(
+    diagnostics: &[Diagnostic],
+    root: &CstNode,
+    activation: &GrammarActivation,
+    effective_rules: &[EffectiveGrammarRule],
+) -> Vec<GrammarDiagnosticFact> {
+    diagnostics
+        .iter()
+        .enumerate()
+        .map(|(diagnostic_index, diagnostic)| {
+            let rule_name = cst_rule_name_at_span(root, diagnostic.span).unwrap_or("source-file");
+            let rule = effective_rules
+                .iter()
+                .find(|rule| rule.name == rule_name)
+                .or_else(|| {
+                    effective_rules
+                        .iter()
+                        .find(|rule| rule.name == "source-file")
+                });
+            GrammarDiagnosticFact {
+                diagnostic_index,
+                code: diagnostic.code,
+                span: diagnostic.span,
+                environment: activation.environment,
+                grammar: activation.grammar,
+                activation: activation.id,
+                rule: rule.map_or(activation.root_rule, |rule| rule.id),
+                rule_name: rule_name.to_string(),
+                expected_fragment: diagnostic_arg(diagnostic, "expected"),
+            }
+        })
+        .collect()
+}
+
+fn diagnostic_arg(diagnostic: &Diagnostic, name: &str) -> Option<String> {
+    diagnostic
+        .args
+        .iter()
+        .find(|arg| arg.name == name)
+        .map(|arg| arg.value.render())
+}
+
+fn cst_rule_name_at_span(root: &CstNode, span: Span) -> Option<&'static str> {
+    let mut best = None;
+    find_cst_rule_name_at_span(root, span, &mut best);
+    best.map(|(_, name)| name)
+}
+
+fn find_cst_rule_name_at_span(
+    node: &CstNode,
+    span: Span,
+    best: &mut Option<(usize, &'static str)>,
+) {
+    if !span_contains(node.span, span) {
+        return;
+    }
+    if let Some(name) = cst_rule_name(node.kind) {
+        let width = node.span.end.saturating_sub(node.span.start);
+        if best.is_none_or(|(best_width, _)| width <= best_width) {
+            *best = Some((width, name));
+        }
+    }
+    for child in &node.children {
+        if let CstElement::Node(child) = child {
+            find_cst_rule_name_at_span(child, span, best);
+        }
+    }
+}
+
+fn span_contains(outer: Span, inner: Span) -> bool {
+    outer.start <= inner.start
+        && (inner.end <= outer.end || inner.start == inner.end && inner.start <= outer.end)
+}
+
 fn count_node(node: &CstNode, counts: &mut [(GrammarRuleId, String, usize)]) {
     if let Some(name) = cst_rule_name(node.kind)
         && let Some((_, _, count)) = counts
@@ -998,5 +1107,24 @@ mod tests {
                     && rule.grammar == derived_grammar
                     && rule.name == "source-file")
         );
+    }
+
+    #[test]
+    fn grammar_diagnostics_record_active_rule_and_expected_fragment() {
+        let report = parse_file_with_environment(
+            SourceFileId::from_path("bad.loko"),
+            "define function main()\nend",
+            GrammarEnvironmentSelection::DerivedHost,
+        );
+        let fact = report
+            .grammar_diagnostics
+            .first()
+            .expect("syntax diagnostic fact");
+
+        assert_eq!(fact.code, DiagnosticCode::SyntaxExpectedExpression);
+        assert_eq!(fact.grammar, GrammarId::new(DERIVED_HOST_GRAMMAR_NAME));
+        assert_eq!(fact.rule_name, "body");
+        assert_eq!(fact.expected_fragment, None);
+        assert_eq!(report.provenance.diagnostics, report.grammar_diagnostics);
     }
 }

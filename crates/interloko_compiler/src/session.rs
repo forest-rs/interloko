@@ -3316,6 +3316,23 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
         );
     }
 
+    let _ = writeln!(out, "grammar diagnostics:");
+    for fact in &artifacts.grammar_parse.grammar_diagnostics {
+        let _ = writeln!(
+            out,
+            "  d{} code={} grammar={} activation={} rule={} rule-name={} span={}..{} expected={}",
+            fact.diagnostic_index,
+            fact.code.as_str(),
+            fact.grammar,
+            fact.activation,
+            fact.rule,
+            fact.rule_name,
+            fact.span.start,
+            fact.span.end,
+            grammar_expected_label(fact.expected_fragment.as_deref())
+        );
+    }
+
     let _ = writeln!(out, "classes:");
     for class in &module.classes {
         let runtime_class = runtime.classes.get(class.id.0 as usize);
@@ -3601,7 +3618,27 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
             );
         }
     }
+    let _ = writeln!(out, "diagnostics:");
+    for fact in &report.grammar_diagnostics {
+        let _ = writeln!(
+            out,
+            "  d{} code={} grammar={} activation={} rule={} rule-name={} span={}..{} expected={}",
+            fact.diagnostic_index,
+            fact.code.as_str(),
+            fact.grammar,
+            fact.activation,
+            fact.rule,
+            fact.rule_name,
+            fact.span.start,
+            fact.span.end,
+            grammar_expected_label(fact.expected_fragment.as_deref())
+        );
+    }
     out
+}
+
+fn grammar_expected_label(expected: Option<&str>) -> String {
+    expected.map_or_else(|| "none".into(), |value| format!("{value:?}"))
 }
 
 fn explain_grammar_rule(rule: &GrammarRule) -> String {

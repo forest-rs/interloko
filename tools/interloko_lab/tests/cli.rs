@@ -325,6 +325,24 @@ fn grammar_header_selects_derived_host_stack() {
 }
 
 #[test]
+fn parse_trace_reports_grammar_diagnostic_facts() {
+    let file = fixture("derived_grammar_syntax_error.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+    let out = run_lab_success(&[
+        "invoke-affordance",
+        path,
+        "language-environment:derived-host",
+        "show-parse-trace",
+    ])
+    .0;
+
+    assert!(out.contains("diagnostics:"));
+    assert!(out.contains("code=syntax.expected-expression"));
+    assert!(out.contains("rule-name=body"));
+    assert!(out.contains("grammar=grm"));
+}
+
+#[test]
 fn inspect_reports_structured_environment_objects() {
     let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");

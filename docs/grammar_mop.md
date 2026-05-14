@@ -72,6 +72,9 @@ That report contains:
 - projected grammar, direct-rule, and effective-rule records;
 - grammar activations over source regions;
 - parse provenance with per-rule CST node counts;
+- grammar diagnostic facts that attach syntax diagnostics to the active
+  grammar, activation, effective rule, source span, diagnostic code, and
+  structured expected fragment when present;
 - syntax diagnostics from the existing parser.
 
 The normal pipeline is unchanged:
@@ -114,6 +117,10 @@ source -> environment-resolution -> grammar-stack -> grammar-parse -> parse
 
 This makes grammar-stack identity explicit without making ordinary method-body
 edits look like grammar edits.
+
+`show-parse-trace` prints grammar diagnostic facts without rendering localized
+diagnostic prose. Presentation tools remain responsible for turning diagnostic
+codes and structured args into user-facing text.
 
 ## Deferred Design
 
