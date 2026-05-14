@@ -22,6 +22,48 @@ const DOMAIN_GRAMMAR_RULE: u64 = 0x4c4f_4b4f_5f52_554c;
 const DOMAIN_GRAMMAR_ACTIVATION: u64 = 0x4c4f_4b4f_5f41_4354;
 const DOMAIN_PARSE_PROVENANCE: u64 = 0x4c4f_4b4f_5f50_5256;
 
+/// Stable name for the base language environment projected by the compiler.
+pub const BASE_LOKO_ENVIRONMENT_NAME: &str = "BaseLokoEnvironment";
+/// Stable name for the base grammar projected by the compiler.
+pub const BASE_LOKO_GRAMMAR_NAME: &str = "BaseLokoGrammar";
+/// Stable name for the trusted derived host environment fixture.
+pub const DERIVED_HOST_ENVIRONMENT_NAME: &str = "DerivedHostEnvironment";
+/// Stable name for the trusted derived host grammar fixture.
+pub const DERIVED_HOST_GRAMMAR_NAME: &str = "DerivedHostGrammar";
+
+/// Selects the grammar environment used by the frontend.
+///
+/// The first slice keeps parsing delegated to the base hand-written parser, but
+/// this selector lets callers request a different read-only grammar projection
+/// and grammar stack for inspection and incremental provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrammarEnvironmentSelection {
+    /// The ordinary Loko grammar projected from the current parser.
+    BaseLoko,
+    /// A trusted host-provided fixture grammar that extends the base grammar.
+    DerivedHost,
+}
+
+impl GrammarEnvironmentSelection {
+    /// Returns the stable environment name associated with this selection.
+    #[must_use]
+    pub const fn environment_name(self) -> &'static str {
+        match self {
+            Self::BaseLoko => BASE_LOKO_ENVIRONMENT_NAME,
+            Self::DerivedHost => DERIVED_HOST_ENVIRONMENT_NAME,
+        }
+    }
+
+    /// Returns the stable command/config token associated with this selection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BaseLoko => "base-loko",
+            Self::DerivedHost => "derived-host",
+        }
+    }
+}
+
 /// Stable id for a language environment.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct LanguageEnvironmentId(
@@ -187,6 +229,8 @@ pub struct GrammarProjection {
 pub struct LanguageEnvironment {
     /// Stable environment id.
     pub id: LanguageEnvironmentId,
+    /// Stable environment slug used in object ids.
+    pub slug: String,
     /// Stable display name.
     pub name: String,
     /// Grammars active for this environment in stack order.
@@ -198,12 +242,16 @@ pub struct LanguageEnvironment {
 pub struct Grammar {
     /// Stable grammar id.
     pub id: GrammarId,
+    /// Stable grammar slug used in object ids.
+    pub slug: String,
     /// Stable display name.
     pub name: String,
     /// Parent grammars. Empty for the base grammar.
     pub extends: Vec<GrammarId>,
     /// Direct projected rule ids in parser surface order.
     pub direct_rules: Vec<GrammarRuleId>,
+    /// Effective rule ids after inheritance and overrides.
+    pub effective_rules: Vec<GrammarRuleId>,
 }
 
 /// Read-only direct grammar rule metaobject.
@@ -213,12 +261,58 @@ pub struct GrammarRule {
     pub id: GrammarRuleId,
     /// Owning grammar.
     pub grammar: GrammarId,
+    /// Owning grammar slug used in object ids.
+    pub grammar_slug: String,
     /// Rule name.
     pub name: String,
     /// Human-readable projected expression.
     pub expression: String,
     /// Projection/source location information.
     pub projection: GrammarProjection,
+}
+
+/// How an effective grammar rule was resolved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectiveGrammarRuleResolution {
+    /// The effective rule is defined directly by the target grammar.
+    Direct,
+    /// The effective rule is inherited from a parent grammar.
+    Inherited,
+    /// The effective rule is an overriding direct rule.
+    Override,
+}
+
+impl EffectiveGrammarRuleResolution {
+    /// Stable text used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Inherited => "inherited",
+            Self::Override => "override",
+        }
+    }
+}
+
+/// Read-only effective grammar rule metaobject.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectiveGrammarRule {
+    /// Stable effective rule id.
+    pub id: GrammarRuleId,
+    /// Grammar whose effective rule table owns this rule.
+    pub grammar: GrammarId,
+    /// Owning grammar slug used in object ids.
+    pub grammar_slug: String,
+    /// Rule name.
+    pub name: String,
+    /// Direct rule selected by this effective rule.
+    pub selected_rule: GrammarRuleId,
+    /// Grammar that provides the selected direct rule.
+    pub selected_rule_grammar: GrammarId,
+    /// Direct rule overridden by this effective rule, when any.
+    pub overridden_rule: Option<GrammarRuleId>,
+    /// Resolution relationship.
+    pub resolution: EffectiveGrammarRuleResolution,
 }
 
 /// Resolved grammar stack for one parse.
@@ -239,6 +333,8 @@ pub struct GrammarActivation {
     pub environment: LanguageEnvironmentId,
     /// Active grammar.
     pub grammar: GrammarId,
+    /// Active grammar slug used in object ids.
+    pub grammar_slug: String,
     /// Source region parsed by this activation.
     pub span: Span,
     /// Rule that produced the root parse node.
@@ -286,6 +382,8 @@ pub struct GrammarParseReport {
     pub grammars: Vec<Grammar>,
     /// Projected direct grammar rules.
     pub rules: Vec<GrammarRule>,
+    /// Projected effective grammar rules.
+    pub effective_rules: Vec<EffectiveGrammarRule>,
     /// Resolved grammar stack.
     pub grammar_stack: GrammarStack,
     /// Grammar activations used by this parse.
@@ -301,19 +399,63 @@ pub struct GrammarParseReport {
 /// Parses source through the base Loko grammar frontend.
 #[must_use]
 pub fn parse_file(source_file: SourceFileId, source: &str) -> GrammarParseReport {
-    let records = base_loko_records();
+    parse_file_with_environment(source_file, source, GrammarEnvironmentSelection::BaseLoko)
+}
+
+/// Parses source through the selected grammar frontend.
+///
+/// All selections currently delegate tokenization and CST construction to the
+/// base hand-written parser. The selected environment controls the projected
+/// grammar stack, effective rule table, activations, and provenance records.
+#[must_use]
+pub fn parse_file_with_environment(
+    source_file: SourceFileId,
+    source: &str,
+    environment: GrammarEnvironmentSelection,
+) -> GrammarParseReport {
+    let records = match environment {
+        GrammarEnvironmentSelection::BaseLoko => base_loko_records(),
+        GrammarEnvironmentSelection::DerivedHost => derived_host_records(),
+    };
+    parse_file_with_records(source_file, source, records)
+}
+
+fn parse_file_with_records(
+    source_file: SourceFileId,
+    source: &str,
+    records: GrammarFrontendRecords,
+) -> GrammarParseReport {
     let syntax = syntax::parse_file(source_file, source);
-    let root_rule = rule_id_by_name(&records.rules, "source-file")
-        .unwrap_or_else(|| GrammarRuleId::new(records.base_grammar, "source-file"));
+    let active_grammar = records.active_grammar;
+    let active_grammar_slug = records
+        .grammars
+        .iter()
+        .find(|grammar| grammar.id == active_grammar)
+        .map(|grammar| grammar.slug.clone())
+        .unwrap_or_else(|| stable_name("ActiveGrammar"));
+    let root_rule =
+        effective_rule_id_by_name(&records.effective_rules, active_grammar, "source-file")
+            .or_else(|| rule_id_by_name(&records.rules, "source-file"))
+            .unwrap_or_else(|| GrammarRuleId::new(active_grammar, "source-file"));
     let activation = GrammarActivation {
-        id: GrammarActivationId::new(source_file, records.base_grammar, "source-file"),
+        id: GrammarActivationId::new(source_file, active_grammar, "source-file"),
         environment: records.environment.id,
-        grammar: records.base_grammar,
+        grammar: active_grammar,
+        grammar_slug: active_grammar_slug,
         span: Span::new(0, source.len()),
         root_rule,
-        reason: "base-loko source file parse".to_string(),
+        reason: format!(
+            "{} source file parse delegated to base parser",
+            records.environment.slug
+        ),
     };
-    let provenance_rules = rule_provenance(&records.rules, &syntax.root);
+    let active_effective_rules = records
+        .effective_rules
+        .iter()
+        .filter(|rule| rule.grammar == active_grammar)
+        .cloned()
+        .collect::<Vec<_>>();
+    let provenance_rules = rule_provenance(&active_effective_rules, &syntax.root);
     let grammar_stack = GrammarStack {
         environment: records.environment.id,
         grammars: records.environment.grammar_stack.clone(),
@@ -332,6 +474,7 @@ pub fn parse_file(source_file: SourceFileId, source: &str) -> GrammarParseReport
         environment: records.environment,
         grammars: records.grammars,
         rules: records.rules,
+        effective_rules: records.effective_rules,
         grammar_stack,
         activations: vec![activation],
         provenance,
@@ -342,44 +485,108 @@ pub fn parse_file(source_file: SourceFileId, source: &str) -> GrammarParseReport
 
 /// Returns the projected base Loko grammar records without parsing source.
 #[must_use]
-pub fn base_loko_records() -> BaseLokoRecords {
-    let environment_id = LanguageEnvironmentId::new("BaseLokoEnvironment");
-    let grammar_id = GrammarId::new("BaseLokoGrammar");
-    let rules = base_loko_rules(grammar_id);
+pub fn base_loko_records() -> GrammarFrontendRecords {
+    let environment_id = LanguageEnvironmentId::new(BASE_LOKO_ENVIRONMENT_NAME);
+    let grammar_id = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
+    let rules = base_loko_rules(grammar_id, "base-loko");
     let direct_rules = rules.iter().map(|rule| rule.id).collect();
+    let effective_rules = direct_effective_rules(grammar_id, "base-loko", &rules);
+    let effective_rule_ids = effective_rules.iter().map(|rule| rule.id).collect();
     let grammar = Grammar {
         id: grammar_id,
-        name: "BaseLokoGrammar".to_string(),
+        slug: "base-loko".to_string(),
+        name: BASE_LOKO_GRAMMAR_NAME.to_string(),
         extends: Vec::new(),
         direct_rules,
+        effective_rules: effective_rule_ids,
     };
     let environment = LanguageEnvironment {
         id: environment_id,
-        name: "BaseLokoEnvironment".to_string(),
+        slug: "base-loko".to_string(),
+        name: BASE_LOKO_ENVIRONMENT_NAME.to_string(),
         grammar_stack: vec![grammar_id],
     };
-    BaseLokoRecords {
+    GrammarFrontendRecords {
         environment,
-        base_grammar: grammar_id,
+        active_grammar: grammar_id,
         grammars: vec![grammar],
         rules,
+        effective_rules,
     }
 }
 
-/// Projected base grammar records.
+/// Returns the trusted host-derived grammar records without parsing source.
+#[must_use]
+pub fn derived_host_records() -> GrammarFrontendRecords {
+    let base_environment = base_loko_records();
+    let base_grammar_id = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
+    let derived_environment_id = LanguageEnvironmentId::new(DERIVED_HOST_ENVIRONMENT_NAME);
+    let derived_grammar_id = GrammarId::new(DERIVED_HOST_GRAMMAR_NAME);
+    let override_rule = GrammarRule {
+        id: GrammarRuleId::new(derived_grammar_id, "function-definition"),
+        grammar: derived_grammar_id,
+        grammar_slug: "derived-host".to_string(),
+        name: "function-definition".to_string(),
+        expression:
+            "host-projected override delegates function-definition parsing to BaseLokoGrammar"
+                .to_string(),
+        projection: GrammarProjection {
+            origin: "trusted-host-fixture".to_string(),
+            location: "host:DerivedHostGrammar/function-definition".to_string(),
+            source_span: None,
+        },
+    };
+    let mut rules = base_environment.rules;
+    rules.push(override_rule.clone());
+    let mut grammars = base_environment.grammars;
+    let base_effective_rules = base_environment.effective_rules;
+    let derived_effective_rules =
+        derived_effective_rules(base_grammar_id, derived_grammar_id, "derived-host", &rules);
+    let derived_effective_rule_ids = derived_effective_rules
+        .iter()
+        .map(|rule| rule.id)
+        .collect::<Vec<_>>();
+    grammars.push(Grammar {
+        id: derived_grammar_id,
+        slug: "derived-host".to_string(),
+        name: DERIVED_HOST_GRAMMAR_NAME.to_string(),
+        extends: vec![base_grammar_id],
+        direct_rules: vec![override_rule.id],
+        effective_rules: derived_effective_rule_ids,
+    });
+    let mut effective_rules = base_effective_rules;
+    effective_rules.extend(derived_effective_rules);
+    let environment = LanguageEnvironment {
+        id: derived_environment_id,
+        slug: "derived-host".to_string(),
+        name: DERIVED_HOST_ENVIRONMENT_NAME.to_string(),
+        grammar_stack: vec![base_grammar_id, derived_grammar_id],
+    };
+    GrammarFrontendRecords {
+        environment,
+        active_grammar: derived_grammar_id,
+        grammars,
+        rules,
+        effective_rules,
+    }
+}
+
+/// Projected grammar frontend records.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BaseLokoRecords {
-    /// Base language environment.
+pub struct GrammarFrontendRecords {
+    /// Language environment.
     pub environment: LanguageEnvironment,
-    /// Base grammar id.
-    pub base_grammar: GrammarId,
+    /// Active grammar id.
+    pub active_grammar: GrammarId,
     /// Projected grammars.
     pub grammars: Vec<Grammar>,
     /// Projected direct rules.
     pub rules: Vec<GrammarRule>,
+    /// Projected effective rules.
+    pub effective_rules: Vec<EffectiveGrammarRule>,
 }
 
-fn base_loko_rules(grammar: GrammarId) -> Vec<GrammarRule> {
+fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
     const RULES: &[(&str, &str, &str)] = &[
         ("source-file", "definition*", "syntax.rs:Parser::parse"),
         (
@@ -505,6 +712,7 @@ fn base_loko_rules(grammar: GrammarId) -> Vec<GrammarRule> {
         .map(|(name, expression, location)| GrammarRule {
             id: GrammarRuleId::new(grammar, name),
             grammar,
+            grammar_slug: grammar_slug.to_string(),
             name: (*name).to_string(),
             expression: (*expression).to_string(),
             projection: GrammarProjection {
@@ -516,6 +724,79 @@ fn base_loko_rules(grammar: GrammarId) -> Vec<GrammarRule> {
         .collect()
 }
 
+fn direct_effective_rules(
+    grammar: GrammarId,
+    grammar_slug: &str,
+    direct_rules: &[GrammarRule],
+) -> Vec<EffectiveGrammarRule> {
+    direct_rules
+        .iter()
+        .map(|rule| EffectiveGrammarRule {
+            id: GrammarRuleId::new(grammar, &format!("effective:{}", rule.name)),
+            grammar,
+            grammar_slug: grammar_slug.to_string(),
+            name: rule.name.clone(),
+            selected_rule: rule.id,
+            selected_rule_grammar: rule.grammar,
+            overridden_rule: None,
+            resolution: EffectiveGrammarRuleResolution::Direct,
+        })
+        .collect()
+}
+
+fn derived_effective_rules(
+    base_grammar: GrammarId,
+    derived_grammar: GrammarId,
+    derived_slug: &str,
+    rules: &[GrammarRule],
+) -> Vec<EffectiveGrammarRule> {
+    let base_rules = rules
+        .iter()
+        .filter(|rule| rule.grammar == base_grammar)
+        .collect::<Vec<_>>();
+    let derived_rules = rules
+        .iter()
+        .filter(|rule| rule.grammar == derived_grammar)
+        .collect::<Vec<_>>();
+    base_rules
+        .into_iter()
+        .map(|base_rule| {
+            if let Some(override_rule) = derived_rules
+                .iter()
+                .find(|candidate| candidate.name == base_rule.name)
+            {
+                EffectiveGrammarRule {
+                    id: GrammarRuleId::new(
+                        derived_grammar,
+                        &format!("effective:{}", base_rule.name),
+                    ),
+                    grammar: derived_grammar,
+                    grammar_slug: derived_slug.to_string(),
+                    name: base_rule.name.clone(),
+                    selected_rule: override_rule.id,
+                    selected_rule_grammar: override_rule.grammar,
+                    overridden_rule: Some(base_rule.id),
+                    resolution: EffectiveGrammarRuleResolution::Override,
+                }
+            } else {
+                EffectiveGrammarRule {
+                    id: GrammarRuleId::new(
+                        derived_grammar,
+                        &format!("effective:{}", base_rule.name),
+                    ),
+                    grammar: derived_grammar,
+                    grammar_slug: derived_slug.to_string(),
+                    name: base_rule.name.clone(),
+                    selected_rule: base_rule.id,
+                    selected_rule_grammar: base_rule.grammar,
+                    overridden_rule: None,
+                    resolution: EffectiveGrammarRuleResolution::Inherited,
+                }
+            }
+        })
+        .collect()
+}
+
 fn rule_id_by_name(rules: &[GrammarRule], name: &str) -> Option<GrammarRuleId> {
     rules
         .iter()
@@ -523,7 +804,18 @@ fn rule_id_by_name(rules: &[GrammarRule], name: &str) -> Option<GrammarRuleId> {
         .map(|rule| rule.id)
 }
 
-fn rule_provenance(rules: &[GrammarRule], root: &CstNode) -> Vec<GrammarRuleProvenance> {
+fn effective_rule_id_by_name(
+    rules: &[EffectiveGrammarRule],
+    grammar: GrammarId,
+    name: &str,
+) -> Option<GrammarRuleId> {
+    rules
+        .iter()
+        .find(|rule| rule.grammar == grammar && rule.name == name)
+        .map(|rule| rule.id)
+}
+
+fn rule_provenance(rules: &[EffectiveGrammarRule], root: &CstNode) -> Vec<GrammarRuleProvenance> {
     let mut counts = rules
         .iter()
         .map(|rule| (rule.id, rule.name.clone(), 0_usize))
@@ -590,26 +882,31 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
 /// Returns the stable EOP id for a language environment.
 #[must_use]
 pub fn language_environment_object_id(environment: &LanguageEnvironment) -> String {
-    format!("language-environment:{}", stable_name(&environment.name))
+    format!("language-environment:{}", environment.slug)
 }
 
 /// Returns the stable EOP id for a grammar.
 #[must_use]
 pub fn grammar_object_id(grammar: &Grammar) -> String {
-    format!("grammar:{}", stable_name(&grammar.name))
+    format!("grammar:{}", grammar.slug)
 }
 
 /// Returns the stable EOP id for a grammar rule.
 #[must_use]
 pub fn grammar_rule_object_id(rule: &GrammarRule) -> String {
-    format!("grammar-rule:base-loko/{}", rule.name)
+    format!("grammar-rule:{}/{}", rule.grammar_slug, rule.name)
+}
+
+/// Returns the stable EOP id for an effective grammar rule.
+#[must_use]
+pub fn effective_grammar_rule_object_id(rule: &EffectiveGrammarRule) -> String {
+    format!("effective-grammar-rule:{}/{}", rule.grammar_slug, rule.name)
 }
 
 /// Returns the stable EOP id for a grammar activation.
 #[must_use]
 pub fn grammar_activation_object_id(activation: &GrammarActivation) -> String {
-    let _ = activation;
-    "grammar-activation:base-loko/source-file".to_string()
+    format!("grammar-activation:{}/source-file", activation.grammar_slug)
 }
 
 fn stable_name(name: &str) -> String {
@@ -628,4 +925,78 @@ fn stable_name(name: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derived_host_records_distinguish_direct_and_effective_rules() {
+        let records = derived_host_records();
+        let derived_grammar = GrammarId::new(DERIVED_HOST_GRAMMAR_NAME);
+        let base_grammar = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
+        let grammar = records
+            .grammars
+            .iter()
+            .find(|grammar| grammar.id == derived_grammar)
+            .expect("derived grammar exists");
+
+        assert_eq!(grammar.extends, vec![base_grammar]);
+        assert_eq!(grammar.direct_rules.len(), 1);
+        assert_eq!(grammar.effective_rules.len(), 25);
+
+        let direct_override = records
+            .rules
+            .iter()
+            .find(|rule| rule.grammar == derived_grammar && rule.name == "function-definition")
+            .expect("derived direct override");
+        assert_eq!(direct_override.projection.origin, "trusted-host-fixture");
+
+        let effective_override = records
+            .effective_rules
+            .iter()
+            .find(|rule| rule.grammar == derived_grammar && rule.name == "function-definition")
+            .expect("derived effective override");
+        assert_eq!(
+            effective_override.resolution,
+            EffectiveGrammarRuleResolution::Override
+        );
+        assert_eq!(effective_override.selected_rule, direct_override.id);
+        assert!(effective_override.overridden_rule.is_some());
+
+        let inherited = records
+            .effective_rules
+            .iter()
+            .find(|rule| rule.grammar == derived_grammar && rule.name == "class-definition")
+            .expect("derived inherited rule");
+        assert_eq!(
+            inherited.resolution,
+            EffectiveGrammarRuleResolution::Inherited
+        );
+        assert_eq!(inherited.selected_rule_grammar, base_grammar);
+    }
+
+    #[test]
+    fn derived_host_parse_uses_derived_activation_and_effective_root_rule() {
+        let report = parse_file_with_environment(
+            SourceFileId::from_path("example.loko"),
+            "define function main() 1 end",
+            GrammarEnvironmentSelection::DerivedHost,
+        );
+        let derived_grammar = GrammarId::new(DERIVED_HOST_GRAMMAR_NAME);
+        let activation = report.activations.first().expect("source-file activation");
+
+        assert_eq!(report.environment.slug, "derived-host");
+        assert_eq!(activation.grammar, derived_grammar);
+        assert_eq!(activation.grammar_slug, "derived-host");
+        assert!(
+            report
+                .effective_rules
+                .iter()
+                .any(|rule| rule.id == activation.root_rule
+                    && rule.grammar == derived_grammar
+                    && rule.name == "source-file")
+        );
+    }
 }

@@ -1,5 +1,44 @@
 # Plans
 
+## Build Grammar Follow-Up Slices
+
+### Goal
+
+Make the grammar MOP slice more load-bearing in four clean commits: project a
+trusted derived grammar, let sessions select a grammar stack, add
+grammar-aware diagnostic/trace facts, and add a tiny source-data layer that can
+carry structural parser/protocol facts before source-authored syntax extension.
+
+### Fence
+
+`grammar_frontend` owns grammar projections, effective grammar rules, selected
+grammar stacks, parse activations, parse provenance, and source-data records
+needed by the frontend. Session and workbench code may select and inspect those
+facts, but AST, semantic IR, lowering, and tape emission continue to consume
+the existing syntax products without knowing grammar lookup internals.
+
+### Steps
+
+1. Add `DerivedHostGrammar` as a read-only host-provided grammar projection
+   extending `BaseLokoGrammar`, with direct and effective rule records kept
+   distinct.
+2. Add session/workbench input for selecting the base or derived grammar stack,
+   and make cache reporting treat grammar-stack changes as parse dependencies.
+3. Add grammar-aware diagnostic facts and parse-trace output without rendering
+   compiler diagnostics from prose.
+4. Add a small source-data representation for structural frontend facts; do
+   not implement macros, semantic actions, or source-authored grammars yet.
+5. Run fmt, clippy, workspace tests, docs, corpus, examples, and lab tests.
+
+### Risks
+
+- The derived grammar is only a projection/delegation fixture; output must not
+  imply it rewrites the parser.
+- Grammar-stack selection must be explicit session input so ordinary source
+  edits do not look like grammar edits.
+- Source-data should stay structural and inert until staged parsing has a real
+  capability boundary.
+
 ## Add Read-Only Grammar MOP Projection
 
 ### Goal

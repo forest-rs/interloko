@@ -179,6 +179,8 @@ pub enum EnvironmentKind {
     Grammar,
     /// A direct grammar rule metaobject.
     GrammarRule,
+    /// An effective grammar rule after grammar-stack resolution.
+    EffectiveGrammarRule,
     /// A grammar activation over a parse region.
     GrammarActivation,
     /// A semantic class metaobject.
@@ -214,6 +216,7 @@ impl EnvironmentKind {
             Self::LanguageEnvironment => "language-environment",
             Self::Grammar => "grammar",
             Self::GrammarRule => "grammar-rule",
+            Self::EffectiveGrammarRule => "effective-grammar-rule",
             Self::GrammarActivation => "grammar-activation",
             Self::Class => "class",
             Self::Slot => "slot",
@@ -560,6 +563,13 @@ impl SessionArtifacts {
             .iter()
             .find(|rule| grammar_frontend::grammar_rule_object_id(rule) == id)
             .map(explain_grammar_rule)
+            .or_else(|| {
+                self.grammar_parse
+                    .effective_rules
+                    .iter()
+                    .find(|rule| grammar_frontend::effective_grammar_rule_object_id(rule) == id)
+                    .map(explain_effective_grammar_rule)
+            })
     }
 
     /// Explains one generic dispatch site by friendly selector id.
@@ -3043,11 +3053,12 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
         };
         let _ = writeln!(
             out,
-            "  {} {} extends={} direct-rules={}",
+            "  {} {} extends={} direct-rules={} effective-rules={}",
             grammar.id,
             grammar.name,
             extends,
-            grammar.direct_rules.len()
+            grammar.direct_rules.len(),
+            grammar.effective_rules.len()
         );
     }
 
@@ -3062,6 +3073,24 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             rule.projection.origin,
             rule.projection.location,
             rule.expression
+        );
+    }
+
+    let _ = writeln!(out, "effective grammar rules:");
+    for rule in &artifacts.grammar_parse.effective_rules {
+        let overridden = rule
+            .overridden_rule
+            .map_or_else(|| "none".to_string(), |rule| rule.to_string());
+        let _ = writeln!(
+            out,
+            "  {} {} grammar={} selected={} selected-grammar={} resolution={} overridden={}",
+            rule.id,
+            rule.name,
+            rule.grammar,
+            rule.selected_rule,
+            rule.selected_rule_grammar,
+            rule.resolution.as_str(),
+            overridden
         );
     }
 
@@ -3389,6 +3418,27 @@ fn explain_grammar_rule(rule: &GrammarRule) -> String {
     out
 }
 
+fn explain_effective_grammar_rule(rule: &grammar_frontend::EffectiveGrammarRule) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "effective grammar rule {}",
+        grammar_frontend::effective_grammar_rule_object_id(rule)
+    );
+    let _ = writeln!(out, "id {}", rule.id);
+    let _ = writeln!(out, "name {}", rule.name);
+    let _ = writeln!(out, "grammar {}", rule.grammar);
+    let _ = writeln!(out, "selected-rule {}", rule.selected_rule);
+    let _ = writeln!(out, "selected-rule-grammar {}", rule.selected_rule_grammar);
+    let _ = writeln!(out, "resolution {}", rule.resolution.as_str());
+    if let Some(overridden_rule) = rule.overridden_rule {
+        let _ = writeln!(out, "overridden-rule {overridden_rule}");
+    } else {
+        let _ = writeln!(out, "overridden-rule none");
+    }
+    out
+}
+
 fn grammar_stack_label(report: &GrammarParseReport) -> String {
     let mut out = String::from("[");
     for (index, grammar_id) in report.grammar_stack.grammars.iter().enumerate() {
@@ -3621,16 +3671,20 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             ]),
             execution: None,
             inspection: format!(
-                "id={} name={} extends={} direct-rules={}",
+                "id={} name={} extends={} direct-rules={} effective-rules={}",
                 grammar.id,
                 grammar.name,
                 grammar.extends.len(),
-                grammar.direct_rules.len()
+                grammar.direct_rules.len(),
+                grammar.effective_rules.len()
             ),
         }));
     }
     for rule in &report.rules {
         project_grammar_rule(sink, rule);
+    }
+    for rule in &report.effective_rules {
+        project_effective_grammar_rule(sink, rule);
     }
     for activation in &report.activations {
         project_grammar_activation(sink, activation);
@@ -3674,7 +3728,7 @@ fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule
         id: grammar_frontend::grammar_rule_object_id(rule),
         kind: EnvironmentKind::GrammarRule,
         meta_class: "<grammar-rule>",
-        origin: EnvironmentOrigin::CompilerGenerated,
+        origin: grammar_rule_origin(rule),
         storage: EnvironmentStorage::CachedArtifact,
         title: rule.name.clone(),
         affordances: Vec::from([
@@ -3696,6 +3750,50 @@ fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule
     }));
 }
 
+fn project_effective_grammar_rule(
+    sink: &mut dyn EnvironmentObjectSink,
+    rule: &grammar_frontend::EffectiveGrammarRule,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let overridden = rule
+        .overridden_rule
+        .map_or_else(|| "none".to_string(), |rule| rule.to_string());
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::effective_grammar_rule_object_id(rule),
+        kind: EnvironmentKind::EffectiveGrammarRule,
+        meta_class: "<effective-grammar-rule>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: rule.name.clone(),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarRule,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "id={} grammar={} selected-rule={} selected-rule-grammar={} resolution={} overridden-rule={}",
+            rule.id,
+            rule.grammar,
+            rule.selected_rule,
+            rule.selected_rule_grammar,
+            rule.resolution.as_str(),
+            overridden
+        ),
+    }));
+}
+
+fn grammar_rule_origin(rule: &GrammarRule) -> EnvironmentOrigin {
+    if rule.projection.origin == "trusted-host-fixture" {
+        EnvironmentOrigin::HostProvided
+    } else {
+        EnvironmentOrigin::CompilerGenerated
+    }
+}
+
 fn project_grammar_activation(
     sink: &mut dyn EnvironmentObjectSink,
     activation: &GrammarActivation,
@@ -3708,7 +3806,7 @@ fn project_grammar_activation(
         meta_class: "<grammar-activation>",
         origin: EnvironmentOrigin::CompilerGenerated,
         storage: EnvironmentStorage::CachedArtifact,
-        title: "Base Loko parse activation".to_string(),
+        title: format!("{} parse activation", activation.grammar_slug),
         affordances: Vec::from([
             Aff::Inspect,
             Aff::DumpMop,
