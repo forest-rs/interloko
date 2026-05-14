@@ -1,5 +1,68 @@
 # Plans
 
+## Expose First-Class MOP Metaobjects To Cairn Code
+
+### Goal
+
+Make class, generic-function, and method metaobjects directly available to
+ordinary Cairn code in a narrow read-only slice. Cairn code should be able to
+ask basic questions such as `class-name(<circle>)`, `generic-methods(area)`,
+and `method-specializers(...)` without going through workbench-only dumps.
+
+### Non-Goals
+
+- No runtime class/generic/method mutation.
+- No user-defined metaclasses.
+- No AMOP-compatible public protocol.
+- No method combination changes.
+- No persistent image/object identity.
+- No special MOP or EOP tape opcodes.
+- No automatic Rust reflection.
+
+### Fence
+
+At the Cairn semantic level, classes, generics, and methods are values. Their
+stable ids remain internal compiler/runtime representation details. Lowering may
+still turn known metaobjects into raw ids for existing hot paths such as `make`,
+`class-of`, `instance?`, casts, slot access, and dispatch.
+
+Runtime host calls own the physical representation of read-only metaobjects.
+Semantic IR owns which metaobject is referenced. Session/MOP/EOP dumps are views
+over the same facts and must not describe a different object system.
+
+### Steps
+
+1. Add semantic value categories and expression forms for class, generic,
+   method, and slot-descriptor metaobjects without breaking existing optimized
+   class-id paths.
+2. Add runtime metadata for generics, methods, and slot descriptors alongside
+   existing runtime class layout.
+3. Add ordinary intrinsic calls for read-only introspection: `class-name`,
+   `class-superclass`, `class-slots`, `generic-name`, `generic-methods`,
+   `method-generic`, and `method-specializers`.
+4. Lower those operations through normal runtime host calls and update tape
+   emission/disassembly without adding new tape opcodes.
+5. Keep generated setter generics/methods visible as metaobjects.
+6. Update semantic, lowered, MOP, EOP, and session dumps so in-language
+   metaobjects and workbench inspection agree.
+7. Add corpus/tests for class name/superclass/slots, generic methods,
+   multi-argument method specializers, generated setters, and host-backed
+   classes.
+8. Update progress notes with the implemented MOP surface and deferred AMOP,
+   mutation, metaclass, and persistence design.
+9. Run `cargo fmt --all`, `cargo clippy --workspace --all-targets
+   --all-features -- -D warnings`, `cargo test --workspace --all-features`, and
+   `cargo doc --workspace --all-features --no-deps`, then commit coherently.
+
+### Risks
+
+- A second visible notion of "class object" would muddy the MOP. Avoid that:
+  public Cairn semantics should talk about metaobjects; ids are internal.
+- Returning vectors of method/slot metaobjects may require minimal vector
+  inspection helpers. Keep any helpers generic and small.
+- Host-backed classes must participate in the same metadata path without
+  implying automatic Rust object reflection.
+
 ## Add True Multi-Argument Generic Dispatch
 
 ### Goal

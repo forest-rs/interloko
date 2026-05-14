@@ -1,5 +1,47 @@
 # Cairn Progress
 
+## Implemented: First-Class Read-Only MOP Metaobjects
+
+- Class references such as `<circle>` now lower as runtime class metaobjects
+  when used as ordinary values. Existing optimized paths still keep class ids
+  internally for `make`, dispatch tests, casts, and slot/runtime layout work.
+- Bare generic-function references used as values now produce generic-function
+  metaobjects instead of remaining only compile-time callable tokens. `apply`
+  still recognizes known generic metaobjects and emits ordinary generic calls.
+- The runtime layout now carries generic-function and method metadata alongside
+  class layout, so runtime host calls can answer basic MOP queries from the
+  same facts used by dumps and dispatch.
+- Cairn code can call read-only MOP intrinsics:
+  - `class-name`;
+  - `class-superclass`;
+  - `class-slots`;
+  - `generic-name`;
+  - `generic-methods`;
+  - `method-generic`;
+  - `method-specializers`.
+- Minimal immutable vector inspection is available through `vector-size` and
+  `vector-ref`, which lets Cairn code inspect method and slot vectors returned
+  by the MOP.
+- Generated setter generics and setter methods are visible through the same
+  generic/method metaobject path as source-authored definitions.
+- Host-backed classes participate in the class metaobject path, but this is
+  explicit Cairn metadata, not automatic Rust reflection.
+- Lowered IR emits ordinary runtime host calls such as `runtime.class-name`,
+  `runtime.generic-methods`, and `runtime.method-specializers`. Tape still has
+  no MOP-specific opcodes.
+- Semantic, lowered, MOP/EOP, and corpus dumps now agree that classes,
+  generics, methods, and slot descriptors are object-system metaobjects.
+
+Deferred:
+
+- Runtime mutation of classes, generics, methods, or slots.
+- User-defined metaclasses and a public AMOP-compatible protocol.
+- Method combination, `next-method`, and extensible dispatch protocols.
+- Rich slot-descriptor operations beyond exposing descriptor objects in
+  `class-slots`.
+- Persistent image identity, permissions, transactions, and automatic host/Rust
+  reflection.
+
 ## Implemented: Multi-Argument Generic Dispatch
 
 - Generic dispatch now considers the full required argument vector instead of

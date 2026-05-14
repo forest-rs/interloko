@@ -1,0 +1,15 @@
+// expect: run 2
+// expect: dump lowered contains runtime.class-slots
+// expect: dump lowered contains runtime.vector-size
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 10;
+end;
+
+define function main() => <integer>
+  vector-size(class-slots(<circle>))
+end;

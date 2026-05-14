@@ -1,0 +1,37 @@
+// expect: run 2
+// expect: dump lowered contains runtime.method-specializers
+// expect: dump lowered contains runtime.vector-ref
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 2;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>, init-value: 3;
+end;
+
+define generic collide(a :: <shape>, b :: <shape>) => <integer>;
+
+define method collide(a :: <shape>, b :: <shape>) => <integer>
+  1
+end;
+
+define method collide(a :: <circle>, b :: <square>) => <integer>
+  2
+end;
+
+define function main() => <integer>
+  let m = vector-ref(generic-methods(collide), 1);
+  let specs = method-specializers(m);
+  if class-name(vector-ref(specs, 0)) = "<circle>"
+  then if class-name(vector-ref(specs, 1)) = "<square>"
+       then vector-size(specs)
+       else 0
+       end
+  else 0
+  end
+end;

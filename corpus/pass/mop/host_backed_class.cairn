@@ -1,0 +1,11 @@
+// host-class: <rust-circle> radius:<integer>
+// expect: run 2
+// expect: dump mop contains origin=host-backed
+// expect: dump lowered contains runtime.class-slots
+
+define function main() => <integer>
+  if class-name(<rust-circle>) = "<rust-circle>"
+  then vector-size(class-slots(<rust-circle>)) + 1
+  else 0
+  end
+end;

@@ -37,6 +37,32 @@ pub const SYMBOL_LITERAL_PREFIX: &str = "cairn.literal.symbol:";
 pub const VECTOR_LITERAL: &str = "cairn.literal.vector";
 /// Host-call symbol for runtime value equality.
 pub const VALUE_EQ: &str = "cairn.value_eq";
+/// Host-call symbol for creating a class metaobject.
+pub const META_CLASS_OBJECT: &str = "cairn.meta.class_object";
+/// Host-call symbol for creating a generic-function metaobject.
+pub const META_GENERIC_OBJECT: &str = "cairn.meta.generic_object";
+/// Host-call symbol for creating a method metaobject.
+pub const META_METHOD_OBJECT: &str = "cairn.meta.method_object";
+/// Host-call symbol for creating a slot-descriptor metaobject.
+pub const META_SLOT_DESCRIPTOR_OBJECT: &str = "cairn.meta.slot_descriptor_object";
+/// Host-call symbol for reading a class metaobject's name.
+pub const META_CLASS_NAME: &str = "cairn.meta.class_name";
+/// Host-call symbol for reading a class metaobject's superclass.
+pub const META_CLASS_SUPERCLASS: &str = "cairn.meta.class_superclass";
+/// Host-call symbol for reading a class metaobject's slot descriptors.
+pub const META_CLASS_SLOTS: &str = "cairn.meta.class_slots";
+/// Host-call symbol for reading a generic-function metaobject's name.
+pub const META_GENERIC_NAME: &str = "cairn.meta.generic_name";
+/// Host-call symbol for reading a generic-function metaobject's methods.
+pub const META_GENERIC_METHODS: &str = "cairn.meta.generic_methods";
+/// Host-call symbol for reading a method metaobject's generic function.
+pub const META_METHOD_GENERIC: &str = "cairn.meta.method_generic";
+/// Host-call symbol for reading a method metaobject's specializers.
+pub const META_METHOD_SPECIALIZERS: &str = "cairn.meta.method_specializers";
+/// Host-call symbol for immutable vector length.
+pub const VECTOR_SIZE: &str = "cairn.vector_size";
+/// Host-call symbol for immutable vector indexing.
+pub const VECTOR_REF: &str = "cairn.vector_ref";
 
 /// Returns the `execution_tape` value type for Cairn objects.
 #[must_use]
@@ -88,11 +114,33 @@ pub struct RuntimeSlot {
     pub host_backed: bool,
 }
 
+/// Runtime generic-function metadata needed by MOP host calls.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeGeneric {
+    /// Generic function name.
+    pub name: String,
+    /// Method ids implementing this generic in semantic order.
+    pub methods: Vec<sem::MethodId>,
+}
+
+/// Runtime method metadata needed by MOP host calls.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeMethod {
+    /// Generic function implemented by this method.
+    pub generic: sem::GenericFunctionId,
+    /// Method specializers in call order.
+    pub specializers: Vec<sem::MethodSpecializer>,
+}
+
 /// Runtime layout emitted alongside a tape program.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeLayout {
     /// Classes in semantic class-id order.
     pub classes: Vec<RuntimeClass>,
+    /// Generic functions in semantic generic-id order.
+    pub generics: Vec<RuntimeGeneric>,
+    /// Methods in semantic method-id order.
+    pub methods: Vec<RuntimeMethod>,
 }
 
 impl RuntimeLayout {
@@ -122,6 +170,27 @@ impl RuntimeLayout {
                             host_backed: matches!(slot.origin, sem::SlotOrigin::HostBacked { .. }),
                         })
                         .collect(),
+                })
+                .collect(),
+            generics: module
+                .generics
+                .iter()
+                .map(|generic| RuntimeGeneric {
+                    name: generic.name.clone(),
+                    methods: module
+                        .methods
+                        .iter()
+                        .filter(|method| method.generic == generic.id)
+                        .map(|method| method.id)
+                        .collect(),
+                })
+                .collect(),
+            methods: module
+                .methods
+                .iter()
+                .map(|method| RuntimeMethod {
+                    generic: method.generic,
+                    specializers: method.specializers.clone(),
                 })
                 .collect(),
         }
@@ -175,6 +244,19 @@ enum RuntimeObjectStorage {
     },
     Vector {
         elements: Vec<Value>,
+    },
+    ClassMeta {
+        class: sem::ClassId,
+    },
+    GenericMeta {
+        generic: sem::GenericFunctionId,
+    },
+    MethodMeta {
+        method: sem::MethodId,
+    },
+    SlotDescriptor {
+        class: sem::ClassId,
+        slot: sem::SlotId,
     },
     HostBacked {
         adapter: alloc::boxed::Box<dyn HostObjectAdapter>,
@@ -344,6 +426,184 @@ impl Host for CairnHost {
                 rets[0] = Value::Bool(self.objects_equal(*lhs, *rhs)?);
                 Ok(0)
             }
+            META_CLASS_OBJECT => {
+                let [ValueRef::U64(class_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.push_class_meta(runtime_class_id(*class_raw)?)?;
+                Ok(0)
+            }
+            META_GENERIC_OBJECT => {
+                let [ValueRef::U64(generic_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.push_generic_meta(runtime_generic_id(*generic_raw)?)?;
+                Ok(0)
+            }
+            META_METHOD_OBJECT => {
+                let [ValueRef::U64(method_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.push_method_meta(runtime_method_id(*method_raw)?)?;
+                Ok(0)
+            }
+            META_SLOT_DESCRIPTOR_OBJECT => {
+                let [ValueRef::U64(class_raw), ValueRef::U64(slot_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.push_slot_descriptor(
+                    runtime_class_id(*class_raw)?,
+                    runtime_slot_id(*slot_raw)?,
+                )?;
+                Ok(0)
+            }
+            META_CLASS_NAME => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = self.meta_class_from_any(*arg)?;
+                let name = self
+                    .layout
+                    .classes
+                    .get(class.0 as usize)
+                    .ok_or(HostError::Failed)?
+                    .name
+                    .clone();
+                rets[0] = self.push_string(name)?;
+                Ok(0)
+            }
+            META_CLASS_SUPERCLASS => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = self.meta_class_from_any(*arg)?;
+                rets[0] = if let Some(superclass) = self
+                    .layout
+                    .classes
+                    .get(class.0 as usize)
+                    .ok_or(HostError::Failed)?
+                    .superclass
+                {
+                    let superclass = self.push_class_meta(superclass)?;
+                    self.push_boxed_value(superclass)
+                } else {
+                    self.push_boxed_value(Value::Bool(false))
+                };
+                Ok(0)
+            }
+            META_CLASS_SLOTS => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = self.meta_class_from_any(*arg)?;
+                let slot_count = self
+                    .layout
+                    .classes
+                    .get(class.0 as usize)
+                    .ok_or(HostError::Failed)?
+                    .slots
+                    .len();
+                let mut elements = Vec::with_capacity(slot_count);
+                for slot_index in 0..slot_count {
+                    let slot = sem::SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX));
+                    let descriptor = self.push_slot_descriptor(class, slot)?;
+                    elements.push(self.push_boxed_value(descriptor));
+                }
+                rets[0] = self.push_vector(elements)?;
+                Ok(0)
+            }
+            META_GENERIC_NAME => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let generic = self.meta_generic_from_any(*arg)?;
+                let name = self
+                    .layout
+                    .generics
+                    .get(generic.0 as usize)
+                    .ok_or(HostError::Failed)?
+                    .name
+                    .clone();
+                rets[0] = self.push_string(name)?;
+                Ok(0)
+            }
+            META_GENERIC_METHODS => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let generic = self.meta_generic_from_any(*arg)?;
+                let methods = self
+                    .layout
+                    .generics
+                    .get(generic.0 as usize)
+                    .ok_or(HostError::Failed)?
+                    .methods
+                    .clone();
+                let mut elements = Vec::with_capacity(methods.len());
+                for method in methods {
+                    let method = self.push_method_meta(method)?;
+                    elements.push(self.push_boxed_value(method));
+                }
+                rets[0] = self.push_vector(elements)?;
+                Ok(0)
+            }
+            META_METHOD_GENERIC => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let method = self.meta_method_from_any(*arg)?;
+                let generic = self
+                    .layout
+                    .methods
+                    .get(method.0 as usize)
+                    .ok_or(HostError::Failed)?
+                    .generic;
+                let generic = self.push_generic_meta(generic)?;
+                rets[0] = self.push_boxed_value(generic);
+                Ok(0)
+            }
+            META_METHOD_SPECIALIZERS => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let method = self.meta_method_from_any(*arg)?;
+                let specializers = self
+                    .layout
+                    .methods
+                    .get(method.0 as usize)
+                    .ok_or(HostError::Failed)?
+                    .specializers
+                    .clone();
+                let mut elements = Vec::with_capacity(specializers.len());
+                for specializer in specializers {
+                    let value = if let Some(class) = specializer {
+                        self.push_class_meta(class)?
+                    } else {
+                        self.push_boxed_value(Value::Bool(false))
+                    };
+                    elements.push(self.box_top_value(value)?);
+                }
+                rets[0] = self.push_vector(elements)?;
+                Ok(0)
+            }
+            VECTOR_SIZE => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::I64(
+                    i64::try_from(self.vector_elements_from_any(*arg)?.len()).unwrap_or(i64::MAX),
+                );
+                Ok(0)
+            }
+            VECTOR_REF => {
+                let [arg, ValueRef::I64(index)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let elements = self.vector_elements_from_any(*arg)?;
+                let index = usize::try_from(*index).map_err(|_| HostError::Failed)?;
+                rets[0] = elements.get(index).cloned().ok_or(HostError::Failed)?;
+                Ok(0)
+            }
             MAKE_OBJECT => {
                 let Some(ValueRef::U64(class_raw)) = args.first().copied() else {
                     return Err(HostError::Failed);
@@ -397,7 +657,13 @@ impl Host for CairnHost {
                     }
                     RuntimeObjectStorage::String { .. }
                     | RuntimeObjectStorage::Symbol { .. }
-                    | RuntimeObjectStorage::Vector { .. } => return Err(HostError::Failed),
+                    | RuntimeObjectStorage::Vector { .. }
+                    | RuntimeObjectStorage::ClassMeta { .. }
+                    | RuntimeObjectStorage::GenericMeta { .. }
+                    | RuntimeObjectStorage::MethodMeta { .. }
+                    | RuntimeObjectStorage::SlotDescriptor { .. } => {
+                        return Err(HostError::Failed);
+                    }
                     RuntimeObjectStorage::HostBacked { adapter } => {
                         adapter.read_slot(slot, slot_info.kind)?
                     }
@@ -490,6 +756,128 @@ impl CairnHost {
         Ok(value)
     }
 
+    fn push_string(&mut self, value: String) -> Result<Value, HostError> {
+        let class = self.builtin_class(sem::BuiltinValueClass::String)?;
+        Ok(self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::String { value },
+        }))
+    }
+
+    fn push_vector(&mut self, elements: Vec<Value>) -> Result<Value, HostError> {
+        let class = self.builtin_class(sem::BuiltinValueClass::Vector)?;
+        Ok(self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::Vector { elements },
+        }))
+    }
+
+    fn push_class_meta(&mut self, class: sem::ClassId) -> Result<Value, HostError> {
+        let _ = self
+            .layout
+            .classes
+            .get(class.0 as usize)
+            .ok_or(HostError::Failed)?;
+        let meta_class = self.builtin_class(sem::BuiltinValueClass::Class)?;
+        Ok(self.push_object(RuntimeObject {
+            class: meta_class,
+            storage: RuntimeObjectStorage::ClassMeta { class },
+        }))
+    }
+
+    fn push_generic_meta(&mut self, generic: sem::GenericFunctionId) -> Result<Value, HostError> {
+        let _ = self
+            .layout
+            .generics
+            .get(generic.0 as usize)
+            .ok_or(HostError::Failed)?;
+        let meta_class = self.builtin_class(sem::BuiltinValueClass::GenericFunction)?;
+        Ok(self.push_object(RuntimeObject {
+            class: meta_class,
+            storage: RuntimeObjectStorage::GenericMeta { generic },
+        }))
+    }
+
+    fn push_method_meta(&mut self, method: sem::MethodId) -> Result<Value, HostError> {
+        let _ = self
+            .layout
+            .methods
+            .get(method.0 as usize)
+            .ok_or(HostError::Failed)?;
+        let meta_class = self.builtin_class(sem::BuiltinValueClass::Method)?;
+        Ok(self.push_object(RuntimeObject {
+            class: meta_class,
+            storage: RuntimeObjectStorage::MethodMeta { method },
+        }))
+    }
+
+    fn push_slot_descriptor(
+        &mut self,
+        class: sem::ClassId,
+        slot: sem::SlotId,
+    ) -> Result<Value, HostError> {
+        let _ = self
+            .layout
+            .classes
+            .get(class.0 as usize)
+            .and_then(|class| class.slots.get(slot.0 as usize))
+            .ok_or(HostError::Failed)?;
+        let meta_class = self.builtin_class(sem::BuiltinValueClass::SlotDescriptor)?;
+        Ok(self.push_object(RuntimeObject {
+            class: meta_class,
+            storage: RuntimeObjectStorage::SlotDescriptor { class, slot },
+        }))
+    }
+
+    fn object_from_any(&self, value: ValueRef<'_>) -> Result<&RuntimeObject, HostError> {
+        let obj = match value {
+            ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => obj,
+            ValueRef::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => {
+                match self.boxed_value(obj)? {
+                    Value::Obj(boxed) if boxed.host_type == CAIRN_OBJECT_TYPE => *boxed,
+                    _ => return Err(HostError::Failed),
+                }
+            }
+            _ => return Err(HostError::Failed),
+        };
+        self.object(obj)
+    }
+
+    fn meta_class_from_any(&self, value: ValueRef<'_>) -> Result<sem::ClassId, HostError> {
+        let object = self.object_from_any(value)?;
+        match &object.storage {
+            RuntimeObjectStorage::ClassMeta { class } => Ok(*class),
+            _ => Err(HostError::Failed),
+        }
+    }
+
+    fn meta_generic_from_any(
+        &self,
+        value: ValueRef<'_>,
+    ) -> Result<sem::GenericFunctionId, HostError> {
+        let object = self.object_from_any(value)?;
+        match &object.storage {
+            RuntimeObjectStorage::GenericMeta { generic } => Ok(*generic),
+            _ => Err(HostError::Failed),
+        }
+    }
+
+    fn meta_method_from_any(&self, value: ValueRef<'_>) -> Result<sem::MethodId, HostError> {
+        let object = self.object_from_any(value)?;
+        match &object.storage {
+            RuntimeObjectStorage::MethodMeta { method } => Ok(*method),
+            _ => Err(HostError::Failed),
+        }
+    }
+
+    fn vector_elements_from_any(&self, value: ValueRef<'_>) -> Result<&[Value], HostError> {
+        let object = self.object_from_any(value)?;
+        match &object.storage {
+            RuntimeObjectStorage::Vector { elements } => Ok(elements),
+            _ => Err(HostError::Failed),
+        }
+    }
+
     fn value_for_any(&self, value: ValueRef<'_>) -> Result<Value, HostError> {
         let ValueRef::Obj(obj) = value else {
             return Err(HostError::Failed);
@@ -517,6 +905,28 @@ impl CairnHost {
                 RuntimeObjectStorage::Vector { elements: left },
                 RuntimeObjectStorage::Vector { elements: right },
             ) => left == right,
+            (
+                RuntimeObjectStorage::ClassMeta { class: left },
+                RuntimeObjectStorage::ClassMeta { class: right },
+            ) => left == right,
+            (
+                RuntimeObjectStorage::GenericMeta { generic: left },
+                RuntimeObjectStorage::GenericMeta { generic: right },
+            ) => left == right,
+            (
+                RuntimeObjectStorage::MethodMeta { method: left },
+                RuntimeObjectStorage::MethodMeta { method: right },
+            ) => left == right,
+            (
+                RuntimeObjectStorage::SlotDescriptor {
+                    class: left_class,
+                    slot: left_slot,
+                },
+                RuntimeObjectStorage::SlotDescriptor {
+                    class: right_class,
+                    slot: right_slot,
+                },
+            ) => left_class == right_class && left_slot == right_slot,
             _ => false,
         })
     }
@@ -568,6 +978,43 @@ impl CairnHost {
                     Ok(Value::Obj(obj))
                 } else {
                     Err(HostError::Failed)
+                }
+            }
+            (sem::ValueKind::ClassObject(expected), ValueRef::Obj(obj)) => {
+                let object = self.object(obj)?;
+                match &object.storage {
+                    RuntimeObjectStorage::ClassMeta { class } if *class == expected => {
+                        Ok(Value::Obj(obj))
+                    }
+                    _ => Err(HostError::Failed),
+                }
+            }
+            (sem::ValueKind::GenericFunctionObject(expected), ValueRef::Obj(obj)) => {
+                let object = self.object(obj)?;
+                match &object.storage {
+                    RuntimeObjectStorage::GenericMeta { generic } if *generic == expected => {
+                        Ok(Value::Obj(obj))
+                    }
+                    _ => Err(HostError::Failed),
+                }
+            }
+            (sem::ValueKind::MethodObject(expected), ValueRef::Obj(obj)) => {
+                let object = self.object(obj)?;
+                match &object.storage {
+                    RuntimeObjectStorage::MethodMeta { method } if *method == expected => {
+                        Ok(Value::Obj(obj))
+                    }
+                    _ => Err(HostError::Failed),
+                }
+            }
+            (sem::ValueKind::SlotDescriptorObject { class, slot }, ValueRef::Obj(obj)) => {
+                let object = self.object(obj)?;
+                match &object.storage {
+                    RuntimeObjectStorage::SlotDescriptor {
+                        class: actual_class,
+                        slot: actual_slot,
+                    } if *actual_class == class && *actual_slot == slot => Ok(Value::Obj(obj)),
+                    _ => Err(HostError::Failed),
                 }
             }
             (sem::ValueKind::KnownCallable(_), _) => Err(HostError::Failed),
@@ -670,6 +1117,78 @@ pub fn value_eq_signature() -> execution_tape::host::HostSig {
     }
 }
 
+/// Host signature for constructing a class metaobject from a class id.
+#[must_use]
+pub fn meta_class_object_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![ValueType::U64],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for constructing a generic-function metaobject.
+#[must_use]
+pub fn meta_generic_object_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![ValueType::U64],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for constructing a method metaobject.
+#[must_use]
+pub fn meta_method_object_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![ValueType::U64],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for constructing a slot descriptor metaobject.
+#[must_use]
+pub fn meta_slot_descriptor_object_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![ValueType::U64, ValueType::U64],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for a one-argument metaobject query returning an object.
+#[must_use]
+pub fn meta_query_object_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![any_type()],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for a one-argument metaobject query returning `<object>`.
+#[must_use]
+pub fn meta_query_any_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![any_type()],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for immutable vector length.
+#[must_use]
+pub fn vector_size_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![any_type()],
+        rets: vec![ValueType::I64],
+    }
+}
+
+/// Host signature for immutable vector indexing.
+#[must_use]
+pub fn vector_ref_signature() -> execution_tape::host::HostSig {
+    execution_tape::host::HostSig {
+        args: vec![any_type(), ValueType::I64],
+        rets: vec![any_type()],
+    }
+}
+
 fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
     match kind {
         sem::ValueKind::Any => Some(any_type()),
@@ -678,14 +1197,35 @@ fn value_type(kind: sem::ValueKind) -> Option<ValueType> {
         sem::ValueKind::String(_)
         | sem::ValueKind::Symbol(_)
         | sem::ValueKind::Vector(_)
-        | sem::ValueKind::Object(_) => Some(object_type()),
-        sem::ValueKind::ClassObject(_) => Some(ValueType::U64),
+        | sem::ValueKind::Object(_)
+        | sem::ValueKind::ClassObject(_)
+        | sem::ValueKind::GenericFunctionObject(_)
+        | sem::ValueKind::MethodObject(_)
+        | sem::ValueKind::SlotDescriptorObject { .. } => Some(object_type()),
         sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => None,
     }
 }
 
 fn runtime_class_id(raw: u64) -> Result<sem::ClassId, HostError> {
     Ok(sem::ClassId(
+        u32::try_from(raw).map_err(|_| HostError::Failed)?,
+    ))
+}
+
+fn runtime_generic_id(raw: u64) -> Result<sem::GenericFunctionId, HostError> {
+    Ok(sem::GenericFunctionId(
+        u32::try_from(raw).map_err(|_| HostError::Failed)?,
+    ))
+}
+
+fn runtime_method_id(raw: u64) -> Result<sem::MethodId, HostError> {
+    Ok(sem::MethodId(
+        u32::try_from(raw).map_err(|_| HostError::Failed)?,
+    ))
+}
+
+fn runtime_slot_id(raw: u64) -> Result<sem::SlotId, HostError> {
+    Ok(sem::SlotId(
         u32::try_from(raw).map_err(|_| HostError::Failed)?,
     ))
 }

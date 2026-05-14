@@ -49,8 +49,14 @@ pub enum ValueKind {
     Bool,
     /// Runtime object, optionally tied to a statically known nominal class.
     Object(Option<sem::ClassId>),
-    /// Class object represented by a runtime class id.
+    /// Class metaobject, optionally tied to the class it represents.
     ClassObject(Option<sem::ClassId>),
+    /// Generic-function metaobject, optionally tied to the generic it represents.
+    GenericFunctionObject(Option<sem::GenericFunctionId>),
+    /// Method metaobject, optionally tied to the method it represents.
+    MethodObject(Option<sem::MethodId>),
+    /// Slot descriptor metaobject.
+    SlotDescriptorObject,
 }
 
 /// A lowered module ready for backend emission.
@@ -87,6 +93,37 @@ pub enum FunctionKind {
     Method(sem::MethodId),
     /// A generated runtime dispatcher for a generic function.
     Dispatcher(sem::GenericFunctionId),
+}
+
+/// Runtime host operation emitted by lowered IR.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum RuntimeOp {
+    /// Builds a class metaobject from a class id.
+    ClassMetaObject,
+    /// Builds a generic-function metaobject from a generic id.
+    GenericMetaObject,
+    /// Builds a method metaobject from a method id.
+    MethodMetaObject,
+    /// Builds a slot descriptor metaobject from a class id and slot id.
+    SlotDescriptorObject,
+    /// Returns the name of a class metaobject.
+    ClassName,
+    /// Returns the superclass of a class metaobject, or `#f`.
+    ClassSuperclass,
+    /// Returns a vector of slot descriptor metaobjects.
+    ClassSlots,
+    /// Returns the name of a generic-function metaobject.
+    GenericName,
+    /// Returns a vector of method metaobjects.
+    GenericMethods,
+    /// Returns the generic-function metaobject implemented by a method.
+    MethodGeneric,
+    /// Returns a vector of class metaobjects for a method's specializers.
+    MethodSpecializers,
+    /// Returns vector length.
+    VectorSize,
+    /// Returns a vector element as `<object>`.
+    VectorRef,
 }
 
 /// A lowered function signature and body.
@@ -283,6 +320,19 @@ pub enum Instr {
         elements: Vec<Register>,
         /// Built-in vector class.
         class: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime host call for kernel-provided object/model operations.
+    RuntimeCall {
+        /// Destination register.
+        dst: Register,
+        /// Runtime operation.
+        op: RuntimeOp,
+        /// Argument registers.
+        args: Vec<Register>,
+        /// Result value category.
+        kind: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -1006,18 +1056,19 @@ impl<'module> BodyLowering<'module> {
                     .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
                 self.coerce_value(value, value_kind(*result_kind)?, *span)
             }
-            sem::Expr::ClassObject { class, span } => {
-                let result = self.alloc(ValueKind::ClassObject(Some(*class)));
-                self.instructions.push(Instr::ConstClass {
-                    dst: result.reg,
-                    class: *class,
-                    span: *span,
-                });
-                Ok(result)
+            sem::Expr::ClassObject { class, span } => self.lower_class_meta_object(*class, *span),
+            sem::Expr::GenericFunctionObject { generic, span } => {
+                self.lower_generic_meta_object(*generic, *span)
             }
             sem::Expr::KnownCallable { .. } => Err(invalid_semantic(
                 "known callable values have no runtime representation",
             )),
+            sem::Expr::IntrinsicCall {
+                intrinsic,
+                args,
+                result_kind,
+                span,
+            } => self.lower_intrinsic_call(*intrinsic, args, *result_kind, *span),
             sem::Expr::DirectCall {
                 function,
                 args,
@@ -1082,15 +1133,19 @@ impl<'module> BodyLowering<'module> {
                 let object = self.lower_expr(object)?;
                 let result = self.alloc(ValueKind::ClassObject(Some(*class)));
                 if object.kind == ValueKind::I64 {
-                    self.instructions.push(Instr::ConstClass {
-                        dst: result.reg,
-                        class: *class,
+                    self.emit_class_meta_object(result.reg, *class, *span);
+                } else {
+                    let class_id = self.alloc(ValueKind::U64);
+                    self.instructions.push(Instr::ClassOf {
+                        dst: class_id.reg,
+                        object: object.reg,
                         span: *span,
                     });
-                } else {
-                    self.instructions.push(Instr::ClassOf {
+                    self.instructions.push(Instr::RuntimeCall {
                         dst: result.reg,
-                        object: object.reg,
+                        op: RuntimeOp::ClassMetaObject,
+                        args: vec![class_id.reg],
+                        kind: result.kind,
                         span: *span,
                     });
                 }
@@ -1291,6 +1346,83 @@ impl<'module> BodyLowering<'module> {
             } => self.lower_handle(body, restart, *span),
             sem::Expr::Error { .. } => Err(invalid_semantic("semantic expression is invalid")),
         }
+    }
+
+    fn lower_class_meta_object(
+        &mut self,
+        class: sem::ClassId,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let result = self.alloc(ValueKind::ClassObject(Some(class)));
+        self.emit_class_meta_object(result.reg, class, span);
+        Ok(result)
+    }
+
+    fn emit_class_meta_object(&mut self, dst: Register, class: sem::ClassId, span: Span) {
+        let class_id = self.alloc(ValueKind::U64);
+        self.instructions.push(Instr::ConstU64 {
+            dst: class_id.reg,
+            value: u64::from(class.0),
+            span,
+        });
+        self.instructions.push(Instr::RuntimeCall {
+            dst,
+            op: RuntimeOp::ClassMetaObject,
+            args: vec![class_id.reg],
+            kind: ValueKind::ClassObject(Some(class)),
+            span,
+        });
+    }
+
+    fn lower_generic_meta_object(
+        &mut self,
+        generic: sem::GenericFunctionId,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let generic_id = self.alloc(ValueKind::U64);
+        let result = self.alloc(ValueKind::GenericFunctionObject(Some(generic)));
+        self.instructions.push(Instr::ConstU64 {
+            dst: generic_id.reg,
+            value: u64::from(generic.0),
+            span,
+        });
+        self.instructions.push(Instr::RuntimeCall {
+            dst: result.reg,
+            op: RuntimeOp::GenericMetaObject,
+            args: vec![generic_id.reg],
+            kind: result.kind,
+            span,
+        });
+        Ok(result)
+    }
+
+    fn lower_intrinsic_call(
+        &mut self,
+        intrinsic: sem::Intrinsic,
+        args: &[sem::Expr],
+        result_kind: sem::ValueKind,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let op = runtime_op_for_intrinsic(intrinsic);
+        let mut regs = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let value = self.lower_expr(arg)?;
+            let value = if runtime_op_arg_is_any(op, index) {
+                self.box_any(value, arg.span())?
+            } else {
+                value
+            };
+            regs.push(value.reg);
+        }
+        let result = self.alloc(value_kind(result_kind)?);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: result.reg,
+            op,
+            args: regs,
+            kind: result.kind,
+            span,
+        });
+        Ok(result)
     }
 
     fn lower_signal(
@@ -1558,6 +1690,23 @@ impl<'module> BodyLowering<'module> {
                 ..value
             });
         }
+        if let (Some(actual), ValueKind::Object(Some(expected_class))) =
+            (lowered_runtime_class(self.module, value.kind), expected)
+            && self.module.is_same_or_subclass(actual, expected_class)
+        {
+            return Ok(Value {
+                kind: expected,
+                ..value
+            });
+        }
+        if matches!(expected, ValueKind::Object(None))
+            && lowered_runtime_class(self.module, value.kind).is_some()
+        {
+            return Ok(Value {
+                kind: expected,
+                ..value
+            });
+        }
         if expected == ValueKind::Any {
             return self.box_any(value, span);
         }
@@ -1637,6 +1786,11 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         | sem::ValueKind::Vector(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::Object(class) => Ok(ValueKind::Object(Some(class))),
         sem::ValueKind::ClassObject(class) => Ok(ValueKind::ClassObject(Some(class))),
+        sem::ValueKind::GenericFunctionObject(generic) => {
+            Ok(ValueKind::GenericFunctionObject(Some(generic)))
+        }
+        sem::ValueKind::MethodObject(method) => Ok(ValueKind::MethodObject(Some(method))),
+        sem::ValueKind::SlotDescriptorObject { .. } => Ok(ValueKind::SlotDescriptorObject),
         sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => {
             Err(invalid_semantic("semantic value kind is invalid"))
         }
@@ -1644,7 +1798,43 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
 }
 
 fn is_compile_time_only(kind: sem::ValueKind) -> bool {
-    matches!(kind, sem::ValueKind::KnownCallable(_))
+    matches!(
+        kind,
+        sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(_))
+            | sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. })
+    )
+}
+
+fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
+    match intrinsic {
+        sem::Intrinsic::ClassName => RuntimeOp::ClassName,
+        sem::Intrinsic::ClassSuperclass => RuntimeOp::ClassSuperclass,
+        sem::Intrinsic::ClassSlots => RuntimeOp::ClassSlots,
+        sem::Intrinsic::GenericName => RuntimeOp::GenericName,
+        sem::Intrinsic::GenericMethods => RuntimeOp::GenericMethods,
+        sem::Intrinsic::MethodGeneric => RuntimeOp::MethodGeneric,
+        sem::Intrinsic::MethodSpecializers => RuntimeOp::MethodSpecializers,
+        sem::Intrinsic::VectorSize => RuntimeOp::VectorSize,
+        sem::Intrinsic::VectorRef => RuntimeOp::VectorRef,
+    }
+}
+
+fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
+    match op {
+        RuntimeOp::ClassName
+        | RuntimeOp::ClassSuperclass
+        | RuntimeOp::ClassSlots
+        | RuntimeOp::GenericName
+        | RuntimeOp::GenericMethods
+        | RuntimeOp::MethodGeneric
+        | RuntimeOp::MethodSpecializers
+        | RuntimeOp::VectorSize => index == 0,
+        RuntimeOp::VectorRef => index == 0,
+        RuntimeOp::ClassMetaObject
+        | RuntimeOp::GenericMetaObject
+        | RuntimeOp::MethodMetaObject
+        | RuntimeOp::SlotDescriptorObject => false,
+    }
 }
 
 fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueKind {
@@ -1679,6 +1869,33 @@ fn is_integer_value_class(module: &sem::Module, class: sem::ClassId) -> bool {
     )
 }
 
+fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::ClassId> {
+    match kind {
+        ValueKind::Object(Some(class)) => Some(class),
+        ValueKind::ClassObject(_) => builtin_class(module, sem::BuiltinValueClass::Class),
+        ValueKind::GenericFunctionObject(_) => {
+            builtin_class(module, sem::BuiltinValueClass::GenericFunction)
+        }
+        ValueKind::MethodObject(_) => builtin_class(module, sem::BuiltinValueClass::Method),
+        ValueKind::SlotDescriptorObject => {
+            builtin_class(module, sem::BuiltinValueClass::SlotDescriptor)
+        }
+        ValueKind::Any
+        | ValueKind::I64
+        | ValueKind::U64
+        | ValueKind::Bool
+        | ValueKind::Object(None) => None,
+    }
+}
+
+fn builtin_class(module: &sem::Module, kind: sem::BuiltinValueClass) -> Option<sem::ClassId> {
+    module
+        .classes
+        .iter()
+        .find(|class| class.origin == sem::ClassOrigin::BuiltinValue { kind })
+        .map(|class| class.id)
+}
+
 fn input_register(index: usize) -> Register {
     Register(u32::try_from(index + 1).unwrap_or(u32::MAX))
 }
@@ -1690,6 +1907,24 @@ fn next_after_inputs(input_count: usize) -> u32 {
 fn invalid_semantic(message: &str) -> LowerError {
     LowerError::InvalidSemantic {
         message: message.into(),
+    }
+}
+
+fn runtime_op_name(op: RuntimeOp) -> &'static str {
+    match op {
+        RuntimeOp::ClassMetaObject => "class-object",
+        RuntimeOp::GenericMetaObject => "generic-object",
+        RuntimeOp::MethodMetaObject => "method-object",
+        RuntimeOp::SlotDescriptorObject => "slot-descriptor-object",
+        RuntimeOp::ClassName => "class-name",
+        RuntimeOp::ClassSuperclass => "class-superclass",
+        RuntimeOp::ClassSlots => "class-slots",
+        RuntimeOp::GenericName => "generic-name",
+        RuntimeOp::GenericMethods => "generic-methods",
+        RuntimeOp::MethodGeneric => "method-generic",
+        RuntimeOp::MethodSpecializers => "method-specializers",
+        RuntimeOp::VectorSize => "vector-size",
+        RuntimeOp::VectorRef => "vector-ref",
     }
 }
 
@@ -1883,6 +2118,19 @@ impl Module {
                 self.fmt_arg_list(f, elements)?;
                 fmt_span(f, *span)
             }
+            Instr::RuntimeCall {
+                dst,
+                op,
+                args,
+                kind,
+                span,
+            } => {
+                write!(f, "  {dst} = runtime.{}", runtime_op_name(*op))?;
+                self.fmt_arg_list(f, args)?;
+                write!(f, ": ")?;
+                self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
             Instr::ReadSlot {
                 dst,
                 receiver,
@@ -1997,6 +2245,17 @@ impl Module {
                 write!(f, ")")
             }
             ValueKind::ClassObject(None) => write!(f, "class"),
+            ValueKind::GenericFunctionObject(Some(generic)) => {
+                if let Some(generic_info) = self.runtime.generics.get(generic.0 as usize) {
+                    write!(f, "generic({})", generic_info.name)
+                } else {
+                    write!(f, "generic#{}", generic.0)
+                }
+            }
+            ValueKind::GenericFunctionObject(None) => write!(f, "generic"),
+            ValueKind::MethodObject(Some(method)) => write!(f, "method#{}", method.0),
+            ValueKind::MethodObject(None) => write!(f, "method"),
+            ValueKind::SlotDescriptorObject => write!(f, "slot-descriptor"),
         }
     }
 
@@ -2104,7 +2363,7 @@ mod tests {
         assert!(dump.contains("call l0("));
         assert!(dump.contains("call l3("));
         assert!(!dump.contains("local l0 f"));
-        assert!(!dump.contains("local l1 g"));
+        assert!(dump.contains("local l1 g"));
     }
 
     #[test]
@@ -2118,7 +2377,7 @@ mod tests {
         assert_eq!(module.functions.len(), 5);
         assert_eq!(module.main, Some(FunctionId(0)));
         let dump = module.dump();
-        assert!(dump.contains("const.class <circle>"));
+        assert!(dump.contains("runtime.class-object"));
         assert!(dump.contains("make <circle>(%r"));
         assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
         assert!(dump.contains("area#dispatch(%r1 x: object) -> i64"));
@@ -2213,7 +2472,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_known_class_objects_to_class_ids() {
+    fn lowers_known_class_objects_to_metaobjects() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function circle-class()\n  <circle>\nend;\n\
@@ -2222,7 +2481,7 @@ mod tests {
 
         let dump = module.dump();
         assert!(dump.contains("fn l0 circle-class() -> class(<circle>)"));
-        assert!(dump.contains("const.class <circle>"));
+        assert!(dump.contains("runtime.class-object"));
         assert!(dump.contains("call l0()"));
         assert!(dump.contains("make <circle>"));
     }

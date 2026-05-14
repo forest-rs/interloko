@@ -1,6 +1,6 @@
 // expect: run 25
 // expect: diagnostics 0
-// expect: dump sem contains known-callable generic g0
+// expect: dump sem contains generic-function-object g0
 // expect: dump sem contains generic-call g0
 // expect: dump lowered contains area#dispatch
 

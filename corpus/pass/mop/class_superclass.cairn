@@ -1,0 +1,14 @@
+// expect: run 1
+// expect: dump lowered contains runtime.class-superclass
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 10;
+end;
+
+define function main() => <integer>
+  if class-name(class-superclass(<circle>)) = "<shape>" then 1 else 0 end
+end;

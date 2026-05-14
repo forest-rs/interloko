@@ -1,7 +1,7 @@
 // expect: run 8
 // expect: diagnostics 0
 // expect: dump sem contains class-object
-// expect: dump lowered contains const.class <circle>
+// expect: dump lowered contains runtime.class-object
 
 define class <circle> (<object>)
   slot radius :: <integer>;

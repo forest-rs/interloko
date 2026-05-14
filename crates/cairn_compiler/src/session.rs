@@ -1669,6 +1669,11 @@ fn collect_dispatch_sites_in_expr(
                 );
             }
         }
+        sem::Expr::IntrinsicCall { args, .. } => {
+            for arg in args {
+                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+            }
+        }
         sem::Expr::If {
             condition,
             then_branch,
@@ -1696,6 +1701,7 @@ fn collect_dispatch_sites_in_expr(
         | sem::Expr::Local { .. }
         | sem::Expr::ClassObject { .. }
         | sem::Expr::KnownCallable { .. }
+        | sem::Expr::GenericFunctionObject { .. }
         | sem::Expr::Error { .. } => {}
     }
 }
@@ -2163,6 +2169,10 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
             sem::ValueKind::ClassObject(*class)
         }
         sem::Expr::KnownCallable { callable, .. } => sem::ValueKind::KnownCallable(*callable),
+        sem::Expr::GenericFunctionObject { generic, .. } => {
+            sem::ValueKind::GenericFunctionObject(*generic)
+        }
+        sem::Expr::IntrinsicCall { result_kind, .. } => *result_kind,
         sem::Expr::DirectCall { function, .. } => module
             .functions
             .get(function.0 as usize)
@@ -2225,9 +2235,18 @@ fn sem_value_kind_class(module: &sem::Module, kind: sem::ValueKind) -> Option<se
         | sem::ValueKind::Symbol(class)
         | sem::ValueKind::Vector(class) => Some(class),
         sem::ValueKind::I64 => sem_builtin_class(module, sem::BuiltinValueClass::Integer),
+        sem::ValueKind::ClassObject(_) => sem_builtin_class(module, sem::BuiltinValueClass::Class),
+        sem::ValueKind::GenericFunctionObject(_) => {
+            sem_builtin_class(module, sem::BuiltinValueClass::GenericFunction)
+        }
+        sem::ValueKind::MethodObject(_) => {
+            sem_builtin_class(module, sem::BuiltinValueClass::Method)
+        }
+        sem::ValueKind::SlotDescriptorObject { .. } => {
+            sem_builtin_class(module, sem::BuiltinValueClass::SlotDescriptor)
+        }
         sem::ValueKind::Any
         | sem::ValueKind::Bool
-        | sem::ValueKind::ClassObject(_)
         | sem::ValueKind::KnownCallable(_)
         | sem::ValueKind::Error => None,
     }
@@ -2258,6 +2277,13 @@ fn sem_builtin_value_kind_for_class(
         sem::ClassOrigin::BuiltinValue {
             kind: sem::BuiltinValueClass::Vector,
         } => Some(sem::ValueKind::Vector(class)),
+        sem::ClassOrigin::BuiltinValue {
+            kind:
+                sem::BuiltinValueClass::Class
+                | sem::BuiltinValueClass::GenericFunction
+                | sem::BuiltinValueClass::Method
+                | sem::BuiltinValueClass::SlotDescriptor,
+        } => Some(sem::ValueKind::Object(class)),
         sem::ClassOrigin::Native | sem::ClassOrigin::HostBacked { .. } => None,
     }
 }
@@ -3811,6 +3837,16 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
             || format!("class-object#{}", class.0),
             |class| format!("class-object({})", class.name),
         ),
+        sem::ValueKind::GenericFunctionObject(generic) => {
+            module.generics.get(generic.0 as usize).map_or_else(
+                || format!("generic-function-object#{}", generic.0),
+                |generic| format!("generic-function-object({})", generic.name),
+            )
+        }
+        sem::ValueKind::MethodObject(method) => format!("method-object(m{})", method.0),
+        sem::ValueKind::SlotDescriptorObject { class, slot } => {
+            format!("slot-descriptor(c{}.s{})", class.0, slot.0)
+        }
         sem::ValueKind::KnownCallable(callable) => {
             format!("known-callable({})", sem_callable_label(module, callable))
         }
@@ -3828,6 +3864,13 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::Vector(class) => format!("vector(c{})", class.0),
         sem::ValueKind::Object(class) => format!("object(c{})", class.0),
         sem::ValueKind::ClassObject(class) => format!("class-object(c{})", class.0),
+        sem::ValueKind::GenericFunctionObject(generic) => {
+            format!("generic-function-object(g{})", generic.0)
+        }
+        sem::ValueKind::MethodObject(method) => format!("method-object(m{})", method.0),
+        sem::ValueKind::SlotDescriptorObject { class, slot } => {
+            format!("slot-descriptor(c{}.s{})", class.0, slot.0)
+        }
         sem::ValueKind::KnownCallable(callable) => {
             format!("known-callable({})", sem_callable_label_for_expr(callable))
         }
@@ -3851,6 +3894,24 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
             || format!("class-object#{}", class.0),
             |class| format!("class-object#{}", class.definition.raw()),
         ),
+        sem::ValueKind::GenericFunctionObject(generic) => {
+            module.generics.get(generic.0 as usize).map_or_else(
+                || format!("generic-function-object#{}", generic.0),
+                |generic| format!("generic-function-object#{}", generic.definition.raw()),
+            )
+        }
+        sem::ValueKind::MethodObject(method) => module.methods.get(method.0 as usize).map_or_else(
+            || format!("method-object#{}", method.0),
+            |method| format!("method-object#{}", method.definition.raw()),
+        ),
+        sem::ValueKind::SlotDescriptorObject { class, slot } => module
+            .classes
+            .get(class.0 as usize)
+            .and_then(|class| class.effective_slots.get(slot.0 as usize))
+            .map_or_else(
+                || format!("slot-descriptor#{}.{}", class.0, slot.0),
+                |slot| format!("slot-descriptor#{}", slot.definition.raw()),
+            ),
         sem::ValueKind::KnownCallable(callable) => sem_callable_fingerprint(module, callable),
         sem::ValueKind::Error => "error".into(),
     }
@@ -3864,8 +3925,11 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::String(_)
         | sem::ValueKind::Symbol(_)
         | sem::ValueKind::Vector(_)
-        | sem::ValueKind::Object(_) => "object-handle",
-        sem::ValueKind::ClassObject(_) => "class-id",
+        | sem::ValueKind::Object(_)
+        | sem::ValueKind::ClassObject(_)
+        | sem::ValueKind::GenericFunctionObject(_)
+        | sem::ValueKind::MethodObject(_)
+        | sem::ValueKind::SlotDescriptorObject { .. } => "object-handle",
         sem::ValueKind::KnownCallable(_) => "compile-time-callable",
         sem::ValueKind::Error => "error",
     }
@@ -3897,6 +3961,20 @@ fn sem_slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
     match mutability {
         sem::SlotMutability::Mutable => "mutable",
         sem::SlotMutability::Constant => "constant",
+    }
+}
+
+fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
+    match intrinsic {
+        sem::Intrinsic::ClassName => "class-name",
+        sem::Intrinsic::ClassSuperclass => "class-superclass",
+        sem::Intrinsic::ClassSlots => "class-slots",
+        sem::Intrinsic::GenericName => "generic-name",
+        sem::Intrinsic::GenericMethods => "generic-methods",
+        sem::Intrinsic::MethodGeneric => "method-generic",
+        sem::Intrinsic::MethodSpecializers => "method-specializers",
+        sem::Intrinsic::VectorSize => "vector-size",
+        sem::Intrinsic::VectorRef => "vector-ref",
     }
 }
 
@@ -4045,6 +4123,25 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 "known-callable {}",
                 sem_callable_label_for_expr(*callable)
             );
+        }
+        sem::Expr::GenericFunctionObject { generic, .. } => {
+            let _ = writeln!(out, "generic-function-object g{}", generic.0);
+        }
+        sem::Expr::IntrinsicCall {
+            intrinsic,
+            args,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "intrinsic {} result={}",
+                sem_intrinsic_label(*intrinsic),
+                sem_kind_label_for_expr(*result_kind)
+            );
+            for arg in args {
+                dump_sem_expr(out, arg, indent + 2);
+            }
         }
         sem::Expr::DirectCall { function, args, .. } => {
             let _ = writeln!(out, "direct-call f{}", function.0);
@@ -4817,6 +4914,28 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::KnownCallable { callable, .. } => {
             let fingerprint = sem_callable_fingerprint(module, *callable);
             let _ = write!(out, "known-callable({fingerprint})");
+        }
+        sem::Expr::GenericFunctionObject { generic, .. } => {
+            let definition = module
+                .generics
+                .get(generic.0 as usize)
+                .map_or(0, |generic| generic.definition.raw());
+            let _ = write!(out, "generic-function-object({definition})");
+        }
+        sem::Expr::IntrinsicCall {
+            intrinsic,
+            args,
+            result_kind,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(
+                out,
+                "intrinsic({}:{result}:",
+                sem_intrinsic_label(*intrinsic)
+            );
+            fingerprint_args(module, args, out);
+            out.push(')');
         }
         sem::Expr::DirectCall { function, args, .. } => {
             let definition = module

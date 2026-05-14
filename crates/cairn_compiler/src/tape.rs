@@ -138,7 +138,10 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
         lower::ValueKind::Object(_) => runtime::object_type(),
-        lower::ValueKind::ClassObject(_) => ValueType::U64,
+        lower::ValueKind::ClassObject(_)
+        | lower::ValueKind::GenericFunctionObject(_)
+        | lower::ValueKind::MethodObject(_)
+        | lower::ValueKind::SlotDescriptorObject => runtime::object_type(),
     }
 }
 
@@ -163,9 +166,9 @@ struct HostSigs {
     symbol_literals: Vec<(String, HostSigId)>,
     vector_literals: Vec<(usize, HostSigId)>,
     value_eq: HostSigId,
+    runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
     box_i64: HostSigId,
     box_bool: HostSigId,
-    box_u64: HostSigId,
     box_object: HostSigId,
     instance_any: HostSigId,
     instance_object: HostSigId,
@@ -232,10 +235,6 @@ impl HostSigs {
             runtime::BOX_VALUE,
             runtime::box_value_signature(ValueType::Bool),
         );
-        let box_u64 = builder.host_sig_for(
-            runtime::BOX_VALUE,
-            runtime::box_value_signature(ValueType::U64),
-        );
         let box_object = builder.host_sig_for(
             runtime::BOX_VALUE,
             runtime::box_value_signature(runtime::object_type()),
@@ -276,6 +275,7 @@ impl HostSigs {
         );
         let vector_literals = vector_literal_sigs(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
+        let runtime_calls = runtime_call_sigs(builder);
         Ok(Self {
             make_object,
             class_of,
@@ -285,9 +285,9 @@ impl HostSigs {
             symbol_literals,
             vector_literals,
             value_eq,
+            runtime_calls,
             box_i64,
             box_bool,
-            box_u64,
             box_object,
             instance_any,
             instance_object,
@@ -319,6 +319,88 @@ impl HostSigs {
             .map(|(_, sig)| *sig)
             .ok_or_else(|| invalid_lowered("vector literal signature is missing"))
     }
+
+    fn runtime_call(&self, op: lower::RuntimeOp) -> Result<HostSigId, TapeError> {
+        self.runtime_calls
+            .iter()
+            .find(|(candidate, _)| *candidate == op)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("runtime call signature is missing"))
+    }
+}
+
+fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, HostSigId)> {
+    use lower::RuntimeOp;
+    [
+        (
+            RuntimeOp::ClassMetaObject,
+            runtime::META_CLASS_OBJECT,
+            runtime::meta_class_object_signature(),
+        ),
+        (
+            RuntimeOp::GenericMetaObject,
+            runtime::META_GENERIC_OBJECT,
+            runtime::meta_generic_object_signature(),
+        ),
+        (
+            RuntimeOp::MethodMetaObject,
+            runtime::META_METHOD_OBJECT,
+            runtime::meta_method_object_signature(),
+        ),
+        (
+            RuntimeOp::SlotDescriptorObject,
+            runtime::META_SLOT_DESCRIPTOR_OBJECT,
+            runtime::meta_slot_descriptor_object_signature(),
+        ),
+        (
+            RuntimeOp::ClassName,
+            runtime::META_CLASS_NAME,
+            runtime::meta_query_object_signature(),
+        ),
+        (
+            RuntimeOp::ClassSuperclass,
+            runtime::META_CLASS_SUPERCLASS,
+            runtime::meta_query_any_signature(),
+        ),
+        (
+            RuntimeOp::ClassSlots,
+            runtime::META_CLASS_SLOTS,
+            runtime::meta_query_object_signature(),
+        ),
+        (
+            RuntimeOp::GenericName,
+            runtime::META_GENERIC_NAME,
+            runtime::meta_query_object_signature(),
+        ),
+        (
+            RuntimeOp::GenericMethods,
+            runtime::META_GENERIC_METHODS,
+            runtime::meta_query_object_signature(),
+        ),
+        (
+            RuntimeOp::MethodGeneric,
+            runtime::META_METHOD_GENERIC,
+            runtime::meta_query_any_signature(),
+        ),
+        (
+            RuntimeOp::MethodSpecializers,
+            runtime::META_METHOD_SPECIALIZERS,
+            runtime::meta_query_object_signature(),
+        ),
+        (
+            RuntimeOp::VectorSize,
+            runtime::VECTOR_SIZE,
+            runtime::vector_size_signature(),
+        ),
+        (
+            RuntimeOp::VectorRef,
+            runtime::VECTOR_REF,
+            runtime::vector_ref_signature(),
+        ),
+    ]
+    .into_iter()
+    .map(|(op, symbol, sig)| (op, builder.host_sig_for(symbol, sig)))
+    .collect()
 }
 
 fn literal_sigs(
@@ -443,8 +525,11 @@ impl<'a> FunctionEmitter<'a> {
                 let sig = match from {
                     lower::ValueKind::I64 => self.host_sigs.box_i64,
                     lower::ValueKind::Bool => self.host_sigs.box_bool,
-                    lower::ValueKind::Object(_) => self.host_sigs.box_object,
-                    lower::ValueKind::ClassObject(_) => self.host_sigs.box_u64,
+                    lower::ValueKind::Object(_)
+                    | lower::ValueKind::ClassObject(_)
+                    | lower::ValueKind::GenericFunctionObject(_)
+                    | lower::ValueKind::MethodObject(_)
+                    | lower::ValueKind::SlotDescriptorObject => self.host_sigs.box_object,
                     lower::ValueKind::Any | lower::ValueKind::U64 => {
                         return Err(invalid_lowered("invalid boxed value input kind"));
                     }
@@ -555,6 +640,18 @@ impl<'a> FunctionEmitter<'a> {
                 let elements = reg_slice(elements);
                 self.set_span(*span);
                 self.asm.host_call(0, sig, 0, &elements, &[dst.0]);
+            }
+            lower::Instr::RuntimeCall {
+                dst,
+                op,
+                args,
+                span,
+                ..
+            } => {
+                let sig = self.host_sigs.runtime_call(*op)?;
+                let args = reg_slice(args);
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &args, &[dst.0]);
             }
             lower::Instr::ReadSlot {
                 dst,
@@ -781,6 +878,10 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         lower::Instr::VectorLiteral { dst, elements, .. } => {
             note_register(*dst, max);
             note_registers(elements, max);
+        }
+        lower::Instr::RuntimeCall { dst, args, .. } => {
+            note_register(*dst, max);
+            note_registers(args, max);
         }
         lower::Instr::ReadSlot { dst, receiver, .. } => {
             note_register(*dst, max);

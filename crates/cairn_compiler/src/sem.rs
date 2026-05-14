@@ -109,8 +109,19 @@ pub enum ValueKind {
     Vector(ClassId),
     /// Runtime object with statically known nominal class.
     Object(ClassId),
-    /// Class object naming a statically known nominal class.
+    /// Class metaobject naming a statically known nominal class.
     ClassObject(ClassId),
+    /// Generic-function metaobject naming a statically known generic.
+    GenericFunctionObject(GenericFunctionId),
+    /// Method metaobject naming a statically known method.
+    MethodObject(MethodId),
+    /// Slot descriptor metaobject naming a statically known effective slot.
+    SlotDescriptorObject {
+        /// Class whose effective slot is described.
+        class: ClassId,
+        /// Effective slot described by this value.
+        slot: SlotId,
+    },
     /// Compile-time-known callable object.
     KnownCallable(KnownCallable),
     /// Invalid or unknown value.
@@ -128,6 +139,14 @@ pub enum BuiltinValueClass {
     Integer,
     /// The built-in `<vector>` class.
     Vector,
+    /// The built-in `<class>` metaobject class.
+    Class,
+    /// The built-in `<generic-function>` metaobject class.
+    GenericFunction,
+    /// The built-in `<method>` metaobject class.
+    Method,
+    /// The built-in `<slot-descriptor>` metaobject class.
+    SlotDescriptor,
 }
 
 impl BuiltinValueClass {
@@ -136,6 +155,10 @@ impl BuiltinValueClass {
         (Self::Symbol, "<symbol>"),
         (Self::Integer, "<integer>"),
         (Self::Vector, "<vector>"),
+        (Self::Class, "<class>"),
+        (Self::GenericFunction, "<generic-function>"),
+        (Self::Method, "<method>"),
+        (Self::SlotDescriptor, "<slot-descriptor>"),
     ];
 
     /// Returns the Cairn-visible class name for this built-in value class.
@@ -146,6 +169,10 @@ impl BuiltinValueClass {
             Self::Symbol => "<symbol>",
             Self::Integer => "<integer>",
             Self::Vector => "<vector>",
+            Self::Class => "<class>",
+            Self::GenericFunction => "<generic-function>",
+            Self::Method => "<method>",
+            Self::SlotDescriptor => "<slot-descriptor>",
         }
     }
 
@@ -155,6 +182,10 @@ impl BuiltinValueClass {
             "<symbol>" => Some(Self::Symbol),
             "<integer>" => Some(Self::Integer),
             "<vector>" => Some(Self::Vector),
+            "<class>" => Some(Self::Class),
+            "<generic-function>" => Some(Self::GenericFunction),
+            "<method>" => Some(Self::Method),
+            "<slot-descriptor>" => Some(Self::SlotDescriptor),
             _ => None,
         }
     }
@@ -165,12 +196,56 @@ impl BuiltinValueClass {
             Self::Symbol => 1,
             Self::Integer => 2,
             Self::Vector => 3,
+            Self::Class => 4,
+            Self::GenericFunction => 5,
+            Self::Method => 6,
+            Self::SlotDescriptor => 7,
         }
     }
 }
 
 fn slot_setter_name(slot_name: &str) -> String {
     format!("{slot_name}-setter")
+}
+
+fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
+    Some(match name {
+        "class-name" => Intrinsic::ClassName,
+        "class-superclass" => Intrinsic::ClassSuperclass,
+        "class-slots" => Intrinsic::ClassSlots,
+        "generic-name" => Intrinsic::GenericName,
+        "generic-methods" => Intrinsic::GenericMethods,
+        "method-generic" => Intrinsic::MethodGeneric,
+        "method-specializers" => Intrinsic::MethodSpecializers,
+        "vector-size" => Intrinsic::VectorSize,
+        "vector-ref" => Intrinsic::VectorRef,
+        _ => return None,
+    })
+}
+
+const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
+    match intrinsic {
+        Intrinsic::ClassName
+        | Intrinsic::ClassSuperclass
+        | Intrinsic::ClassSlots
+        | Intrinsic::GenericName
+        | Intrinsic::GenericMethods
+        | Intrinsic::MethodGeneric
+        | Intrinsic::MethodSpecializers
+        | Intrinsic::VectorSize => 1,
+        Intrinsic::VectorRef => 2,
+    }
+}
+
+fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
+    match (intrinsic, index) {
+        (Intrinsic::ClassName | Intrinsic::ClassSuperclass | Intrinsic::ClassSlots, 0) => "<class>",
+        (Intrinsic::GenericName | Intrinsic::GenericMethods, 0) => "<generic-function>",
+        (Intrinsic::MethodGeneric | Intrinsic::MethodSpecializers, 0) => "<method>",
+        (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => "<vector>",
+        (Intrinsic::VectorRef, 1) => "<integer>",
+        _ => "<object>",
+    }
 }
 
 /// Registry of host-backed metaobjects supplied by the embedding Rust host.
@@ -993,6 +1068,29 @@ impl From<ast::CompareOp> for CompareOp {
     }
 }
 
+/// Built-in read-only runtime operation exposed by the Cairn kernel.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Intrinsic {
+    /// Returns the name of a class metaobject.
+    ClassName,
+    /// Returns the superclass metaobject for a class, or `#f`.
+    ClassSuperclass,
+    /// Returns slot-descriptor metaobjects for a class.
+    ClassSlots,
+    /// Returns the name of a generic-function metaobject.
+    GenericName,
+    /// Returns method metaobjects attached to a generic function.
+    GenericMethods,
+    /// Returns the generic-function metaobject implemented by a method.
+    MethodGeneric,
+    /// Returns class metaobjects for a method's specializers.
+    MethodSpecializers,
+    /// Returns an immutable vector's element count.
+    VectorSize,
+    /// Returns one immutable vector element as `<object>`.
+    VectorRef,
+}
+
 /// Semantic expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
@@ -1057,6 +1155,24 @@ pub enum Expr {
     KnownCallable {
         /// Known callable identity.
         callable: KnownCallable,
+        /// Source span.
+        span: Span,
+    },
+    /// Resolved generic-function metaobject value.
+    GenericFunctionObject {
+        /// Generic function represented by this value.
+        generic: GenericFunctionId,
+        /// Source span.
+        span: Span,
+    },
+    /// Built-in runtime intrinsic call.
+    IntrinsicCall {
+        /// Intrinsic operation.
+        intrinsic: Intrinsic,
+        /// Argument expressions.
+        args: Vec<Expr>,
+        /// Result value category.
+        result_kind: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -1236,6 +1352,8 @@ impl Expr {
             | Self::Local { span, .. }
             | Self::ClassObject { span, .. }
             | Self::KnownCallable { span, .. }
+            | Self::GenericFunctionObject { span, .. }
+            | Self::IntrinsicCall { span, .. }
             | Self::DirectCall { span, .. }
             | Self::GenericCall { span, .. }
             | Self::Signal { span, .. }
@@ -2660,6 +2778,9 @@ impl Lowering {
                     );
                     return Expr::Error { span: *span };
                 }
+                if let Some(call) = self.lower_intrinsic_call(ctx, callee, &lowered_args, *span) {
+                    return call;
+                }
                 if let Some(symbol) = self.resolve_function(callee) {
                     if symbol.arity() == args.len() {
                         for (index, (arg, expected)) in
@@ -2912,8 +3033,8 @@ impl Lowering {
             };
         }
         if let Some(symbol) = self.resolve_generic(name) {
-            return Expr::KnownCallable {
-                callable: KnownCallable::GenericFunction(symbol.id),
+            return Expr::GenericFunctionObject {
+                generic: symbol.id,
                 span,
             };
         }
@@ -2951,7 +3072,8 @@ impl Lowering {
             ValueKind::KnownCallable(KnownCallable::DirectFunction(function)) => {
                 self.lower_applied_direct_call(ctx, function, lowered_args, span)
             }
-            ValueKind::KnownCallable(KnownCallable::GenericFunction(generic)) => {
+            ValueKind::KnownCallable(KnownCallable::GenericFunction(generic))
+            | ValueKind::GenericFunctionObject(generic) => {
                 self.lower_applied_generic_call(ctx, generic, lowered_args, span)
             }
             ValueKind::KnownCallable(KnownCallable::SlotAccessor { .. }) => {
@@ -2973,6 +3095,97 @@ impl Lowering {
                 );
                 Expr::Error { span }
             }
+        }
+    }
+
+    fn lower_intrinsic_call(
+        &self,
+        ctx: &mut FunctionContext,
+        callee: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Expr> {
+        let intrinsic = intrinsic_for_name(callee)?;
+        let expected = intrinsic_arity(intrinsic);
+        if args.len() != expected {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                    .with_arg(DiagnosticArg::text("callee", callee.to_string()))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "expected_count",
+                        u64::try_from(expected).unwrap_or(u64::MAX),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
+            return Some(Expr::Error { span });
+        }
+        for (index, arg) in args.iter().enumerate() {
+            let actual = self.expr_kind(arg);
+            if !self.intrinsic_arg_matches(intrinsic, index, actual) {
+                ctx.diagnostics.push(
+                    Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                        .with_arg(DiagnosticArg::text("function", callee.to_string()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "argument_index",
+                            u64::try_from(index + 1).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::text(
+                            "expected",
+                            intrinsic_expected_name(intrinsic, index),
+                        ))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
+            }
+        }
+        Some(Expr::IntrinsicCall {
+            intrinsic,
+            args: args.to_vec(),
+            result_kind: self.intrinsic_result_kind(intrinsic),
+            span,
+        })
+    }
+
+    fn intrinsic_result_kind(&self, intrinsic: Intrinsic) -> ValueKind {
+        match intrinsic {
+            Intrinsic::ClassName | Intrinsic::GenericName => self
+                .builtin_value_class(BuiltinValueClass::String)
+                .map_or(ValueKind::Error, ValueKind::String),
+            Intrinsic::ClassSlots | Intrinsic::GenericMethods | Intrinsic::MethodSpecializers => {
+                self.builtin_value_class(BuiltinValueClass::Vector)
+                    .map_or(ValueKind::Error, ValueKind::Vector)
+            }
+            Intrinsic::VectorSize => ValueKind::I64,
+            Intrinsic::ClassSuperclass | Intrinsic::MethodGeneric | Intrinsic::VectorRef => {
+                ValueKind::Any
+            }
+        }
+    }
+
+    fn intrinsic_arg_matches(&self, intrinsic: Intrinsic, index: usize, actual: ValueKind) -> bool {
+        if actual == ValueKind::Error {
+            return true;
+        }
+        match (intrinsic, index) {
+            (Intrinsic::ClassName | Intrinsic::ClassSuperclass | Intrinsic::ClassSlots, 0) => {
+                matches!(actual, ValueKind::ClassObject(_) | ValueKind::Any)
+            }
+            (Intrinsic::GenericName | Intrinsic::GenericMethods, 0) => matches!(
+                actual,
+                ValueKind::GenericFunctionObject(_)
+                    | ValueKind::KnownCallable(KnownCallable::GenericFunction(_))
+                    | ValueKind::Any
+            ),
+            (Intrinsic::MethodGeneric | Intrinsic::MethodSpecializers, 0) => {
+                matches!(actual, ValueKind::MethodObject(_) | ValueKind::Any)
+            }
+            (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => {
+                matches!(actual, ValueKind::Vector(_) | ValueKind::Any)
+            }
+            (Intrinsic::VectorRef, 1) => actual == ValueKind::I64,
+            _ => false,
         }
     }
 
@@ -3328,6 +3541,10 @@ impl Lowering {
             | ValueKind::Symbol(_)
             | ValueKind::Vector(_)
             | ValueKind::I64
+            | ValueKind::ClassObject(_)
+            | ValueKind::GenericFunctionObject(_)
+            | ValueKind::MethodObject(_)
+            | ValueKind::SlotDescriptorObject { .. }
             | ValueKind::Error => {}
             actual => {
                 ctx.diagnostics.push(
@@ -3381,6 +3598,10 @@ impl Lowering {
             | ValueKind::Symbol(_)
             | ValueKind::Vector(_)
             | ValueKind::I64
+            | ValueKind::ClassObject(_)
+            | ValueKind::GenericFunctionObject(_)
+            | ValueKind::MethodObject(_)
+            | ValueKind::SlotDescriptorObject { .. }
             | ValueKind::Error => {}
             actual => {
                 ctx.diagnostics.push(
@@ -3716,6 +3937,10 @@ impl Lowering {
                 ValueKind::ClassObject(*class)
             }
             Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
+            Expr::GenericFunctionObject { generic, .. } => {
+                ValueKind::GenericFunctionObject(*generic)
+            }
+            Expr::IntrinsicCall { result_kind, .. } => *result_kind,
             Expr::AccessorCall { result_kind, .. } => *result_kind,
             Expr::SlotWrite { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. }
@@ -3794,6 +4019,13 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
             } => Some(ValueKind::Vector(class)),
+            ClassOrigin::BuiltinValue {
+                kind:
+                    BuiltinValueClass::Class
+                    | BuiltinValueClass::GenericFunction
+                    | BuiltinValueClass::Method
+                    | BuiltinValueClass::SlotDescriptor,
+            } => Some(ValueKind::Object(class)),
             ClassOrigin::Native | ClassOrigin::HostBacked { .. } => None,
         }
     }
@@ -3805,11 +4037,17 @@ impl Lowering {
             }
             ValueKind::I64 => self.builtin_value_class(BuiltinValueClass::Integer),
             ValueKind::Object(class) => Some(class),
-            ValueKind::Any
-            | ValueKind::Bool
-            | ValueKind::ClassObject(_)
-            | ValueKind::KnownCallable(_)
-            | ValueKind::Error => None,
+            ValueKind::ClassObject(_) => self.builtin_value_class(BuiltinValueClass::Class),
+            ValueKind::GenericFunctionObject(_) => {
+                self.builtin_value_class(BuiltinValueClass::GenericFunction)
+            }
+            ValueKind::MethodObject(_) => self.builtin_value_class(BuiltinValueClass::Method),
+            ValueKind::SlotDescriptorObject { .. } => {
+                self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
+            }
+            ValueKind::Any | ValueKind::Bool | ValueKind::KnownCallable(_) | ValueKind::Error => {
+                None
+            }
         }
     }
 
@@ -3916,6 +4154,18 @@ impl Lowering {
             "<vector>" => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
+            "<class>" => self
+                .builtin_value_class(BuiltinValueClass::Class)
+                .map_or(ValueKind::Error, ValueKind::Object),
+            "<generic-function>" => self
+                .builtin_value_class(BuiltinValueClass::GenericFunction)
+                .map_or(ValueKind::Error, ValueKind::Object),
+            "<method>" => self
+                .builtin_value_class(BuiltinValueClass::Method)
+                .map_or(ValueKind::Error, ValueKind::Object),
+            "<slot-descriptor>" => self
+                .builtin_value_class(BuiltinValueClass::SlotDescriptor)
+                .map_or(ValueKind::Error, ValueKind::Object),
             name => self
                 .resolve_class(name)
                 .map(|class| ValueKind::Object(class.id))
@@ -3957,7 +4207,12 @@ impl Lowering {
             ValueKind::I64 => self
                 .kind_for_builtin_class(specializer)
                 .is_some_and(|kind| kind == ValueKind::I64),
-            ValueKind::Bool | ValueKind::ClassObject(_) | ValueKind::KnownCallable(_) => false,
+            ValueKind::Bool
+            | ValueKind::ClassObject(_)
+            | ValueKind::GenericFunctionObject(_)
+            | ValueKind::MethodObject(_)
+            | ValueKind::SlotDescriptorObject { .. }
+            | ValueKind::KnownCallable(_) => false,
         }
     }
 
@@ -3969,6 +4224,10 @@ impl Lowering {
                     | ValueKind::String(_)
                     | ValueKind::Symbol(_)
                     | ValueKind::Vector(_)
+                    | ValueKind::ClassObject(_)
+                    | ValueKind::GenericFunctionObject(_)
+                    | ValueKind::MethodObject(_)
+                    | ValueKind::SlotDescriptorObject { .. }
                     | ValueKind::Error
             ),
             ValueKind::Object(expected) => {
@@ -3987,6 +4246,9 @@ impl Lowering {
             ValueKind::I64
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
+            | ValueKind::GenericFunctionObject(_)
+            | ValueKind::MethodObject(_)
+            | ValueKind::SlotDescriptorObject { .. }
             | ValueKind::KnownCallable(_) => expected == actual,
         }
     }
@@ -4007,6 +4269,24 @@ impl Lowering {
             ValueKind::String(_) => "<string>".into(),
             ValueKind::Symbol(_) => "<symbol>".into(),
             ValueKind::Vector(_) => "<vector>".into(),
+            ValueKind::GenericFunctionObject(generic) => {
+                self.generic_symbols.get(generic.0 as usize).map_or_else(
+                    || format!("generic-function-object#{}", generic.0),
+                    |symbol| format!("generic-function object `{}`", symbol.name),
+                )
+            }
+            ValueKind::MethodObject(method) => self.methods.get(method.0 as usize).map_or_else(
+                || format!("method-object#{}", method.0),
+                |method| format!("method object m{}", method.id.0),
+            ),
+            ValueKind::SlotDescriptorObject { class, slot } => self
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.effective_slots.get(slot.0 as usize))
+                .map_or_else(
+                    || format!("slot-descriptor#{}.{}", class.0, slot.0),
+                    |slot| format!("slot descriptor `{}`", slot.name),
+                ),
             ValueKind::Object(class) => self
                 .classes
                 .get(class.0 as usize)
@@ -4158,7 +4438,7 @@ mod tests {
         );
         assert_eq!(
             module.functions[1].locals[1].kind,
-            ValueKind::KnownCallable(KnownCallable::GenericFunction(GenericFunctionId(0)))
+            ValueKind::GenericFunctionObject(GenericFunctionId(0))
         );
         let Expr::Binary { lhs, rhs, .. } = &module.functions[1].body.result else {
             panic!("expected binary result");
@@ -4228,7 +4508,7 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes.len(), 5);
+        assert_eq!(module.classes.len(), 9);
         assert_eq!(
             module.classes[0].origin,
             ClassOrigin::HostBacked {
