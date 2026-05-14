@@ -21,7 +21,7 @@ args=[keyword=r:,slot=radius]
 The workbench exposes those facts through EOP records:
 
 ```sh
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/diagnostic_unknown_local.loko diagnostic:d0
 ```
 
 The output includes the diagnostic code, labels, and args. It deliberately does
@@ -45,14 +45,14 @@ silently falling back to English.
 Select a built-in diagnostic locale with:
 
 ```sh
-INTERLOKO_DIAGNOSTIC_LOCALE=pseudo cargo run -p interloko_lab -- run program.cairn
+INTERLOKO_DIAGNOSTIC_LOCALE=pseudo cargo run -p interloko_lab -- run program.loko
 ```
 
 Load an override catalog from a MessageFormat resource TOML file with:
 
 ```sh
 INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml \
-  cargo run -p interloko_lab -- run program.cairn
+  cargo run -p interloko_lab -- run program.loko
 ```
 
 ## Second Read

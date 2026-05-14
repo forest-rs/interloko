@@ -1605,7 +1605,7 @@ Ticket: `cai-5zew`
 
 ### Goal
 
-Build a small, durable corpus of `.cairn` programs and a workspace runner that
+Build a small, durable corpus of `.loko` programs and a workspace runner that
 validates each program through the session API. The corpus should make it easy
 to add new semantic examples, expected diagnostics, and lightweight dump
 stability checks without committing large snapshot files.
@@ -1631,7 +1631,7 @@ syntax, semantic, lowering, tape, or runtime rules.
 ### Plumbing
 
 ```text
-corpus/**/*.cairn
+corpus/**/*.loko
   -> header expectations
   -> tools/interloko_corpus
   -> interloko_compiler::session
@@ -1725,7 +1725,7 @@ decisions.
 ### Plumbing
 
 ```text
-.cairn file(s)
+.loko file(s)
   -> interloko_compiler::session
   -> syntax / ast / sem / lower / tape / runtime
   -> dumps + artifact graph + edit diff

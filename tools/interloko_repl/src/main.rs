@@ -25,7 +25,7 @@ use reedline::{
 
 type Result<T> = std::result::Result<T, ReplError>;
 
-const SOURCE_NAME: &str = "repl.cairn";
+const SOURCE_NAME: &str = "repl.loko";
 const SCRATCH_FUNCTION: &str = "__interloko_repl_expr";
 const COMMANDS: &[&str] = &[
     ":help",

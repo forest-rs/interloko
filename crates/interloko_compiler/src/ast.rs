@@ -2121,7 +2121,7 @@ mod tests {
 
     #[test]
     fn syntax_and_ast_definition_ids_survive_whitespace_edits() {
-        let source_file = SourceFileId::from_path("examples/main.cairn");
+        let source_file = SourceFileId::from_path("examples/main.loko");
         let before_tree = syntax::parse_file(source_file, "define function main()\n  40 + 2\nend;");
         let edited_tree = syntax::parse_file(
             source_file,

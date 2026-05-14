@@ -104,7 +104,7 @@ fn object_id_with_prefix(eop: &str, prefix: &str) -> String {
 
 #[test]
 fn diagnostics_are_rendered_through_message_format_catalog() {
-    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let diagnostic = fixture("diagnostic_unknown_local.loko");
     let path = diagnostic.to_str().expect("fixture path should be utf8");
     let (_stdout, stderr) = run_lab_success(&["dump", path, "--stage", "sem"]);
 
@@ -114,7 +114,7 @@ fn diagnostics_are_rendered_through_message_format_catalog() {
 
 #[test]
 fn diagnostics_can_use_pseudo_catalog() {
-    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let diagnostic = fixture("diagnostic_unknown_local.loko");
     let path = diagnostic.to_str().expect("fixture path should be utf8");
     let (_stdout, stderr) = run_lab_success_with_env(
         &["dump", path, "--stage", "sem"],
@@ -137,7 +137,7 @@ fn diagnostics_fail_for_missing_catalog_entries() {
         "[messages]\n\"sem.unresolved-class\" = \"class { $class }\"\n",
     )
     .expect("partial catalog should be written");
-    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let diagnostic = fixture("diagnostic_unknown_local.loko");
     let path = diagnostic.to_str().expect("fixture path should be utf8");
     let catalog = catalog_path.to_str().expect("catalog path should be utf8");
 
@@ -153,7 +153,7 @@ fn diagnostics_fail_for_missing_catalog_entries() {
 
 #[test]
 fn artifact_output_is_independent_of_diagnostic_locale() {
-    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let diagnostic = fixture("diagnostic_unknown_local.loko");
     let path = diagnostic.to_str().expect("fixture path should be utf8");
     let english = run_lab(&["artifacts", path]);
     let (pseudo, _stderr) = run_lab_success_with_env(
@@ -166,7 +166,7 @@ fn artifact_output_is_independent_of_diagnostic_locale() {
 
 #[test]
 fn run_executes_main() {
-    let file = fixture("generic_area.cairn");
+    let file = fixture("generic_area.loko");
     let out = run_lab(&["run", file.to_str().expect("fixture path should be utf8")]);
 
     assert_eq!(out.trim(), "100");
@@ -174,7 +174,7 @@ fn run_executes_main() {
 
 #[test]
 fn rich_values_run_and_dump_through_lab() {
-    let file = fixture("rich_values.cairn");
+    let file = fixture("rich_values.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let out = run_lab(&["run", path]);
@@ -196,7 +196,7 @@ fn rich_values_run_and_dump_through_lab() {
 
 #[test]
 fn dump_exposes_stages() {
-    let file = fixture("generic_area.cairn");
+    let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let syntax = run_lab(&["dump", path, "--stage", "syntax"]);
@@ -229,7 +229,7 @@ fn dump_exposes_stages() {
 
 #[test]
 fn mop_reports_native_and_host_backed_metaobjects() {
-    let native = fixture("generic_area.cairn");
+    let native = fixture("generic_area.loko");
     let native_out = run_lab(&["mop", native.to_str().expect("fixture path should be utf8")]);
     assert!(native_out.contains("c0"));
     assert!(native_out.contains("<circle>"));
@@ -243,7 +243,7 @@ fn mop_reports_native_and_host_backed_metaobjects() {
         "m0 specializers=(c0:<circle>) specializer-origins=(native) method-origin=source"
     ));
 
-    let host = fixture("host_backed_area.cairn");
+    let host = fixture("host_backed_area.loko");
     let host_out = run_lab(&["mop", host.to_str().expect("fixture path should be utf8")]);
     assert!(host_out.contains("<rust-circle> origin=host-backed(hc0)"));
     assert!(host_out.contains("<rust-square> origin=host-backed(hc1)"));
@@ -260,7 +260,7 @@ fn mop_reports_native_and_host_backed_metaobjects() {
 
 #[test]
 fn eop_reports_environment_objects_and_affordances() {
-    let host = fixture("host_backed_area.cairn");
+    let host = fixture("host_backed_area.loko");
     let out = run_lab(&["eop", host.to_str().expect("fixture path should be utf8")]);
 
     assert!(out.contains("object source:"));
@@ -285,7 +285,7 @@ fn eop_reports_environment_objects_and_affordances() {
 
 #[test]
 fn inspect_reports_structured_environment_objects() {
-    let file = fixture("generic_area.cairn");
+    let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");
     let eop = run_lab(&["eop", path]);
     let source_id = object_id_with_prefix(&eop, "source:");
@@ -312,7 +312,7 @@ fn inspect_reports_structured_environment_objects() {
         assert!(out.contains("inspection:"));
     }
 
-    let diagnostic = fixture("diagnostic_unknown_local.cairn");
+    let diagnostic = fixture("diagnostic_unknown_local.loko");
     let diagnostic_path = diagnostic.to_str().expect("fixture path should be utf8");
     let out = run_lab(&["inspect", diagnostic_path, "diagnostic:d0"]);
     assert!(out.contains("object diagnostic:d0"));
@@ -324,7 +324,7 @@ fn inspect_reports_structured_environment_objects() {
 
 #[test]
 fn inspect_reports_richer_slot_metadata() {
-    let file = fixture("slot_defaults.cairn");
+    let file = fixture("slot_defaults.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let out = run_lab(&["inspect", path, "slot:c0.s0"]);
@@ -338,7 +338,7 @@ fn inspect_reports_richer_slot_metadata() {
 
 #[test]
 fn inspect_reports_inherited_effective_slots() {
-    let file = fixture("inherited_point.cairn");
+    let file = fixture("inherited_point.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let mop = run_lab(&["dump", path, "--stage", "mop"]);
@@ -369,7 +369,7 @@ fn inspect_reports_inherited_effective_slots() {
 
 #[test]
 fn mop_reports_dispatch_applicability_for_inheritance() {
-    let file = fixture("inherited_dispatch.cairn");
+    let file = fixture("inherited_dispatch.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let mop = run_lab(&["mop", path]);
@@ -393,7 +393,7 @@ fn mop_reports_dispatch_applicability_for_inheritance() {
 
 #[test]
 fn dispatch_command_lists_and_explains_dispatch_sites() {
-    let file = fixture("inherited_dispatch.cairn");
+    let file = fixture("inherited_dispatch.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let list = run_lab(&["dispatch", path]);
@@ -424,7 +424,7 @@ fn dispatch_command_lists_and_explains_dispatch_sites() {
 
 #[test]
 fn dispatch_command_shows_multi_argument_vectors() {
-    let file = fixture("multi_dispatch.cairn");
+    let file = fixture("multi_dispatch.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let list = run_lab(&["dispatch", path]);
@@ -443,7 +443,7 @@ fn dispatch_command_shows_multi_argument_vectors() {
 
 #[test]
 fn affordances_lists_stable_object_actions_and_unknown_ids_fail() {
-    let file = fixture("generic_area.cairn");
+    let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let out = run_lab(&["affordances", path, "generic:g0"]);
@@ -459,7 +459,7 @@ fn affordances_lists_stable_object_actions_and_unknown_ids_fail() {
 
 #[test]
 fn invoke_affordance_runs_read_only_views() {
-    let file = fixture("generic_area.cairn");
+    let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
     let accessor = run_lab(&["invoke-affordance", path, "slot:c0.s0", "show-accessor"]);
@@ -493,7 +493,7 @@ fn invoke_affordance_runs_read_only_views() {
 
 #[test]
 fn invoke_affordance_runs_dump_and_run_actions() {
-    let file = fixture("generic_area.cairn");
+    let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");
     let eop = run_lab(&["eop", path]);
     let source_id = object_id_with_prefix(&eop, "source:");
@@ -523,12 +523,12 @@ fn invoke_affordance_runs_dump_and_run_actions() {
 
 #[test]
 fn host_projection_records_are_explicit_and_inspectable() {
-    let plain = fixture("generic_area.cairn");
+    let plain = fixture("generic_area.loko");
     let plain_out = run_lab(&["eop", plain.to_str().expect("fixture path should be utf8")]);
     assert!(!plain_out.contains("host-class:rust-shape"));
     assert!(!plain_out.contains("host-instance:circle-10"));
 
-    let projected = fixture("host_projected_environment.cairn");
+    let projected = fixture("host_projected_environment.loko");
     let path = projected.to_str().expect("fixture path should be utf8");
     let eop = run_lab(&["eop", path]);
     assert!(eop.contains("object host-class:rust-shape"));
@@ -553,7 +553,7 @@ fn host_projection_records_are_explicit_and_inspectable() {
 
 #[test]
 fn artifacts_lists_stable_keys_and_edges() {
-    let file = fixture("generic_area.cairn");
+    let file = fixture("generic_area.loko");
     let out = run_lab(&[
         "artifacts",
         file.to_str().expect("fixture path should be utf8"),
@@ -567,9 +567,9 @@ fn artifacts_lists_stable_keys_and_edges() {
 
 #[test]
 fn diff_reports_preserved_and_focused_method_changes() {
-    let before = fixture("generic_area.cairn");
-    let trivia = fixture("generic_area_trivia.cairn");
-    let edited = fixture("generic_area_method_edit.cairn");
+    let before = fixture("generic_area.loko");
+    let trivia = fixture("generic_area_trivia.loko");
+    let edited = fixture("generic_area_method_edit.loko");
 
     let harmless = run_lab(&[
         "diff",
@@ -598,8 +598,8 @@ fn diff_reports_preserved_and_focused_method_changes() {
 
 #[test]
 fn diff_reports_parent_slot_edit_affecting_child_artifacts() {
-    let before = fixture("inherited_point_parent_before.cairn");
-    let after = fixture("inherited_point_parent_after.cairn");
+    let before = fixture("inherited_point_parent_before.loko");
+    let after = fixture("inherited_point_parent_after.loko");
 
     let changed = run_lab(&[
         "diff",

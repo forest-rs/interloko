@@ -17,7 +17,7 @@ UI contract, Portolan bridge, or authorization layer.
 Run `eop` to discover object IDs:
 
 ```sh
-cargo run -p interloko_lab -- eop tools/interloko_lab/fixtures/generic_area.cairn
+cargo run -p interloko_lab -- eop tools/interloko_lab/fixtures/generic_area.loko
 ```
 
 Typical IDs include:
@@ -40,7 +40,7 @@ Typical IDs include:
 Inspect prints one structured EOP record:
 
 ```sh
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/generic_area.cairn class:c0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/generic_area.loko class:c0
 ```
 
 The output includes:
@@ -57,7 +57,7 @@ The output includes:
 Diagnostics are environment objects too:
 
 ```sh
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/diagnostic_unknown_local.cairn diagnostic:d0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/diagnostic_unknown_local.loko diagnostic:d0
 ```
 
 Diagnostic inspection reports structured facts, not only prose: stable code,
@@ -68,7 +68,7 @@ Class inspection includes initialization facts derived from the class's
 finalized effective slots:
 
 ```sh
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.cairn class:c1
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c1
 ```
 
 The `inspection` text names the accepted init keywords, inherited/direct slot
@@ -82,13 +82,13 @@ not user-defined initialization methods themselves.
 List actions exposed by one object:
 
 ```sh
-cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_area.cairn generic:g0
+cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_area.loko generic:g0
 ```
 
 Unknown object IDs fail with a list of available IDs:
 
 ```sh
-cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_area.cairn missing:object
+cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_area.loko missing:object
 ```
 
 ## Read-Only Invocation
@@ -97,14 +97,14 @@ cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_a
 existing compiler/session views:
 
 ```sh
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn slot:c0.s0 show-accessor
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn accessor:c0.s0 show-slot
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn generic:g0 show-dispatch
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn dispatch:d0 show-dispatch
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn class:c0 show-runtime-layout
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn method:m0 show-dependencies
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn method:m0 dump-sem
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.cairn function:f0 run
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko slot:c0.s0 show-accessor
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko accessor:c0.s0 show-slot
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko generic:g0 show-dispatch
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko dispatch:d0 show-dispatch
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko class:c0 show-runtime-layout
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko method:m0 show-dependencies
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko method:m0 dump-sem
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko function:f0 run
 ```
 
 Supported read-only invocations are:
@@ -136,20 +136,20 @@ artifact keys.
 List dispatch sites:
 
 ```sh
-cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.cairn
+cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.loko
 ```
 
 Explain one dispatch site:
 
 ```sh
-cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0
+cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0
 ```
 
 The same explanation is available through EOP:
 
 ```sh
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0 show-dispatch
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0 show-dispatch
 ```
 
 The explanation is read-only. It describes the current one-argument nominal
@@ -172,9 +172,9 @@ end;
 Run:
 
 ```sh
-cargo run -p interloko_lab -- eop tools/interloko_lab/fixtures/host_projected_environment.cairn
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projected_environment.cairn host-class:rust-shape
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projected_environment.cairn host-instance:circle-10
+cargo run -p interloko_lab -- eop tools/interloko_lab/fixtures/host_projected_environment.loko
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projected_environment.loko host-class:rust-shape
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projected_environment.loko host-instance:circle-10
 ```
 
 These records are host-provided environment objects. They do not make

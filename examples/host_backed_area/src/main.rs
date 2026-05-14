@@ -11,7 +11,7 @@ use interloko_compiler::sem::{
 };
 
 fn main() -> Result<(), CompileError> {
-    let source = include_str!("../programs/host_backed_area.cairn");
+    let source = include_str!("../programs/host_backed_area.loko");
     let registry = host_registry();
     let compiled = compile_with_host_registry(source, &registry)?;
 

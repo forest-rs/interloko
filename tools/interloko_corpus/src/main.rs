@@ -81,7 +81,7 @@ fn list_command(root: Option<&str>) -> Result<Outcome> {
 fn dump_command(args: &[String]) -> Result<Outcome> {
     if args.len() != 4 || args[2] != "--stage" {
         return Err(CorpusError::Usage(
-            "usage: interloko_corpus dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
+            "usage: interloko_corpus dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
                 .into(),
         ));
     }
@@ -135,7 +135,7 @@ fn collect_cairn_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
             collect_cairn_files(&path, paths)?;
         } else if path
             .extension()
-            .is_some_and(|extension| extension == "interloko")
+            .is_some_and(|extension| extension == "loko")
         {
             paths.push(path);
         }
@@ -428,7 +428,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_corpus".into());
     format!(
-        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
+        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
     )
 }
 

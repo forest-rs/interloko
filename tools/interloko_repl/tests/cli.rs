@@ -94,7 +94,7 @@ fn dispatch_sites_can_be_listed_and_explained() {
 
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.lines().any(|line| line == "9"));
-    assert!(stdout.contains("dispatch sites for repl.cairn"));
+    assert!(stdout.contains("dispatch sites for repl.loko"));
     assert!(stdout.contains("dispatch dispatch:d0"));
     assert!(stdout.contains("generic: g0:area"));
 }

@@ -316,7 +316,7 @@ Deferred:
   - arity mismatches;
   - missing slot initializers;
   - unknown slot initializers.
-- Each `.cairn` corpus file declares expectations in leading comments:
+- Each `.loko` corpus file declares expectations in leading comments:
   - `// expect: run N`;
   - `// expect: diagnostics N`;
   - `// expect: diagnostic contains TEXT`;
@@ -327,9 +327,9 @@ Deferred:
   - `check [corpus-root]` to compile every corpus program through
     `interloko_compiler::session`;
   - `list [corpus-root]` to inspect discovered cases;
-  - `dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all` for
+  - `dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all` for
     snapshot-like stage output without committing generated dumps.
-- Add a new case by placing a `.cairn` file under `corpus/pass` or
+- Add a new case by placing a `.loko` file under `corpus/pass` or
   `corpus/fail`, adding at least one `// expect:` header line, and running
   `cargo run -p interloko_corpus`.
 
@@ -991,7 +991,7 @@ Deferred:
   `show-slot`, `show-accessor`, `show-dispatch`, `show-runtime-layout`,
   `show-dependencies`, `dump-syntax`, `dump-ast`, `dump-sem`, `dump-mop`,
   `dump-eop`, `dump-lowered`, `dump-tape`, and `run`.
-- `tools/interloko_lab/fixtures/host_projected_environment.cairn` demonstrates an
+- `tools/interloko_lab/fixtures/host_projected_environment.loko` demonstrates an
   explicit host projection provider with a class-like host object and an
   instance-like host object. The provider is installed only from explicit
   `// host-eop-*` fixture metadata.
@@ -1135,7 +1135,7 @@ Deferred:
   sibling impossible-test/cast diagnostics.
 - MOP, semantic, EOP, and runtime-layout inspection now report superclass
   chains, direct/effective/runtime slot source, and dispatch applicability. The
-  workbench fixtures `inherited_point.cairn`, `inherited_dispatch.cairn`, and
+  workbench fixtures `inherited_point.loko`, `inherited_dispatch.loko`, and
   the inherited parent-slot diff fixtures show how to inspect inherited
   behavior and incremental propagation.
 - `docs/mop_class_finalization.md` and `docs/slot_model.md` describe the
@@ -1292,7 +1292,7 @@ Deferred:
   `<string>`, `<symbol>`, `<integer>`, and `<vector>` annotations.
 - Session, MOP, EOP, lowered, and tape dumps expose the new built-in value
   classes and literal forms.
-- `examples/rich_values`, `tools/interloko_lab/fixtures/rich_values.cairn`, REPL
+- `examples/rich_values`, `tools/interloko_lab/fixtures/rich_values.loko`, REPL
   transcript coverage, and corpus programs demonstrate strings, symbols,
   keyword-style symbols, vectors, typed slots/functions, integer specializers,
   and generic dispatch.

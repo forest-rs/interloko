@@ -171,14 +171,14 @@ not a new method-combination or optimization protocol.
 Useful workbench commands:
 
 ```sh
-cargo run -p interloko_lab -- dump tools/interloko_lab/fixtures/inherited_point.cairn --stage mop
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.cairn class:c1
-cargo run -p interloko_lab -- dump tools/interloko_lab/fixtures/inherited_dispatch.cairn --stage mop
-cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.cairn
-cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.cairn generic:g0
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.cairn dispatch:d0
-cargo run -p interloko_lab -- diff tools/interloko_lab/fixtures/inherited_point_parent_before.cairn tools/interloko_lab/fixtures/inherited_point_parent_after.cairn
+cargo run -p interloko_lab -- dump tools/interloko_lab/fixtures/inherited_point.loko --stage mop
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c1
+cargo run -p interloko_lab -- dump tools/interloko_lab/fixtures/inherited_dispatch.loko --stage mop
+cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.loko
+cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.loko generic:g0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0
+cargo run -p interloko_lab -- diff tools/interloko_lab/fixtures/inherited_point_parent_before.loko tools/interloko_lab/fixtures/inherited_point_parent_after.loko
 ```
 
 ## Surface Syntax As Future Metaobject Construction

@@ -105,7 +105,7 @@ fn run(args: Vec<String>) -> Result<()> {
         "diff" => {
             if args.len() != 3 {
                 return Err(LabError::Usage(
-                    "usage: interloko_lab diff <before.cairn> <after.cairn>".into(),
+                    "usage: interloko_lab diff <before.loko> <after.loko>".into(),
                 ));
             }
             let source_file = SourceFileId::from_path(&args[1]);
@@ -154,7 +154,7 @@ fn read_path(path: &str) -> Result<String> {
 fn single_file_arg(args: &[String]) -> Result<&str> {
     if args.len() != 2 {
         return Err(LabError::Usage(format!(
-            "usage: interloko_lab {} <file.cairn>",
+            "usage: interloko_lab {} <file.loko>",
             args.first().map_or("COMMAND", String::as_str)
         )));
     }
@@ -164,7 +164,7 @@ fn single_file_arg(args: &[String]) -> Result<&str> {
 fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
     if args.len() != 4 || args[2] != "--stage" {
         return Err(LabError::Usage(
-            "usage: interloko_lab dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
+            "usage: interloko_lab dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all"
                 .into(),
         ));
     }
@@ -189,7 +189,7 @@ fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
 fn object_args(args: &[String]) -> Result<(&str, &str)> {
     if args.len() != 3 {
         return Err(LabError::Usage(format!(
-            "usage: interloko_lab {} <file.cairn> <object-id>",
+            "usage: interloko_lab {} <file.loko> <object-id>",
             args.first().map_or("COMMAND", String::as_str)
         )));
     }
@@ -201,7 +201,7 @@ fn dispatch_args(args: &[String]) -> Result<(&str, Option<&str>)> {
         2 => Ok((&args[1], None)),
         3 => Ok((&args[1], Some(args[2].as_str()))),
         _ => Err(LabError::Usage(
-            "usage: interloko_lab dispatch <file.cairn> [dispatch-site-id]".into(),
+            "usage: interloko_lab dispatch <file.loko> [dispatch-site-id]".into(),
         )),
     }
 }
@@ -209,7 +209,7 @@ fn dispatch_args(args: &[String]) -> Result<(&str, Option<&str>)> {
 fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance)> {
     if args.len() != 4 {
         return Err(LabError::Usage(
-            "usage: interloko_lab invoke-affordance <file.cairn> <object-id> <affordance>".into(),
+            "usage: interloko_lab invoke-affordance <file.loko> <object-id> <affordance>".into(),
         ));
     }
     let affordance = parse_affordance(&args[3]).ok_or_else(|| LabError::UnknownAffordance {
@@ -804,7 +804,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} dispatch <file.cairn> [dispatch-site-id]\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} run <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 

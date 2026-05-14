@@ -3,7 +3,7 @@
 use interloko_compiler::driver::{CompileError, compile, compile_and_run_main};
 
 fn main() -> Result<(), CompileError> {
-    let source = include_str!("../programs/rich_values.cairn");
+    let source = include_str!("../programs/rich_values.loko");
 
     match dump_mode().as_deref() {
         None => {

@@ -5315,7 +5315,7 @@ mod tests {
 
     #[test]
     fn session_collects_stages_artifacts_and_runtime() {
-        let artifacts = CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::RunMain);
+        let artifacts = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::RunMain);
 
         assert_eq!(artifacts.diagnostics, Vec::new());
         assert!(artifacts.lowered.is_some());
@@ -5396,7 +5396,7 @@ mod tests {
     #[test]
     fn session_runs_named_zero_arg_functions() {
         let artifacts = CompilerSession::compile_source(
-            "scratch.cairn",
+            "scratch.loko",
             "define function helper(x)\n  x + 1\nend;\n\
              define function __interloko_repl_expr_0()\n  helper(41)\nend;\n\
              define function object_result()\n  make(<box>, value: 1)\nend;\n\
@@ -5432,7 +5432,7 @@ mod tests {
     #[test]
     fn dispatch_sites_explain_exact_class_selection() {
         let artifacts =
-            CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
         let sites = artifacts.dispatch_sites();
 
         assert_eq!(sites.len(), 1);
@@ -5496,7 +5496,7 @@ mod tests {
                       define method score(c :: <circle>) => <integer>\n  c.radius\nend;\n\
                       define function main()\n  score(make(<circle>))\nend;";
         let artifacts =
-            CompilerSession::compile_source("score.cairn", source, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("score.loko", source, RuntimeMode::CompileOnly);
         let site = artifacts.dispatch_site("dispatch:d0").expect("site exists");
 
         assert_eq!(
@@ -5533,7 +5533,7 @@ mod tests {
                       define method score(c :: <circle>) => <integer>\n  c.radius\nend;\n\
                       define function call-score(s :: <shape>) => <integer>\n  score(s)\nend;";
         let artifacts =
-            CompilerSession::compile_source("score.cairn", source, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("score.loko", source, RuntimeMode::CompileOnly);
         let site = artifacts.dispatch_site("dispatch:d0").expect("site exists");
 
         assert_eq!(
@@ -5564,7 +5564,7 @@ mod tests {
                       define method area(s :: <square>) => <integer>\n  s.side\nend;\n\
                       define function main()\n  area(make(<circle>))\nend;";
         let artifacts =
-            CompilerSession::compile_source("area.cairn", source, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("area.loko", source, RuntimeMode::CompileOnly);
         let site = artifacts.dispatch_site("dispatch:d0").expect("site exists");
 
         assert_eq!(
@@ -5583,9 +5583,9 @@ mod tests {
 
     #[test]
     fn dispatch_site_ids_survive_harmless_trivia_edits() {
-        let before = CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
+        let before = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
         let after = CompilerSession::compile_source(
-            "area.cairn",
+            "area.loko",
             "\n// same dispatch with harmless trivia\n\
              define class <circle>   (   <object>   )\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
@@ -5623,11 +5623,11 @@ mod tests {
                              define function main()\n  score(make(<circle>))\nend;";
 
         let before =
-            CompilerSession::compile_source("score.cairn", before, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("score.loko", before, RuntimeMode::CompileOnly);
         let with_child =
-            CompilerSession::compile_source("score.cairn", with_child, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("score.loko", with_child, RuntimeMode::CompileOnly);
         let class_changed =
-            CompilerSession::compile_source("score.cairn", class_changed, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("score.loko", class_changed, RuntimeMode::CompileOnly);
 
         let before_site = before.dispatch_site("dispatch:d0").expect("site exists");
         let with_child_site = with_child
@@ -5665,7 +5665,7 @@ mod tests {
 
     #[test]
     fn session_projects_structured_eop_records() {
-        let artifacts = CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::RunMain);
+        let artifacts = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::RunMain);
         let objects = artifacts.environment_objects();
 
         let source = eop_object(&objects, &format!("source:{}", artifacts.source.id));
@@ -5771,7 +5771,7 @@ mod tests {
             )),
         );
         let artifacts = CompilerSession::compile_source_with_host_registry(
-            "host.cairn",
+            "host.loko",
             "define generic area(x :: <object>) => <integer>;\n\
              define method area(c :: <rust-circle>) => <integer>\n  c.radius * c.radius\nend;",
             RuntimeMode::CompileOnly,
@@ -5832,7 +5832,7 @@ mod tests {
     #[test]
     fn host_environment_provider_projects_explicit_records() {
         let artifacts =
-            CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
+            CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
         let objects = artifacts.environment_objects_with_host(&ExampleHostProvider);
 
         let host = eop_object(&objects, "host:rust-circle");
@@ -5852,7 +5852,7 @@ mod tests {
     #[test]
     fn session_projects_structured_diagnostic_records() {
         let artifacts = CompilerSession::compile_source(
-            "bad.cairn",
+            "bad.loko",
             "define function main()\n  missing\nend;",
             RuntimeMode::CompileOnly,
         );
@@ -5892,9 +5892,9 @@ mod tests {
 
     #[test]
     fn session_diff_preserves_ids_for_harmless_edit() {
-        let before = CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
+        let before = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
         let after = CompilerSession::compile_source(
-            "area.cairn",
+            "area.loko",
             "\n// same program with trivia edits\n\
              define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
@@ -5915,9 +5915,9 @@ mod tests {
 
     #[test]
     fn session_diff_reports_focused_method_artifacts() {
-        let before = CompilerSession::compile_source("area.cairn", AREA, RuntimeMode::CompileOnly);
+        let before = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
         let after = CompilerSession::compile_source(
-            "area.cairn",
+            "area.loko",
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius + c.radius\nend;\n\
@@ -5947,7 +5947,7 @@ mod tests {
     #[test]
     fn incremental_first_compile_populates_cache_and_repeat_reuses_all() {
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", AREA);
+        let file = session.add_source("area.loko", AREA);
 
         let first = session
             .compile(file, RuntimeMode::RunMain)
@@ -5969,7 +5969,7 @@ mod tests {
     #[test]
     fn incremental_trivia_edit_reuses_most_artifacts() {
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", AREA);
+        let file = session.add_source("area.loko", AREA);
         let _ = session
             .compile(file, RuntimeMode::RunMain)
             .expect("source should exist");
@@ -6021,7 +6021,7 @@ mod tests {
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", before);
+        let file = session.add_source("area.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6069,7 +6069,7 @@ mod tests {
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", before);
+        let file = session.add_source("area.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6123,7 +6123,7 @@ mod tests {
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", before);
+        let file = session.add_source("area.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6171,7 +6171,7 @@ mod tests {
                      define method score(f :: <flag>)\n  f.value\nend;\n\
                      define function main()\n  score(make(<flag>, value: 1))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("flag.cairn", before);
+        let file = session.add_source("flag.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6217,7 +6217,7 @@ mod tests {
         let after = "define class <circle> (<object>)\n  slot radius :: <integer>, init-keyword: r:;\nend;\n\
                      define function main()\n  make(<circle>, r: 10).radius\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("circle.cairn", before);
+        let file = session.add_source("circle.loko", before);
         let _ = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6254,13 +6254,13 @@ mod tests {
     #[test]
     fn session_diff_preserves_ids_for_slot_declaration_trivia() {
         let before = CompilerSession::compile_source(
-            "circle.cairn",
+            "circle.loko",
             "define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 10;\nend;\n\
              define function main()\n  make(<circle>).radius\nend;",
             RuntimeMode::CompileOnly,
         );
         let after = CompilerSession::compile_source(
-            "circle.cairn",
+            "circle.loko",
             "\n// same slot facts with trivia edits\n\
              define class <circle> (<object>)\n  slot radius   ::   <integer>,   init-value:   10;\nend;\n\
              define function main()\n  make(<circle>).radius\nend;",
@@ -6287,14 +6287,14 @@ mod tests {
     #[test]
     fn session_diff_preserves_ids_for_superclass_trivia() {
         let before = CompilerSession::compile_source(
-            "point.cairn",
+            "point.loko",
             "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
              define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
              define function main()\n  make(<point>).x\nend;",
             RuntimeMode::CompileOnly,
         );
         let after = CompilerSession::compile_source(
-            "point.cairn",
+            "point.loko",
             "\n// same inheritance facts with trivia edits\n\
              define class <shape> (<object>)\n  slot x   ::   <integer>, init-value: 1;\nend;\n\
              define class <point>   (   <shape>   )\n  slot y :: <integer>, init-value: 2;\nend;\n\
@@ -6319,7 +6319,7 @@ mod tests {
                      define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
                      define function main()\n  make(<point>).x\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("point.cairn", before);
+        let file = session.add_source("point.loko", before);
         let _ = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6368,7 +6368,7 @@ mod tests {
                      define method score(s :: <shape>) => <integer>\n  s.size + 1\nend;\n\
                      define function main()\n  score(make(<circle>))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("score.cairn", before);
+        let file = session.add_source("score.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6408,14 +6408,14 @@ mod tests {
     #[test]
     fn child_slot_edit_does_not_mark_parent_definitions_changed() {
         let before = CompilerSession::compile_source(
-            "point.cairn",
+            "point.loko",
             "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
              define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
              define function main()\n  make(<point>).y\nend;",
             RuntimeMode::CompileOnly,
         );
         let after = CompilerSession::compile_source(
-            "point.cairn",
+            "point.loko",
             "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
              define class <point> (<shape>)\n  slot y :: <integer>, init-value: 3;\nend;\n\
              define function main()\n  make(<point>).y\nend;",
@@ -6434,13 +6434,13 @@ mod tests {
     #[test]
     fn adding_subclass_preserves_parent_definition_ids() {
         let before = CompilerSession::compile_source(
-            "shape.cairn",
+            "shape.loko",
             "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
              define function main()\n  make(<shape>).x\nend;",
             RuntimeMode::CompileOnly,
         );
         let after = CompilerSession::compile_source(
-            "shape.cairn",
+            "shape.loko",
             "define class <shape> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
              define class <point> (<shape>)\n  slot y :: <integer>, init-value: 2;\nend;\n\
              define function main()\n  make(<shape>).x\nend;",
@@ -6471,7 +6471,7 @@ mod tests {
         let after = "define class <circle> (<object>)\n  slot radius :: <integer>, init-value: 11;\nend;\n\
                      define function main()\n  make(<circle>).radius\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("circle.cairn", before);
+        let file = session.add_source("circle.loko", before);
         let _ = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6512,7 +6512,7 @@ mod tests {
         let after = "define class <circle> (<object>)\n  constant slot radius :: <integer>, init-value: 10;\nend;\n\
                      define function main()\n  make(<circle>).radius\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("circle.cairn", before);
+        let file = session.add_source("circle.loko", before);
         let _ = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6559,7 +6559,7 @@ mod tests {
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", before);
+        let file = session.add_source("area.loko", before);
         let _ = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6594,7 +6594,7 @@ mod tests {
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  let klass = <square>;\n  area(make(klass, side: 9))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", before);
+        let file = session.add_source("area.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6657,7 +6657,7 @@ mod tests {
                      define function dec(x)\n  x - 1\nend;\n\
                      define function main()\n  let f = dec;\n  apply(f, 10) + area(make(<circle>, radius: 2))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("callable.cairn", before);
+        let file = session.add_source("callable.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");
@@ -6714,7 +6714,7 @@ mod tests {
                      define function hold(x :: <object>) => <object>\n  x\nend;\n\
                      define function main()\n  let ignored = hold(7);\n  area(make(<circle>, radius: 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
-        let file = session.add_source("area.cairn", before);
+        let file = session.add_source("area.loko", before);
         let first = session
             .compile(file, RuntimeMode::CompileOnly)
             .expect("source should exist");

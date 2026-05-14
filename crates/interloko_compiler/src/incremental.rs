@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn artifact_keys_follow_definition_ids_across_insertions() {
-        let source_file = SourceFileId::from_path("examples/area.cairn");
+        let source_file = SourceFileId::from_path("examples/area.loko");
         let before = lower_file(
             source_file,
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
