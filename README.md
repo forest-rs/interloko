@@ -1,0 +1,191 @@
+# Interloko
+
+Interloko is an experimental compiler/runtime substrate for a small
+Dylan-shaped source language called Loko.
+
+The short version:
+
+- **Interloko** is the compiler, runtime, object model, and inspection
+  substrate.
+- **Loko** is the source notation, stored in `.loko` files.
+- **Vivarium** is the possible future collaborative environment built on top of
+  this substrate.
+
+This repository is not trying to be a production language yet. It is a working
+place to make object-system semantics, generic dispatch, host interop,
+incremental compilation, and inspectable execution concrete.
+
+## Try It
+
+Run one corpus program:
+
+```sh
+cargo run -p interloko_lab -- run corpus/pass/generics/two_class_dispatch.loko
+```
+
+Inspect a compiler stage:
+
+```sh
+cargo run -p interloko_lab -- dump corpus/pass/generics/two_class_dispatch.loko --stage sem
+cargo run -p interloko_lab -- dump corpus/pass/generics/two_class_dispatch.loko --stage tape
+```
+
+Run the small-program corpus:
+
+```sh
+cargo run -p interloko_corpus -- check corpus
+```
+
+Start the REPL:
+
+```sh
+cargo run -p interloko_repl
+```
+
+## A Small Loko Program
+
+```loko
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define method area(s :: <square>)
+  s.side * s.side
+end;
+
+define function main()
+  area(make(<square>, side: 9))
+end;
+```
+
+That program parses through the normal pipeline:
+
+```text
+source -> syntax -> AST -> semantic IR -> lowered IR -> execution_tape
+```
+
+Generic dispatch is represented in Interloko's semantic/lowered IR, then
+emitted to `execution_tape` through ordinary calls and runtime host calls rather
+than special generic-dispatch bytecode.
+
+## What Works Today
+
+The current slices include:
+
+- function definitions, locals, arithmetic, booleans, conditionals, and calls;
+- nominal classes with typed slots, init keywords, inherited slots, and slot
+  assignment through setter generics;
+- generic functions and multi-argument method dispatch over nominal classes;
+- simple strings, symbols, keywords, and immutable vectors;
+- recoverable condition/restart forms;
+- read-only MOP inspection for classes, slots, generics, methods, and dispatch;
+- structured EOP records for environment/workbench objects and affordances;
+- explicit host-backed class/slot metadata for Rust interop experiments;
+- compiler sessions, incremental artifacts, cache reports, and stage dumps;
+- structured diagnostics rendered through MessageFormat 2 catalogs.
+
+## What This Is Not Yet
+
+Interloko is intentionally not:
+
+- a stable public language or Dylan compatibility project;
+- a persistent image or database;
+- the Vivarium product/environment layer;
+- an LSP, watch mode, or IDE;
+- a macro system;
+- a Cranelift backend;
+- a full module system;
+- a sealed-dispatch optimizer.
+
+The project is useful because the compiler and runtime already expose enough
+structure to inspect what the object model means and how it lowers, without
+pretending the larger environment exists yet.
+
+## Repository Layout
+
+```text
+crates/interloko_model       shared ids and small substrate facts
+crates/interloko_runtime     runtime layout, host calls, object storage
+crates/interloko_compiler    Loko parser, AST, semantic IR, lowering, sessions
+
+tools/interloko_lab          command-line workbench for dumps and inspection
+tools/interloko_corpus       corpus runner for small .loko programs
+tools/interloko_diagnostics  diagnostic catalog loading/rendering
+tools/interloko_repl         small interactive REPL over compiler sessions
+
+corpus/                      pass/fail .loko fixture programs
+examples/                    Rust embedding examples
+docs/                        focused design notes
+```
+
+Useful docs:
+
+- [`DESIGN.md`](DESIGN.md) explains the broader compiler/runtime direction.
+- [`docs/interloko_boundary.md`](docs/interloko_boundary.md) explains the
+  Interloko/Loko/Vivarium naming split.
+- [`docs/mop_protocol.md`](docs/mop_protocol.md) describes read-only MOP
+  protocols.
+- [`docs/eop_workbench.md`](docs/eop_workbench.md) describes environment object
+  records and workbench affordances.
+- [`corpus/README.md`](corpus/README.md) explains corpus expectations.
+
+## Workbench Commands
+
+`interloko_lab` is the quickest way to see what is going on:
+
+```sh
+cargo run -p interloko_lab -- run <file.loko>
+cargo run -p interloko_lab -- dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all
+cargo run -p interloko_lab -- artifacts <file.loko>
+cargo run -p interloko_lab -- dispatch <file.loko> [dispatch-site-id]
+cargo run -p interloko_lab -- inspect <file.loko> <object-id>
+cargo run -p interloko_lab -- affordances <file.loko> <object-id>
+cargo run -p interloko_lab -- diff <before.loko> <after.loko>
+```
+
+Diagnostics can be rendered with the bundled catalogs or a custom catalog:
+
+```sh
+INTERLOKO_DIAGNOSTIC_LOCALE=pseudo cargo run -p interloko_lab -- run corpus/fail/diagnostics/unresolved_local.loko
+INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml cargo run -p interloko_lab -- run some-file.loko
+```
+
+## Development
+
+The normal validation set is:
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo doc --workspace --all-features --no-deps
+cargo run -p interloko_corpus -- check corpus
+```
+
+Core crates should stay small and boring. New examples, experiments, and
+benchmarks should live in top-level workspace crates rather than adding
+development dependencies to the core crates.
+
+## Glossary
+
+- **Loko:** the current Dylan-shaped source notation and `.loko` file format.
+- **Interloko:** the compiler/runtime substrate that parses, analyzes, lowers,
+  executes, and inspects Loko programs.
+- **MOP:** Metaobject Protocol; structured facts about classes, slots, generic
+  functions, methods, and dispatch.
+- **EOP:** Environment Object Protocol; structured facts that make compiler,
+  runtime, host, and future workspace objects inspectable.
+- **Host-backed object:** a Rust-owned value exposed to Interloko through
+  explicit metadata and runtime adapters.
+- **Vivarium:** the future collaborative environment layer, not implemented in
+  this repository yet.
