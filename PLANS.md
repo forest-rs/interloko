@@ -1,5 +1,44 @@
 # Plans
 
+## Extract Interloko Runtime Host Support
+
+### Goal
+
+Move executable runtime host support out of `cairn_compiler` and into
+`crates/interloko_runtime`, while leaving semantic IR and sem-to-layout
+construction in the compiler.
+
+### Fence
+
+`interloko_runtime` owns host-call symbols/signatures, runtime layout data,
+runtime-representable value kinds, `CairnHost`, object storage, boxed top
+values, string/symbol/vector runtime objects, metaobject host calls, and
+host-backed object adapters. `cairn_compiler` owns syntax, semantic IR,
+semantic `ValueKind`, lowering, sessions, diagnostics, and the adapter that
+turns `sem::Module` into runtime layout.
+
+### Steps
+
+1. Create `crates/interloko_runtime` and add workspace/compiler dependencies.
+2. Move runtime host symbols, signatures, layout structs, object heap/storage,
+   boxed values, literals, MOP query host calls, and `CairnHost`.
+3. Add runtime `ValueKind` and convert semantic slot kinds during layout
+   construction.
+4. Replace `RuntimeLayout::from_sem` with
+   `cairn_compiler::runtime::runtime_layout_from_sem`.
+5. Keep `cairn_compiler::runtime` as compatibility re-exports plus the
+   sem-layout adapter.
+6. Point tape emission at `interloko_runtime` symbols/signatures.
+7. Update docs/progress, run gates/examples, audit, and commit.
+
+### Risks
+
+- Moving semantic `ValueKind` directly would leak compiler-only states into the
+  runtime crate.
+- Moving layout construction into runtime would make runtime depend on semantic
+  IR and weaken the new dependency direction.
+- Compatibility re-exports must not hide which crate owns host execution.
+
 ## Establish Interloko Core Substrate Boundary
 
 ### Goal

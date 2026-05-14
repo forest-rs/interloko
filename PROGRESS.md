@@ -1,5 +1,36 @@
 # Cairn Progress
 
+## Implemented: Interloko Runtime Boundary
+
+- Added `crates/interloko_runtime` as the executable runtime crate for the
+  current Interloko-shaped object model.
+- Moved runtime host-call symbols and signatures into `interloko_runtime`,
+  including object construction, slot get/set, boxing, class tests/casts,
+  literal construction, vector helpers, and read-only MOP query calls.
+- Moved `RuntimeLayout`, `RuntimeClass`, `RuntimeSlot`, `RuntimeGeneric`,
+  `RuntimeMethod`, and `HostObjectKind` into `interloko_runtime`.
+- Added a runtime-owned `ValueKind` that covers only executable value
+  categories. Compiler-only semantic states such as known callables and errors
+  remain in `cairn_compiler::sem::ValueKind`.
+- Moved `CairnHost`, native object storage, boxed `<object>` storage, string,
+  symbol, vector, metaobject, and host-backed adapter support into
+  `interloko_runtime`.
+- `cairn_compiler::runtime` now re-exports `interloko_runtime` for compatibility
+  and owns `runtime_layout_from_sem`, the sem-to-runtime layout adapter.
+- Lowering builds runtime layout values through the compiler adapter, while
+  tape emission imports host symbols/signatures directly from
+  `interloko_runtime`.
+- Host-backed examples now distinguish semantic declaration kinds from runtime
+  adapter value kinds.
+
+Deferred:
+
+- Persistent runtime/image state.
+- Runtime scheduler, async/effect handler stack, or dispatch caches.
+- Moving semantic IR, lowering, sessions, diagnostics, or tape emission out of
+  `cairn_compiler`.
+- Renaming the public language/compiler crates away from Cairn.
+
 ## Implemented: Interloko Model Boundary
 
 - `docs/interloko_boundary.md` records the naming split:

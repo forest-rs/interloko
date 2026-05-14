@@ -1,0 +1,13 @@
+[package]
+name = "interloko_runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interloko runtime layout, host-call signatures, and execution_tape host support."
+
+[dependencies]
+execution_tape = { path = "../../../execution/execution_tape" }
+interloko_model = { path = "../interloko_model" }
+
+[lints]
+workspace = true

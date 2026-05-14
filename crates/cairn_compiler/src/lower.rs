@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::runtime::RuntimeLayout;
+use crate::runtime::{self, RuntimeLayout};
 use crate::sem;
 use crate::syntax::Span;
 
@@ -563,7 +563,7 @@ impl<'module> Lowering<'module> {
         }
 
         Ok(Module {
-            runtime: RuntimeLayout::from_sem(self.module),
+            runtime: runtime::runtime_layout_from_sem(self.module),
             functions,
             main,
         })
@@ -2508,7 +2508,10 @@ mod tests {
         let dump = module.dump();
         assert!(dump.contains("box.any"));
         assert!(dump.contains("<box>.value: any"));
-        assert_eq!(module.runtime.classes[0].slots[0].kind, sem::ValueKind::Any);
+        assert_eq!(
+            module.runtime.classes[0].slots[0].kind,
+            runtime::ValueKind::Any
+        );
     }
 
     #[test]

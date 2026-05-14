@@ -50,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "execution_tape",
  "interloko_model",
+ "interloko_runtime",
  "invalidation",
 ]
 
@@ -443,6 +444,14 @@ dependencies = [
 [[package]]
 name = "interloko_model"
 version = "0.1.0"
+
+[[package]]
+name = "interloko_runtime"
+version = "0.1.0"
+dependencies = [
+ "execution_tape",
+ "interloko_model",
+]
 
 [[package]]
 name = "invalidation"

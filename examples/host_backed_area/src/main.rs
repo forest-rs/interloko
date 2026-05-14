@@ -1,8 +1,10 @@
 //! Host-backed object Cairn example.
 
 use cairn_compiler::driver::{CompileError, compile_with_host_registry};
-use cairn_compiler::runtime::{CairnHost, HostObjectAdapter};
-use cairn_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind};
+use cairn_compiler::runtime::{CairnHost, HostObjectAdapter, ValueKind as RuntimeValueKind};
+use cairn_compiler::sem::{
+    HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
+};
 use execution_tape::host::HostError;
 use execution_tape::value::Value;
 
@@ -56,12 +58,12 @@ fn host_registry() -> HostMetaRegistry {
     let mut registry = HostMetaRegistry::new();
     registry.add_class(HostClass::new("<rust-circle>").with_slot(HostSlot::new(
         "radius",
-        ValueKind::I64,
+        SemValueKind::I64,
         "<integer>",
     )));
     registry.add_class(HostClass::new("<rust-square>").with_slot(HostSlot::new(
         "side",
-        ValueKind::I64,
+        SemValueKind::I64,
         "<integer>",
     )));
     registry
@@ -88,9 +90,9 @@ struct RustCircle {
 }
 
 impl HostObjectAdapter for RustCircle {
-    fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, HostError> {
+    fn read_slot(&self, slot: SlotId, kind: RuntimeValueKind) -> Result<Value, HostError> {
         match (slot.0, kind) {
-            (0, ValueKind::I64) => Ok(Value::I64(self.radius)),
+            (0, RuntimeValueKind::I64) => Ok(Value::I64(self.radius)),
             _ => Err(HostError::Failed),
         }
     }
@@ -102,9 +104,9 @@ struct RustSquare {
 }
 
 impl HostObjectAdapter for RustSquare {
-    fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, HostError> {
+    fn read_slot(&self, slot: SlotId, kind: RuntimeValueKind) -> Result<Value, HostError> {
         match (slot.0, kind) {
-            (0, ValueKind::I64) => Ok(Value::I64(self.side)),
+            (0, RuntimeValueKind::I64) => Ok(Value::I64(self.side)),
             _ => Err(HostError::Failed),
         }
     }

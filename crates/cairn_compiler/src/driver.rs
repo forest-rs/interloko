@@ -208,7 +208,7 @@ fn run_tape_function_i64(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::HostObjectAdapter;
+    use crate::runtime::{HostObjectAdapter, ValueKind as RuntimeValueKind};
     use crate::sem::{HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind};
     use execution_tape::host::HostError;
 
@@ -218,9 +218,9 @@ mod tests {
     }
 
     impl HostObjectAdapter for RustCircle {
-        fn read_slot(&self, slot: SlotId, kind: SemValueKind) -> Result<Value, HostError> {
+        fn read_slot(&self, slot: SlotId, kind: RuntimeValueKind) -> Result<Value, HostError> {
             match (slot.0, kind) {
-                (0, SemValueKind::I64) => Ok(Value::I64(self.radius)),
+                (0, RuntimeValueKind::I64) => Ok(Value::I64(self.radius)),
                 _ => Err(HostError::Failed),
             }
         }
@@ -232,9 +232,9 @@ mod tests {
     }
 
     impl HostObjectAdapter for RustSquare {
-        fn read_slot(&self, slot: SlotId, kind: SemValueKind) -> Result<Value, HostError> {
+        fn read_slot(&self, slot: SlotId, kind: RuntimeValueKind) -> Result<Value, HostError> {
             match (slot.0, kind) {
-                (0, SemValueKind::I64) => Ok(Value::I64(self.side)),
+                (0, RuntimeValueKind::I64) => Ok(Value::I64(self.side)),
                 _ => Err(HostError::Failed),
             }
         }

@@ -17,7 +17,7 @@ use execution_tape::vm::{Limits, Vm};
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
-use crate::runtime::{CairnHost, HostObjectKind, RuntimeLayout};
+use crate::runtime::{self, CairnHost, HostObjectKind, RuntimeLayout};
 use crate::syntax::{CstElement, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, syntax, tape};
 
@@ -2940,7 +2940,7 @@ fn dump_sem(module: &sem::Module) -> String {
 }
 
 fn dump_mop(module: &sem::Module) -> String {
-    let runtime = RuntimeLayout::from_sem(module);
+    let runtime = runtime::runtime_layout_from_sem(module);
     let mut out = String::new();
     let _ = writeln!(out, "mop {}", module.source_file);
 
@@ -3148,9 +3148,9 @@ fn dump_mop(module: &sem::Module) -> String {
                 out,
                 "    s{slot_index} {} kind={} storage={} {source} runtime={}",
                 slot.name,
-                sem_kind_label(module, slot.kind),
+                runtime_kind_label(module, slot.kind),
                 storage,
-                sem_runtime_repr(slot.kind)
+                runtime_repr(slot.kind)
             );
         }
     }
@@ -3276,7 +3276,7 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     use EnvironmentAffordance as Aff;
 
     let module = &artifacts.sem;
-    let runtime = RuntimeLayout::from_sem(module);
+    let runtime = runtime::runtime_layout_from_sem(module);
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("source:{}", artifacts.source.id),
         kind: EnvironmentKind::SourceFile,
@@ -3770,8 +3770,8 @@ fn project_environment_runtime_class(
             inspection: format!(
                 "class-id=c{index} slot-id=s{slot_index} storage={} kind={} {source} runtime={}",
                 storage,
-                sem_kind_label(module, slot.kind),
-                sem_runtime_repr(slot.kind)
+                runtime_kind_label(module, slot.kind),
+                runtime_repr(slot.kind)
             ),
         }));
     }
@@ -3854,6 +3854,35 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
     }
 }
 
+fn runtime_kind_label(module: &sem::Module, kind: runtime::ValueKind) -> String {
+    match kind {
+        runtime::ValueKind::Any => "object-top".into(),
+        runtime::ValueKind::I64 => "integer".into(),
+        runtime::ValueKind::Bool => "boolean".into(),
+        runtime::ValueKind::String(class) => value_class_label(module, "string", class),
+        runtime::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
+        runtime::ValueKind::Vector(class) => value_class_label(module, "vector", class),
+        runtime::ValueKind::Object(class) => module.classes.get(class.0 as usize).map_or_else(
+            || format!("class#{}", class.0),
+            |class| format!("object({})", class.name),
+        ),
+        runtime::ValueKind::ClassObject(class) => module.classes.get(class.0 as usize).map_or_else(
+            || format!("class-object#{}", class.0),
+            |class| format!("class-object({})", class.name),
+        ),
+        runtime::ValueKind::GenericFunctionObject(generic) => {
+            module.generics.get(generic.0 as usize).map_or_else(
+                || format!("generic-function-object#{}", generic.0),
+                |generic| format!("generic-function-object({})", generic.name),
+            )
+        }
+        runtime::ValueKind::MethodObject(method) => format!("method-object(m{})", method.0),
+        runtime::ValueKind::SlotDescriptorObject { class, slot } => {
+            format!("slot-descriptor(c{}.s{})", class.0, slot.0)
+        }
+    }
+}
+
 fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
     match kind {
         sem::ValueKind::Any => "object-top".into(),
@@ -3932,6 +3961,22 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         | sem::ValueKind::SlotDescriptorObject { .. } => "object-handle",
         sem::ValueKind::KnownCallable(_) => "compile-time-callable",
         sem::ValueKind::Error => "error",
+    }
+}
+
+fn runtime_repr(kind: runtime::ValueKind) -> &'static str {
+    match kind {
+        runtime::ValueKind::Any => "boxed-any",
+        runtime::ValueKind::I64 => "i64",
+        runtime::ValueKind::Bool => "bool",
+        runtime::ValueKind::String(_)
+        | runtime::ValueKind::Symbol(_)
+        | runtime::ValueKind::Vector(_)
+        | runtime::ValueKind::Object(_)
+        | runtime::ValueKind::ClassObject(_)
+        | runtime::ValueKind::GenericFunctionObject(_)
+        | runtime::ValueKind::MethodObject(_)
+        | runtime::ValueKind::SlotDescriptorObject { .. } => "object-handle",
     }
 }
 

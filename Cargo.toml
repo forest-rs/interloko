@@ -2,6 +2,7 @@
 members = [
     "crates/cairn_compiler",
     "crates/interloko_model",
+    "crates/interloko_runtime",
     "examples/forty_two",
     "examples/generic_area",
     "examples/host_backed_area",

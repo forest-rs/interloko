@@ -15,9 +15,10 @@ Cairn      current prototype language/compiler name
 Loko       possible future language/notation name, not used yet
 ```
 
-In this repo, the first concrete Interloko artifact is
-`crates/interloko_model`. It holds small shared model facts that should not be
-owned by the compiler forever.
+In this repo, the first concrete Interloko artifacts are
+`crates/interloko_model` and `crates/interloko_runtime`. The model crate holds
+small shared facts. The runtime crate owns executable host support for the
+current object model without depending on Cairn semantic IR.
 
 ## Boundaries
 
@@ -45,7 +46,7 @@ Vivarium is reserved for the later collaborative environment:
 - product-level affordances;
 - permission and capability policy.
 
-## First Slice
+## Current Slices
 
 The first extraction is deliberately small. `interloko_model` owns:
 
@@ -58,10 +59,23 @@ The first extraction is deliberately small. `interloko_model` owns:
 `cairn_compiler::sem` re-exports those names so existing code can keep using the
 same semantic module path while the dependency direction improves.
 
-`ValueKind` stays in `cairn_compiler` for now because it still contains
-compiler-only states such as known callables and errors. Runtime layout records
-also stay in `cairn_compiler` until `cairn_runtime` can be extracted without
-pulling semantic IR ownership across the crate boundary.
+`interloko_runtime` owns:
+
+- runtime-representable `ValueKind` for host signatures and slot IO;
+- `RuntimeLayout`, `RuntimeClass`, `RuntimeSlot`, `RuntimeGeneric`, and
+  `RuntimeMethod`;
+- host-call symbols and `execution_tape` host signatures;
+- `CairnHost`, native object storage, boxed `<object>` values, strings,
+  symbols, vectors, metaobjects, and host-backed object adapters.
+
+`cairn_compiler` still owns semantic `ValueKind`, because it contains
+compiler-only states such as known callables and errors. The compiler also owns
+the semantic-to-runtime adapter: `cairn_compiler::runtime::runtime_layout_from_sem`.
+That function translates finalized semantic classes, slots, generics, methods,
+and setter metadata into runtime layout values consumed by `interloko_runtime`.
+
+`cairn_compiler::runtime` remains as a compatibility module that re-exports the
+runtime crate plus the semantic layout adapter.
 
 ## Glossary
 
@@ -73,4 +87,3 @@ pulling semantic IR ownership across the crate boundary.
   host calls.
 - **Product layer:** the future user-facing Vivarium environment built on the
   substrate and language/runtime pieces.
-

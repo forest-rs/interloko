@@ -17,9 +17,9 @@ use execution_tape::verifier::VerifiedProgram;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::lower;
-use crate::runtime::{self, RuntimeLayout};
 use crate::sem;
 use crate::syntax::Span;
+use interloko_runtime::{self as runtime, RuntimeLayout};
 
 /// A verified tape program emitted from lowered Cairn IR.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1019,7 +1019,10 @@ mod tests {
         assert_eq!(tape.program.program().functions.len(), 5);
         assert_eq!(tape.main, Some(FuncId(0)));
         assert_eq!(tape.runtime.classes[0].slots[0].name, "radius");
-        assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::I64);
+        assert_eq!(
+            tape.runtime.classes[0].slots[0].kind,
+            runtime::ValueKind::I64
+        );
     }
 
     #[test]
@@ -1053,7 +1056,10 @@ mod tests {
 
         assert_eq!(tape.program.program().functions.len(), 3);
         assert_eq!(tape.runtime.classes[0].slots[0].name, "valid?");
-        assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::Bool);
+        assert_eq!(
+            tape.runtime.classes[0].slots[0].kind,
+            runtime::ValueKind::Bool
+        );
     }
 
     #[test]
@@ -1066,6 +1072,9 @@ mod tests {
 
         assert_eq!(tape.program.program().functions.len(), 3);
         assert_eq!(tape.runtime.classes[0].slots[0].name, "value");
-        assert_eq!(tape.runtime.classes[0].slots[0].kind, sem::ValueKind::Any);
+        assert_eq!(
+            tape.runtime.classes[0].slots[0].kind,
+            runtime::ValueKind::Any
+        );
     }
 }
