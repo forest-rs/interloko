@@ -1,5 +1,53 @@
 # Plans
 
+## Establish Interloko Core Substrate Boundary
+
+### Goal
+
+Introduce Interloko as the name and crate boundary for the boring shared
+substrate under the current Cairn prototype. This is not a repo rename. It is
+the first dependency-direction step toward separating model facts from compiler
+and runtime execution.
+
+### Naming
+
+- Interloko is the core technical substrate for programmable object spaces.
+- Vivarium is the later collaborative environment and product layer.
+- Cairn remains the current prototype language/compiler name for now.
+- Loko is a possible future language/notation name, but this slice does not
+  use it.
+
+### Fence
+
+`interloko_model` owns durable shared model identifiers and small value-class
+facts needed by both compiler and runtime-shaped code. It explicitly does not
+own syntax, semantic IR, lowering, tape emission, runtime host execution,
+session orchestration, collaboration, identity, permissions, or persistence.
+
+### Steps
+
+1. Add a naming/architecture note that records the Interloko/Vivarium/Cairn
+   boundary and provisional crate naming.
+2. Create `crates/interloko_model` as a `no_std` substrate crate.
+3. Move durable shared ids (`ClassId`, `SlotId`, `GenericFunctionId`,
+   `MethodId`) and `BuiltinValueClass` into `interloko_model`.
+4. Re-export the moved types from `cairn_compiler::sem` so existing call sites
+   remain calm during the extraction.
+5. Keep `ValueKind`, runtime layout records, semantic IR, lowering, tape
+   emission, sessions, diagnostics, and runtime host execution in
+   `cairn_compiler`.
+6. Update progress notes and run all workspace gates, corpus, and examples.
+
+### Risks
+
+- Moving `ValueKind` now would pull compiler-only callable/error states into
+  the model crate. Leave it until there is a cleaner runtime/model value kind.
+- Moving `RuntimeLayout` now would still drag semantic construction policy and
+  runtime host details across the new boundary. Leave it for the later runtime
+  extraction.
+- Renaming packages before the boundary proves itself would create churn
+  without architectural value.
+
 ## Name The Read-Only MOP Protocol Surface
 
 ### Goal
