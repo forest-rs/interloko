@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 // expect: dump sem contains hold(x:object-top) result=Any return=object-top
 // expect: dump lowered contains box.any
-// expect: dump tape contains cairn.box_value
+// expect: dump tape contains interloko.box_value
 
 define function hold(x :: <object>) => <object>
   x

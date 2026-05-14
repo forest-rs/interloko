@@ -12,7 +12,7 @@
 - Added a runtime-owned `ValueKind` that covers only executable value
   categories. Compiler-only semantic states such as known callables and errors
   remain in `interloko_compiler::sem::ValueKind`.
-- Moved `CairnHost`, native object storage, boxed `<object>` storage, string,
+- Moved `InterlokoHost`, native object storage, boxed `<object>` storage, string,
   symbol, vector, metaobject, and host-backed adapter support into
   `interloko_runtime`.
 - `interloko_compiler::runtime` now re-exports `interloko_runtime` for compatibility
@@ -48,7 +48,7 @@ Deferred:
   the extraction.
 - `ValueKind` remains in `interloko_compiler::sem` because it still contains
   compiler-only callable and error states.
-- Runtime layout records and `CairnHost` remain in `interloko_compiler` until a
+- Runtime layout records and `InterlokoHost` remain in `interloko_compiler` until a
   later `interloko_runtime` extraction can avoid pulling semantic IR ownership
   across the crate boundary.
 - Crate/package names remain unpublished and provisional.
@@ -186,7 +186,7 @@ Deferred:
 - Constant slots, unknown slots, non-object receivers, host-backed slots, and
   wrong assigned value types produce structured diagnostics.
 - Lowered IR now has typed `slot.write` instructions, and tape emission lowers
-  them to ordinary runtime host calls (`cairn.slot_set`), not special bytecode.
+  them to ordinary runtime host calls (`interloko.slot_set`), not special bytecode.
 - Runtime native object storage mutates the selected slot and returns the stored
   value.
 - MOP/EOP/session dumps expose generated setter generics and methods as
@@ -496,11 +496,11 @@ Deferred:
 - Lowered IR still uses runtime object construction and `slot.read`
   instructions, but `slot.read` now records and dumps the returned value kind.
 - `execution_tape` emission still uses host calls, not native aggregate opcodes:
-  - `cairn.make_object` has per-class host signatures with mixed slot argument
+  - `interloko.make_object` has per-class host signatures with mixed slot argument
     types;
-  - `cairn.slot_get` has per-slot host signatures whose return type matches the
+  - `interloko.slot_get` has per-slot host signatures whose return type matches the
     declared slot kind;
-  - `cairn.class_of` remains the runtime support used by generic dispatch.
+  - `interloko.class_of` remains the runtime support used by generic dispatch.
 - The runtime object heap now stores slot payloads as `execution_tape::Value`
   values, so integers, booleans, and Cairn object handles round-trip through the
   host boundary.
@@ -514,7 +514,7 @@ Deferred:
 ### Runtime Object ABI Notes
 
 - Cairn objects are still runtime-managed host objects identified by
-  `CAIRN_OBJECT_TYPE`.
+  `INTERLOKO_OBJECT_TYPE`.
 - Object construction passes a class id followed by slot payload registers in
   semantic slot order.
 - Slot reads pass an object handle and slot id to the host and receive a value
@@ -562,10 +562,10 @@ Deferred:
 - Lowering uses a boxed top-value representation for `<object>` slots rather
   than treating them as nominal object handles:
   - concrete integers, booleans, and nominal object handles are boxed with
-    `cairn.box_value`;
-  - boxed top values use the host object type `CAIRN_VALUE_TYPE`;
-  - nominal instances still use `CAIRN_OBJECT_TYPE`;
-  - `cairn.make_object` and `cairn.slot_get` use boxed-any signatures for
+    `interloko.box_value`;
+  - boxed top values use the host object type `INTERLOKO_VALUE_TYPE`;
+  - nominal instances still use `INTERLOKO_OBJECT_TYPE`;
+  - `interloko.make_object` and `interloko.slot_get` use boxed-any signatures for
     `<object>` slots.
 - Incremental coverage now distinguishes two slot metadata cases:
   - slot type edits affect runtime layout and recompute lowered/tape artifacts;
@@ -666,7 +666,7 @@ Deferred:
   <integer>`.
 - Lowered IR function signatures now consume the checked semantic kinds.
   Concrete values flowing into `<object>` parameters or returns are boxed with
-  the existing `box.any` / `cairn.box_value` runtime path.
+  the existing `box.any` / `interloko.box_value` runtime path.
 - AST, semantic, lowered, and corpus dumps expose annotated parameter and
   result meaning. Stable semantic fingerprints include parameter and explicit
   result categories so signature edits participate in session diffs.
@@ -716,7 +716,7 @@ Deferred:
 - Lowered dispatcher signatures now use the declared generic result category.
   When a generic returns `<object>` and a method returns a more precise nominal
   object, the dispatcher boxes through the existing `box.any` /
-  `cairn.box_value` runtime path.
+  `interloko.box_value` runtime path.
 - AST, semantic, lowered, and corpus dumps expose generic and method contracts.
   Definition and dispatcher fingerprints include contract kinds so signature
   edits participate in session diffs and cache reports.
@@ -751,8 +751,8 @@ Deferred:
   `<object>` parameters can feed slot reads after an `instance?` guard.
 - Lowered IR represents tests and casts with ordinary instructions that emit
   ordinary runtime host calls:
-  - `cairn.instance_of`;
-  - `cairn.cast_object`.
+  - `interloko.instance_of`;
+  - `interloko.cast_object`.
 - No new `execution_tape` generic, cast, or class-test opcodes were added.
 - AST, semantic, lowered, and tape dumps expose tests, casts, and refinement.
   Semantic fingerprints include use-site local result kinds and refinements so
@@ -830,7 +830,7 @@ Deferred:
   this slice.
 - `make(<host-backed-class>, ...)` is rejected during semantic lowering.
   Host-backed object handles must be supplied by the embedding runtime.
-- `CairnHost` can install host-backed object handles through a
+- `InterlokoHost` can install host-backed object handles through a
   `HostObjectAdapter`. The adapter owns Rust value access and exposes
   read-only slot reads back to the Cairn runtime.
 - Host-backed object handles participate in:
@@ -842,13 +842,13 @@ Deferred:
 - Lowered IR continues to expose ordinary model operations such as class tests,
   casts, generic dispatch calls, and `slot.read` before tape emission.
 - Tape emission still uses ordinary runtime host calls such as
-  `cairn.slot_get`, `cairn.instance_of`, and `cairn.cast_object`. There are no
+  `interloko.slot_get`, `interloko.instance_of`, and `interloko.cast_object`. There are no
   host-backed-specific `execution_tape` opcodes.
 - Tests include hand-written Rust adapters for small Rust-backed shapes and
   cover slot reads, generic dispatch, `<object>` boxing, casts, invalid slot
   reads, and invalid casts.
 - `examples/host_backed_area` is a runnable Rust embedding example. It creates
-  Rust-backed circle and square values, installs them into `CairnHost`, and
+  Rust-backed circle and square values, installs them into `InterlokoHost`, and
   runs Cairn generic dispatch over those host-backed object handles.
 - `interloko_corpus` supports `// host-class:` headers for compile/dump fixtures,
   and the corpus now includes host-backed slot, dispatch, construction, slot,
@@ -860,7 +860,7 @@ Deferred:
   instead of by Cairn source.
 - **Host-backed slot:** a read-only Cairn slot whose value is provided by a
   host adapter.
-- **Host object handle:** a runtime object handle stored in `CairnHost` that
+- **Host object handle:** a runtime object handle stored in `InterlokoHost` that
   points at adapter-owned Rust data.
 - **Adapter:** Rust code that maps a Cairn `SlotId` and expected `ValueKind` to
   a runtime value.
@@ -939,7 +939,7 @@ Deferred:
   `add-method`.
 - `HostEnvironmentProvider` is an explicit host projection seam. Host adapters
   can contribute host-owned environment records into the same sink without
-  making `CairnHost` a world registry or enumerating the runtime heap.
+  making `InterlokoHost` a world registry or enumerating the runtime heap.
 - `interloko_lab dump <file> --stage eop` and `interloko_lab eop <file>` print the EOP
   summary. The workbench still understands leading `// host-class:` metadata so
   host-backed objects are visible in the environment view.
@@ -1001,7 +1001,7 @@ Deferred:
 ### Workbench Boundary
 
 - `interloko_lab` is a workbench surface, not the long-term UI.
-- Host projection is adapter-owned and explicit. `CairnHost` does not enumerate
+- Host projection is adapter-owned and explicit. `InterlokoHost` does not enumerate
   runtime heap objects.
 - EOP remains structured protocol vocabulary. There is still no Portolan bridge,
   Understory inspector, persistent image, capability policy, mutation
@@ -1252,8 +1252,8 @@ Deferred:
   Rendering is strict: missing catalog entries, missing required args, and
   MessageFormat failures are presentation errors rather than silent fallbacks.
 - Built-in English and pseudo catalogs cover every stable diagnostic code.
-  `interloko_lab` selects them with `CAIRN_DIAGNOSTIC_LOCALE=en|pseudo`, or loads an
-  override TOML resource through `CAIRN_DIAGNOSTIC_CATALOG`.
+  `interloko_lab` selects them with `INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo`, or loads an
+  override TOML resource through `INTERLOKO_DIAGNOSTIC_CATALOG`.
 - `interloko_corpus` supports `// expect: diagnostic code ...` while keeping
   `diagnostic contains ...` expectations for catalog-rendered English checks.
 - Corpus coverage now includes representative code expectations for syntax,

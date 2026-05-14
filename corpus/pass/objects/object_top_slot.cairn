@@ -2,7 +2,7 @@
 // expect: dump sem contains value :: <object>
 // expect: dump sem contains runtime=boxed-any
 // expect: dump lowered contains box.any
-// expect: dump tape contains cairn.box_value
+// expect: dump tape contains interloko.box_value
 
 define class <box> (<object>)
   slot value;

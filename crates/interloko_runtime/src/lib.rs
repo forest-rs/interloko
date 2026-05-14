@@ -18,85 +18,85 @@ use execution_tape::value::{Obj, ObjHandle, Value};
 use interloko_model::{BuiltinValueClass, ClassId, GenericFunctionId, MethodId, SlotId};
 
 /// Host object type used for Cairn runtime objects.
-pub const CAIRN_OBJECT_TYPE: HostTypeId = HostTypeId(0x4341_4952_4e5f_4f42);
+pub const INTERLOKO_OBJECT_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f4f_424a);
 /// Host object type used for boxed top `<object>` values.
-pub const CAIRN_VALUE_TYPE: HostTypeId = HostTypeId(0x4341_4952_4e5f_5641);
+pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
 
 /// Host-call symbol for object construction.
-pub const MAKE_OBJECT: &str = "cairn.make_object";
+pub const MAKE_OBJECT: &str = "interloko.make_object";
 /// Host-call symbol for reading an object's class id.
-pub const CLASS_OF: &str = "cairn.class_of";
+pub const CLASS_OF: &str = "interloko.class_of";
 /// Host-call symbol for reading a typed runtime-managed slot.
-pub const SLOT_GET: &str = "cairn.slot_get";
+pub const SLOT_GET: &str = "interloko.slot_get";
 /// Host-call symbol for writing a typed runtime-managed slot.
-pub const SLOT_SET: &str = "cairn.slot_set";
+pub const SLOT_SET: &str = "interloko.slot_set";
 /// Host-call symbol for boxing a concrete value as the top `<object>` value.
-pub const BOX_VALUE: &str = "cairn.box_value";
+pub const BOX_VALUE: &str = "interloko.box_value";
 /// Host-call symbol for testing whether a value is an instance of a class.
-pub const INSTANCE_OF: &str = "cairn.instance_of";
+pub const INSTANCE_OF: &str = "interloko.instance_of";
 /// Host-call symbol for casting a value to a known runtime object class.
-pub const CAST_OBJECT: &str = "cairn.cast_object";
+pub const CAST_OBJECT: &str = "interloko.cast_object";
 /// Host-call symbol prefix for string literals.
-pub const STRING_LITERAL_PREFIX: &str = "cairn.literal.string:";
+pub const STRING_LITERAL_PREFIX: &str = "interloko.literal.string:";
 /// Host-call symbol prefix for symbol literals.
-pub const SYMBOL_LITERAL_PREFIX: &str = "cairn.literal.symbol:";
+pub const SYMBOL_LITERAL_PREFIX: &str = "interloko.literal.symbol:";
 /// Host-call symbol for immutable vector literals.
-pub const VECTOR_LITERAL: &str = "cairn.literal.vector";
+pub const VECTOR_LITERAL: &str = "interloko.literal.vector";
 /// Host-call symbol for runtime value equality.
-pub const VALUE_EQ: &str = "cairn.value_eq";
+pub const VALUE_EQ: &str = "interloko.value_eq";
 /// Host-call symbol for creating a class metaobject.
-pub const META_CLASS_OBJECT: &str = "cairn.meta.class_object";
+pub const META_CLASS_OBJECT: &str = "interloko.meta.class_object";
 /// Host-call symbol for creating a generic-function metaobject.
-pub const META_GENERIC_OBJECT: &str = "cairn.meta.generic_object";
+pub const META_GENERIC_OBJECT: &str = "interloko.meta.generic_object";
 /// Host-call symbol for creating a method metaobject.
-pub const META_METHOD_OBJECT: &str = "cairn.meta.method_object";
+pub const META_METHOD_OBJECT: &str = "interloko.meta.method_object";
 /// Host-call symbol for creating a slot-descriptor metaobject.
-pub const META_SLOT_DESCRIPTOR_OBJECT: &str = "cairn.meta.slot_descriptor_object";
+pub const META_SLOT_DESCRIPTOR_OBJECT: &str = "interloko.meta.slot_descriptor_object";
 /// Host-call symbol for reading a value's runtime class metaobject.
-pub const MOP_OBJECT_CLASS: &str = "cairn.mop.object_class";
+pub const MOP_OBJECT_CLASS: &str = "interloko.mop.object_class";
 /// Host-call symbol for reading a class metaobject's name.
-pub const MOP_CLASS_NAME: &str = "cairn.mop.class_name";
+pub const MOP_CLASS_NAME: &str = "interloko.mop.class_name";
 /// Host-call symbol for reading a class metaobject's direct superclass.
-pub const MOP_CLASS_DIRECT_SUPERCLASS: &str = "cairn.mop.class_direct_superclass";
+pub const MOP_CLASS_DIRECT_SUPERCLASS: &str = "interloko.mop.class_direct_superclass";
 /// Host-call symbol for reading a class metaobject's direct slot descriptors.
-pub const MOP_CLASS_DIRECT_SLOTS: &str = "cairn.mop.class_direct_slots";
+pub const MOP_CLASS_DIRECT_SLOTS: &str = "interloko.mop.class_direct_slots";
 /// Host-call symbol for reading a class metaobject's effective slot descriptors.
-pub const MOP_CLASS_EFFECTIVE_SLOTS: &str = "cairn.mop.class_effective_slots";
+pub const MOP_CLASS_EFFECTIVE_SLOTS: &str = "interloko.mop.class_effective_slots";
 /// Host-call symbol for reading a slot descriptor's source name.
-pub const MOP_SLOT_NAME: &str = "cairn.mop.slot_name";
+pub const MOP_SLOT_NAME: &str = "interloko.mop.slot_name";
 /// Host-call symbol for reading a slot descriptor's declared type text.
-pub const MOP_SLOT_TYPE: &str = "cairn.mop.slot_type";
+pub const MOP_SLOT_TYPE: &str = "interloko.mop.slot_type";
 /// Host-call symbol for reading a slot descriptor's init keyword text.
-pub const MOP_SLOT_INIT_KEYWORD: &str = "cairn.mop.slot_init_keyword";
+pub const MOP_SLOT_INIT_KEYWORD: &str = "interloko.mop.slot_init_keyword";
 /// Host-call symbol for reading a slot descriptor's mutability flag.
-pub const MOP_SLOT_MUTABLE: &str = "cairn.mop.slot_mutable";
+pub const MOP_SLOT_MUTABLE: &str = "interloko.mop.slot_mutable";
 /// Host-call symbol for reading a slot descriptor's getter accessor name.
-pub const MOP_SLOT_GETTER: &str = "cairn.mop.slot_getter";
+pub const MOP_SLOT_GETTER: &str = "interloko.mop.slot_getter";
 /// Host-call symbol for reading a slot descriptor's setter generic.
-pub const MOP_SLOT_SETTER: &str = "cairn.mop.slot_setter";
+pub const MOP_SLOT_SETTER: &str = "interloko.mop.slot_setter";
 /// Host-call symbol for reading a generic-function metaobject's name.
-pub const MOP_GENERIC_FUNCTION_NAME: &str = "cairn.mop.generic_function_name";
+pub const MOP_GENERIC_FUNCTION_NAME: &str = "interloko.mop.generic_function_name";
 /// Host-call symbol for reading a generic-function metaobject's methods.
-pub const MOP_GENERIC_FUNCTION_METHODS: &str = "cairn.mop.generic_function_methods";
+pub const MOP_GENERIC_FUNCTION_METHODS: &str = "interloko.mop.generic_function_methods";
 /// Host-call symbol for reading a method metaobject's generic function.
-pub const MOP_METHOD_GENERIC_FUNCTION: &str = "cairn.mop.method_generic_function";
+pub const MOP_METHOD_GENERIC_FUNCTION: &str = "interloko.mop.method_generic_function";
 /// Host-call symbol for reading a method metaobject's specializers.
-pub const MOP_METHOD_SPECIALIZERS: &str = "cairn.mop.method_specializers";
+pub const MOP_METHOD_SPECIALIZERS: &str = "interloko.mop.method_specializers";
 /// Host-call symbol for immutable vector length.
-pub const VECTOR_SIZE: &str = "cairn.vector_size";
+pub const VECTOR_SIZE: &str = "interloko.vector_size";
 /// Host-call symbol for immutable vector indexing.
-pub const VECTOR_REF: &str = "cairn.vector_ref";
+pub const VECTOR_REF: &str = "interloko.vector_ref";
 
 /// Returns the `execution_tape` value type for Cairn objects.
 #[must_use]
 pub const fn object_type() -> ValueType {
-    ValueType::Obj(CAIRN_OBJECT_TYPE)
+    ValueType::Obj(INTERLOKO_OBJECT_TYPE)
 }
 
 /// Returns the `execution_tape` value type for boxed top `<object>` values.
 #[must_use]
 pub const fn any_type() -> ValueType {
-    ValueType::Obj(CAIRN_VALUE_TYPE)
+    ValueType::Obj(INTERLOKO_VALUE_TYPE)
 }
 
 /// Runtime-representable value category used by host signatures and slot IO.
@@ -298,14 +298,14 @@ pub trait HostObjectAdapter {
 }
 
 /// Host implementation for Cairn runtime object operations.
-pub struct CairnHost {
+pub struct InterlokoHost {
     layout: RuntimeLayout,
     objects: Vec<RuntimeObject>,
     values: Vec<Value>,
     symbols: Vec<InternedObject>,
 }
 
-impl CairnHost {
+impl InterlokoHost {
     /// Creates a new runtime host with an empty object heap.
     #[must_use]
     pub fn new(layout: RuntimeLayout) -> Self {
@@ -343,16 +343,16 @@ impl CairnHost {
     pub fn box_top_value(&mut self, value: Value) -> Result<Value, HostError> {
         match value {
             Value::I64(_) | Value::Bool(_) | Value::U64(_) => Ok(self.push_boxed_value(value)),
-            Value::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => {
+            Value::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.push_boxed_value(Value::Obj(obj)))
             }
-            Value::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => Ok(Value::Obj(obj)),
+            Value::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => Ok(Value::Obj(obj)),
             _ => Err(HostError::Failed),
         }
     }
 
     fn object(&self, obj: Obj) -> Result<&RuntimeObject, HostError> {
-        if obj.host_type != CAIRN_OBJECT_TYPE {
+        if obj.host_type != INTERLOKO_OBJECT_TYPE {
             return Err(HostError::SignatureMismatch);
         }
         let index = usize::try_from(obj.handle.0)
@@ -363,7 +363,7 @@ impl CairnHost {
     }
 
     fn object_mut(&mut self, obj: Obj) -> Result<&mut RuntimeObject, HostError> {
-        if obj.host_type != CAIRN_OBJECT_TYPE {
+        if obj.host_type != INTERLOKO_OBJECT_TYPE {
             return Err(HostError::SignatureMismatch);
         }
         let index = usize::try_from(obj.handle.0)
@@ -374,7 +374,7 @@ impl CairnHost {
     }
 
     fn boxed_value(&self, obj: Obj) -> Result<&Value, HostError> {
-        if obj.host_type != CAIRN_VALUE_TYPE {
+        if obj.host_type != INTERLOKO_VALUE_TYPE {
             return Err(HostError::SignatureMismatch);
         }
         let index = usize::try_from(obj.handle.0)
@@ -388,7 +388,7 @@ impl CairnHost {
         let handle = ObjHandle(u64::try_from(self.values.len() + 1).unwrap_or(u64::MAX));
         self.values.push(value);
         Value::Obj(Obj {
-            host_type: CAIRN_VALUE_TYPE,
+            host_type: INTERLOKO_VALUE_TYPE,
             handle,
         })
     }
@@ -397,13 +397,13 @@ impl CairnHost {
         let handle = ObjHandle(u64::try_from(self.objects.len() + 1).unwrap_or(u64::MAX));
         self.objects.push(object);
         Value::Obj(Obj {
-            host_type: CAIRN_OBJECT_TYPE,
+            host_type: INTERLOKO_OBJECT_TYPE,
             handle,
         })
     }
 }
 
-impl Host for CairnHost {
+impl Host for InterlokoHost {
     fn call(
         &mut self,
         symbol: &str,
@@ -777,7 +777,9 @@ impl Host for CairnHost {
                     [ValueRef::I64(value)] => Value::I64(*value),
                     [ValueRef::Bool(value)] => Value::Bool(*value),
                     [ValueRef::U64(value)] => Value::U64(*value),
-                    [ValueRef::Obj(obj)] if obj.host_type == CAIRN_OBJECT_TYPE => Value::Obj(*obj),
+                    [ValueRef::Obj(obj)] if obj.host_type == INTERLOKO_OBJECT_TYPE => {
+                        Value::Obj(*obj)
+                    }
                     _ => return Err(HostError::Failed),
                 };
                 rets[0] = self.push_boxed_value(value);
@@ -812,7 +814,7 @@ impl Host for CairnHost {
     }
 }
 
-impl CairnHost {
+impl InterlokoHost {
     fn builtin_class(&self, kind: BuiltinValueClass) -> Result<ClassId, HostError> {
         self.layout.class_id(kind.name()).ok_or(HostError::Failed)
     }
@@ -933,10 +935,10 @@ impl CairnHost {
 
     fn object_from_any(&self, value: ValueRef<'_>) -> Result<&RuntimeObject, HostError> {
         let obj = match value {
-            ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => obj,
-            ValueRef::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => {
+            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => obj,
+            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj)? {
-                    Value::Obj(boxed) if boxed.host_type == CAIRN_OBJECT_TYPE => *boxed,
+                    Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => *boxed,
                     _ => return Err(HostError::Failed),
                 }
             }
@@ -948,11 +950,13 @@ impl CairnHost {
     fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
         match value {
             ValueRef::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
-            ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => Ok(self.object(obj)?.class),
-            ValueRef::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => {
+            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
+                Ok(self.object(obj)?.class)
+            }
+            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj)? {
                     Value::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
-                    Value::Obj(boxed) if boxed.host_type == CAIRN_OBJECT_TYPE => {
+                    Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
                         Ok(self.object(*boxed)?.class)
                     }
                     _ => Err(HostError::Failed),
@@ -1069,10 +1073,10 @@ impl CairnHost {
 
     fn value_object(&self, value: ValueRef<'_>) -> Option<Obj> {
         match value {
-            ValueRef::Obj(obj) if obj.host_type == CAIRN_OBJECT_TYPE => Some(obj),
-            ValueRef::Obj(obj) if obj.host_type == CAIRN_VALUE_TYPE => {
+            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => Some(obj),
+            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj).ok()? {
-                    Value::Obj(boxed) if boxed.host_type == CAIRN_OBJECT_TYPE => Some(*boxed),
+                    Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => Some(*boxed),
                     _ => None,
                 }
             }

@@ -5,8 +5,8 @@
 // expect: dump sem contains local l0 as object(c0)
 // expect: dump lowered contains instance?
 // expect: dump lowered contains as <circle>
-// expect: dump tape contains cairn.instance_of
-// expect: dump tape contains cairn.cast_object
+// expect: dump tape contains interloko.instance_of
+// expect: dump tape contains interloko.cast_object
 
 define class <circle> (<object>)
   slot radius :: <integer>;

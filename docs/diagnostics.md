@@ -45,13 +45,13 @@ silently falling back to English.
 Select a built-in diagnostic locale with:
 
 ```sh
-CAIRN_DIAGNOSTIC_LOCALE=pseudo cargo run -p interloko_lab -- run program.cairn
+INTERLOKO_DIAGNOSTIC_LOCALE=pseudo cargo run -p interloko_lab -- run program.cairn
 ```
 
 Load an override catalog from a MessageFormat resource TOML file with:
 
 ```sh
-CAIRN_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml \
+INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml \
   cargo run -p interloko_lab -- run program.cairn
 ```
 

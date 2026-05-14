@@ -10,7 +10,7 @@ use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::runtime::CairnHost;
+use crate::runtime::InterlokoHost;
 use crate::sem::HostMetaRegistry;
 use crate::{ast, lower, sem, syntax, tape};
 
@@ -120,7 +120,7 @@ impl CompiledModule {
         &self,
         name: &str,
         args: &[Value],
-        host: CairnHost,
+        host: InterlokoHost,
     ) -> Result<i64, CompileError> {
         let Some(function) = self.tape_function(name) else {
             return Err(CompileError::MissingFunction { name: name.into() });
@@ -182,7 +182,7 @@ pub fn compile_and_run_main(source: &str) -> Result<i64, CompileError> {
         return Err(CompileError::MainHasParameters);
     }
 
-    let host = CairnHost::new(compiled.tape.runtime.clone());
+    let host = InterlokoHost::new(compiled.tape.runtime.clone());
     run_tape_function_i64(&compiled.tape.program, main, &[], host)
 }
 
@@ -190,7 +190,7 @@ fn run_tape_function_i64(
     program: &execution_tape::verifier::VerifiedProgram,
     function: FuncId,
     args: &[Value],
-    host: CairnHost,
+    host: InterlokoHost,
 ) -> Result<i64, CompileError> {
     let mut vm = Vm::new(host, Limits::default());
     let output = vm
@@ -392,7 +392,7 @@ mod tests {
             &registry,
         )
         .expect("program should compile");
-        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let mut host = InterlokoHost::new(compiled.tape.runtime.clone());
         let class = compiled
             .tape
             .runtime
@@ -418,7 +418,7 @@ mod tests {
             &registry,
         )
         .expect("program should compile");
-        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let mut host = InterlokoHost::new(compiled.tape.runtime.clone());
         let class = compiled
             .tape
             .runtime
@@ -444,7 +444,7 @@ mod tests {
             &registry,
         )
         .expect("program should compile");
-        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let mut host = InterlokoHost::new(compiled.tape.runtime.clone());
         let class = compiled
             .tape
             .runtime
@@ -462,7 +462,7 @@ mod tests {
             .expect("host-backed object-top flow should run");
         assert_eq!(value, 5);
 
-        let mut host = CairnHost::new(compiled.tape.runtime.clone());
+        let mut host = InterlokoHost::new(compiled.tape.runtime.clone());
         let class = compiled
             .tape
             .runtime

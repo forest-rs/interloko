@@ -11,7 +11,7 @@ construction in the compiler.
 ### Fence
 
 `interloko_runtime` owns host-call symbols/signatures, runtime layout data,
-runtime-representable value kinds, `CairnHost`, object storage, boxed top
+runtime-representable value kinds, `InterlokoHost`, object storage, boxed top
 values, string/symbol/vector runtime objects, metaobject host calls, and
 host-backed object adapters. `interloko_compiler` owns syntax, semantic IR,
 semantic `ValueKind`, lowering, sessions, diagnostics, and the adapter that
@@ -21,7 +21,7 @@ turns `sem::Module` into runtime layout.
 
 1. Create `crates/interloko_runtime` and add workspace/compiler dependencies.
 2. Move runtime host symbols, signatures, layout structs, object heap/storage,
-   boxed values, literals, MOP query host calls, and `CairnHost`.
+   boxed values, literals, MOP query host calls, and `InterlokoHost`.
 3. Add runtime `ValueKind` and convert semantic slot kinds during layout
    construction.
 4. Replace `RuntimeLayout::from_sem` with
@@ -785,7 +785,7 @@ authorization policy.
 - Affordance execution is read-only and maps to existing dumps/views.
 - Host-projected records appear only when an explicit workbench provider is
   installed by fixture metadata.
-- `CairnHost` remains an execution host, not an environment registry.
+- `InterlokoHost` remains an execution host, not an environment registry.
 - Existing `eop` and corpus behavior stays intact.
 
 ### Steps
@@ -829,7 +829,7 @@ or authorization policy.
   host metadata, diagnostics, and query graph.
 - Text dumps are views over typed records; tests should not need to parse text
   to verify the protocol.
-- `CairnHost` remains an execution host, not an environment registry.
+- `InterlokoHost` remains an execution host, not an environment registry.
 - Host projection is explicit and adapter-owned.
 - MOP answers object-system questions. EOP answers environment/tooling
   questions.
@@ -849,7 +849,7 @@ or authorization policy.
 
 ### Risks
 
-- If host projection reaches into `CairnHost`, EOP becomes runtime enumeration
+- If host projection reaches into `InterlokoHost`, EOP becomes runtime enumeration
   rather than adapter-owned projection.
 - If records imply a stable serialized schema, this slice will overpromise.
 - If affordance names are just ad hoc strings, downstream tools will have to
@@ -898,7 +898,7 @@ it may later populate the same registry, but it does not replace Cairn's MOP.
    - native class behavior stays unchanged.
 3. Add runtime host object support:
    - public adapter trait for read-only Rust-side slot access;
-   - public API to install a host-backed object handle in `CairnHost`;
+   - public API to install a host-backed object handle in `InterlokoHost`;
    - `class_of`, `instance?`, `as`, slot reads, and `<object>` boxing work for
      host-backed handles.
 4. Add execution/testing helpers:

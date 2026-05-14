@@ -4,7 +4,7 @@
 // expect: dump sem contains radius-setter
 // expect: dump sem contains slot-write
 // expect: dump lowered contains slot.write
-// expect: dump tape contains cairn.slot_set
+// expect: dump tape contains interloko.slot_set
 
 define class <circle> (<object>)
   slot radius :: <integer>;

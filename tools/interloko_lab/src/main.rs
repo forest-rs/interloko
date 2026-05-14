@@ -748,7 +748,7 @@ fn invalid_host_eop_header(path: &Path, line: usize, message: &str) -> LabError 
 }
 
 fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
-    if let Ok(path) = env::var("CAIRN_DIAGNOSTIC_CATALOG") {
+    if let Ok(path) = env::var("INTERLOKO_DIAGNOSTIC_CATALOG") {
         let source = fs::read_to_string(&path).map_err(|error| LabError::Io {
             path: path.clone(),
             error,
@@ -758,7 +758,7 @@ fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
         return Ok(DiagnosticRenderer::new(catalog));
     }
 
-    match env::var("CAIRN_DIAGNOSTIC_LOCALE")
+    match env::var("INTERLOKO_DIAGNOSTIC_LOCALE")
         .unwrap_or_else(|_| "en".into())
         .as_str()
     {
@@ -804,7 +804,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} dispatch <file.cairn> [dispatch-site-id]\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>\n\ndiagnostics:\n  CAIRN_DIAGNOSTIC_LOCALE=en|pseudo\n  CAIRN_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} run <file.cairn>\n  {binary} dump <file.cairn> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.cairn>\n  {binary} eop <file.cairn>\n  {binary} dispatch <file.cairn> [dispatch-site-id]\n  {binary} inspect <file.cairn> <object-id>\n  {binary} affordances <file.cairn> <object-id>\n  {binary} invoke-affordance <file.cairn> <object-id> <affordance>\n  {binary} artifacts <file.cairn>\n  {binary} diff <before.cairn> <after.cairn>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 

@@ -17,7 +17,7 @@ use execution_tape::vm::{Limits, Vm};
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
-use crate::runtime::{self, CairnHost, HostObjectKind, RuntimeLayout};
+use crate::runtime::{self, HostObjectKind, InterlokoHost, RuntimeLayout};
 use crate::syntax::{CstElement, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, syntax, tape};
 
@@ -2426,7 +2426,7 @@ fn run_zero_arg_function_i64(
         };
     };
 
-    let host = CairnHost::new(tape.runtime.clone());
+    let host = InterlokoHost::new(tape.runtime.clone());
     let mut vm = Vm::new(host, Limits::default());
     let output = match vm.run(&tape.program, func, &[], TraceMask::NONE, None) {
         Ok(output) => output,

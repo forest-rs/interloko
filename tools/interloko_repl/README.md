@@ -31,8 +31,8 @@ square(5)
 ```
 
 Integer results print directly. Diagnostics are rendered through
-`interloko_diagnostics`, using the same `CAIRN_DIAGNOSTIC_LOCALE` and
-`CAIRN_DIAGNOSTIC_CATALOG` environment variables as `interloko_lab`.
+`interloko_diagnostics`, using the same `INTERLOKO_DIAGNOSTIC_LOCALE` and
+`INTERLOKO_DIAGNOSTIC_CATALOG` environment variables as `interloko_lab`.
 
 Interactive controls:
 

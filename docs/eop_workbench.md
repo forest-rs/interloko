@@ -178,7 +178,7 @@ cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projecte
 ```
 
 These records are host-provided environment objects. They do not make
-`CairnHost` enumerate runtime heap values, do not reflect Rust automatically,
+`InterlokoHost` enumerate runtime heap values, do not reflect Rust automatically,
 and do not create Cairn language semantics.
 
 ## Glossary

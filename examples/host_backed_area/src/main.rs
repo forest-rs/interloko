@@ -1,12 +1,14 @@
 //! Host-backed object Cairn example.
 
+use execution_tape::host::HostError;
+use execution_tape::value::Value;
 use interloko_compiler::driver::{CompileError, compile_with_host_registry};
-use interloko_compiler::runtime::{CairnHost, HostObjectAdapter, ValueKind as RuntimeValueKind};
+use interloko_compiler::runtime::{
+    HostObjectAdapter, InterlokoHost, ValueKind as RuntimeValueKind,
+};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
-use execution_tape::host::HostError;
-use execution_tape::value::Value;
 
 fn main() -> Result<(), CompileError> {
     let source = include_str!("../programs/host_backed_area.cairn");
@@ -15,7 +17,7 @@ fn main() -> Result<(), CompileError> {
 
     match dump_mode().as_deref() {
         None => {
-            let mut host = CairnHost::new(compiled.tape.runtime.clone());
+            let mut host = InterlokoHost::new(compiled.tape.runtime.clone());
             let circle = host_object(
                 &compiled,
                 &mut host,
@@ -71,7 +73,7 @@ fn host_registry() -> HostMetaRegistry {
 
 fn host_object(
     compiled: &interloko_compiler::driver::CompiledModule,
-    host: &mut CairnHost,
+    host: &mut InterlokoHost,
     class_name: &str,
     adapter: impl HostObjectAdapter + 'static,
 ) -> Value {

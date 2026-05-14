@@ -622,7 +622,7 @@ fn function_run_message(result: &FunctionRunResult) -> String {
 }
 
 fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
-    if let Ok(path) = env::var("CAIRN_DIAGNOSTIC_CATALOG") {
+    if let Ok(path) = env::var("INTERLOKO_DIAGNOSTIC_CATALOG") {
         let source = fs::read_to_string(&path).map_err(|error| ReplError::Io {
             path: path.clone(),
             error,
@@ -631,7 +631,7 @@ fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
         return Ok(DiagnosticRenderer::new(catalog));
     }
 
-    let renderer = match env::var("CAIRN_DIAGNOSTIC_LOCALE")
+    let renderer = match env::var("INTERLOKO_DIAGNOSTIC_LOCALE")
         .unwrap_or_else(|_| "en".into())
         .as_str()
     {
@@ -977,7 +977,7 @@ impl Prompt for CairnPrompt {
         if self.pending_definition {
             "define".into()
         } else {
-            "cairn".into()
+            "interloko".into()
         }
     }
 

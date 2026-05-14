@@ -135,7 +135,7 @@ fn collect_cairn_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
             collect_cairn_files(&path, paths)?;
         } else if path
             .extension()
-            .is_some_and(|extension| extension == "cairn")
+            .is_some_and(|extension| extension == "interloko")
         {
             paths.push(path);
         }

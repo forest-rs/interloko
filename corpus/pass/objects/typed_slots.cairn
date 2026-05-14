@@ -3,7 +3,7 @@
 // expect: dump ast contains valid? :: <boolean>
 // expect: dump sem contains item :: <circle>
 // expect: dump lowered contains <flag>.valid?: bool
-// expect: dump tape contains cairn.slot_get
+// expect: dump tape contains interloko.slot_get
 
 define class <circle> (<object>)
   slot radius :: <integer>;

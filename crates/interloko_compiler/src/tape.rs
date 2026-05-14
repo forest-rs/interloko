@@ -73,7 +73,7 @@ impl TapeError {
 /// dispatch opcodes.
 pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     let mut builder = ProgramBuilder::new();
-    builder.set_program_name("cairn");
+    builder.set_program_name("interloko");
     let host_sigs = HostSigs::new(&mut builder, module)?;
 
     let mut ids = TapeIds::default();

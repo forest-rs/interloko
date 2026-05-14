@@ -118,7 +118,7 @@ fn diagnostics_can_use_pseudo_catalog() {
     let path = diagnostic.to_str().expect("fixture path should be utf8");
     let (_stdout, stderr) = run_lab_success_with_env(
         &["dump", path, "--stage", "sem"],
-        &[("CAIRN_DIAGNOSTIC_LOCALE", "pseudo")],
+        &[("INTERLOKO_DIAGNOSTIC_LOCALE", "pseudo")],
     );
 
     assert!(stderr.contains("sem.unresolved-local"));
@@ -143,7 +143,7 @@ fn diagnostics_fail_for_missing_catalog_entries() {
 
     let stderr = run_lab_failure_with_env(
         &["dump", path, "--stage", "sem"],
-        &[("CAIRN_DIAGNOSTIC_CATALOG", catalog)],
+        &[("INTERLOKO_DIAGNOSTIC_CATALOG", catalog)],
     );
     let _ = fs::remove_file(catalog_path);
 
@@ -158,7 +158,7 @@ fn artifact_output_is_independent_of_diagnostic_locale() {
     let english = run_lab(&["artifacts", path]);
     let (pseudo, _stderr) = run_lab_success_with_env(
         &["artifacts", path],
-        &[("CAIRN_DIAGNOSTIC_LOCALE", "pseudo")],
+        &[("INTERLOKO_DIAGNOSTIC_LOCALE", "pseudo")],
     );
 
     assert_eq!(english, pseudo);

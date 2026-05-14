@@ -65,7 +65,7 @@ same semantic module path while the dependency direction improves.
 - `RuntimeLayout`, `RuntimeClass`, `RuntimeSlot`, `RuntimeGeneric`, and
   `RuntimeMethod`;
 - host-call symbols and `execution_tape` host signatures;
-- `CairnHost`, native object storage, boxed `<object>` values, strings,
+- `InterlokoHost`, native object storage, boxed `<object>` values, strings,
   symbols, vectors, metaobjects, and host-backed object adapters.
 
 `interloko_compiler` still owns semantic `ValueKind`, because it contains
