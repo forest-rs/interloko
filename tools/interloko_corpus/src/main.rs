@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use interloko_compiler::diagnostic::DiagnosticCode;
+use interloko_compiler::grammar_frontend::GrammarEnvironmentSelection;
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
     CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
@@ -90,10 +91,12 @@ fn dump_command(args: &[String]) -> Result<Outcome> {
     })?;
     let source = read_to_string(Path::new(&args[1]))?;
     let registry = parse_host_registry(Path::new(&args[1]), &source)?;
-    let artifacts = CompilerSession::compile_source_with_host_registry(
+    let grammar_environment = parse_grammar_environment(Path::new(&args[1]), &source)?;
+    let artifacts = CompilerSession::compile_source_with_grammar_and_host_registry(
         &args[1],
         &source,
         RuntimeMode::CompileOnly,
+        grammar_environment,
         &registry,
     );
     print!("{}", artifacts.dump_stage(stage));
@@ -108,13 +111,14 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
     let mut cases = Vec::with_capacity(paths.len());
     for path in paths {
         let source = read_to_string(&path)?;
-        let (expectations, host_registry) = parse_header(&path, &source)?;
+        let (expectations, host_registry, grammar_environment) = parse_header(&path, &source)?;
         let display_path = display_path(root, &path);
         cases.push(Case {
             display_path,
             source,
             expectations,
             host_registry,
+            grammar_environment,
         });
     }
     Ok(cases)
@@ -143,9 +147,17 @@ fn collect_loko_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn parse_header(path: &Path, source: &str) -> Result<(Vec<Expectation>, HostMetaRegistry)> {
+fn parse_header(
+    path: &Path,
+    source: &str,
+) -> Result<(
+    Vec<Expectation>,
+    HostMetaRegistry,
+    GrammarEnvironmentSelection,
+)> {
     let mut expectations = Vec::new();
     let mut host_registry = HostMetaRegistry::new();
+    let mut grammar_environment = GrammarEnvironmentSelection::BaseLoko;
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
@@ -153,6 +165,8 @@ fn parse_header(path: &Path, source: &str) -> Result<(Vec<Expectation>, HostMeta
                 expectations.push(parse_expectation(path, index + 1, rest.trim())?);
             } else if let Some(rest) = trimmed.strip_prefix("// host-class:") {
                 host_registry.add_class(parse_host_class(path, index + 1, rest.trim())?);
+            } else if let Some(rest) = trimmed.strip_prefix("// grammar:") {
+                grammar_environment = parse_grammar_selection(path, index + 1, rest.trim())?;
             }
             continue;
         }
@@ -166,7 +180,7 @@ fn parse_header(path: &Path, source: &str) -> Result<(Vec<Expectation>, HostMeta
             message: "missing // expect: header".into(),
         });
     }
-    Ok((expectations, host_registry))
+    Ok((expectations, host_registry, grammar_environment))
 }
 
 fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
@@ -182,6 +196,37 @@ fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
         break;
     }
     Ok(host_registry)
+}
+
+fn parse_grammar_environment(path: &Path, source: &str) -> Result<GrammarEnvironmentSelection> {
+    let mut selection = GrammarEnvironmentSelection::BaseLoko;
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// grammar:") {
+                selection = parse_grammar_selection(path, index + 1, rest.trim())?;
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(selection)
+}
+
+fn parse_grammar_selection(
+    path: &Path,
+    line: usize,
+    input: &str,
+) -> Result<GrammarEnvironmentSelection> {
+    match input {
+        "base-loko" => Ok(GrammarEnvironmentSelection::BaseLoko),
+        "derived-host" => Ok(GrammarEnvironmentSelection::DerivedHost),
+        _ => Err(invalid_header(
+            path,
+            line,
+            "grammar must be `base-loko` or `derived-host`",
+        )),
+    }
 }
 
 fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> {
@@ -356,15 +401,20 @@ fn check_case(case: &Case) -> Vec<String> {
 
 fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::SessionArtifacts {
     if has_host_registry(&case.host_registry) {
-        CompilerSession::compile_source_with_host_registry(
+        CompilerSession::compile_source_with_grammar_and_host_registry(
             &case.display_path,
             &case.source,
             mode,
+            case.grammar_environment,
             &case.host_registry,
         )
     } else {
         let mut session = IncrementalCompilerSession::new();
-        let source = session.add_source(&case.display_path, &case.source);
+        let source = session.add_source_with_grammar(
+            &case.display_path,
+            &case.source,
+            case.grammar_environment,
+        );
         session
             .compile(source, mode)
             .expect("source was just added to incremental session")
@@ -453,6 +503,7 @@ struct Case {
     source: String,
     expectations: Vec<Expectation>,
     host_registry: HostMetaRegistry,
+    grammar_environment: GrammarEnvironmentSelection,
 }
 
 #[derive(Debug)]

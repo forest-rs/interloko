@@ -291,6 +291,40 @@ fn eop_reports_environment_objects_and_affordances() {
 }
 
 #[test]
+fn grammar_header_selects_derived_host_stack() {
+    let file = fixture("derived_grammar.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+    let eop = run_lab(&["eop", path]);
+
+    assert!(eop.contains("object language-environment:derived-host"));
+    assert!(eop.contains("object grammar:derived-host"));
+    assert!(eop.contains("object grammar-rule:derived-host/function-definition"));
+    assert!(eop.contains("origin=host-provided storage=cached-artifact"));
+    assert!(eop.contains("object effective-grammar-rule:derived-host/function-definition"));
+    assert!(eop.contains("resolution=override"));
+    assert!(eop.contains("object effective-grammar-rule:derived-host/class-definition"));
+    assert!(eop.contains("resolution=inherited"));
+
+    let stack = run_lab(&[
+        "invoke-affordance",
+        path,
+        "language-environment:derived-host",
+        "show-grammar-stack",
+    ]);
+    assert!(stack.contains("BaseLokoGrammar"));
+    assert!(stack.contains("DerivedHostGrammar"));
+
+    let rule = run_lab(&[
+        "invoke-affordance",
+        path,
+        "effective-grammar-rule:derived-host/function-definition",
+        "show-grammar-rule",
+    ]);
+    assert!(rule.contains("effective grammar rule"));
+    assert!(rule.contains("resolution override"));
+}
+
+#[test]
 fn inspect_reports_structured_environment_objects() {
     let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");

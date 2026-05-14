@@ -21,6 +21,9 @@ Supported expectations:
   `all`.
 - `// host-class: <name> slot:<type>`: declare host-backed metadata for
   compile/dump corpus cases. This is a corpus runner header, not Loko syntax.
+- `// grammar: base-loko|derived-host`: select the grammar environment used by
+  the session. `derived-host` is a trusted fixture that extends the base grammar
+  for MOP/trace inspection while delegating parsing to the base parser.
 
 Use `corpus/pass` for programs that should compile and run cleanly. Use
 `corpus/fail` for programs that intentionally exercise diagnostics.

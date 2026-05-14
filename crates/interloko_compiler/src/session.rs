@@ -16,7 +16,8 @@ use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::grammar_frontend::{
-    self, GrammarActivation, GrammarParseReport, GrammarRule, LanguageEnvironment,
+    self, GrammarActivation, GrammarEnvironmentSelection, GrammarParseReport, GrammarRule,
+    LanguageEnvironment,
 };
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
@@ -33,6 +34,8 @@ pub struct SourceFile {
     pub name: String,
     /// Source text.
     pub source: String,
+    /// Grammar environment selected for this source.
+    pub grammar_environment: GrammarEnvironmentSelection,
 }
 
 impl SourceFile {
@@ -42,13 +45,41 @@ impl SourceFile {
         Self::with_id(SourceFileId::from_path(name), name, source)
     }
 
+    /// Creates a named source file using `name` as the stable identity input
+    /// and an explicit grammar environment.
+    #[must_use]
+    pub fn named_with_grammar(
+        name: &str,
+        source: &str,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> Self {
+        Self::with_id_and_grammar(
+            SourceFileId::from_path(name),
+            name,
+            source,
+            grammar_environment,
+        )
+    }
+
     /// Creates a named source file with an explicit id.
     #[must_use]
     pub fn with_id(id: SourceFileId, name: &str, source: &str) -> Self {
+        Self::with_id_and_grammar(id, name, source, GrammarEnvironmentSelection::BaseLoko)
+    }
+
+    /// Creates a named source file with an explicit id and grammar environment.
+    #[must_use]
+    pub fn with_id_and_grammar(
+        id: SourceFileId,
+        name: &str,
+        source: &str,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> Self {
         Self {
             id,
             name: name.to_string(),
             source: source.to_string(),
+            grammar_environment,
         }
     }
 }
@@ -795,9 +826,49 @@ impl CompilerSession {
         id
     }
 
+    /// Adds a named source file with an explicit grammar environment.
+    pub fn add_source_with_grammar(
+        &mut self,
+        name: &str,
+        source: &str,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> SourceFileId {
+        let file = SourceFile::named_with_grammar(name, source, grammar_environment);
+        let id = file.id;
+        self.files.push(file);
+        id
+    }
+
     /// Adds a source file with an explicit id.
     pub fn add_source_with_id(&mut self, id: SourceFileId, name: &str, source: &str) {
         self.files.push(SourceFile::with_id(id, name, source));
+    }
+
+    /// Adds a source file with an explicit id and grammar environment.
+    pub fn add_source_with_id_and_grammar(
+        &mut self,
+        id: SourceFileId,
+        name: &str,
+        source: &str,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) {
+        self.files.push(SourceFile::with_id_and_grammar(
+            id,
+            name,
+            source,
+            grammar_environment,
+        ));
+    }
+
+    /// Changes one source file's grammar environment.
+    pub fn set_grammar_environment(
+        &mut self,
+        id: SourceFileId,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> Option<()> {
+        let file = self.files.iter_mut().find(|file| file.id == id)?;
+        file.grammar_environment = grammar_environment;
+        Some(())
     }
 
     /// Returns a source file by id.
@@ -818,6 +889,21 @@ impl CompilerSession {
         compile_file(&SourceFile::named(name, source), mode)
     }
 
+    /// Compiles a named source with an explicit grammar environment without
+    /// storing it in the session.
+    #[must_use]
+    pub fn compile_source_with_grammar(
+        name: &str,
+        source: &str,
+        mode: RuntimeMode,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> SessionArtifacts {
+        compile_file(
+            &SourceFile::named_with_grammar(name, source, grammar_environment),
+            mode,
+        )
+    }
+
     /// Compiles a named source with host-backed metaobject declarations.
     #[must_use]
     pub fn compile_source_with_host_registry(
@@ -827,6 +913,23 @@ impl CompilerSession {
         registry: &sem::HostMetaRegistry,
     ) -> SessionArtifacts {
         compile_file_with_host_registry(&SourceFile::named(name, source), mode, registry)
+    }
+
+    /// Compiles a named source with host-backed metadata and an explicit
+    /// grammar environment.
+    #[must_use]
+    pub fn compile_source_with_grammar_and_host_registry(
+        name: &str,
+        source: &str,
+        mode: RuntimeMode,
+        grammar_environment: GrammarEnvironmentSelection,
+        registry: &sem::HostMetaRegistry,
+    ) -> SessionArtifacts {
+        compile_file_with_host_registry(
+            &SourceFile::named_with_grammar(name, source, grammar_environment),
+            mode,
+            registry,
+        )
     }
 
     /// Compiles source with an explicit source file id without storing it.
@@ -840,6 +943,22 @@ impl CompilerSession {
         compile_file(&SourceFile::with_id(id, name, source), mode)
     }
 
+    /// Compiles source with an explicit source file id and grammar environment
+    /// without storing it.
+    #[must_use]
+    pub fn compile_source_with_id_and_grammar(
+        id: SourceFileId,
+        name: &str,
+        source: &str,
+        mode: RuntimeMode,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> SessionArtifacts {
+        compile_file(
+            &SourceFile::with_id_and_grammar(id, name, source, grammar_environment),
+            mode,
+        )
+    }
+
     /// Compiles source with an explicit source file id and host-backed registry.
     #[must_use]
     pub fn compile_source_with_id_and_host_registry(
@@ -850,6 +969,24 @@ impl CompilerSession {
         registry: &sem::HostMetaRegistry,
     ) -> SessionArtifacts {
         compile_file_with_host_registry(&SourceFile::with_id(id, name, source), mode, registry)
+    }
+
+    /// Compiles source with an explicit source file id, grammar environment,
+    /// and host-backed registry.
+    #[must_use]
+    pub fn compile_source_with_id_grammar_and_host_registry(
+        id: SourceFileId,
+        name: &str,
+        source: &str,
+        mode: RuntimeMode,
+        grammar_environment: GrammarEnvironmentSelection,
+        registry: &sem::HostMetaRegistry,
+    ) -> SessionArtifacts {
+        compile_file_with_host_registry(
+            &SourceFile::with_id_and_grammar(id, name, source, grammar_environment),
+            mode,
+            registry,
+        )
     }
 
     /// Diffs two source versions.
@@ -884,16 +1021,57 @@ impl IncrementalCompilerSession {
         id
     }
 
+    /// Adds a named source file with an explicit grammar environment.
+    pub fn add_source_with_grammar(
+        &mut self,
+        name: &str,
+        source: &str,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> SourceFileId {
+        let file = SourceFile::named_with_grammar(name, source, grammar_environment);
+        let id = file.id;
+        self.files.push(CachedSourceFile::new(file));
+        id
+    }
+
     /// Adds a source file with an explicit stable id.
     pub fn add_source_with_id(&mut self, id: SourceFileId, name: &str, source: &str) {
         self.files
             .push(CachedSourceFile::new(SourceFile::with_id(id, name, source)));
     }
 
+    /// Adds a source file with an explicit stable id and grammar environment.
+    pub fn add_source_with_id_and_grammar(
+        &mut self,
+        id: SourceFileId,
+        name: &str,
+        source: &str,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) {
+        self.files
+            .push(CachedSourceFile::new(SourceFile::with_id_and_grammar(
+                id,
+                name,
+                source,
+                grammar_environment,
+            )));
+    }
+
     /// Edits a source file's text while preserving its stable id and name.
     pub fn edit_source(&mut self, id: SourceFileId, source: &str) -> Option<()> {
         let file = self.file_mut(id)?;
         file.source.source = source.to_string();
+        Some(())
+    }
+
+    /// Changes a source file's grammar environment while preserving its text.
+    pub fn set_grammar_environment(
+        &mut self,
+        id: SourceFileId,
+        grammar_environment: GrammarEnvironmentSelection,
+    ) -> Option<()> {
+        let file = self.file_mut(id)?;
+        file.source.grammar_environment = grammar_environment;
         Some(())
     }
 
@@ -923,6 +1101,17 @@ impl IncrementalCompilerSession {
         self.compile(id, mode)
     }
 
+    /// Changes a source file's grammar environment and recompiles it.
+    pub fn set_grammar_environment_and_compile(
+        &mut self,
+        id: SourceFileId,
+        grammar_environment: GrammarEnvironmentSelection,
+        mode: RuntimeMode,
+    ) -> Option<IncrementalUpdate> {
+        self.set_grammar_environment(id, grammar_environment)?;
+        self.compile(id, mode)
+    }
+
     fn file_mut(&mut self, id: SourceFileId) -> Option<&mut CachedSourceFile> {
         self.files.iter_mut().find(|file| file.source.id == id)
     }
@@ -933,7 +1122,7 @@ impl IncrementalCompilerSession {
         let previous_cache = self.files[index].cache.clone();
         let previous_source = previous_artifacts
             .as_ref()
-            .map(|artifacts| artifacts.source.source.clone());
+            .map(|artifacts| artifacts.source.clone());
         let artifacts = self.files[index].artifacts_for(&source, mode);
         let diff = previous_artifacts
             .as_ref()
@@ -941,7 +1130,7 @@ impl IncrementalCompilerSession {
         let reports = cache_reports(
             previous_cache.as_ref(),
             diff.as_ref(),
-            previous_source.as_deref(),
+            previous_source.as_ref(),
             &artifacts,
         );
         let cache = ArtifactCache::from_update(&artifacts, &reports);
@@ -1038,8 +1227,11 @@ impl IncrementalUpdate {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "incremental report for {} ({}) revision {}",
-            self.source.name, self.source.id, self.revision
+            "incremental report for {} ({}) revision {} grammar {}",
+            self.source.name,
+            self.source.id,
+            self.revision,
+            self.source.grammar_environment.as_str()
         );
         let _ = writeln!(out, "summary:");
         let _ = writeln!(out, "  reused {}", self.reused_count());
@@ -1314,10 +1506,13 @@ impl ArtifactCache {
 fn cache_reports(
     previous: Option<&ArtifactCache>,
     diff: Option<&SessionDiff>,
-    previous_source: Option<&str>,
+    previous_source: Option<&SourceFile>,
     artifacts: &SessionArtifacts,
 ) -> Vec<CacheArtifactReport> {
-    let source_changed = previous_source.is_some_and(|source| source != artifacts.source.source);
+    let source_changed =
+        previous_source.is_some_and(|source| source.source != artifacts.source.source);
+    let grammar_changed = previous_source
+        .is_some_and(|source| source.grammar_environment != artifacts.source.grammar_environment);
     let affected = diff.map_or(&[][..], |diff| diff.affected.as_slice());
     artifacts
         .artifact_reports()
@@ -1325,15 +1520,19 @@ fn cache_reports(
         .map(|report| {
             let fingerprint = artifact_fingerprint(report.artifact, artifacts);
             let previous = previous.and_then(|cache| cache.get(report.key));
-            let action = if previous.is_some_and(|entry| entry.fingerprint == fingerprint) {
+            let forced_by_grammar = grammar_changed && artifact_depends_on_grammar(report.artifact);
+            let action = if !forced_by_grammar
+                && previous.is_some_and(|entry| entry.fingerprint == fingerprint)
+            {
                 CacheAction::Reused
             } else {
                 CacheAction::Recomputed
             };
+            let sem_affected = affected.iter().any(|item| item.key == report.key);
+            let affected = sem_affected || forced_by_grammar;
             let invalidated = previous.is_some()
                 && action == CacheAction::Recomputed
-                && (source_changed || affected.iter().any(|item| item.key == report.key));
-            let affected = affected.iter().any(|item| item.key == report.key);
+                && (source_changed || grammar_changed || sem_affected);
             let metrics = match action {
                 CacheAction::Reused => ArtifactMetrics::default(),
                 CacheAction::Recomputed => ArtifactMetrics {
@@ -1351,6 +1550,10 @@ fn cache_reports(
             }
         })
         .collect()
+}
+
+fn artifact_depends_on_grammar(artifact: QueryArtifact) -> bool {
+    !matches!(artifact, QueryArtifact::Source)
 }
 
 fn artifact_fingerprint(
@@ -2431,7 +2634,11 @@ fn compile_file_with_host_registry(
     mode: RuntimeMode,
     registry: &sem::HostMetaRegistry,
 ) -> SessionArtifacts {
-    let grammar_parse = grammar_frontend::parse_file(file.id, &file.source);
+    let grammar_parse = grammar_frontend::parse_file_with_environment(
+        file.id,
+        &file.source,
+        file.grammar_environment,
+    );
     let syntax = grammar_parse.syntax.clone();
     let ast = ast::lower(&syntax);
     let sem = sem::lower_with_host_registry(&ast, registry);
@@ -5727,6 +5934,7 @@ mod tests {
                         define generic area(x);\n\
                         define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                         define function main()\n  area(make(<circle>, radius: 10))\nend;";
+    const SIMPLE_MAIN: &str = "define function main()\n  42\nend";
 
     fn eop_object<'a>(objects: &'a [EnvironmentObject], id: &str) -> &'a EnvironmentObject {
         objects
@@ -5863,6 +6071,7 @@ mod tests {
         assert!(eop.contains("object language-environment:base-loko"));
         assert!(eop.contains("object grammar:base-loko"));
         assert!(eop.contains("object grammar-rule:base-loko/function-definition"));
+        assert!(eop.contains("object effective-grammar-rule:base-loko/function-definition"));
         assert!(eop.contains("object grammar-activation:base-loko/source-file"));
         assert!(eop.contains("object class:c0"));
         assert!(eop.contains("object generic:g0"));
@@ -5931,6 +6140,65 @@ mod tests {
                 eop_object(&after_objects, id).id
             );
         }
+    }
+
+    #[test]
+    fn grammar_environment_selection_changes_stack_and_cache_reports() {
+        let source_file = SourceFileId::from_path("examples/grammar.loko");
+        let mut session = IncrementalCompilerSession::new();
+        session.add_source_with_id(source_file, "examples/grammar.loko", SIMPLE_MAIN);
+        let base = session
+            .compile(source_file, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        let derived = session
+            .set_grammar_environment_and_compile(
+                source_file,
+                GrammarEnvironmentSelection::DerivedHost,
+                RuntimeMode::CompileOnly,
+            )
+            .expect("source was just added");
+
+        assert!(
+            base.artifacts
+                .dump_grammar_stack()
+                .contains("BaseLokoGrammar")
+        );
+        assert!(
+            derived
+                .artifacts
+                .dump_grammar_stack()
+                .contains("DerivedHostGrammar")
+        );
+        assert!(
+            derived
+                .artifacts
+                .dump_stage(DumpStage::Eop)
+                .contains("effective-grammar-rule:derived-host/function-definition")
+        );
+
+        let grammar_stack = derived
+            .reports
+            .iter()
+            .find(|report| report.artifact == QueryArtifact::GrammarStack)
+            .expect("grammar stack report");
+        let grammar_parse = derived
+            .reports
+            .iter()
+            .find(|report| report.artifact == QueryArtifact::GrammarParse)
+            .expect("grammar parse report");
+        let source = derived
+            .reports
+            .iter()
+            .find(|report| report.artifact == QueryArtifact::Source)
+            .expect("source report");
+
+        assert_eq!(source.action, CacheAction::Reused);
+        assert_eq!(grammar_stack.action, CacheAction::Recomputed);
+        assert!(grammar_stack.invalidated);
+        assert!(grammar_stack.affected);
+        assert_eq!(grammar_parse.action, CacheAction::Recomputed);
+        assert!(grammar_parse.invalidated);
+        assert!(grammar_parse.affected);
     }
 
     #[test]

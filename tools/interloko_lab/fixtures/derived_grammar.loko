@@ -1,0 +1,5 @@
+// grammar: derived-host
+
+define function main()
+  42
+end

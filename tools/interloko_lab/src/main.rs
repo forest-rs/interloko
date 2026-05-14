@@ -6,6 +6,7 @@ use std::fmt::{self, Write as _};
 use std::fs;
 use std::path::Path;
 
+use interloko_compiler::grammar_frontend::GrammarEnvironmentSelection;
 use interloko_compiler::identity::SourceFileId;
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
@@ -111,13 +112,21 @@ fn run(args: Vec<String>) -> Result<()> {
             let source_file = SourceFileId::from_path(&args[1]);
             let before = read_path(&args[1])?;
             let after = read_path(&args[2])?;
+            let before_grammar = parse_grammar_environment(Path::new(&args[1]), &before)?;
+            let after_grammar = parse_grammar_environment(Path::new(&args[2]), &after)?;
             let mut session = IncrementalCompilerSession::new();
-            session.add_source_with_id(source_file, &args[1], &before);
+            session.add_source_with_id_and_grammar(source_file, &args[1], &before, before_grammar);
             let _ = session
                 .compile(source_file, RuntimeMode::CompileOnly)
                 .expect("source was just added");
+            session
+                .edit_source(source_file, &after)
+                .expect("source was just added");
+            session
+                .set_grammar_environment(source_file, after_grammar)
+                .expect("source was just added");
             let update = session
-                .edit_and_compile(source_file, &after, RuntimeMode::CompileOnly)
+                .compile(source_file, RuntimeMode::CompileOnly)
                 .expect("source was just added");
             print!("{}", update.dump_cache_report());
             Ok(())
@@ -133,10 +142,16 @@ fn compile_path(path: &str, mode: RuntimeMode) -> Result<SessionArtifacts> {
 
 fn compile_workbench_path(path: &str, mode: RuntimeMode) -> Result<CompiledWorkbench> {
     let source = read_path(path)?;
+    let grammar_environment = parse_grammar_environment(Path::new(path), &source)?;
     let registry = parse_host_registry(Path::new(path), &source)?;
     let host_environment = parse_host_environment(Path::new(path), &source)?;
-    let artifacts =
-        CompilerSession::compile_source_with_host_registry(path, &source, mode, &registry);
+    let artifacts = CompilerSession::compile_source_with_grammar_and_host_registry(
+        path,
+        &source,
+        mode,
+        grammar_environment,
+        &registry,
+    );
     Ok(CompiledWorkbench {
         artifacts,
         host_environment,
@@ -600,6 +615,37 @@ fn mop_section(artifacts: &SessionArtifacts, start: &str, end: &str) -> String {
         .map_or_else(|| section.into(), |end_index| section[..end_index].into())
 }
 
+fn parse_grammar_environment(path: &Path, source: &str) -> Result<GrammarEnvironmentSelection> {
+    let mut selection = GrammarEnvironmentSelection::BaseLoko;
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// grammar:") {
+                selection = parse_grammar_selection(path, index + 1, rest.trim())?;
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(selection)
+}
+
+fn parse_grammar_selection(
+    path: &Path,
+    line: usize,
+    input: &str,
+) -> Result<GrammarEnvironmentSelection> {
+    match input {
+        "base-loko" => Ok(GrammarEnvironmentSelection::BaseLoko),
+        "derived-host" => Ok(GrammarEnvironmentSelection::DerivedHost),
+        _ => Err(LabError::InvalidGrammarHeader {
+            path: path.display().to_string(),
+            line,
+            message: "grammar must be `base-loko` or `derived-host`".into(),
+        }),
+    }
+}
+
 fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
     let mut host_registry = HostMetaRegistry::new();
     for (index, line) in source.lines().enumerate() {
@@ -848,6 +894,11 @@ enum LabError {
         line: usize,
         message: String,
     },
+    InvalidGrammarHeader {
+        path: String,
+        line: usize,
+        message: String,
+    },
     UnknownObject {
         id: String,
         available: Vec<String>,
@@ -875,6 +926,7 @@ impl LabError {
         match self {
             Self::Usage(_)
             | Self::InvalidHeader { .. }
+            | Self::InvalidGrammarHeader { .. }
             | Self::InvalidHostEopHeader { .. }
             | Self::UnknownObject { .. }
             | Self::UnknownDispatchSite { .. }
@@ -904,6 +956,13 @@ impl fmt::Display for LabError {
                 message,
             } => {
                 write!(f, "{path}:{line}: invalid host-eop header: {message}")
+            }
+            Self::InvalidGrammarHeader {
+                path,
+                line,
+                message,
+            } => {
+                write!(f, "{path}:{line}: invalid grammar header: {message}")
             }
             Self::UnknownObject { id, available } => {
                 write!(f, "unknown object id `{id}`")?;

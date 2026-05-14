@@ -1,0 +1,9 @@
+// grammar: derived-host
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump mop contains DerivedHostGrammar
+// expect: dump eop contains effective-grammar-rule:derived-host/function-definition
+
+define function main()
+  42
+end

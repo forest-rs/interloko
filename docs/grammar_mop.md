@@ -16,15 +16,15 @@ compatibility, or user-defined parser rules.
 
 ## Current Records
 
-The base projection names one language environment and one grammar:
+The default projection names one language environment and one grammar:
 
 ```text
 language-environment:base-loko  BaseLokoEnvironment
 grammar:base-loko               BaseLokoGrammar
 ```
 
-`BaseLokoGrammar` contains direct grammar-rule records projected from the
-current parser surface, such as:
+`BaseLokoGrammar` contains direct and effective grammar-rule records projected
+from the current parser surface, such as:
 
 ```text
 grammar-rule:base-loko/source-file
@@ -32,6 +32,7 @@ grammar-rule:base-loko/class-definition
 grammar-rule:base-loko/function-definition
 grammar-rule:base-loko/method-definition
 grammar-rule:base-loko/expression
+effective-grammar-rule:base-loko/function-definition
 ```
 
 Each rule records:
@@ -45,6 +46,19 @@ Each rule records:
 - optional source span information, currently `none` because these rules are
   compiler-projected Rust facts rather than source-authored grammar forms.
 
+There is also a trusted host fixture:
+
+```text
+language-environment:derived-host  DerivedHostEnvironment
+grammar:derived-host               DerivedHostGrammar extends BaseLokoGrammar
+```
+
+`DerivedHostGrammar` overrides the projected `function-definition` rule and
+inherits every other effective rule from `BaseLokoGrammar`. This proves direct
+and effective rule records can be inspected separately. It still delegates CST
+construction to the base parser; it is a grammar-stack/provenance fixture, not
+new syntax.
+
 ## Parse Reports
 
 The grammar frontend wraps the existing `syntax::parse_file` path and returns a
@@ -55,7 +69,7 @@ That report contains:
 - the parsed `SyntaxTree`;
 - the resolved language environment;
 - the resolved grammar stack;
-- projected grammar and direct-rule records;
+- projected grammar, direct-rule, and effective-rule records;
 - grammar activations over source regions;
 - parse provenance with per-rule CST node counts;
 - syntax diagnostics from the existing parser.
@@ -82,6 +96,16 @@ cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_d
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko language-environment:base-loko show-parse-trace
 ```
 
+Workbench and corpus files can select the derived fixture with a leading
+header:
+
+```text
+// grammar: derived-host
+```
+
+The default is `// grammar: base-loko`. The header is workbench/corpus session
+input, not Loko syntax.
+
 The artifact graph now separates the frontend facts:
 
 ```text
@@ -95,8 +119,6 @@ edits look like grammar edits.
 
 Later slices may add:
 
-- host-provided derived grammars;
-- effective grammar rules computed from grammar inheritance;
 - source-authored grammar declarations;
 - staged parsing over source regions;
 - structural semantic actions that emit forms or grammar deltas.
