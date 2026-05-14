@@ -1,6 +1,6 @@
-//! Thin invalidation shell for Cairn compiler query artifacts.
+//! Thin invalidation shell for Interloko compiler query artifacts.
 //!
-//! Cairn owns artifacts and scheduling. This module only maps compiler query
+//! Interloko owns artifacts and scheduling. This module only maps compiler query
 //! artifacts into `invalidation` keys and exposes affected-order drains.
 
 use alloc::vec::Vec;

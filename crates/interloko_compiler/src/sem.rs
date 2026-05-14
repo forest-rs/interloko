@@ -1,4 +1,4 @@
-//! Semantic IR for the first generic-dispatch Cairn slice.
+//! Semantic IR for the first generic-dispatch Interloko slice.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -69,7 +69,7 @@ pub enum KnownCallable {
 /// Semantic value category for this slice.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ValueKind {
-    /// Top Cairn value category corresponding to source `<object>`.
+    /// Top value category corresponding to source `<object>`.
     Any,
     /// Signed integer value.
     I64,
@@ -230,7 +230,7 @@ impl HostMetaRegistry {
 /// Host-backed class declaration supplied by a Rust adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostClass {
-    /// Cairn-visible class name, such as `<rust-circle>`.
+    /// Loko-visible class name, such as `<rust-circle>`.
     pub name: String,
     /// Host-backed slots in source-visible slot order.
     pub slots: Vec<HostSlot>,
@@ -257,9 +257,9 @@ impl HostClass {
 /// Host-backed read-only slot declaration supplied by a Rust adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostSlot {
-    /// Cairn-visible slot/accessor name.
+    /// Loko-visible slot/accessor name.
     pub name: String,
-    /// Declared Cairn value category.
+    /// Declared value category.
     pub kind: ValueKind,
     /// Human-readable type name used by dumps.
     pub type_name: String,
@@ -280,7 +280,7 @@ impl HostSlot {
 /// Host-backed function declaration supplied by a Rust adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostFunction {
-    /// Cairn-visible function name.
+    /// Loko-visible function name.
     pub name: String,
     /// Declared parameter value categories.
     pub param_kinds: Vec<ValueKind>,
@@ -303,7 +303,7 @@ impl HostFunction {
 /// Origin of a semantic class metaobject.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ClassOrigin {
-    /// Class defined in Cairn source.
+    /// Class defined in Loko source.
     Native,
     /// Built-in value class supplied by the language kernel.
     BuiltinValue {
@@ -320,7 +320,7 @@ pub enum ClassOrigin {
 /// Origin of a semantic slot metaobject.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SlotOrigin {
-    /// Slot defined in Cairn source.
+    /// Slot defined in Loko source.
     Native,
     /// Slot declared by the host-backed metaobject registry.
     HostBacked {
@@ -373,14 +373,14 @@ pub type GenericParamKind = Option<ValueKind>;
 
 /// One method specializer in parameter order.
 ///
-/// `None` represents source `<object>`, which is Cairn's current top value
+/// `None` represents source `<object>`, which is Interloko's current top value
 /// category rather than a nominal [`ClassId`].
 pub type MethodSpecializer = Option<ClassId>;
 
 /// Origin of a semantic generic function metaobject.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum GenericFunctionOrigin {
-    /// Generic declared directly in Cairn source.
+    /// Generic declared directly in Loko source.
     Source,
     /// Compiler-synthesized generic for a writable native slot setter.
     SlotSetter {
@@ -421,7 +421,7 @@ pub enum MethodSelection {
 
 impl Module {
     /// Returns true when `actual` is the same class as `expected` or inherits
-    /// from it through Cairn's single nominal superclass chain.
+    /// from it through Interloko's single nominal superclass chain.
     #[must_use]
     pub fn is_same_or_subclass(&self, actual: ClassId, expected: ClassId) -> bool {
         is_same_or_subclass_in_classes(&self.classes, actual, expected)
@@ -450,7 +450,7 @@ impl Module {
     }
 
     /// Returns true when two class specializers can describe at least one
-    /// common runtime class in Cairn's current single-inheritance lattice.
+    /// common runtime class in Interloko's current single-inheritance lattice.
     #[must_use]
     pub fn classes_may_overlap(&self, left: ClassId, right: ClassId) -> bool {
         self.is_same_or_subclass(left, right) || self.is_same_or_subclass(right, left)
@@ -802,7 +802,7 @@ pub struct GenericFunction {
 /// Origin of a semantic method metaobject.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MethodOrigin {
-    /// Method declared directly in Cairn source.
+    /// Method declared directly in Loko source.
     Source,
     /// Compiler-synthesized method for a writable native slot setter.
     SlotSetter {
@@ -1000,7 +1000,7 @@ impl From<ast::CompareOp> for CompareOp {
     }
 }
 
-/// Built-in read-only runtime operation exposed by the Cairn kernel.
+/// Built-in read-only runtime operation exposed by the Interloko kernel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Intrinsic {
     /// Returns a value's runtime class metaobject as `<object>`.

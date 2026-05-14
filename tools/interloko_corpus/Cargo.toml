@@ -3,7 +3,7 @@ name = "interloko_corpus"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Small-program corpus runner for Cairn compiler sessions."
+description = "Small-program corpus runner for Interloko compiler sessions."
 
 [dependencies]
 interloko_compiler = { path = "../../crates/interloko_compiler" }

@@ -1,4 +1,4 @@
-//! Milestone-0 end-to-end Cairn example.
+//! Milestone-0 end-to-end Interloko example.
 
 use interloko_compiler::driver::{CompileError, compile, compile_and_run_main};
 

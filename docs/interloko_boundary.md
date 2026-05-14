@@ -2,23 +2,22 @@
 
 ## Overview
 
-Interloko is the provisional name for the core technical substrate underneath
-the current Cairn prototype. The name is being introduced as an architecture
-boundary before any project-wide rename.
+Interloko is the core technical substrate and current compiler/runtime stack.
+Loko is the current source notation and `.loko` file format. Vivarium is
+reserved for the later collaborative environment built on those layers.
 
 The split is:
 
 ```text
-Interloko  core substrate for programmable object spaces
+Interloko  substrate, compiler/runtime crates, and object protocols
+Loko       source notation and language surface
 Vivarium   later collaborative environment and product layer
-Cairn      current prototype language/compiler name
-Loko       possible future language/notation name, not used yet
 ```
 
 In this repo, the first concrete Interloko artifacts are
 `crates/interloko_model` and `crates/interloko_runtime`. The model crate holds
 small shared facts. The runtime crate owns executable host support for the
-current object model without depending on Cairn semantic IR.
+current object model without depending on compiler semantic IR.
 
 ## Boundaries
 
@@ -30,9 +29,9 @@ future environment layers:
 - future protocol records that describe objects, host boundaries, and
   computations without owning a compiler pipeline.
 
-Cairn owns the current language implementation:
+`interloko_compiler` owns the current Loko implementation:
 
-- syntax and parsing;
+- source syntax and parsing;
 - AST and semantic IR;
 - type checking and diagnostics;
 - lowering and tape emission;

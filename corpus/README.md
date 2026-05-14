@@ -1,4 +1,4 @@
-# Cairn Small-Program Corpus
+# Interloko Small-Program Corpus
 
 This directory contains small `.loko` programs used by `tools/interloko_corpus`.
 Each program declares its expectations in leading comments:
@@ -20,7 +20,7 @@ Supported expectations:
   Stages are `syntax`, `ast`, `sem`, `mop`, `eop`, `lowered`, `tape`, and
   `all`.
 - `// host-class: <name> slot:<type>`: declare host-backed metadata for
-  compile/dump corpus cases. This is a corpus runner header, not Cairn syntax.
+  compile/dump corpus cases. This is a corpus runner header, not Loko syntax.
 
 Use `corpus/pass` for programs that should compile and run cleanly. Use
 `corpus/fail` for programs that intentionally exercise diagnostics.

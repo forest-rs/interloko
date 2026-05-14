@@ -1,4 +1,4 @@
-//! Small-program corpus runner for Cairn compiler sessions.
+//! Small-program corpus runner for Interloko compiler sessions.
 
 use std::env;
 use std::error::Error;
@@ -102,7 +102,7 @@ fn dump_command(args: &[String]) -> Result<Outcome> {
 
 fn load_cases(root: &Path) -> Result<Vec<Case>> {
     let mut paths = Vec::new();
-    collect_cairn_files(root, &mut paths)?;
+    collect_loko_files(root, &mut paths)?;
     paths.sort();
 
     let mut cases = Vec::with_capacity(paths.len());
@@ -120,7 +120,7 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
     Ok(cases)
 }
 
-fn collect_cairn_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_loko_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     let entries = fs::read_dir(root).map_err(|error| CorpusError::Io {
         path: root.display().to_string(),
         error,
@@ -132,7 +132,7 @@ fn collect_cairn_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
         })?;
         let path = entry.path();
         if path.is_dir() {
-            collect_cairn_files(&path, paths)?;
+            collect_loko_files(&path, paths)?;
         } else if path
             .extension()
             .is_some_and(|extension| extension == "loko")
@@ -193,7 +193,7 @@ fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> 
         return Err(invalid_header(
             path,
             line,
-            "host-class name must be a Cairn class name",
+            "host-class name must be a Loko class name",
         ));
     }
     let mut class = HostClass::new(name);

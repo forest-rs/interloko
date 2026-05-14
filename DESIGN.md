@@ -1,22 +1,23 @@
-# Cairn DESIGN.md
+# Interloko DESIGN.md
 
 ## Status
 
-Cairn is a bounded semantic-kernel/compiler experiment, not a production
-language and not a Dylan compatibility project.
+Interloko is a bounded semantic-kernel/compiler experiment, not a production
+environment and not a Dylan compatibility project. Loko is the current
+Dylan-shaped source notation used by that experiment.
 
-The near-term purpose of Cairn is to provide a concrete, demanding frontend for
+The near-term purpose of Interloko is to provide a concrete, demanding frontend for
 `execution_tape`, while exploring a modern Dylan-shaped language design centered
 on generic functions, typed/restartable effects, refinement-friendly types,
 host-backed metaobjects, and incremental compilation.
 
-The broader purpose is more specific than "a programming language": Cairn is
+The broader purpose is more specific than "a programming language": Interloko is
 the programmable semantic kernel for executable object systems that can live
 inside a larger human/agent workspace.
 
 That larger workspace may include persistent objects, documents, transcripts,
-tools, search, semantic UI, histories, branches, and live computations. Cairn
-does not own all of that. Cairn owns the language-level object/protocol model,
+tools, search, semantic UI, histories, branches, and live computations. Interloko
+does not own all of that. Interloko owns the language-level object/protocol model,
 semantic IR, executable behavior, and inspectable lowering path that such a
 workspace can build on.
 
@@ -24,14 +25,14 @@ The first milestone must stay small enough to implement and validate end-to-end.
 
 ## One-sentence summary
 
-Cairn is a Dylan-shaped semantic kernel for executable object systems: it
+Interloko is a Dylan-shaped semantic kernel for executable object systems: it
 models objects, generic behavior, conditions, host-backed metaobjects, and
 environment-facing affordances, then lowers that model through a DFMC-like
 middle layer into `execution_tape`, with Cranelift left as a later backend.
 
 ## Broader framing
 
-The long-term system around Cairn is closer to a programmable shared image than
+The long-term system around Interloko is closer to a programmable shared image than
 to a conventional app or standalone language implementation.
 
 The useful picture is:
@@ -41,7 +42,7 @@ world/image
   persistent object graph, histories, conversations, tasks, documents,
   tools, branches, traces, and live computations
 
-Cairn
+Interloko
   semantic object/protocol model, generic functions, methods, conditions,
   host-backed metaobjects, EOP/MOP records, executable behavior
 
@@ -57,7 +58,7 @@ execution_tape
   durable, inspectable, replayable execution substrate
 ```
 
-This framing gives Cairn a reason to exist beyond syntax. It is the layer that
+This framing gives Interloko a reason to exist beyond syntax. It is the layer that
 keeps environment objects, host-native Rust objects, user-authored code,
 compiler artifacts, and eventually agent-produced artifacts in one explicit
 semantic space.
@@ -73,7 +74,7 @@ capability policy.
 
 ### Boundary
 
-Cairn owns semantic facts and executable behavior. It explicitly does not own
+Interloko owns semantic facts and executable behavior. It explicitly does not own
 canonical persistence, UI rendering, search ranking, agent scheduling,
 capability enforcement, distributed synchronization, or the full workspace
 image.
@@ -86,7 +87,7 @@ That boundary keeps the strata replaceable:
 * Understory/Overstory can own presentation and interaction primitives.
 * A future image/world layer can own persistence, identity over time,
   transactions, permissions, and branches.
-* Cairn can stay focused on the semantic protocols and compilation path that
+* Interloko can stay focused on the semantic protocols and compilation path that
   make those layers coherent.
 
 ### Current first slice
@@ -101,8 +102,8 @@ image:
   `kind`, `class`, `origin`, `storage`, `presentation`, `affordances`,
   `execution`, and `inspection` facets. Text dumps are rendered views over
   those records.
-* Host-backed objects prove the boundary between Cairn semantic classes and
-  Rust-owned values: the host supplies handles and adapters; Cairn supplies the
+* Host-backed objects prove the boundary between Interloko semantic classes and
+  Rust-owned values: the host supplies handles and adapters; Interloko supplies the
   nominal object model and dispatch semantics.
 * Host-owned environment objects can be projected explicitly by Rust adapters.
   This is opt-in projection, not automatic host reflection or runtime heap
@@ -141,15 +142,15 @@ responsibilities inside the compiler.
 * Do not require the first version to have a complete type system.
 * Do not implement generic dispatch over parameterized type arguments in the first milestone.
 * Do not make this a replacement for Rust.
-* Do not make Cairn the persistence layer for the workspace image.
-* Do not make Cairn the UI toolkit, search engine, command router, or agent
+* Do not make Interloko the persistence layer for the workspace image.
+* Do not make Interloko the UI toolkit, search engine, command router, or agent
   scheduler.
 * Do not let EOP/MOP dumps imply stable serialization, capability enforcement,
   or persistent object identity before those protocols exist.
 
 ## Design posture
 
-Cairn should be designed as a sequence of small vertical slices.
+Interloko should be designed as a sequence of small vertical slices.
 
 The project should prefer:
 
@@ -174,9 +175,10 @@ The project should avoid:
 * vague "world model" claims that are not grounded in explicit object,
   protocol, lowering, and inspection data.
 
-## Language identity
+## Language Identity
 
-Cairn is Dylan-inspired, but not Dylan-compatible.
+Loko is Dylan-inspired, but not Dylan-compatible. Interloko is the substrate,
+compiler, runtime, and protocol stack that implements it.
 
 Its likely long-term identity is:
 
@@ -355,7 +357,7 @@ Binding should produce diagnostics, not panics, when names are unresolved.
 
 ### Semantic IR
 
-Semantic IR is the first representation where Cairn-specific semantics become explicit.
+Semantic IR is the first representation where Interloko-specific semantics become explicit.
 
 Long-term semantic IR should represent:
 
@@ -448,7 +450,7 @@ tape:     CALL area_circle
 
 ## Execution tape design pressure
 
-Cairn should help answer what `execution_tape` needs.
+Interloko should help answer what `execution_tape` needs.
 
 Likely useful tape capabilities:
 
@@ -509,7 +511,7 @@ Later runtime responsibilities:
 
 ## Parametric types
 
-Cairn should support parametric types, but they should not become the primary dispatch mechanism at first.
+Interloko should support parametric types, but they should not become the primary dispatch mechanism at first.
 
 Core principle:
 
@@ -595,7 +597,7 @@ Later, read-only abstractions may support covariance and sink-like abstractions 
 
 ### Reification
 
-Cairn should eventually support runtime type descriptors for some parameterized types.
+Interloko should eventually support runtime type descriptors for some parameterized types.
 
 However, do not require all type parameters to be universally reified in the first implementation.
 
@@ -619,7 +621,7 @@ Early implementation may treat many parametric types as semantic/checking constr
 
 ### Type objects
 
-Cairn should preserve a Dylan-like notion of type/class objects.
+Interloko should preserve a Dylan-like notion of type/class objects.
 
 Eventually, this should work:
 
@@ -651,7 +653,7 @@ Instead of starting with value parameters like:
 
 Initial rule:
 
-> Cairn v0/v1 supports type parameters. Value-level constraints are represented as refinements, not generic parameters.
+> Interloko v0/v1 supports type parameters. Value-level constraints are represented as refinements, not generic parameters.
 
 ### Parametric effects
 
@@ -694,7 +696,7 @@ Type =
 
 ## Effects and conditions
 
-Cairn’s effect system should be understood as a modernized, generalized condition/restart/control-flow system.
+Interloko’s effect system should be understood as a modernized, generalized condition/restart/control-flow system.
 
 Core idea:
 
@@ -783,7 +785,7 @@ An exploratory context can infer and report them.
 
 ## Incremental compilation and invalidation
 
-Cairn should be built around queryable compiler stages.
+Interloko should be built around queryable compiler stages.
 
 Possible queries:
 
@@ -802,7 +804,7 @@ Each query should record dependencies.
 
 A change should invalidate the smallest reasonable set of downstream artifacts.
 
-This makes Cairn a useful workload for the invalidation crate.
+This makes Interloko a useful workload for the invalidation crate.
 
 ## Milestones
 
@@ -981,15 +983,15 @@ Add:
 Initial simple layout:
 
 ```text
-cairn/
+interloko/
   crates/
-    cairn_syntax/
-    cairn_ast/
-    cairn_sem/
-    cairn_lower/
-    cairn_tape/
-    cairn_runtime/
-    cairn_driver/
+    interloko_syntax/
+    interloko_ast/
+    interloko_sem/
+    interloko_lower/
+    interloko_tape/
+    interloko_runtime/
+    interloko_driver/
   examples/
   tests/
   DESIGN.md
@@ -998,17 +1000,17 @@ cairn/
 Possible later layout:
 
 ```text
-cairn_syntax       // lexer, CST, syntax nodes
-cairn_parse        // parser, error recovery
-cairn_ast          // surface AST
-cairn_bind         // scopes, definitions, binding IDs
-cairn_sem          // typed/effectful semantic IR
-cairn_dfmc         // analysis and optimization layer
-cairn_lower        // backend-neutral lowering
-cairn_tape         // execution_tape backend
-cairn_clif         // Cranelift backend
-cairn_runtime      // object model, dispatch, conditions
-cairn_driver       // incremental query driver
+interloko_syntax       // lexer, CST, syntax nodes
+interloko_parse        // parser, error recovery
+interloko_ast          // surface AST
+interloko_bind         // scopes, definitions, binding IDs
+interloko_sem          // typed/effectful semantic IR
+interloko_dfmc         // analysis and optimization layer
+interloko_lower        // backend-neutral lowering
+interloko_tape         // execution_tape backend
+interloko_clif         // Cranelift backend
+interloko_runtime      // object model, dispatch, conditions
+interloko_driver       // incremental query driver
 interloko_diagnostics  // diagnostic types/rendering if needed
 ```
 
@@ -1073,7 +1075,7 @@ Milestone 0 must include at least one end-to-end test that compiles and runs a `
 A good first Codex goal should be narrow and verifiable:
 
 ```text
-/goal Build the initial Cairn compiler prototype as a bounded execution_tape frontend experiment.
+/goal Build the initial Interloko compiler prototype as a bounded execution_tape frontend experiment.
 
 Read DESIGN.md first. Implement only Milestone 0:
 - parse a tiny Dylan-like syntax for function definitions, let bindings, numeric literals, arithmetic, and calls;
@@ -1118,4 +1120,4 @@ Pause or narrow the project if:
 
 Keep the tape boring. Let the semantic layers be interesting.
 
-Cairn succeeds if it teaches us what the boring substrate must support while giving us a concrete playground for generic functions, typed effects, restartable conditions, parametric types, refinements, and incremental compilation.
+Interloko succeeds if it teaches us what the boring substrate must support while giving us a concrete playground for generic functions, typed effects, restartable conditions, parametric types, refinements, and incremental compilation.

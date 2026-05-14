@@ -14,11 +14,11 @@ Add a no-std in-memory incremental session/cache layer with edit APIs, artifact 
 
 ## Acceptance Criteria
 
-Incremental session edit API exists; cached artifacts report reused/recomputed/invalidated/affected states with dependency edges and counters; cairn_lab and cairn_corpus exercise it; full workspace gates pass.
+Incremental session edit API exists; cached artifacts report reused/recomputed/invalidated/affected states with dependency edges and counters; interloko_lab and interloko_corpus exercise it; full workspace gates pass.
 
 
 ## Notes
 
 **2026-05-12T01:08:22Z**
 
-Implemented IncrementalCompilerSession, expanded query artifacts for diagnostics/lowered/runtime, cache action reports with invalidated/affected flags and counters, cairn_lab diff incremental output, cairn_corpus incremental checks, focused tests, and docs/progress notes. fmt, clippy, workspace tests, docs, examples, lab commands, and corpus runner passed locally.
+Implemented IncrementalCompilerSession, expanded query artifacts for diagnostics/lowered/runtime, cache action reports with invalidated/affected flags and counters, interloko_lab diff incremental output, interloko_corpus incremental checks, focused tests, and docs/progress notes. fmt, clippy, workspace tests, docs, examples, lab commands, and corpus runner passed locally.

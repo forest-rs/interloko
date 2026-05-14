@@ -1,4 +1,4 @@
-//! CLI workbench for Cairn compiler sessions.
+//! CLI workbench for Interloko compiler sessions.
 
 use std::env;
 use std::error::Error;
@@ -618,7 +618,7 @@ fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> 
         return Err(invalid_header(
             path,
             line,
-            "host-class name must be a Cairn class name",
+            "host-class name must be a Loko class name",
         ));
     }
     let mut class = HostClass::new(name);
@@ -648,7 +648,7 @@ fn parse_host_eop_class(path: &Path, line: usize, input: &str) -> Result<Environ
         return Err(invalid_host_eop_header(
             path,
             line,
-            "host-eop-class class name must be a Cairn class name",
+            "host-eop-class class name must be a Loko class name",
         ));
     }
     if parts.next().is_some() {
@@ -678,7 +678,7 @@ fn parse_host_eop_instance(path: &Path, line: usize, input: &str) -> Result<Envi
         return Err(invalid_host_eop_header(
             path,
             line,
-            "host-eop-instance class name must be a Cairn class name",
+            "host-eop-instance class name must be a Loko class name",
         ));
     }
     let facts = parts.collect::<Vec<_>>().join(" ");

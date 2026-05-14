@@ -1,4 +1,4 @@
-//! Host-backed object Cairn example.
+//! Host-backed object Interloko example.
 
 use execution_tape::host::HostError;
 use execution_tape::value::Value;

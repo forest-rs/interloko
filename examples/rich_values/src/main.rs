@@ -1,4 +1,4 @@
-//! Rich value-type Cairn example.
+//! Rich value-type Interloko example.
 
 use interloko_compiler::driver::{CompileError, compile, compile_and_run_main};
 

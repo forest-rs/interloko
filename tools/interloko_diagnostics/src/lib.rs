@@ -1,4 +1,4 @@
-//! Diagnostic presentation adapters for Cairn tools.
+//! Diagnostic presentation adapters for Interloko tools.
 //!
 //! `interloko_compiler` emits structured diagnostic facts. This crate owns the
 //! presentation step that turns those facts into user-facing text through
@@ -26,12 +26,12 @@ pub struct DiagnosticCatalog {
 impl DiagnosticCatalog {
     /// Compiles the built-in English diagnostic catalog.
     pub fn english() -> Result<Self, DiagnosticCatalogError> {
-        Self::from_toml_source("cairn-diagnostics/en", ENGLISH_CATALOG_TOML)
+        Self::from_toml_source("interloko-diagnostics/en", ENGLISH_CATALOG_TOML)
     }
 
     /// Compiles the built-in pseudo-localized diagnostic catalog.
     pub fn pseudo() -> Result<Self, DiagnosticCatalogError> {
-        Self::from_toml_source("cairn-diagnostics/pseudo", PSEUDO_CATALOG_TOML)
+        Self::from_toml_source("interloko-diagnostics/pseudo", PSEUDO_CATALOG_TOML)
     }
 
     /// Compiles a diagnostic catalog from a MessageFormat resource TOML source.

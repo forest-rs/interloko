@@ -22,4 +22,4 @@ Untyped slots default to <object>; <object> is distinct from nominal object hand
 
 **2026-05-12T03:42:28Z**
 
-Implemented Dylan-shaped slot defaults and init keywords. Untyped slots now resolve to top <object> ValueKind::Any, distinct from nominal Object(ClassId). execution_tape lowering boxes top values through cairn.box_value/CAIRN_VALUE_TYPE. Added required-init-keyword/init-keyword diagnostics, dumps/fingerprints, corpus cases, and incremental coverage. Gates run: fmt, clippy, workspace tests, docs, examples, corpus.
+Implemented Dylan-shaped slot defaults and init keywords. Untyped slots now resolve to top <object> ValueKind::Any, distinct from nominal Object(ClassId). execution_tape lowering boxes top values through interloko.box_value/INTERLOKO_VALUE_TYPE. Added required-init-keyword/init-keyword diagnostics, dumps/fingerprints, corpus cases, and incremental coverage. Gates run: fmt, clippy, workspace tests, docs, examples, corpus.

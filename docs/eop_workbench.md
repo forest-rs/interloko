@@ -1,4 +1,4 @@
-# Cairn EOP Workbench
+# Interloko EOP Workbench
 
 ## Overview
 
@@ -161,7 +161,7 @@ multi-argument dispatch, or new tape opcodes.
 The workbench can install an explicit host projection provider from fixture
 metadata:
 
-```cairn
+```loko
 // host-eop-class: rust-shape <rust-shape>
 // host-eop-instance: circle-10 <rust-shape> radius=10
 define function main()
@@ -179,7 +179,7 @@ cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/host_projecte
 
 These records are host-provided environment objects. They do not make
 `InterlokoHost` enumerate runtime heap values, do not reflect Rust automatically,
-and do not create Cairn language semantics.
+and do not create Loko language semantics.
 
 ## Glossary
 

@@ -3,7 +3,7 @@ name = "interloko_diagnostics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MessageFormat-backed diagnostic presentation for Cairn tools."
+description = "MessageFormat-backed diagnostic presentation for Interloko tools."
 
 [dependencies]
 interloko_compiler = { path = "../../crates/interloko_compiler" }

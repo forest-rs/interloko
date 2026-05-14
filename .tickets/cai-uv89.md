@@ -11,7 +11,7 @@ tags: [compiler, lowering, tape]
 ---
 # Add lowered executable IR and dumps
 
-Implement Cairn lowered executable IR for constants, locals, calls, generic dispatch, object construction, slot reads, arithmetic, and make execution_tape emission consume lowered IR.
+Implement Interloko lowered executable IR for constants, locals, calls, generic dispatch, object construction, slot reads, arithmetic, and make execution_tape emission consume lowered IR.
 
 ## Design
 

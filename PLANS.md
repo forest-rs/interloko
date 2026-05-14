@@ -44,17 +44,15 @@ turns `sem::Module` into runtime layout.
 ### Goal
 
 Introduce Interloko as the name and crate boundary for the boring shared
-substrate under the current Cairn prototype. This is not a repo rename. It is
-the first dependency-direction step toward separating model facts from compiler
-and runtime execution.
+substrate under the current compiler/runtime prototype. This is the first
+dependency-direction step toward separating model facts from compiler and
+runtime execution. Loko is the source notation and `.loko` file format.
 
 ### Naming
 
 - Interloko is the core technical substrate for programmable object spaces.
 - Vivarium is the later collaborative environment and product layer.
-- Cairn remains the current prototype language/compiler name for now.
-- Loko is a possible future language/notation name, but this slice does not
-  use it.
+- Loko is the current source notation and language surface.
 
 ### Fence
 
@@ -65,7 +63,7 @@ session orchestration, collaboration, identity, permissions, or persistence.
 
 ### Steps
 
-1. Add a naming/architecture note that records the Interloko/Vivarium/Cairn
+1. Add a naming/architecture note that records the Interloko/Vivarium/Loko
    boundary and provisional crate naming.
 2. Create `crates/interloko_model` as a `no_std` substrate crate.
 3. Move durable shared ids (`ClassId`, `SlotId`, `GenericFunctionId`,
@@ -92,7 +90,7 @@ session orchestration, collaboration, identity, permissions, or persistence.
 ### Goal
 
 Turn the first-class metaobject slice into an intentional read-only MOP
-protocol. Cairn code should ask object-system questions through stable protocol
+protocol. Loko code should ask object-system questions through stable protocol
 names such as `object-class`, `class-direct-slots`,
 `class-effective-slots`, `slot-name`, `generic-function-methods`, and
 `method-generic-function`. The old compiler-owned metadata remains the source
@@ -129,25 +127,25 @@ are views over the same semantic/runtime facts, not a parallel protocol model.
 5. Lower all protocol operations through ordinary runtime host calls and tape
    host signatures, with no MOP-specific tape opcodes.
 6. Update corpus examples, session dumps, lowered dumps, progress notes, and
-   user-facing docs so Cairn code and workbench inspection tell the same story.
+   user-facing docs so Loko code and workbench inspection tell the same story.
 7. Run fmt, clippy, tests, docs, corpus, examples, then commit coherently.
 
 ### Risks
 
 - `slot-type` cannot yet return a first-class type object for `<object>`, so it
-  should expose the declared type text until Cairn has a real type metaobject
+  should expose the declared type text until Interloko has a real type metaobject
   layer.
 - Getter accessors are not generic functions yet. `slot-getter` should expose
   the getter name honestly rather than pretending a getter generic exists.
 - Direct/effective slot descriptors must still name effective runtime storage
   positions so existing slot reads and layout remain simple.
 
-## Expose First-Class MOP Metaobjects To Cairn Code
+## Expose First-Class MOP Metaobjects To Loko Code
 
 ### Goal
 
 Make class, generic-function, and method metaobjects directly available to
-ordinary Cairn code in a narrow read-only slice. Cairn code should be able to
+ordinary Loko code in a narrow read-only slice. Loko code should be able to
 ask basic questions such as `class-name(<circle>)`, `generic-methods(area)`,
 and `method-specializers(...)` without going through workbench-only dumps.
 
@@ -163,7 +161,7 @@ and `method-specializers(...)` without going through workbench-only dumps.
 
 ### Fence
 
-At the Cairn semantic level, classes, generics, and methods are values. Their
+At the Interloko semantic level, classes, generics, and methods are values. Their
 stable ids remain internal compiler/runtime representation details. Lowering may
 still turn known metaobjects into raw ids for existing hot paths such as `make`,
 `class-of`, `instance?`, casts, slot access, and dispatch.
@@ -199,7 +197,7 @@ over the same facts and must not describe a different object system.
 ### Risks
 
 - A second visible notion of "class object" would muddy the MOP. Avoid that:
-  public Cairn semantics should talk about metaobjects; ids are internal.
+  public Interloko semantics should talk about metaobjects; ids are internal.
 - Returning vectors of method/slot metaobjects may require minimal vector
   inspection helpers. Keep any helpers generic and small.
 - Host-backed classes must participate in the same metadata path without
@@ -311,7 +309,7 @@ generic overhead.
 
 ### Goal
 
-Add Cairn's first non-numeric language values: strings, symbols, keywords, and
+Add Interloko's first non-numeric language values: strings, symbols, keywords, and
 simple immutable vectors. These values must flow through syntax, AST, semantic
 IR, lowered IR, tape/runtime execution, dumps, examples, corpus, and
 diagnostics.
@@ -354,7 +352,7 @@ string interpolation, locale semantics, or optimizer work.
 - Keep interning deterministic inside a compiled module/session, not globally
   persistent.
 
-## Add Initial Cairn REPL Tool
+## Add Initial Interloko REPL Tool
 
 ### Goal
 
@@ -617,7 +615,7 @@ multi-argument dispatch, or new execution_tape opcodes.
 
 ### Goal
 
-Make Cairn's existing single-inheritance class finalization affect semantic type
+Make Interloko's existing single-inheritance class finalization affect semantic type
 checks, runtime predicates/casts, generic dispatch, and workbench inspection,
 without changing effective slot layout or adding inheritance-specific tape
 operations.
@@ -804,7 +802,7 @@ authorization policy.
 
 - If command output becomes too clever, it will look like a UI contract instead
   of a workbench inspection tool.
-- If fixture metadata is confused with Cairn syntax, the language boundary gets
+- If fixture metadata is confused with Loko syntax, the language boundary gets
   muddy.
 - If invoke support includes mutation affordances, this slice overreaches.
 
@@ -860,23 +858,23 @@ or authorization policy.
 ### Goal
 
 Introduce a narrow host-backed metaobject path so Rust-side adapters can
-declare nominal Cairn classes and expose read-only slots without making Rust
-objects Cairn-native heap objects. Host-backed classes should participate in
+declare nominal Interloko classes and expose read-only slots without making Rust
+objects Interloko-native heap objects. Host-backed classes should participate in
 the same semantic class IDs, slot reads, `instance?`, `as`, and generic method
-dispatch as native Cairn classes.
+dispatch as native Interloko classes.
 
 ### Fence
 
 Semantic IR owns nominal metaobject facts, class/slot origin, type categories,
 and dispatch meaning. Runtime owns object handles, host-backed object identity,
 and host-call execution. Adapter code owns Rust value access. Facet is deferred:
-it may later populate the same registry, but it does not replace Cairn's MOP.
+it may later populate the same registry, but it does not replace Interloko's MOP.
 
 ### Invariants
 
 - The user-facing concept is host-backed, not foreign.
 - Native and host-backed classes share the same `ClassId` space.
-- Host-backed classes cannot be constructed by Cairn `make` in this slice.
+- Host-backed classes cannot be constructed by Loko `make` in this slice.
 - Host-backed object handles are supplied by the embedding Rust host.
 - Slot access is read-only and adapter-mediated.
 - Lowered IR keeps class tests, casts, and slot reads as explicit model
@@ -1082,7 +1080,7 @@ Ticket: `cai-lnet`
 
 ### Goal
 
-Make Cairn slot declarations follow the useful part of Dylan's slot shape:
+Make Interloko slot declarations follow the useful part of Dylan's slot shape:
 untyped slots default to `<object>`, slots can declare required or renamed
 construction keywords, and object construction reports focused diagnostics for
 bad keyword initialization.
@@ -1099,7 +1097,7 @@ end;
 The important semantic distinction is:
 
 ```text
-<object>             => top Cairn value category
+<object>             => top Interloko value category
 nominal <some-class> => runtime-managed object handle specialized to a class
 ```
 
@@ -1151,7 +1149,7 @@ boxed primitive identity, Dylan initialization methods, or optimization.
 4. Validate object construction by construction keyword, including duplicate
    keyword detection and focused missing/unknown/type diagnostics.
 5. Update lowered IR and tape/runtime host-call signatures so top-value slots
-   can store and return any first-slice Cairn value.
+   can store and return any first-slice Interloko value.
 6. Update CST/AST/semantic/lowered/tape dumps, fingerprints, and artifact
    reporting to include declared type, keyword, requiredness, and runtime
    representation.
@@ -1212,7 +1210,7 @@ does not add tape-native structs.
 
 The compiler owns slot declaration parsing, slot kind resolution, initializer
 checking, and typed slot-read IR. The runtime owns storing and returning mixed
-slot values for runtime-managed Cairn objects. Neither side owns native aggregate
+slot values for runtime-managed Interloko objects. Neither side owns native aggregate
 layout in this slice.
 
 ### Invariants
@@ -1221,7 +1219,7 @@ layout in this slice.
   The later `cai-lnet` slot-initialization slice changed their default to
   `<object>`.
 - Explicit primitive slot types are limited to `<integer>` and `<boolean>`.
-- Explicit nominal slot types refer to already-declared or source-declared Cairn
+- Explicit nominal slot types refer to already-declared or source-declared Interloko
   classes by name.
 - `make(<class>, slot: value)` checks each initializer against the slot's
   declared value kind.
@@ -1300,7 +1298,7 @@ Ticket: `cai-xvew`
 
 ### Goal
 
-Add Cairn's first recoverable condition/restart vertical slice. Condition
+Add Interloko's first recoverable condition/restart vertical slice. Condition
 objects remain ordinary nominal objects. `signal(condition)` inside a lexical
 `handle ... with restart <condition-class> ... end` resumes with one handler
 value, lowering to existing object construction, branches, jumps, and moves.
@@ -1409,7 +1407,7 @@ Ticket: `cai-srg5`
 
 ### Goal
 
-Add Cairn's first expression-level control-flow slice: boolean literals,
+Add Interloko's first expression-level control-flow slice: boolean literals,
 integer comparisons, and `if` expressions that flow through syntax, AST,
 semantic IR, lowered IR, `execution_tape`, dumps, corpus fixtures, and
 incremental cache reporting.
@@ -1694,7 +1692,7 @@ Ticket: `cai-lk7f`
 
 ### Goal
 
-Build a usable incremental compiler workbench around the existing Cairn
+Build a usable incremental compiler workbench around the existing Interloko
 pipeline. The workbench should let a caller compile a named source file, inspect
 every stage, list stable artifact keys, run `main`, and compare two file
 versions for preserved/changed definitions and affected query artifacts.

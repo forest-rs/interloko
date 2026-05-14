@@ -15,7 +15,7 @@ Add explicit slot type declarations for primitive integer, primitive boolean, an
 
 ## Acceptance Criteria
 
-fmt, clippy -D warnings, workspace tests, docs, examples, cairn_lab tests, and cairn_corpus pass; progress notes document slot typing semantics and deferred native aggregate design
+fmt, clippy -D warnings, workspace tests, docs, examples, interloko_lab tests, and interloko_corpus pass; progress notes document slot typing semantics and deferred native aggregate design
 
 
 ## Notes

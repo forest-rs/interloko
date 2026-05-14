@@ -1,4 +1,4 @@
-//! Generic-dispatch Cairn example.
+//! Generic-dispatch Interloko example.
 
 use interloko_compiler::driver::{CompileError, compile, compile_and_run_main};
 

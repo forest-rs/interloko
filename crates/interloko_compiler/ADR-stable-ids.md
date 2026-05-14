@@ -2,11 +2,11 @@
 
 ## Status
 
-Accepted for the current single-file Cairn compiler prototype.
+Accepted for the current single-file Interloko compiler prototype.
 
 ## Context
 
-Cairn now has a full source-to-tape pipeline and a thin invalidation shell. The
+Interloko now has a full source-to-tape pipeline and a thin invalidation shell. The
 early semantic IDs (`ClassId`, `FunctionId`, `MethodId`, etc.) are dense indexes
 inside one compiled module. They are useful for table lookup, but they are not
 stable artifact identities: inserting a preceding method can renumber a later
@@ -68,7 +68,7 @@ Not guaranteed across:
 - renaming a definition;
 - changing a method specializer;
 - duplicate definitions with the same stable discriminator;
-- multi-file module identity, because Cairn does not yet have a module system;
+- multi-file module identity, because Interloko does not yet have a module system;
 - expression edits, except that trivia-only expression edits are ignored.
 
 ## Consequences

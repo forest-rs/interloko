@@ -1,4 +1,4 @@
-//! Backend-neutral executable IR lowered from semantic Cairn IR.
+//! Backend-neutral executable IR lowered from semantic Interloko IR.
 //!
 //! This module owns the register-shaped executable IR that backends consume. It
 //! explicitly does not own syntax parsing, semantic name resolution, runtime
@@ -39,7 +39,7 @@ pub struct LabelId(
 /// Lowered value category.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ValueKind {
-    /// Boxed top Cairn value corresponding to source `<object>`.
+    /// Boxed top Interloko value corresponding to source `<object>`.
     Any,
     /// Signed integer value.
     I64,

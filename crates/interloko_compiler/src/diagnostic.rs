@@ -1,4 +1,4 @@
-//! Structured diagnostics for Cairn compiler stages.
+//! Structured diagnostics for Interloko compiler stages.
 
 use alloc::format;
 use alloc::string::String;

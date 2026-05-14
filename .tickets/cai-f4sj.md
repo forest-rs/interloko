@@ -14,7 +14,7 @@ Introduce the backend-neutral lowered executable IR from DESIGN.md once the dire
 
 ## Design
 
-Keep execution_tape emission as an adapter over lowered IR. Do not expose high-level Cairn semantics through tape opcodes.
+Keep execution_tape emission as an adapter over lowered IR. Do not expose high-level Interloko semantics through tape opcodes.
 
 ## Acceptance Criteria
 

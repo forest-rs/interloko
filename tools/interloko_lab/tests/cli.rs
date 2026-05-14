@@ -129,7 +129,7 @@ fn diagnostics_can_use_pseudo_catalog() {
 #[test]
 fn diagnostics_fail_for_missing_catalog_entries() {
     let catalog_path = std::env::temp_dir().join(format!(
-        "cairn-partial-diagnostics-{}.mf2.toml",
+        "interloko-partial-diagnostics-{}.mf2.toml",
         std::process::id()
     ));
     fs::write(
@@ -224,7 +224,7 @@ fn dump_exposes_stages() {
     assert!(lowered.contains("area#dispatch"));
 
     let tape = run_lab(&["dump", path, "--stage", "tape"]);
-    assert!(tape.contains("program=\"cairn\""));
+    assert!(tape.contains("program=\"interloko\""));
 }
 
 #[test]
@@ -505,7 +505,7 @@ fn invoke_affordance_runs_dump_and_run_actions() {
         ("dump-mop", "mop"),
         ("dump-eop", "objects:"),
         ("dump-lowered", "area#dispatch"),
-        ("dump-tape", "program=\"cairn\""),
+        ("dump-tape", "program=\"interloko\""),
     ] {
         let out = run_lab(&["invoke-affordance", path, source_id.as_str(), affordance]);
         assert!(out.contains(expected), "{affordance} output was {out}");

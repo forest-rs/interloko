@@ -15,11 +15,11 @@ Add boolean literals, integer comparisons, if expressions, lowered branch/join I
 
 ## Acceptance Criteria
 
-fmt, clippy -D warnings, workspace tests, docs, examples, cairn_lab tests, cairn_corpus pass
+fmt, clippy -D warnings, workspace tests, docs, examples, interloko_lab tests, interloko_corpus pass
 
 
 ## Notes
 
 **2026-05-12T01:41:59Z**
 
-Implemented booleans, integer comparisons, if expressions, lowered branch/join IR, execution_tape emission, corpus cases, incremental branch-edit tests, and progress notes. Validation passed: fmt, clippy -D warnings, workspace tests, docs, examples, cairn_lab lowered dump, cairn_corpus.
+Implemented booleans, integer comparisons, if expressions, lowered branch/join IR, execution_tape emission, corpus cases, incremental branch-edit tests, and progress notes. Validation passed: fmt, clippy -D warnings, workspace tests, docs, examples, interloko_lab lowered dump, interloko_corpus.

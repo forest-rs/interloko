@@ -218,7 +218,7 @@ impl EnvironmentKind {
 /// Origin of a projected environment object.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EnvironmentOrigin {
-    /// The object is authored by Cairn source.
+    /// The object is authored by Loko source.
     SourceAuthored,
     /// The object is declared by explicit host-backed metadata.
     HostBacked,
@@ -244,7 +244,7 @@ impl EnvironmentOrigin {
 /// Storage ownership for a projected environment object.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EnvironmentStorage {
-    /// The object is represented by Cairn source definitions.
+    /// The object is represented by Loko source definitions.
     SourceDefined,
     /// The object is represented by explicit host registry metadata.
     HostRegistry,
@@ -252,7 +252,7 @@ pub enum EnvironmentStorage {
     HostAdapter,
     /// The object is represented by cached compiler/session artifacts.
     CachedArtifact,
-    /// The object is represented by host-owned state outside Cairn.
+    /// The object is represented by host-owned state outside Interloko.
     HostOwned,
 }
 
@@ -5388,7 +5388,7 @@ mod tests {
         assert!(
             artifacts
                 .dump_stage(DumpStage::Tape)
-                .contains("program=\"cairn\"")
+                .contains("program=\"interloko\"")
         );
         assert!(artifacts.dump_artifact_graph().contains("dependencies:"));
     }

@@ -2,7 +2,7 @@
 
 ## First Read
 
-Cairn diagnostics are facts first. Prose belongs to catalog-backed
+Interloko diagnostics are facts first. Prose belongs to catalog-backed
 presentation tools.
 
 A diagnostic has a stable code, severity, primary span, source labels,
@@ -110,7 +110,7 @@ That keeps incremental reuse stable when a user switches from `en` to
 
 The corpus runner supports both forms:
 
-```cairn
+```loko
 // expect: diagnostic code sem.unresolved-local
 // expect: diagnostic contains unresolved local `missing`
 ```

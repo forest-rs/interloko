@@ -3,7 +3,7 @@ name = "interloko_repl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Plain-stdio REPL for Cairn compiler sessions."
+description = "Plain-stdio REPL for Interloko compiler sessions."
 
 [dependencies]
 interloko_compiler = { path = "../../crates/interloko_compiler" }

@@ -1,4 +1,4 @@
-# Cairn Slot Model
+# Interloko Slot Model
 
 This slice treats slots as object-model facts that are visible in semantic IR,
 MOP dumps, EOP records, and the workbench.
@@ -7,7 +7,7 @@ MOP dumps, EOP records, and the workbench.
 
 Untyped slots default to `<object>`:
 
-```cairn
+```loko
 define class <box> (<object>)
   slot value;
 end;
@@ -15,7 +15,7 @@ end;
 
 Typed slots declare a value category:
 
-```cairn
+```loko
 define class <circle> (<object>)
   slot radius :: <integer>;
 end;
@@ -24,7 +24,7 @@ end;
 Construction keywords default to the slot name. A slot can rename that keyword
 or require it:
 
-```cairn
+```loko
 define class <circle> (<object>)
   slot radius :: <integer>, init-keyword: r:;
   slot diameter :: <integer>, required-init-keyword: diameter:;
@@ -34,7 +34,7 @@ end;
 `init-value:` supplies a default expression when construction omits the slot.
 An explicit construction keyword overrides the default:
 
-```cairn
+```loko
 define class <circle> (<object>)
   slot radius :: <integer>, required-init-keyword: r:, init-value: 10;
 end;
@@ -48,7 +48,7 @@ end;
 construction-time assignment only; slot reads behave the same as ordinary
 mutable slots because slot writes do not exist yet.
 
-```cairn
+```loko
 define class <box> (<object>)
   constant slot value :: <integer>, init-value: 5;
 end;
@@ -56,7 +56,7 @@ end;
 
 Classes may name one superclass. `<object>` is the root/default superclass:
 
-```cairn
+```loko
 define class <shape> (<object>)
   slot radius :: <integer>, required-init-keyword: radius:;
 end;
@@ -71,7 +71,7 @@ end;
 
 A slot typed as a parent class accepts subclass instances:
 
-```cairn
+```loko
 define class <shape> (<object>)
   slot size :: <integer>, init-value: 10;
 end;
@@ -118,7 +118,7 @@ end;
 - Slot allocation metadata is currently always `instance`.
 - Accessor identity remains the slot definition identity, so stable IDs survive
   harmless declaration trivia edits.
-- Host-backed classes remain non-constructible through Cairn `make`.
+- Host-backed classes remain non-constructible through Loko `make`.
 
 ## Workbench Inspection
 

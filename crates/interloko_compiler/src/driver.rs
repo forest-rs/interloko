@@ -605,7 +605,7 @@ mod tests {
         assert!(lowered.contains("slot.read"));
 
         let tape = compiled.dump_tape();
-        assert!(tape.contains("; program=\"cairn\""));
+        assert!(tape.contains("; program=\"interloko\""));
         assert!(tape.contains("name=\"area#dispatch\""));
     }
 }

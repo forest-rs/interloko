@@ -1,6 +1,6 @@
-//! Adapter from lowered Cairn IR to `execution_tape`.
+//! Adapter from lowered Interloko IR to `execution_tape`.
 //!
-//! This module owns only bytecode emission for already-lowered Cairn functions.
+//! This module owns only bytecode emission for already-lowered Interloko functions.
 //! Generic dispatch, object construction, slot reads, and slot writes arrive
 //! here as lowered instructions and are encoded with ordinary calls, branches,
 //! constants, and host calls.
@@ -21,12 +21,12 @@ use crate::sem;
 use crate::syntax::Span;
 use interloko_runtime::{self as runtime, RuntimeLayout};
 
-/// A verified tape program emitted from lowered Cairn IR.
+/// A verified tape program emitted from lowered Interloko IR.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TapeModule {
     /// Verified executable tape program.
     pub program: VerifiedProgram,
-    /// Runtime layout required by the Cairn host.
+    /// Runtime layout required by the Interloko host.
     pub runtime: RuntimeLayout,
     /// `execution_tape` function ids in lowered function order.
     pub functions: Vec<FuncId>,
@@ -69,7 +69,7 @@ impl TapeError {
 /// Emits a verified `execution_tape` program for a lowered module.
 ///
 /// The emitted tape uses normal `execution_tape` bytecode: calls, branches,
-/// constants, arithmetic, and host calls. There are no Cairn-specific generic
+/// constants, arithmetic, and host calls. There are no Interloko-specific generic
 /// dispatch opcodes.
 pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     let mut builder = ProgramBuilder::new();

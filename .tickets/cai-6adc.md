@@ -14,7 +14,7 @@ Add a thin invalidation/query shell using invalidation 0.2 for parse, bind, meth
 
 ## Design
 
-Cairn owns artifacts and scheduling. invalidation only models dependency edges and affected ordering.
+Interloko owns artifacts and scheduling. invalidation only models dependency edges and affected ordering.
 
 ## Acceptance Criteria
 

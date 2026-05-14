@@ -14,7 +14,7 @@ Introduce a thin query/cache shell around the proven syntax, AST, semantic, and 
 
 ## Design
 
-Keep stage functions pure where practical. Let Cairn own cached artifacts and use invalidation only for dependency-aware dirty/affected ordering.
+Keep stage functions pure where practical. Let Interloko own cached artifacts and use invalidation only for dependency-aware dirty/affected ordering.
 
 ## Acceptance Criteria
 

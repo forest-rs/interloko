@@ -35,7 +35,7 @@ pub struct MethodId(
     pub u32,
 );
 
-/// Built-in value class supplied by the Interloko language kernel.
+/// Built-in value class supplied by the Loko language kernel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum BuiltinValueClass {
     /// The built-in `<string>` class.
@@ -69,7 +69,7 @@ impl BuiltinValueClass {
         (Self::SlotDescriptor, "<slot-descriptor>"),
     ];
 
-    /// Returns the Cairn-visible class name for this built-in value class.
+    /// Returns the Loko-visible class name for this built-in value class.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {

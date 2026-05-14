@@ -21,4 +21,4 @@ Corpus covers arithmetic, locals, direct calls, classes, slots, object construct
 
 **2026-05-12T00:28:53Z**
 
-Implemented corpus fixtures, expectation header parser, cairn_corpus check/list/dump commands, runner tests, and progress notes. Full fmt/clippy/test/doc/examples/workbench/corpus validation passed locally.
+Implemented corpus fixtures, expectation header parser, interloko_corpus check/list/dump commands, runner tests, and progress notes. Full fmt/clippy/test/doc/examples/workbench/corpus validation passed locally.

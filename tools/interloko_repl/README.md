@@ -1,6 +1,6 @@
 # interloko_repl
 
-`interloko_repl` is a small REPL over the existing Cairn compiler session pipeline.
+`interloko_repl` is a small REPL over the existing Interloko compiler session pipeline.
 Interactive terminal sessions use `reedline` for line editing, local in-memory
 history, Ctrl-C/Ctrl-D handling, and completions. Piped input keeps the plain
 stdio transcript mode used by tests and scripts.
@@ -17,7 +17,7 @@ cargo run -p interloko_repl
 
 Definitions are entered as multiline `define ... end;` forms:
 
-```cairn
+```loko
 define function square(x)
   x * x
 end;
@@ -39,7 +39,7 @@ Interactive controls:
 - Up/Down browse the local history for this process.
 - Tab completes colon commands, `:dump` stages, dispatch IDs, and object IDs
   from the most recent artifacts.
-- Input is highlighted in the editor: commands, Cairn keywords, class names,
+- Input is highlighted in the editor: commands, Interloko keywords, class names,
   literals, comments, punctuation, and unknown tokens get distinct styles.
 - Ctrl-C cancels the current line, and clears a pending multiline definition.
 - Ctrl-D exits.
@@ -71,7 +71,7 @@ Current limits:
   `interloko_lab` for file-based host registry examples.
 
 The REPL is also a natural future integration point for Portolan-style
-affordances and intents. This crate currently exposes Cairn EOP/MOP objects and
+affordances and intents. This crate currently exposes Interloko EOP/MOP objects and
 their affordance names directly; a Portolan bridge should consume those records
 from the compiler/session layer rather than making the REPL own the action
 model.

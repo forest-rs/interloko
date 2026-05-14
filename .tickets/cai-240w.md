@@ -15,7 +15,7 @@ Allow restart handlers to bind the signaled condition object, e.g. with restart 
 
 ## Acceptance Criteria
 
-fmt, clippy -D warnings, workspace tests, docs, examples, cairn_lab tests, cairn_corpus pass
+fmt, clippy -D warnings, workspace tests, docs, examples, interloko_lab tests, interloko_corpus pass
 
 
 ## Notes

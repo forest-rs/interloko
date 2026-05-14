@@ -3,7 +3,7 @@ name = "interloko_lab"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI workbench for inspecting Cairn compiler sessions."
+description = "CLI workbench for inspecting Interloko compiler sessions."
 
 [dependencies]
 interloko_compiler = { path = "../../crates/interloko_compiler" }

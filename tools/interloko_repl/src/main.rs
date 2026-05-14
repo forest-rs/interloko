@@ -1,4 +1,4 @@
-//! Plain-stdio REPL for Cairn compiler sessions.
+//! Plain-stdio REPL for Interloko compiler sessions.
 
 use std::env;
 use std::error::Error;
@@ -107,7 +107,7 @@ where
 
     loop {
         refresh_completion_state(&completion_state, &repl);
-        let prompt = CairnPrompt {
+        let prompt = InterlokoPrompt {
             pending_definition: repl.has_pending_definition(),
         };
         match line_editor.read_line(&prompt)? {
@@ -140,13 +140,13 @@ fn reedline_editor(completion_state: Arc<Mutex<CompletionState>>, style: OutputS
     add_menu_keybindings(&mut keybindings);
 
     let editor = Reedline::create()
-        .with_completer(Box::new(CairnCompleter::new(completion_state)))
+        .with_completer(Box::new(InterlokoCompleter::new(completion_state)))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu)))
         .with_edit_mode(Box::new(Emacs::new(keybindings)))
         .with_quick_completions(true)
         .with_partial_completions(true);
     if style == OutputStyle::Ansi {
-        editor.with_highlighter(Box::new(CairnHighlighter))
+        editor.with_highlighter(Box::new(InterlokoHighlighter))
     } else {
         editor
     }
@@ -658,14 +658,14 @@ fn help_text() -> &'static str {
 }
 
 #[derive(Clone, Debug, Default)]
-struct CairnHighlighter;
+struct InterlokoHighlighter;
 
-impl Highlighter for CairnHighlighter {
+impl Highlighter for InterlokoHighlighter {
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         if line.starts_with(':') {
             return highlight_command_input(line);
         }
-        highlight_cairn_input(line)
+        highlight_loko_input(line)
     }
 }
 
@@ -717,7 +717,7 @@ fn push_command_arguments(styled: &mut StyledText, text: &str) {
     }
 }
 
-fn highlight_cairn_input(line: &str) -> StyledText {
+fn highlight_loko_input(line: &str) -> StyledText {
     let mut styled = StyledText::new();
     let mut cursor = 0;
     for token in syntax::lex(line) {
@@ -903,17 +903,17 @@ fn refresh_completion_state(state: &Arc<Mutex<CompletionState>>, repl: &Repl) {
 }
 
 #[derive(Clone, Debug)]
-struct CairnCompleter {
+struct InterlokoCompleter {
     state: Arc<Mutex<CompletionState>>,
 }
 
-impl CairnCompleter {
+impl InterlokoCompleter {
     fn new(state: Arc<Mutex<CompletionState>>) -> Self {
         Self { state }
     }
 }
 
-impl Completer for CairnCompleter {
+impl Completer for InterlokoCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
         let before_cursor = line.get(..pos).unwrap_or(line);
         if !before_cursor.starts_with(':') {
@@ -968,11 +968,11 @@ fn completion_token(before_cursor: &str, pos: usize) -> (usize, &str) {
     (token_start, &before_cursor[token_start..pos])
 }
 
-struct CairnPrompt {
+struct InterlokoPrompt {
     pending_definition: bool,
 }
 
-impl Prompt for CairnPrompt {
+impl Prompt for InterlokoPrompt {
     fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
         if self.pending_definition {
             "define".into()
@@ -1076,7 +1076,7 @@ impl From<ReedlineError> for ReplError {
 mod tests {
     use super::*;
 
-    fn completion_values(completer: &mut CairnCompleter, line: &str) -> Vec<String> {
+    fn completion_values(completer: &mut InterlokoCompleter, line: &str) -> Vec<String> {
         completer
             .complete(line, line.len())
             .into_iter()
@@ -1095,7 +1095,7 @@ mod tests {
     #[test]
     fn completes_commands_and_dump_stages() {
         let state = Arc::new(Mutex::new(CompletionState::default()));
-        let mut completer = CairnCompleter::new(state);
+        let mut completer = InterlokoCompleter::new(state);
 
         assert!(completion_values(&mut completer, ":du").contains(&":dump".to_string()));
         assert!(completion_values(&mut completer, ":dump l").contains(&"lowered".to_string()));
@@ -1129,7 +1129,7 @@ mod tests {
         assert!(state.dispatch_ids.iter().any(|id| id == "dispatch:d0"));
 
         let state = Arc::new(Mutex::new(state));
-        let mut completer = CairnCompleter::new(state);
+        let mut completer = InterlokoCompleter::new(state);
         assert!(
             completion_values(&mut completer, ":inspect function:")
                 .contains(&"function:f0".to_string())
@@ -1147,8 +1147,8 @@ mod tests {
     }
 
     #[test]
-    fn highlighter_styles_cairn_source_tokens() {
-        let highlighted = CairnHighlighter.highlight("define class <circle> // note", 0);
+    fn highlighter_styles_loko_source_tokens() {
+        let highlighted = InterlokoHighlighter.highlight("define class <circle> // note", 0);
 
         assert_eq!(
             segment_style(&highlighted, "define"),
@@ -1166,7 +1166,7 @@ mod tests {
 
     #[test]
     fn highlighter_styles_repl_commands_and_arguments() {
-        let highlighted = CairnHighlighter.highlight(":dump lowered", 0);
+        let highlighted = InterlokoHighlighter.highlight(":dump lowered", 0);
 
         assert_eq!(
             segment_style(&highlighted, ":dump"),

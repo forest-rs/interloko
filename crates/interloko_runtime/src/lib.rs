@@ -1,7 +1,7 @@
 //! Runtime layout, host-call signatures, and `execution_tape` host support.
 //!
 //! This crate owns the executable runtime boundary for Interloko-shaped
-//! programs. It intentionally does not own Cairn syntax, semantic IR, lowering,
+//! programs. It intentionally does not own Loko syntax, semantic IR, lowering,
 //! sessions, or compiler query state.
 
 #![no_std]
@@ -17,7 +17,7 @@ use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 use interloko_model::{BuiltinValueClass, ClassId, GenericFunctionId, MethodId, SlotId};
 
-/// Host object type used for Cairn runtime objects.
+/// Host object type used for Interloko runtime objects.
 pub const INTERLOKO_OBJECT_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f4f_424a);
 /// Host object type used for boxed top `<object>` values.
 pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
@@ -87,7 +87,7 @@ pub const VECTOR_SIZE: &str = "interloko.vector_size";
 /// Host-call symbol for immutable vector indexing.
 pub const VECTOR_REF: &str = "interloko.vector_ref";
 
-/// Returns the `execution_tape` value type for Cairn objects.
+/// Returns the `execution_tape` value type for Interloko objects.
 #[must_use]
 pub const fn object_type() -> ValueType {
     ValueType::Obj(INTERLOKO_OBJECT_TYPE)
@@ -147,12 +147,12 @@ pub struct RuntimeClass {
     pub slots: Vec<RuntimeSlot>,
 }
 
-/// Runtime object storage kind for a nominal Cairn class.
+/// Runtime object storage kind for a nominal Interloko class.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum HostObjectKind {
-    /// Object is allocated and stored by the Cairn runtime heap.
+    /// Object is allocated and stored by the Interloko runtime heap.
     Native,
-    /// Object is a built-in value allocated by the Cairn runtime heap.
+    /// Object is a built-in value allocated by the Interloko runtime heap.
     BuiltinValue {
         /// Built-in value class represented by this runtime class.
         kind: BuiltinValueClass,
@@ -176,7 +176,7 @@ pub struct RuntimeSlot {
     pub source_slot: SlotId,
     /// External construction keyword without the trailing colon.
     pub init_keyword: String,
-    /// Whether this slot is writable through Cairn.
+    /// Whether this slot is writable through Interloko.
     pub mutable: bool,
     /// Getter accessor call name.
     pub getter: String,
@@ -216,7 +216,7 @@ pub struct RuntimeLayout {
 }
 
 impl RuntimeLayout {
-    /// Returns the runtime class id for a Cairn-visible class name.
+    /// Returns the runtime class id for a Loko-visible class name.
     #[must_use]
     pub fn class_id(&self, name: &str) -> Option<ClassId> {
         self.classes
@@ -290,14 +290,14 @@ struct InternedObject {
 
 /// Adapter for reading data from a Rust-owned host-backed object.
 ///
-/// Implementors own the concrete Rust value access. Cairn only passes the
-/// resolved slot id and expected Cairn value category.
+/// Implementors own the concrete Rust value access. Interloko only passes the
+/// resolved slot id and expected Interloko value category.
 pub trait HostObjectAdapter {
     /// Reads one slot from a host-backed object.
     fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, HostError>;
 }
 
-/// Host implementation for Cairn runtime object operations.
+/// Host implementation for Interloko runtime object operations.
 pub struct InterlokoHost {
     layout: RuntimeLayout,
     objects: Vec<RuntimeObject>,
@@ -317,7 +317,7 @@ impl InterlokoHost {
         }
     }
 
-    /// Installs a Rust-owned host-backed object and returns its Cairn handle.
+    /// Installs a Rust-owned host-backed object and returns its Interloko handle.
     pub fn push_host_object(
         &mut self,
         class: ClassId,

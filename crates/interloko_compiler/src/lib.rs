@@ -1,4 +1,4 @@
-//! Milestone-0 Cairn compiler frontend.
+//! Milestone-0 Interloko compiler frontend.
 //!
 //! This crate intentionally implements only the first vertical slice from the
 //! repository design: a tiny Dylan-like syntax lowered through a small

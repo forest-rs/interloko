@@ -2,8 +2,8 @@
 
 ## Overview
 
-Cairn's read-only Metaobject Protocol exposes object-system facts to ordinary
-Cairn code. It lets a program inspect classes, slots, generic functions, and
+Interloko's read-only Metaobject Protocol exposes object-system facts to ordinary
+Loko code. It lets a program inspect classes, slots, generic functions, and
 methods through named protocol operations instead of relying only on workbench
 dumps.
 
@@ -86,7 +86,7 @@ effective slot lists.
 
 ## Current Limits
 
-- `slot-type` returns declared type text, not a first-class type object. Cairn
+- `slot-type` returns declared type text, not a first-class type object. Interloko
   does not yet have a type metaobject layer for `<object>` and future richer
   type expressions.
 - `slot-getter` returns the getter accessor name. Getter accessors are not

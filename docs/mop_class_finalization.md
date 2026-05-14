@@ -1,7 +1,7 @@
 # AMOP-Informed Class Finalization
 
-This note describes Cairn's current class finalization model. It borrows AMOP
-vocabulary because that vocabulary names the right boundaries, but Cairn is not
+This note describes Interloko's current class finalization model. It borrows AMOP
+vocabulary because that vocabulary names the right boundaries, but Interloko is not
 claiming CLOS compatibility.
 
 ## Vocabulary
@@ -28,15 +28,15 @@ claiming CLOS compatibility.
 - **Runtime layout** is the executable storage view consumed by lowered IR and
   `execution_tape` host calls.
 
-The useful AMOP distinction is not "make Cairn into CLOS." It is "keep the
+The useful AMOP distinction is not "make Interloko into CLOS." It is "keep the
 source class definition separate from the computed class facts used to allocate,
 inspect, and optimize instances."
 
 ## Source Facts
 
-Cairn currently supports one optional superclass:
+Interloko currently supports one optional superclass:
 
-```cairn
+```loko
 define class <shape> (<object>)
   slot x :: <integer>, required-init-keyword: x:;
 end;
@@ -83,7 +83,7 @@ This slice intentionally rejects inherited slot conflicts instead of
 implementing Dylan-style inherited slot specifications or AMOP-style slot
 option combination.
 
-After effective slots are finalized, Cairn computes an initialization plan for
+After effective slots are finalized, Interloko computes an initialization plan for
 the class. The plan is not another source of slot truth; it is the construction
 view of the effective slots. Plan steps appear in the same inherited-then-direct
 layout order as effective slots. Each step records the accepted keyword, source
@@ -184,7 +184,7 @@ cargo run -p interloko_lab -- diff tools/interloko_lab/fixtures/inherited_point_
 ## Surface Syntax As Future Metaobject Construction
 
 Dylan-style `define class` syntax can be understood as surface sugar for
-constructing class and slot metaobjects, then finalizing them. Cairn does not
+constructing class and slot metaobjects, then finalizing them. Interloko does not
 execute such metaobject-construction functions yet; the compiler still lowers
 syntax directly. The design point is that the eventual reflective protocol has a
 place to land.
@@ -199,7 +199,7 @@ values or defaults, and construct the object in initialization-plan order.
 The substrate added here is meant to be reused by a later protocol. A future
 `make` can allocate an instance, pass the same init-argument records to
 `initialize`, and let user-defined methods consume or forward them. Before that
-is enabled, Cairn still needs decisions about `make` as a generic function,
+is enabled, Interloko still needs decisions about `make` as a generic function,
 custom allocation, keyword forwarding, `next-method`, method combination,
 reinitialization, class redefinition, and mutation/setter interaction.
 

@@ -1,4 +1,4 @@
-# Cairn Progress
+# Interloko Progress
 
 ## Implemented: Interloko Runtime Boundary
 
@@ -29,15 +29,14 @@ Deferred:
 - Runtime scheduler, async/effect handler stack, or dispatch caches.
 - Moving semantic IR, lowering, sessions, diagnostics, or tape emission out of
   `interloko_compiler`.
-- Renaming the public language/compiler crates away from Cairn.
+- Further crate extraction beyond the current Interloko compiler/runtime split.
 
 ## Implemented: Interloko Model Boundary
 
 - `docs/interloko_boundary.md` records the naming split:
   - Interloko is the core substrate for programmable object spaces;
   - Vivarium is the later collaborative environment/product layer;
-  - Cairn remains the current prototype language/compiler name;
-  - Loko is a possible future language/notation name, not used yet.
+  - Loko is the current source notation and `.loko` file format.
 - Added `crates/interloko_model` as the first `no_std` substrate crate.
 - Moved durable shared model identifiers into `interloko_model`:
   `ClassId`, `SlotId`, `GenericFunctionId`, and `MethodId`.
@@ -64,7 +63,7 @@ Deferred:
 
 ## Implemented: Named Read-Only MOP Protocol
 
-- Cairn code now uses canonical read-only MOP protocol names:
+- Loko code now uses canonical read-only MOP protocol names:
   `object-class`, `class-direct-superclass`, `class-direct-slots`,
   `class-effective-slots`, `slot-name`, `slot-type`,
   `slot-init-keyword`, `slot-mutable?`, `slot-getter`, `slot-setter`,
@@ -110,7 +109,7 @@ Deferred:
 - The runtime layout now carries generic-function and method metadata alongside
   class layout, so runtime host calls can answer basic MOP queries from the
   same facts used by dumps and dispatch.
-- Cairn code can call read-only MOP protocol operations:
+- Loko code can call read-only MOP protocol operations:
   - `class-name`;
   - `class-direct-superclass`;
   - `class-effective-slots`;
@@ -119,12 +118,12 @@ Deferred:
   - `method-generic-function`;
   - `method-specializers`.
 - Minimal immutable vector inspection is available through `vector-size` and
-  `vector-ref`, which lets Cairn code inspect method and slot vectors returned
+  `vector-ref`, which lets Loko code inspect method and slot vectors returned
   by the MOP.
 - Generated setter generics and setter methods are visible through the same
   generic/method metaobject path as source-authored definitions.
 - Host-backed classes participate in the class metaobject path, but this is
-  explicit Cairn metadata, not automatic Rust reflection.
+  explicit Interloko metadata, not automatic Rust reflection.
 - Lowered IR emits ordinary runtime host calls such as `runtime.class-name`,
   `runtime.generic-function-methods`, and `runtime.method-specializers`. Tape
   still has no MOP-specific opcodes.
@@ -147,7 +146,7 @@ Deferred:
   only a single dispatch parameter.
 - Source methods retain all specialized parameters in AST and semantic IR.
 - Semantic methods now carry specializer vectors. `None` in that vector
-  represents source `<object>`, because `<object>` is still Cairn's top value
+  represents source `<object>`, because `<object>` is still Interloko's top value
   category rather than a nominal class id.
 - A method applies when every specialized parameter accepts the runtime
   argument class.
@@ -399,7 +398,7 @@ Deferred:
   - unconditional jumps;
   - register moves used as explicit join values.
 - `execution_tape` emission maps those lowered instructions to ordinary tape
-  operations. There are no special Cairn control-flow opcodes.
+  operations. There are no special Interloko control-flow opcodes.
 - Session dumps show control flow in CST, AST, semantic IR, lowered IR, and tape
   disassembly.
 - The corpus now includes small programs for boolean conditionals,
@@ -485,7 +484,7 @@ Deferred:
 - The implemented slot value categories are intentionally small:
   - primitive signed integer;
   - primitive boolean;
-  - nominal Cairn runtime object with an exact class id.
+  - nominal Interloko runtime object with an exact class id.
 - Object construction checks each keyword initializer against the declared slot
   kind. Mismatches produce diagnostics such as `slot valid? expects <boolean>
   but initializer has <integer>`.
@@ -502,7 +501,7 @@ Deferred:
     declared slot kind;
   - `interloko.class_of` remains the runtime support used by generic dispatch.
 - The runtime object heap now stores slot payloads as `execution_tape::Value`
-  values, so integers, booleans, and Cairn object handles round-trip through the
+  values, so integers, booleans, and Interloko object handles round-trip through the
   host boundary.
 - AST, semantic, lowered, and tape dumps expose enough of the model to see
   typed slots and typed slot reads in the workbench.
@@ -513,13 +512,13 @@ Deferred:
 
 ### Runtime Object ABI Notes
 
-- Cairn objects are still runtime-managed host objects identified by
+- Interloko objects are still runtime-managed host objects identified by
   `INTERLOKO_OBJECT_TYPE`.
 - Object construction passes a class id followed by slot payload registers in
   semantic slot order.
 - Slot reads pass an object handle and slot id to the host and receive a value
   whose tape type is determined by the slot declaration.
-- This ABI is deliberately compatible with Rust/Cairn interop and dynamic
+- This ABI is deliberately compatible with Rust/Interloko interop and dynamic
   language features, but it is not a tape-native struct representation.
 
 ### Deferred Native-Aggregate Design
@@ -538,7 +537,7 @@ Deferred:
   - `slot value :: <object>;`
 - Semantic IR distinguishes the top `<object>` value category from nominal
   object handles:
-  - `ValueKind::Any` means any first-slice Cairn value;
+  - `ValueKind::Any` means any first-slice Interloko value;
   - `ValueKind::Object(ClassId)` means a runtime-managed object with a known
     nominal class.
 - Existing integer-like examples and corpus programs now spell integer slots
@@ -793,7 +792,7 @@ Deferred:
   lowered registers and do not create runtime `execution_tape` values.
 - Lowered IR and tape emission remain unchanged for successful `apply` forms:
   the emitted code is the ordinary direct call or generated generic dispatcher
-  call that Cairn already used.
+  call that Interloko already used.
 - Semantic dumps and fingerprints expose known-callable identities, including
   local bindings. Incremental coverage shows that changing a callable target in
   one function recomputes the function-level lowered/tape artifacts while
@@ -818,21 +817,21 @@ Deferred:
 - `HostMetaRegistry` lets an embedding Rust host declare host-backed classes,
   slots, and functions explicitly. This is metadata only; the registry does not
   inspect Rust values or depend on reflection.
-- Host-backed classes and Cairn-native classes share the same nominal
+- Host-backed classes and Interloko-native classes share the same nominal
   `ClassId` space. Methods can specialize on either kind, and generic dispatch
   uses the same class-id comparison path for both.
 - Semantic classes and slots now carry origin metadata:
-  - `native` for Cairn source definitions;
+  - `native` for Loko source definitions;
   - `host-backed(hcN)` and `host-backed(hcN.hsN)` for registry declarations.
 - Semantic dumps show class and slot origin, so it is visible when a program is
-  using a Rust-backed metaobject instead of a Cairn-native definition.
-- Host-backed slots have Cairn `ValueKind` declarations and are read-only in
+  using a Rust-backed metaobject instead of an Interloko-native definition.
+- Host-backed slots have Interloko `ValueKind` declarations and are read-only in
   this slice.
 - `make(<host-backed-class>, ...)` is rejected during semantic lowering.
   Host-backed object handles must be supplied by the embedding runtime.
 - `InterlokoHost` can install host-backed object handles through a
   `HostObjectAdapter`. The adapter owns Rust value access and exposes
-  read-only slot reads back to the Cairn runtime.
+  read-only slot reads back to the Interloko runtime.
 - Host-backed object handles participate in:
   - `<object>` boxing through the host value representation;
   - `instance?`;
@@ -849,20 +848,20 @@ Deferred:
   reads, and invalid casts.
 - `examples/host_backed_area` is a runnable Rust embedding example. It creates
   Rust-backed circle and square values, installs them into `InterlokoHost`, and
-  runs Cairn generic dispatch over those host-backed object handles.
+  runs Interloko generic dispatch over those host-backed object handles.
 - `interloko_corpus` supports `// host-class:` headers for compile/dump fixtures,
   and the corpus now includes host-backed slot, dispatch, construction, slot,
   and cast cases.
 
 ### Host-Backed Glossary
 
-- **Host-backed class:** a nominal Cairn class declared by the embedding host
-  instead of by Cairn source.
-- **Host-backed slot:** a read-only Cairn slot whose value is provided by a
+- **Host-backed class:** a nominal Interloko class declared by the embedding host
+  instead of by Loko source.
+- **Host-backed slot:** a read-only Interloko slot whose value is provided by a
   host adapter.
 - **Host object handle:** a runtime object handle stored in `InterlokoHost` that
   points at adapter-owned Rust data.
-- **Adapter:** Rust code that maps a Cairn `SlotId` and expected `ValueKind` to
+- **Adapter:** Rust code that maps an Interloko `SlotId` and expected `ValueKind` to
   a runtime value.
 - **Registry:** explicit metadata describing host-backed metaobjects before
   semantic lowering.
@@ -870,14 +869,14 @@ Deferred:
 ### Deferred Host-Backed Design
 
 - `facet` integration is deferred. It should later populate
-  `HostMetaRegistry`; it should not replace Cairn's object-model semantics.
-- Automatic Rust reflection, mutation, Cairn-side construction of host-backed
+  `HostMetaRegistry`; it should not replace Interloko's object-model semantics.
+- Automatic Rust reflection, mutation, Interloko-side construction of host-backed
   values, ownership/lifetime generality, dynamic unknown host classes,
   host-backed generic Rust types, enum/variant modeling, trait discovery,
   dynamic method installation, persistence, async/effects integration, and
   Cranelift remain out of scope.
 - Host-backed functions are metadata scaffolding in this slice. Runtime calls
-  still go through the existing Cairn lowering and host-call mechanisms.
+  still go through the existing Interloko lowering and host-call mechanisms.
 
 ## Implemented: MOP Inspector Dumps
 
@@ -896,7 +895,7 @@ Deferred:
 - `interloko_corpus` supports `dump mop contains ...` expectations.
 - `interloko_lab` compile-only paths understand leading `// host-class:` headers
   as workbench metadata, matching the corpus runner. This remains a tooling
-  convention, not Cairn source syntax.
+  convention, not Loko source syntax.
 
 ### Migration Notes
 
@@ -906,7 +905,7 @@ Deferred:
 
 ## Implemented: Structured Environment Object Protocol Records
 
-- `DESIGN.md` now frames Cairn as a Dylan-shaped semantic kernel for
+- `DESIGN.md` now frames Interloko as a Dylan-shaped semantic kernel for
   executable object systems inside a larger human/agent workspace, with clear
   boundaries around persistence, search, UI, and scheduling.
 - `SessionArtifacts::environment_objects()` returns typed EOP records for the
@@ -965,7 +964,7 @@ Deferred:
 - EOP records are Rust structs, not a stable serialized schema. There is no
   Portolan subject bridge, Understory inspector, persistent image, capability
   policy, transaction model, or agent provenance model yet.
-- Future Cairn-level generic functions may mirror these projection protocols,
+- Future Interloko-level generic functions may mirror these projection protocols,
   but this slice keeps projection at the Rust/session API boundary.
 
 ### Migration Notes
@@ -1005,7 +1004,7 @@ Deferred:
   runtime heap objects.
 - EOP remains structured protocol vocabulary. There is still no Portolan bridge,
   Understory inspector, persistent image, capability policy, mutation
-  transaction model, or Cairn-level EOP generic function protocol.
+  transaction model, or Interloko-level EOP generic function protocol.
 
 ## Implemented: Richer Dylan-Shaped Slots
 
@@ -1227,7 +1226,7 @@ Deferred:
   `next-method`, method combination, reinitialization, class redefinition,
   obsolete instances, slot setters, multiple inheritance, and host-backed
   construction remain deferred.
-- Before user-defined initialization is enabled, Cairn still needs decisions
+- Before user-defined initialization is enabled, Interloko still needs decisions
   about method ordering, keyword consumption/forwarding rules, allocation hooks,
   interaction with setters/mutation, and how initialization participates in MOP
   inspection and incremental invalidation.
@@ -1270,7 +1269,7 @@ Deferred:
 
 ## Implemented: First Richer Value Types
 
-- Cairn now parses and lowers string, symbol, integer, and immutable vector
+- Interloko now parses and lowers string, symbol, integer, and immutable vector
   literals:
   - strings use `"..."` with `\n`, `\t`, `\"`, and `\\` escapes;
   - symbols use `#name`;
