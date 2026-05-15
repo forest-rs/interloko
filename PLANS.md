@@ -1,5 +1,58 @@
 # Plans
 
+## Build Structural Frontend Forms And Records Grammar
+
+### Goal
+
+Move staged grammar adapters from text emission toward an inspectable expander
+substrate. Adapters emit structural frontend forms with source provenance; the
+frontend materializes those forms back to ordinary Loko source only at the
+existing parser boundary. Add a trusted `records` staged grammar that emits
+class definitions with typed slots through those forms.
+
+### Fence
+
+`grammar_frontend` owns trusted staged adapter registration, frontend form
+records, staged-region routing, form-to-source materialization, grammar-stack
+records, structural emissions, and parse provenance. It explicitly does not own
+AST lowering, semantic meaning, source-authored grammars, macro hygiene,
+arbitrary host execution, plugin loading, or parser generation.
+
+### Invariants
+
+- `syntax -> AST -> sem -> lower -> tape` stays unchanged for this slice.
+- Staged adapters return structured frontend forms as the primary result.
+- Materialized source is a compatibility artifact and remains inspectable.
+- Original source spans stay attached to forms and staged-region records.
+- Calculator behavior remains working while moving off raw text emission.
+- `records` is a trusted Rust-hosted adapter, not source-authored grammar
+  syntax.
+- Diagnostics carry stable codes and structured args, not English-text parsing.
+
+### Steps
+
+1. Add frontend form structs/enums for emitted functions, classes, slots,
+   expression text, spans, and source-data projection.
+2. Change staged emissions to carry forms plus materialized source; update trace
+   and EOP output to show forms before emitted text.
+3. Replace one-off adapter lookup with a small built-in registry that can hold
+   `calculator` and `records`.
+4. Add `RecordsGrammar` with direct/effective rules and simple syntax:
+   `record name`, typed `field: <type>` lines, `end`.
+5. Add records lab/corpus fixtures that compile/run and expose classes/slots in
+   MOP/EOP.
+6. Update docs/progress, run fmt, clippy, workspace tests, docs, corpus, lab,
+   and example binaries.
+
+### Risks
+
+- Frontend forms could look more powerful than they are; docs must state that
+  AST still comes from materialized Loko text.
+- Records syntax should stay small enough to prove the path without becoming a
+  second language.
+- Span mapping for generated forms remains approximate at the parser boundary;
+  exact generated-to-original diagnostic remapping is deferred.
+
 ## Generalize Staged Grammar Activation
 
 ### Goal

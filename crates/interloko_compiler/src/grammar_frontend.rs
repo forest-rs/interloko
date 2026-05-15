@@ -356,6 +356,143 @@ pub struct GrammarActivation {
     pub reason: String,
 }
 
+/// A structural frontend form emitted by a trusted staged grammar adapter.
+///
+/// This is a transitional expander-facing representation. The current frontend
+/// still materializes forms back to ordinary Loko source before invoking the
+/// existing parser.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontendForm {
+    /// Original staged source span that produced this form.
+    pub source_span: Span,
+    /// Specific emitted form.
+    pub kind: FrontendFormKind,
+}
+
+impl FrontendForm {
+    /// Builds a zero-argument function form.
+    #[must_use]
+    pub fn function(name: impl Into<String>, body: FrontendExpression, source_span: Span) -> Self {
+        Self {
+            source_span,
+            kind: FrontendFormKind::Function(FrontendFunction {
+                name: name.into(),
+                body,
+            }),
+        }
+    }
+
+    /// Builds a class form.
+    #[must_use]
+    pub fn class(
+        name: impl Into<String>,
+        superclass: impl Into<String>,
+        slots: Vec<FrontendSlot>,
+        source_span: Span,
+    ) -> Self {
+        Self {
+            source_span,
+            kind: FrontendFormKind::Class(FrontendClass {
+                name: name.into(),
+                superclass: superclass.into(),
+                slots,
+            }),
+        }
+    }
+}
+
+/// Specific structural frontend form variants.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrontendFormKind {
+    /// A zero-argument function definition.
+    Function(FrontendFunction),
+    /// A class definition with direct slots.
+    Class(FrontendClass),
+}
+
+/// Structural frontend function form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontendFunction {
+    /// Function name.
+    pub name: String,
+    /// Function body expression.
+    pub body: FrontendExpression,
+}
+
+/// Structural frontend class form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontendClass {
+    /// Class name, including angle brackets when appropriate.
+    pub name: String,
+    /// Superclass name, including angle brackets when appropriate.
+    pub superclass: String,
+    /// Direct slots emitted for this class.
+    pub slots: Vec<FrontendSlot>,
+}
+
+/// Structural frontend slot declaration form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontendSlot {
+    /// Slot source span in the staged region.
+    pub source_span: Span,
+    /// Slot name.
+    pub name: String,
+    /// Slot type name, including angle brackets when appropriate.
+    pub type_name: String,
+    /// Whether this slot should be emitted as `constant slot`.
+    pub constant: bool,
+    /// Optional init keyword name without the trailing colon.
+    pub init_keyword: Option<String>,
+    /// Whether the init keyword is required.
+    pub required_init_keyword: bool,
+}
+
+impl FrontendSlot {
+    /// Builds a mutable slot with an optional init keyword.
+    #[must_use]
+    pub fn new(name: impl Into<String>, type_name: impl Into<String>, source_span: Span) -> Self {
+        Self {
+            source_span,
+            name: name.into(),
+            type_name: type_name.into(),
+            constant: false,
+            init_keyword: None,
+            required_init_keyword: false,
+        }
+    }
+
+    /// Returns a copy of this slot marked with an init keyword.
+    #[must_use]
+    pub fn with_init_keyword(mut self, keyword: impl Into<String>, required: bool) -> Self {
+        self.init_keyword = Some(keyword.into());
+        self.required_init_keyword = required;
+        self
+    }
+}
+
+/// Structural frontend expression form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrontendExpression {
+    /// Transitional raw Loko expression text with original source span.
+    LokoText {
+        /// Expression source text.
+        text: String,
+        /// Original staged source span.
+        source_span: Span,
+    },
+}
+
+impl FrontendExpression {
+    /// Builds a transitional raw Loko expression form.
+    #[must_use]
+    pub fn loko_text(text: impl Into<String>, source_span: Span) -> Self {
+        Self::LokoText {
+            text: text.into(),
+            source_span,
+        }
+    }
+}
+
 /// One staged source region and its structural parse result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedParseRegion {
@@ -373,8 +510,12 @@ pub struct StagedParseRegion {
     pub activation_directive: Span,
     /// Original source region parsed by the staged grammar.
     pub source_span: Span,
-    /// Ordinary Loko source emitted by the staged grammar.
-    pub emitted_source: String,
+    /// Structural frontend forms emitted by the staged grammar.
+    pub forms: Vec<FrontendForm>,
+    /// Inert structural projection of `forms`.
+    pub forms_data: SourceData,
+    /// Ordinary Loko source materialized from frontend forms.
+    pub materialized_source: String,
     /// Inert structural parse result.
     pub data: SourceData,
 }
@@ -563,6 +704,143 @@ fn parse_file_with_records(
     }
 }
 
+/// Materializes frontend forms into ordinary Loko source.
+#[must_use]
+pub fn materialize_frontend_forms(forms: &[FrontendForm]) -> String {
+    let mut source = String::new();
+    for form in forms {
+        materialize_frontend_form(form, &mut source);
+    }
+    source
+}
+
+fn materialize_frontend_form(form: &FrontendForm, source: &mut String) {
+    match &form.kind {
+        FrontendFormKind::Function(function) => {
+            source.push_str("define function ");
+            source.push_str(&function.name);
+            source.push_str("()\n  ");
+            materialize_frontend_expression(&function.body, source);
+            source.push_str("\nend\n");
+        }
+        FrontendFormKind::Class(class) => {
+            source.push_str("define class ");
+            source.push_str(&class.name);
+            source.push_str(" (");
+            source.push_str(&class.superclass);
+            source.push_str(")\n");
+            for slot in &class.slots {
+                source.push_str("  ");
+                if slot.constant {
+                    source.push_str("constant ");
+                }
+                source.push_str("slot ");
+                source.push_str(&slot.name);
+                source.push_str(" :: ");
+                source.push_str(&slot.type_name);
+                if let Some(keyword) = &slot.init_keyword {
+                    if slot.required_init_keyword {
+                        source.push_str(", required-init-keyword: ");
+                    } else {
+                        source.push_str(", init-keyword: ");
+                    }
+                    source.push_str(keyword);
+                    source.push(':');
+                }
+                source.push_str(";\n");
+            }
+            source.push_str("end\n");
+        }
+    }
+}
+
+fn materialize_frontend_expression(expression: &FrontendExpression, source: &mut String) {
+    match expression {
+        FrontendExpression::LokoText { text, .. } => source.push_str(text),
+    }
+}
+
+/// Projects frontend forms into inert source data for dumps and EOP records.
+#[must_use]
+pub fn frontend_forms_source_data(forms: &[FrontendForm]) -> SourceData {
+    SourceData::list(forms.iter().map(frontend_form_source_data).collect())
+}
+
+fn frontend_form_source_data(form: &FrontendForm) -> SourceData {
+    match &form.kind {
+        FrontendFormKind::Function(function) => SourceData::record(
+            "frontend-function",
+            vec![
+                source_data::field("name", SourceData::symbol(function.name.as_str())),
+                source_span_data(form.source_span),
+                source_data::field("body", frontend_expression_source_data(&function.body)),
+            ],
+        ),
+        FrontendFormKind::Class(class) => SourceData::record(
+            "frontend-class",
+            vec![
+                source_data::field("name", SourceData::symbol(class.name.as_str())),
+                source_data::field("superclass", SourceData::symbol(class.superclass.as_str())),
+                source_span_data(form.source_span),
+                source_data::field(
+                    "slots",
+                    SourceData::list(class.slots.iter().map(frontend_slot_source_data).collect()),
+                ),
+            ],
+        ),
+    }
+}
+
+fn frontend_expression_source_data(expression: &FrontendExpression) -> SourceData {
+    match expression {
+        FrontendExpression::LokoText { text, source_span } => SourceData::record(
+            "frontend-expression",
+            vec![
+                source_data::field("kind", SourceData::symbol("loko-text")),
+                source_data::field("text", SourceData::string(text.as_str())),
+                source_span_data(*source_span),
+            ],
+        ),
+    }
+}
+
+fn frontend_slot_source_data(slot: &FrontendSlot) -> SourceData {
+    let init_keyword = slot
+        .init_keyword
+        .as_deref()
+        .map_or_else(|| SourceData::symbol("none"), SourceData::symbol);
+    SourceData::record(
+        "frontend-slot",
+        vec![
+            source_data::field("name", SourceData::symbol(slot.name.as_str())),
+            source_data::field("type", SourceData::symbol(slot.type_name.as_str())),
+            source_data::field("constant", SourceData::bool(slot.constant)),
+            source_data::field("init-keyword", init_keyword),
+            source_data::field(
+                "required-init-keyword",
+                SourceData::bool(slot.required_init_keyword),
+            ),
+            source_span_data(slot.source_span),
+        ],
+    )
+}
+
+fn source_span_data(span: Span) -> source_data::SourceDataField {
+    source_data::field(
+        "source-span",
+        SourceData::record(
+            "span",
+            vec![
+                source_data::field(
+                    "start",
+                    SourceData::integer(usize_to_source_i64(span.start)),
+                ),
+                source_data::field("end", SourceData::integer(usize_to_source_i64(span.end))),
+            ],
+        ),
+    )
+}
+
 fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarParseReport> {
     let discovery = discover_staged_regions(source);
     if discovery.regions.is_empty() {
@@ -641,9 +919,11 @@ fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarP
             .adapter
             .parse_region(region.body, region.body_span.start);
         diagnostics.extend(emission.diagnostics);
-        materialized_source.push_str(&emission.emitted_source);
+        let region_materialized_source = materialize_frontend_forms(&emission.forms);
+        materialized_source.push_str(&region_materialized_source);
         materialized_cursor = region.end_marker.end;
         staged_rule_counts.push((grammar, region.adapter.provenance_rule_names()));
+        let forms_data = frontend_forms_source_data(&emission.forms);
 
         activations.push(activation.clone());
         staged_regions.push(StagedParseRegion {
@@ -654,7 +934,9 @@ fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarP
             grammar_slug: region.adapter.grammar_slug().to_string(),
             activation_directive: region.activation_directive,
             source_span: region.body_span,
-            emitted_source: emission.emitted_source,
+            forms: emission.forms,
+            forms_data,
+            materialized_source: region_materialized_source,
             data: emission.data,
         });
     }
@@ -741,7 +1023,7 @@ struct SourceLine<'source> {
 }
 
 struct StagedRegionEmission {
-    emitted_source: String,
+    forms: Vec<FrontendForm>,
     data: SourceData,
     diagnostics: Vec<Diagnostic>,
 }
@@ -919,7 +1201,7 @@ fn missing_activation_diagnostic(span: Span, name: &str) -> Diagnostic {
 }
 
 fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmission {
-    let mut emitted_source = String::new();
+    let mut forms = Vec::new();
     let mut diagnostics = Vec::new();
     let mut functions = Vec::new();
     let mut offset = source_offset;
@@ -951,11 +1233,16 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
             ));
             continue;
         }
-        emitted_source.push_str("define function ");
-        emitted_source.push_str(name);
-        emitted_source.push_str("()\n  ");
-        emitted_source.push_str(expression);
-        emitted_source.push_str("\nend\n");
+        let expression_offset = trimmed.find(expression).unwrap_or(0);
+        let expression_span = Span::new(
+            trimmed_start + expression_offset,
+            trimmed_start + expression_offset + expression.len(),
+        );
+        forms.push(FrontendForm::function(
+            name,
+            FrontendExpression::loko_text(expression, expression_span),
+            trimmed_span,
+        ));
         functions.push(SourceData::record(
             "calculator-function",
             vec![
@@ -981,7 +1268,7 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
     }
 
     StagedRegionEmission {
-        emitted_source,
+        forms,
         data: SourceData::record(
             "calculator-region",
             vec![
@@ -1828,6 +2115,15 @@ mod tests {
         );
         assert_eq!(report.staged_regions[0].adapter, "calculator");
         assert_eq!(report.staged_regions[0].object_slug, "r0");
+        assert!(
+            source_data::dump(&report.staged_regions[1].forms_data)
+                .contains("frontend-function(name: main")
+        );
+        assert!(
+            report.staged_regions[1]
+                .materialized_source
+                .contains("define function main()")
+        );
         assert!(
             source_data::dump(&report.staged_regions[1].data)
                 .contains("calculator-function(name: main")

@@ -3324,7 +3324,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
     for region in &artifacts.grammar_parse.staged_regions {
         let _ = writeln!(
             out,
-            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} emitted={:?} data={}",
+            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} forms={} materialized={:?} data={}",
             grammar_frontend::staged_parse_region_object_id(region),
             region.adapter,
             region.activation,
@@ -3333,7 +3333,8 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             region.activation_directive.end,
             region.source_span.start,
             region.source_span.end,
-            region.emitted_source,
+            region.forms_data,
+            region.materialized_source,
             region.data
         );
     }
@@ -3634,7 +3635,7 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
     for region in &report.staged_regions {
         let _ = writeln!(
             out,
-            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} emitted={:?}",
+            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} forms={}",
             grammar_frontend::staged_parse_region_object_id(region),
             region.adapter,
             region.activation,
@@ -3643,8 +3644,9 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
             region.activation_directive.end,
             region.source_span.start,
             region.source_span.end,
-            region.emitted_source
+            region.forms_data
         );
+        let _ = writeln!(out, "    materialized={:?}", region.materialized_source);
         let _ = writeln!(out, "    data={}", region.data);
     }
     let _ = writeln!(out, "rule provenance:");
@@ -4138,7 +4140,7 @@ fn project_staged_parse_region(
         ]),
         execution: None,
         inspection: format!(
-            "adapter={} activation={} grammar={} directive={}..{} span={}..{} emitted={:?} data={}",
+            "adapter={} activation={} grammar={} directive={}..{} span={}..{} forms={} materialized={:?} data={}",
             region.adapter,
             region.activation,
             region.grammar,
@@ -4146,7 +4148,8 @@ fn project_staged_parse_region(
             region.activation_directive.end,
             region.source_span.start,
             region.source_span.end,
-            region.emitted_source,
+            region.forms_data,
+            region.materialized_source,
             region.data
         ),
     }));
