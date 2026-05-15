@@ -2295,7 +2295,7 @@ impl Module {
             }
             ValueKind::ClassObject(None) => write!(f, "class"),
             ValueKind::GenericFunctionObject(Some(generic)) => {
-                if let Some(generic_info) = self.runtime.generics.get(generic.0 as usize) {
+                if let Some(generic_info) = self.runtime.generic(generic) {
                     write!(f, "generic({})", generic_info.name)
                 } else {
                     write!(f, "generic#{}", generic.0)
@@ -2309,7 +2309,7 @@ impl Module {
     }
 
     fn fmt_class(&self, f: &mut fmt::Formatter<'_>, class: sem::ClassId) -> fmt::Result {
-        if let Some(class_info) = self.runtime.classes.get(class.0 as usize) {
+        if let Some(class_info) = self.runtime.class(class) {
             write!(f, "{}", class_info.name)
         } else {
             write!(f, "class#{}", class.0)

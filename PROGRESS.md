@@ -324,6 +324,12 @@ Deferred:
 - `interloko_compiler::runtime` owns only `runtime_layout_from_sem`, the
   sem-to-runtime layout adapter; executable runtime APIs are imported from
   `interloko_runtime` directly.
+- Added runtime-owned object protocol helpers for class/generic/method lookup,
+  superclass chains, effective slots, and slot capability reporting.
+- Added `RuntimeError` for structured runtime object-operation failures, with
+  `execution_tape::host::HostError` mapping only at the tape host boundary.
+- Host-backed adapters now report `RuntimeError`, making host-backed slot reads
+  part of the same runtime slot protocol as native slot reads.
 - Lowering builds runtime layout values through the compiler adapter, while
   tape emission imports host symbols/signatures directly from
   `interloko_runtime`.

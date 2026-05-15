@@ -4131,7 +4131,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
 
     let _ = writeln!(out, "classes:");
     for class in &module.classes {
-        let runtime_class = runtime.classes.get(class.id.0 as usize);
+        let runtime_class = runtime.class(class.id);
         let runtime_kind =
             runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
         let superclass = sem_superclass_label(module, class.superclass);
@@ -4306,7 +4306,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
     }
 
     let _ = writeln!(out, "runtime layout:");
-    for (index, class) in runtime.classes.iter().enumerate() {
+    for (index, class) in runtime.classes().iter().enumerate() {
         let sem_class = module.classes.get(index);
         let superclass = sem_superclass_label(module, class.superclass);
         let _ = writeln!(
@@ -4316,11 +4316,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             runtime_object_kind_label(class.kind)
         );
         for (slot_index, slot) in class.slots.iter().enumerate() {
-            let storage = if slot.host_backed {
-                "host-backed"
-            } else {
-                "native"
-            };
+            let capability = slot.capability();
             let source = sem_class
                 .and_then(|sem_class| {
                     sem_class
@@ -4331,10 +4327,13 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
                 .unwrap_or_else(|| "source=missing".into());
             let _ = writeln!(
                 out,
-                "    s{slot_index} {} kind={} storage={} {source} runtime={}",
+                "    s{slot_index} {} kind={} storage={} readable={} writable={} write-rejection={} {source} runtime={}",
                 slot.name,
                 runtime_kind_label(module, slot.kind),
-                storage,
+                runtime_slot_storage_label(capability.storage),
+                capability.readable,
+                capability.writable,
+                runtime_slot_write_rejection_label(capability.write_rejection),
                 runtime_repr(slot.kind)
             );
         }
@@ -4348,6 +4347,24 @@ fn runtime_object_kind_label(kind: HostObjectKind) -> &'static str {
         HostObjectKind::Native => "native",
         HostObjectKind::BuiltinValue { .. } => "builtin-value",
         HostObjectKind::HostBacked => "host-backed",
+    }
+}
+
+fn runtime_slot_storage_label(storage: runtime::RuntimeSlotStorage) -> &'static str {
+    match storage {
+        runtime::RuntimeSlotStorage::Native => "native",
+        runtime::RuntimeSlotStorage::HostBacked => "host-backed",
+    }
+}
+
+fn runtime_slot_write_rejection_label(
+    rejection: Option<runtime::RuntimeSlotWriteRejection>,
+) -> &'static str {
+    match rejection {
+        None => "none",
+        Some(runtime::RuntimeSlotWriteRejection::ConstantSlot) => "constant-slot",
+        Some(runtime::RuntimeSlotWriteRejection::HostBackedSlot) => "host-backed-slot",
+        Some(runtime::RuntimeSlotWriteRejection::NonNativeObject) => "non-native-object",
     }
 }
 
@@ -5072,7 +5089,7 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             ),
         }));
     }
-    for (index, class) in runtime.classes.iter().enumerate() {
+    for (index, class) in runtime.classes().iter().enumerate() {
         project_environment_runtime_class(module, sink, index, class);
     }
     for report in artifacts.artifact_reports() {
@@ -5585,7 +5602,7 @@ fn project_environment_class(
 ) {
     use EnvironmentAffordance as Aff;
 
-    let runtime_class = runtime.classes.get(class.id.0 as usize);
+    let runtime_class = runtime.class(class.id);
     let runtime_kind =
         runtime_class.map_or("missing", |class| runtime_object_kind_label(class.kind));
     let superclass = sem_superclass_label(module, class.superclass);
@@ -5961,11 +5978,7 @@ fn project_environment_runtime_class(
         ),
     }));
     for (slot_index, slot) in class.slots.iter().enumerate() {
-        let storage = if slot.host_backed {
-            "host-backed"
-        } else {
-            "native"
-        };
+        let capability = slot.capability();
         let source = module
             .classes
             .get(index)
@@ -5986,8 +5999,11 @@ fn project_environment_runtime_class(
             affordances: Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::DumpTape]),
             execution: None,
             inspection: format!(
-                "class-id=c{index} slot-id=s{slot_index} storage={} kind={} {source} runtime={}",
-                storage,
+                "class-id=c{index} slot-id=s{slot_index} storage={} readable={} writable={} write-rejection={} kind={} {source} runtime={}",
+                runtime_slot_storage_label(capability.storage),
+                capability.readable,
+                capability.writable,
+                runtime_slot_write_rejection_label(capability.write_rejection),
                 runtime_kind_label(module, slot.kind),
                 runtime_repr(slot.kind)
             ),

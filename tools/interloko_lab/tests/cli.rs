@@ -674,7 +674,9 @@ fn inspect_reports_inherited_effective_slots() {
     assert!(mop.contains("effective-slots=2"));
     assert!(mop.contains("source=inherited c1.s0"));
     assert!(mop.contains("c2 <point> kind=native superclass=c1:<shape>"));
-    assert!(mop.contains("s0 x kind=integer storage=native source=inherited source-slot=c1.s0"));
+    assert!(mop.contains(
+        "s0 x kind=integer storage=native readable=true writable=true write-rejection=none source=inherited source-slot=c1.s0"
+    ));
 
     let class = run_lab(&["inspect", path, "class:c2"]);
     assert!(class.contains("superclass=c1:<shape>"));

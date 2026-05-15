@@ -63,6 +63,11 @@ same semantic module path while the dependency direction improves.
 - runtime-representable `ValueKind` for host signatures and slot IO;
 - `RuntimeLayout`, `RuntimeClass`, `RuntimeSlot`, `RuntimeGeneric`, and
   `RuntimeMethod`;
+- read-only runtime object protocol helpers for class lookup, superclass
+  chains, effective slot lookup, generic/method lookup, and slot capability
+  reporting;
+- structured runtime operation errors through `RuntimeError`, mapped to
+  `execution_tape::host::HostError` only at the host-call ABI boundary;
 - host-call symbols and `execution_tape` host signatures;
 - `InterlokoHost`, native object storage, boxed `<object>` values, strings,
   symbols, vectors, metaobjects, and host-backed object adapters.
@@ -77,6 +82,12 @@ Executable runtime APIs are imported from `interloko_runtime` directly. The
 `interloko_compiler::runtime` module is only the semantic layout adapter; callers
 that previously used `interloko_compiler::runtime::InterlokoHost` or related
 runtime types should import them from `interloko_runtime` instead.
+
+Host-backed Rust objects implement `interloko_runtime::HostObjectAdapter`. The
+adapter participates in the same slot read protocol as native objects, but
+host-backed slots remain read-only in the current slice. Slot capability reports
+distinguish native writable slots, constant native slots, and host-backed
+read-only slots.
 
 ## Glossary
 
