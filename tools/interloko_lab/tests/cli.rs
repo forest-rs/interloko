@@ -356,7 +356,7 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert!(trace.contains("adapter=calculator"));
     assert!(trace.contains("directive="));
     assert!(trace.contains("define function main()"));
-    assert!(trace.contains("calculator staged region emitted ordinary Loko source"));
+    assert!(trace.contains("calculator staged region emitted frontend forms for materialization"));
 }
 
 #[test]

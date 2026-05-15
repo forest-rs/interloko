@@ -1,8 +1,9 @@
 # Grammar MOP
 
 Interloko exposes the current hand-written Loko parser as read-only grammar
-metaobjects. It also has one tiny staged-parse prototype. This is still not a
-parser rewrite and not a macro system.
+metaobjects. It also has trusted staged grammar adapters that emit structural
+frontend forms before those forms are materialized back to ordinary Loko source.
+This is still not a parser rewrite and not a macro system.
 
 ## Boundary
 
@@ -63,15 +64,21 @@ new syntax.
 The staged prototype adds:
 
 ```text
-language-environment:staged-calculator  StagedCalculatorEnvironment
-grammar:calculator                      CalculatorRegionGrammar extends BaseLokoGrammar
+language-environment:staged-loko  StagedLokoEnvironment
+grammar:calculator                CalculatorRegionGrammar extends BaseLokoGrammar
+grammar:records                   RecordsRegionGrammar extends BaseLokoGrammar
 ```
 
 `CalculatorRegionGrammar` has direct rules for `calculator-region` and
 `calculator-function`. A frontend metadata directive selects it by name:
 `// grammar-activate: calculator`. Later comment-delimited regions are routed
-through the registered calculator adapter and materialized as ordinary Loko
-function definitions.
+through the registered calculator adapter and emit structural function forms.
+
+`RecordsRegionGrammar` has direct rules for `records-region`,
+`record-definition`, and `record-field`. It is selected with
+`// grammar-activate: records` and emits structural class forms with typed
+slots. Both adapters are trusted Rust-hosted entries in an internal registry;
+there is no source-authored grammar definition syntax yet.
 
 ## Parse Reports
 
@@ -85,8 +92,8 @@ That report contains:
 - the resolved grammar stack;
 - projected grammar, direct-rule, and effective-rule records;
 - grammar activations over source regions;
-- staged regions with emitted ordinary Loko source and inert source-data parse
-  results;
+- staged regions with frontend forms, materialized ordinary Loko source, and
+  inert source-data parse results;
 - parse provenance with per-rule CST node counts;
 - grammar diagnostic facts that attach syntax diagnostics to the active
   grammar, activation, effective rule, source span, diagnostic code, and
@@ -125,7 +132,7 @@ header:
 The default is `// grammar: base-loko`. The header is workbench/corpus session
 input, not Loko syntax.
 
-Use the staged calculator prototype like this:
+Use the staged calculator adapter like this:
 
 ```text
 // grammar-activate: calculator
@@ -139,7 +146,8 @@ main = helper() + 2
 // end-staged-loko
 ```
 
-The staged regions emit these ordinary Loko forms before AST lowering:
+The staged regions emit structural `frontend-function` forms. The frontend then
+materializes those forms into ordinary Loko source before AST lowering:
 
 ```text
 define function helper()
@@ -155,7 +163,40 @@ Inspect it with:
 
 ```sh
 cargo run -p interloko_lab -- run tools/interloko_lab/fixtures/staged_calculator.loko
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/staged_calculator.loko language-environment:staged-calculator show-parse-trace
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/staged_calculator.loko language-environment:staged-loko show-parse-trace
+```
+
+Use the staged records adapter like this:
+
+```text
+// grammar-activate: records
+
+// staged-loko: records
+record circle
+  radius: <integer>
+end
+// end-staged-loko
+
+define function main()
+  let c = make(<circle>, radius: 10);
+  radius(c)
+end
+```
+
+The records region emits a structural `frontend-class` form, then materializes
+to ordinary class syntax:
+
+```text
+define class <circle> (<object>)
+  slot radius :: <integer>, required-init-keyword: radius:;
+end
+```
+
+Inspect it with:
+
+```sh
+cargo run -p interloko_lab -- run tools/interloko_lab/fixtures/staged_records.loko
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/staged_records.loko language-environment:staged-loko show-parse-trace
 ```
 
 The artifact graph now separates the frontend facts:
@@ -172,9 +213,9 @@ diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
 
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
-activation directive span, source span, emitted source, and inert source-data
-result. The directive and `// staged-loko:` markers are frontend/workbench
-metadata; they are not part of the Loko language semantics.
+activation directive span, source span, frontend forms, materialized source, and
+inert source-data result. The directive and `// staged-loko:` markers are
+frontend/workbench metadata; they are not part of the Loko language semantics.
 
 ## Source Data
 
@@ -199,12 +240,25 @@ This is deliberately not Loko syntax. It is a structural carrier for frontend
 facts so later staged parsing or semantic actions can exchange data-like forms
 without running host code or pretending macros already exist.
 
+Frontend forms currently project to source data such as:
+
+```text
+frontend-function(name: main, ...)
+frontend-class(name: <circle>, superclass: <object>, ...)
+frontend-slot(name: radius, type: <integer>, ...)
+```
+
+These records are the inspectable expander boundary. They are not executable
+semantic actions, and they do not bypass the existing parser.
+
 ## Deferred Design
 
 Later slices may add:
 
 - source-authored grammar declarations;
-- structural semantic actions that emit forms or grammar deltas.
+- structural semantic actions that emit forms or grammar deltas;
+- direct AST construction from frontend forms;
+- macro hygiene and name-introduction rules;
 - exact original-source span mapping for emitted forms;
 - a public registry/capability policy for choosing staged grammar adapters;
 

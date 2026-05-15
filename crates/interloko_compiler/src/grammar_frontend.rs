@@ -913,7 +913,7 @@ fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarP
             span: region.body_span,
             root_rule,
             reason: format!(
-                "{} staged region emitted ordinary Loko source",
+                "{} staged region emitted frontend forms for materialization",
                 region.adapter.adapter_name()
             ),
         };

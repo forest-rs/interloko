@@ -1,13 +1,21 @@
 # Interloko Progress
 
-## Implemented: Staged Grammar Registry Prototype
+## Implemented: Structural Frontend Forms And Records Grammar
 
 - Added `CalculatorRegionGrammar` and
-  `StagedCalculatorEnvironment` as the first grammar MOP slice where grammar
-  records participate in parsing, not only inspection.
-- Added an internal staged grammar adapter protocol and registry. The only
-  registered adapter today is `calculator`.
-- A frontend metadata directive selects the staged grammar:
+  `RecordsRegionGrammar` under `StagedLokoEnvironment` as grammar MOP slices
+  where grammar records participate in parsing, not only inspection.
+- Added structural frontend forms for staged adapter output:
+  `frontend-function`, `frontend-class`, `frontend-slot`, and transitional
+  raw Loko expression text. Forms carry original staged source spans and are
+  projected through inert `source_data`.
+- Staged adapters now emit frontend forms first. The grammar frontend
+  materializes those forms back to ordinary Loko source only at the existing
+  parser boundary, so AST, semantic IR, lowering, and tape emission remain
+  unchanged.
+- Added an internal staged grammar adapter registry. The registered adapters
+  today are `calculator` and `records`.
+- A frontend metadata directive selects a staged grammar:
 
   ```text
   // grammar-activate: calculator
@@ -22,11 +30,32 @@
   // end-staged-loko
   ```
 
-  are routed through the calculator adapter and emit ordinary Loko source:
+  are routed through the calculator adapter and emit frontend function forms
+  that materialize to ordinary Loko source:
 
   ```text
   define function helper()
     40
+  end
+  ```
+
+- A records region:
+
+  ```text
+  // grammar-activate: records
+
+  // staged-loko: records
+  record circle
+    radius: <integer>
+  end
+  // end-staged-loko
+  ```
+
+  emits a frontend class form that materializes to:
+
+  ```text
+  define class <circle> (<object>)
+    slot radius :: <integer>, required-init-keyword: radius:;
   end
   ```
 
@@ -35,18 +64,21 @@
   lower, or tape layer performs grammar lookup.
 - Parse trace now shows grammar activations for the base source file and each
   staged region, plus a `staged regions:` section with adapter name, activation
-  directive span, emitted source, and inert `source_data`.
-- MOP/EOP output includes `grammar:calculator`, activation objects such as
-  `grammar-activation:calculator/r0`, and staged-region objects such as
-  `staged-region:calculator/r0`.
-- Added lab and corpus fixtures showing that the staged calculator program runs
-  and remains inspectable.
+  directive span, frontend forms, materialized source, and inert
+  `source_data`.
+- MOP/EOP output includes `grammar:calculator`, `grammar:records`, activation
+  objects such as `grammar-activation:calculator/r0`, and staged-region objects
+  such as `staged-region:records/r0`.
+- Added lab and corpus fixtures showing that staged calculator and records
+  programs run and remain inspectable.
 
 Deferred:
 
 - Source-authored grammar definitions.
 - Public staged grammar registry and capability policy.
-- Original-source span remapping for emitted ordinary Loko forms.
+- Direct AST construction from frontend forms.
+- Macro hygiene and name-introduction policy.
+- Exact original-source span remapping for diagnostics from materialized forms.
 - Semantic actions beyond inert structural source-data emission.
 
 ## Implemented: Grammar MOP Follow-Up Slices
