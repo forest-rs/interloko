@@ -6,7 +6,7 @@ use std::fmt::{self, Write as _};
 use std::fs;
 use std::path::Path;
 
-use interloko_compiler::grammar_frontend::GrammarEnvironmentSelection;
+use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
 use interloko_compiler::identity::SourceFileId;
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
@@ -722,12 +722,13 @@ fn mop_section(artifacts: &SessionArtifacts, start: &str, end: &str) -> String {
 }
 
 fn parse_grammar_environment(path: &Path, source: &str) -> Result<GrammarEnvironmentSelection> {
-    let mut selection = GrammarEnvironmentSelection::BaseLoko;
+    let registry = GrammarFrontendRegistry::builtin();
+    let mut selection = GrammarEnvironmentSelection::base_loko();
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             if let Some(rest) = trimmed.strip_prefix("// grammar:") {
-                selection = parse_grammar_selection(path, index + 1, rest.trim())?;
+                selection = parse_grammar_selection(path, index + 1, rest.trim(), &registry)?;
             }
             continue;
         }
@@ -740,16 +741,27 @@ fn parse_grammar_selection(
     path: &Path,
     line: usize,
     input: &str,
+    registry: &GrammarFrontendRegistry,
 ) -> Result<GrammarEnvironmentSelection> {
-    match input {
-        "base-loko" => Ok(GrammarEnvironmentSelection::BaseLoko),
-        "derived-host" => Ok(GrammarEnvironmentSelection::DerivedHost),
-        _ => Err(LabError::InvalidGrammarHeader {
+    registry
+        .environment_selection(input)
+        .ok_or_else(|| LabError::InvalidGrammarHeader {
             path: path.display().to_string(),
             line,
-            message: "grammar must be `base-loko` or `derived-host`".into(),
-        }),
-    }
+            message: grammar_header_message(registry),
+        })
+}
+
+fn grammar_header_message(registry: &GrammarFrontendRegistry) -> String {
+    format!(
+        "grammar must be one of {}",
+        registry
+            .environment_slugs()
+            .into_iter()
+            .map(|slug| format!("`{slug}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {

@@ -38,40 +38,78 @@ pub const RECORDS_GRAMMAR_NAME: &str = "RecordsRegionGrammar";
 /// Stable name for the directive-activated staged grammar environment.
 pub const STAGED_LOKO_ENVIRONMENT_NAME: &str = "StagedLokoEnvironment";
 
+/// Stable registry token for the base language environment.
+pub const BASE_LOKO_ENVIRONMENT_SLUG: &str = "base-loko";
+/// Stable registry token for the trusted host-derived language environment.
+pub const DERIVED_HOST_ENVIRONMENT_SLUG: &str = "derived-host";
+/// Stable registry token for the directive-activated staged environment.
+pub const STAGED_LOKO_ENVIRONMENT_SLUG: &str = "staged-loko";
+/// Stable registry token for the calculator staged grammar.
+pub const CALCULATOR_GRAMMAR_SLUG: &str = "calculator";
+/// Stable registry token for the records staged grammar.
+pub const RECORDS_GRAMMAR_SLUG: &str = "records";
+
 const GRAMMAR_ACTIVATE_PREFIX: &str = "// grammar-activate:";
 const STAGED_LOKO_PREFIX: &str = "// staged-loko:";
 const STAGED_LOKO_END: &str = "// end-staged-loko";
 
 /// Selects the grammar environment used by the frontend.
 ///
-/// The first slice keeps parsing delegated to the base hand-written parser, but
-/// this selector lets callers request a different read-only grammar projection
-/// and grammar stack for inspection and incremental provenance.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GrammarEnvironmentSelection {
-    /// The ordinary Loko grammar projected from the current parser.
-    BaseLoko,
-    /// A trusted host-provided fixture grammar that extends the base grammar.
-    DerivedHost,
+/// Selections are registry tokens rather than a closed enum so new host or
+/// source-authored language environments can be registered without adding a new
+/// compiler variant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarEnvironmentSelection {
+    slug: String,
 }
 
 impl GrammarEnvironmentSelection {
-    /// Returns the stable environment name associated with this selection.
+    /// Creates a grammar environment selection from a registry token.
     #[must_use]
-    pub const fn environment_name(self) -> &'static str {
-        match self {
-            Self::BaseLoko => BASE_LOKO_ENVIRONMENT_NAME,
-            Self::DerivedHost => DERIVED_HOST_ENVIRONMENT_NAME,
-        }
+    pub fn new(slug: impl Into<String>) -> Self {
+        Self { slug: slug.into() }
+    }
+
+    /// Returns the ordinary base Loko grammar environment selection.
+    #[must_use]
+    pub fn base_loko() -> Self {
+        Self::new(BASE_LOKO_ENVIRONMENT_SLUG)
+    }
+
+    /// Returns the trusted host-derived fixture grammar environment selection.
+    #[must_use]
+    pub fn derived_host() -> Self {
+        Self::new(DERIVED_HOST_ENVIRONMENT_SLUG)
     }
 
     /// Returns the stable command/config token associated with this selection.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BaseLoko => "base-loko",
-            Self::DerivedHost => "derived-host",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.slug
+    }
+}
+
+impl Default for GrammarEnvironmentSelection {
+    fn default() -> Self {
+        Self::base_loko()
+    }
+}
+
+impl fmt::Display for GrammarEnvironmentSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for GrammarEnvironmentSelection {
+    fn from(slug: &str) -> Self {
+        Self::new(slug)
+    }
+}
+
+impl From<String> for GrammarEnvironmentSelection {
+    fn from(slug: String) -> Self {
+        Self::new(slug)
     }
 }
 
@@ -604,10 +642,144 @@ pub struct GrammarParseReport {
     pub syntax: SyntaxTree,
 }
 
+/// Provider for a registered language environment.
+///
+/// A provider contributes the grammar records for one environment token. The
+/// current built-ins still delegate CST construction to the hand-written parser,
+/// but this protocol keeps selection out of hardcoded caller matches.
+pub trait GrammarEnvironmentProvider: Sync {
+    /// Stable registry token accepted by source headers and tools.
+    fn environment_slug(&self) -> &'static str;
+
+    /// Stable human-facing environment name.
+    fn environment_name(&self) -> &'static str;
+
+    /// Projected grammar records for this environment.
+    fn records(&self) -> GrammarFrontendRecords;
+
+    /// Whether this environment scans source for staged grammar regions.
+    fn discovers_staged_regions(&self) -> bool {
+        false
+    }
+}
+
+/// Adapter protocol for directive-activated staged grammar regions.
+///
+/// Staged adapters parse only their delimited source region and emit inert
+/// frontend forms. They do not execute host code or bypass the ordinary
+/// syntax-to-AST-to-semantic pipeline.
+pub trait StagedGrammarAdapter: Sync {
+    /// Stable adapter token used in `// grammar-activate:` and
+    /// `// staged-loko:` directives.
+    fn adapter_name(&self) -> &'static str;
+
+    /// Stable human-facing grammar name.
+    fn grammar_name(&self) -> &'static str;
+
+    /// Stable EOP/object slug for this grammar.
+    fn grammar_slug(&self) -> &'static str;
+
+    /// Root rule used for staged-region provenance.
+    fn root_rule(&self) -> &'static str;
+
+    /// Rule names charged when this staged adapter emits forms.
+    fn provenance_rule_names(&self) -> &'static [&'static str];
+
+    /// Direct grammar rules projected for this staged grammar.
+    fn direct_rules(&self, grammar: GrammarId) -> Vec<GrammarRule>;
+
+    /// Parses a delimited source region into frontend forms and diagnostics.
+    fn parse_region(&self, body: &str, source_offset: usize) -> StagedRegionEmission;
+}
+
+/// Registry of language environments and staged grammar adapters.
+#[derive(Clone, Copy)]
+pub struct GrammarFrontendRegistry {
+    environment_providers: &'static [&'static dyn GrammarEnvironmentProvider],
+    staged_adapters: &'static [&'static dyn StagedGrammarAdapter],
+}
+
+impl GrammarFrontendRegistry {
+    /// Creates a registry from explicit static providers.
+    #[must_use]
+    pub const fn new(
+        environment_providers: &'static [&'static dyn GrammarEnvironmentProvider],
+        staged_adapters: &'static [&'static dyn StagedGrammarAdapter],
+    ) -> Self {
+        Self {
+            environment_providers,
+            staged_adapters,
+        }
+    }
+
+    /// Returns the built-in registry used by sessions and workbench tools.
+    #[must_use]
+    pub const fn builtin() -> Self {
+        Self::new(
+            &BUILTIN_GRAMMAR_ENVIRONMENTS,
+            &BUILTIN_STAGED_GRAMMAR_ADAPTERS,
+        )
+    }
+
+    /// Finds a language environment provider by registry token.
+    #[must_use]
+    pub fn environment_provider(
+        &self,
+        slug: &str,
+    ) -> Option<&'static dyn GrammarEnvironmentProvider> {
+        self.environment_providers
+            .iter()
+            .copied()
+            .find(|provider| provider.environment_slug() == slug)
+    }
+
+    /// Converts a registry token into a selection if the environment exists.
+    #[must_use]
+    pub fn environment_selection(&self, slug: &str) -> Option<GrammarEnvironmentSelection> {
+        self.environment_provider(slug)
+            .map(|provider| GrammarEnvironmentSelection::new(provider.environment_slug()))
+    }
+
+    /// Returns the registered language environment tokens.
+    #[must_use]
+    pub fn environment_slugs(&self) -> Vec<&'static str> {
+        self.environment_providers
+            .iter()
+            .map(|provider| provider.environment_slug())
+            .collect()
+    }
+
+    /// Finds a staged grammar adapter by registry token.
+    #[must_use]
+    pub fn staged_adapter(&self, name: &str) -> Option<&'static dyn StagedGrammarAdapter> {
+        self.staged_adapters
+            .iter()
+            .copied()
+            .find(|adapter| adapter.adapter_name() == name)
+    }
+
+    /// Returns the registered staged adapter tokens.
+    #[must_use]
+    pub fn staged_adapter_names(&self) -> Vec<&'static str> {
+        self.staged_adapters
+            .iter()
+            .map(|adapter| adapter.adapter_name())
+            .collect()
+    }
+
+    fn staged_records(&self, adapter_names: &[&str]) -> GrammarFrontendRecords {
+        staged_registry_records(adapter_names, self)
+    }
+}
+
 /// Parses source through the base Loko grammar frontend.
 #[must_use]
 pub fn parse_file(source_file: SourceFileId, source: &str) -> GrammarParseReport {
-    parse_file_with_environment(source_file, source, GrammarEnvironmentSelection::BaseLoko)
+    parse_file_with_environment(
+        source_file,
+        source,
+        GrammarEnvironmentSelection::base_loko(),
+    )
 }
 
 /// Parses source through the selected grammar frontend.
@@ -621,16 +793,41 @@ pub fn parse_file_with_environment(
     source: &str,
     environment: GrammarEnvironmentSelection,
 ) -> GrammarParseReport {
-    if environment == GrammarEnvironmentSelection::BaseLoko
-        && let Some(report) = parse_staged_file(source_file, source)
-    {
-        return report;
+    parse_file_with_registry(
+        source_file,
+        source,
+        environment,
+        &GrammarFrontendRegistry::builtin(),
+    )
+}
+
+/// Parses source through an explicit grammar frontend registry.
+///
+/// Unknown environment selections still produce a report, using the base parser
+/// plus a structured diagnostic, so session callers do not need to handle a
+/// separate parse failure path.
+#[must_use]
+pub fn parse_file_with_registry(
+    source_file: SourceFileId,
+    source: &str,
+    environment: GrammarEnvironmentSelection,
+    registry: &GrammarFrontendRegistry,
+) -> GrammarParseReport {
+    if let Some(provider) = registry.environment_provider(environment.as_str()) {
+        if provider.discovers_staged_regions()
+            && let Some(report) = parse_staged_file(source_file, source, registry)
+        {
+            return report;
+        }
+        return parse_file_with_records(source_file, source, provider.records());
     }
-    let records = match environment {
-        GrammarEnvironmentSelection::BaseLoko => base_loko_records(),
-        GrammarEnvironmentSelection::DerivedHost => derived_host_records(),
-    };
-    parse_file_with_records(source_file, source, records)
+
+    let mut report = parse_file_with_records(source_file, source, base_loko_records());
+    push_report_diagnostic(
+        &mut report,
+        unknown_environment_diagnostic(Span::new(0, 0), environment.as_str(), registry),
+    );
+    report
 }
 
 fn parse_file_with_records(
@@ -843,8 +1040,12 @@ fn source_span_data(span: Span) -> source_data::SourceDataField {
     )
 }
 
-fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarParseReport> {
-    let discovery = discover_staged_regions(source);
+fn parse_staged_file(
+    source_file: SourceFileId,
+    source: &str,
+    registry: &GrammarFrontendRegistry,
+) -> Option<GrammarParseReport> {
+    let discovery = discover_staged_regions(source, registry);
     if discovery.regions.is_empty() {
         if !discovery.diagnostics.is_empty() {
             let mut report = parse_file_with_records(source_file, source, base_loko_records());
@@ -863,7 +1064,7 @@ fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarP
         return None;
     }
     let adapter_names = staged_adapter_names(&discovery.regions);
-    let records = staged_registry_records(&adapter_names);
+    let records = registry.staged_records(&adapter_names);
     let base_grammar = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
     let base_root_rule =
         effective_rule_id_by_name(&records.effective_rules, base_grammar, "source-file")
@@ -873,7 +1074,7 @@ fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarP
         id: GrammarActivationId::new(source_file, base_grammar, "source-file"),
         environment: records.environment.id,
         grammar: base_grammar,
-        grammar_slug: "base-loko".to_string(),
+        grammar_slug: BASE_LOKO_ENVIRONMENT_SLUG.to_string(),
         object_slug: "source-file".to_string(),
         span: Span::new(0, source.len()),
         root_rule: base_root_rule,
@@ -1000,7 +1201,7 @@ fn parse_staged_file(source_file: SourceFileId, source: &str) -> Option<GrammarP
 }
 
 struct DiscoveredStagedRegion<'source> {
-    adapter: &'static dyn StagedGrammar,
+    adapter: &'static dyn StagedGrammarAdapter,
     activation_directive: Span,
     start_marker: Span,
     end_marker: Span,
@@ -1014,7 +1215,7 @@ struct StagedRegionDiscovery<'source> {
 }
 
 struct ActiveStagedGrammar {
-    adapter: &'static dyn StagedGrammar,
+    adapter: &'static dyn StagedGrammarAdapter,
     directive: Span,
 }
 
@@ -1024,35 +1225,71 @@ struct SourceLine<'source> {
     text: &'source str,
 }
 
-struct StagedRegionEmission {
-    forms: Vec<FrontendForm>,
-    data: SourceData,
-    diagnostics: Vec<Diagnostic>,
+/// Output emitted by a staged grammar adapter for one source region.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedRegionEmission {
+    /// Frontend forms emitted by the adapter.
+    pub forms: Vec<FrontendForm>,
+    /// Inert structured protocol data describing the adapter parse.
+    pub data: SourceData,
+    /// Diagnostics emitted while parsing the staged region.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
-trait StagedGrammar: Sync {
-    fn adapter_name(&self) -> &'static str;
-    fn grammar_name(&self) -> &'static str;
-    fn grammar_slug(&self) -> &'static str;
-    fn root_rule(&self) -> &'static str;
-    fn provenance_rule_names(&self) -> &'static [&'static str];
-    fn direct_rules(&self, grammar: GrammarId) -> Vec<GrammarRule>;
-    fn parse_region(&self, body: &str, source_offset: usize) -> StagedRegionEmission;
-}
-
+struct BaseLokoEnvironmentProvider;
+struct DerivedHostEnvironmentProvider;
 struct CalculatorStagedGrammar;
 struct RecordsStagedGrammar;
 
+static BASE_LOKO_ENVIRONMENT_PROVIDER: BaseLokoEnvironmentProvider = BaseLokoEnvironmentProvider;
+static DERIVED_HOST_ENVIRONMENT_PROVIDER: DerivedHostEnvironmentProvider =
+    DerivedHostEnvironmentProvider;
 static CALCULATOR_STAGED_GRAMMAR: CalculatorStagedGrammar = CalculatorStagedGrammar;
 static RECORDS_STAGED_GRAMMAR: RecordsStagedGrammar = RecordsStagedGrammar;
-static STAGED_GRAMMAR_REGISTRY: [&dyn StagedGrammar; 2] =
+static BUILTIN_GRAMMAR_ENVIRONMENTS: [&dyn GrammarEnvironmentProvider; 2] = [
+    &BASE_LOKO_ENVIRONMENT_PROVIDER,
+    &DERIVED_HOST_ENVIRONMENT_PROVIDER,
+];
+static BUILTIN_STAGED_GRAMMAR_ADAPTERS: [&dyn StagedGrammarAdapter; 2] =
     [&CALCULATOR_STAGED_GRAMMAR, &RECORDS_STAGED_GRAMMAR];
 const CALCULATOR_PROVENANCE_RULES: &[&str] = &["calculator-region", "calculator-function"];
 const RECORDS_PROVENANCE_RULES: &[&str] = &["records-region", "record-definition", "record-field"];
 
-impl StagedGrammar for CalculatorStagedGrammar {
+impl GrammarEnvironmentProvider for BaseLokoEnvironmentProvider {
+    fn environment_slug(&self) -> &'static str {
+        BASE_LOKO_ENVIRONMENT_SLUG
+    }
+
+    fn environment_name(&self) -> &'static str {
+        BASE_LOKO_ENVIRONMENT_NAME
+    }
+
+    fn records(&self) -> GrammarFrontendRecords {
+        base_loko_records()
+    }
+
+    fn discovers_staged_regions(&self) -> bool {
+        true
+    }
+}
+
+impl GrammarEnvironmentProvider for DerivedHostEnvironmentProvider {
+    fn environment_slug(&self) -> &'static str {
+        DERIVED_HOST_ENVIRONMENT_SLUG
+    }
+
+    fn environment_name(&self) -> &'static str {
+        DERIVED_HOST_ENVIRONMENT_NAME
+    }
+
+    fn records(&self) -> GrammarFrontendRecords {
+        derived_host_records()
+    }
+}
+
+impl StagedGrammarAdapter for CalculatorStagedGrammar {
     fn adapter_name(&self) -> &'static str {
-        "calculator"
+        CALCULATOR_GRAMMAR_SLUG
     }
 
     fn grammar_name(&self) -> &'static str {
@@ -1060,7 +1297,7 @@ impl StagedGrammar for CalculatorStagedGrammar {
     }
 
     fn grammar_slug(&self) -> &'static str {
-        "calculator"
+        CALCULATOR_GRAMMAR_SLUG
     }
 
     fn root_rule(&self) -> &'static str {
@@ -1080,9 +1317,9 @@ impl StagedGrammar for CalculatorStagedGrammar {
     }
 }
 
-impl StagedGrammar for RecordsStagedGrammar {
+impl StagedGrammarAdapter for RecordsStagedGrammar {
     fn adapter_name(&self) -> &'static str {
-        "records"
+        RECORDS_GRAMMAR_SLUG
     }
 
     fn grammar_name(&self) -> &'static str {
@@ -1090,7 +1327,7 @@ impl StagedGrammar for RecordsStagedGrammar {
     }
 
     fn grammar_slug(&self) -> &'static str {
-        "records"
+        RECORDS_GRAMMAR_SLUG
     }
 
     fn root_rule(&self) -> &'static str {
@@ -1110,14 +1347,10 @@ impl StagedGrammar for RecordsStagedGrammar {
     }
 }
 
-fn lookup_staged_grammar(name: &str) -> Option<&'static dyn StagedGrammar> {
-    STAGED_GRAMMAR_REGISTRY
-        .iter()
-        .copied()
-        .find(|adapter| adapter.adapter_name() == name)
-}
-
-fn discover_staged_regions(source: &str) -> StagedRegionDiscovery<'_> {
+fn discover_staged_regions<'source>(
+    source: &'source str,
+    registry: &GrammarFrontendRegistry,
+) -> StagedRegionDiscovery<'source> {
     let mut regions = Vec::new();
     let mut diagnostics = Vec::new();
     let mut active = None;
@@ -1128,7 +1361,7 @@ fn discover_staged_regions(source: &str) -> StagedRegionDiscovery<'_> {
         if let Some(name) = trimmed.strip_prefix(GRAMMAR_ACTIVATE_PREFIX) {
             let directive_span = Span::new(line.start, line.end);
             let name = name.trim();
-            match lookup_staged_grammar(name) {
+            match registry.staged_adapter(name) {
                 Some(adapter) => {
                     active = Some(ActiveStagedGrammar {
                         adapter,
@@ -1137,7 +1370,7 @@ fn discover_staged_regions(source: &str) -> StagedRegionDiscovery<'_> {
                 }
                 None => {
                     active = None;
-                    diagnostics.push(unknown_staged_grammar_diagnostic(directive_span));
+                    diagnostics.push(unknown_staged_grammar_diagnostic(directive_span, registry));
                 }
             }
             offset = line.end;
@@ -1147,8 +1380,8 @@ fn discover_staged_regions(source: &str) -> StagedRegionDiscovery<'_> {
         if let Some(name) = trimmed.strip_prefix(STAGED_LOKO_PREFIX) {
             let name = name.trim();
             let start_marker = Span::new(line.start, line.end);
-            let Some(adapter) = lookup_staged_grammar(name) else {
-                diagnostics.push(unknown_staged_grammar_diagnostic(start_marker));
+            let Some(adapter) = registry.staged_adapter(name) else {
+                diagnostics.push(unknown_staged_grammar_diagnostic(start_marker, registry));
                 offset = line.end;
                 continue;
             };
@@ -1226,8 +1459,14 @@ fn staged_adapter_names(regions: &[DiscoveredStagedRegion<'_>]) -> Vec<&'static 
     names
 }
 
-fn unknown_staged_grammar_diagnostic(span: Span) -> Diagnostic {
-    expected_syntax_diagnostic(span, "registered staged grammar")
+fn unknown_staged_grammar_diagnostic(span: Span, registry: &GrammarFrontendRegistry) -> Diagnostic {
+    expected_syntax_diagnostic(
+        span,
+        &format!(
+            "registered staged grammar ({})",
+            registry.staged_adapter_names().join(", ")
+        ),
+    )
 }
 
 fn missing_activation_diagnostic(span: Span, name: &str) -> Diagnostic {
@@ -1482,8 +1721,37 @@ fn expected_syntax_diagnostic(span: Span, expected: &str) -> Diagnostic {
         .with_arg(DiagnosticArg::text("expected", expected))
 }
 
+fn unknown_environment_diagnostic(
+    span: Span,
+    environment: &str,
+    registry: &GrammarFrontendRegistry,
+) -> Diagnostic {
+    Diagnostic::error(span, DiagnosticCode::SyntaxExpectedToken)
+        .with_arg(DiagnosticArg::text(
+            "expected",
+            format!(
+                "registered grammar environment ({})",
+                registry.environment_slugs().join(", ")
+            ),
+        ))
+        .with_arg(DiagnosticArg::text("environment", environment))
+}
+
 fn staged_expected_diagnostic(span: Span, adapter: &str, expected: &str) -> Diagnostic {
     expected_syntax_diagnostic(span, expected).with_arg(DiagnosticArg::text("adapter", adapter))
+}
+
+fn push_report_diagnostic(report: &mut GrammarParseReport, diagnostic: Diagnostic) {
+    report.diagnostics.push(diagnostic);
+    if let Some(activation) = report.activations.first() {
+        report.grammar_diagnostics = grammar_diagnostic_facts(
+            &report.diagnostics,
+            &report.syntax.root,
+            activation,
+            &report.effective_rules,
+        );
+        report.provenance.diagnostics = report.grammar_diagnostics.clone();
+    }
 }
 
 fn valid_calculator_function_name(name: &str) -> bool {
@@ -1554,13 +1822,13 @@ fn usize_to_source_i64(value: usize) -> i64 {
 pub fn base_loko_records() -> GrammarFrontendRecords {
     let environment_id = LanguageEnvironmentId::new(BASE_LOKO_ENVIRONMENT_NAME);
     let grammar_id = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
-    let rules = base_loko_rules(grammar_id, "base-loko");
+    let rules = base_loko_rules(grammar_id, BASE_LOKO_ENVIRONMENT_SLUG);
     let direct_rules = rules.iter().map(|rule| rule.id).collect();
-    let effective_rules = direct_effective_rules(grammar_id, "base-loko", &rules);
+    let effective_rules = direct_effective_rules(grammar_id, BASE_LOKO_ENVIRONMENT_SLUG, &rules);
     let effective_rule_ids = effective_rules.iter().map(|rule| rule.id).collect();
     let grammar = Grammar {
         id: grammar_id,
-        slug: "base-loko".to_string(),
+        slug: BASE_LOKO_ENVIRONMENT_SLUG.to_string(),
         name: BASE_LOKO_GRAMMAR_NAME.to_string(),
         extends: Vec::new(),
         direct_rules,
@@ -1568,7 +1836,7 @@ pub fn base_loko_records() -> GrammarFrontendRecords {
     };
     let environment = LanguageEnvironment {
         id: environment_id,
-        slug: "base-loko".to_string(),
+        slug: BASE_LOKO_ENVIRONMENT_SLUG.to_string(),
         name: BASE_LOKO_ENVIRONMENT_NAME.to_string(),
         grammar_stack: vec![grammar_id],
     };
@@ -1591,7 +1859,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
     let override_rule = GrammarRule {
         id: GrammarRuleId::new(derived_grammar_id, "function-definition"),
         grammar: derived_grammar_id,
-        grammar_slug: "derived-host".to_string(),
+        grammar_slug: DERIVED_HOST_ENVIRONMENT_SLUG.to_string(),
         name: "function-definition".to_string(),
         expression:
             "host-projected override delegates function-definition parsing to BaseLokoGrammar"
@@ -1614,15 +1882,19 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
     rules.push(override_rule.clone());
     let mut grammars = base_environment.grammars;
     let base_effective_rules = base_environment.effective_rules;
-    let derived_effective_rules =
-        derived_effective_rules(base_grammar_id, derived_grammar_id, "derived-host", &rules);
+    let derived_effective_rules = derived_effective_rules(
+        base_grammar_id,
+        derived_grammar_id,
+        DERIVED_HOST_ENVIRONMENT_SLUG,
+        &rules,
+    );
     let derived_effective_rule_ids = derived_effective_rules
         .iter()
         .map(|rule| rule.id)
         .collect::<Vec<_>>();
     grammars.push(Grammar {
         id: derived_grammar_id,
-        slug: "derived-host".to_string(),
+        slug: DERIVED_HOST_ENVIRONMENT_SLUG.to_string(),
         name: DERIVED_HOST_GRAMMAR_NAME.to_string(),
         extends: vec![base_grammar_id],
         direct_rules: vec![override_rule.id],
@@ -1632,7 +1904,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
     effective_rules.extend(derived_effective_rules);
     let environment = LanguageEnvironment {
         id: derived_environment_id,
-        slug: "derived-host".to_string(),
+        slug: DERIVED_HOST_ENVIRONMENT_SLUG.to_string(),
         name: DERIVED_HOST_ENVIRONMENT_NAME.to_string(),
         grammar_stack: vec![base_grammar_id, derived_grammar_id],
     };
@@ -1648,10 +1920,13 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
 /// Returns the directive-activated staged calculator records without parsing source.
 #[must_use]
 pub fn staged_calculator_records() -> GrammarFrontendRecords {
-    staged_registry_records(&["calculator"])
+    GrammarFrontendRegistry::builtin().staged_records(&[CALCULATOR_GRAMMAR_SLUG])
 }
 
-fn staged_registry_records(adapter_names: &[&str]) -> GrammarFrontendRecords {
+fn staged_registry_records(
+    adapter_names: &[&str],
+    registry: &GrammarFrontendRegistry,
+) -> GrammarFrontendRecords {
     let base_environment = base_loko_records();
     let base_grammar_id = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
     let mut rules = base_environment.rules;
@@ -1661,7 +1936,7 @@ fn staged_registry_records(adapter_names: &[&str]) -> GrammarFrontendRecords {
     let mut active_grammar = base_grammar_id;
 
     for adapter_name in adapter_names {
-        let Some(adapter) = lookup_staged_grammar(adapter_name) else {
+        let Some(adapter) = registry.staged_adapter(adapter_name) else {
             continue;
         };
         let grammar_id = GrammarId::new(adapter.grammar_name());
@@ -1694,7 +1969,7 @@ fn staged_registry_records(adapter_names: &[&str]) -> GrammarFrontendRecords {
     let environment_id = LanguageEnvironmentId::new(STAGED_LOKO_ENVIRONMENT_NAME);
     let environment = LanguageEnvironment {
         id: environment_id,
-        slug: "staged-loko".to_string(),
+        slug: STAGED_LOKO_ENVIRONMENT_SLUG.to_string(),
         name: STAGED_LOKO_ENVIRONMENT_NAME.to_string(),
         grammar_stack,
     };
@@ -2240,7 +2515,7 @@ pub fn staged_parse_region_object_id(region: &StagedParseRegion) -> String {
 
 fn stable_name(name: &str) -> String {
     if matches!(name, "BaseLokoEnvironment" | "BaseLokoGrammar") {
-        return "base-loko".to_string();
+        return BASE_LOKO_ENVIRONMENT_SLUG.to_string();
     }
     let mut out = String::new();
     for (index, ch) in name.chars().enumerate() {
@@ -2259,6 +2534,69 @@ fn stable_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_registry_resolves_environment_and_staged_tokens() {
+        let registry = GrammarFrontendRegistry::builtin();
+
+        assert_eq!(
+            registry.environment_slugs(),
+            vec![BASE_LOKO_ENVIRONMENT_SLUG, DERIVED_HOST_ENVIRONMENT_SLUG]
+        );
+        assert_eq!(
+            registry
+                .environment_selection(BASE_LOKO_ENVIRONMENT_SLUG)
+                .expect("base environment registered")
+                .as_str(),
+            BASE_LOKO_ENVIRONMENT_SLUG
+        );
+        assert_eq!(
+            registry
+                .environment_provider(DERIVED_HOST_ENVIRONMENT_SLUG)
+                .expect("derived environment registered")
+                .environment_name(),
+            DERIVED_HOST_ENVIRONMENT_NAME
+        );
+        assert_eq!(
+            registry.staged_adapter_names(),
+            vec![CALCULATOR_GRAMMAR_SLUG, RECORDS_GRAMMAR_SLUG]
+        );
+        assert_eq!(
+            registry
+                .staged_adapter(RECORDS_GRAMMAR_SLUG)
+                .expect("records staged adapter registered")
+                .grammar_name(),
+            RECORDS_GRAMMAR_NAME
+        );
+    }
+
+    #[test]
+    fn unknown_environment_selection_reports_registry_expectation() {
+        let report = parse_file_with_registry(
+            SourceFileId::from_path("unknown-grammar.loko"),
+            "define function main() 1 end",
+            GrammarEnvironmentSelection::new("missing-grammar"),
+            &GrammarFrontendRegistry::builtin(),
+        );
+
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.args.iter().any(|arg| arg.name == "environment"))
+            .expect("unknown grammar environment diagnostic");
+        assert!(
+            diagnostic
+                .args
+                .iter()
+                .any(|arg| arg.value.render().contains("base-loko, derived-host"))
+        );
+        assert!(
+            diagnostic
+                .args
+                .iter()
+                .any(|arg| arg.value.render() == "missing-grammar")
+        );
+    }
 
     #[test]
     fn derived_host_records_distinguish_direct_and_effective_rules() {
@@ -2315,7 +2653,7 @@ mod tests {
         let report = parse_file_with_environment(
             SourceFileId::from_path("example.loko"),
             "define function main() 1 end",
-            GrammarEnvironmentSelection::DerivedHost,
+            GrammarEnvironmentSelection::derived_host(),
         );
         let derived_grammar = GrammarId::new(DERIVED_HOST_GRAMMAR_NAME);
         let activation = report.activations.first().expect("source-file activation");
@@ -2338,7 +2676,7 @@ mod tests {
         let report = parse_file_with_environment(
             SourceFileId::from_path("bad.loko"),
             "define function main()\nend",
-            GrammarEnvironmentSelection::DerivedHost,
+            GrammarEnvironmentSelection::derived_host(),
         );
         let fact = report
             .grammar_diagnostics
@@ -2428,7 +2766,7 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
-                    == Some("registered staged grammar".to_string()))
+                    == Some("registered staged grammar (calculator, records)".to_string()))
         );
     }
 

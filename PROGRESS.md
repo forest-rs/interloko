@@ -1,5 +1,33 @@
 # Interloko Progress
 
+## Implemented: Grammar Frontend Registry Cleanup
+
+- Replaced the closed `GrammarEnvironmentSelection` enum with a registry-token
+  selection type. Callers now use `GrammarEnvironmentSelection::base_loko()`,
+  `GrammarEnvironmentSelection::derived_host()`, or
+  `GrammarFrontendRegistry::builtin().environment_selection(token)`.
+- Added `GrammarFrontendRegistry`, `GrammarEnvironmentProvider`, and
+  `StagedGrammarAdapter` as the explicit protocol for language environment
+  records and directive-activated staged grammar adapters.
+- The built-in registry now owns `base-loko`, `derived-host`, `calculator`,
+  and `records` lookup instead of scattering string matches through the
+  frontend and tools.
+- `interloko_lab` and `interloko_corpus` validate `// grammar:` headers
+  through the registry, so new registered environments do not need duplicated
+  tool-side match arms.
+- Staged grammar discovery now resolves `// grammar-activate:` and
+  `// staged-loko:` directives through the registry and reports the registered
+  adapter set in expectation diagnostics.
+- `docs/grammar_mop.md` describes the registry protocol and the public API
+  migration away from enum variants.
+
+Deferred:
+
+- Source-authored grammar registration.
+- Non-static runtime registry mutation.
+- Capability policy for host-provided grammar adapters.
+- Direct frontend-form-to-AST parsing without materialized Loko.
+
 ## Implemented: Timing Metrics And Execution Traces
 
 - Session artifacts now carry work counters plus elapsed timing fields for the

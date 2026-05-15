@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use interloko_compiler::diagnostic::DiagnosticCode;
-use interloko_compiler::grammar_frontend::GrammarEnvironmentSelection;
+use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
     CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
@@ -157,7 +157,8 @@ fn parse_header(
 )> {
     let mut expectations = Vec::new();
     let mut host_registry = HostMetaRegistry::new();
-    let mut grammar_environment = GrammarEnvironmentSelection::BaseLoko;
+    let grammar_registry = GrammarFrontendRegistry::builtin();
+    let mut grammar_environment = GrammarEnvironmentSelection::base_loko();
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
@@ -166,7 +167,8 @@ fn parse_header(
             } else if let Some(rest) = trimmed.strip_prefix("// host-class:") {
                 host_registry.add_class(parse_host_class(path, index + 1, rest.trim())?);
             } else if let Some(rest) = trimmed.strip_prefix("// grammar:") {
-                grammar_environment = parse_grammar_selection(path, index + 1, rest.trim())?;
+                grammar_environment =
+                    parse_grammar_selection(path, index + 1, rest.trim(), &grammar_registry)?;
             }
             continue;
         }
@@ -199,12 +201,13 @@ fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
 }
 
 fn parse_grammar_environment(path: &Path, source: &str) -> Result<GrammarEnvironmentSelection> {
-    let mut selection = GrammarEnvironmentSelection::BaseLoko;
+    let registry = GrammarFrontendRegistry::builtin();
+    let mut selection = GrammarEnvironmentSelection::base_loko();
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             if let Some(rest) = trimmed.strip_prefix("// grammar:") {
-                selection = parse_grammar_selection(path, index + 1, rest.trim())?;
+                selection = parse_grammar_selection(path, index + 1, rest.trim(), &registry)?;
             }
             continue;
         }
@@ -217,16 +220,23 @@ fn parse_grammar_selection(
     path: &Path,
     line: usize,
     input: &str,
+    registry: &GrammarFrontendRegistry,
 ) -> Result<GrammarEnvironmentSelection> {
-    match input {
-        "base-loko" => Ok(GrammarEnvironmentSelection::BaseLoko),
-        "derived-host" => Ok(GrammarEnvironmentSelection::DerivedHost),
-        _ => Err(invalid_header(
-            path,
-            line,
-            "grammar must be `base-loko` or `derived-host`",
-        )),
-    }
+    registry
+        .environment_selection(input)
+        .ok_or_else(|| invalid_header(path, line, &grammar_header_message(registry)))
+}
+
+fn grammar_header_message(registry: &GrammarFrontendRegistry) -> String {
+    format!(
+        "grammar must be one of {}",
+        registry
+            .environment_slugs()
+            .into_iter()
+            .map(|slug| format!("`{slug}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn parse_host_class(path: &Path, line: usize, input: &str) -> Result<HostClass> {
@@ -405,7 +415,7 @@ fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::
             &case.display_path,
             &case.source,
             mode,
-            case.grammar_environment,
+            case.grammar_environment.clone(),
             &case.host_registry,
         )
     } else {
@@ -413,7 +423,7 @@ fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::
         let source = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
-            case.grammar_environment,
+            case.grammar_environment.clone(),
         );
         session
             .compile(source, mode)

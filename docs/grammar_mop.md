@@ -17,6 +17,21 @@ user-defined parser rules.
 
 ## Current Records
 
+The frontend selects language environments and staged region grammars through
+`GrammarFrontendRegistry`. The built-in registry exposes these environment
+tokens:
+
+```text
+base-loko
+derived-host
+```
+
+Tools use that registry to validate `// grammar:` headers instead of matching
+hardcoded strings. `GrammarEnvironmentSelection` is a registry token; callers
+can use `GrammarEnvironmentSelection::base_loko()`,
+`GrammarEnvironmentSelection::derived_host()`, or
+`GrammarFrontendRegistry::builtin().environment_selection(token)`.
+
 The default projection names one language environment and one grammar:
 
 ```text
@@ -77,8 +92,8 @@ through the registered calculator adapter and emit structural function forms.
 `RecordsRegionGrammar` has direct rules for `records-region`,
 `record-definition`, and `record-field`. It is selected with
 `// grammar-activate: records` and emits structural class forms with typed
-slots. Both adapters are trusted Rust-hosted entries in an internal registry;
-there is no source-authored grammar definition syntax yet.
+slots. Both adapters are trusted Rust-hosted entries in the same explicit
+registry protocol; there is no source-authored grammar definition syntax yet.
 
 ## Parse Reports
 

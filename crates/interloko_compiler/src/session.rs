@@ -65,7 +65,7 @@ impl SourceFile {
     /// Creates a named source file with an explicit id.
     #[must_use]
     pub fn with_id(id: SourceFileId, name: &str, source: &str) -> Self {
-        Self::with_id_and_grammar(id, name, source, GrammarEnvironmentSelection::BaseLoko)
+        Self::with_id_and_grammar(id, name, source, GrammarEnvironmentSelection::base_loko())
     }
 
     /// Creates a named source file with an explicit id and grammar environment.
@@ -2940,7 +2940,7 @@ fn compile_file_with_host_registry(
     let mut timings = ArtifactTimingCollector::default();
     let (source, elapsed_nanos) = measure_elapsed(|| file.clone());
     timings.record(QueryArtifact::Source, elapsed_nanos);
-    let (grammar_environment, elapsed_nanos) = measure_elapsed(|| file.grammar_environment);
+    let (grammar_environment, elapsed_nanos) = measure_elapsed(|| file.grammar_environment.clone());
     timings.record(QueryArtifact::EnvironmentResolution, elapsed_nanos);
     let (grammar_parse, elapsed_nanos) = measure_elapsed(|| {
         grammar_frontend::parse_file_with_environment(file.id, &file.source, grammar_environment)
@@ -6934,7 +6934,7 @@ mod tests {
         let derived = session
             .set_grammar_environment_and_compile(
                 source_file,
-                GrammarEnvironmentSelection::DerivedHost,
+                GrammarEnvironmentSelection::derived_host(),
                 RuntimeMode::CompileOnly,
             )
             .expect("source was just added");
