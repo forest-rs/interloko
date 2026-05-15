@@ -73,8 +73,10 @@ the semantic-to-runtime adapter: `interloko_compiler::runtime::runtime_layout_fr
 That function translates finalized semantic classes, slots, generics, methods,
 and setter metadata into runtime layout values consumed by `interloko_runtime`.
 
-`interloko_compiler::runtime` remains as a compatibility module that re-exports the
-runtime crate plus the semantic layout adapter.
+Executable runtime APIs are imported from `interloko_runtime` directly. The
+`interloko_compiler::runtime` module is only the semantic layout adapter; callers
+that previously used `interloko_compiler::runtime::InterlokoHost` or related
+runtime types should import them from `interloko_runtime` instead.
 
 ## Glossary
 

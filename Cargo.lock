@@ -414,6 +414,7 @@ version = "0.1.0"
 dependencies = [
  "execution_tape",
  "interloko_compiler",
+ "interloko_runtime",
 ]
 
 [[package]]

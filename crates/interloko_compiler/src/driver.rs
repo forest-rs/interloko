@@ -8,9 +8,9 @@ use execution_tape::trace::TraceMask;
 use execution_tape::value::FuncId;
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
+use interloko_runtime::InterlokoHost;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::runtime::InterlokoHost;
 use crate::sem::HostMetaRegistry;
 use crate::{ast, lower, sem, syntax, tape};
 
@@ -208,9 +208,9 @@ fn run_tape_function_i64(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{HostObjectAdapter, ValueKind as RuntimeValueKind};
     use crate::sem::{HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind};
     use execution_tape::host::HostError;
+    use interloko_runtime::{HostObjectAdapter, ValueKind as RuntimeValueKind};
 
     #[derive(Debug)]
     struct RustCircle {

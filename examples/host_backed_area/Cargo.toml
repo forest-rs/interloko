@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 interloko_compiler = { path = "../../crates/interloko_compiler" }
+interloko_runtime = { path = "../../crates/interloko_runtime" }
 execution_tape = { path = "../../../execution/execution_tape" }
 
 [lints]

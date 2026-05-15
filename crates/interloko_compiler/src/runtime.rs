@@ -1,11 +1,8 @@
-//! Compatibility re-exports and semantic-to-runtime layout construction.
+//! Semantic-to-runtime layout construction.
 //!
-//! Executable runtime host support now lives in [`interloko_runtime`]. This
-//! module keeps the historical `interloko_compiler::runtime` path available while
-//! the compiler owns the one part that still depends on semantic IR: converting
-//! a resolved [`sem::Module`] into a runtime layout.
-
-pub use interloko_runtime::*;
+//! Executable runtime host support lives in [`interloko_runtime`]. The compiler
+//! owns the one part that still depends on semantic IR: converting a resolved
+//! [`sem::Module`] into a runtime layout.
 
 use interloko_runtime::{
     HostObjectKind as RtHostObjectKind, RuntimeClass as RtRuntimeClass,
@@ -18,7 +15,7 @@ use crate::sem;
 /// Creates a runtime layout from a semantic module.
 #[must_use]
 pub fn runtime_layout_from_sem(module: &sem::Module) -> RtRuntimeLayout {
-    RtRuntimeLayout {
+    let layout = RtRuntimeLayout {
         classes: module
             .classes
             .iter()
@@ -72,7 +69,9 @@ pub fn runtime_layout_from_sem(module: &sem::Module) -> RtRuntimeLayout {
                 specializers: method.specializers.clone(),
             })
             .collect(),
-    }
+    };
+    debug_assert!(layout.validate().is_ok());
+    layout
 }
 
 /// Converts semantic value categories into runtime-representable categories.

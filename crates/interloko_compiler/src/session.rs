@@ -22,9 +22,10 @@ use crate::grammar_frontend::{
 };
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
-use crate::runtime::{self, HostObjectKind, InterlokoHost, RuntimeLayout};
+use crate::runtime as runtime_bridge;
 use crate::syntax::{CstElement, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, tape};
+use interloko_runtime::{self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout};
 
 /// Named source file accepted by a compiler session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2433,7 +2434,7 @@ fn make_dispatch_site(
             matches!(kind, sem::ValueKind::Any) || sem_value_kind_class(module, *kind).is_some()
         });
     let (applicable, rejected, selected_method) = dispatch_site_methods(
-        module,
+        artifacts,
         generic_id,
         &static_argument_kinds,
         &exact_static_classes,
@@ -2483,7 +2484,7 @@ fn dispatch_site_key(
 }
 
 fn dispatch_site_methods(
-    module: &sem::Module,
+    artifacts: &SessionArtifacts,
     generic_id: sem::GenericFunctionId,
     static_kinds: &[sem::ValueKind],
     exact_classes: &[Option<sem::ClassId>],
@@ -2492,16 +2493,24 @@ fn dispatch_site_methods(
     Vec<DispatchMethodRejection>,
     Option<sem::MethodId>,
 ) {
+    let module = &artifacts.sem;
     let methods = dispatch_methods(module, generic_id);
     let exact_tuple = exact_classes.iter().copied().collect::<Option<Vec<_>>>();
+
+    if let (Some(actuals), Some(lowered)) = (exact_tuple.as_ref(), artifacts.lowered.as_ref())
+        && let Ok(lookup) = lowered.runtime.dispatch_lookup(generic_id, actuals)
+    {
+        return dispatch_site_methods_from_runtime_lookup(module, lookup);
+    }
+
+    let mut applicable = Vec::new();
+    let mut rejected = Vec::new();
     let selected_method = exact_tuple.as_ref().and_then(|actuals| {
         match module.select_method_for_classes(generic_id, actuals) {
             sem::MethodSelection::Selected(method) => Some(method),
             sem::MethodSelection::None | sem::MethodSelection::Ambiguous => None,
         }
     });
-    let mut applicable = Vec::new();
-    let mut rejected = Vec::new();
 
     for method in methods {
         if let Some(actuals) = &exact_tuple {
@@ -2551,6 +2560,72 @@ fn dispatch_site_methods(
     }
 
     (applicable, rejected, selected_method)
+}
+
+fn dispatch_site_methods_from_runtime_lookup(
+    module: &sem::Module,
+    lookup: runtime::RuntimeDispatchLookup,
+) -> (
+    Vec<DispatchMethodCandidate>,
+    Vec<DispatchMethodRejection>,
+    Option<sem::MethodId>,
+) {
+    let selected_method = lookup.selected_method();
+    let applicable = lookup
+        .applicable
+        .into_iter()
+        .filter_map(|candidate| {
+            let method = module.methods.get(candidate.method.0 as usize)?;
+            Some(DispatchMethodCandidate {
+                method: candidate.method,
+                definition: method.definition,
+                specializer: method.specializer,
+                specializers: method.specializers.clone(),
+                distance: candidate.distances.first().copied(),
+                distances: candidate.distances.into_iter().map(Some).collect(),
+                selected: candidate.selected,
+                runtime_only: false,
+            })
+        })
+        .collect();
+    let rejected = lookup
+        .rejected
+        .into_iter()
+        .filter_map(|rejected| {
+            let method = module.methods.get(rejected.method.0 as usize)?;
+            Some(DispatchMethodRejection {
+                method: rejected.method,
+                definition: method.definition,
+                specializer: method.specializer,
+                specializers: method.specializers.clone(),
+                reason: runtime_dispatch_rejection_reason_label(module, rejected.reason),
+            })
+        })
+        .collect();
+    (applicable, rejected, selected_method)
+}
+
+fn runtime_dispatch_rejection_reason_label(
+    module: &sem::Module,
+    reason: runtime::RuntimeDispatchRejectionReason,
+) -> String {
+    match reason {
+        runtime::RuntimeDispatchRejectionReason::ArityMismatch { expected, actual } => {
+            format!("arity mismatch: expected {expected} argument(s), got {actual}")
+        }
+        runtime::RuntimeDispatchRejectionReason::MissingSpecializer { argument } => {
+            format!("argument {} has no runtime specializer", argument + 1)
+        }
+        runtime::RuntimeDispatchRejectionReason::ArgumentNotInstance {
+            argument,
+            actual,
+            specializer,
+        } => format!(
+            "argument {} {}",
+            argument + 1,
+            exact_class_rejection_reason(module, actual, specializer)
+        ),
+    }
 }
 
 fn first_specializer_distance(
@@ -3930,7 +4005,7 @@ fn dump_sem(module: &sem::Module) -> String {
 
 fn dump_mop(artifacts: &SessionArtifacts) -> String {
     let module = &artifacts.sem;
-    let runtime = runtime::runtime_layout_from_sem(module);
+    let runtime = runtime_bridge::runtime_layout_from_sem(module);
     let mut out = String::new();
     let _ = writeln!(out, "mop {}", module.source_file);
 
@@ -4928,7 +5003,7 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     use EnvironmentAffordance as Aff;
 
     let module = &artifacts.sem;
-    let runtime = runtime::runtime_layout_from_sem(module);
+    let runtime = runtime_bridge::runtime_layout_from_sem(module);
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("source:{}", artifacts.source.id),
         kind: EnvironmentKind::SourceFile,
@@ -5865,7 +5940,7 @@ fn project_environment_runtime_class(
     module: &sem::Module,
     sink: &mut dyn EnvironmentObjectSink,
     index: usize,
-    class: &crate::runtime::RuntimeClass,
+    class: &runtime::RuntimeClass,
 ) {
     use EnvironmentAffordance as Aff;
 

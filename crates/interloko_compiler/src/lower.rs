@@ -11,9 +11,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::runtime::{self, RuntimeLayout};
+use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
+use interloko_runtime::RuntimeLayout;
 
 /// Durable function identifier within a lowered module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -563,7 +564,7 @@ impl<'module> Lowering<'module> {
         }
 
         Ok(Module {
-            runtime: runtime::runtime_layout_from_sem(self.module),
+            runtime: runtime_bridge::runtime_layout_from_sem(self.module),
             functions,
             main,
         })
@@ -2373,6 +2374,7 @@ fn fmt_quoted(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
 mod tests {
     use super::*;
     use crate::{ast, syntax};
+    use interloko_runtime as runtime;
 
     fn lower_source(source: &str) -> Module {
         let tree = syntax::parse(source);

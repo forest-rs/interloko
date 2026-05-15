@@ -3,12 +3,10 @@
 use execution_tape::host::HostError;
 use execution_tape::value::Value;
 use interloko_compiler::driver::{CompileError, compile_with_host_registry};
-use interloko_compiler::runtime::{
-    HostObjectAdapter, InterlokoHost, ValueKind as RuntimeValueKind,
-};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
+use interloko_runtime::{HostObjectAdapter, InterlokoHost, ValueKind as RuntimeValueKind};
 
 fn main() -> Result<(), CompileError> {
     let source = include_str!("../programs/host_backed_area.loko");

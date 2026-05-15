@@ -321,8 +321,9 @@ Deferred:
 - Moved `InterlokoHost`, native object storage, boxed `<object>` storage, string,
   symbol, vector, metaobject, and host-backed adapter support into
   `interloko_runtime`.
-- `interloko_compiler::runtime` now re-exports `interloko_runtime` for compatibility
-  and owns `runtime_layout_from_sem`, the sem-to-runtime layout adapter.
+- `interloko_compiler::runtime` owns only `runtime_layout_from_sem`, the
+  sem-to-runtime layout adapter; executable runtime APIs are imported from
+  `interloko_runtime` directly.
 - Lowering builds runtime layout values through the compiler adapter, while
   tape emission imports host symbols/signatures directly from
   `interloko_runtime`.
