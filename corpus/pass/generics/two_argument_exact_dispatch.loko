@@ -1,6 +1,6 @@
 // expect: run 12
 // expect: diagnostics 0
-// expect: dump sem contains specializers=(c1:<circle>, c2:<square>)
+// expect: dump sem contains specializers=(c2:<circle>, c3:<square>)
 // expect: dump lowered contains collide#dispatch
 // expect: dump tape contains name="collide#dispatch"
 

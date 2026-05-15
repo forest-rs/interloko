@@ -282,7 +282,7 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(native_out.contains("initialize-methods=deferred"));
     assert!(native_out.contains("g0 area"));
     assert!(native_out.contains(
-        "m0 specializers=(c0:<circle>) specializer-origins=(native) method-origin=source"
+        "m0 specializers=(c1:<circle>) specializer-origins=(native) method-origin=source"
     ));
 
     let host = fixture("host_backed_area.loko");
@@ -293,10 +293,10 @@ fn mop_reports_native_and_host_backed_metaobjects() {
     assert!(host_out.contains("slot s0"));
     assert!(host_out.contains("storage=host-backed"));
     assert!(host_out.contains(
-        "m0 specializers=(c0:<rust-circle>) specializer-origins=(host-backed(hc0)) method-origin=source"
+        "m0 specializers=(c1:<rust-circle>) specializer-origins=(host-backed(hc0)) method-origin=source"
     ));
     assert!(host_out.contains(
-        "m1 specializers=(c1:<rust-square>) specializer-origins=(host-backed(hc1)) method-origin=source"
+        "m1 specializers=(c2:<rust-square>) specializer-origins=(host-backed(hc1)) method-origin=source"
     ));
 }
 
@@ -326,10 +326,12 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("show-grammar-rule"));
     assert!(out.contains("object grammar-activation:base-loko/source-file"));
     assert!(out.contains("object class:c0"));
+    assert!(out.contains("origin=compiler-generated storage=cached-artifact"));
+    assert!(out.contains("object class:c1"));
     assert!(out.contains("origin=host-backed storage=host-registry"));
-    assert!(out.contains("object slot:c0.s0"));
+    assert!(out.contains("object slot:c1.s0"));
     assert!(out.contains("storage=host-adapter"));
-    assert!(out.contains("object accessor:c0.s0"));
+    assert!(out.contains("object accessor:c1.s0"));
     assert!(out.contains("execution callable=known"));
     assert!(out.contains("object generic:g0"));
     assert!(out.contains("show-dispatch"));
@@ -339,6 +341,7 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("object dispatch:d0"));
     assert!(out.contains("kind=dispatch-site"));
     assert!(out.contains("object runtime-class:c0"));
+    assert!(out.contains("object runtime-class:c1"));
     assert!(out.contains("object artifact:"));
 }
 
@@ -568,6 +571,8 @@ fn report_handles_plain_loko_sources() {
     assert!(html.contains("returned 100"));
     assert!(html.contains("No staged regions were activated in this source."));
     assert!(html.contains("class:c0"));
+    assert!(html.contains("&lt;object&gt;"));
+    assert!(html.contains("class:c1"));
     assert!(html.contains("generic:g0"));
 }
 
@@ -599,9 +604,10 @@ fn inspect_reports_structured_environment_objects() {
 
     for (object_id, expected) in [
         (source_id.as_str(), "kind: source-file"),
-        ("class:c0", "kind: class"),
-        ("slot:c0.s0", "kind: slot"),
-        ("accessor:c0.s0", "kind: accessor"),
+        ("class:c0", "title: <object>"),
+        ("class:c1", "kind: class"),
+        ("slot:c1.s0", "kind: slot"),
+        ("accessor:c1.s0", "kind: accessor"),
         ("generic:g0", "kind: generic"),
         ("method:m0", "kind: method"),
         ("function:f0", "kind: function"),
@@ -619,8 +625,9 @@ fn inspect_reports_structured_environment_objects() {
             "grammar-activation:base-loko/source-file",
             "kind: grammar-activation",
         ),
-        ("runtime-class:c0", "kind: runtime-layout-row"),
-        ("runtime-slot:c0.s0", "class: <runtime-slot>"),
+        ("runtime-class:c0", "title: runtime <object>"),
+        ("runtime-class:c1", "kind: runtime-layout-row"),
+        ("runtime-slot:c1.s0", "class: <runtime-slot>"),
         (artifact_id.as_str(), "kind: artifact"),
     ] {
         let out = run_lab(&["inspect", path, object_id]);
@@ -646,7 +653,7 @@ fn inspect_reports_richer_slot_metadata() {
     let file = fixture("slot_defaults.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
-    let out = run_lab(&["inspect", path, "slot:c0.s0"]);
+    let out = run_lab(&["inspect", path, "slot:c1.s0"]);
     assert!(out.contains("kind: slot"));
     assert!(out.contains("type=<integer>"));
     assert!(out.contains("init-keyword=r: required"));
@@ -662,16 +669,16 @@ fn inspect_reports_inherited_effective_slots() {
 
     let mop = run_lab(&["dump", path, "--stage", "mop"]);
     assert!(mop.contains("<point>"));
-    assert!(mop.contains("superclass=c0:<shape>"));
-    assert!(mop.contains("chain=c1:<point> -> c0:<shape> -> <object>"));
+    assert!(mop.contains("superclass=c1:<shape>"));
+    assert!(mop.contains("chain=c2:<point> -> c1:<shape> -> c0:<object>"));
     assert!(mop.contains("effective-slots=2"));
-    assert!(mop.contains("source=inherited c0.s0"));
-    assert!(mop.contains("c1 <point> kind=native superclass=c0:<shape>"));
-    assert!(mop.contains("s0 x kind=integer storage=native source=inherited source-slot=c0.s0"));
+    assert!(mop.contains("source=inherited c1.s0"));
+    assert!(mop.contains("c2 <point> kind=native superclass=c1:<shape>"));
+    assert!(mop.contains("s0 x kind=integer storage=native source=inherited source-slot=c1.s0"));
 
-    let class = run_lab(&["inspect", path, "class:c1"]);
-    assert!(class.contains("superclass=c0:<shape>"));
-    assert!(class.contains("chain=c1:<point> -> c0:<shape> -> <object>"));
+    let class = run_lab(&["inspect", path, "class:c2"]);
+    assert!(class.contains("superclass=c1:<shape>"));
+    assert!(class.contains("chain=c2:<point> -> c1:<shape> -> c0:<object>"));
     assert!(class.contains("finalized=true"));
     assert!(class.contains("direct-slots=1"));
     assert!(class.contains("effective-slots=2"));
@@ -680,9 +687,9 @@ fn inspect_reports_inherited_effective_slots() {
     assert!(class.contains("initialize-methods=deferred"));
     assert!(class.contains("override=explicit-init-args-over-defaults"));
 
-    let inherited = run_lab(&["inspect", path, "slot:c1.s0"]);
+    let inherited = run_lab(&["inspect", path, "slot:c2.s0"]);
     assert!(inherited.contains("source=inherited"));
-    assert!(inherited.contains("source-slot=class:c0.s0"));
+    assert!(inherited.contains("source-slot=class:c1.s0"));
     assert!(inherited.contains("init-keyword=x: required"));
 }
 
@@ -693,21 +700,21 @@ fn mop_reports_dispatch_applicability_for_inheritance() {
 
     let mop = run_lab(&["mop", path]);
     assert!(mop.contains("method m0"));
-    assert!(mop.contains("applicable=([c0:<shape>@0,c1:<circle>@1])"));
+    assert!(mop.contains("applicable=([c1:<shape>@0,c2:<circle>@1])"));
     assert!(mop.contains("method m1"));
-    assert!(mop.contains("applicable=([c1:<circle>@0])"));
+    assert!(mop.contains("applicable=([c2:<circle>@0])"));
     assert!(mop.contains(
-        "m1 specializers=(c1:<circle>) specializer-origins=(native) method-origin=source applies-to=([c1:<circle>@0])"
+        "m1 specializers=(c2:<circle>) specializer-origins=(native) method-origin=source applies-to=([c2:<circle>@0])"
     ));
     assert!(mop.contains(
-        "m0 specializers=(c0:<shape>) specializer-origins=(native) method-origin=source applies-to=([c0:<shape>@0,c1:<circle>@1])"
+        "m0 specializers=(c1:<shape>) specializer-origins=(native) method-origin=source applies-to=([c1:<shape>@0,c2:<circle>@1])"
     ));
 
     let generic = run_lab(&["inspect", path, "generic:g0"]);
-    assert!(generic.contains("dispatch=m1=>([c1:<circle>@0]);m0=>([c0:<shape>@0,c1:<circle>@1])"));
+    assert!(generic.contains("dispatch=m1=>([c2:<circle>@0]);m0=>([c1:<shape>@0,c2:<circle>@1])"));
 
     let method = run_lab(&["inspect", path, "method:m0"]);
-    assert!(method.contains("applies-to=([c0:<shape>@0,c1:<circle>@1])"));
+    assert!(method.contains("applies-to=([c1:<shape>@0,c2:<circle>@1])"));
 }
 
 #[test]
@@ -721,16 +728,16 @@ fn dispatch_command_lists_and_explains_dispatch_sites() {
     assert!(list.contains("owner=function main"));
     assert!(list.contains("generic=g0:score"));
     assert!(list.contains("static-args=(object(<circle>))"));
-    assert!(list.contains("selected=m1:score(c1:<circle>)"));
+    assert!(list.contains("selected=m1:score(c2:<circle>)"));
 
     let explanation = run_lab(&["dispatch", path, "dispatch:d0"]);
     assert!(explanation.contains("dispatch dispatch:d0"));
     assert!(explanation.contains("owner: function main"));
     assert!(explanation.contains("contract=score(x:object(<shape>)) -> integer"));
     assert!(explanation.contains("static-kinds: (object(<circle>))"));
-    assert!(explanation.contains("m1:score(c1:<circle>)"));
+    assert!(explanation.contains("m1:score(c2:<circle>)"));
     assert!(explanation.contains("selected"));
-    assert!(explanation.contains("m0:score(c0:<shape>)"));
+    assert!(explanation.contains("m0:score(c1:<shape>)"));
     assert!(explanation.contains("shadowed"));
     assert!(explanation.contains("dispatcher: score#dispatch"));
     assert!(explanation.contains("generic-dispatcher"));
@@ -749,14 +756,14 @@ fn dispatch_command_shows_multi_argument_vectors() {
     let list = run_lab(&["dispatch", path]);
     assert!(list.contains("generic=g0:collide"));
     assert!(list.contains("static-args=(object(<circle>), object(<square>))"));
-    assert!(list.contains("selected=m1:collide(c1:<circle>, c2:<square>)"));
+    assert!(list.contains("selected=m1:collide(c2:<circle>, c3:<square>)"));
 
     let explanation = run_lab(&["dispatch", path, "dispatch:d0"]);
     assert!(explanation.contains("static-kinds: (object(<circle>), object(<square>))"));
-    assert!(explanation.contains("exact-classes: (c1:<circle>, c2:<square>)"));
-    assert!(explanation.contains("specializers=(c1:<circle>, c2:<square>)"));
+    assert!(explanation.contains("exact-classes: (c2:<circle>, c3:<square>)"));
+    assert!(explanation.contains("specializers=(c2:<circle>, c3:<square>)"));
     assert!(explanation.contains("distances=(0,0) selected"));
-    assert!(explanation.contains("specializers=(c0:<shape>, c0:<shape>)"));
+    assert!(explanation.contains("specializers=(c1:<shape>, c1:<shape>)"));
     assert!(explanation.contains("distances=(1,1) shadowed"));
 }
 
@@ -781,12 +788,12 @@ fn invoke_affordance_runs_read_only_views() {
     let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");
 
-    let accessor = run_lab(&["invoke-affordance", path, "slot:c0.s0", "show-accessor"]);
-    assert!(accessor.contains("object accessor:c0.s0"));
-    assert!(accessor.contains("reads=slot:c0.s0"));
+    let accessor = run_lab(&["invoke-affordance", path, "slot:c1.s0", "show-accessor"]);
+    assert!(accessor.contains("object accessor:c1.s0"));
+    assert!(accessor.contains("reads=slot:c1.s0"));
 
-    let slot = run_lab(&["invoke-affordance", path, "accessor:c0.s0", "show-slot"]);
-    assert!(slot.contains("object slot:c0.s0"));
+    let slot = run_lab(&["invoke-affordance", path, "accessor:c1.s0", "show-slot"]);
+    assert!(slot.contains("object slot:c1.s0"));
     assert!(slot.contains("show-accessor"));
 
     let dispatch = run_lab(&["invoke-affordance", path, "generic:g0", "show-dispatch"]);
@@ -797,9 +804,9 @@ fn invoke_affordance_runs_read_only_views() {
     assert!(dispatch_site.contains("dispatch dispatch:d0"));
     assert!(dispatch_site.contains("dispatcher: area#dispatch"));
 
-    let runtime = run_lab(&["invoke-affordance", path, "class:c0", "show-runtime-layout"]);
+    let runtime = run_lab(&["invoke-affordance", path, "class:c1", "show-runtime-layout"]);
     assert!(runtime.contains("runtime layout:"));
-    assert!(runtime.contains("c0 <circle>"));
+    assert!(runtime.contains("c1 <circle>"));
 
     let deps = run_lab(&["invoke-affordance", path, "method:m0", "show-dependencies"]);
     assert!(deps.contains("artifact graph"));

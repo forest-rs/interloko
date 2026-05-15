@@ -1,8 +1,8 @@
 // expect: run 8
 // expect: diagnostics 0
 // expect: dump ast contains instance? <circle>
-// expect: dump sem contains refinement l0 => object(c0)
-// expect: dump sem contains local l0 as object(c0)
+// expect: dump sem contains refinement l0 => object(c1)
+// expect: dump sem contains local l0 as object(c1)
 // expect: dump lowered contains instance?
 // expect: dump lowered contains as <circle>
 // expect: dump tape contains interloko.instance_of

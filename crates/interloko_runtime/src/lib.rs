@@ -15,7 +15,9 @@ use alloc::vec::Vec;
 use execution_tape::host::{AccessSink, Host, HostError, SigHash, ValueRef};
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
-use interloko_model::{BuiltinValueClass, ClassId, GenericFunctionId, MethodId, SlotId};
+use interloko_model::{
+    BuiltinValueClass, ClassId, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
+};
 
 /// Host object type used for Interloko runtime objects.
 pub const INTERLOKO_OBJECT_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f4f_424a);
@@ -131,7 +133,8 @@ pub enum ValueKind {
     },
 }
 
-/// Runtime method specializer. `None` means unspecialized / `<object>`.
+/// Runtime method specializer. `None` is reserved for invalid or legacy
+/// compatibility records; source `<object>` is `OBJECT_CLASS_ID`.
 pub type MethodSpecializer = Option<ClassId>;
 
 /// Runtime class layout needed by the host object heap.
@@ -950,12 +953,14 @@ impl InterlokoHost {
     fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
         match value {
             ValueRef::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
+            ValueRef::Bool(_) | ValueRef::U64(_) => Ok(OBJECT_CLASS_ID),
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.object(obj)?.class)
             }
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj)? {
                     Value::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
+                    Value::Bool(_) | Value::U64(_) => Ok(OBJECT_CLASS_ID),
                     Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
                         Ok(self.object(*boxed)?.class)
                     }
@@ -1085,10 +1090,8 @@ impl InterlokoHost {
     }
 
     fn value_is_instance(&self, value: ValueRef<'_>, class: ClassId) -> bool {
-        self.value_object(value).is_some_and(|obj| {
-            self.object(obj)
-                .is_ok_and(|object| self.layout.is_same_or_subclass(object.class, class))
-        })
+        self.class_of_any(value)
+            .is_ok_and(|actual| self.layout.is_same_or_subclass(actual, class))
     }
 
     fn value_for_slot(&self, value: ValueRef<'_>, kind: ValueKind) -> Result<Value, HostError> {

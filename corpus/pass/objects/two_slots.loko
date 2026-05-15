@@ -1,6 +1,6 @@
 // expect: run 42
 // expect: diagnostics 0
-// expect: dump sem contains make c0
+// expect: dump sem contains make c1
 
 define class <rectangle> (<object>)
   slot width :: <integer>;

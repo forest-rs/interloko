@@ -129,8 +129,8 @@ cargo run -p interloko_lab -- dump corpus/pass/objects/constant_slot.loko --stag
 cargo run -p interloko_lab -- dump corpus/pass/objects/constant_slot.loko --stage eop
 cargo run -p interloko_lab -- dump corpus/pass/objects/inherited_parent_child_slots.loko --stage mop
 cargo run -p interloko_lab -- dump tools/interloko_lab/fixtures/inherited_dispatch.loko --stage mop
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/slot_defaults.loko slot:c0.s0
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c1
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/slot_defaults.loko slot:c1.s0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c2
 ```
 
 The slot records show the declared type, init keyword, required/default status,

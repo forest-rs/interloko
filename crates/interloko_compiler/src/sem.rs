@@ -11,7 +11,9 @@ use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::Span;
 
-pub use interloko_model::{BuiltinValueClass, ClassId, GenericFunctionId, MethodId, SlotId};
+pub use interloko_model::{
+    BuiltinValueClass, ClassId, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
+};
 
 /// Durable direct function identifier within a semantic module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -303,6 +305,8 @@ impl HostFunction {
 /// Origin of a semantic class metaobject.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ClassOrigin {
+    /// Built-in root class for every Interloko object.
+    ObjectRoot,
     /// Class defined in Loko source.
     Native,
     /// Built-in value class supplied by the language kernel.
@@ -373,8 +377,8 @@ pub type GenericParamKind = Option<ValueKind>;
 
 /// One method specializer in parameter order.
 ///
-/// `None` represents source `<object>`, which is Interloko's current top value
-/// category rather than a nominal [`ClassId`].
+/// `None` is reserved for invalid or legacy compatibility records. Source
+/// `<object>` is represented by [`OBJECT_CLASS_ID`].
 pub type MethodSpecializer = Option<ClassId>;
 
 /// Origin of a semantic generic function metaobject.
@@ -825,7 +829,9 @@ pub struct Method {
     /// Specialized class for the first argument, retained as a compatibility
     /// mirror for older inspection paths.
     pub specializer: ClassId,
-    /// Specialized classes in call order. `None` means source `<object>`.
+    /// Specialized classes in call order. Source `<object>` is represented by
+    /// [`OBJECT_CLASS_ID`]; `None` is reserved for invalid compatibility
+    /// records.
     pub specializers: Vec<MethodSpecializer>,
     /// Dispatch parameter local, retained as a compatibility mirror for older
     /// single-dispatch paths.
@@ -1517,6 +1523,24 @@ impl Lowering {
     }
 
     fn collect_classes(&mut self, module: &ast::Module) {
+        self.classes.push(Class {
+            id: OBJECT_CLASS_ID,
+            definition: DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Class,
+                "<object>",
+                "object-root",
+            ),
+            name: "<object>".into(),
+            origin: ClassOrigin::ObjectRoot,
+            superclass: None,
+            finalized: false,
+            direct_slots: Vec::new(),
+            effective_slots: Vec::new(),
+            initialization_plan: InitializationPlan::default(),
+            span: Span::default(),
+        });
+
         for (index, class) in module.classes.iter().enumerate() {
             if let Some(previous) = self.classes.iter().find(|item| item.name == class.name) {
                 self.diagnostics.push(
@@ -1533,12 +1557,13 @@ impl Lowering {
                         )),
                 );
             }
+            let class_id = ClassId(u32::try_from(index + 1).unwrap_or(u32::MAX));
             self.classes.push(Class {
-                id: ClassId(u32::try_from(index).unwrap_or(u32::MAX)),
+                id: class_id,
                 definition: class.definition,
                 name: class.name.clone(),
                 origin: ClassOrigin::Native,
-                superclass: None,
+                superclass: Some(OBJECT_CLASS_ID),
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
@@ -1548,6 +1573,8 @@ impl Lowering {
         }
 
         for (class_index, class) in module.classes.iter().enumerate() {
+            let lowered_class_index = class_index + 1;
+            let class_id = ClassId(u32::try_from(lowered_class_index).unwrap_or(u32::MAX));
             let slots = class
                 .slots
                 .iter()
@@ -1565,7 +1592,7 @@ impl Lowering {
                         accessor: Accessor {
                             definition: slot.definition,
                             name: slot.name.clone(),
-                            class: ClassId(u32::try_from(class_index).unwrap_or(u32::MAX)),
+                            class: class_id,
                             slot: id,
                             result_kind: kind,
                         },
@@ -1582,7 +1609,7 @@ impl Lowering {
                 })
                 .collect::<Vec<_>>();
             self.check_duplicate_init_keywords(class, &slots);
-            if let Some(lowered_class) = self.classes.get_mut(class_index) {
+            if let Some(lowered_class) = self.classes.get_mut(lowered_class_index) {
                 lowered_class.direct_slots = slots;
             }
         }
@@ -1661,7 +1688,7 @@ impl Lowering {
                 origin: ClassOrigin::HostBacked {
                     host_class: host_class_id,
                 },
-                superclass: None,
+                superclass: Some(OBJECT_CLASS_ID),
                 finalized: false,
                 direct_slots: slots,
                 effective_slots: Vec::new(),
@@ -1702,7 +1729,7 @@ impl Lowering {
                 ),
                 name: (*name).to_string(),
                 origin: ClassOrigin::BuiltinValue { kind: *kind },
-                superclass: None,
+                superclass: Some(OBJECT_CLASS_ID),
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
@@ -1714,6 +1741,7 @@ impl Lowering {
 
     fn resolve_superclasses(&mut self, module: &ast::Module) {
         for (class_index, class) in module.classes.iter().enumerate() {
+            let lowered_class_index = class_index + 1;
             let Some(superclass) = class.superclass.as_deref() else {
                 continue;
             };
@@ -1757,7 +1785,7 @@ impl Lowering {
                 );
                 continue;
             }
-            if let Some(lowered_class) = self.classes.get_mut(class_index) {
+            if let Some(lowered_class) = self.classes.get_mut(lowered_class_index) {
                 lowered_class.superclass = Some(parent_id);
             }
         }
@@ -1766,6 +1794,7 @@ impl Lowering {
     fn collect_slot_init_values(&mut self, module: &ast::Module) {
         let mut lowered_values = Vec::new();
         for (class_index, class) in module.classes.iter().enumerate() {
+            let lowered_class_index = class_index + 1;
             for (slot_index, slot) in class.slots.iter().enumerate() {
                 let Some(init_value) = &slot.init_value else {
                     continue;
@@ -1775,7 +1804,7 @@ impl Lowering {
                 self.diagnostics.extend(ctx.diagnostics);
                 let slot_kind = self
                     .classes
-                    .get(class_index)
+                    .get(lowered_class_index)
                     .and_then(|class| class.direct_slots.get(slot_index))
                     .map_or(ValueKind::Error, |slot| slot.kind);
                 let value_kind = self.expr_kind(&value);
@@ -1790,7 +1819,7 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(value_kind))),
                     );
                 }
-                lowered_values.push((class_index, slot_index, value));
+                lowered_values.push((lowered_class_index, slot_index, value));
             }
         }
 
@@ -2138,6 +2167,10 @@ impl Lowering {
         }
     }
 
+    fn method_specializer_for_kind(&self, kind: ValueKind) -> MethodSpecializer {
+        Some(self.value_kind_class(kind).unwrap_or(OBJECT_CLASS_ID))
+    }
+
     fn collect_slot_setter_methods(&mut self) {
         let slots = self
             .classes
@@ -2217,7 +2250,7 @@ impl Lowering {
                 definition,
                 generic,
                 specializer: class,
-                specializers: vec![self.value_kind_class(slot.kind), Some(class)],
+                specializers: vec![self.method_specializer_for_kind(slot.kind), Some(class)],
                 param: object_param,
                 params: vec![value_param, object_param],
                 locals: ctx.locals,
@@ -4013,7 +4046,7 @@ impl Lowering {
                     | BuiltinValueClass::Method
                     | BuiltinValueClass::SlotDescriptor,
             } => Some(ValueKind::Object(class)),
-            ClassOrigin::Native | ClassOrigin::HostBacked { .. } => None,
+            ClassOrigin::ObjectRoot | ClassOrigin::Native | ClassOrigin::HostBacked { .. } => None,
         }
     }
 
@@ -4100,7 +4133,7 @@ impl Lowering {
         param: &ast::MethodParam,
     ) -> (MethodSpecializer, ValueKind) {
         if param.class_name == "<object>" {
-            return (None, ValueKind::Any);
+            return (Some(OBJECT_CLASS_ID), ValueKind::Any);
         }
         let Some(class) = self.resolve_class(&param.class_name) else {
             self.diagnostics.push(
@@ -4391,6 +4424,34 @@ mod tests {
         })
     }
 
+    fn class_id(module: &Module, name: &str) -> ClassId {
+        class(module, name).id
+    }
+
+    fn class<'a>(module: &'a Module, name: &str) -> &'a Class {
+        module
+            .classes
+            .iter()
+            .find(|class| class.name == name)
+            .unwrap_or_else(|| panic!("missing class {name}"))
+    }
+
+    #[test]
+    fn object_is_a_real_root_class() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic score(x :: <object>) => <integer>;\n\
+             define method score(x :: <object>)\n  1\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes[0].name, "<object>");
+        assert_eq!(module.classes[0].superclass, None);
+        assert_eq!(module.classes[1].name, "<circle>");
+        assert_eq!(module.classes[1].superclass, Some(ClassId(0)));
+        assert_eq!(module.methods[0].specializers, [Some(ClassId(0))]);
+    }
+
     #[test]
     fn resolves_locals_and_direct_calls() {
         let module = lower_source(
@@ -4454,11 +4515,12 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let circle = class(&module, "<circle>");
         assert_eq!(
             module.functions[0].locals[0].kind,
             ValueKind::KnownCallable(KnownCallable::SlotAccessor {
-                accessor: module.classes[0].direct_slots[0].accessor.definition,
-                class: ClassId(0),
+                accessor: circle.direct_slots[0].accessor.definition,
+                class: circle.id,
                 slot: SlotId(0),
             })
         );
@@ -4495,21 +4557,21 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes.len(), 9);
+        let rust_circle = class(&module, "<rust-circle>");
         assert_eq!(
-            module.classes[0].origin,
+            rust_circle.origin,
             ClassOrigin::HostBacked {
                 host_class: HostClassId(0),
             }
         );
         assert_eq!(
-            module.classes[0].direct_slots[0].origin,
+            rust_circle.direct_slots[0].origin,
             SlotOrigin::HostBacked {
                 host_class: HostClassId(0),
                 host_slot: HostSlotId(0),
             }
         );
-        assert_eq!(module.methods[0].specializer, ClassId(0));
+        assert_eq!(module.methods[0].specializer, rust_circle.id);
         assert!(matches!(module.methods[0].body.result, Expr::Binary { .. }));
     }
 
@@ -4537,17 +4599,17 @@ mod tests {
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
         );
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[0].id, ClassId(0));
-        assert_eq!(module.classes[0].direct_slots[0].id, SlotId(0));
-        assert_eq!(module.classes[0].direct_slots[0].kind, ValueKind::I64);
+        let circle = class(&module, "<circle>");
+        assert_eq!(circle.direct_slots[0].id, SlotId(0));
+        assert_eq!(circle.direct_slots[0].kind, ValueKind::I64);
         assert_eq!(
-            module.classes[0].direct_slots[0].accessor.definition,
-            module.classes[0].direct_slots[0].definition
+            circle.direct_slots[0].accessor.definition,
+            circle.direct_slots[0].definition
         );
         assert_eq!(module.generics[0].id, GenericFunctionId(0));
         assert_eq!(module.methods[0].id, MethodId(0));
         assert_eq!(module.methods[0].generic, GenericFunctionId(0));
-        assert_eq!(module.methods[0].specializer, ClassId(0));
+        assert_eq!(module.methods[0].specializer, circle.id);
         let Expr::GenericCall { generic, args, .. } = &module.functions[0].body.result else {
             panic!("expected generic call");
         };
@@ -4555,9 +4617,9 @@ mod tests {
         assert!(matches!(
             args[0],
             Expr::MakeObject {
-                class_id: ClassId(0),
+                class_id,
                 ..
-            }
+            } if class_id == circle.id
         ));
         let Expr::Binary { lhs, .. } = &module.methods[0].body.result else {
             panic!("expected method body binary expression");
@@ -4565,10 +4627,10 @@ mod tests {
         assert!(matches!(
             lhs.as_ref(),
             Expr::AccessorCall {
-                class: ClassId(0),
+                class,
                 slot: SlotId(0),
                 ..
-            }
+            } if *class == circle.id
         ));
     }
 
@@ -4581,23 +4643,19 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[1].superclass, Some(ClassId(0)));
-        assert!(module.classes[1].finalized);
-        assert_eq!(module.classes[1].direct_slots.len(), 1);
-        assert_eq!(module.classes[1].effective_slots.len(), 2);
-        assert_eq!(module.classes[1].effective_slots[0].name, "x");
-        assert_eq!(
-            module.classes[1].effective_slots[0].source_class,
-            ClassId(0)
-        );
-        assert_eq!(module.classes[1].effective_slots[0].source_slot, SlotId(0));
-        assert_eq!(module.classes[1].effective_slots[1].name, "y");
-        assert_eq!(
-            module.classes[1].effective_slots[1].source_class,
-            ClassId(1)
-        );
-        let plan = &module.classes[1].initialization_plan;
-        assert_eq!(plan.class, ClassId(1));
+        let shape_id = class_id(&module, "<shape>");
+        let point = class(&module, "<point>");
+        assert_eq!(point.superclass, Some(shape_id));
+        assert!(point.finalized);
+        assert_eq!(point.direct_slots.len(), 1);
+        assert_eq!(point.effective_slots.len(), 2);
+        assert_eq!(point.effective_slots[0].name, "x");
+        assert_eq!(point.effective_slots[0].source_class, shape_id);
+        assert_eq!(point.effective_slots[0].source_slot, SlotId(0));
+        assert_eq!(point.effective_slots[1].name, "y");
+        assert_eq!(point.effective_slots[1].source_class, point.id);
+        let plan = &point.initialization_plan;
+        assert_eq!(plan.class, point.id);
         assert_eq!(plan.steps.len(), 2);
         assert_eq!(plan.steps[0].slot, SlotId(0));
         assert_eq!(plan.steps[0].init_keyword, "x");
@@ -4611,7 +4669,7 @@ mod tests {
         let Expr::AccessorCall { class, slot, .. } = &module.functions[0].body.result else {
             panic!("expected inherited slot read");
         };
-        assert_eq!(*class, ClassId(1));
+        assert_eq!(*class, point.id);
         assert_eq!(*slot, SlotId(0));
     }
 
@@ -4629,19 +4687,13 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(
-            module.classes[2].direct_slots[0].kind,
-            ValueKind::Object(ClassId(0))
-        );
-        assert_eq!(
-            module.functions[0].result_kind,
-            ValueKind::Object(ClassId(0))
-        );
-        assert_eq!(
-            module.functions[1].result_kind,
-            ValueKind::Object(ClassId(0))
-        );
-        assert_eq!(module.methods[0].specializer, ClassId(1));
+        let shape_id = class_id(&module, "<shape>");
+        let circle_id = class_id(&module, "<circle>");
+        let holder = class(&module, "<holder>");
+        assert_eq!(holder.direct_slots[0].kind, ValueKind::Object(shape_id));
+        assert_eq!(module.functions[0].result_kind, ValueKind::Object(shape_id));
+        assert_eq!(module.functions[1].result_kind, ValueKind::Object(shape_id));
+        assert_eq!(module.methods[0].specializer, circle_id);
     }
 
     #[test]
@@ -4654,6 +4706,8 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let problem_id = class_id(&module, "<problem>");
+        let invalid_radius_id = class_id(&module, "<invalid-radius>");
         let Expr::Handle { body, .. } = &module.functions[0].body.result else {
             panic!("expected handle");
         };
@@ -4668,9 +4722,9 @@ mod tests {
         assert!(matches!(
             condition.as_ref(),
             Expr::InstanceOf {
-                class: ClassId(0),
+                class,
                 ..
-            }
+            } if *class == problem_id
         ));
         let Expr::AccessorCall {
             receiver, class, ..
@@ -4678,25 +4732,25 @@ mod tests {
         else {
             panic!("expected parent slot read");
         };
-        assert_eq!(*class, ClassId(0));
+        assert_eq!(*class, problem_id);
         assert!(matches!(
             receiver.as_ref(),
             Expr::Cast {
-                class: ClassId(0),
+                class,
                 ..
-            }
+            } if *class == problem_id
         ));
 
         let Expr::Handle { body, restart, .. } = &module.functions[1].body.result else {
             panic!("expected restart handle");
         };
-        assert_eq!(restart.specializer, ClassId(0));
+        assert_eq!(restart.specializer, problem_id);
         assert!(matches!(
             body.as_ref(),
             Expr::Signal {
-                condition_class: ClassId(1),
+                condition_class,
                 ..
-            }
+            } if *condition_class == invalid_radius_id
         ));
     }
 
@@ -4860,6 +4914,7 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let circle = class(&module, "<circle>");
         let Expr::AccessorCall {
             accessor,
             class,
@@ -4870,8 +4925,8 @@ mod tests {
         else {
             panic!("expected accessor call");
         };
-        assert_eq!(*accessor, module.classes[0].direct_slots[0].definition);
-        assert_eq!(*class, ClassId(0));
+        assert_eq!(*accessor, circle.direct_slots[0].definition);
+        assert_eq!(*class, circle.id);
         assert_eq!(*slot, SlotId(0));
         assert_eq!(*result_kind, ValueKind::I64);
     }
@@ -4884,14 +4939,15 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let circle_id = class_id(&module, "<circle>");
         assert_eq!(
             module.functions[0].locals[0].kind,
-            ValueKind::ClassObject(ClassId(0))
+            ValueKind::ClassObject(circle_id)
         );
         let Expr::ClassObject { class, .. } = &module.functions[0].body.lets[0].value else {
             panic!("expected class object let value");
         };
-        assert_eq!(*class, ClassId(0));
+        assert_eq!(*class, circle_id);
 
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
@@ -4899,14 +4955,15 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let circle_id = class_id(&module, "<circle>");
         assert_eq!(
             module.functions[0].locals[1].kind,
-            ValueKind::ClassObject(ClassId(0))
+            ValueKind::ClassObject(circle_id)
         );
         let Expr::ClassOf { class, .. } = &module.functions[0].body.lets[1].value else {
             panic!("expected class-of expression");
         };
-        assert_eq!(*class, ClassId(0));
+        assert_eq!(*class, circle_id);
     }
 
     #[test]
@@ -4919,15 +4976,16 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let circle_id = class_id(&module, "<circle>");
         assert_eq!(module.functions[0].param_kinds, [ValueKind::Bool]);
         assert_eq!(module.functions[0].return_annotation, Some(ValueKind::Bool));
         assert_eq!(
             module.functions[1].param_kinds,
-            [ValueKind::ClassObject(ClassId(0)), ValueKind::I64]
+            [ValueKind::ClassObject(circle_id), ValueKind::I64]
         );
         assert_eq!(
             module.functions[1].return_annotation,
-            Some(ValueKind::Object(ClassId(0)))
+            Some(ValueKind::Object(circle_id))
         );
         assert_eq!(module.functions[2].result_kind, ValueKind::I64);
     }
@@ -4970,6 +5028,7 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let circle_id = class_id(&module, "<circle>");
         let Expr::If {
             condition,
             refinement,
@@ -4982,15 +5041,15 @@ mod tests {
         assert!(matches!(
             condition.as_ref(),
             Expr::InstanceOf {
-                class: ClassId(0),
+                class,
                 ..
-            }
+            } if *class == circle_id
         ));
         assert_eq!(
             *refinement,
             Some(Refinement {
                 local: LocalId(0),
-                kind: ValueKind::Object(ClassId(0)),
+                kind: ValueKind::Object(circle_id),
             })
         );
         let Expr::AccessorCall { receiver, .. } = then_branch.as_ref() else {
@@ -5000,9 +5059,9 @@ mod tests {
             receiver.as_ref(),
             Expr::Local {
                 local: LocalId(0),
-                result_kind: ValueKind::Object(ClassId(0)),
+                result_kind,
                 ..
-            }
+            } if *result_kind == ValueKind::Object(circle_id)
         ));
         let Expr::AccessorCall { receiver, .. } = &module.functions[1].body.result else {
             panic!("expected cast slot accessor");
@@ -5010,9 +5069,9 @@ mod tests {
         assert!(matches!(
             receiver.as_ref(),
             Expr::Cast {
-                class: ClassId(0),
+                class,
                 ..
-            }
+            } if *class == circle_id
         ));
     }
 
@@ -5067,12 +5126,12 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[0].direct_slots[0].kind, ValueKind::I64);
-        assert_eq!(
-            module.classes[1].direct_slots[0].kind,
-            ValueKind::Object(ClassId(0))
-        );
-        assert_eq!(module.classes[1].direct_slots[1].kind, ValueKind::Bool);
+        let circle_id = class_id(&module, "<circle>");
+        let circle = class(&module, "<circle>");
+        let box_class = class(&module, "<box>");
+        assert_eq!(circle.direct_slots[0].kind, ValueKind::I64);
+        assert_eq!(box_class.direct_slots[0].kind, ValueKind::Object(circle_id));
+        assert_eq!(box_class.direct_slots[1].kind, ValueKind::Bool);
         assert_eq!(module.functions[0].result_kind, ValueKind::I64);
     }
 
@@ -5084,11 +5143,12 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[0].direct_slots[0].type_name, "<object>");
-        assert_eq!(module.classes[0].direct_slots[0].kind, ValueKind::Any);
-        assert_eq!(module.classes[0].direct_slots[0].init_keyword, "value");
-        assert!(!module.classes[0].direct_slots[0].required_init_keyword);
-        assert_eq!(module.classes[0].direct_slots[1].kind, ValueKind::Any);
+        let box_class = class(&module, "<box>");
+        assert_eq!(box_class.direct_slots[0].type_name, "<object>");
+        assert_eq!(box_class.direct_slots[0].kind, ValueKind::Any);
+        assert_eq!(box_class.direct_slots[0].init_keyword, "value");
+        assert!(!box_class.direct_slots[0].required_init_keyword);
+        assert_eq!(box_class.direct_slots[1].kind, ValueKind::Any);
         assert_eq!(module.functions[0].result_kind, ValueKind::Any);
     }
 
@@ -5100,19 +5160,14 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.classes[0].direct_slots[0].init_keyword, "r");
-        assert!(module.classes[0].direct_slots[0].required_init_keyword);
-        assert_eq!(module.classes[0].direct_slots[1].init_keyword, "payload");
-        assert!(!module.classes[0].direct_slots[1].required_init_keyword);
-        assert_eq!(module.classes[0].initialization_plan.steps.len(), 2);
-        assert_eq!(
-            module.classes[0].initialization_plan.steps[0].init_keyword,
-            "r"
-        );
-        assert_eq!(
-            module.classes[0].initialization_plan.steps[1].init_keyword,
-            "payload"
-        );
+        let circle = class(&module, "<circle>");
+        assert_eq!(circle.direct_slots[0].init_keyword, "r");
+        assert!(circle.direct_slots[0].required_init_keyword);
+        assert_eq!(circle.direct_slots[1].init_keyword, "payload");
+        assert!(!circle.direct_slots[1].required_init_keyword);
+        assert_eq!(circle.initialization_plan.steps.len(), 2);
+        assert_eq!(circle.initialization_plan.steps[0].init_keyword, "r");
+        assert_eq!(circle.initialization_plan.steps[1].init_keyword, "payload");
         let Expr::AccessorCall { receiver, .. } = &module.functions[0].body.result else {
             panic!("expected accessor call");
         };
@@ -5143,7 +5198,8 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        let radius = &module.classes[0].direct_slots[0];
+        let circle = class(&module, "<circle>");
+        let radius = &circle.direct_slots[0];
         assert_eq!(radius.init_keyword, "r");
         assert!(radius.required_init_keyword);
         assert_eq!(radius.allocation, SlotAllocation::Instance);
@@ -5152,14 +5208,14 @@ mod tests {
             radius.init_value,
             Some(Expr::ConstI64 { value: 10, .. })
         ));
-        let cached = &module.classes[0].direct_slots[1];
+        let cached = &circle.direct_slots[1];
         assert_eq!(cached.kind, ValueKind::Any);
         assert_eq!(cached.mutability, SlotMutability::Mutable);
         assert!(matches!(
             cached.init_value,
             Some(Expr::ConstBool { value: true, .. })
         ));
-        let plan = &module.classes[0].initialization_plan;
+        let plan = &circle.initialization_plan;
         assert_eq!(plan.steps.len(), 2);
         assert!(plan.steps[0].required_init_keyword);
         assert!(plan.steps[0].has_default);
@@ -5356,35 +5412,37 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
+        let bad_id = class_id(&module, "<bad>");
         assert_eq!(module.functions[0].result_kind, ValueKind::I64);
         let Expr::Handle { body, restart, .. } = &module.functions[0].body.result else {
             panic!("expected handle expression");
         };
-        assert_eq!(restart.specializer, ClassId(0));
+        assert_eq!(restart.specializer, bad_id);
         assert_eq!(restart.result_kind, ValueKind::I64);
         let condition_local = restart
             .condition_local
             .expect("restart should bind condition object");
         assert_eq!(
             module.functions[0].locals[condition_local.0 as usize].kind,
-            ValueKind::Object(ClassId(0))
+            ValueKind::Object(bad_id)
         );
         assert!(matches!(
             restart.body.as_ref(),
             Expr::AccessorCall {
                 receiver,
-                class: ClassId(0),
+                class,
                 slot: SlotId(0),
                 ..
-            } if matches!(receiver.as_ref(), Expr::Local { local, .. } if *local == condition_local)
+            } if *class == bad_id
+                && matches!(receiver.as_ref(), Expr::Local { local, .. } if *local == condition_local)
         ));
         assert!(matches!(
             body.as_ref(),
             Expr::Signal {
-                condition_class: ClassId(0),
+                condition_class,
                 result_kind: ValueKind::I64,
                 ..
-            }
+            } if *condition_class == bad_id
         ));
     }
 

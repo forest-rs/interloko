@@ -918,6 +918,14 @@ impl<'module> BodyLowering<'module> {
         labels: MatchLabels,
         span: Span,
     ) -> Result<(), LowerError> {
+        if specializer == sem::OBJECT_CLASS_ID {
+            self.instructions.push(Instr::Jump {
+                label: labels.success,
+                span,
+            });
+            return Ok(());
+        }
+
         if matches!(
             generic.param_kinds.get(index).copied().flatten(),
             Some(sem::ValueKind::I64)
@@ -2373,6 +2381,15 @@ mod tests {
         lower(&sem).expect("lowering should succeed")
     }
 
+    fn runtime_class<'a>(module: &'a Module, name: &str) -> &'a runtime::RuntimeClass {
+        module
+            .runtime
+            .classes
+            .iter()
+            .find(|class| class.name == name)
+            .unwrap_or_else(|| panic!("missing runtime class {name}"))
+    }
+
     #[test]
     fn lowers_direct_calls_arithmetic_and_locals() {
         let module = lower_source(
@@ -2437,7 +2454,6 @@ mod tests {
 
         let dump = module.dump();
         assert!(dump.contains("score#dispatch(%r1 x: object(<shape>)) -> i64"));
-        assert!(dump.contains("const.u64 0"));
         assert!(dump.contains("const.u64 1"));
         assert!(dump.contains("call l1(%r1)"));
     }
@@ -2464,7 +2480,7 @@ mod tests {
             })
             .expect("make should be lowered");
 
-        assert_eq!(make.0, sem::ClassId(1));
+        assert_eq!(make.0, sem::ClassId(2));
         assert_eq!(make.1.len(), 2);
         assert_eq!(const_i64(main, make.1[0]), Some(7));
         assert_eq!(const_i64(main, make.1[1]), Some(2));
@@ -2509,7 +2525,7 @@ mod tests {
         assert!(dump.contains("box.any"));
         assert!(dump.contains("<box>.value: any"));
         assert_eq!(
-            module.runtime.classes[0].slots[0].kind,
+            runtime_class(&module, "<box>").slots[0].kind,
             runtime::ValueKind::Any
         );
     }

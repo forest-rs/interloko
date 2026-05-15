@@ -805,7 +805,7 @@ fn class_object_facts(artifacts: &SessionArtifacts, object_id: &str) -> Vec<Obje
     let superclass = class
         .superclass
         .and_then(|id| class_name(&artifacts.sem, id))
-        .unwrap_or("<object>");
+        .unwrap_or("<none>");
     let init_keywords = class
         .initialization_plan
         .steps
@@ -1113,6 +1113,7 @@ fn class_name(module: &sem::Module, id: sem::ClassId) -> Option<&str> {
 
 fn class_origin_label(origin: ClassOrigin) -> String {
     match origin {
+        ClassOrigin::ObjectRoot => "object root".into(),
         ClassOrigin::Native => "native object".into(),
         ClassOrigin::BuiltinValue { kind } => format!("built-in {}", kind.name()),
         ClassOrigin::HostBacked { host_class } => format!("host-backed class h{}", host_class.0),

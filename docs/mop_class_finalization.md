@@ -154,11 +154,12 @@ MOP and semantic dumps show:
 - dispatch applicability for each method, including subclass classes that can
   select a parent-specialized method.
 
-EOP inspection exposes class and slot records from those same facts. A
-`slot:c1.s0` record names the effective slot at layout position `s0` on class
-`c1`, while its inspection text points back to the source slot that introduced
-it. Generic and method records include the dispatch applicability summary used
-by the lowered dispatcher.
+EOP inspection exposes class and slot records from those same facts.
+`class:c0` is the compiler-generated `<object>` root. A `slot:c2.s0` record
+names the effective slot at layout position `s0` on the `<point>` class in the
+fixture below, while its inspection text points back to the source slot that
+introduced it. Generic and method records include the dispatch applicability
+summary used by the lowered dispatcher.
 
 Dispatch sites are exposed as compiler-generated EOP objects with IDs such as
 `dispatch:d0`. A dispatch-site explanation names the enclosing function or
@@ -172,7 +173,7 @@ Useful workbench commands:
 
 ```sh
 cargo run -p interloko_lab -- dump tools/interloko_lab/fixtures/inherited_point.loko --stage mop
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c1
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c2
 cargo run -p interloko_lab -- dump tools/interloko_lab/fixtures/inherited_dispatch.loko --stage mop
 cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.loko
 cargo run -p interloko_lab -- dispatch tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0

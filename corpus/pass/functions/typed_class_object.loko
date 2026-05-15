@@ -1,6 +1,6 @@
 // expect: run 7
 // expect: diagnostics 0
-// expect: dump sem contains circle-class() result=ClassObject(ClassId(0)) return=class-object(<circle>)
+// expect: dump sem contains circle-class() result=ClassObject(ClassId(1)) return=class-object(<circle>)
 // expect: dump sem contains build(klass:class-object(<circle>), radius:integer)
 // expect: dump lowered contains class(<circle>)
 

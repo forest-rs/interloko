@@ -2982,7 +2982,9 @@ fn sem_builtin_value_kind_for_class(
                 | sem::BuiltinValueClass::Method
                 | sem::BuiltinValueClass::SlotDescriptor,
         } => Some(sem::ValueKind::Object(class)),
-        sem::ClassOrigin::Native | sem::ClassOrigin::HostBacked { .. } => None,
+        sem::ClassOrigin::ObjectRoot
+        | sem::ClassOrigin::Native
+        | sem::ClassOrigin::HostBacked { .. } => None,
     }
 }
 
@@ -5920,6 +5922,7 @@ fn project_environment_runtime_class(
 
 fn eop_class_origin(origin: sem::ClassOrigin) -> EnvironmentOrigin {
     match origin {
+        sem::ClassOrigin::ObjectRoot => EnvironmentOrigin::CompilerGenerated,
         sem::ClassOrigin::Native => EnvironmentOrigin::SourceAuthored,
         sem::ClassOrigin::BuiltinValue { .. } => EnvironmentOrigin::CompilerGenerated,
         sem::ClassOrigin::HostBacked { .. } => EnvironmentOrigin::HostBacked,
@@ -5928,6 +5931,7 @@ fn eop_class_origin(origin: sem::ClassOrigin) -> EnvironmentOrigin {
 
 fn eop_class_storage(origin: sem::ClassOrigin) -> EnvironmentStorage {
     match origin {
+        sem::ClassOrigin::ObjectRoot => EnvironmentStorage::CachedArtifact,
         sem::ClassOrigin::Native => EnvironmentStorage::SourceDefined,
         sem::ClassOrigin::BuiltinValue { .. } => EnvironmentStorage::CachedArtifact,
         sem::ClassOrigin::HostBacked { .. } => EnvironmentStorage::HostRegistry,
@@ -6499,6 +6503,7 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
 
 fn sem_class_origin_label(origin: sem::ClassOrigin) -> String {
     match origin {
+        sem::ClassOrigin::ObjectRoot => "object-root".into(),
         sem::ClassOrigin::Native => "native".into(),
         sem::ClassOrigin::BuiltinValue { kind } => format!("builtin-value({})", kind.name()),
         sem::ClassOrigin::HostBacked { host_class } => {
@@ -6527,7 +6532,7 @@ fn sem_method_origin_label(origin: sem::MethodOrigin) -> String {
 
 fn sem_superclass_label(module: &sem::Module, superclass: Option<sem::ClassId>) -> String {
     superclass.map_or_else(
-        || "<object>".into(),
+        || "<none>".into(),
         |class| {
             module.classes.get(class.0 as usize).map_or_else(
                 || format!("c{}:<missing>", class.0),
@@ -6545,7 +6550,6 @@ fn sem_superclass_chain_label(module: &sem::Module, class: sem::ClassId) -> Stri
             |class| format!("c{}:{}", class.id.0, class.name),
         ));
     }
-    parts.push("<object>".into());
     parts.join(" -> ")
 }
 
@@ -7952,8 +7956,8 @@ mod tests {
         );
         assert!(!site.applicable[1].runtime_only);
         let explanation = artifacts.explain_dispatch_site("dispatch:d0").unwrap();
-        assert!(explanation.contains("m1:score(c1:<circle>)"));
-        assert!(explanation.contains("m0:score(c0:<shape>)"));
+        assert!(explanation.contains("m1:score(c2:<circle>)"));
+        assert!(explanation.contains("m0:score(c1:<shape>)"));
         assert!(explanation.contains("shadowed"));
     }
 
@@ -8010,7 +8014,7 @@ mod tests {
         }));
         let explanation = artifacts.explain_dispatch_site("dispatch:d0").unwrap();
         assert!(explanation.contains("rejected methods:"));
-        assert!(explanation.contains("c2:<square>"));
+        assert!(explanation.contains("c3:<square>"));
         assert!(explanation.contains("disjoint"));
     }
 
@@ -8148,7 +8152,13 @@ mod tests {
                 .contains(EnvironmentAffordance::ShowGrammarExtension)
         );
 
-        let class = eop_object(&objects, "class:c0");
+        let root_class = eop_object(&objects, "class:c0");
+        assert_eq!(root_class.kind, EnvironmentKind::Class);
+        assert_eq!(root_class.origin, EnvironmentOrigin::CompilerGenerated);
+        assert_eq!(root_class.storage, EnvironmentStorage::CachedArtifact);
+        assert_eq!(root_class.presentation.title, "<object>");
+
+        let class = eop_object(&objects, "class:c1");
         assert_eq!(class.kind, EnvironmentKind::Class);
         assert_eq!(class.origin, EnvironmentOrigin::SourceAuthored);
         assert_eq!(class.storage, EnvironmentStorage::SourceDefined);
@@ -8171,20 +8181,20 @@ mod tests {
                 .contains("initialize-methods=deferred")
         );
 
-        let slot = eop_object(&objects, "slot:c0.s0");
+        let slot = eop_object(&objects, "slot:c1.s0");
         assert_eq!(slot.kind, EnvironmentKind::Slot);
         assert!(
             slot.affordances
                 .contains(EnvironmentAffordance::ShowAccessor)
         );
 
-        let accessor = eop_object(&objects, "accessor:c0.s0");
+        let accessor = eop_object(&objects, "accessor:c1.s0");
         assert_eq!(accessor.kind, EnvironmentKind::Accessor);
         assert!(
             accessor
                 .execution
                 .as_ref()
-                .is_some_and(|execution| execution.detail.contains("reads=slot:c0.s0"))
+                .is_some_and(|execution| execution.detail.contains("reads=slot:c1.s0"))
         );
 
         let generic = eop_object(&objects, "generic:g0");
@@ -8217,7 +8227,11 @@ mod tests {
         );
         assert!(dispatch.inspection.detail.contains("generic=g0:area"));
 
-        let runtime_class = eop_object(&objects, "runtime-class:c0");
+        let runtime_root_class = eop_object(&objects, "runtime-class:c0");
+        assert_eq!(runtime_root_class.kind, EnvironmentKind::RuntimeLayoutRow);
+        assert_eq!(runtime_root_class.presentation.title, "runtime <object>");
+
+        let runtime_class = eop_object(&objects, "runtime-class:c1");
         assert_eq!(runtime_class.kind, EnvironmentKind::RuntimeLayoutRow);
         assert!(
             runtime_class
@@ -8314,7 +8328,8 @@ mod tests {
         assert_eq!(artifacts.ast.classes.len(), 1);
         assert_eq!(artifacts.ast.classes[0].name, "<circle>");
         assert_eq!(artifacts.ast.classes[0].slots[0].name, "radius");
-        assert_eq!(artifacts.sem.classes[0].name, "<circle>");
+        assert_eq!(artifacts.sem.classes[0].name, "<object>");
+        assert_eq!(artifacts.sem.classes[1].name, "<circle>");
     }
 
     #[test]
@@ -8338,6 +8353,8 @@ mod tests {
         assert_eq!(artifacts.diagnostics, Vec::new());
         let sem = artifacts.dump_stage(DumpStage::Sem);
         assert!(sem.contains("class c0"));
+        assert!(sem.contains("<object> origin=object-root"));
+        assert!(sem.contains("class c1"));
         assert!(sem.contains("origin=host-backed(hc0)"));
         assert!(sem.contains("slot s0"));
         assert!(sem.contains("origin=host-backed(hc0.hs0)"));
@@ -8346,20 +8363,22 @@ mod tests {
         assert!(mop.contains("runtime=host-backed"));
         assert!(mop.contains("storage=host-backed"));
         assert!(mop.contains(
-            "m0 specializers=(c0:<rust-circle>) specializer-origins=(host-backed(hc0)) method-origin=source"
+            "m0 specializers=(c1:<rust-circle>) specializer-origins=(host-backed(hc0)) method-origin=source"
         ));
         let eop = artifacts.dump_stage(DumpStage::Eop);
         assert!(eop.contains("object class:c0"));
+        assert!(eop.contains("origin=compiler-generated storage=cached-artifact"));
+        assert!(eop.contains("object class:c1"));
         assert!(eop.contains("origin=host-backed storage=host-registry"));
-        assert!(eop.contains("object slot:c0.s0"));
+        assert!(eop.contains("object slot:c1.s0"));
         assert!(eop.contains("storage=host-adapter"));
-        assert!(eop.contains("object runtime-class:c0"));
+        assert!(eop.contains("object runtime-class:c1"));
 
         let objects = artifacts.environment_objects();
-        let class = eop_object(&objects, "class:c0");
+        let class = eop_object(&objects, "class:c1");
         assert_eq!(class.origin, EnvironmentOrigin::HostBacked);
         assert_eq!(class.storage, EnvironmentStorage::HostRegistry);
-        let slot = eop_object(&objects, "slot:c0.s0");
+        let slot = eop_object(&objects, "slot:c1.s0");
         assert_eq!(slot.origin, EnvironmentOrigin::HostBacked);
         assert_eq!(slot.storage, EnvironmentStorage::HostAdapter);
     }
@@ -9195,7 +9214,7 @@ mod tests {
             update
                 .artifacts
                 .dump_stage(DumpStage::Sem)
-                .contains("class-object c1")
+                .contains("class-object c2")
         );
     }
 

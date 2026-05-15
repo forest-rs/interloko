@@ -996,6 +996,14 @@ mod tests {
         lower::lower(&sem).expect("lowering should succeed")
     }
 
+    fn runtime_class<'a>(tape: &'a TapeModule, name: &str) -> &'a runtime::RuntimeClass {
+        tape.runtime
+            .classes
+            .iter()
+            .find(|class| class.name == name)
+            .unwrap_or_else(|| panic!("missing runtime class {name}"))
+    }
+
     #[test]
     fn emits_verified_tape_for_direct_calls_and_arithmetic() {
         let module = lower_source(
@@ -1018,11 +1026,9 @@ mod tests {
         let tape = emit(&module).expect("tape emission should succeed");
         assert_eq!(tape.program.program().functions.len(), 5);
         assert_eq!(tape.main, Some(FuncId(0)));
-        assert_eq!(tape.runtime.classes[0].slots[0].name, "radius");
-        assert_eq!(
-            tape.runtime.classes[0].slots[0].kind,
-            runtime::ValueKind::I64
-        );
+        let circle = runtime_class(&tape, "<circle>");
+        assert_eq!(circle.slots[0].name, "radius");
+        assert_eq!(circle.slots[0].kind, runtime::ValueKind::I64);
     }
 
     #[test]
@@ -1055,11 +1061,9 @@ mod tests {
         let tape = emit(&module).expect("tape emission should succeed");
 
         assert_eq!(tape.program.program().functions.len(), 3);
-        assert_eq!(tape.runtime.classes[0].slots[0].name, "valid?");
-        assert_eq!(
-            tape.runtime.classes[0].slots[0].kind,
-            runtime::ValueKind::Bool
-        );
+        let flag = runtime_class(&tape, "<flag>");
+        assert_eq!(flag.slots[0].name, "valid?");
+        assert_eq!(flag.slots[0].kind, runtime::ValueKind::Bool);
     }
 
     #[test]
@@ -1071,10 +1075,8 @@ mod tests {
         let tape = emit(&module).expect("tape emission should succeed");
 
         assert_eq!(tape.program.program().functions.len(), 3);
-        assert_eq!(tape.runtime.classes[0].slots[0].name, "value");
-        assert_eq!(
-            tape.runtime.classes[0].slots[0].kind,
-            runtime::ValueKind::Any
-        );
+        let box_class = runtime_class(&tape, "<box>");
+        assert_eq!(box_class.slots[0].name, "value");
+        assert_eq!(box_class.slots[0].kind, runtime::ValueKind::Any);
     }
 }

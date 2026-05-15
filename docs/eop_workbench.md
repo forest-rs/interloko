@@ -23,15 +23,17 @@ cargo run -p interloko_lab -- eop tools/interloko_lab/fixtures/generic_area.loko
 Typical IDs include:
 
 - `source:<source-file-id>`
-- `class:c0`
-- `slot:c0.s0`
-- `accessor:c0.s0`
+- `class:c0` for the compiler-generated `<object>` root
+- `class:c1` for the first source or host class
+- `slot:c1.s0`
+- `accessor:c1.s0`
 - `generic:g0`
 - `method:m0`
 - `function:f0`
 - `dispatch:d0`
-- `runtime-class:c0`
-- `runtime-slot:c0.s0`
+- `runtime-class:c0` for the root runtime layout row
+- `runtime-class:c1`
+- `runtime-slot:c1.s0`
 - `artifact:<artifact-key>`
 - `diagnostic:d0`
 
@@ -40,7 +42,7 @@ Typical IDs include:
 Inspect prints one structured EOP record:
 
 ```sh
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/generic_area.loko class:c0
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/generic_area.loko class:c1
 ```
 
 The output includes:
@@ -68,7 +70,7 @@ Class inspection includes initialization facts derived from the class's
 finalized effective slots:
 
 ```sh
-cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c1
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_point.loko class:c2
 ```
 
 The `inspection` text names the accepted init keywords, inherited/direct slot
@@ -97,11 +99,11 @@ cargo run -p interloko_lab -- affordances tools/interloko_lab/fixtures/generic_a
 existing compiler/session views:
 
 ```sh
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko slot:c0.s0 show-accessor
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko accessor:c0.s0 show-slot
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko slot:c1.s0 show-accessor
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko accessor:c1.s0 show-slot
 cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko generic:g0 show-dispatch
 cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko dispatch:d0 show-dispatch
-cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko class:c0 show-runtime-layout
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko class:c1 show-runtime-layout
 cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko method:m0 show-dependencies
 cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko method:m0 dump-sem
 cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/generic_area.loko function:f0 run

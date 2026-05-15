@@ -14,6 +14,9 @@ pub struct ClassId(
     pub u32,
 );
 
+/// Stable class id for Interloko's `<object>` root class.
+pub const OBJECT_CLASS_ID: ClassId = ClassId(0);
+
 /// Durable slot identifier within a finalized class.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SlotId(

@@ -1,6 +1,6 @@
 // expect: run 1
 // expect: diagnostics 0
-// expect: dump mop contains specializers=(c0:<shape>, c0:<shape>)
+// expect: dump mop contains specializers=(c1:<shape>, c1:<shape>)
 
 define class <shape> (<object>)
   slot size :: <integer>, init-value: 1;

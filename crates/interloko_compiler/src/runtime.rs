@@ -25,6 +25,7 @@ pub fn runtime_layout_from_sem(module: &sem::Module) -> RtRuntimeLayout {
             .map(|class| RtRuntimeClass {
                 name: class.name.clone(),
                 kind: match class.origin {
+                    sem::ClassOrigin::ObjectRoot => RtHostObjectKind::Native,
                     sem::ClassOrigin::Native => RtHostObjectKind::Native,
                     sem::ClassOrigin::BuiltinValue { kind } => {
                         RtHostObjectKind::BuiltinValue { kind }

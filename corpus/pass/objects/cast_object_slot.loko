@@ -1,7 +1,7 @@
 // expect: run 9
 // expect: diagnostics 0
 // expect: dump ast contains as <circle>
-// expect: dump sem contains as c0
+// expect: dump sem contains as c1
 // expect: dump lowered contains as <circle>
 // expect: dump tape contains interloko.cast_object
 
