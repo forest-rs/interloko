@@ -1,5 +1,56 @@
 # Plans
 
+## Move Runtime Ownership Forward
+
+### Goal
+
+Make `interloko_runtime` own more executable object-system behavior instead of
+leaving it implicit in compiler lowering, session inspection, or host-call
+branches. Add layout validation, runtime slot APIs, runtime generic dispatch
+lookup/explanation data, and direct runtime conformance tests.
+
+### Fence
+
+`interloko_runtime` owns executable class layout invariants, runtime object
+storage, slot read/write behavior, class ancestry, and method-table dispatch
+facts. It explicitly does not own Loko syntax, AST, semantic IR, lowering,
+compiler sessions, EOP projection, HTML reports, diagnostics catalogs, or
+source-authored grammar behavior.
+
+### Invariants
+
+- `class:c0` is the `<object>` root and has no superclass.
+- Every non-root class has a valid superclass chain that reaches `<object>`.
+- Runtime slots point at valid source classes and source slots.
+- Runtime methods point at valid generics and valid class specializers.
+- Slot reads/writes go through runtime APIs used by tape host calls.
+- Generic dispatch lookup has one structured implementation reusable by
+  compiler/session explanations.
+- The compiler bridge remains the only `sem::Module -> RuntimeLayout` adapter.
+- `interloko_runtime` stays `no_std` and does not gain compiler dependencies.
+
+### Steps
+
+1. Add `RuntimeLayout::validate` and direct runtime tests for root, class,
+   slot, generic, and method invariants.
+2. Add runtime slot read/write APIs and update host-call branches to delegate to
+   them.
+3. Add runtime dispatch lookup/explanation records with applicable/rejected
+   candidates, distances, selected method, and ambiguity/no-method outcomes.
+4. Update compiler/session dispatch inspection to use runtime lookup facts where
+   practical while keeping rendering and artifact wiring in the compiler.
+5. Update docs/progress notes and run fmt, clippy, workspace tests, docs, and
+   corpus.
+
+### Risks
+
+- Dispatch explanation must stay structurally compatible with current
+  workbench output while changing the owner of the lookup facts.
+- Runtime validation should catch bad layouts without making valid compiler
+  output pay excessive cost during normal execution.
+- Keep the first slice narrow: no new public macro semantics, persistent
+  runtime image, host adapter split, or scheduler.
+
 ## Add Timing Instrumentation And Execution Tracing
 
 ### Goal
@@ -316,8 +367,8 @@ turns `sem::Module` into runtime layout.
    construction.
 4. Replace `RuntimeLayout::from_sem` with
    `interloko_compiler::runtime::runtime_layout_from_sem`.
-5. Keep `interloko_compiler::runtime` as compatibility re-exports plus the
-   sem-layout adapter.
+5. Keep `interloko_compiler::runtime` as only the sem-layout adapter; import
+   executable runtime APIs from `interloko_runtime` directly.
 6. Point tape emission at `interloko_runtime` symbols/signatures.
 7. Update docs/progress, run gates/examples, audit, and commit.
 
