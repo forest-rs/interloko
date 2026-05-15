@@ -1,5 +1,29 @@
 # Interloko Progress
 
+## Implemented: Staged Grammar Extension Records
+
+- Registered staged adapters now expose structured
+  `GrammarExtensionDescriptor` records. Descriptors name the adapter, projected
+  grammar, activation directive, region delimiters, accepted region shape,
+  emitted frontend form kinds, provenance rules, and required capabilities.
+- Parse reports now carry concrete extension activation records, emitted
+  frontend-form records, and extension provenance records alongside the older
+  staged-region summary.
+- EOP projection now exposes `grammar-extension:*`,
+  `grammar-extension-activation:*`, `grammar-extension-emission:*`, and
+  `grammar-extension-provenance:*` objects. These make staged parsing visible
+  as protocol data instead of trait-method convention.
+- `interloko_lab extensions <file.loko>` and the `show-grammar-extension`
+  affordance explain registered extensions, source activation spans, emitted
+  forms, capabilities, and charged provenance rules.
+
+Deferred:
+
+- Source-authored grammar extension definitions.
+- A real capability policy beyond explicit capability records.
+- Semantic actions that emit structural forms without trusted Rust adapters.
+- Direct frontend-form-to-AST lowering without materialized Loko source.
+
 ## Implemented: Grammar Frontend Registry Cleanup
 
 - Replaced the closed `GrammarEnvironmentSelection` enum with a registry-token

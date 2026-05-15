@@ -334,6 +334,14 @@ pub enum EnvironmentKind {
     RegisteredGrammarEnvironment,
     /// A staged grammar adapter registered with the grammar frontend registry.
     StagedGrammarAdapter,
+    /// A registered staged grammar extension descriptor.
+    GrammarExtension,
+    /// A concrete staged grammar extension activation.
+    GrammarExtensionActivation,
+    /// A frontend form emitted by a staged grammar extension.
+    GrammarExtensionEmission,
+    /// A provenance rule charged to a staged grammar extension.
+    GrammarExtensionProvenance,
     /// A language environment metaobject.
     LanguageEnvironment,
     /// A grammar metaobject.
@@ -379,6 +387,10 @@ impl EnvironmentKind {
             Self::GrammarRegistry => "grammar-registry",
             Self::RegisteredGrammarEnvironment => "registered-grammar-environment",
             Self::StagedGrammarAdapter => "staged-grammar-adapter",
+            Self::GrammarExtension => "grammar-extension",
+            Self::GrammarExtensionActivation => "grammar-extension-activation",
+            Self::GrammarExtensionEmission => "grammar-extension-emission",
+            Self::GrammarExtensionProvenance => "grammar-extension-provenance",
             Self::LanguageEnvironment => "language-environment",
             Self::Grammar => "grammar",
             Self::GrammarRule => "grammar-rule",
@@ -511,6 +523,8 @@ pub enum EnvironmentAffordance {
     ShowParseTrace,
     /// Show registered language environments and staged grammar adapters.
     ShowGrammarRegistry,
+    /// Show staged grammar extension descriptors and concrete emissions.
+    ShowGrammarExtension,
 }
 
 impl EnvironmentAffordance {
@@ -543,6 +557,7 @@ impl EnvironmentAffordance {
             Self::ShowGrammarRule => "show-grammar-rule",
             Self::ShowParseTrace => "show-parse-trace",
             Self::ShowGrammarRegistry => "show-grammar-registry",
+            Self::ShowGrammarExtension => "show-grammar-extension",
         }
     }
 }
@@ -762,10 +777,22 @@ impl SessionArtifacts {
         dump_grammar_registry(self.grammar_registry)
     }
 
+    /// Dumps registered grammar extension descriptors and concrete use records.
+    #[must_use]
+    pub fn dump_grammar_extensions(&self) -> String {
+        dump_grammar_extensions(self)
+    }
+
     /// Dumps parse provenance and grammar activations.
     #[must_use]
     pub fn dump_parse_trace(&self) -> String {
         dump_parse_trace(&self.grammar_parse)
+    }
+
+    /// Explains a staged grammar extension environment object id.
+    #[must_use]
+    pub fn explain_grammar_extension(&self, id: &str) -> Option<String> {
+        explain_grammar_extension(self, id)
     }
 
     /// Explains a grammar rule environment object id.
@@ -4288,6 +4315,267 @@ fn dump_grammar_registry(registry: GrammarFrontendRegistry) -> String {
     out
 }
 
+fn dump_grammar_extensions(artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "grammar extensions");
+    let _ = writeln!(out, "registered:");
+    for descriptor in artifacts.grammar_registry.extension_descriptors() {
+        let _ = writeln!(
+            out,
+            "  {} {} grammar={} capabilities={} emits={} activates={:?} region={:?} end={:?}",
+            grammar_frontend::grammar_extension_object_id(&descriptor),
+            descriptor.grammar_name,
+            descriptor.grammar_slug,
+            render_extension_capabilities(&descriptor.capabilities),
+            descriptor.emitted_form_kinds.join(","),
+            descriptor.activation_directive,
+            descriptor.region_start_directive,
+            descriptor.region_end_directive
+        );
+        let _ = writeln!(
+            out,
+            "    accepts={:?} root-rule={} provenance={}",
+            descriptor.accepted_region,
+            descriptor.root_rule,
+            descriptor.provenance_rule_names.join(",")
+        );
+    }
+    let _ = writeln!(out, "activations:");
+    for activation in &artifacts.grammar_parse.extension_activations {
+        let _ = writeln!(
+            out,
+            "  {} adapter={} activation={} grammar={} directive={}..{} marker={}..{} end={}..{} span={}..{} capabilities={} emitted-forms={}",
+            grammar_frontend::grammar_extension_activation_object_id(activation),
+            activation.adapter,
+            activation.activation,
+            activation.grammar,
+            activation.activation_directive.start,
+            activation.activation_directive.end,
+            activation.start_marker.start,
+            activation.start_marker.end,
+            activation.end_marker.start,
+            activation.end_marker.end,
+            activation.source_span.start,
+            activation.source_span.end,
+            render_extension_capabilities(&activation.capabilities),
+            activation.emitted_form_count
+        );
+    }
+    let _ = writeln!(out, "emissions:");
+    for emission in &artifacts.grammar_parse.extension_emissions {
+        let _ = writeln!(
+            out,
+            "  {} adapter={} activation={} kind={} span={}..{} data={}",
+            grammar_frontend::grammar_extension_emission_object_id(emission),
+            emission.adapter,
+            emission.activation,
+            emission.form_kind,
+            emission.source_span.start,
+            emission.source_span.end,
+            emission.data
+        );
+    }
+    let _ = writeln!(out, "provenance:");
+    for provenance in &artifacts.grammar_parse.extension_provenance {
+        let _ = writeln!(
+            out,
+            "  {} adapter={} activation={} grammar={} rule={} rule-name={} nodes={}",
+            grammar_frontend::grammar_extension_provenance_object_id(provenance),
+            provenance.adapter,
+            provenance.activation,
+            provenance.grammar,
+            provenance.rule,
+            provenance.rule_name,
+            provenance.node_count
+        );
+    }
+    out
+}
+
+fn explain_grammar_extension(artifacts: &SessionArtifacts, id: &str) -> Option<String> {
+    artifacts
+        .grammar_registry
+        .extension_descriptors()
+        .into_iter()
+        .find(|descriptor| grammar_frontend::grammar_extension_object_id(descriptor) == id)
+        .or_else(|| {
+            id.strip_prefix("staged-grammar-adapter:")
+                .and_then(|name| artifacts.grammar_registry.extension_descriptor(name))
+        })
+        .map(explain_grammar_extension_descriptor)
+        .or_else(|| {
+            artifacts
+                .grammar_parse
+                .extension_activations
+                .iter()
+                .find(|activation| {
+                    grammar_frontend::grammar_extension_activation_object_id(activation) == id
+                })
+                .map(explain_grammar_extension_activation)
+        })
+        .or_else(|| {
+            artifacts
+                .grammar_parse
+                .extension_emissions
+                .iter()
+                .find(|emission| {
+                    grammar_frontend::grammar_extension_emission_object_id(emission) == id
+                })
+                .map(explain_grammar_extension_emission)
+        })
+        .or_else(|| {
+            artifacts
+                .grammar_parse
+                .extension_provenance
+                .iter()
+                .find(|provenance| {
+                    grammar_frontend::grammar_extension_provenance_object_id(provenance) == id
+                })
+                .map(explain_grammar_extension_provenance)
+        })
+}
+
+fn explain_grammar_extension_descriptor(
+    descriptor: grammar_frontend::GrammarExtensionDescriptor,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar extension {}",
+        grammar_frontend::grammar_extension_object_id(&descriptor)
+    );
+    let _ = writeln!(out, "adapter {}", descriptor.adapter);
+    let _ = writeln!(
+        out,
+        "grammar {} {}",
+        descriptor.grammar_slug, descriptor.grammar_name
+    );
+    let _ = writeln!(
+        out,
+        "activation-directive {:?}",
+        descriptor.activation_directive
+    );
+    let _ = writeln!(
+        out,
+        "region-start-directive {:?}",
+        descriptor.region_start_directive
+    );
+    let _ = writeln!(
+        out,
+        "region-end-directive {:?}",
+        descriptor.region_end_directive
+    );
+    let _ = writeln!(out, "accepted-region {:?}", descriptor.accepted_region);
+    let _ = writeln!(out, "root-rule {}", descriptor.root_rule);
+    let _ = writeln!(out, "emits {}", descriptor.emitted_form_kinds.join(","));
+    let _ = writeln!(
+        out,
+        "provenance {}",
+        descriptor.provenance_rule_names.join(",")
+    );
+    let _ = writeln!(
+        out,
+        "capabilities {}",
+        render_extension_capabilities(&descriptor.capabilities)
+    );
+    out
+}
+
+fn explain_grammar_extension_activation(
+    activation: &grammar_frontend::GrammarExtensionActivation,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar extension activation {}",
+        grammar_frontend::grammar_extension_activation_object_id(activation)
+    );
+    let _ = writeln!(out, "adapter {}", activation.adapter);
+    let _ = writeln!(out, "activation {}", activation.activation);
+    let _ = writeln!(
+        out,
+        "grammar {} {}",
+        activation.grammar, activation.grammar_slug
+    );
+    let _ = writeln!(
+        out,
+        "activation-directive {}..{}",
+        activation.activation_directive.start, activation.activation_directive.end
+    );
+    let _ = writeln!(
+        out,
+        "region-marker {}..{}",
+        activation.start_marker.start, activation.start_marker.end
+    );
+    let _ = writeln!(
+        out,
+        "region-end {}..{}",
+        activation.end_marker.start, activation.end_marker.end
+    );
+    let _ = writeln!(
+        out,
+        "source-span {}..{}",
+        activation.source_span.start, activation.source_span.end
+    );
+    let _ = writeln!(
+        out,
+        "capabilities {}",
+        render_extension_capabilities(&activation.capabilities)
+    );
+    let _ = writeln!(out, "emitted-forms {}", activation.emitted_form_count);
+    out
+}
+
+fn explain_grammar_extension_emission(
+    emission: &grammar_frontend::GrammarExtensionEmission,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar extension emission {}",
+        grammar_frontend::grammar_extension_emission_object_id(emission)
+    );
+    let _ = writeln!(out, "adapter {}", emission.adapter);
+    let _ = writeln!(out, "activation {}", emission.activation);
+    let _ = writeln!(out, "form-index {}", emission.form_index);
+    let _ = writeln!(out, "form-kind {}", emission.form_kind);
+    let _ = writeln!(
+        out,
+        "source-span {}..{}",
+        emission.source_span.start, emission.source_span.end
+    );
+    let _ = writeln!(out, "data {}", emission.data);
+    out
+}
+
+fn explain_grammar_extension_provenance(
+    provenance: &grammar_frontend::GrammarExtensionProvenance,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar extension provenance {}",
+        grammar_frontend::grammar_extension_provenance_object_id(provenance)
+    );
+    let _ = writeln!(out, "adapter {}", provenance.adapter);
+    let _ = writeln!(out, "activation {}", provenance.activation);
+    let _ = writeln!(out, "grammar {}", provenance.grammar);
+    let _ = writeln!(out, "rule {}", provenance.rule);
+    let _ = writeln!(out, "rule-name {}", provenance.rule_name);
+    let _ = writeln!(out, "nodes {}", provenance.node_count);
+    out
+}
+
+fn render_extension_capabilities(
+    capabilities: &[grammar_frontend::GrammarExtensionCapability],
+) -> String {
+    capabilities
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn dump_grammar_stack(report: &GrammarParseReport) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -4358,6 +4646,45 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
         );
         let _ = writeln!(out, "    materialized={:?}", region.materialized_source);
         let _ = writeln!(out, "    data={}", region.data);
+    }
+    let _ = writeln!(out, "extension activations:");
+    for activation in &report.extension_activations {
+        let _ = writeln!(
+            out,
+            "  {} adapter={} directive={}..{} marker={}..{} span={}..{} capabilities={} emitted-forms={}",
+            grammar_frontend::grammar_extension_activation_object_id(activation),
+            activation.adapter,
+            activation.activation_directive.start,
+            activation.activation_directive.end,
+            activation.start_marker.start,
+            activation.start_marker.end,
+            activation.source_span.start,
+            activation.source_span.end,
+            render_extension_capabilities(&activation.capabilities),
+            activation.emitted_form_count
+        );
+    }
+    let _ = writeln!(out, "extension emissions:");
+    for emission in &report.extension_emissions {
+        let _ = writeln!(
+            out,
+            "  {} kind={} span={}..{} data={}",
+            grammar_frontend::grammar_extension_emission_object_id(emission),
+            emission.form_kind,
+            emission.source_span.start,
+            emission.source_span.end,
+            emission.data
+        );
+    }
+    let _ = writeln!(out, "extension provenance:");
+    for provenance in &report.extension_provenance {
+        let _ = writeln!(
+            out,
+            "  {} rule={} nodes={}",
+            grammar_frontend::grammar_extension_provenance_object_id(provenance),
+            provenance.rule_name,
+            provenance.node_count
+        );
     }
     let _ = writeln!(out, "rule provenance:");
     for rule in &report.provenance.rules {
@@ -4672,6 +4999,9 @@ fn project_grammar_registry(artifacts: &SessionArtifacts, sink: &mut dyn Environ
     for adapter in artifacts.grammar_registry.staged_adapters() {
         project_staged_grammar_adapter(sink, *adapter);
     }
+    for descriptor in artifacts.grammar_registry.extension_descriptors() {
+        project_grammar_extension_descriptor(sink, &descriptor);
+    }
 }
 
 fn project_registered_grammar_environment(
@@ -4730,14 +5060,56 @@ fn project_staged_grammar_adapter(
         origin: EnvironmentOrigin::HostProvided,
         storage: EnvironmentStorage::FrontendRegistry,
         title: adapter.grammar_name().into(),
-        affordances: Vec::from([Aff::Inspect, Aff::DumpEop, Aff::ShowGrammarRegistry]),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpEop,
+            Aff::ShowGrammarRegistry,
+            Aff::ShowGrammarExtension,
+        ]),
         execution: None,
         inspection: format!(
-            "name={} grammar={} root-rule={} provenance-rules=[{}]",
+            "name={} grammar={} root-rule={} capabilities=[{}] emits=[{}] provenance-rules=[{}]",
             adapter.adapter_name(),
             adapter.grammar_slug(),
             adapter.root_rule(),
+            render_extension_capabilities(adapter.required_capabilities()),
+            adapter.emitted_form_kinds().join(","),
             adapter.provenance_rule_names().join(",")
+        ),
+    }));
+}
+
+fn project_grammar_extension_descriptor(
+    sink: &mut dyn EnvironmentObjectSink,
+    descriptor: &grammar_frontend::GrammarExtensionDescriptor,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::grammar_extension_object_id(descriptor),
+        kind: EnvironmentKind::GrammarExtension,
+        meta_class: "<grammar-extension>",
+        origin: EnvironmentOrigin::HostProvided,
+        storage: EnvironmentStorage::FrontendRegistry,
+        title: descriptor.grammar_name.clone(),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpEop,
+            Aff::ShowGrammarRegistry,
+            Aff::ShowGrammarExtension,
+        ]),
+        execution: None,
+        inspection: format!(
+            "adapter={} grammar={} activation={:?} region={:?} end={:?} accepts={:?} capabilities=[{}] emits=[{}] provenance-rules=[{}]",
+            descriptor.adapter,
+            descriptor.grammar_slug,
+            descriptor.activation_directive,
+            descriptor.region_start_directive,
+            descriptor.region_end_directive,
+            descriptor.accepted_region,
+            render_extension_capabilities(&descriptor.capabilities),
+            descriptor.emitted_form_kinds.join(","),
+            descriptor.provenance_rule_names.join(",")
         ),
     }));
 }
@@ -4785,6 +5157,15 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     }
     for region in &report.staged_regions {
         project_staged_parse_region(sink, region);
+    }
+    for activation in &report.extension_activations {
+        project_grammar_extension_activation(sink, activation);
+    }
+    for emission in &report.extension_emissions {
+        project_grammar_extension_emission(sink, emission);
+    }
+    for provenance in &report.extension_provenance {
+        project_grammar_extension_provenance(sink, provenance);
     }
 }
 
@@ -4959,6 +5340,116 @@ fn project_staged_parse_region(
             region.forms_data,
             region.materialized_source,
             region.data
+        ),
+    }));
+}
+
+fn project_grammar_extension_activation(
+    sink: &mut dyn EnvironmentObjectSink,
+    activation: &grammar_frontend::GrammarExtensionActivation,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::grammar_extension_activation_object_id(activation),
+        kind: EnvironmentKind::GrammarExtensionActivation,
+        meta_class: "<grammar-extension-activation>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: format!("{} extension activation {}", activation.adapter, activation.object_slug),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarExtension,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "adapter={} activation={} grammar={} directive={}..{} marker={}..{} end={}..{} span={}..{} capabilities=[{}] emitted-forms={}",
+            activation.adapter,
+            activation.activation,
+            activation.grammar,
+            activation.activation_directive.start,
+            activation.activation_directive.end,
+            activation.start_marker.start,
+            activation.start_marker.end,
+            activation.end_marker.start,
+            activation.end_marker.end,
+            activation.source_span.start,
+            activation.source_span.end,
+            render_extension_capabilities(&activation.capabilities),
+            activation.emitted_form_count
+        ),
+    }));
+}
+
+fn project_grammar_extension_emission(
+    sink: &mut dyn EnvironmentObjectSink,
+    emission: &grammar_frontend::GrammarExtensionEmission,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::grammar_extension_emission_object_id(emission),
+        kind: EnvironmentKind::GrammarExtensionEmission,
+        meta_class: "<grammar-extension-emission>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: format!(
+            "{} {} f{}",
+            emission.adapter, emission.form_kind, emission.form_index
+        ),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarExtension,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "adapter={} activation={} form-index={} kind={} span={}..{} data={}",
+            emission.adapter,
+            emission.activation,
+            emission.form_index,
+            emission.form_kind,
+            emission.source_span.start,
+            emission.source_span.end,
+            emission.data
+        ),
+    }));
+}
+
+fn project_grammar_extension_provenance(
+    sink: &mut dyn EnvironmentObjectSink,
+    provenance: &grammar_frontend::GrammarExtensionProvenance,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::grammar_extension_provenance_object_id(provenance),
+        kind: EnvironmentKind::GrammarExtensionProvenance,
+        meta_class: "<grammar-extension-provenance>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: format!("{} provenance {}", provenance.adapter, provenance.rule_name),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarExtension,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "adapter={} activation={} grammar={} rule={} rule-name={} nodes={}",
+            provenance.adapter,
+            provenance.activation,
+            provenance.grammar,
+            provenance.rule,
+            provenance.rule_name,
+            provenance.node_count
         ),
     }));
 }
@@ -6929,6 +7420,10 @@ mod tests {
                 EnvironmentAffordance::ShowGrammarRegistry,
                 "show-grammar-registry",
             ),
+            (
+                EnvironmentAffordance::ShowGrammarExtension,
+                "show-grammar-extension",
+            ),
         ];
 
         for (affordance, name) in names {
@@ -7599,6 +8094,14 @@ mod tests {
         assert_eq!(staged_adapter.kind, EnvironmentKind::StagedGrammarAdapter);
         assert_eq!(staged_adapter.storage, EnvironmentStorage::FrontendRegistry);
 
+        let grammar_extension = eop_object(&objects, "grammar-extension:records");
+        assert_eq!(grammar_extension.kind, EnvironmentKind::GrammarExtension);
+        assert!(
+            grammar_extension
+                .affordances
+                .contains(EnvironmentAffordance::ShowGrammarExtension)
+        );
+
         let class = eop_object(&objects, "class:c0");
         assert_eq!(class.kind, EnvironmentKind::Class);
         assert_eq!(class.origin, EnvironmentOrigin::SourceAuthored);
@@ -7682,6 +8185,53 @@ mod tests {
                 .iter()
                 .any(|object| object.kind == EnvironmentKind::Artifact
                     && object.storage == EnvironmentStorage::CachedArtifact)
+        );
+    }
+
+    #[test]
+    fn session_projects_staged_extension_records() {
+        let source = "// grammar-activate: calculator\n\
+                      // staged-loko: calculator\n\
+                      main = 40 + 2\n\
+                      // end-staged-loko\n";
+        let artifacts =
+            CompilerSession::compile_source("staged.loko", source, RuntimeMode::CompileOnly);
+        let objects = artifacts.environment_objects();
+
+        let activation = eop_object(&objects, "grammar-extension-activation:calculator/r0");
+        assert_eq!(activation.kind, EnvironmentKind::GrammarExtensionActivation);
+        assert!(
+            activation
+                .inspection
+                .detail
+                .contains("capabilities=[emit-frontend-forms]")
+        );
+
+        let emission = eop_object(&objects, "grammar-extension-emission:calculator/r0/f0");
+        assert_eq!(emission.kind, EnvironmentKind::GrammarExtensionEmission);
+        assert!(
+            emission
+                .inspection
+                .detail
+                .contains("kind=frontend-function")
+        );
+
+        let provenance = eop_object(
+            &objects,
+            "grammar-extension-provenance:calculator/r0/calculator-function",
+        );
+        assert_eq!(provenance.kind, EnvironmentKind::GrammarExtensionProvenance);
+        assert!(provenance.inspection.detail.contains("nodes=1"));
+
+        let dump = artifacts.dump_grammar_extensions();
+        assert!(dump.contains("grammar extensions"));
+        assert!(dump.contains("grammar-extension:calculator"));
+        assert!(dump.contains("grammar-extension-emission:calculator/r0/f0"));
+        assert!(
+            artifacts
+                .explain_grammar_extension("grammar-extension:calculator")
+                .expect("extension descriptor explanation")
+                .contains("capabilities emit-frontend-forms")
         );
     }
 

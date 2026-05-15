@@ -105,6 +105,31 @@ through the registered calculator adapter and emit structural function forms.
 slots. Both adapters are trusted Rust-hosted entries in the same explicit
 registry protocol; there is no source-authored grammar definition syntax yet.
 
+Each staged adapter also exposes a `GrammarExtensionDescriptor`. The descriptor
+is the readable protocol record for the extension:
+
+```text
+adapter: records
+grammar: records / RecordsRegionGrammar
+activation directive: // grammar-activate: records
+region start: // staged-loko: records
+region end: // end-staged-loko
+accepted region: `record name` blocks with typed fields
+capabilities: emit-frontend-forms
+emits: frontend-class
+provenance: records-region, record-definition, record-field
+```
+
+Concrete parses add three more record families:
+
+- extension activations, tying an activation directive to a source region;
+- extension emissions, one per frontend form emitted by the adapter;
+- extension provenance, one per charged staged grammar rule.
+
+These records are deliberately still read-only. They make trusted Rust-hosted
+extensions visible as protocol data without claiming that source-authored
+grammars, semantic actions, or a macro system exist yet.
+
 ## Parse Reports
 
 The grammar frontend wraps the existing `syntax::parse_file` path and returns a
@@ -119,6 +144,8 @@ That report contains:
 - grammar activations over source regions;
 - staged regions with frontend forms, materialized ordinary Loko source, and
   inert source-data parse results;
+- staged grammar extension activations, emitted frontend forms, and charged
+  provenance rules;
 - parse provenance with per-rule CST node counts;
 - grammar diagnostic facts that attach syntax diagnostics to the active
   grammar, activation, effective rule, source span, diagnostic code, and
@@ -142,8 +169,10 @@ Use `interloko_lab` to inspect the grammar projection:
 cargo run -p interloko_lab -- dump corpus/pass/generics/two_class_dispatch.loko --stage mop
 cargo run -p interloko_lab -- eop corpus/pass/generics/two_class_dispatch.loko
 cargo run -p interloko_lab -- registry corpus/pass/generics/two_class_dispatch.loko
+cargo run -p interloko_lab -- extensions tools/interloko_lab/fixtures/staged_records.loko
 cargo run -p interloko_lab -- inspect corpus/pass/generics/two_class_dispatch.loko grammar-registry:session
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar-registry:session show-grammar-registry
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/staged_records.loko grammar-extension:records show-grammar-extension
 cargo run -p interloko_lab -- inspect corpus/pass/generics/two_class_dispatch.loko grammar:base-loko
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar:base-loko show-grammar-stack
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar-rule:base-loko/function-definition show-grammar-rule

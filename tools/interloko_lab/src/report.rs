@@ -539,6 +539,19 @@ fn render_model_section(
             EnvironmentKind::StagedGrammarAdapter,
             "Staged Grammar Adapters",
         ),
+        (EnvironmentKind::GrammarExtension, "Grammar Extensions"),
+        (
+            EnvironmentKind::GrammarExtensionActivation,
+            "Grammar Extension Activations",
+        ),
+        (
+            EnvironmentKind::GrammarExtensionEmission,
+            "Grammar Extension Emissions",
+        ),
+        (
+            EnvironmentKind::GrammarExtensionProvenance,
+            "Grammar Extension Provenance",
+        ),
     ] {
         let group = objects
             .iter()
@@ -917,6 +930,18 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
         }
         EnvironmentKind::StagedGrammarAdapter => {
             "Trusted staged grammar adapter available through the session grammar registry."
+        }
+        EnvironmentKind::GrammarExtension => {
+            "Structured descriptor for a registered staged grammar extension."
+        }
+        EnvironmentKind::GrammarExtensionActivation => {
+            "Concrete activation of a staged grammar extension over a source region."
+        }
+        EnvironmentKind::GrammarExtensionEmission => {
+            "Frontend form emitted by a staged grammar extension."
+        }
+        EnvironmentKind::GrammarExtensionProvenance => {
+            "Grammar rule provenance charged to a staged grammar extension."
         }
         EnvironmentKind::LanguageEnvironment => {
             "Language environment selected for parsing this source."

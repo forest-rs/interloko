@@ -315,6 +315,9 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("object registered-grammar-environment:derived-host"));
     assert!(out.contains("object staged-grammar-adapter:calculator"));
     assert!(out.contains("object staged-grammar-adapter:records"));
+    assert!(out.contains("object grammar-extension:calculator"));
+    assert!(out.contains("object grammar-extension:records"));
+    assert!(out.contains("show-grammar-extension"));
     assert!(out.contains("object language-environment:base-loko"));
     assert!(out.contains("kind=language-environment"));
     assert!(out.contains("object grammar:base-loko"));
@@ -337,6 +340,26 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("kind=dispatch-site"));
     assert!(out.contains("object runtime-class:c0"));
     assert!(out.contains("object artifact:"));
+}
+
+#[test]
+fn extensions_command_lists_descriptors_activations_emissions_and_provenance() {
+    let file = fixture("staged_records.loko");
+    let out = run_lab(&[
+        "extensions",
+        file.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    assert!(out.contains("grammar extensions"));
+    assert!(out.contains("grammar-extension:records"));
+    assert!(out.contains("capabilities=emit-frontend-forms"));
+    assert!(out.contains("emits=frontend-class"));
+    assert!(out.contains("activations:"));
+    assert!(out.contains("grammar-extension-activation:records/r0"));
+    assert!(out.contains("emissions:"));
+    assert!(out.contains("grammar-extension-emission:records/r0/f0"));
+    assert!(out.contains("provenance:"));
+    assert!(out.contains("grammar-extension-provenance:records/r0/record-definition"));
 }
 
 #[test]
@@ -406,6 +429,9 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert!(eop.contains("object grammar-activation:calculator/r0"));
     assert!(eop.contains("object grammar-activation:calculator/r1"));
     assert!(eop.contains("object staged-region:calculator/r1"));
+    assert!(eop.contains("object grammar-extension-activation:calculator/r1"));
+    assert!(eop.contains("object grammar-extension-emission:calculator/r1/f0"));
+    assert!(eop.contains("object grammar-extension-provenance:calculator/r1/calculator-function"));
     assert!(eop.contains("adapter=calculator"));
     assert!(eop.contains("directive="));
 
@@ -417,6 +443,9 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     ]);
     assert!(trace.contains("CalculatorRegionGrammar"));
     assert!(trace.contains("staged regions:"));
+    assert!(trace.contains("extension activations:"));
+    assert!(trace.contains("extension emissions:"));
+    assert!(trace.contains("extension provenance:"));
     assert!(trace.contains("forms=[frontend-function(name: main"));
     assert!(trace.contains("calculator-function(name: main"));
     assert!(trace.contains("adapter=calculator"));
@@ -437,6 +466,9 @@ fn staged_records_region_runs_and_projects_classes() {
     assert!(eop.contains("object language-environment:staged-loko"));
     assert!(eop.contains("object grammar:records"));
     assert!(eop.contains("object staged-region:records/r0"));
+    assert!(eop.contains("object grammar-extension-activation:records/r0"));
+    assert!(eop.contains("object grammar-extension-emission:records/r0/f0"));
+    assert!(eop.contains("object grammar-extension-provenance:records/r0/record-field"));
     assert!(eop.contains("frontend-class(name: <circle>"));
     assert!(eop.contains("object class:c"));
     assert!(eop.contains("presentation title=\"<circle>\""));
@@ -449,6 +481,7 @@ fn staged_records_region_runs_and_projects_classes() {
         "show-parse-trace",
     ]);
     assert!(trace.contains("RecordsRegionGrammar"));
+    assert!(trace.contains("extension emissions:"));
     assert!(trace.contains("forms=[frontend-class(name: <circle>"));
     assert!(trace.contains("materialized=\"define class <circle>"));
     assert!(trace.contains("records-region(grammar: RecordsRegionGrammar"));
@@ -803,6 +836,15 @@ fn invoke_affordance_runs_read_only_views() {
     ]);
     assert!(registry.contains("grammar registry"));
     assert!(registry.contains("staged adapters:"));
+
+    let extension = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar-extension:records",
+        "show-grammar-extension",
+    ]);
+    assert!(extension.contains("grammar extension grammar-extension:records"));
+    assert!(extension.contains("capabilities emit-frontend-forms"));
 }
 
 #[test]
