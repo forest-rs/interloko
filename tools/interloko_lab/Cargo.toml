@@ -6,7 +6,7 @@ license.workspace = true
 description = "CLI workbench for inspecting Interloko compiler sessions."
 
 [dependencies]
-interloko_compiler = { path = "../../crates/interloko_compiler" }
+interloko_compiler = { path = "../../crates/interloko_compiler", features = ["std"] }
 interloko_diagnostics = { path = "../interloko_diagnostics" }
 
 [lints]

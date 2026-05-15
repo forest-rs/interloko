@@ -550,6 +550,7 @@ pub struct SessionArtifacts {
     /// Runtime result when [`RuntimeMode::RunMain`] was requested.
     pub runtime_result: Option<RuntimeResult>,
     invalidation: QueryInvalidation,
+    artifact_metrics: Vec<ArtifactMetricEntry>,
 }
 
 impl SessionArtifacts {
@@ -557,6 +558,35 @@ impl SessionArtifacts {
     #[must_use]
     pub fn artifact_reports(&self) -> Vec<ArtifactReport> {
         self.invalidation.artifact_reports()
+    }
+
+    /// Returns stable artifact reports with work and timing metrics.
+    #[must_use]
+    pub fn artifact_metrics(&self) -> Vec<ArtifactMetricsReport> {
+        self.invalidation
+            .artifact_reports()
+            .into_iter()
+            .map(|report| ArtifactMetricsReport {
+                artifact: report.artifact,
+                key: report.key,
+                metrics: self.metrics_for(report.artifact),
+            })
+            .collect()
+    }
+
+    /// Returns metrics for one query artifact.
+    #[must_use]
+    pub fn metrics_for(&self, artifact: QueryArtifact) -> ArtifactMetrics {
+        self.artifact_metrics
+            .iter()
+            .find(|entry| entry.artifact == artifact)
+            .map_or_else(
+                || ArtifactMetrics {
+                    work_units: artifact_work_units(artifact, self),
+                    ..ArtifactMetrics::default()
+                },
+                |entry| entry.metrics,
+            )
     }
 
     /// Returns inspectable generic dispatch-site records in traversal order.
@@ -721,8 +751,16 @@ impl SessionArtifacts {
             self.source.name, self.source.id
         );
         let _ = writeln!(out, "artifacts:");
-        for report in self.invalidation.artifact_reports() {
-            let _ = writeln!(out, "  {} {}", report.key, artifact_label(report.artifact));
+        for report in self.artifact_metrics() {
+            let _ = writeln!(
+                out,
+                "  {} {} work={} ticks={} ns={}",
+                report.key,
+                artifact_label(report.artifact),
+                report.metrics.work_units,
+                report.metrics.elapsed_ticks,
+                report.metrics.elapsed_nanos
+            );
         }
         let _ = writeln!(out, "dependencies:");
         for edge in self.invalidation.artifact_edges() {
@@ -1184,15 +1222,21 @@ impl CachedSourceFile {
 
 fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> SessionArtifacts {
     let mut artifacts = previous.clone();
+    let mut timings = ArtifactTimingCollector::default();
     artifacts.runtime_result = match mode {
         RuntimeMode::CompileOnly => None,
         RuntimeMode::RunMain => previous.runtime_result.clone().or_else(|| {
-            previous
-                .tape
-                .as_ref()
-                .map(|tape| run_main(&previous.sem, tape))
+            let (result, elapsed_nanos) = measure_elapsed(|| {
+                previous
+                    .tape
+                    .as_ref()
+                    .map(|tape| run_main(&previous.sem, tape))
+            });
+            timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
+            result
         }),
     };
+    artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
     artifacts
 }
 
@@ -1245,7 +1289,7 @@ impl IncrementalUpdate {
         for report in &self.reports {
             let _ = writeln!(
                 out,
-                "  {:?}{} {} invalidated={} affected={} work={} ticks={}",
+                "  {:?}{} {} invalidated={} affected={} work={} ticks={} ns={}",
                 report.action,
                 if report.action == CacheAction::Reused {
                     "    "
@@ -1256,7 +1300,8 @@ impl IncrementalUpdate {
                 report.invalidated,
                 report.affected,
                 report.metrics.work_units,
-                report.metrics.elapsed_ticks
+                report.metrics.elapsed_ticks,
+                report.metrics.elapsed_nanos
             );
         }
         let _ = writeln!(out, "dependencies:");
@@ -1318,13 +1363,28 @@ pub enum CacheAction {
     Recomputed,
 }
 
-/// Deterministic per-artifact counters.
+/// Per-artifact work counters and optional wall-clock timing.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArtifactMetrics {
     /// Logical work units charged for the artifact action.
     pub work_units: u64,
     /// Logical elapsed ticks charged for the artifact action.
     pub elapsed_ticks: u64,
+    /// Observed wall-clock duration in nanoseconds when `std` timing is enabled.
+    ///
+    /// Foundational `no_std` builds expose this field as `0`.
+    pub elapsed_nanos: u64,
+}
+
+/// Stable artifact report with work and timing metrics.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactMetricsReport {
+    /// Query artifact.
+    pub artifact: QueryArtifact,
+    /// Stable artifact key.
+    pub key: ArtifactKey,
+    /// Work and timing metrics for the artifact.
+    pub metrics: ArtifactMetrics,
 }
 
 /// Cache status for one artifact.
@@ -1342,6 +1402,12 @@ pub struct CacheArtifactReport {
     pub affected: bool,
     /// Deterministic counters for this artifact action.
     pub metrics: ArtifactMetrics,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ArtifactMetricEntry {
+    artifact: QueryArtifact,
+    metrics: ArtifactMetrics,
 }
 
 /// Stable backing key for one dispatch-site record.
@@ -1506,6 +1572,51 @@ impl ArtifactCache {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ArtifactTimingCollector {
+    entries: Vec<(QueryArtifact, u64)>,
+}
+
+impl ArtifactTimingCollector {
+    fn record(&mut self, artifact: QueryArtifact, elapsed_nanos: u64) {
+        self.entries.push((artifact, elapsed_nanos));
+    }
+
+    fn elapsed_nanos(&self, artifact: QueryArtifact) -> Option<u64> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|(entry, elapsed)| (*entry == artifact).then_some(*elapsed))
+    }
+}
+
+fn build_artifact_metrics(
+    artifacts: &SessionArtifacts,
+    timings: &ArtifactTimingCollector,
+) -> Vec<ArtifactMetricEntry> {
+    artifacts
+        .artifact_reports()
+        .into_iter()
+        .map(|report| {
+            let work_units = artifact_work_units(report.artifact, artifacts);
+            let elapsed_nanos = timings.elapsed_nanos(report.artifact).unwrap_or_else(|| {
+                let ((), elapsed_nanos) = measure_elapsed(|| {
+                    let _ = artifact_fingerprint(report.artifact, artifacts);
+                });
+                elapsed_nanos
+            });
+            ArtifactMetricEntry {
+                artifact: report.artifact,
+                metrics: ArtifactMetrics {
+                    work_units,
+                    elapsed_ticks: 1,
+                    elapsed_nanos,
+                },
+            }
+        })
+        .collect()
+}
+
 fn cache_reports(
     previous: Option<&ArtifactCache>,
     diff: Option<&SessionDiff>,
@@ -1521,7 +1632,12 @@ fn cache_reports(
         .artifact_reports()
         .into_iter()
         .map(|report| {
-            let fingerprint = artifact_fingerprint(report.artifact, artifacts);
+            let ((fingerprint, work_units), elapsed_nanos) = measure_elapsed(|| {
+                (
+                    artifact_fingerprint(report.artifact, artifacts),
+                    artifact_work_units(report.artifact, artifacts),
+                )
+            });
             let previous = previous.and_then(|cache| cache.get(report.key));
             let forced_by_grammar = grammar_changed && artifact_depends_on_grammar(report.artifact);
             let action = if !forced_by_grammar
@@ -1539,8 +1655,9 @@ fn cache_reports(
             let metrics = match action {
                 CacheAction::Reused => ArtifactMetrics::default(),
                 CacheAction::Recomputed => ArtifactMetrics {
-                    work_units: artifact_work_units(report.artifact, artifacts),
+                    work_units,
                     elapsed_ticks: 1,
+                    elapsed_nanos,
                 },
             };
             CacheArtifactReport {
@@ -1808,6 +1925,23 @@ fn artifact_work_units(artifact: QueryArtifact, artifacts: &SessionArtifacts) ->
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "std")]
+fn measure_elapsed<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    let start = std::time::Instant::now();
+    let value = work();
+    (value, duration_nanos_u64(start.elapsed()))
+}
+
+#[cfg(not(feature = "std"))]
+fn measure_elapsed<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    (work(), 0)
+}
+
+#[cfg(feature = "std")]
+fn duration_nanos_u64(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn collect_dispatch_sites(artifacts: &SessionArtifacts) -> Vec<DispatchSiteRecord> {
@@ -2637,35 +2771,48 @@ fn compile_file_with_host_registry(
     mode: RuntimeMode,
     registry: &sem::HostMetaRegistry,
 ) -> SessionArtifacts {
-    let grammar_parse = grammar_frontend::parse_file_with_environment(
-        file.id,
-        &file.source,
-        file.grammar_environment,
-    );
-    let syntax = grammar_parse.syntax.clone();
-    let ast = ast::lower(&syntax);
-    let sem = sem::lower_with_host_registry(&ast, registry);
-    let diagnostics = sem.diagnostics.clone();
+    let mut timings = ArtifactTimingCollector::default();
+    let (source, elapsed_nanos) = measure_elapsed(|| file.clone());
+    timings.record(QueryArtifact::Source, elapsed_nanos);
+    let (grammar_environment, elapsed_nanos) = measure_elapsed(|| file.grammar_environment);
+    timings.record(QueryArtifact::EnvironmentResolution, elapsed_nanos);
+    let (grammar_parse, elapsed_nanos) = measure_elapsed(|| {
+        grammar_frontend::parse_file_with_environment(file.id, &file.source, grammar_environment)
+    });
+    timings.record(QueryArtifact::GrammarParse, elapsed_nanos);
+    let (_, elapsed_nanos) = measure_elapsed(|| grammar_parse.grammar_stack.grammars.len());
+    timings.record(QueryArtifact::GrammarStack, elapsed_nanos);
+    let (syntax, elapsed_nanos) = measure_elapsed(|| grammar_parse.syntax.clone());
+    timings.record(QueryArtifact::Parse, elapsed_nanos);
+    let (ast, elapsed_nanos) = measure_elapsed(|| ast::lower(&syntax));
+    timings.record(QueryArtifact::Ast, elapsed_nanos);
+    let (sem, elapsed_nanos) = measure_elapsed(|| sem::lower_with_host_registry(&ast, registry));
+    timings.record(QueryArtifact::Bind, elapsed_nanos);
+    let (diagnostics, elapsed_nanos) = measure_elapsed(|| sem.diagnostics.clone());
+    timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
     let invalidation = QueryInvalidation::for_module(&sem);
 
-    let (lowered, lower_error) = match lower::lower(&sem) {
+    let ((lowered, lower_error), elapsed_nanos) = measure_elapsed(|| match lower::lower(&sem) {
         Ok(module) => (Some(module), None),
         Err(error) => (None, Some(error)),
-    };
-    let (tape, tape_error) = match &lowered {
+    });
+    timings.record(QueryArtifact::LoweredModule, elapsed_nanos);
+    let ((tape, tape_error), elapsed_nanos) = measure_elapsed(|| match &lowered {
         Some(lowered) => match tape::emit(lowered) {
             Ok(module) => (Some(module), None),
             Err(error) => (None, Some(error)),
         },
         None => (None, None),
-    };
-    let runtime_result = match mode {
+    });
+    timings.record(QueryArtifact::TapeProgram, elapsed_nanos);
+    let (runtime_result, elapsed_nanos) = measure_elapsed(|| match mode {
         RuntimeMode::CompileOnly => None,
         RuntimeMode::RunMain => tape.as_ref().map(|tape| run_main(&sem, tape)),
-    };
+    });
+    timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
 
-    SessionArtifacts {
-        source: file.clone(),
+    let mut artifacts = SessionArtifacts {
+        source,
         syntax,
         grammar_parse,
         ast,
@@ -2677,7 +2824,10 @@ fn compile_file_with_host_registry(
         diagnostics,
         runtime_result,
         invalidation,
-    }
+        artifact_metrics: Vec::new(),
+    };
+    artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
+    artifacts
 }
 
 fn run_main(module: &sem::Module, tape: &tape::TapeModule) -> RuntimeResult {
@@ -6226,6 +6376,30 @@ mod tests {
                 .explain_grammar_rule("grammar-rule:base-loko/function-definition")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn session_reports_artifact_work_and_timing_fields() {
+        let artifacts = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::RunMain);
+        let metrics = artifacts.artifact_metrics();
+
+        let parse = metrics
+            .iter()
+            .find(|report| report.artifact == QueryArtifact::Parse)
+            .expect("parse metric should be present");
+        assert!(parse.metrics.work_units > 0);
+        assert_eq!(parse.metrics.elapsed_ticks, 1);
+
+        let runtime = metrics
+            .iter()
+            .find(|report| report.artifact == QueryArtifact::RuntimeResult)
+            .expect("runtime metric should be present");
+        assert_eq!(runtime.metrics.work_units, 1);
+
+        let graph = artifacts.dump_artifact_graph();
+        assert!(graph.contains("work="));
+        assert!(graph.contains("ticks="));
+        assert!(graph.contains("ns="));
     }
 
     #[test]

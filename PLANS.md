@@ -1,5 +1,54 @@
 # Plans
 
+## Add Timing Instrumentation And Execution Tracing
+
+### Goal
+
+Expose how much work each compiler artifact did and what the emitted tape did
+at runtime. Timing should make the static HTML report and lab CLI more honest:
+artifact keys show identity, work units show scale, durations show observed
+cost, and execution traces show the runtime path through ordinary tape calls
+and host calls.
+
+### Fence
+
+The session/workbench layer owns artifact timing, work summaries, and captured
+runtime trace records. It explicitly does not own scheduling policy, persistent
+profiling storage, external tracing backends, or `execution_tape` VM internals
+beyond using its public `TraceSink` API.
+
+### Invariants
+
+- Artifact keys and fingerprints do not include timing data.
+- The compiler crate remains `no_std` by default; real wall-clock timing is
+  enabled through an explicit `std` feature for tools.
+- Non-`std` builds still expose stable timing fields with zero/unknown values.
+- Trace capture uses ordinary `execution_tape::trace::TraceMask` values.
+- Reports and CLI output expose compact summaries first, with raw trace/event
+  detail available on demand.
+
+### Steps
+
+1. Add per-artifact timing metrics beside existing work-unit/cache reports.
+2. Thread timing through artifact graph dumps, diff/cache reports, and session
+   artifacts without changing artifact fingerprints.
+3. Add an Interloko trace sink that records run, call-frame, host-call, and
+   optional instruction events from `execution_tape`.
+4. Add traced runtime execution paths and session trace dumps.
+5. Add `interloko_lab run --trace`, `interloko_lab trace <file>`, and report
+   timing/trace presentation.
+6. Add tests for timing presence, trace event capture, default non-traced
+   behavior, and report/CLI output.
+7. Update docs/progress and commit as timing, tracing, and lab/report slices.
+
+### Risks
+
+- Wall-clock timing can make tests flaky; tests should assert presence and
+  shape, not exact durations.
+- Trace output can become noisy; default reports should prefer summarized
+  timelines.
+- The timing feature must not pull `std` into foundational builds by default.
+
 ## Build The Interloko HTML Report Demo
 
 ### Goal

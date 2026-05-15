@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "std"))]
 extern crate std;
 
 /// Surface AST produced from the CST.

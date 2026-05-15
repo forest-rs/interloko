@@ -64,6 +64,20 @@ fn run_lab_success_with_env(args: &[&str], envs: &[(&str, &str)]) -> (String, St
     )
 }
 
+fn normalize_timing_nanos(output: &str) -> String {
+    let mut normalized = String::new();
+    for line in output.lines() {
+        if let Some((prefix, _)) = line.split_once(" ns=") {
+            normalized.push_str(prefix);
+            normalized.push_str(" ns=<timing>");
+        } else {
+            normalized.push_str(line);
+        }
+        normalized.push('\n');
+    }
+    normalized
+}
+
 fn run_lab_failure(args: &[&str]) -> String {
     let output = Command::new(bin())
         .args(args)
@@ -161,7 +175,13 @@ fn artifact_output_is_independent_of_diagnostic_locale() {
         &[("INTERLOKO_DIAGNOSTIC_LOCALE", "pseudo")],
     );
 
-    assert_eq!(english, pseudo);
+    assert!(english.contains("work="));
+    assert!(english.contains("ticks="));
+    assert!(english.contains("ns="));
+    assert_eq!(
+        normalize_timing_nanos(&english),
+        normalize_timing_nanos(&pseudo)
+    );
 }
 
 #[test]
