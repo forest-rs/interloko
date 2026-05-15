@@ -1,5 +1,50 @@
 # Plans
 
+## Add Runtime Object Protocol Helpers
+
+### Goal
+
+Make `interloko_runtime` easier to use as a small executable object protocol,
+not just a bucket of layout structs and tape host-call branches. Add structured
+runtime operation errors, public inspection helpers, slot capability reporting,
+and a clearer host-backed adapter contract.
+
+### Fence
+
+`interloko_runtime` owns executable runtime object protocol facts and failures;
+it explicitly does not own semantic IR, workbench rendering, diagnostics
+catalogs, source syntax, or persistence/image policy.
+
+### Invariants
+
+- Public runtime operations report structured runtime errors before mapping to
+  `execution_tape::host::HostError`.
+- Host-backed objects and native objects share the same slot-read protocol.
+- Writable slot capability is explicit and distinguishes constant,
+  host-backed, and non-native storage.
+- Runtime inspection helpers expose classes, roots, superclass chains, slots,
+  generics, and methods without forcing callers to index raw vectors directly.
+- `interloko_runtime` remains `no_std` and does not depend on compiler crates.
+
+### Steps
+
+1. Add `RuntimeError`, slot capability types, and layout/object inspection
+   helpers.
+2. Change `InterlokoHost` public object APIs to return `RuntimeError` and map
+   those errors to `HostError` only at the tape host boundary.
+3. Update host object adapters, examples, and compiler tests for the structured
+   error contract.
+4. Use runtime helpers in compiler/session projection where it reduces raw
+   layout indexing.
+5. Update docs/progress and run fmt, clippy, workspace tests, and docs.
+
+### Risks
+
+- Keep this as a protocol cleanup, not a full persistent runtime or capability
+  system.
+- Avoid threading localized diagnostics into the runtime crate; runtime errors
+  should stay structural.
+
 ## Move Runtime Ownership Forward
 
 ### Goal

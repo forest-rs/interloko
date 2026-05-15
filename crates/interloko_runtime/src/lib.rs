@@ -189,6 +189,70 @@ pub struct RuntimeSlot {
     pub host_backed: bool,
 }
 
+impl RuntimeSlot {
+    /// Returns the executable storage protocol for this slot.
+    #[must_use]
+    pub const fn storage(&self) -> RuntimeSlotStorage {
+        if self.host_backed {
+            RuntimeSlotStorage::HostBacked
+        } else {
+            RuntimeSlotStorage::Native
+        }
+    }
+
+    /// Returns the slot's runtime access capability.
+    #[must_use]
+    pub const fn capability(&self) -> RuntimeSlotCapability {
+        let storage = self.storage();
+        let write_rejection = if self.host_backed {
+            Some(RuntimeSlotWriteRejection::HostBackedSlot)
+        } else if self.mutable {
+            None
+        } else {
+            Some(RuntimeSlotWriteRejection::ConstantSlot)
+        };
+        RuntimeSlotCapability {
+            storage,
+            readable: true,
+            writable: write_rejection.is_none(),
+            write_rejection,
+        }
+    }
+}
+
+/// Executable storage protocol for a runtime slot.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeSlotStorage {
+    /// Slot is stored in Interloko's native object heap.
+    Native,
+    /// Slot value is read from a Rust host adapter.
+    HostBacked,
+}
+
+/// Runtime slot read/write capability.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSlotCapability {
+    /// Storage protocol used by the slot.
+    pub storage: RuntimeSlotStorage,
+    /// Whether the slot can be read through the runtime slot protocol.
+    pub readable: bool,
+    /// Whether the slot can be written through the runtime slot protocol.
+    pub writable: bool,
+    /// Reason writes are rejected, when not writable.
+    pub write_rejection: Option<RuntimeSlotWriteRejection>,
+}
+
+/// Structural reason a runtime slot write is rejected.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeSlotWriteRejection {
+    /// Slot was declared constant.
+    ConstantSlot,
+    /// Slot is supplied by a host adapter and is read-only in this slice.
+    HostBackedSlot,
+    /// The receiver's storage is not a native slot vector.
+    NonNativeObject,
+}
+
 /// Runtime generic-function metadata needed by MOP host calls.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeGeneric {
@@ -216,6 +280,121 @@ pub struct RuntimeLayout {
     pub generics: Vec<RuntimeGeneric>,
     /// Methods in semantic method-id order.
     pub methods: Vec<RuntimeMethod>,
+}
+
+/// Structured error from runtime object protocol operations.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeError {
+    /// Runtime layout does not contain the requested class.
+    InvalidClass {
+        /// Invalid class id.
+        class: ClassId,
+    },
+    /// Runtime layout does not contain the requested generic function.
+    InvalidGeneric {
+        /// Invalid generic id.
+        generic: GenericFunctionId,
+    },
+    /// Runtime layout does not contain the requested method.
+    InvalidMethod {
+        /// Invalid method id.
+        method: MethodId,
+    },
+    /// Runtime layout does not contain the requested effective slot.
+    InvalidSlot {
+        /// Class whose slot table was queried.
+        class: ClassId,
+        /// Invalid effective slot id.
+        slot: SlotId,
+    },
+    /// Native object construction was requested for a non-native class.
+    ClassIsNotNative {
+        /// Requested class.
+        class: ClassId,
+        /// Actual runtime class kind.
+        kind: HostObjectKind,
+    },
+    /// Host-backed object installation was requested for a non-host-backed class.
+    ClassIsNotHostBacked {
+        /// Requested class.
+        class: ClassId,
+        /// Actual runtime class kind.
+        kind: HostObjectKind,
+    },
+    /// Object construction field count does not match the runtime class layout.
+    FieldArityMismatch {
+        /// Requested class.
+        class: ClassId,
+        /// Expected layout field count.
+        expected: usize,
+        /// Actual field count.
+        actual: usize,
+    },
+    /// A host object handle did not use the Interloko object host type.
+    ObjectHostTypeMismatch {
+        /// Object supplied by the caller.
+        object: Obj,
+        /// Expected host object type.
+        expected: HostTypeId,
+    },
+    /// A boxed value handle did not use the Interloko boxed-value host type.
+    ValueHostTypeMismatch {
+        /// Object supplied by the caller.
+        object: Obj,
+        /// Expected host object type.
+        expected: HostTypeId,
+    },
+    /// A host object handle was well typed but unknown to this runtime host.
+    InvalidObjectHandle {
+        /// Unknown object.
+        object: Obj,
+    },
+    /// A boxed value handle was well typed but unknown to this runtime host.
+    InvalidBoxedValueHandle {
+        /// Unknown boxed value object.
+        object: Obj,
+    },
+    /// A runtime value could not be represented as boxed top `<object>`.
+    CannotBoxValue,
+    /// A value did not match the expected runtime value category.
+    ValueKindMismatch {
+        /// Expected value kind.
+        expected: ValueKind,
+    },
+    /// Slot writes are not permitted for this slot/receiver combination.
+    SlotWriteRejected {
+        /// Receiver runtime class.
+        class: ClassId,
+        /// Effective slot id.
+        slot: SlotId,
+        /// Structural rejection reason.
+        reason: RuntimeSlotWriteRejection,
+    },
+    /// A host object adapter could not read a requested slot.
+    HostAdapterReadFailed {
+        /// Effective slot id requested from the adapter.
+        slot: SlotId,
+    },
+}
+
+impl RuntimeError {
+    /// Maps this structured runtime error into the coarse `execution_tape` host ABI error.
+    #[must_use]
+    pub const fn host_error(&self) -> HostError {
+        match self {
+            Self::ObjectHostTypeMismatch { .. } | Self::ValueHostTypeMismatch { .. } => {
+                HostError::SignatureMismatch
+            }
+            _ => HostError::Failed,
+        }
+    }
+}
+
+impl From<RuntimeError> for HostError {
+    fn from(error: RuntimeError) -> Self {
+        error.host_error()
+    }
 }
 
 /// First invalid invariant found while checking a [`RuntimeLayout`].
@@ -432,6 +611,30 @@ pub enum RuntimeDispatchRejectionReason {
 }
 
 impl RuntimeLayout {
+    /// Returns all runtime classes in class-id order.
+    #[must_use]
+    pub fn classes(&self) -> &[RuntimeClass] {
+        &self.classes
+    }
+
+    /// Returns all runtime generics in generic-id order.
+    #[must_use]
+    pub fn generics(&self) -> &[RuntimeGeneric] {
+        &self.generics
+    }
+
+    /// Returns all runtime methods in method-id order.
+    #[must_use]
+    pub fn methods(&self) -> &[RuntimeMethod] {
+        &self.methods
+    }
+
+    /// Returns the `<object>` root class.
+    #[must_use]
+    pub fn object_root(&self) -> Option<&RuntimeClass> {
+        self.class(OBJECT_CLASS_ID)
+    }
+
     /// Returns the runtime class id for a Loko-visible class name.
     #[must_use]
     pub fn class_id(&self, name: &str) -> Option<ClassId> {
@@ -439,6 +642,13 @@ impl RuntimeLayout {
             .iter()
             .position(|class| class.name == name)
             .map(|index| ClassId(u32::try_from(index).unwrap_or(u32::MAX)))
+    }
+
+    /// Returns the runtime class id and layout for a Loko-visible class name.
+    #[must_use]
+    pub fn class_by_name(&self, name: &str) -> Option<(ClassId, &RuntimeClass)> {
+        let id = self.class_id(name)?;
+        self.class(id).map(|class| (id, class))
     }
 
     /// Returns true when `actual` is `expected` or inherits from it.
@@ -491,11 +701,68 @@ impl RuntimeLayout {
         self.classes.get(class.0 as usize)
     }
 
+    /// Returns superclass ids from direct superclass up to `<object>`.
+    #[must_use]
+    pub fn superclass_chain(&self, class: ClassId) -> Option<Vec<ClassId>> {
+        let mut current = self.class(class)?.superclass;
+        let mut chain = Vec::new();
+        let mut visited = 0;
+        while let Some(class_id) = current {
+            chain.push(class_id);
+            visited += 1;
+            if visited > self.classes.len() {
+                return None;
+            }
+            current = self.class(class_id)?.superclass;
+        }
+        Some(chain)
+    }
+
+    /// Returns effective slots for one runtime class.
+    #[must_use]
+    pub fn effective_slots(&self, class: ClassId) -> Option<&[RuntimeSlot]> {
+        self.class(class).map(|class| class.slots.as_slice())
+    }
+
     /// Returns one runtime effective slot by class and slot id.
     #[must_use]
     pub fn slot(&self, class: ClassId, slot: SlotId) -> Option<&RuntimeSlot> {
         self.class(class)
             .and_then(|class| class.slots.get(slot.0 as usize))
+    }
+
+    /// Returns runtime slot access capability for one effective slot.
+    #[must_use]
+    pub fn slot_capability(&self, class: ClassId, slot: SlotId) -> Option<RuntimeSlotCapability> {
+        self.slot(class, slot).map(RuntimeSlot::capability)
+    }
+
+    /// Returns the runtime generic id for a generic-function name.
+    #[must_use]
+    pub fn generic_id(&self, name: &str) -> Option<GenericFunctionId> {
+        self.generics
+            .iter()
+            .position(|generic| generic.name == name)
+            .map(|index| GenericFunctionId(u32::try_from(index).unwrap_or(u32::MAX)))
+    }
+
+    /// Returns one runtime generic by id.
+    #[must_use]
+    pub fn generic(&self, generic: GenericFunctionId) -> Option<&RuntimeGeneric> {
+        self.generics.get(generic.0 as usize)
+    }
+
+    /// Returns the method ids implementing one runtime generic.
+    #[must_use]
+    pub fn methods_for_generic(&self, generic: GenericFunctionId) -> Option<&[MethodId]> {
+        self.generic(generic)
+            .map(|generic| generic.methods.as_slice())
+    }
+
+    /// Returns one runtime method by id.
+    #[must_use]
+    pub fn method(&self, method: MethodId) -> Option<&RuntimeMethod> {
+        self.methods.get(method.0 as usize)
     }
 
     /// Validates runtime layout invariants required by object storage and dispatch.
@@ -819,7 +1086,7 @@ struct InternedObject {
 /// resolved slot id and expected Interloko value category.
 pub trait HostObjectAdapter {
     /// Reads one slot from a host-backed object.
-    fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, HostError>;
+    fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, RuntimeError>;
 }
 
 /// Host implementation for Interloko runtime object operations.
@@ -854,17 +1121,23 @@ impl InterlokoHost {
         &mut self,
         class: ClassId,
         fields: &[ValueRef<'_>],
-    ) -> Result<Value, HostError> {
+    ) -> Result<Value, RuntimeError> {
         let class_info = self
             .layout
-            .classes
-            .get(class.0 as usize)
-            .ok_or(HostError::Failed)?;
+            .class(class)
+            .ok_or(RuntimeError::InvalidClass { class })?;
         if class_info.kind != HostObjectKind::Native {
-            return Err(HostError::Failed);
+            return Err(RuntimeError::ClassIsNotNative {
+                class,
+                kind: class_info.kind,
+            });
         }
         if fields.len() != class_info.slots.len() {
-            return Err(HostError::Failed);
+            return Err(RuntimeError::FieldArityMismatch {
+                class,
+                expected: class_info.slots.len(),
+                actual: fields.len(),
+            });
         }
         let mut slots = Vec::with_capacity(class_info.slots.len());
         for (field, slot) in fields.iter().zip(&class_info.slots) {
@@ -877,15 +1150,25 @@ impl InterlokoHost {
     }
 
     /// Reads one runtime effective slot from an object.
-    pub fn read_slot(&self, object: Obj, slot: SlotId) -> Result<Value, HostError> {
+    pub fn read_slot(&self, object: Obj, slot: SlotId) -> Result<Value, RuntimeError> {
         let object = self.object(object)?;
+        let object_class = object.class;
         let slot_info = self
             .layout
-            .slot(object.class, slot)
-            .ok_or(HostError::Failed)?;
+            .slot(object_class, slot)
+            .ok_or(RuntimeError::InvalidSlot {
+                class: object_class,
+                slot,
+            })?;
         match &object.storage {
             RuntimeObjectStorage::Native { slots } => {
-                slots.get(slot.0 as usize).cloned().ok_or(HostError::Failed)
+                slots
+                    .get(slot.0 as usize)
+                    .cloned()
+                    .ok_or(RuntimeError::InvalidSlot {
+                        class: object_class,
+                        slot,
+                    })
             }
             RuntimeObjectStorage::HostBacked { adapter } => adapter.read_slot(slot, slot_info.kind),
             RuntimeObjectStorage::String { .. }
@@ -894,7 +1177,10 @@ impl InterlokoHost {
             | RuntimeObjectStorage::ClassMeta { .. }
             | RuntimeObjectStorage::GenericMeta { .. }
             | RuntimeObjectStorage::MethodMeta { .. }
-            | RuntimeObjectStorage::SlotDescriptor { .. } => Err(HostError::Failed),
+            | RuntimeObjectStorage::SlotDescriptor { .. } => Err(RuntimeError::InvalidSlot {
+                class: object_class,
+                slot,
+            }),
         }
     }
 
@@ -904,21 +1190,37 @@ impl InterlokoHost {
         object: Obj,
         slot: SlotId,
         value: ValueRef<'_>,
-    ) -> Result<Value, HostError> {
+    ) -> Result<Value, RuntimeError> {
         let object_class = self.object(object)?.class;
         let slot_info = self
             .layout
             .slot(object_class, slot)
-            .ok_or(HostError::Failed)?;
-        if slot_info.host_backed || !slot_info.mutable {
-            return Err(HostError::Failed);
+            .ok_or(RuntimeError::InvalidSlot {
+                class: object_class,
+                slot,
+            })?;
+        if let Some(reason) = slot_info.capability().write_rejection {
+            return Err(RuntimeError::SlotWriteRejected {
+                class: object_class,
+                slot,
+                reason,
+            });
         }
         let value = self.value_for_slot(value, slot_info.kind)?;
         let object = self.object_mut(object)?;
         let RuntimeObjectStorage::Native { slots } = &mut object.storage else {
-            return Err(HostError::Failed);
+            return Err(RuntimeError::SlotWriteRejected {
+                class: object_class,
+                slot,
+                reason: RuntimeSlotWriteRejection::NonNativeObject,
+            });
         };
-        let target = slots.get_mut(slot.0 as usize).ok_or(HostError::Failed)?;
+        let target = slots
+            .get_mut(slot.0 as usize)
+            .ok_or(RuntimeError::InvalidSlot {
+                class: object_class,
+                slot,
+            })?;
         *target = value.clone();
         Ok(value)
     }
@@ -928,14 +1230,16 @@ impl InterlokoHost {
         &mut self,
         class: ClassId,
         adapter: impl HostObjectAdapter + 'static,
-    ) -> Result<Value, HostError> {
+    ) -> Result<Value, RuntimeError> {
         let class_info = self
             .layout
-            .classes
-            .get(class.0 as usize)
-            .ok_or(HostError::Failed)?;
+            .class(class)
+            .ok_or(RuntimeError::InvalidClass { class })?;
         if class_info.kind != HostObjectKind::HostBacked {
-            return Err(HostError::Failed);
+            return Err(RuntimeError::ClassIsNotHostBacked {
+                class,
+                kind: class_info.kind,
+            });
         }
         Ok(self.push_object(RuntimeObject {
             class,
@@ -946,48 +1250,63 @@ impl InterlokoHost {
     }
 
     /// Boxes a value into the top `<object>` runtime representation.
-    pub fn box_top_value(&mut self, value: Value) -> Result<Value, HostError> {
+    pub fn box_top_value(&mut self, value: Value) -> Result<Value, RuntimeError> {
         match value {
             Value::I64(_) | Value::Bool(_) | Value::U64(_) => Ok(self.push_boxed_value(value)),
             Value::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.push_boxed_value(Value::Obj(obj)))
             }
             Value::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => Ok(Value::Obj(obj)),
-            _ => Err(HostError::Failed),
+            _ => Err(RuntimeError::CannotBoxValue),
         }
     }
 
-    fn object(&self, obj: Obj) -> Result<&RuntimeObject, HostError> {
+    fn object(&self, obj: Obj) -> Result<&RuntimeObject, RuntimeError> {
         if obj.host_type != INTERLOKO_OBJECT_TYPE {
-            return Err(HostError::SignatureMismatch);
+            return Err(RuntimeError::ObjectHostTypeMismatch {
+                object: obj,
+                expected: INTERLOKO_OBJECT_TYPE,
+            });
         }
         let index = usize::try_from(obj.handle.0)
             .ok()
             .and_then(|raw| raw.checked_sub(1))
-            .ok_or(HostError::Failed)?;
-        self.objects.get(index).ok_or(HostError::Failed)
+            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })?;
+        self.objects
+            .get(index)
+            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
     }
 
-    fn object_mut(&mut self, obj: Obj) -> Result<&mut RuntimeObject, HostError> {
+    fn object_mut(&mut self, obj: Obj) -> Result<&mut RuntimeObject, RuntimeError> {
         if obj.host_type != INTERLOKO_OBJECT_TYPE {
-            return Err(HostError::SignatureMismatch);
+            return Err(RuntimeError::ObjectHostTypeMismatch {
+                object: obj,
+                expected: INTERLOKO_OBJECT_TYPE,
+            });
         }
         let index = usize::try_from(obj.handle.0)
             .ok()
             .and_then(|raw| raw.checked_sub(1))
-            .ok_or(HostError::Failed)?;
-        self.objects.get_mut(index).ok_or(HostError::Failed)
+            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })?;
+        self.objects
+            .get_mut(index)
+            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
     }
 
-    fn boxed_value(&self, obj: Obj) -> Result<&Value, HostError> {
+    fn boxed_value(&self, obj: Obj) -> Result<&Value, RuntimeError> {
         if obj.host_type != INTERLOKO_VALUE_TYPE {
-            return Err(HostError::SignatureMismatch);
+            return Err(RuntimeError::ValueHostTypeMismatch {
+                object: obj,
+                expected: INTERLOKO_VALUE_TYPE,
+            });
         }
         let index = usize::try_from(obj.handle.0)
             .ok()
             .and_then(|raw| raw.checked_sub(1))
-            .ok_or(HostError::Failed)?;
-        self.values.get(index).ok_or(HostError::Failed)
+            .ok_or(RuntimeError::InvalidBoxedValueHandle { object: obj })?;
+        self.values
+            .get(index)
+            .ok_or(RuntimeError::InvalidBoxedValueHandle { object: obj })
     }
 
     fn push_boxed_value(&mut self, value: Value) -> Value {
@@ -1488,7 +1807,7 @@ impl InterlokoHost {
             }
             _ => return Err(HostError::Failed),
         };
-        self.object(obj)
+        Ok(self.object(obj)?)
     }
 
     fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
@@ -1635,7 +1954,7 @@ impl InterlokoHost {
             .is_ok_and(|actual| self.layout.is_same_or_subclass(actual, class))
     }
 
-    fn value_for_slot(&self, value: ValueRef<'_>, kind: ValueKind) -> Result<Value, HostError> {
+    fn value_for_slot(&self, value: ValueRef<'_>, kind: ValueKind) -> Result<Value, RuntimeError> {
         match (kind, value) {
             (ValueKind::Any, ValueRef::Obj(obj)) => {
                 let _ = self.boxed_value(obj)?;
@@ -1657,7 +1976,7 @@ impl InterlokoHost {
                 {
                     Ok(Value::Obj(obj))
                 } else {
-                    Err(HostError::Failed)
+                    Err(RuntimeError::ValueKindMismatch { expected: kind })
                 }
             }
             (ValueKind::ClassObject(expected), ValueRef::Obj(obj)) => {
@@ -1666,7 +1985,7 @@ impl InterlokoHost {
                     RuntimeObjectStorage::ClassMeta { class } if *class == expected => {
                         Ok(Value::Obj(obj))
                     }
-                    _ => Err(HostError::Failed),
+                    _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),
                 }
             }
             (ValueKind::GenericFunctionObject(expected), ValueRef::Obj(obj)) => {
@@ -1675,7 +1994,7 @@ impl InterlokoHost {
                     RuntimeObjectStorage::GenericMeta { generic } if *generic == expected => {
                         Ok(Value::Obj(obj))
                     }
-                    _ => Err(HostError::Failed),
+                    _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),
                 }
             }
             (ValueKind::MethodObject(expected), ValueRef::Obj(obj)) => {
@@ -1684,7 +2003,7 @@ impl InterlokoHost {
                     RuntimeObjectStorage::MethodMeta { method } if *method == expected => {
                         Ok(Value::Obj(obj))
                     }
-                    _ => Err(HostError::Failed),
+                    _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),
                 }
             }
             (ValueKind::SlotDescriptorObject { class, slot }, ValueRef::Obj(obj)) => {
@@ -1694,10 +2013,10 @@ impl InterlokoHost {
                         class: actual_class,
                         slot: actual_slot,
                     } if *actual_class == class && *actual_slot == slot => Ok(Value::Obj(obj)),
-                    _ => Err(HostError::Failed),
+                    _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),
                 }
             }
-            _ => Err(HostError::Failed),
+            _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),
         }
     }
 }
@@ -1987,6 +2306,22 @@ mod tests {
         }
     }
 
+    fn host_backed_class(
+        name: &str,
+        superclass: Option<ClassId>,
+        mut slots: Vec<RuntimeSlot>,
+    ) -> RuntimeClass {
+        for slot in &mut slots {
+            slot.host_backed = true;
+        }
+        RuntimeClass {
+            name: name.into(),
+            kind: HostObjectKind::HostBacked,
+            superclass,
+            slots,
+        }
+    }
+
     fn dispatch_layout() -> RuntimeLayout {
         RuntimeLayout {
             classes: vec![
@@ -2039,6 +2374,27 @@ mod tests {
         let layout = dispatch_layout();
 
         assert_eq!(layout.validate(), Ok(()));
+        assert_eq!(layout.classes().len(), 4);
+        assert_eq!(layout.generics().len(), 1);
+        assert_eq!(layout.methods().len(), 3);
+        assert_eq!(
+            layout.object_root().map(|class| class.name.as_str()),
+            Some("<object>")
+        );
+        assert_eq!(
+            layout.class_by_name("<circle>").map(|(id, _)| id),
+            Some(ClassId(2))
+        );
+        assert_eq!(
+            layout.superclass_chain(ClassId(2)),
+            Some(vec![ClassId(1), OBJECT_CLASS_ID])
+        );
+        assert_eq!(layout.effective_slots(ClassId(2)).map(<[_]>::len), Some(2));
+        assert_eq!(layout.generic_id("score"), Some(GenericFunctionId(0)));
+        assert_eq!(
+            layout.methods_for_generic(GenericFunctionId(0)),
+            Some([MethodId(0), MethodId(1), MethodId(2)].as_slice())
+        );
         assert_eq!(
             layout.inheritance_distance(ClassId(2), OBJECT_CLASS_ID),
             Some(2)
@@ -2071,6 +2427,15 @@ mod tests {
     #[test]
     fn slot_api_reads_and_writes_native_slots() {
         let layout = dispatch_layout();
+        assert_eq!(
+            layout.slot_capability(ClassId(2), SlotId(1)),
+            Some(RuntimeSlotCapability {
+                storage: RuntimeSlotStorage::Native,
+                readable: true,
+                writable: true,
+                write_rejection: None
+            })
+        );
         let mut host = InterlokoHost::new_checked(layout).expect("layout should validate");
         let value = host
             .make_object(ClassId(2), &[ValueRef::I64(4), ValueRef::I64(10)])
@@ -2094,6 +2459,61 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct TestHostObject {
+        value: i64,
+    }
+
+    impl HostObjectAdapter for TestHostObject {
+        fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, RuntimeError> {
+            match (slot, kind) {
+                (SlotId(0), ValueKind::I64) => Ok(Value::I64(self.value)),
+                _ => Err(RuntimeError::HostAdapterReadFailed { slot }),
+            }
+        }
+    }
+
+    #[test]
+    fn slot_api_reads_host_backed_slots_but_rejects_writes() {
+        let mut layout = dispatch_layout();
+        layout.classes.push(host_backed_class(
+            "<rust-counter>",
+            Some(OBJECT_CLASS_ID),
+            vec![slot("value", ValueKind::I64, ClassId(4), SlotId(0))],
+        ));
+        assert_eq!(layout.validate(), Ok(()));
+        assert_eq!(
+            layout.slot_capability(ClassId(4), SlotId(0)),
+            Some(RuntimeSlotCapability {
+                storage: RuntimeSlotStorage::HostBacked,
+                readable: true,
+                writable: false,
+                write_rejection: Some(RuntimeSlotWriteRejection::HostBackedSlot)
+            })
+        );
+
+        let mut host = InterlokoHost::new_checked(layout).expect("layout should validate");
+        let value = host
+            .push_host_object(ClassId(4), TestHostObject { value: 99 })
+            .expect("host object should install");
+        let Value::Obj(object) = value else {
+            panic!("expected object");
+        };
+
+        assert_eq!(
+            host.read_slot(object, SlotId(0)).expect("slot should read"),
+            Value::I64(99)
+        );
+        assert_eq!(
+            host.write_slot(object, SlotId(0), ValueRef::I64(100)),
+            Err(RuntimeError::SlotWriteRejected {
+                class: ClassId(4),
+                slot: SlotId(0),
+                reason: RuntimeSlotWriteRejection::HostBackedSlot
+            })
+        );
+    }
+
     #[test]
     fn slot_api_rejects_constant_slots() {
         let mut layout = dispatch_layout();
@@ -2108,7 +2528,11 @@ mod tests {
 
         assert_eq!(
             host.write_slot(object, SlotId(1), ValueRef::I64(12)),
-            Err(HostError::Failed)
+            Err(RuntimeError::SlotWriteRejected {
+                class: ClassId(2),
+                slot: SlotId(1),
+                reason: RuntimeSlotWriteRejection::ConstantSlot
+            })
         );
     }
 
