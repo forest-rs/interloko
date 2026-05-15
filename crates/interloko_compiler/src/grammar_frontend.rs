@@ -52,6 +52,27 @@ pub const RECORDS_GRAMMAR_SLUG: &str = "records";
 const GRAMMAR_ACTIVATE_PREFIX: &str = "// grammar-activate:";
 const STAGED_LOKO_PREFIX: &str = "// staged-loko:";
 const STAGED_LOKO_END: &str = "// end-staged-loko";
+const EMIT_FRONTEND_FORMS_CAPABILITIES: &[GrammarExtensionCapability] =
+    &[GrammarExtensionCapability::EmitFrontendForms];
+const CALCULATOR_EMITTED_FORM_KINDS: &[&str] = &["frontend-function"];
+const RECORDS_EMITTED_FORM_KINDS: &[&str] = &["frontend-class"];
+
+/// Capability required by a staged grammar extension.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrammarExtensionCapability {
+    /// The extension may emit inert frontend forms for later materialization.
+    EmitFrontendForms,
+}
+
+impl GrammarExtensionCapability {
+    /// Returns the stable capability token used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmitFrontendForms => "emit-frontend-forms",
+        }
+    }
+}
 
 /// Selects the grammar environment used by the frontend.
 ///
@@ -560,6 +581,98 @@ pub struct StagedParseRegion {
     pub data: SourceData,
 }
 
+/// Registered staged grammar extension descriptor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarExtensionDescriptor {
+    /// Stable adapter token.
+    pub adapter: String,
+    /// Grammar slug projected by this extension.
+    pub grammar_slug: String,
+    /// Human-facing grammar name.
+    pub grammar_name: String,
+    /// Directive that enables this extension for later staged regions.
+    pub activation_directive: String,
+    /// Directive that starts a staged region for this extension.
+    pub region_start_directive: String,
+    /// Directive that ends a staged region for this extension.
+    pub region_end_directive: String,
+    /// Human-readable accepted region shape.
+    pub accepted_region: String,
+    /// Root rule used for staged-region provenance.
+    pub root_rule: String,
+    /// Frontend form kinds this extension may emit.
+    pub emitted_form_kinds: Vec<String>,
+    /// Rule names charged when this staged adapter emits forms.
+    pub provenance_rule_names: Vec<String>,
+    /// Capabilities required by this extension.
+    pub capabilities: Vec<GrammarExtensionCapability>,
+}
+
+/// Concrete use of a staged grammar extension in one parse.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarExtensionActivation {
+    /// Registered staged grammar adapter token.
+    pub adapter: String,
+    /// Grammar activation that parsed the source region.
+    pub activation: GrammarActivationId,
+    /// Grammar used for this staged region.
+    pub grammar: GrammarId,
+    /// Grammar slug used in object ids and dumps.
+    pub grammar_slug: String,
+    /// Stable region slug used in object ids.
+    pub object_slug: String,
+    /// Comment directive that enabled this adapter.
+    pub activation_directive: Span,
+    /// Comment directive that starts this staged region.
+    pub start_marker: Span,
+    /// Comment directive that ends this staged region.
+    pub end_marker: Span,
+    /// Original source region parsed by this extension.
+    pub source_span: Span,
+    /// Capabilities exercised by this activation.
+    pub capabilities: Vec<GrammarExtensionCapability>,
+    /// Number of frontend forms emitted by this activation.
+    pub emitted_form_count: usize,
+}
+
+/// One frontend form emitted by a staged grammar extension.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarExtensionEmission {
+    /// Registered staged grammar adapter token.
+    pub adapter: String,
+    /// Grammar activation that emitted the form.
+    pub activation: GrammarActivationId,
+    /// Stable region slug used in object ids.
+    pub object_slug: String,
+    /// Zero-based emitted form index within the region.
+    pub form_index: usize,
+    /// Stable emitted frontend form kind.
+    pub form_kind: String,
+    /// Source span that produced the emitted form.
+    pub source_span: Span,
+    /// Inert structural emitted form data.
+    pub data: SourceData,
+}
+
+/// Provenance rule charged to a staged grammar extension activation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarExtensionProvenance {
+    /// Registered staged grammar adapter token.
+    pub adapter: String,
+    /// Grammar activation associated with the rule.
+    pub activation: GrammarActivationId,
+    /// Stable region slug used in object ids.
+    pub object_slug: String,
+    /// Grammar that owns the effective rule.
+    pub grammar: GrammarId,
+    /// Effective rule charged to the activation.
+    pub rule: GrammarRuleId,
+    /// Human-readable rule name.
+    pub rule_name: String,
+    /// Number of parse/projection nodes associated with this rule.
+    pub node_count: usize,
+}
+
 /// Per-rule parse provenance summary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarRuleProvenance {
@@ -632,6 +745,12 @@ pub struct GrammarParseReport {
     pub activations: Vec<GrammarActivation>,
     /// Staged parse regions, if any.
     pub staged_regions: Vec<StagedParseRegion>,
+    /// Concrete staged grammar extension activations in this parse.
+    pub extension_activations: Vec<GrammarExtensionActivation>,
+    /// Frontend forms emitted by staged grammar extensions.
+    pub extension_emissions: Vec<GrammarExtensionEmission>,
+    /// Provenance rules charged to staged grammar extensions.
+    pub extension_provenance: Vec<GrammarExtensionProvenance>,
     /// Parse provenance facts.
     pub provenance: ParseProvenance,
     /// Grammar-specific diagnostic facts.
@@ -684,6 +803,44 @@ pub trait StagedGrammarAdapter: Sync {
 
     /// Rule names charged when this staged adapter emits forms.
     fn provenance_rule_names(&self) -> &'static [&'static str];
+
+    /// Capabilities required by this staged grammar extension.
+    fn required_capabilities(&self) -> &'static [GrammarExtensionCapability] {
+        EMIT_FRONTEND_FORMS_CAPABILITIES
+    }
+
+    /// Human-readable accepted staged region shape.
+    fn accepted_region(&self) -> &'static str {
+        "comment-delimited staged Loko region"
+    }
+
+    /// Frontend form kinds this staged grammar extension may emit.
+    fn emitted_form_kinds(&self) -> &'static [&'static str];
+
+    /// Returns the structured extension descriptor for this adapter.
+    fn extension_descriptor(&self) -> GrammarExtensionDescriptor {
+        GrammarExtensionDescriptor {
+            adapter: self.adapter_name().to_string(),
+            grammar_slug: self.grammar_slug().to_string(),
+            grammar_name: self.grammar_name().to_string(),
+            activation_directive: format!("{GRAMMAR_ACTIVATE_PREFIX} {}", self.adapter_name()),
+            region_start_directive: format!("{STAGED_LOKO_PREFIX} {}", self.adapter_name()),
+            region_end_directive: STAGED_LOKO_END.to_string(),
+            accepted_region: self.accepted_region().to_string(),
+            root_rule: self.root_rule().to_string(),
+            emitted_form_kinds: self
+                .emitted_form_kinds()
+                .iter()
+                .map(|kind| (*kind).to_string())
+                .collect(),
+            provenance_rule_names: self
+                .provenance_rule_names()
+                .iter()
+                .map(|rule| (*rule).to_string())
+                .collect(),
+            capabilities: self.required_capabilities().to_vec(),
+        }
+    }
 
     /// Direct grammar rules projected for this staged grammar.
     fn direct_rules(&self, grammar: GrammarId) -> Vec<GrammarRule>;
@@ -804,6 +961,22 @@ impl GrammarFrontendRegistry {
             .iter()
             .map(|adapter| adapter.adapter_name())
             .collect()
+    }
+
+    /// Returns descriptors for the registered staged grammar extensions.
+    #[must_use]
+    pub fn extension_descriptors(&self) -> Vec<GrammarExtensionDescriptor> {
+        self.staged_adapters
+            .iter()
+            .map(|adapter| adapter.extension_descriptor())
+            .collect()
+    }
+
+    /// Returns the descriptor for one registered staged grammar extension.
+    #[must_use]
+    pub fn extension_descriptor(&self, name: &str) -> Option<GrammarExtensionDescriptor> {
+        self.staged_adapter(name)
+            .map(|adapter| adapter.extension_descriptor())
     }
 
     fn staged_records(&self, adapter_names: &[&str]) -> GrammarFrontendRecords {
@@ -935,6 +1108,9 @@ fn parse_file_with_records(
         grammar_stack,
         activations: vec![activation],
         staged_regions: Vec::new(),
+        extension_activations: Vec::new(),
+        extension_emissions: Vec::new(),
+        extension_provenance: Vec::new(),
         provenance,
         grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
@@ -1002,6 +1178,15 @@ fn materialize_frontend_expression(expression: &FrontendExpression, source: &mut
 #[must_use]
 pub fn frontend_forms_source_data(forms: &[FrontendForm]) -> SourceData {
     SourceData::list(forms.iter().map(frontend_form_source_data).collect())
+}
+
+/// Returns the stable frontend form kind token for one emitted form.
+#[must_use]
+pub fn frontend_form_kind_name(form: &FrontendForm) -> &'static str {
+    match &form.kind {
+        FrontendFormKind::Function(_) => "frontend-function",
+        FrontendFormKind::Class(_) => "frontend-class",
+    }
 }
 
 fn frontend_form_source_data(form: &FrontendForm) -> SourceData {
@@ -1125,6 +1310,8 @@ fn parse_staged_file(
     let mut materialized_cursor = 0_usize;
     let mut activations = vec![base_activation];
     let mut staged_regions = Vec::new();
+    let mut extension_activations = Vec::new();
+    let mut extension_emissions = Vec::new();
     let mut staged_rule_counts = Vec::new();
 
     for (index, region) in discovery.regions.iter().enumerate() {
@@ -1167,6 +1354,31 @@ fn parse_staged_file(
         staged_rule_counts.push((grammar, region.adapter.provenance_rule_names()));
         let forms_data = frontend_forms_source_data(&emission.forms);
 
+        extension_activations.push(GrammarExtensionActivation {
+            adapter: region.adapter.adapter_name().to_string(),
+            activation: activation.id,
+            grammar,
+            grammar_slug: region.adapter.grammar_slug().to_string(),
+            object_slug: object_slug.clone(),
+            activation_directive: region.activation_directive,
+            start_marker: region.start_marker,
+            end_marker: region.end_marker,
+            source_span: region.body_span,
+            capabilities: region.adapter.required_capabilities().to_vec(),
+            emitted_form_count: emission.forms.len(),
+        });
+        for (form_index, form) in emission.forms.iter().enumerate() {
+            extension_emissions.push(GrammarExtensionEmission {
+                adapter: region.adapter.adapter_name().to_string(),
+                activation: activation.id,
+                object_slug: object_slug.clone(),
+                form_index,
+                form_kind: frontend_form_kind_name(form).to_string(),
+                source_span: form.source_span,
+                data: frontend_form_source_data(form),
+            });
+        }
+
         activations.push(activation.clone());
         staged_regions.push(StagedParseRegion {
             object_slug,
@@ -1199,6 +1411,12 @@ fn parse_staged_file(
             );
         }
     }
+    let extension_provenance = extension_provenance_records(
+        &staged_regions,
+        &records.effective_rules,
+        &provenance_rules,
+        registry,
+    );
 
     let grammar_stack = GrammarStack {
         environment: records.environment.id,
@@ -1232,6 +1450,9 @@ fn parse_staged_file(
         grammar_stack,
         activations,
         staged_regions,
+        extension_activations,
+        extension_emissions,
+        extension_provenance,
         provenance,
         grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
@@ -1347,6 +1568,14 @@ impl StagedGrammarAdapter for CalculatorStagedGrammar {
         CALCULATOR_PROVENANCE_RULES
     }
 
+    fn accepted_region(&self) -> &'static str {
+        "`name = expression` calculator function lines"
+    }
+
+    fn emitted_form_kinds(&self) -> &'static [&'static str] {
+        CALCULATOR_EMITTED_FORM_KINDS
+    }
+
     fn direct_rules(&self, grammar: GrammarId) -> Vec<GrammarRule> {
         calculator_rules(grammar, self.grammar_slug())
     }
@@ -1375,6 +1604,14 @@ impl StagedGrammarAdapter for RecordsStagedGrammar {
 
     fn provenance_rule_names(&self) -> &'static [&'static str] {
         RECORDS_PROVENANCE_RULES
+    }
+
+    fn accepted_region(&self) -> &'static str {
+        "`record name` blocks with typed fields"
+    }
+
+    fn emitted_form_kinds(&self) -> &'static [&'static str] {
+        RECORDS_EMITTED_FORM_KINDS
     }
 
     fn direct_rules(&self, grammar: GrammarId) -> Vec<GrammarRule> {
@@ -1850,6 +2087,42 @@ fn add_staged_rule_count(
     if let Some(provenance) = rules.iter_mut().find(|item| item.rule == rule.id) {
         provenance.node_count = provenance.node_count.saturating_add(1);
     }
+}
+
+fn extension_provenance_records(
+    regions: &[StagedParseRegion],
+    effective_rules: &[EffectiveGrammarRule],
+    provenance_rules: &[GrammarRuleProvenance],
+    registry: &GrammarFrontendRegistry,
+) -> Vec<GrammarExtensionProvenance> {
+    let mut records = Vec::new();
+    for region in regions {
+        let Some(adapter) = registry.staged_adapter(&region.adapter) else {
+            continue;
+        };
+        for rule_name in adapter.provenance_rule_names() {
+            let Some(rule) = effective_rules
+                .iter()
+                .find(|rule| rule.grammar == region.grammar && rule.name == *rule_name)
+            else {
+                continue;
+            };
+            let node_count = provenance_rules
+                .iter()
+                .find(|provenance| provenance.rule == rule.id)
+                .map_or(0, |provenance| provenance.node_count);
+            records.push(GrammarExtensionProvenance {
+                adapter: region.adapter.clone(),
+                activation: region.activation,
+                object_slug: region.object_slug.clone(),
+                grammar: region.grammar,
+                rule: rule.id,
+                rule_name: (*rule_name).to_string(),
+                node_count,
+            });
+        }
+    }
+    records
 }
 
 fn usize_to_source_i64(value: usize) -> i64 {
@@ -2552,6 +2825,39 @@ pub fn staged_parse_region_object_id(region: &StagedParseRegion) -> String {
     )
 }
 
+/// Returns the stable EOP id for a registered grammar extension descriptor.
+#[must_use]
+pub fn grammar_extension_object_id(descriptor: &GrammarExtensionDescriptor) -> String {
+    format!("grammar-extension:{}", descriptor.adapter)
+}
+
+/// Returns the stable EOP id for a grammar extension activation.
+#[must_use]
+pub fn grammar_extension_activation_object_id(activation: &GrammarExtensionActivation) -> String {
+    format!(
+        "grammar-extension-activation:{}/{}",
+        activation.adapter, activation.object_slug
+    )
+}
+
+/// Returns the stable EOP id for one emitted frontend form.
+#[must_use]
+pub fn grammar_extension_emission_object_id(emission: &GrammarExtensionEmission) -> String {
+    format!(
+        "grammar-extension-emission:{}/{}/f{}",
+        emission.adapter, emission.object_slug, emission.form_index
+    )
+}
+
+/// Returns the stable EOP id for one extension provenance rule.
+#[must_use]
+pub fn grammar_extension_provenance_object_id(provenance: &GrammarExtensionProvenance) -> String {
+    format!(
+        "grammar-extension-provenance:{}/{}/{}",
+        provenance.adapter, provenance.object_slug, provenance.rule_name
+    )
+}
+
 fn stable_name(name: &str) -> String {
     if matches!(name, "BaseLokoEnvironment" | "BaseLokoGrammar") {
         return BASE_LOKO_ENVIRONMENT_SLUG.to_string();
@@ -2606,6 +2912,24 @@ mod tests {
                 .expect("records staged adapter registered")
                 .grammar_name(),
             RECORDS_GRAMMAR_NAME
+        );
+        let descriptors = registry.extension_descriptors();
+        assert_eq!(descriptors.len(), 2);
+        let records = registry
+            .extension_descriptor(RECORDS_GRAMMAR_SLUG)
+            .expect("records extension descriptor");
+        assert_eq!(records.adapter, RECORDS_GRAMMAR_SLUG);
+        assert_eq!(records.grammar_name, RECORDS_GRAMMAR_NAME);
+        assert_eq!(records.activation_directive, "// grammar-activate: records");
+        assert_eq!(records.region_start_directive, "// staged-loko: records");
+        assert_eq!(
+            records.capabilities,
+            vec![GrammarExtensionCapability::EmitFrontendForms]
+        );
+        assert_eq!(records.emitted_form_kinds, vec!["frontend-class"]);
+        assert_eq!(
+            records.provenance_rule_names,
+            vec!["records-region", "record-definition", "record-field"]
         );
     }
 
@@ -2763,6 +3087,28 @@ mod tests {
         );
         assert_eq!(report.staged_regions[0].adapter, "calculator");
         assert_eq!(report.staged_regions[0].object_slug, "r0");
+        assert_eq!(report.extension_activations.len(), 2);
+        assert_eq!(report.extension_activations[0].adapter, "calculator");
+        assert_eq!(report.extension_activations[0].emitted_form_count, 1);
+        assert_eq!(
+            report.extension_activations[0].capabilities,
+            vec![GrammarExtensionCapability::EmitFrontendForms]
+        );
+        assert_eq!(report.extension_emissions.len(), 2);
+        assert_eq!(report.extension_emissions[0].form_kind, "frontend-function");
+        assert!(
+            source_data::dump(&report.extension_emissions[1].data)
+                .contains("frontend-function(name: main")
+        );
+        assert!(
+            report
+                .extension_provenance
+                .iter()
+                .any(|provenance| provenance.adapter == "calculator"
+                    && provenance.object_slug == "r1"
+                    && provenance.rule_name == "calculator-function"
+                    && provenance.node_count > 0)
+        );
         assert!(
             source_data::dump(&report.staged_regions[1].forms_data)
                 .contains("frontend-function(name: main")
