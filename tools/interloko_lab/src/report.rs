@@ -167,13 +167,34 @@ fn render_pipeline(artifacts: &SessionArtifacts) -> String {
     out
 }
 
+fn render_section_heading(eyebrow: &str, title: &str, intro: &str) -> String {
+    let mut out = String::new();
+    out.push_str("        <div class=\"section__heading\">\n");
+    out.push_str("          <div>\n");
+    let _ = writeln!(
+        out,
+        "            <p class=\"eyebrow\">{}</p>",
+        escape_html(eyebrow)
+    );
+    let _ = writeln!(out, "            <h2>{}</h2>", escape_html(title));
+    out.push_str("          </div>\n");
+    let _ = writeln!(
+        out,
+        "          <p class=\"section__intro\">{}</p>",
+        escape_html(intro)
+    );
+    out.push_str("        </div>\n");
+    out
+}
+
 fn render_source_section(artifacts: &SessionArtifacts) -> String {
     let mut out = String::new();
     out.push_str("      <section class=\"section section--source\" id=\"source\">\n");
-    out.push_str("        <div class=\"section__heading\">\n");
-    out.push_str("          <p class=\"eyebrow\">Original source</p>\n");
-    out.push_str("          <h2>Source With Provenance</h2>\n");
-    out.push_str("        </div>\n");
+    out.push_str(&render_section_heading(
+        "Original source",
+        "Source With Provenance",
+        "This is the file the compiler saw. Highlights show grammar directives, staged regions, generated frontend forms, and diagnostics; click a highlighted span to follow the related compiler objects.",
+    ));
     out.push_str(&render_source_legend(artifacts));
     out.push_str("        <div class=\"source-frame\">\n");
     out.push_str(&render_source_lines(artifacts));
@@ -299,10 +320,11 @@ fn render_source_segments(
 fn render_staged_section(artifacts: &SessionArtifacts, objects: &[EnvironmentObject]) -> String {
     let mut out = String::new();
     out.push_str("      <section class=\"section\" id=\"staged\">\n");
-    out.push_str("        <div class=\"section__heading\">\n");
-    out.push_str("          <p class=\"eyebrow\">Staged grammar</p>\n");
-    out.push_str("          <h2>Expansion Chain</h2>\n");
-    out.push_str("        </div>\n");
+    out.push_str(&render_section_heading(
+        "Staged grammar",
+        "Expansion Chain",
+        "A staged grammar adapter turns selected source regions into structured frontend forms. This section shows that path from adapter to forms, debug Loko text, generated objects, and executable artifacts.",
+    ));
     if artifacts.grammar_parse.staged_regions.is_empty() {
         out.push_str("        <div class=\"empty-state\">No staged regions were activated in this source. The report still shows the normal source-to-tape pipeline.</div>\n");
     } else {
@@ -599,10 +621,11 @@ fn render_model_section(
 ) -> String {
     let mut out = String::new();
     out.push_str("      <section class=\"section\" id=\"model\">\n");
-    out.push_str("        <div class=\"section__heading\">\n");
-    out.push_str("          <p class=\"eyebrow\">MOP / EOP</p>\n");
-    out.push_str("          <h2>Generated And Inspectable Objects</h2>\n");
-    out.push_str("        </div>\n");
+    out.push_str(&render_section_heading(
+        "MOP / EOP",
+        "Generated And Inspectable Objects",
+        "These cards are the environment's inspectable objects: classes, slots, accessors, generics, methods, functions, and grammar records. They are the object-model view of what the compiler built.",
+    ));
     for (kind, title) in [
         (EnvironmentKind::Class, "Classes"),
         (EnvironmentKind::Slot, "Slots"),
@@ -1152,10 +1175,11 @@ fn value_kind_label(module: &sem::Module, kind: ValueKind) -> String {
 fn render_diagnostics_section(artifacts: &SessionArtifacts) -> String {
     let mut out = String::new();
     out.push_str("      <section class=\"section\" id=\"diagnostics\">\n");
-    out.push_str("        <div class=\"section__heading\">\n");
-    out.push_str("          <p class=\"eyebrow\">Diagnostics</p>\n");
-    out.push_str("          <h2>Structured Diagnostic Facts</h2>\n");
-    out.push_str("        </div>\n");
+    out.push_str(&render_section_heading(
+        "Diagnostics",
+        "Structured Diagnostic Facts",
+        "Diagnostics are stored as stable codes, spans, labels, and arguments. Presentation tools can render those facts into human text without changing the compiler artifact itself.",
+    ));
     if artifacts.diagnostics.is_empty() {
         out.push_str("        <div class=\"empty-state\">No diagnostics were emitted.</div>\n");
     } else {
@@ -1222,10 +1246,11 @@ fn render_diagnostic(index: usize, diagnostic: &Diagnostic) -> String {
 fn render_artifacts_section(artifacts: &SessionArtifacts) -> String {
     let mut out = String::new();
     out.push_str("      <section class=\"section\" id=\"artifacts\">\n");
-    out.push_str("        <div class=\"section__heading\">\n");
-    out.push_str("          <p class=\"eyebrow\">Incremental engine</p>\n");
-    out.push_str("          <h2>Artifact Keys And Dependency Graph</h2>\n");
-    out.push_str("        </div>\n");
+    out.push_str(&render_section_heading(
+        "Incremental engine",
+        "Artifact Keys And Dependency Graph",
+        "Every compiler stage produces a named artifact with a stable key, work count, and observed duration. The graph shows which artifacts depend on which earlier results.",
+    ));
     out.push_str("        <div class=\"pipeline-panel\" id=\"artifact-pipeline\">\n");
     out.push_str("          <div class=\"pipeline-panel__copy\">\n");
     out.push_str("            <h3>Compiler Artifact Path</h3>\n");
@@ -1262,10 +1287,11 @@ fn render_artifacts_section(artifacts: &SessionArtifacts) -> String {
 fn render_trace_section(artifacts: &SessionArtifacts) -> String {
     let mut out = String::new();
     out.push_str("      <section class=\"section\" id=\"trace\">\n");
-    out.push_str("        <div class=\"section__heading\">\n");
-    out.push_str("          <p class=\"eyebrow\">Runtime trace</p>\n");
-    out.push_str("          <h2>Execution Timeline</h2>\n");
-    out.push_str("        </div>\n");
+    out.push_str(&render_section_heading(
+        "Runtime trace",
+        "Execution Timeline",
+        "This is the observed run of main through execution_tape. It records call frames, runtime host calls, and the final outcome so generated behavior can be inspected after compilation.",
+    ));
     let Some(trace) = &artifacts.runtime_trace else {
         out.push_str("        <div class=\"empty-state\">Runtime tracing was not requested for this report.</div>\n");
         out.push_str("      </section>\n");
@@ -1461,10 +1487,11 @@ fn format_duration_nanos(nanos: u64) -> String {
 fn render_ir_section(artifacts: &SessionArtifacts) -> String {
     let mut out = String::new();
     out.push_str("      <section class=\"section\" id=\"ir\">\n");
-    out.push_str("        <div class=\"section__heading\">\n");
-    out.push_str("          <p class=\"eyebrow\">Executable path</p>\n");
-    out.push_str("          <h2>Lowered IR And Tape</h2>\n");
-    out.push_str("        </div>\n");
+    out.push_str(&render_section_heading(
+        "Executable path",
+        "Lowered IR And Tape",
+        "Lowered IR is Interloko's executable plan. Tape disassembly is the concrete execution_tape program emitted from that plan and run by the runtime.",
+    ));
     out.push_str(&render_collapsible_dump_with_rel(
         "Lowered IR",
         "lowered-ir",
@@ -2418,10 +2445,14 @@ pre {
   display: flex;
   justify-content: space-between;
   gap: 24px;
-  align-items: end;
+  align-items: start;
   margin-bottom: 20px;
   border-bottom: 1px solid var(--line);
   padding-bottom: 14px;
+}
+
+.section__heading > div {
+  min-width: min(100%, 320px);
 }
 
 .section__heading h2,
@@ -2429,6 +2460,14 @@ pre {
   margin: 0;
   font-size: clamp(1.4rem, 3vw, 2.2rem);
   letter-spacing: 0;
+}
+
+.section__intro {
+  max-width: 680px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.96rem;
+  line-height: 1.55;
 }
 
 .group-heading {
@@ -2504,7 +2543,7 @@ pre {
   background: #101614;
   color: #edf4f1;
   font-size: 0.88rem;
-  line-height: 1.6;
+  line-height: 1.16;
 }
 
 .source-line {
@@ -2531,24 +2570,24 @@ pre {
 }
 
 .source-mark {
-  padding: 1px 2px;
-  border-radius: 3px;
+  padding: 0 2px;
+  border-radius: 2px;
   color: #edf4f1;
 }
 
 .source-mark--activation {
   background: rgba(196, 112, 73, 0.42);
-  border-bottom: 2px solid #c47049;
+  box-shadow: inset 0 -2px #c47049;
 }
 
 .source-mark--form {
   background: rgba(147, 210, 199, 0.18);
-  border-bottom: 2px solid #93d2c7;
+  box-shadow: inset 0 -2px #93d2c7;
 }
 
 .source-mark--diagnostic {
   background: rgba(227, 122, 122, 0.62);
-  border-bottom: 2px solid #e37a7a;
+  box-shadow: inset 0 -2px #e37a7a;
 }
 
 .region-grid {
@@ -2723,20 +2762,28 @@ pre {
 }
 
 .object-card__title {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
+  display: block;
 }
 
 .object-card__title span,
 .object-card__title code {
+  display: block;
   min-width: 0;
-  overflow-wrap: anywhere;
 }
 
 .object-card__title span {
-  flex: 1;
   font-weight: 800;
+  line-height: 1.25;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.object-card__title code {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .object-card p {
@@ -3022,6 +3069,10 @@ pre {
   .section__heading,
   .region-card__head {
     display: block;
+  }
+
+  .section__intro {
+    margin-top: 12px;
   }
 
   .source-line {

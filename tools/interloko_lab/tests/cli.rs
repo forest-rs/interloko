@@ -509,6 +509,8 @@ fn report_generates_staged_records_html() {
 
     assert!(html.contains("Interloko compiler workbench report"));
     assert!(html.contains("staged_records.loko"));
+    assert!(html.contains("This is the file the compiler saw."));
+    assert!(html.contains("object-model view of what the compiler built"));
     assert!(html.contains("Runtime result"));
     assert!(html.contains("returned 10"));
     assert!(html.contains("id=\"artifact-pipeline\""));
