@@ -389,6 +389,75 @@ fn staged_records_region_runs_and_projects_classes() {
 }
 
 #[test]
+fn report_generates_staged_records_html() {
+    let file = fixture("staged_records.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+    let report = std::env::temp_dir().join(format!(
+        "interloko-staged-records-report-{}.html",
+        std::process::id()
+    ));
+    let report_path = report.to_str().expect("report path should be utf8");
+    let _ = fs::remove_file(&report);
+
+    let stdout = run_lab(&["report", path, "--output", report_path]);
+    assert!(stdout.contains("wrote "));
+
+    let html = fs::read_to_string(&report).expect("report should be written");
+    let _ = fs::remove_file(&report);
+
+    assert!(html.contains("Interloko compiler workbench report"));
+    assert!(html.contains("staged_records.loko"));
+    assert!(html.contains("Runtime result"));
+    assert!(html.contains("returned 10"));
+    assert!(html.contains("id=\"artifact-pipeline\""));
+    assert!(html.contains("Compiler Artifact Path"));
+    assert!(html.contains("id=\"interloko-report-data\""));
+    assert!(html.contains("\"stagedRegions\""));
+    assert!(html.contains("Expansion Chain"));
+    assert!(html.contains("RecordsRegionGrammar"));
+    assert!(html.contains("frontend-class"));
+    assert!(html.contains("define class &lt;circle&gt;"));
+    assert!(html.contains("ast-class:"));
+    assert!(html.contains("class:c"));
+    assert!(html.contains("slot:c"));
+    assert!(html.contains("class=\"meta-chip\" title=\"Class metaobject"));
+    assert!(html.contains("<dt>superclass</dt><dd>&lt;object&gt;</dd>"));
+    assert!(html.contains("<dt>init keys</dt><dd>radius:</dd>"));
+    assert!(html.contains("Raw inspection facts"));
+    assert!(html.contains("No diagnostics were emitted."));
+    assert!(html.contains("Artifact Graph"));
+    assert!(html.contains("Lowered IR"));
+    assert!(html.contains("Tape Disassembly"));
+    assert!(html.contains("source-mark--activation"));
+    assert!(html.contains("activation directive"));
+    assert!(html.contains("frontend form source"));
+}
+
+#[test]
+fn report_handles_plain_loko_sources() {
+    let file = fixture("generic_area.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+    let report = std::env::temp_dir().join(format!(
+        "interloko-generic-area-report-{}.html",
+        std::process::id()
+    ));
+    let report_path = report.to_str().expect("report path should be utf8");
+    let _ = fs::remove_file(&report);
+
+    let stdout = run_lab(&["report", path, "--output", report_path]);
+    assert!(stdout.contains("wrote "));
+
+    let html = fs::read_to_string(&report).expect("report should be written");
+    let _ = fs::remove_file(&report);
+
+    assert!(html.contains("generic_area.loko"));
+    assert!(html.contains("returned 100"));
+    assert!(html.contains("No staged regions were activated in this source."));
+    assert!(html.contains("class:c0"));
+    assert!(html.contains("generic:g0"));
+}
+
+#[test]
 fn parse_trace_reports_grammar_diagnostic_facts() {
     let file = fixture("derived_grammar_syntax_error.loko");
     let path = file.to_str().expect("fixture path should be utf8");

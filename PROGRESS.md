@@ -1,5 +1,38 @@
 # Interloko Progress
 
+## Implemented: Static HTML Workbench Reports
+
+- Added `interloko_lab report <file.loko> --output <report.html>` as a
+  single-command demo path for compiler/session artifacts.
+- The command compiles through the existing session pipeline with runtime
+  execution requested, then writes one deterministic self-contained HTML file
+  with embedded CSS, JavaScript, and structured JSON data.
+- The report first viewport shows source file, runtime result, diagnostic
+  count, grammar stack, staged-region count, and a compact artifact pipeline.
+- Source rendering includes line numbers plus provenance highlights for staged
+  grammar activation directives, frontend-form source spans, and diagnostics.
+- Staged-region rendering shows the current expansion chain:
+  adapter -> frontend forms -> materialized Loko -> matched AST/semantic/EOP
+  objects.
+- The report exposes generated classes, slots, accessors, setter generics,
+  methods, functions, object ids, affordances, structured diagnostics, artifact
+  keys, dependency graph text, lowered IR, and `execution_tape` disassembly.
+- A small embedded script lets readers click related source spans, staged
+  regions, frontend forms, objects, and artifacts to highlight connected nodes
+  where current artifacts expose those relations.
+- Added lab tests covering staged-records report generation and the empty-state
+  path for ordinary Loko sources.
+- `docs/interloko_report.md` documents the command as the preferred static demo
+  path and explains how this can evolve into a live workbench later.
+
+Deferred:
+
+- Live editing, watch mode, server/browser RPC, and incremental browser
+  refresh.
+- A shared presentation/data API outside `tools/interloko_lab`.
+- Rich graph layout beyond compact cards and relation highlighting.
+- Exact generated-source-to-original-source diagnostic remapping.
+
 ## Implemented: Structural Frontend Forms And Records Grammar
 
 - Added `CalculatorRegionGrammar` and

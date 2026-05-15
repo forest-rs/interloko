@@ -23,6 +23,12 @@ Run one corpus program:
 cargo run -p interloko_lab -- run corpus/pass/generics/two_class_dispatch.loko
 ```
 
+Generate the staged-grammar report demo:
+
+```sh
+cargo run -p interloko_lab -- report tools/interloko_lab/fixtures/staged_records.loko --output /tmp/staged-records.html
+```
+
 Inspect a compiler stage:
 
 ```sh
@@ -139,6 +145,8 @@ Useful docs:
   projection for the base Loko parser.
 - [`docs/eop_workbench.md`](docs/eop_workbench.md) describes environment object
   records and workbench affordances.
+- [`docs/interloko_report.md`](docs/interloko_report.md) explains the static
+  HTML report command and its staged-grammar demo path.
 - [`corpus/README.md`](corpus/README.md) explains corpus expectations.
 
 ## Workbench Commands
@@ -149,6 +157,7 @@ Useful docs:
 cargo run -p interloko_lab -- run <file.loko>
 cargo run -p interloko_lab -- dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all
 cargo run -p interloko_lab -- artifacts <file.loko>
+cargo run -p interloko_lab -- report <file.loko> --output <report.html>
 cargo run -p interloko_lab -- dispatch <file.loko> [dispatch-site-id]
 cargo run -p interloko_lab -- inspect <file.loko> <object-id>
 cargo run -p interloko_lab -- affordances <file.loko> <object-id>

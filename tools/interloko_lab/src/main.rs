@@ -17,6 +17,8 @@ use interloko_compiler::session::{
 };
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 
+mod report;
+
 type Result<T> = std::result::Result<T, LabError>;
 
 fn main() {
@@ -101,6 +103,16 @@ fn run(args: Vec<String>) -> Result<()> {
             let file = single_file_arg(&args)?;
             let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
             print!("{}", artifacts.dump_artifact_graph());
+            Ok(())
+        }
+        "report" => {
+            let (file, output) = report_args(&args)?;
+            let workbench = compile_workbench_path(file, RuntimeMode::RunMain)?;
+            report::write_report(Path::new(output), &workbench).map_err(|error| LabError::Io {
+                path: output.into(),
+                error,
+            })?;
+            println!("wrote {output}");
             Ok(())
         }
         "diff" => {
@@ -219,6 +231,15 @@ fn dispatch_args(args: &[String]) -> Result<(&str, Option<&str>)> {
             "usage: interloko_lab dispatch <file.loko> [dispatch-site-id]".into(),
         )),
     }
+}
+
+fn report_args(args: &[String]) -> Result<(&str, &str)> {
+    if args.len() != 4 || args[2] != "--output" {
+        return Err(LabError::Usage(
+            "usage: interloko_lab report <file.loko> --output <report.html>".into(),
+        ));
+    }
+    Ok((&args[1], &args[3]))
 }
 
 fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance)> {
@@ -873,7 +894,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} run <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} run <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 

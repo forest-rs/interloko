@@ -1,5 +1,44 @@
 # Plans
 
+## Build The Interloko HTML Report Demo
+
+### Goal
+
+Make `interloko_lab report <file> --output <path>` the clearest way to show a
+Loko program moving through the compiler/workbench stack. The command writes one
+self-contained HTML file with embedded CSS, JavaScript, and structured data.
+The staged-records fixture is the flagship demo, but ordinary Loko files should
+also get useful empty states.
+
+### Fence
+
+`tools/interloko_lab` owns this presentation surface. It consumes existing
+session artifacts, EOP objects, stage dumps, grammar parse reports, and runtime
+results. It does not add compiler semantics, new grammar behavior, a web
+server, live editing, external frontend dependencies, or shared presentation
+APIs unless extraction becomes clearly justified later.
+
+### Steps
+
+1. Add report CLI parsing and a lab-local report renderer.
+2. Render source, staged regions, frontend forms, materialized source,
+   generated metaobjects, diagnostics, artifact keys, lowered IR, and tape
+   disassembly into a polished self-contained report.
+3. Embed deterministic JSON data and a small relation-highlighting script.
+4. Add lab fixture tests for the staged-records report.
+5. Document the report command as the preferred demo path and update progress.
+6. Run fmt, clippy, workspace tests, docs, corpus/examples, generate the sample
+   report, and commit.
+
+### Risks
+
+- The report can look more capable than the compiler if it hides which stages
+  are still materialized-source compatibility paths.
+- Source span highlighting should stay honest: staged/source/form relations are
+  shown where current artifacts expose enough provenance.
+- Keep presentation code out of core crates until a real live tool needs a
+  shared report/data API.
+
 ## Build Structural Frontend Forms And Records Grammar
 
 ### Goal
