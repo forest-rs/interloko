@@ -328,6 +328,12 @@ impl fmt::Display for EnvironmentObjectId {
 pub enum EnvironmentKind {
     /// A named source file known to the session.
     SourceFile,
+    /// A session-owned grammar frontend registry.
+    GrammarRegistry,
+    /// A language environment registered with the grammar frontend registry.
+    RegisteredGrammarEnvironment,
+    /// A staged grammar adapter registered with the grammar frontend registry.
+    StagedGrammarAdapter,
     /// A language environment metaobject.
     LanguageEnvironment,
     /// A grammar metaobject.
@@ -370,6 +376,9 @@ impl EnvironmentKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SourceFile => "source-file",
+            Self::GrammarRegistry => "grammar-registry",
+            Self::RegisteredGrammarEnvironment => "registered-grammar-environment",
+            Self::StagedGrammarAdapter => "staged-grammar-adapter",
             Self::LanguageEnvironment => "language-environment",
             Self::Grammar => "grammar",
             Self::GrammarRule => "grammar-rule",
@@ -426,6 +435,8 @@ pub enum EnvironmentStorage {
     HostRegistry,
     /// The object is represented by an adapter-owned host slot bridge.
     HostAdapter,
+    /// The object is represented by the grammar frontend registry.
+    FrontendRegistry,
     /// The object is represented by cached compiler/session artifacts.
     CachedArtifact,
     /// The object is represented by host-owned state outside Interloko.
@@ -440,6 +451,7 @@ impl EnvironmentStorage {
             Self::SourceDefined => "source-defined",
             Self::HostRegistry => "host-registry",
             Self::HostAdapter => "host-adapter",
+            Self::FrontendRegistry => "frontend-registry",
             Self::CachedArtifact => "cached-artifact",
             Self::HostOwned => "host-owned",
         }
@@ -497,6 +509,8 @@ pub enum EnvironmentAffordance {
     ShowGrammarRule,
     /// Show parse provenance and grammar activations.
     ShowParseTrace,
+    /// Show registered language environments and staged grammar adapters.
+    ShowGrammarRegistry,
 }
 
 impl EnvironmentAffordance {
@@ -528,6 +542,7 @@ impl EnvironmentAffordance {
             Self::ShowGrammarStack => "show-grammar-stack",
             Self::ShowGrammarRule => "show-grammar-rule",
             Self::ShowParseTrace => "show-parse-trace",
+            Self::ShowGrammarRegistry => "show-grammar-registry",
         }
     }
 }
@@ -739,6 +754,12 @@ impl SessionArtifacts {
     #[must_use]
     pub fn dump_grammar_stack(&self) -> String {
         dump_grammar_stack(&self.grammar_parse)
+    }
+
+    /// Dumps the registered language environments and staged grammar adapters.
+    #[must_use]
+    pub fn dump_grammar_registry(&self) -> String {
+        dump_grammar_registry(self.grammar_registry)
     }
 
     /// Dumps parse provenance and grammar activations.
@@ -4225,6 +4246,48 @@ fn runtime_object_kind_label(kind: HostObjectKind) -> &'static str {
     }
 }
 
+fn dump_grammar_registry(registry: GrammarFrontendRegistry) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "grammar registry");
+    let _ = writeln!(out, "environments:");
+    for provider in registry.environment_providers() {
+        let records = provider.records();
+        let _ = write!(
+            out,
+            "  {} {} discovers-staged-regions={}",
+            provider.environment_slug(),
+            provider.environment_name(),
+            provider.discovers_staged_regions()
+        );
+        let _ = write!(out, " stack=");
+        for (index, grammar_id) in records.environment.grammar_stack.iter().enumerate() {
+            if index > 0 {
+                out.push_str(" -> ");
+            }
+            let name = records
+                .grammars
+                .iter()
+                .find(|grammar| grammar.id == *grammar_id)
+                .map_or("<unknown>", |grammar| grammar.name.as_str());
+            let _ = write!(out, "{grammar_id}:{name}");
+        }
+        out.push('\n');
+    }
+    let _ = writeln!(out, "staged adapters:");
+    for adapter in registry.staged_adapters() {
+        let _ = writeln!(
+            out,
+            "  {} {} grammar={} root-rule={} provenance-rules={}",
+            adapter.adapter_name(),
+            adapter.grammar_name(),
+            adapter.grammar_slug(),
+            adapter.root_rule(),
+            adapter.provenance_rule_names().join(",")
+        );
+    }
+    out
+}
+
 fn dump_grammar_stack(report: &GrammarParseReport) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -4524,6 +4587,7 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
         ),
     }));
 
+    project_grammar_registry(artifacts, sink);
     project_environment_grammar(artifacts, sink);
 
     for class in &module.classes {
@@ -4579,6 +4643,103 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             inspection: format!("key={} artifact={artifact}", report.key),
         }));
     }
+}
+
+fn project_grammar_registry(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
+    use EnvironmentAffordance as Aff;
+
+    let environments = artifacts.grammar_registry.environment_slugs();
+    let adapters = artifacts.grammar_registry.staged_adapter_names();
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: "grammar-registry:session".into(),
+        kind: EnvironmentKind::GrammarRegistry,
+        meta_class: "<grammar-registry>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::FrontendRegistry,
+        title: "session grammar registry".into(),
+        affordances: Vec::from([Aff::Inspect, Aff::DumpEop, Aff::ShowGrammarRegistry]),
+        execution: None,
+        inspection: format!(
+            "environments=[{}] staged-adapters=[{}]",
+            environments.join(","),
+            adapters.join(",")
+        ),
+    }));
+
+    for provider in artifacts.grammar_registry.environment_providers() {
+        project_registered_grammar_environment(sink, *provider);
+    }
+    for adapter in artifacts.grammar_registry.staged_adapters() {
+        project_staged_grammar_adapter(sink, *adapter);
+    }
+}
+
+fn project_registered_grammar_environment(
+    sink: &mut dyn EnvironmentObjectSink,
+    provider: &'static dyn grammar_frontend::GrammarEnvironmentProvider,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let records = provider.records();
+    let grammar_names = records
+        .grammars
+        .iter()
+        .map(|grammar| grammar.slug.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: format!(
+            "registered-grammar-environment:{}",
+            provider.environment_slug()
+        ),
+        kind: EnvironmentKind::RegisteredGrammarEnvironment,
+        meta_class: "<registered-grammar-environment>",
+        origin: registered_environment_origin(provider.environment_slug()),
+        storage: EnvironmentStorage::FrontendRegistry,
+        title: provider.environment_name().into(),
+        affordances: Vec::from([Aff::Inspect, Aff::DumpEop, Aff::ShowGrammarRegistry]),
+        execution: None,
+        inspection: format!(
+            "slug={} name={} discovers-staged-regions={} grammars=[{}]",
+            provider.environment_slug(),
+            provider.environment_name(),
+            provider.discovers_staged_regions(),
+            grammar_names
+        ),
+    }));
+}
+
+fn registered_environment_origin(slug: &str) -> EnvironmentOrigin {
+    if slug == grammar_frontend::BASE_LOKO_ENVIRONMENT_SLUG {
+        EnvironmentOrigin::CompilerGenerated
+    } else {
+        EnvironmentOrigin::HostProvided
+    }
+}
+
+fn project_staged_grammar_adapter(
+    sink: &mut dyn EnvironmentObjectSink,
+    adapter: &'static dyn grammar_frontend::StagedGrammarAdapter,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: format!("staged-grammar-adapter:{}", adapter.adapter_name()),
+        kind: EnvironmentKind::StagedGrammarAdapter,
+        meta_class: "<staged-grammar-adapter>",
+        origin: EnvironmentOrigin::HostProvided,
+        storage: EnvironmentStorage::FrontendRegistry,
+        title: adapter.grammar_name().into(),
+        affordances: Vec::from([Aff::Inspect, Aff::DumpEop, Aff::ShowGrammarRegistry]),
+        execution: None,
+        inspection: format!(
+            "name={} grammar={} root-rule={} provenance-rules=[{}]",
+            adapter.adapter_name(),
+            adapter.grammar_slug(),
+            adapter.root_rule(),
+            adapter.provenance_rule_names().join(",")
+        ),
+    }));
 }
 
 fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
@@ -6764,6 +6925,10 @@ mod tests {
             ),
             (EnvironmentAffordance::ShowGrammarRule, "show-grammar-rule"),
             (EnvironmentAffordance::ShowParseTrace, "show-parse-trace"),
+            (
+                EnvironmentAffordance::ShowGrammarRegistry,
+                "show-grammar-registry",
+            ),
         ];
 
         for (affordance, name) in names {
@@ -7400,6 +7565,39 @@ mod tests {
         assert_eq!(source.origin, EnvironmentOrigin::SourceAuthored);
         assert_eq!(source.storage, EnvironmentStorage::SourceDefined);
         assert!(source.affordances.contains(EnvironmentAffordance::DumpEop));
+
+        let grammar_registry = eop_object(&objects, "grammar-registry:session");
+        assert_eq!(grammar_registry.kind, EnvironmentKind::GrammarRegistry);
+        assert_eq!(
+            grammar_registry.storage,
+            EnvironmentStorage::FrontendRegistry
+        );
+        assert!(
+            grammar_registry
+                .affordances
+                .contains(EnvironmentAffordance::ShowGrammarRegistry)
+        );
+        assert!(
+            grammar_registry
+                .inspection
+                .detail
+                .contains("environments=[base-loko,derived-host]")
+        );
+
+        let registered_environment =
+            eop_object(&objects, "registered-grammar-environment:base-loko");
+        assert_eq!(
+            registered_environment.kind,
+            EnvironmentKind::RegisteredGrammarEnvironment
+        );
+        assert_eq!(
+            registered_environment.storage,
+            EnvironmentStorage::FrontendRegistry
+        );
+
+        let staged_adapter = eop_object(&objects, "staged-grammar-adapter:records");
+        assert_eq!(staged_adapter.kind, EnvironmentKind::StagedGrammarAdapter);
+        assert_eq!(staged_adapter.storage, EnvironmentStorage::FrontendRegistry);
 
         let class = eop_object(&objects, "class:c0");
         assert_eq!(class.kind, EnvironmentKind::Class);

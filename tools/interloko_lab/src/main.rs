@@ -95,6 +95,13 @@ fn run(args: Vec<String>) -> Result<()> {
             print!("{}", workbench.dump_eop());
             Ok(())
         }
+        "registry" => {
+            let file = single_file_arg(&args)?;
+            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+            print_diagnostics(&artifacts.diagnostics)?;
+            print!("{}", artifacts.dump_grammar_registry());
+            Ok(())
+        }
         "dispatch" => {
             let (file, dispatch_id) = dispatch_args(&args)?;
             let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
@@ -377,6 +384,7 @@ fn all_affordances() -> &'static [EnvironmentAffordance] {
         Aff::ShowGrammarStack,
         Aff::ShowGrammarRule,
         Aff::ShowParseTrace,
+        Aff::ShowGrammarRegistry,
     ]
 }
 
@@ -645,6 +653,10 @@ fn invoke_affordance(file: &str, object_id: &str, affordance: EnvironmentAfforda
         }
         EnvironmentAffordance::ShowParseTrace => {
             print!("{}", workbench.artifacts.dump_parse_trace());
+            Ok(())
+        }
+        EnvironmentAffordance::ShowGrammarRegistry => {
+            print!("{}", workbench.artifacts.dump_grammar_registry());
             Ok(())
         }
         EnvironmentAffordance::Run => unreachable!("run handled before compile-only path"),
@@ -997,7 +1009,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 

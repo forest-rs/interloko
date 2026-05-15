@@ -15,6 +15,13 @@
 - `interloko_lab` and `interloko_corpus` validate `// grammar:` headers
   through the registry, so new registered environments do not need duplicated
   tool-side match arms.
+- `CompilerSession` and `IncrementalCompilerSession` now own the grammar
+  registry they compile with; the built-in registry remains the default, but
+  alternate static registries can be passed through the session boundary.
+- `interloko_lab registry <file.loko>` plus EOP objects expose the session
+  registry, registered language environments, and staged adapters. The same
+  data is available through the `grammar-registry:session` object and
+  `show-grammar-registry` affordance.
 - Staged grammar discovery now resolves `// grammar-activate:` and
   `// staged-loko:` directives through the registry and reports the registered
   adapter set in expectation diagnostics.

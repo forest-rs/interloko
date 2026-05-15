@@ -530,6 +530,15 @@ fn render_model_section(
         (EnvironmentKind::Generic, "Generics"),
         (EnvironmentKind::Method, "Methods"),
         (EnvironmentKind::Function, "Functions"),
+        (EnvironmentKind::GrammarRegistry, "Grammar Registry"),
+        (
+            EnvironmentKind::RegisteredGrammarEnvironment,
+            "Registered Grammar Environments",
+        ),
+        (
+            EnvironmentKind::StagedGrammarAdapter,
+            "Staged Grammar Adapters",
+        ),
     ] {
         let group = objects
             .iter()
@@ -900,6 +909,15 @@ fn function_object_facts(artifacts: &SessionArtifacts, object_id: &str) -> Vec<O
 fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
     match kind {
         EnvironmentKind::SourceFile => "Named source file known to this session.",
+        EnvironmentKind::GrammarRegistry => {
+            "Session-owned registry of language environments and staged grammar adapters."
+        }
+        EnvironmentKind::RegisteredGrammarEnvironment => {
+            "Language environment available through the session grammar registry."
+        }
+        EnvironmentKind::StagedGrammarAdapter => {
+            "Trusted staged grammar adapter available through the session grammar registry."
+        }
         EnvironmentKind::LanguageEnvironment => {
             "Language environment selected for parsing this source."
         }
@@ -938,6 +956,9 @@ fn environment_storage_title(storage: EnvironmentStorage) -> &'static str {
         EnvironmentStorage::SourceDefined => "Represented by source-level definitions.",
         EnvironmentStorage::HostRegistry => "Represented by host registry metadata.",
         EnvironmentStorage::HostAdapter => "Represented through an adapter-owned host bridge.",
+        EnvironmentStorage::FrontendRegistry => {
+            "Represented by the session grammar frontend registry."
+        }
         EnvironmentStorage::CachedArtifact => "Represented by cached compiler/session artifacts.",
         EnvironmentStorage::HostOwned => "Represented by host-owned state outside Interloko.",
     }

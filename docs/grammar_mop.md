@@ -31,6 +31,16 @@ hardcoded strings. `GrammarEnvironmentSelection` is a registry token; callers
 can use `GrammarEnvironmentSelection::base_loko()`,
 `GrammarEnvironmentSelection::derived_host()`, or
 `GrammarFrontendRegistry::builtin().environment_selection(token)`.
+Compiler sessions own the registry they compile with, and EOP projection exposes
+that session registry as inspectable objects:
+
+```text
+grammar-registry:session
+registered-grammar-environment:base-loko
+registered-grammar-environment:derived-host
+staged-grammar-adapter:calculator
+staged-grammar-adapter:records
+```
 
 The default projection names one language environment and one grammar:
 
@@ -131,6 +141,9 @@ Use `interloko_lab` to inspect the grammar projection:
 ```sh
 cargo run -p interloko_lab -- dump corpus/pass/generics/two_class_dispatch.loko --stage mop
 cargo run -p interloko_lab -- eop corpus/pass/generics/two_class_dispatch.loko
+cargo run -p interloko_lab -- registry corpus/pass/generics/two_class_dispatch.loko
+cargo run -p interloko_lab -- inspect corpus/pass/generics/two_class_dispatch.loko grammar-registry:session
+cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar-registry:session show-grammar-registry
 cargo run -p interloko_lab -- inspect corpus/pass/generics/two_class_dispatch.loko grammar:base-loko
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar:base-loko show-grammar-stack
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar-rule:base-loko/function-definition show-grammar-rule

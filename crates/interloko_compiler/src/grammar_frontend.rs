@@ -758,6 +758,14 @@ impl GrammarFrontendRegistry {
             .find(|provider| provider.environment_slug() == slug)
     }
 
+    /// Returns the registered language environment providers in resolution order.
+    #[must_use]
+    pub const fn environment_providers(
+        &self,
+    ) -> &'static [&'static dyn GrammarEnvironmentProvider] {
+        self.environment_providers
+    }
+
     /// Converts a registry token into a selection if the environment exists.
     #[must_use]
     pub fn environment_selection(&self, slug: &str) -> Option<GrammarEnvironmentSelection> {
@@ -781,6 +789,12 @@ impl GrammarFrontendRegistry {
             .iter()
             .copied()
             .find(|adapter| adapter.adapter_name() == name)
+    }
+
+    /// Returns the registered staged grammar adapters in resolution order.
+    #[must_use]
+    pub const fn staged_adapters(&self) -> &'static [&'static dyn StagedGrammarAdapter] {
+        self.staged_adapters
     }
 
     /// Returns the registered staged adapter tokens.

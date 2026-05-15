@@ -308,6 +308,13 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("object source:"));
     assert!(out.contains("kind=source-file"));
     assert!(out.contains("dump-eop"));
+    assert!(out.contains("object grammar-registry:session"));
+    assert!(out.contains("kind=grammar-registry"));
+    assert!(out.contains("show-grammar-registry"));
+    assert!(out.contains("object registered-grammar-environment:base-loko"));
+    assert!(out.contains("object registered-grammar-environment:derived-host"));
+    assert!(out.contains("object staged-grammar-adapter:calculator"));
+    assert!(out.contains("object staged-grammar-adapter:records"));
     assert!(out.contains("object language-environment:base-loko"));
     assert!(out.contains("kind=language-environment"));
     assert!(out.contains("object grammar:base-loko"));
@@ -330,6 +337,23 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("kind=dispatch-site"));
     assert!(out.contains("object runtime-class:c0"));
     assert!(out.contains("object artifact:"));
+}
+
+#[test]
+fn registry_command_lists_registered_frontend_entries() {
+    let file = fixture("staged_records.loko");
+    let out = run_lab(&[
+        "registry",
+        file.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    assert!(out.contains("grammar registry"));
+    assert!(out.contains("environments:"));
+    assert!(out.contains("base-loko BaseLokoEnvironment"));
+    assert!(out.contains("derived-host DerivedHostEnvironment"));
+    assert!(out.contains("staged adapters:"));
+    assert!(out.contains("calculator CalculatorRegionGrammar"));
+    assert!(out.contains("records RecordsRegionGrammar"));
 }
 
 #[test]
@@ -770,6 +794,15 @@ fn invoke_affordance_runs_read_only_views() {
     ]);
     assert!(parse_trace.contains("parse trace"));
     assert!(parse_trace.contains("rule provenance:"));
+
+    let registry = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar-registry:session",
+        "show-grammar-registry",
+    ]);
+    assert!(registry.contains("grammar registry"));
+    assert!(registry.contains("staged adapters:"));
 }
 
 #[test]
