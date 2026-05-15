@@ -1,5 +1,35 @@
 # Interloko Progress
 
+## Implemented: Timing Metrics And Execution Traces
+
+- Session artifacts now carry work counters plus elapsed timing fields for the
+  source, grammar/environment, parse, AST, semantic, diagnostic, lowering,
+  tape, runtime, method, and generic-dispatch artifacts already reported by
+  the incremental engine.
+- Stable artifact keys and fingerprints remain independent of timing data.
+  Timing is presentation/reporting metadata, not an input to cache identity.
+- Foundational compiler builds remain `no_std` by default. Tools opt into the
+  compiler `std` feature to collect wall-clock nanoseconds; `no_std` builds
+  still expose the same metrics shape with zero wall-clock duration.
+- Added structured execution trace capture over the public
+  `execution_tape::trace::TraceSink` API. Trace records cover run start/end,
+  call-frame enter/exit, host-call enter/exit, and optional instruction
+  events.
+- `interloko_lab run --trace <file.loko>` prints the normal result followed by
+  the trace. `interloko_lab trace <file.loko>` prints only the trace, and
+  `--instructions` includes per-instruction events.
+- HTML reports now include per-stage duration/work summaries, artifact cards
+  with timing/work fields, a compact execution timeline, and a collapsible raw
+  trace dump.
+
+Deferred:
+
+- Persistent profiling storage.
+- Live trace streaming, watch mode, and browser RPC.
+- Parallel scheduling and scheduler-owned timing aggregation.
+- Export to external trace/profiling formats.
+- Instruction-level timeline visualization by default.
+
 ## Implemented: Static HTML Workbench Reports
 
 - Added `interloko_lab report <file.loko> --output <report.html>` as a

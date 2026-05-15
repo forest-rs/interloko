@@ -26,7 +26,10 @@ The rest of the report shows:
 - generated classes, slots, accessors, generics, methods, functions, EOP ids,
   readable object facts, raw inspection facts, and affordances;
 - structured diagnostics with codes, spans, labels, and arguments;
-- artifact keys and the query dependency graph;
+- artifact keys, per-artifact work/timing summaries, and the query dependency
+  graph;
+- a compact runtime execution timeline plus a raw trace dump when the report
+  runs `main`;
 - lowered IR and `execution_tape` disassembly.
 
 Click a highlighted source span, staged region, frontend form, object, or
@@ -49,6 +52,12 @@ relation.
 
 The report does not bypass the compiler. It uses the same session artifacts as
 `run`, `dump`, `eop`, `inspect`, `dispatch`, and `artifacts`.
+
+Reports request normal runtime execution with tracing enabled. The trace uses
+the `execution_tape` tracing sink API and records run boundaries, call-frame
+scope changes, and host-call scope changes. Instruction events are available
+through `interloko_lab trace --instructions`, but are intentionally omitted
+from the default report timeline so short demos stay readable.
 
 It is also not a live tool yet. There is no server, editor, watch mode, browser
 RPC, persistence, or LSP integration. The generated JavaScript only provides

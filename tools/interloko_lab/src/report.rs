@@ -15,7 +15,8 @@ use interloko_compiler::sem::{
 };
 use interloko_compiler::session::{
     DumpStage, EnvironmentKind, EnvironmentObject, EnvironmentOrigin, EnvironmentStorage,
-    RuntimeResult, SessionArtifacts,
+    ExecutionTraceEvent, ExecutionTraceOutcome, ExecutionTraceScope, RuntimeResult,
+    SessionArtifacts,
 };
 use interloko_compiler::syntax::Span;
 
@@ -51,6 +52,7 @@ fn render_report(workbench: &CompiledWorkbench) -> String {
     out.push_str(&render_model_section(artifacts, &objects, &related_objects));
     out.push_str(&render_diagnostics_section(artifacts));
     out.push_str(&render_artifacts_section(artifacts));
+    out.push_str(&render_trace_section(artifacts));
     out.push_str(&render_ir_section(artifacts));
     out.push_str("    </main>\n");
     out.push_str("  </div>\n");
@@ -148,12 +150,15 @@ fn render_pipeline(artifacts: &SessionArtifacts) -> String {
         let key = report_for(&reports, artifact)
             .map(|report| report.key.to_string())
             .unwrap_or_else(|| "not emitted".to_string());
+        let metrics = artifacts.metrics_for(artifact);
         let _ = writeln!(
             out,
-            "          <li class=\"pipeline__node\" data-node=\"artifact:{}\"><span>{}</span><code>{}</code></li>",
+            "          <li class=\"pipeline__node\" data-node=\"artifact:{}\"><span>{}</span><code>{}</code><small>{} · {} work</small></li>",
             escape_attr(&key),
             escape_html(label),
-            escape_html(&key)
+            escape_html(&key),
+            escape_html(&format_duration_nanos(metrics.elapsed_nanos)),
+            metrics.work_units
         );
     }
     out.push_str("        </ol>\n");
@@ -1098,19 +1103,21 @@ fn render_artifacts_section(artifacts: &SessionArtifacts) -> String {
     out.push_str("        <div class=\"pipeline-panel\" id=\"artifact-pipeline\">\n");
     out.push_str("          <div class=\"pipeline-panel__copy\">\n");
     out.push_str("            <h3>Compiler Artifact Path</h3>\n");
-    out.push_str("            <p>Stable query artifacts produced for this file. Keys are shown for inspection and cross-linking; timing belongs to a later instrumented pass.</p>\n");
+    out.push_str("            <p>Stable query artifacts produced for this file. Keys identify artifacts; timing and work show the observed cost of this run.</p>\n");
     out.push_str("          </div>\n");
     out.push_str(&render_pipeline(artifacts));
     out.push_str("        </div>\n");
     out.push_str("        <div class=\"artifact-grid\">\n");
-    for report in artifacts.artifact_reports() {
+    for report in artifacts.artifact_metrics() {
         let label = artifact_label(report.artifact);
         let _ = writeln!(
             out,
-            "          <article class=\"artifact-card\" data-node=\"artifact:{}\"><span>{}</span><code>{}</code></article>",
+            "          <article class=\"artifact-card\" data-node=\"artifact:{}\"><span>{}</span><code>{}</code><dl><div><dt>time</dt><dd>{}</dd></div><div><dt>work</dt><dd>{}</dd></div></dl></article>",
             escape_attr(&report.key.to_string()),
             escape_html(&label),
-            escape_html(&report.key.to_string())
+            escape_html(&report.key.to_string()),
+            escape_html(&format_duration_nanos(report.metrics.elapsed_nanos)),
+            report.metrics.work_units
         );
     }
     out.push_str("        </div>\n");
@@ -1122,6 +1129,205 @@ fn render_artifacts_section(artifacts: &SessionArtifacts) -> String {
     ));
     out.push_str("      </section>\n");
     out
+}
+
+fn render_trace_section(artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    out.push_str("      <section class=\"section\" id=\"trace\">\n");
+    out.push_str("        <div class=\"section__heading\">\n");
+    out.push_str("          <p class=\"eyebrow\">Runtime trace</p>\n");
+    out.push_str("          <h2>Execution Timeline</h2>\n");
+    out.push_str("        </div>\n");
+    let Some(trace) = &artifacts.runtime_trace else {
+        out.push_str("        <div class=\"empty-state\">Runtime tracing was not requested for this report.</div>\n");
+        out.push_str("      </section>\n");
+        return out;
+    };
+    out.push_str("        <div class=\"trace-summary\">\n");
+    trace_metric(&mut out, "events", trace.events.len());
+    trace_metric(&mut out, "calls", trace_call_count(trace));
+    trace_metric(&mut out, "host calls", trace_host_count(trace));
+    trace_metric(&mut out, "instructions", trace_instruction_count(trace));
+    out.push_str("        </div>\n");
+    out.push_str("        <ol class=\"trace-timeline\">\n");
+    for (index, event) in trace.events.iter().take(80).enumerate() {
+        let _ = writeln!(
+            out,
+            "          <li class=\"trace-event {}\"><span>{index:04}</span><strong>{}</strong><small>{}</small></li>",
+            trace_event_class(event),
+            escape_html(&trace_event_summary(event)),
+            escape_html(&trace_event_detail(event))
+        );
+    }
+    if trace.events.len() > 80 {
+        let _ = writeln!(
+            out,
+            "          <li class=\"trace-event trace-event--more\"><span>...</span><strong>{} more events</strong><small>Open the raw trace for the complete stream.</small></li>",
+            trace.events.len() - 80
+        );
+    }
+    out.push_str("        </ol>\n");
+    out.push_str(&render_collapsible_dump(
+        "Raw Execution Trace",
+        "execution-trace",
+        &artifacts.dump_execution_trace(),
+        false,
+    ));
+    out.push_str("      </section>\n");
+    out
+}
+
+fn trace_metric(out: &mut String, label: &str, value: usize) {
+    let _ = writeln!(
+        out,
+        "          <div><span>{}</span><strong>{}</strong></div>",
+        escape_html(label),
+        value
+    );
+}
+
+fn trace_call_count(trace: &interloko_compiler::session::ExecutionTrace) -> usize {
+    trace
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ExecutionTraceEvent::ScopeEnter {
+                    scope: ExecutionTraceScope::CallFrame { .. },
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+fn trace_host_count(trace: &interloko_compiler::session::ExecutionTrace) -> usize {
+    trace
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ExecutionTraceEvent::ScopeEnter {
+                    scope: ExecutionTraceScope::HostCall { .. },
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+fn trace_instruction_count(trace: &interloko_compiler::session::ExecutionTrace) -> usize {
+    trace
+        .events
+        .iter()
+        .filter(|event| matches!(event, ExecutionTraceEvent::Instruction { .. }))
+        .count()
+}
+
+fn trace_event_class(event: &ExecutionTraceEvent) -> &'static str {
+    match event {
+        ExecutionTraceEvent::RunStart { .. } | ExecutionTraceEvent::RunEnd { .. } => {
+            "trace-event--run"
+        }
+        ExecutionTraceEvent::ScopeEnter {
+            scope: ExecutionTraceScope::CallFrame { .. },
+            ..
+        }
+        | ExecutionTraceEvent::ScopeExit {
+            scope: ExecutionTraceScope::CallFrame { .. },
+            ..
+        } => "trace-event--call",
+        ExecutionTraceEvent::ScopeEnter {
+            scope: ExecutionTraceScope::HostCall { .. },
+            ..
+        }
+        | ExecutionTraceEvent::ScopeExit {
+            scope: ExecutionTraceScope::HostCall { .. },
+            ..
+        } => "trace-event--host",
+        ExecutionTraceEvent::Instruction { .. } => "trace-event--instr",
+    }
+}
+
+fn trace_event_summary(event: &ExecutionTraceEvent) -> String {
+    match event {
+        ExecutionTraceEvent::RunStart { entry, .. } => format!("run starts at f{entry}"),
+        ExecutionTraceEvent::RunEnd { outcome } => match outcome {
+            ExecutionTraceOutcome::Ok => "run ends ok".into(),
+            ExecutionTraceOutcome::Trap { .. } => "run traps".into(),
+        },
+        ExecutionTraceEvent::ScopeEnter { scope, .. } => {
+            format!("enter {}", trace_scope_summary(scope))
+        }
+        ExecutionTraceEvent::ScopeExit { scope, .. } => {
+            format!("exit {}", trace_scope_summary(scope))
+        }
+        ExecutionTraceEvent::Instruction { opcode, .. } => format!("instruction 0x{opcode:02x}"),
+    }
+}
+
+fn trace_event_detail(event: &ExecutionTraceEvent) -> String {
+    match event {
+        ExecutionTraceEvent::RunStart { arg_count, .. } => format!("args={arg_count}"),
+        ExecutionTraceEvent::RunEnd { outcome } => match outcome {
+            ExecutionTraceOutcome::Ok => "outcome=ok".into(),
+            ExecutionTraceOutcome::Trap { message } => format!("trap={message}"),
+        },
+        ExecutionTraceEvent::ScopeEnter {
+            depth,
+            func,
+            pc,
+            span_id,
+            ..
+        }
+        | ExecutionTraceEvent::ScopeExit {
+            depth,
+            func,
+            pc,
+            span_id,
+            ..
+        } => format!(
+            "depth={depth} func=f{func} pc={pc}{}",
+            report_span_suffix(*span_id)
+        ),
+        ExecutionTraceEvent::Instruction {
+            func,
+            pc,
+            next_pc,
+            span_id,
+            ..
+        } => format!(
+            "func=f{func} pc={pc}->{next_pc}{}",
+            report_span_suffix(*span_id)
+        ),
+    }
+}
+
+fn trace_scope_summary(scope: &ExecutionTraceScope) -> String {
+    match scope {
+        ExecutionTraceScope::CallFrame { func } => format!("call frame f{func}"),
+        ExecutionTraceScope::HostCall { symbol_name, .. } => format!("host {symbol_name}"),
+    }
+}
+
+fn report_span_suffix(span_id: Option<u64>) -> String {
+    span_id.map_or_else(String::new, |span_id| format!(" span={span_id}"))
+}
+
+fn format_duration_nanos(nanos: u64) -> String {
+    if nanos == 0 {
+        "0 ns".into()
+    } else if nanos < 1_000 {
+        format!("{nanos} ns")
+    } else if nanos < 1_000_000 {
+        format!("{:.1} us", nanos as f64 / 1_000.0)
+    } else if nanos < 1_000_000_000 {
+        format!("{:.1} ms", nanos as f64 / 1_000_000.0)
+    } else {
+        format!("{:.2} s", nanos as f64 / 1_000_000_000.0)
+    }
 }
 
 fn render_ir_section(artifacts: &SessionArtifacts) -> String {
@@ -1246,16 +1452,35 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
     }
     out.push(']');
     out.push_str(",\"artifacts\":[");
-    for (index, report) in artifacts.artifact_reports().iter().enumerate() {
+    for (index, report) in artifacts.artifact_metrics().iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
         let _ = write!(
             out,
-            "{{\"key\":{},\"label\":{}}}",
+            "{{\"key\":{},\"label\":{},\"work\":{},\"elapsedNanos\":{}}}",
             json_string(&report.key.to_string()),
-            json_string(&artifact_label(report.artifact))
+            json_string(&artifact_label(report.artifact)),
+            report.metrics.work_units,
+            report.metrics.elapsed_nanos
         );
+    }
+    out.push(']');
+    out.push_str(",\"executionTrace\":[");
+    if let Some(trace) = &artifacts.runtime_trace {
+        for (index, event) in trace.events.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "{{\"index\":{},\"kind\":{},\"summary\":{},\"detail\":{}}}",
+                index,
+                json_string(trace_event_class(event)),
+                json_string(&trace_event_summary(event)),
+                json_string(&trace_event_detail(event))
+            );
+        }
     }
     out.push(']');
     out.push('}');
@@ -1947,6 +2172,14 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.pipeline__node small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
 .report-main {
   padding: clamp(24px, 4vw, 56px);
 }
@@ -2381,6 +2614,31 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.artifact-card dl {
+  margin: 12px 0 0;
+}
+
+.artifact-card dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+}
+
+.artifact-card dt {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.artifact-card dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .arg-list {
   margin: 12px 0 0;
 }
@@ -2427,6 +2685,85 @@ pre {
   font-size: 0.9rem;
 }
 
+.trace-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.trace-summary div {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.trace-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.trace-summary strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 1.45rem;
+}
+
+.trace-timeline {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trace-event {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(160px, 0.45fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--teal);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.trace-event span {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.trace-event strong,
+.trace-event small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.trace-event small {
+  color: var(--muted);
+}
+
+.trace-event--run {
+  border-left-color: var(--accent);
+}
+
+.trace-event--host {
+  border-left-color: #c47049;
+}
+
+.trace-event--instr {
+  border-left-color: #74837e;
+}
+
+.trace-event--more {
+  opacity: 0.82;
+}
+
 .is-focus {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
@@ -2470,6 +2807,10 @@ pre {
   }
 
   .arg-list div {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-event {
     grid-template-columns: 1fr;
   }
 }

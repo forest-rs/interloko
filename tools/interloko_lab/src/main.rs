@@ -13,13 +13,31 @@ use interloko_compiler::session::{
     AffordanceFacet, CompilerSession, DumpStage, EnvironmentAffordance, EnvironmentKind,
     EnvironmentObject, EnvironmentObjectId, EnvironmentObjectSink, EnvironmentOrigin,
     EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession, InspectionFacet,
-    PresentationFacet, RuntimeMode, RuntimeResult, SessionArtifacts,
+    PresentationFacet, RuntimeMode, RuntimeResult, SessionArtifacts, execution_trace_mask,
 };
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 
 mod report;
 
 type Result<T> = std::result::Result<T, LabError>;
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct TraceOptions {
+    enabled: bool,
+    include_instructions: bool,
+}
+
+impl TraceOptions {
+    fn runtime_mode(self) -> RuntimeMode {
+        if self.enabled {
+            RuntimeMode::RunMainTraced {
+                mask: execution_trace_mask(self.include_instructions),
+            }
+        } else {
+            RuntimeMode::RunMain
+        }
+    }
+}
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -34,17 +52,27 @@ fn run(args: Vec<String>) -> Result<()> {
     };
     match command {
         "run" => {
-            let file = single_file_arg(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::RunMain)?;
+            let (file, trace) = run_args(&args)?;
+            let artifacts = compile_path(file, trace.runtime_mode())?;
             print_diagnostics(&artifacts.diagnostics)?;
             match artifacts.runtime_result {
                 Some(RuntimeResult::ReturnedI64(value)) => {
                     println!("{value}");
+                    if trace.enabled {
+                        print!("{}", artifacts.dump_execution_trace());
+                    }
                     Ok(())
                 }
                 Some(result) => Err(LabError::Runtime(format!("{result:?}"))),
                 None => Err(LabError::Runtime("runtime was not requested".into())),
             }
+        }
+        "trace" => {
+            let (file, trace) = trace_args(&args)?;
+            let artifacts = compile_path(file, trace.runtime_mode())?;
+            print_diagnostics(&artifacts.diagnostics)?;
+            print!("{}", artifacts.dump_execution_trace());
+            Ok(())
         }
         "dump" => {
             let (file, stage) = dump_args(&args)?;
@@ -107,7 +135,12 @@ fn run(args: Vec<String>) -> Result<()> {
         }
         "report" => {
             let (file, output) = report_args(&args)?;
-            let workbench = compile_workbench_path(file, RuntimeMode::RunMain)?;
+            let workbench = compile_workbench_path(
+                file,
+                RuntimeMode::RunMainTraced {
+                    mask: execution_trace_mask(false),
+                },
+            )?;
             report::write_report(Path::new(output), &workbench).map_err(|error| LabError::Io {
                 path: output.into(),
                 error,
@@ -186,6 +219,58 @@ fn single_file_arg(args: &[String]) -> Result<&str> {
         )));
     }
     Ok(&args[1])
+}
+
+fn run_args(args: &[String]) -> Result<(&str, TraceOptions)> {
+    let (file, trace) = file_with_trace_options(args, false)?;
+    if file.is_empty() {
+        return Err(LabError::Usage(
+            "usage: interloko_lab run [--trace] [--instructions] <file.loko>".into(),
+        ));
+    }
+    Ok((file, trace))
+}
+
+fn trace_args(args: &[String]) -> Result<(&str, TraceOptions)> {
+    let (file, mut trace) = file_with_trace_options(args, true)?;
+    if file.is_empty() {
+        return Err(LabError::Usage(
+            "usage: interloko_lab trace [--instructions] <file.loko>".into(),
+        ));
+    }
+    trace.enabled = true;
+    Ok((file, trace))
+}
+
+fn file_with_trace_options(args: &[String], trace_command: bool) -> Result<(&str, TraceOptions)> {
+    let mut file = None;
+    let mut trace = TraceOptions {
+        enabled: trace_command,
+        include_instructions: false,
+    };
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--trace" if !trace_command => trace.enabled = true,
+            "--instructions" | "--trace-instr" => {
+                trace.enabled = true;
+                trace.include_instructions = true;
+            }
+            option if option.starts_with("--") => {
+                return Err(LabError::Usage(format!(
+                    "unknown trace option {option}; expected --trace, --instructions, or --trace-instr"
+                )));
+            }
+            path => {
+                if file.replace(path).is_some() {
+                    return Err(LabError::Usage(format!(
+                        "usage: interloko_lab {} [--trace] [--instructions] <file.loko>",
+                        args.first().map_or("COMMAND", String::as_str)
+                    )));
+                }
+            }
+        }
+    }
+    Ok((file.unwrap_or(""), trace))
 }
 
 fn dump_args(args: &[String]) -> Result<(&str, DumpStage)> {
@@ -894,7 +979,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} run <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 

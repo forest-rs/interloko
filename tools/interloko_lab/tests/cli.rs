@@ -193,6 +193,28 @@ fn run_executes_main() {
 }
 
 #[test]
+fn run_and_trace_commands_expose_execution_trace() {
+    let file = fixture("generic_area.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let run = run_lab(&["run", "--trace", path]);
+    assert!(run.starts_with("100\nexecution trace:"));
+    assert!(run.contains("run-start"));
+    assert!(run.contains("run-end ok"));
+    assert!(run.contains("call-frame"));
+    assert!(run.contains("host-call"));
+
+    let trace = run_lab(&["trace", path]);
+    assert!(trace.starts_with("execution trace:"));
+    assert!(trace.contains("run-start"));
+    assert!(trace.contains("host-call"));
+    assert!(!trace.contains("instr func="));
+
+    let instruction_trace = run_lab(&["trace", "--instructions", path]);
+    assert!(instruction_trace.contains("instr func="));
+}
+
+#[test]
 fn rich_values_run_and_dump_through_lab() {
     let file = fixture("rich_values.loko");
     let path = file.to_str().expect("fixture path should be utf8");
@@ -431,8 +453,12 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("returned 10"));
     assert!(html.contains("id=\"artifact-pipeline\""));
     assert!(html.contains("Compiler Artifact Path"));
+    assert!(html.contains("<dt>time</dt>"));
+    assert!(html.contains("<dt>work</dt>"));
     assert!(html.contains("id=\"interloko-report-data\""));
     assert!(html.contains("\"stagedRegions\""));
+    assert!(html.contains("\"elapsedNanos\""));
+    assert!(html.contains("\"executionTrace\""));
     assert!(html.contains("Expansion Chain"));
     assert!(html.contains("RecordsRegionGrammar"));
     assert!(html.contains("frontend-class"));
@@ -446,6 +472,9 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("Raw inspection facts"));
     assert!(html.contains("No diagnostics were emitted."));
     assert!(html.contains("Artifact Graph"));
+    assert!(html.contains("Execution Timeline"));
+    assert!(html.contains("Raw Execution Trace"));
+    assert!(html.contains("host calls"));
     assert!(html.contains("Lowered IR"));
     assert!(html.contains("Tape Disassembly"));
     assert!(html.contains("source-mark--activation"));
