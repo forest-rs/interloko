@@ -10,7 +10,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
-use execution_tape::trace::TraceMask;
+use execution_tape::program::Program;
+use execution_tape::trace::{ScopeKind, TraceMask, TraceOutcome, TraceSink};
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 
@@ -91,6 +92,24 @@ pub enum RuntimeMode {
     CompileOnly,
     /// Compile and run zero-argument `main` when possible.
     RunMain,
+    /// Compile and run zero-argument `main` with execution tracing enabled.
+    RunMainTraced {
+        /// Events requested from `execution_tape`.
+        mask: TraceMask,
+    },
+}
+
+/// Returns Interloko's default runtime trace mask.
+///
+/// The default captures run boundaries, call frames, and host calls while
+/// leaving per-instruction tracing off.
+#[must_use]
+pub fn execution_trace_mask(include_instructions: bool) -> TraceMask {
+    let mut mask = TraceMask::RUN | TraceMask::CALL | TraceMask::HOST;
+    if include_instructions {
+        mask |= TraceMask::INSTR;
+    }
+    mask
 }
 
 /// Result of running `main` through the session API.
@@ -151,6 +170,111 @@ pub enum FunctionRunResult {
     FunctionReturnedNonI64 {
         /// Requested function name.
         name: String,
+    },
+}
+
+/// Result and optional trace from running a zero-argument function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TracedFunctionRunResult {
+    /// Function result.
+    pub result: FunctionRunResult,
+    /// Captured trace, when tracing was requested and the VM ran.
+    pub trace: Option<ExecutionTrace>,
+}
+
+/// Captured `execution_tape` trace for one runtime run.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExecutionTrace {
+    /// Events in the order emitted by the VM.
+    pub events: Vec<ExecutionTraceEvent>,
+}
+
+/// One captured runtime trace event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionTraceEvent {
+    /// VM run started.
+    RunStart {
+        /// Entry function id.
+        entry: u32,
+        /// Number of arguments passed to the entry function.
+        arg_count: usize,
+    },
+    /// VM run ended.
+    RunEnd {
+        /// Runtime outcome.
+        outcome: ExecutionTraceOutcome,
+    },
+    /// A call-frame or host-call scope was entered.
+    ScopeEnter {
+        /// Scope kind.
+        scope: ExecutionTraceScope,
+        /// VM frame depth at the boundary.
+        depth: usize,
+        /// Current function id at the boundary.
+        func: u32,
+        /// Program counter at the boundary.
+        pc: u32,
+        /// Optional source span id carried by `execution_tape`.
+        span_id: Option<u64>,
+    },
+    /// A call-frame or host-call scope was exited.
+    ScopeExit {
+        /// Scope kind.
+        scope: ExecutionTraceScope,
+        /// VM frame depth at the boundary.
+        depth: usize,
+        /// Current function id at the boundary.
+        func: u32,
+        /// Program counter at the boundary.
+        pc: u32,
+        /// Optional source span id carried by `execution_tape`.
+        span_id: Option<u64>,
+    },
+    /// One executed instruction.
+    Instruction {
+        /// Current function id.
+        func: u32,
+        /// Program counter before the instruction.
+        pc: u32,
+        /// Program counter after the instruction.
+        next_pc: u32,
+        /// Optional source span id carried by `execution_tape`.
+        span_id: Option<u64>,
+        /// Raw opcode byte.
+        opcode: u8,
+    },
+}
+
+/// Captured runtime trace outcome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionTraceOutcome {
+    /// Runtime completed successfully.
+    Ok,
+    /// Runtime trapped.
+    Trap {
+        /// Trap details.
+        message: String,
+    },
+}
+
+/// Scope kind captured from `execution_tape`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionTraceScope {
+    /// VM call frame.
+    CallFrame {
+        /// Function id.
+        func: u32,
+    },
+    /// Host call.
+    HostCall {
+        /// Host signature id.
+        host_sig: u32,
+        /// Host symbol id.
+        symbol: u32,
+        /// Host symbol name, when resolvable from the program.
+        symbol_name: String,
+        /// Stable host signature hash carried by bytecode.
+        sig_hash: u64,
     },
 }
 
@@ -547,8 +671,10 @@ pub struct SessionArtifacts {
     pub tape_error: Option<tape::TapeError>,
     /// Aggregated diagnostics from the compiler pipeline.
     pub diagnostics: Vec<Diagnostic>,
-    /// Runtime result when [`RuntimeMode::RunMain`] was requested.
+    /// Runtime result when [`RuntimeMode::RunMain`] or tracing was requested.
     pub runtime_result: Option<RuntimeResult>,
+    /// Captured runtime trace when traced execution was requested.
+    pub runtime_trace: Option<ExecutionTrace>,
     invalidation: QueryInvalidation,
     artifact_metrics: Vec<ArtifactMetricEntry>,
 }
@@ -654,6 +780,31 @@ impl SessionArtifacts {
             .map_or(FunctionRunResult::TapeUnavailable, |tape| {
                 run_zero_arg_function_i64(&self.sem, tape, function_name)
             })
+    }
+
+    /// Runs a named zero-argument function and captures an execution trace.
+    #[must_use]
+    pub fn run_zero_arg_function_i64_traced(
+        &self,
+        function_name: &str,
+        mask: TraceMask,
+    ) -> TracedFunctionRunResult {
+        self.tape.as_ref().map_or(
+            TracedFunctionRunResult {
+                result: FunctionRunResult::TapeUnavailable,
+                trace: None,
+            },
+            |tape| run_zero_arg_function_i64_with_trace(&self.sem, tape, function_name, Some(mask)),
+        )
+    }
+
+    /// Dumps the captured runtime trace, when present.
+    #[must_use]
+    pub fn dump_execution_trace(&self) -> String {
+        self.runtime_trace.as_ref().map_or_else(
+            || "execution trace unavailable: traced execution was not requested\n".into(),
+            dump_execution_trace,
+        )
     }
 
     /// Returns structured environment objects projected from these artifacts.
@@ -1223,19 +1374,34 @@ impl CachedSourceFile {
 fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> SessionArtifacts {
     let mut artifacts = previous.clone();
     let mut timings = ArtifactTimingCollector::default();
-    artifacts.runtime_result = match mode {
-        RuntimeMode::CompileOnly => None,
-        RuntimeMode::RunMain => previous.runtime_result.clone().or_else(|| {
-            let (result, elapsed_nanos) = measure_elapsed(|| {
-                previous
-                    .tape
-                    .as_ref()
-                    .map(|tape| run_main(&previous.sem, tape))
+    let (runtime_result, runtime_trace) = match mode {
+        RuntimeMode::CompileOnly => (None, None),
+        RuntimeMode::RunMain => (
+            previous.runtime_result.clone().or_else(|| {
+                let (result, elapsed_nanos) = measure_elapsed(|| {
+                    previous
+                        .tape
+                        .as_ref()
+                        .map(|tape| run_main(&previous.sem, tape))
+                });
+                timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
+                result
+            }),
+            None,
+        ),
+        RuntimeMode::RunMainTraced { mask } => {
+            let ((result, trace), elapsed_nanos) = measure_elapsed(|| {
+                previous.tape.as_ref().map_or((None, None), |tape| {
+                    let (result, trace) = run_main_with_trace(&previous.sem, tape, Some(mask));
+                    (Some(result), trace)
+                })
             });
             timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
-            result
-        }),
+            (result, trace)
+        }
     };
+    artifacts.runtime_result = runtime_result;
+    artifacts.runtime_trace = runtime_trace;
     artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
     artifacts
 }
@@ -2805,9 +2971,13 @@ fn compile_file_with_host_registry(
         None => (None, None),
     });
     timings.record(QueryArtifact::TapeProgram, elapsed_nanos);
-    let (runtime_result, elapsed_nanos) = measure_elapsed(|| match mode {
-        RuntimeMode::CompileOnly => None,
-        RuntimeMode::RunMain => tape.as_ref().map(|tape| run_main(&sem, tape)),
+    let ((runtime_result, runtime_trace), elapsed_nanos) = measure_elapsed(|| match mode {
+        RuntimeMode::CompileOnly => (None, None),
+        RuntimeMode::RunMain => (tape.as_ref().map(|tape| run_main(&sem, tape)), None),
+        RuntimeMode::RunMainTraced { mask } => tape.as_ref().map_or((None, None), |tape| {
+            let (result, trace) = run_main_with_trace(&sem, tape, Some(mask));
+            (Some(result), trace)
+        }),
     });
     timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
 
@@ -2823,6 +2993,7 @@ fn compile_file_with_host_registry(
         tape_error,
         diagnostics,
         runtime_result,
+        runtime_trace,
         invalidation,
         artifact_metrics: Vec::new(),
     };
@@ -2831,7 +3002,17 @@ fn compile_file_with_host_registry(
 }
 
 fn run_main(module: &sem::Module, tape: &tape::TapeModule) -> RuntimeResult {
-    match run_zero_arg_function_i64(module, tape, "main") {
+    let (result, _) = run_main_with_trace(module, tape, None);
+    result
+}
+
+fn run_main_with_trace(
+    module: &sem::Module,
+    tape: &tape::TapeModule,
+    trace_mask: Option<TraceMask>,
+) -> (RuntimeResult, Option<ExecutionTrace>) {
+    let traced = run_zero_arg_function_i64_with_trace(module, tape, "main", trace_mask);
+    let result = match traced.result {
         FunctionRunResult::ReturnedI64(value) => RuntimeResult::ReturnedI64(value),
         FunctionRunResult::MissingFunction { .. } | FunctionRunResult::TapeUnavailable => {
             RuntimeResult::MissingMain
@@ -2839,7 +3020,8 @@ fn run_main(module: &sem::Module, tape: &tape::TapeModule) -> RuntimeResult {
         FunctionRunResult::FunctionHasParameters { .. } => RuntimeResult::MainHasParameters,
         FunctionRunResult::Trap { message } => RuntimeResult::Trap { message },
         FunctionRunResult::FunctionReturnedNonI64 { .. } => RuntimeResult::MainReturnedNonI64,
-    }
+    };
+    (result, traced.trace)
 }
 
 fn run_zero_arg_function_i64(
@@ -2847,43 +3029,270 @@ fn run_zero_arg_function_i64(
     tape: &tape::TapeModule,
     function_name: &str,
 ) -> FunctionRunResult {
+    run_zero_arg_function_i64_with_trace(module, tape, function_name, None).result
+}
+
+fn run_zero_arg_function_i64_with_trace(
+    module: &sem::Module,
+    tape: &tape::TapeModule,
+    function_name: &str,
+    trace_mask: Option<TraceMask>,
+) -> TracedFunctionRunResult {
     let Some(function) = module
         .functions
         .iter()
         .find(|function| function.name == function_name)
     else {
-        return FunctionRunResult::MissingFunction {
-            name: function_name.to_string(),
+        return TracedFunctionRunResult {
+            result: FunctionRunResult::MissingFunction {
+                name: function_name.to_string(),
+            },
+            trace: None,
         };
     };
     if !function.params.is_empty() {
-        return FunctionRunResult::FunctionHasParameters {
-            name: function_name.to_string(),
+        return TracedFunctionRunResult {
+            result: FunctionRunResult::FunctionHasParameters {
+                name: function_name.to_string(),
+            },
+            trace: None,
         };
     }
     let Some(func) = tape.functions.get(function.id.0 as usize).copied() else {
-        return FunctionRunResult::MissingFunction {
-            name: function_name.to_string(),
+        return TracedFunctionRunResult {
+            result: FunctionRunResult::MissingFunction {
+                name: function_name.to_string(),
+            },
+            trace: None,
         };
     };
 
     let host = InterlokoHost::new(tape.runtime.clone());
     let mut vm = Vm::new(host, Limits::default());
-    let output = match vm.run(&tape.program, func, &[], TraceMask::NONE, None) {
+    let mut trace = trace_mask.map(ExecutionTraceSink::new);
+    let (mask, sink): (TraceMask, Option<&mut dyn TraceSink>) =
+        trace.as_mut().map_or((TraceMask::NONE, None), |trace| {
+            (trace.mask(), Some(trace as &mut dyn TraceSink))
+        });
+    let output = match vm.run(&tape.program, func, &[], mask, sink) {
         Ok(output) => output,
         Err(trap) => {
-            return FunctionRunResult::Trap {
-                message: format!("{trap:?}"),
+            return TracedFunctionRunResult {
+                result: FunctionRunResult::Trap {
+                    message: format!("{trap:?}"),
+                },
+                trace: trace.map(ExecutionTraceSink::finish),
             };
         }
     };
 
-    match output.as_slice() {
+    let result = match output.as_slice() {
         [Value::I64(value)] => FunctionRunResult::ReturnedI64(*value),
         _ => FunctionRunResult::FunctionReturnedNonI64 {
             name: function_name.to_string(),
         },
+    };
+    TracedFunctionRunResult {
+        result,
+        trace: trace.map(ExecutionTraceSink::finish),
     }
+}
+
+#[derive(Clone, Debug)]
+struct ExecutionTraceSink {
+    mask: TraceMask,
+    trace: ExecutionTrace,
+}
+
+impl ExecutionTraceSink {
+    fn new(mask: TraceMask) -> Self {
+        Self {
+            mask,
+            trace: ExecutionTrace::default(),
+        }
+    }
+
+    fn finish(self) -> ExecutionTrace {
+        self.trace
+    }
+}
+
+impl TraceSink for ExecutionTraceSink {
+    fn mask(&self) -> TraceMask {
+        self.mask
+    }
+
+    fn run_start(
+        &mut self,
+        _program: &Program,
+        entry: execution_tape::value::FuncId,
+        arg_count: usize,
+    ) {
+        self.trace.events.push(ExecutionTraceEvent::RunStart {
+            entry: entry.0,
+            arg_count,
+        });
+    }
+
+    fn instr(
+        &mut self,
+        _program: &Program,
+        func: execution_tape::value::FuncId,
+        pc: u32,
+        next_pc: u32,
+        span_id: Option<u64>,
+        opcode: u8,
+    ) {
+        self.trace.events.push(ExecutionTraceEvent::Instruction {
+            func: func.0,
+            pc,
+            next_pc,
+            span_id,
+            opcode,
+        });
+    }
+
+    fn scope_enter(
+        &mut self,
+        program: &Program,
+        kind: ScopeKind,
+        depth: usize,
+        func: execution_tape::value::FuncId,
+        pc: u32,
+        span_id: Option<u64>,
+    ) {
+        self.trace.events.push(ExecutionTraceEvent::ScopeEnter {
+            scope: trace_scope(program, kind),
+            depth,
+            func: func.0,
+            pc,
+            span_id,
+        });
+    }
+
+    fn scope_exit(
+        &mut self,
+        program: &Program,
+        kind: ScopeKind,
+        depth: usize,
+        func: execution_tape::value::FuncId,
+        pc: u32,
+        span_id: Option<u64>,
+    ) {
+        self.trace.events.push(ExecutionTraceEvent::ScopeExit {
+            scope: trace_scope(program, kind),
+            depth,
+            func: func.0,
+            pc,
+            span_id,
+        });
+    }
+
+    fn run_end(&mut self, _program: &Program, outcome: TraceOutcome<'_>) {
+        let outcome = match outcome {
+            TraceOutcome::Ok => ExecutionTraceOutcome::Ok,
+            TraceOutcome::Trap(trap) => ExecutionTraceOutcome::Trap {
+                message: format!("{trap:?}"),
+            },
+        };
+        self.trace
+            .events
+            .push(ExecutionTraceEvent::RunEnd { outcome });
+    }
+}
+
+fn trace_scope(program: &Program, kind: ScopeKind) -> ExecutionTraceScope {
+    match kind {
+        ScopeKind::CallFrame { func } => ExecutionTraceScope::CallFrame { func: func.0 },
+        ScopeKind::HostCall {
+            host_sig,
+            symbol,
+            sig_hash,
+        } => ExecutionTraceScope::HostCall {
+            host_sig: host_sig.0,
+            symbol: symbol.index(),
+            symbol_name: program
+                .symbol_str(symbol)
+                .unwrap_or("<invalid-symbol>")
+                .to_string(),
+            sig_hash: sig_hash.0,
+        },
+    }
+}
+
+fn dump_execution_trace(trace: &ExecutionTrace) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "execution trace:");
+    if trace.events.is_empty() {
+        out.push_str("  none\n");
+        return out;
+    }
+    for (index, event) in trace.events.iter().enumerate() {
+        let _ = writeln!(out, "  {index:04} {}", execution_trace_event_label(event));
+    }
+    out
+}
+
+fn execution_trace_event_label(event: &ExecutionTraceEvent) -> String {
+    match event {
+        ExecutionTraceEvent::RunStart { entry, arg_count } => {
+            format!("run-start entry=f{entry} args={arg_count}")
+        }
+        ExecutionTraceEvent::RunEnd { outcome } => match outcome {
+            ExecutionTraceOutcome::Ok => "run-end ok".into(),
+            ExecutionTraceOutcome::Trap { message } => format!("run-end trap {message}"),
+        },
+        ExecutionTraceEvent::ScopeEnter {
+            scope,
+            depth,
+            func,
+            pc,
+            span_id,
+        } => format!(
+            "enter {} depth={depth} func=f{func} pc={pc}{}",
+            trace_scope_label(scope),
+            span_label(*span_id)
+        ),
+        ExecutionTraceEvent::ScopeExit {
+            scope,
+            depth,
+            func,
+            pc,
+            span_id,
+        } => format!(
+            "exit {} depth={depth} func=f{func} pc={pc}{}",
+            trace_scope_label(scope),
+            span_label(*span_id)
+        ),
+        ExecutionTraceEvent::Instruction {
+            func,
+            pc,
+            next_pc,
+            span_id,
+            opcode,
+        } => format!(
+            "instr func=f{func} pc={pc}->{next_pc} opcode=0x{opcode:02x}{}",
+            span_label(*span_id)
+        ),
+    }
+}
+
+fn trace_scope_label(scope: &ExecutionTraceScope) -> String {
+    match scope {
+        ExecutionTraceScope::CallFrame { func } => format!("call-frame f{func}"),
+        ExecutionTraceScope::HostCall {
+            host_sig,
+            symbol,
+            symbol_name,
+            sig_hash,
+        } => {
+            format!("host-call {symbol_name} symbol={symbol} sig=h{host_sig} hash={sig_hash:016x}")
+        }
+    }
+}
+
+fn span_label(span_id: Option<u64>) -> String {
+    span_id.map_or_else(String::new, |span_id| format!(" span={span_id}"))
 }
 
 fn dump_syntax(tree: &SyntaxTree) -> String {
@@ -6400,6 +6809,84 @@ mod tests {
         assert!(graph.contains("work="));
         assert!(graph.contains("ticks="));
         assert!(graph.contains("ns="));
+    }
+
+    #[test]
+    fn session_captures_execution_trace_when_requested() {
+        let artifacts = CompilerSession::compile_source(
+            "area.loko",
+            AREA,
+            RuntimeMode::RunMainTraced {
+                mask: TraceMask::RUN | TraceMask::CALL | TraceMask::HOST,
+            },
+        );
+        assert_eq!(
+            artifacts.runtime_result,
+            Some(RuntimeResult::ReturnedI64(100))
+        );
+        let trace = artifacts
+            .runtime_trace
+            .as_ref()
+            .expect("trace should be captured");
+        assert!(
+            trace
+                .events
+                .iter()
+                .any(|event| matches!(event, ExecutionTraceEvent::RunStart { .. }))
+        );
+        assert!(
+            trace
+                .events
+                .iter()
+                .any(|event| matches!(event, ExecutionTraceEvent::RunEnd { .. }))
+        );
+        assert!(trace.events.iter().any(|event| {
+            matches!(
+                event,
+                ExecutionTraceEvent::ScopeEnter {
+                    scope: ExecutionTraceScope::CallFrame { .. },
+                    ..
+                }
+            )
+        }));
+        assert!(trace.events.iter().any(|event| {
+            matches!(
+                event,
+                ExecutionTraceEvent::ScopeEnter {
+                    scope: ExecutionTraceScope::HostCall { .. },
+                    ..
+                }
+            )
+        }));
+
+        let dump = artifacts.dump_execution_trace();
+        assert!(dump.contains("execution trace:"));
+        assert!(dump.contains("run-start"));
+        assert!(dump.contains("host-call"));
+
+        let plain = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::RunMain);
+        assert!(plain.runtime_trace.is_none());
+        assert!(
+            plain
+                .dump_execution_trace()
+                .contains("traced execution was not requested")
+        );
+    }
+
+    #[test]
+    fn session_can_capture_instruction_trace_for_named_runs() {
+        let artifacts =
+            CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
+        let traced =
+            artifacts.run_zero_arg_function_i64_traced("main", TraceMask::RUN | TraceMask::INSTR);
+        assert_eq!(traced.result, FunctionRunResult::ReturnedI64(100));
+        let trace = traced.trace.expect("trace should be captured");
+        assert!(
+            trace
+                .events
+                .iter()
+                .any(|event| matches!(event, ExecutionTraceEvent::Instruction { .. }))
+        );
     }
 
     #[test]
