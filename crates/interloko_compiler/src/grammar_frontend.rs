@@ -2433,6 +2433,24 @@ mod tests {
     }
 
     #[test]
+    fn staged_calculator_region_reports_malformed_lines() {
+        let source = "// grammar-activate: calculator\n\
+                      // staged-loko: calculator\n\
+                      main 40 + 2\n\
+                      // end-staged-loko\n";
+        let report = parse_file(SourceFileId::from_path("calculator.loko"), source);
+
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
+                    == Some("`name = expression`".to_string())
+                    && diagnostic_arg(diagnostic, "adapter") == Some("calculator".to_string()))
+        );
+    }
+
+    #[test]
     fn staged_records_region_emits_class_frontend_forms() {
         let source = "// grammar-activate: records\n\n\
                       // staged-loko: records\n\
@@ -2511,6 +2529,45 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
                     == Some("`field: <type>`".to_string())
+                    && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string()))
+        );
+    }
+
+    #[test]
+    fn staged_records_region_reports_invalid_fields() {
+        let source = "// grammar-activate: records\n\
+                      // staged-loko: records\n\
+                      record circle\n\
+                        123: <integer>\n\
+                      end\n\
+                      // end-staged-loko\n";
+        let report = parse_file(SourceFileId::from_path("records.loko"), source);
+
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
+                    == Some("valid record field".to_string())
+                    && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string())
+                    && diagnostic_arg(diagnostic, "field") == Some("123".to_string()))
+        );
+    }
+
+    #[test]
+    fn staged_records_region_reports_malformed_record_syntax() {
+        let source = "// grammar-activate: records\n\
+                      // staged-loko: records\n\
+                      circle\n\
+                      // end-staged-loko\n";
+        let report = parse_file(SourceFileId::from_path("records.loko"), source);
+
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
+                    == Some("`record name`".to_string())
                     && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string()))
         );
     }
