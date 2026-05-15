@@ -74,8 +74,12 @@ cargo run -p interloko_lab -- report tools/interloko_lab/fixtures/staged_records
 
 That file demonstrates staged records syntax becoming frontend class forms,
 then generated AST/semantic class, slot, accessor, and setter-generic objects.
-The materialized Loko column remains in the report so readers can compare the
-staged syntax to ordinary Loko syntax.
+It also runs a small `main` function that constructs generated classes, reads
+slots, and writes one slot through the synthesized setter generic. The
+materialized Loko column remains in the report so readers can compare the
+staged syntax to ordinary Loko syntax, but staged class/function forms are
+lowered directly into AST definitions rather than reparsed from that debug
+text.
 
 For a plain non-staged program:
 

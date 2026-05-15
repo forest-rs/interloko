@@ -15,6 +15,24 @@ It explicitly does not own AST lowering, semantic lowering, source-authored
 grammars, semantic actions, host code execution, OMeta/Ohm compatibility, or
 user-defined parser rules.
 
+## What Is Real Now
+
+The implemented grammar slice has three load-bearing pieces:
+
+- a read-only grammar MOP projection for the base hand-written parser;
+- an explicit session-owned grammar registry and grammar-stack selection path;
+- trusted Rust-hosted staged adapters that emit structural frontend forms.
+
+Those frontend forms are compiler data, not source text. `ast.rs` consumes
+staged function and class forms directly when building AST definitions.
+Materialized Loko is still carried for reports and debugging, but it is no
+longer the semantic input for staged definitions.
+
+The remaining text-shaped fallback is inside staged function bodies:
+`FrontendExpression::LokoText` is parsed by the existing expression parser.
+That keeps this slice small while leaving a clear follow-up path toward fully
+structural frontend expressions.
+
 ## Current Records
 
 The frontend selects language environments and staged region grammars through
@@ -210,8 +228,10 @@ main = helper() + 2
 // end-staged-loko
 ```
 
-The staged regions emit structural `frontend-function` forms. The frontend then
-materializes those forms into ordinary Loko source before AST lowering:
+The staged regions emit structural `frontend-function` forms. AST lowering
+consumes those function forms directly, while each body is currently carried as
+`FrontendExpression::LokoText` and parsed by the existing expression parser.
+Reports also show a materialized ordinary-Loko debug projection:
 
 ```text
 define function helper()
@@ -247,8 +267,9 @@ define function main()
 end
 ```
 
-The records region emits a structural `frontend-class` form, then materializes
-to ordinary class syntax:
+The records region emits a structural `frontend-class` form that AST lowering
+consumes directly. Reports also show a materialized ordinary class definition
+as a debug projection:
 
 ```text
 define class <circle> (<object>)
@@ -321,7 +342,7 @@ Later slices may add:
 
 - source-authored grammar declarations;
 - structural semantic actions that emit forms or grammar deltas;
-- direct AST construction from frontend forms;
+- fully structural frontend expressions with no `LokoText` body fallback;
 - macro hygiene and name-introduction rules;
 - exact original-source span mapping for emitted forms;
 - a public registry/capability policy for choosing staged grammar adapters;

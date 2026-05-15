@@ -462,7 +462,7 @@ fn staged_records_region_runs_and_projects_classes() {
     let path = file.to_str().expect("fixture path should be utf8");
 
     let run = run_lab(&["run", path]);
-    assert_eq!(run.trim(), "10");
+    assert_eq!(run.trim(), "143");
 
     let eop = run_lab(&["eop", path]);
     assert!(eop.contains("object language-environment:staged-loko"));
@@ -512,7 +512,7 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("This is the file the compiler saw."));
     assert!(html.contains("object-model view of what the compiler built"));
     assert!(html.contains("Runtime result"));
-    assert!(html.contains("returned 10"));
+    assert!(html.contains("returned 143"));
     assert!(html.contains("id=\"artifact-pipeline\""));
     assert!(html.contains("Compiler Artifact Path"));
     assert!(html.contains("<dt>time</dt>"));

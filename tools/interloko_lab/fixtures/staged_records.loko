@@ -11,6 +11,10 @@ end
 // end-staged-loko
 
 define function main()
-  let c = make(<circle>, radius: 10);
-  radius(c)
+  let small = make(<circle>, radius: 3);
+  let large = make(<circle>, radius: 10);
+  let tag = make(<label>, text: "area");
+  let title = text(tag);
+  let grown = radius-setter(radius(large) + radius(small), small);
+  radius(small) * radius(large) + grown
 end

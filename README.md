@@ -29,6 +29,12 @@ Generate the staged-grammar report demo:
 cargo run -p interloko_lab -- report tools/interloko_lab/fixtures/staged_records.loko --output /tmp/staged-records.html
 ```
 
+Open `/tmp/staged-records.html` directly in a browser. That report is the
+current best demo of the grammar/frontend work: a trusted `records` region
+emits structural class forms, the AST consumes those forms directly, and the
+report links source spans to generated classes, slots, accessors, artifacts,
+lowered IR, tape, and runtime trace output.
+
 Inspect a compiler stage:
 
 ```sh
@@ -95,6 +101,7 @@ The current slices include:
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
+- read-only grammar MOP inspection plus trusted staged grammar adapters;
 - structured EOP records for environment/workbench objects and affordances;
 - explicit host-backed class/slot metadata for Rust interop experiments;
 - compiler sessions, incremental artifacts, cache reports, and stage dumps;
@@ -142,7 +149,7 @@ Useful docs:
 - [`docs/mop_protocol.md`](docs/mop_protocol.md) describes read-only MOP
   protocols.
 - [`docs/grammar_mop.md`](docs/grammar_mop.md) describes the read-only grammar
-  projection for the base Loko parser.
+  projection, grammar registry, and staged adapter boundary.
 - [`docs/eop_workbench.md`](docs/eop_workbench.md) describes environment object
   records and workbench affordances.
 - [`docs/interloko_report.md`](docs/interloko_report.md) explains the static
