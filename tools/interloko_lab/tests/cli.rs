@@ -334,7 +334,7 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert_eq!(run.trim(), "42");
 
     let eop = run_lab(&["eop", path]);
-    assert!(eop.contains("object language-environment:staged-calculator"));
+    assert!(eop.contains("object language-environment:staged-loko"));
     assert!(eop.contains("object grammar:calculator"));
     assert!(eop.contains("object grammar-activation:base-loko/source-file"));
     assert!(eop.contains("object grammar-activation:calculator/r0"));
@@ -346,16 +346,46 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     let trace = run_lab(&[
         "invoke-affordance",
         path,
-        "language-environment:staged-calculator",
+        "language-environment:staged-loko",
         "show-parse-trace",
     ]);
     assert!(trace.contains("CalculatorRegionGrammar"));
     assert!(trace.contains("staged regions:"));
+    assert!(trace.contains("forms=[frontend-function(name: main"));
     assert!(trace.contains("calculator-function(name: main"));
     assert!(trace.contains("adapter=calculator"));
     assert!(trace.contains("directive="));
     assert!(trace.contains("define function main()"));
     assert!(trace.contains("calculator staged region emitted ordinary Loko source"));
+}
+
+#[test]
+fn staged_records_region_runs_and_projects_classes() {
+    let file = fixture("staged_records.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let run = run_lab(&["run", path]);
+    assert_eq!(run.trim(), "10");
+
+    let eop = run_lab(&["eop", path]);
+    assert!(eop.contains("object language-environment:staged-loko"));
+    assert!(eop.contains("object grammar:records"));
+    assert!(eop.contains("object staged-region:records/r0"));
+    assert!(eop.contains("frontend-class(name: <circle>"));
+    assert!(eop.contains("object class:c"));
+    assert!(eop.contains("presentation title=\"<circle>\""));
+    assert!(eop.contains("slot radius"));
+
+    let trace = run_lab(&[
+        "invoke-affordance",
+        path,
+        "language-environment:staged-loko",
+        "show-parse-trace",
+    ]);
+    assert!(trace.contains("RecordsRegionGrammar"));
+    assert!(trace.contains("forms=[frontend-class(name: <circle>"));
+    assert!(trace.contains("materialized=\"define class <circle>"));
+    assert!(trace.contains("records-region(grammar: RecordsRegionGrammar"));
 }
 
 #[test]

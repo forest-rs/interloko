@@ -1,0 +1,16 @@
+// grammar-activate: records
+
+// staged-loko: records
+record circle
+  radius: <integer>
+end
+
+record label
+  text: <string>
+end
+// end-staged-loko
+
+define function main()
+  let c = make(<circle>, radius: 10);
+  radius(c)
+end

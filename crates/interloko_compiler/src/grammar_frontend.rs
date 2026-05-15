@@ -33,8 +33,10 @@ pub const DERIVED_HOST_ENVIRONMENT_NAME: &str = "DerivedHostEnvironment";
 pub const DERIVED_HOST_GRAMMAR_NAME: &str = "DerivedHostGrammar";
 /// Stable name for the tiny staged calculator grammar prototype.
 pub const CALCULATOR_GRAMMAR_NAME: &str = "CalculatorRegionGrammar";
-/// Stable name for the directive-activated staged calculator environment.
-pub const STAGED_CALCULATOR_ENVIRONMENT_NAME: &str = "StagedCalculatorEnvironment";
+/// Stable name for the trusted staged records grammar prototype.
+pub const RECORDS_GRAMMAR_NAME: &str = "RecordsRegionGrammar";
+/// Stable name for the directive-activated staged grammar environment.
+pub const STAGED_LOKO_ENVIRONMENT_NAME: &str = "StagedLokoEnvironment";
 
 const GRAMMAR_ACTIVATE_PREFIX: &str = "// grammar-activate:";
 const STAGED_LOKO_PREFIX: &str = "// staged-loko:";
@@ -1039,10 +1041,14 @@ trait StagedGrammar: Sync {
 }
 
 struct CalculatorStagedGrammar;
+struct RecordsStagedGrammar;
 
 static CALCULATOR_STAGED_GRAMMAR: CalculatorStagedGrammar = CalculatorStagedGrammar;
-static STAGED_GRAMMAR_REGISTRY: [&dyn StagedGrammar; 1] = [&CALCULATOR_STAGED_GRAMMAR];
+static RECORDS_STAGED_GRAMMAR: RecordsStagedGrammar = RecordsStagedGrammar;
+static STAGED_GRAMMAR_REGISTRY: [&dyn StagedGrammar; 2] =
+    [&CALCULATOR_STAGED_GRAMMAR, &RECORDS_STAGED_GRAMMAR];
 const CALCULATOR_PROVENANCE_RULES: &[&str] = &["calculator-region", "calculator-function"];
+const RECORDS_PROVENANCE_RULES: &[&str] = &["records-region", "record-definition", "record-field"];
 
 impl StagedGrammar for CalculatorStagedGrammar {
     fn adapter_name(&self) -> &'static str {
@@ -1071,6 +1077,36 @@ impl StagedGrammar for CalculatorStagedGrammar {
 
     fn parse_region(&self, body: &str, source_offset: usize) -> StagedRegionEmission {
         parse_calculator_region(body, source_offset)
+    }
+}
+
+impl StagedGrammar for RecordsStagedGrammar {
+    fn adapter_name(&self) -> &'static str {
+        "records"
+    }
+
+    fn grammar_name(&self) -> &'static str {
+        RECORDS_GRAMMAR_NAME
+    }
+
+    fn grammar_slug(&self) -> &'static str {
+        "records"
+    }
+
+    fn root_rule(&self) -> &'static str {
+        "records-region"
+    }
+
+    fn provenance_rule_names(&self) -> &'static [&'static str] {
+        RECORDS_PROVENANCE_RULES
+    }
+
+    fn direct_rules(&self, grammar: GrammarId) -> Vec<GrammarRule> {
+        records_rules(grammar, self.grammar_slug())
+    }
+
+    fn parse_region(&self, body: &str, source_offset: usize) -> StagedRegionEmission {
+        parse_records_region(body, source_offset)
     }
 }
 
@@ -1219,8 +1255,9 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
         let trimmed_start = line_start + leading;
         let trimmed_span = Span::new(trimmed_start, trimmed_start + trimmed.len());
         let Some((name, expression)) = trimmed.split_once('=') else {
-            diagnostics.push(expected_syntax_diagnostic(
+            diagnostics.push(staged_expected_diagnostic(
                 trimmed_span,
+                "calculator",
                 "`name = expression`",
             ));
             continue;
@@ -1228,8 +1265,9 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
         let name = name.trim();
         let expression = expression.trim();
         if name.is_empty() || expression.is_empty() || !valid_calculator_function_name(name) {
-            diagnostics.push(expected_syntax_diagnostic(
+            diagnostics.push(staged_expected_diagnostic(
                 trimmed_span,
+                "calculator",
                 "`name = expression`",
             ));
             continue;
@@ -1262,8 +1300,9 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
     }
 
     if functions.is_empty() && diagnostics.is_empty() {
-        diagnostics.push(expected_syntax_diagnostic(
+        diagnostics.push(staged_expected_diagnostic(
             Span::new(source_offset, source_offset + body.len()),
+            "calculator",
             "`name = expression`",
         ));
     }
@@ -1281,9 +1320,170 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
     }
 }
 
+struct RecordBuilder {
+    name: String,
+    header_span: Span,
+    fields: Vec<FrontendSlot>,
+    field_data: Vec<SourceData>,
+}
+
+fn parse_records_region(body: &str, source_offset: usize) -> StagedRegionEmission {
+    let mut forms = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut records = Vec::new();
+    let mut current: Option<RecordBuilder> = None;
+    let mut offset = source_offset;
+
+    for line in body.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        offset = line_end;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        let leading = line.find(trimmed).unwrap_or(0);
+        let trimmed_start = line_start + leading;
+        let trimmed_span = Span::new(trimmed_start, trimmed_start + trimmed.len());
+
+        if current.is_some() {
+            if trimmed == "end" {
+                let record = current.take().expect("record was just matched");
+                let source_span = Span::new(record.header_span.start, trimmed_span.end);
+                let fields_data = SourceData::list(record.field_data);
+                forms.push(FrontendForm::class(
+                    record.name.clone(),
+                    "<object>",
+                    record.fields,
+                    source_span,
+                ));
+                records.push(SourceData::record(
+                    "record-definition",
+                    vec![
+                        source_data::field("name", SourceData::symbol(record.name.as_str())),
+                        source_span_data(source_span),
+                        source_data::field("fields", fields_data),
+                    ],
+                ));
+                continue;
+            }
+            let record = current.as_mut().expect("record was just matched");
+            parse_record_field(trimmed, trimmed_span, record, &mut diagnostics);
+            continue;
+        }
+
+        let Some(name) = trimmed.strip_prefix("record ") else {
+            diagnostics.push(staged_expected_diagnostic(
+                trimmed_span,
+                "records",
+                "`record name`",
+            ));
+            continue;
+        };
+        let name = name.trim();
+        let Some(class_name) = normalize_record_class_name(name) else {
+            diagnostics.push(staged_expected_diagnostic(
+                trimmed_span,
+                "records",
+                "valid record name",
+            ));
+            continue;
+        };
+        current = Some(RecordBuilder {
+            name: class_name,
+            header_span: trimmed_span,
+            fields: Vec::new(),
+            field_data: Vec::new(),
+        });
+    }
+
+    if let Some(record) = current {
+        diagnostics.push(staged_expected_diagnostic(
+            record.header_span,
+            "records",
+            "`end`",
+        ));
+    }
+
+    if records.is_empty() && diagnostics.is_empty() {
+        diagnostics.push(staged_expected_diagnostic(
+            Span::new(source_offset, source_offset + body.len()),
+            "records",
+            "`record name`",
+        ));
+    }
+
+    StagedRegionEmission {
+        forms,
+        data: SourceData::record(
+            "records-region",
+            vec![
+                source_data::field("grammar", SourceData::symbol(RECORDS_GRAMMAR_NAME)),
+                source_data::field("records", SourceData::list(records)),
+            ],
+        ),
+        diagnostics,
+    }
+}
+
+fn parse_record_field(
+    trimmed: &str,
+    span: Span,
+    record: &mut RecordBuilder,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some((name, type_name)) = trimmed.split_once(':') else {
+        diagnostics.push(staged_expected_diagnostic(
+            span,
+            "records",
+            "`field: <type>`",
+        ));
+        return;
+    };
+    let name = name.trim();
+    let type_name = type_name.trim().trim_end_matches(';').trim();
+    if !valid_record_field_name(name) {
+        diagnostics.push(
+            staged_expected_diagnostic(span, "records", "valid record field")
+                .with_arg(DiagnosticArg::text("field", name)),
+        );
+        return;
+    }
+    if record.fields.iter().any(|field| field.name == name) {
+        diagnostics.push(
+            staged_expected_diagnostic(span, "records", "unique record field")
+                .with_arg(DiagnosticArg::text("field", name)),
+        );
+        return;
+    }
+    if !valid_type_name(type_name) {
+        diagnostics.push(
+            staged_expected_diagnostic(span, "records", "field type name")
+                .with_arg(DiagnosticArg::text("field", name)),
+        );
+        return;
+    }
+
+    record
+        .fields
+        .push(FrontendSlot::new(name, type_name, span).with_init_keyword(name, true));
+    record.field_data.push(SourceData::record(
+        "record-field",
+        vec![
+            source_data::field("name", SourceData::symbol(name)),
+            source_data::field("type", SourceData::symbol(type_name)),
+            source_span_data(span),
+        ],
+    ));
+}
+
 fn expected_syntax_diagnostic(span: Span, expected: &str) -> Diagnostic {
     Diagnostic::error(span, DiagnosticCode::SyntaxExpectedToken)
         .with_arg(DiagnosticArg::text("expected", expected))
+}
+
+fn staged_expected_diagnostic(span: Span, adapter: &str, expected: &str) -> Diagnostic {
+    expected_syntax_diagnostic(span, expected).with_arg(DiagnosticArg::text("adapter", adapter))
 }
 
 fn valid_calculator_function_name(name: &str) -> bool {
@@ -1293,6 +1493,39 @@ fn valid_calculator_function_name(name: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
+}
+
+fn normalize_record_class_name(name: &str) -> Option<String> {
+    if valid_type_name(name) {
+        return Some(name.to_string());
+    }
+    if valid_record_type_fragment(name) {
+        return Some(format!("<{name}>"));
+    }
+    None
+}
+
+fn valid_type_name(name: &str) -> bool {
+    let Some(inner) = name
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+    else {
+        return false;
+    };
+    valid_record_type_fragment(inner)
+}
+
+fn valid_record_type_fragment(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_record_field_name(name: &str) -> bool {
+    valid_calculator_function_name(name)
 }
 
 fn add_staged_rule_count(
@@ -1458,11 +1691,11 @@ fn staged_registry_records(adapter_names: &[&str]) -> GrammarFrontendRecords {
         active_grammar = grammar_id;
     }
 
-    let environment_id = LanguageEnvironmentId::new(STAGED_CALCULATOR_ENVIRONMENT_NAME);
+    let environment_id = LanguageEnvironmentId::new(STAGED_LOKO_ENVIRONMENT_NAME);
     let environment = LanguageEnvironment {
         id: environment_id,
-        slug: "staged-calculator".to_string(),
-        name: STAGED_CALCULATOR_ENVIRONMENT_NAME.to_string(),
+        slug: "staged-loko".to_string(),
+        name: STAGED_LOKO_ENVIRONMENT_NAME.to_string(),
         grammar_stack,
     };
     GrammarFrontendRecords {
@@ -1639,6 +1872,43 @@ fn calculator_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
             "calculator-function",
             "name `=` expression => `define function name() expression end`",
             "grammar_frontend.rs:parse_calculator_region",
+        ),
+    ];
+
+    RULES
+        .iter()
+        .map(|(name, expression, location)| GrammarRule {
+            id: GrammarRuleId::new(grammar, name),
+            grammar,
+            grammar_slug: grammar_slug.to_string(),
+            name: (*name).to_string(),
+            expression: (*expression).to_string(),
+            expression_data: grammar_rule_expression_data(name, expression, location),
+            projection: GrammarProjection {
+                origin: "compiler-projected-prototype".to_string(),
+                location: (*location).to_string(),
+                source_span: None,
+            },
+        })
+        .collect()
+}
+
+fn records_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
+    const RULES: &[(&str, &str, &str)] = &[
+        (
+            "records-region",
+            "record-definition*",
+            "grammar_frontend.rs:parse_records_region",
+        ),
+        (
+            "record-definition",
+            "`record` name record-field* `end` => class form",
+            "grammar_frontend.rs:parse_records_region",
+        ),
+        (
+            "record-field",
+            "name `:` type-name => required slot form",
+            "grammar_frontend.rs:parse_records_region",
         ),
     ];
 
@@ -2093,7 +2363,7 @@ mod tests {
                       // end-staged-loko\n";
         let report = parse_file(SourceFileId::from_path("staged.loko"), source);
 
-        assert_eq!(report.environment.name, STAGED_CALCULATOR_ENVIRONMENT_NAME);
+        assert_eq!(report.environment.name, STAGED_LOKO_ENVIRONMENT_NAME);
         assert_eq!(report.activations.len(), 3);
         assert_eq!(report.staged_regions.len(), 2);
         assert!(
@@ -2159,6 +2429,89 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
                     == Some("registered staged grammar".to_string()))
+        );
+    }
+
+    #[test]
+    fn staged_records_region_emits_class_frontend_forms() {
+        let source = "// grammar-activate: records\n\n\
+                      // staged-loko: records\n\
+                      record circle\n\
+                        radius: <integer>\n\
+                      end\n\
+                      // end-staged-loko\n\n\
+                      define function main()\n\
+                        let c = make(<circle>, radius: 10);\n\
+                        radius(c)\n\
+                      end\n";
+        let report = parse_file(SourceFileId::from_path("records.loko"), source);
+
+        assert_eq!(report.environment.name, STAGED_LOKO_ENVIRONMENT_NAME);
+        assert!(
+            report
+                .grammar_stack
+                .grammars
+                .contains(&GrammarId::new(RECORDS_GRAMMAR_NAME))
+        );
+        assert_eq!(report.staged_regions.len(), 1);
+        assert_eq!(report.staged_regions[0].adapter, "records");
+        assert!(
+            source_data::dump(&report.staged_regions[0].forms_data)
+                .contains("frontend-class(name: <circle>")
+        );
+        assert!(
+            report.staged_regions[0]
+                .materialized_source
+                .contains("define class <circle> (<object>)")
+        );
+        assert!(
+            report
+                .syntax
+                .source
+                .contains("required-init-keyword: radius:")
+        );
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn staged_records_region_reports_duplicate_fields() {
+        let source = "// grammar-activate: records\n\
+                      // staged-loko: records\n\
+                      record circle\n\
+                        radius: <integer>\n\
+                        radius: <integer>\n\
+                      end\n\
+                      // end-staged-loko\n";
+        let report = parse_file(SourceFileId::from_path("records.loko"), source);
+
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
+                    == Some("unique record field".to_string())
+                    && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string())
+                    && diagnostic_arg(diagnostic, "field") == Some("radius".to_string()))
+        );
+    }
+
+    #[test]
+    fn staged_records_region_reports_malformed_fields() {
+        let source = "// grammar-activate: records\n\
+                      // staged-loko: records\n\
+                      record circle\n\
+                        radius <integer>\n\
+                      end\n\
+                      // end-staged-loko\n";
+        let report = parse_file(SourceFileId::from_path("records.loko"), source);
+
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
+                    == Some("`field: <type>`".to_string())
+                    && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string()))
         );
     }
 }

@@ -1,0 +1,24 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump eop contains grammar:records
+// expect: dump eop contains staged-region:records/r0
+// expect: dump eop contains frontend-class(name: <circle>
+// expect: dump mop contains RecordsRegionGrammar
+// expect: dump syntax contains TypeName "<circle>"
+
+// grammar-activate: records
+
+// staged-loko: records
+record circle
+  radius: <integer>
+end
+
+record label
+  text: <string>
+end
+// end-staged-loko
+
+define function main()
+  let c = make(<circle>, radius: 10);
+  radius(c)
+end
