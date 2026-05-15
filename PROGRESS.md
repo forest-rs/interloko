@@ -1,5 +1,30 @@
 # Interloko Progress
 
+## Implemented: Direct Frontend Forms To AST
+
+- Staged grammar regions are no longer materialized into the source that feeds
+  the ordinary parser. The grammar frontend blanks staged regions while
+  preserving byte offsets and line structure, then carries structural frontend
+  forms beside the syntax tree.
+- `ast::lower_with_frontend_forms` now lowers staged `FrontendForm::Function`
+  and `FrontendForm::Class` values directly into AST definitions. Generated
+  functions, classes, slots, and expression bodies carry stable IDs and source
+  spans tied to the original staged region.
+- Materialized Loko remains available on each staged region for dumps, reports,
+  and human comparison, but it is an inspectable projection rather than the
+  semantic compiler input.
+- Grammar extension emissions now report the generated EOP object where
+  practical, for example `generated=function:f0` or `generated=class:c0`.
+- Staged calculator and records fixtures still compile and run through the
+  normal syntax -> AST -> semantic IR -> lowered IR -> execution_tape pipeline.
+
+Deferred:
+
+- Replacing transitional `FrontendExpression::LokoText` with richer structured
+  expression forms.
+- Source-authored grammar definitions, semantic actions, macro hygiene, and a
+  capability policy for user-provided grammar extensions.
+
 ## Implemented: Staged Grammar Extension Records
 
 - Registered staged adapters now expose structured
@@ -22,7 +47,6 @@ Deferred:
 - Source-authored grammar extension definitions.
 - A real capability policy beyond explicit capability records.
 - Semantic actions that emit structural forms without trusted Rust adapters.
-- Direct frontend-form-to-AST lowering without materialized Loko source.
 
 ## Implemented: Grammar Frontend Registry Cleanup
 
@@ -57,7 +81,6 @@ Deferred:
 - Source-authored grammar registration.
 - Non-static runtime registry mutation.
 - Capability policy for host-provided grammar adapters.
-- Direct frontend-form-to-AST parsing without materialized Loko.
 
 ## Implemented: Timing Metrics And Execution Traces
 
@@ -101,8 +124,8 @@ Deferred:
 - Source rendering includes line numbers plus provenance highlights for staged
   grammar activation directives, frontend-form source spans, and diagnostics.
 - Staged-region rendering shows the current expansion chain:
-  adapter -> frontend forms -> materialized Loko -> matched AST/semantic/EOP
-  objects.
+  adapter -> frontend forms -> generated AST/semantic/EOP objects, with
+  materialized Loko kept as a debug projection.
 - The report exposes generated classes, slots, accessors, setter generics,
   methods, functions, object ids, affordances, structured diagnostics, artifact
   keys, dependency graph text, lowered IR, and `execution_tape` disassembly.
@@ -120,7 +143,7 @@ Deferred:
   refresh.
 - A shared presentation/data API outside `tools/interloko_lab`.
 - Rich graph layout beyond compact cards and relation highlighting.
-- Exact generated-source-to-original-source diagnostic remapping.
+- Richer relation layout and generated-object explanations.
 
 ## Implemented: Structural Frontend Forms And Records Grammar
 
@@ -131,10 +154,9 @@ Deferred:
   `frontend-function`, `frontend-class`, `frontend-slot`, and transitional
   raw Loko expression text. Forms carry original staged source spans and are
   projected through inert `source_data`.
-- Staged adapters now emit frontend forms first. The grammar frontend
-  materializes those forms back to ordinary Loko source only at the existing
-  parser boundary, so AST, semantic IR, lowering, and tape emission remain
-  unchanged.
+- Staged adapters now emit frontend forms first. The grammar frontend preserves
+  materialized Loko for inspection, while AST lowering consumes the structural
+  forms directly.
 - Added an internal staged grammar adapter registry. The registered adapters
   today are `calculator` and `records`.
 - A frontend metadata directive selects a staged grammar:
@@ -181,12 +203,13 @@ Deferred:
   end
   ```
 
-- The existing pipeline still consumes normal `SyntaxTree` output:
-  syntax -> AST -> semantic IR -> lowered IR -> execution_tape. No AST, sem,
-  lower, or tape layer performs grammar lookup.
+- The existing pipeline still runs through the normal AST, semantic IR,
+  lowering, and tape layers. `ast.rs` is the only downstream layer that sees
+  staged frontend forms; `sem`, `lower`, and `tape` do not perform grammar
+  lookup.
 - Parse trace now shows grammar activations for the base source file and each
   staged region, plus a `staged regions:` section with adapter name, activation
-  directive span, frontend forms, materialized source, and inert
+  directive span, frontend forms, debug materialized source, and inert
   `source_data`.
 - MOP/EOP output includes `grammar:calculator`, `grammar:records`, activation
   objects such as `grammar-activation:calculator/r0`, and staged-region objects
@@ -198,9 +221,8 @@ Deferred:
 
 - Source-authored grammar definitions.
 - Public staged grammar registry and capability policy.
-- Direct AST construction from frontend forms.
 - Macro hygiene and name-introduction policy.
-- Exact original-source span remapping for diagnostics from materialized forms.
+- Richer structured expression forms instead of transitional raw Loko text.
 - Semantic actions beyond inert structural source-data emission.
 
 ## Implemented: Grammar MOP Follow-Up Slices

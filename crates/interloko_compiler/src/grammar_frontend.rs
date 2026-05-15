@@ -420,8 +420,8 @@ pub struct GrammarActivation {
 /// A structural frontend form emitted by a trusted staged grammar adapter.
 ///
 /// This is a transitional expander-facing representation. The current frontend
-/// still materializes forms back to ordinary Loko source before invoking the
-/// existing parser.
+/// lowers these forms directly into the AST. Materialized Loko remains available
+/// as an inspectable debug projection, but it is not the semantic compiler input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendForm {
     /// Original staged source span that produced this form.
@@ -1306,8 +1306,6 @@ fn parse_staged_file(
     };
 
     let mut diagnostics = discovery.diagnostics;
-    let mut materialized_source = String::new();
-    let mut materialized_cursor = 0_usize;
     let mut activations = vec![base_activation];
     let mut staged_regions = Vec::new();
     let mut extension_activations = Vec::new();
@@ -1315,8 +1313,6 @@ fn parse_staged_file(
     let mut staged_rule_counts = Vec::new();
 
     for (index, region) in discovery.regions.iter().enumerate() {
-        materialized_source.push_str(&source[materialized_cursor..region.start_marker.start]);
-
         let grammar = GrammarId::new(region.adapter.grammar_name());
         let root_rule = effective_rule_id_by_name(
             &records.effective_rules,
@@ -1340,7 +1336,7 @@ fn parse_staged_file(
             span: region.body_span,
             root_rule,
             reason: format!(
-                "{} staged region emitted frontend forms for materialization",
+                "{} staged region emitted frontend forms for direct AST lowering",
                 region.adapter.adapter_name()
             ),
         };
@@ -1349,8 +1345,6 @@ fn parse_staged_file(
             .parse_region(region.body, region.body_span.start);
         diagnostics.extend(emission.diagnostics);
         let region_materialized_source = materialize_frontend_forms(&emission.forms);
-        materialized_source.push_str(&region_materialized_source);
-        materialized_cursor = region.end_marker.end;
         staged_rule_counts.push((grammar, region.adapter.provenance_rule_names()));
         let forms_data = frontend_forms_source_data(&emission.forms);
 
@@ -1394,9 +1388,9 @@ fn parse_staged_file(
             data: emission.data,
         });
     }
-    materialized_source.push_str(&source[materialized_cursor..]);
 
-    let mut syntax = syntax::parse_file(source_file, &materialized_source);
+    let parser_source = source_with_staged_regions_blanked(source, &discovery.regions);
+    let mut syntax = syntax::parse_file(source_file, &parser_source);
     syntax.diagnostics.extend(diagnostics);
 
     let active_effective_rules = records.effective_rules.to_vec();
@@ -1458,6 +1452,34 @@ fn parse_staged_file(
         diagnostics: syntax.diagnostics.clone(),
         syntax,
     })
+}
+
+fn source_with_staged_regions_blanked(
+    source: &str,
+    regions: &[DiscoveredStagedRegion<'_>],
+) -> String {
+    let mut parser_source = String::with_capacity(source.len());
+    let mut cursor = 0_usize;
+    for region in regions {
+        parser_source.push_str(&source[cursor..region.start_marker.start]);
+        push_blank_preserving_newlines(
+            &mut parser_source,
+            &source[region.start_marker.start..region.end_marker.end],
+        );
+        cursor = region.end_marker.end;
+    }
+    parser_source.push_str(&source[cursor..]);
+    parser_source
+}
+
+fn push_blank_preserving_newlines(output: &mut String, source: &str) {
+    for ch in source.chars() {
+        if ch == '\n' || ch == '\r' {
+            output.push(ch);
+        } else {
+            output.push(' ');
+        }
+    }
 }
 
 struct DiscoveredStagedRegion<'source> {
@@ -3054,7 +3076,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_calculator_region_emits_ordinary_loko_source() {
+    fn staged_calculator_region_emits_structural_frontend_forms() {
         let source = "// grammar-activate: calculator\n\n\
                       // staged-loko: calculator\n\
                       helper = 40\n\
@@ -3073,18 +3095,8 @@ mod tests {
                 .grammars
                 .contains(&GrammarId::new(CALCULATOR_GRAMMAR_NAME))
         );
-        assert!(
-            report
-                .syntax
-                .source
-                .contains("define function helper()\n  40\nend")
-        );
-        assert!(
-            report
-                .syntax
-                .source
-                .contains("define function main()\n  helper() + 2\nend")
-        );
+        assert!(!report.syntax.source.contains("define function helper()"));
+        assert!(!report.syntax.source.contains("define function main()"));
         assert_eq!(report.staged_regions[0].adapter, "calculator");
         assert_eq!(report.staged_regions[0].object_slug, "r0");
         assert_eq!(report.extension_activations.len(), 2);
@@ -3117,6 +3129,11 @@ mod tests {
             report.staged_regions[1]
                 .materialized_source
                 .contains("define function main()")
+        );
+        assert!(
+            report.staged_regions[1]
+                .materialized_source
+                .contains("helper() + 2")
         );
         assert!(
             source_data::dump(&report.staged_regions[1].data)
@@ -3206,11 +3223,11 @@ mod tests {
                 .contains("define class <circle> (<object>)")
         );
         assert!(
-            report
-                .syntax
-                .source
+            report.staged_regions[0]
+                .materialized_source
                 .contains("required-init-keyword: radius:")
         );
+        assert!(!report.syntax.source.contains("define class <circle>"));
         assert!(report.diagnostics.is_empty());
     }
 

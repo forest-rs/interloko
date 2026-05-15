@@ -100,6 +100,24 @@ impl AstNodeId {
         Self(builder.finish())
     }
 
+    /// Builds an AST node id for a compiler-generated node with source provenance.
+    #[must_use]
+    pub fn generated(
+        source_file: SourceFileId,
+        tag: u64,
+        name: &str,
+        start: usize,
+        end: usize,
+    ) -> Self {
+        let mut builder = StableIdBuilder::new(DOMAIN_AST_NODE);
+        builder.mix_u64(source_file.raw());
+        builder.mix_u64(tag);
+        builder.mix_str(name);
+        builder.mix_u64(u64::try_from(start).unwrap_or(u64::MAX));
+        builder.mix_u64(u64::try_from(end).unwrap_or(u64::MAX));
+        Self(builder.finish())
+    }
+
     /// Returns the raw identifier bits.
     #[must_use]
     pub const fn raw(self) -> u64 {

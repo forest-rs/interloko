@@ -2,7 +2,7 @@
 
 Interloko exposes the current hand-written Loko parser as read-only grammar
 metaobjects. It also has trusted staged grammar adapters that emit structural
-frontend forms before those forms are materialized back to ordinary Loko source.
+frontend forms that are lowered directly into AST definitions.
 This is still not a parser rewrite and not a macro system.
 
 ## Boundary
@@ -102,8 +102,12 @@ through the registered calculator adapter and emit structural function forms.
 `RecordsRegionGrammar` has direct rules for `records-region`,
 `record-definition`, and `record-field`. It is selected with
 `// grammar-activate: records` and emits structural class forms with typed
-slots. Both adapters are trusted Rust-hosted entries in the same explicit
-registry protocol; there is no source-authored grammar definition syntax yet.
+slots. `ast.rs` consumes those structural forms directly as compiler-generated
+definitions with source spans from the staged region. Materialized Loko is still
+stored on each staged region for dumps, reports, and debugging, but the semantic
+pipeline no longer reparses it as the source of truth. Both adapters are trusted
+Rust-hosted entries in the same explicit registry protocol; there is no
+source-authored grammar definition syntax yet.
 
 Each staged adapter also exposes a `GrammarExtensionDescriptor`. The descriptor
 is the readable protocol record for the extension:
@@ -142,8 +146,8 @@ That report contains:
 - the resolved grammar stack;
 - projected grammar, direct-rule, and effective-rule records;
 - grammar activations over source regions;
-- staged regions with frontend forms, materialized ordinary Loko source, and
-  inert source-data parse results;
+- staged regions with frontend forms, materialized ordinary Loko debug text,
+  and inert source-data parse results;
 - staged grammar extension activations, emitted frontend forms, and charged
   provenance rules;
 - parse provenance with per-rule CST node counts;
@@ -152,14 +156,17 @@ That report contains:
   structured expected fragment when present;
 - syntax diagnostics from the existing parser.
 
-The normal pipeline is unchanged:
+The normal pipeline now has one explicit structured-input join point:
 
 ```text
-GrammarParseReport.syntax -> AST -> semantic IR -> lowered IR -> execution_tape
+GrammarParseReport.syntax + staged frontend forms -> AST -> semantic IR -> lowered IR -> execution_tape
 ```
 
-`ast.rs`, `sem.rs`, `lower.rs`, and `tape.rs` do not perform grammar lookup.
-They continue to consume the same syntax and semantic products as before.
+`ast.rs` lowers staged `FrontendForm::Function` and `FrontendForm::Class`
+values into AST definitions. `FrontendExpression::LokoText` is still a
+transitional expression payload and is parsed through the existing expression
+parser under the hood. `sem.rs`, `lower.rs`, and `tape.rs` do not perform
+grammar lookup and continue to consume ordinary AST/semantic products.
 
 ## Workbench Use
 
@@ -270,8 +277,8 @@ diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
 
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
-activation directive span, source span, frontend forms, materialized source, and
-inert source-data result. The directive and `// staged-loko:` markers are
+activation directive span, source span, frontend forms, debug materialized
+source, and inert source-data result. The directive and `// staged-loko:` markers are
 frontend/workbench metadata; they are not part of the Loko language semantics.
 
 ## Source Data

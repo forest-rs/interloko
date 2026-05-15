@@ -451,7 +451,9 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert!(trace.contains("adapter=calculator"));
     assert!(trace.contains("directive="));
     assert!(trace.contains("define function main()"));
-    assert!(trace.contains("calculator staged region emitted frontend forms for materialization"));
+    assert!(
+        trace.contains("calculator staged region emitted frontend forms for direct AST lowering")
+    );
 }
 
 #[test]
@@ -469,6 +471,7 @@ fn staged_records_region_runs_and_projects_classes() {
     assert!(eop.contains("object grammar-extension-activation:records/r0"));
     assert!(eop.contains("object grammar-extension-emission:records/r0/f0"));
     assert!(eop.contains("object grammar-extension-provenance:records/r0/record-field"));
+    assert!(eop.contains("generated=class:c"));
     assert!(eop.contains("frontend-class(name: <circle>"));
     assert!(eop.contains("object class:c"));
     assert!(eop.contains("presentation title=\"<circle>\""));

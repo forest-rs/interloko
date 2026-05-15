@@ -22,7 +22,8 @@ The rest of the report shows:
 - a source legend for activation directives, staged regions, frontend-form
   spans, and diagnostics;
 - staged grammar regions, when present;
-- adapter -> frontend forms -> materialized Loko -> AST/semantic object links;
+- adapter -> frontend forms -> generated AST/semantic object links, with
+  materialized Loko shown as a debug projection;
 - generated classes, slots, accessors, generics, methods, functions, EOP ids,
   readable object facts, raw inspection facts, and affordances;
 - structured diagnostics with codes, spans, labels, and arguments;
@@ -40,9 +41,9 @@ relation.
 
 - **Report:** a static HTML presentation of one compiler session.
 - **Frontend form:** an inert structured form emitted by a trusted staged
-  adapter before it is materialized back to ordinary Loko source.
-- **Materialized Loko:** compatibility source generated from frontend forms and
-  passed through the existing parser.
+  adapter and lowered directly into AST definitions.
+- **Materialized Loko:** debug text generated from frontend forms for
+  inspection and reports. It is not the semantic compiler input.
 - **EOP object:** an inspectable environment object with stable id, kind,
   presentation, storage/origin facts, and affordances.
 - **Artifact key:** stable query artifact identity used by the incremental
@@ -72,8 +73,9 @@ cargo run -p interloko_lab -- report tools/interloko_lab/fixtures/staged_records
 ```
 
 That file demonstrates staged records syntax becoming frontend class forms,
-then materialized Loko class definitions, then semantic class/slot/accessor and
-setter-generic objects.
+then generated AST/semantic class, slot, accessor, and setter-generic objects.
+The materialized Loko column remains in the report so readers can compare the
+staged syntax to ordinary Loko syntax.
 
 For a plain non-staged program:
 

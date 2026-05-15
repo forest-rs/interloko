@@ -3085,7 +3085,8 @@ fn compile_file_with_registries(
     timings.record(QueryArtifact::GrammarStack, elapsed_nanos);
     let (syntax, elapsed_nanos) = measure_elapsed(|| grammar_parse.syntax.clone());
     timings.record(QueryArtifact::Parse, elapsed_nanos);
-    let (ast, elapsed_nanos) = measure_elapsed(|| ast::lower(&syntax));
+    let (ast, elapsed_nanos) =
+        measure_elapsed(|| ast::lower_with_frontend_forms(&syntax, &grammar_parse.staged_regions));
     timings.record(QueryArtifact::Ast, elapsed_nanos);
     let (sem, elapsed_nanos) = measure_elapsed(|| sem::lower_with_host_registry(&ast, registry));
     timings.record(QueryArtifact::Bind, elapsed_nanos);
@@ -4315,6 +4316,37 @@ fn dump_grammar_registry(registry: GrammarFrontendRegistry) -> String {
     out
 }
 
+fn frontend_emission_generated_label(
+    artifacts: &SessionArtifacts,
+    emission: &grammar_frontend::GrammarExtensionEmission,
+) -> Option<String> {
+    let form = artifacts
+        .grammar_parse
+        .staged_regions
+        .iter()
+        .find(|region| {
+            region.adapter == emission.adapter
+                && region.activation == emission.activation
+                && region.object_slug == emission.object_slug
+        })?
+        .forms
+        .get(emission.form_index)?;
+    match &form.kind {
+        grammar_frontend::FrontendFormKind::Function(function) => artifacts
+            .sem
+            .functions
+            .iter()
+            .find(|semantic_function| semantic_function.name == function.name)
+            .map(|semantic_function| format!("function:f{}", semantic_function.id.0)),
+        grammar_frontend::FrontendFormKind::Class(class) => artifacts
+            .sem
+            .classes
+            .iter()
+            .find(|semantic_class| semantic_class.name == class.name)
+            .map(|semantic_class| format!("class:c{}", semantic_class.id.0)),
+    }
+}
+
 fn dump_grammar_extensions(artifacts: &SessionArtifacts) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "grammar extensions");
@@ -4363,15 +4395,18 @@ fn dump_grammar_extensions(artifacts: &SessionArtifacts) -> String {
     }
     let _ = writeln!(out, "emissions:");
     for emission in &artifacts.grammar_parse.extension_emissions {
+        let generated = frontend_emission_generated_label(artifacts, emission)
+            .unwrap_or_else(|| "none".to_string());
         let _ = writeln!(
             out,
-            "  {} adapter={} activation={} kind={} span={}..{} data={}",
+            "  {} adapter={} activation={} kind={} span={}..{} generated={} data={}",
             grammar_frontend::grammar_extension_emission_object_id(emission),
             emission.adapter,
             emission.activation,
             emission.form_kind,
             emission.source_span.start,
             emission.source_span.end,
+            generated,
             emission.data
         );
     }
@@ -4421,7 +4456,7 @@ fn explain_grammar_extension(artifacts: &SessionArtifacts, id: &str) -> Option<S
                 .find(|emission| {
                     grammar_frontend::grammar_extension_emission_object_id(emission) == id
                 })
-                .map(explain_grammar_extension_emission)
+                .map(|emission| explain_grammar_extension_emission(artifacts, emission))
         })
         .or_else(|| {
             artifacts
@@ -4527,6 +4562,7 @@ fn explain_grammar_extension_activation(
 }
 
 fn explain_grammar_extension_emission(
+    artifacts: &SessionArtifacts,
     emission: &grammar_frontend::GrammarExtensionEmission,
 ) -> String {
     let mut out = String::new();
@@ -4539,6 +4575,12 @@ fn explain_grammar_extension_emission(
     let _ = writeln!(out, "activation {}", emission.activation);
     let _ = writeln!(out, "form-index {}", emission.form_index);
     let _ = writeln!(out, "form-kind {}", emission.form_kind);
+    let _ = writeln!(
+        out,
+        "generated {}",
+        frontend_emission_generated_label(artifacts, emission)
+            .unwrap_or_else(|| "none".to_string())
+    );
     let _ = writeln!(
         out,
         "source-span {}..{}",
@@ -5162,7 +5204,7 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
         project_grammar_extension_activation(sink, activation);
     }
     for emission in &report.extension_emissions {
-        project_grammar_extension_emission(sink, emission);
+        project_grammar_extension_emission(artifacts, sink, emission);
     }
     for provenance in &report.extension_provenance {
         project_grammar_extension_provenance(sink, provenance);
@@ -5385,11 +5427,14 @@ fn project_grammar_extension_activation(
 }
 
 fn project_grammar_extension_emission(
+    artifacts: &SessionArtifacts,
     sink: &mut dyn EnvironmentObjectSink,
     emission: &grammar_frontend::GrammarExtensionEmission,
 ) {
     use EnvironmentAffordance as Aff;
 
+    let generated = frontend_emission_generated_label(artifacts, emission)
+        .unwrap_or_else(|| "none".to_string());
     sink.emit(environment_object(EnvironmentObjectParts {
         id: grammar_frontend::grammar_extension_emission_object_id(emission),
         kind: EnvironmentKind::GrammarExtensionEmission,
@@ -5409,13 +5454,14 @@ fn project_grammar_extension_emission(
         ]),
         execution: None,
         inspection: format!(
-            "adapter={} activation={} form-index={} kind={} span={}..{} data={}",
+            "adapter={} activation={} form-index={} kind={} span={}..{} generated={} data={}",
             emission.adapter,
             emission.activation,
             emission.form_index,
             emission.form_kind,
             emission.source_span.start,
             emission.source_span.end,
+            generated,
             emission.data
         ),
     }));
@@ -8215,6 +8261,7 @@ mod tests {
                 .detail
                 .contains("kind=frontend-function")
         );
+        assert!(emission.inspection.detail.contains("generated=function:f0"));
 
         let provenance = eop_object(
             &objects,
@@ -8227,12 +8274,47 @@ mod tests {
         assert!(dump.contains("grammar extensions"));
         assert!(dump.contains("grammar-extension:calculator"));
         assert!(dump.contains("grammar-extension-emission:calculator/r0/f0"));
+        assert!(dump.contains("generated=function:f0"));
         assert!(
             artifacts
                 .explain_grammar_extension("grammar-extension:calculator")
                 .expect("extension descriptor explanation")
                 .contains("capabilities emit-frontend-forms")
         );
+    }
+
+    #[test]
+    fn session_lowers_staged_forms_directly_into_ast() {
+        let source = "// grammar-activate: records\n\
+                      // staged-loko: records\n\
+                      record circle\n\
+                        radius: <integer>\n\
+                      end\n\
+                      // end-staged-loko\n\
+                      define function main()\n\
+                        let c = make(<circle>, radius: 10);\n\
+                        radius(c)\n\
+                      end\n";
+        let artifacts =
+            CompilerSession::compile_source("records.loko", source, RuntimeMode::RunMain);
+
+        assert_eq!(
+            artifacts.runtime_result,
+            Some(RuntimeResult::ReturnedI64(10))
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        assert!(
+            artifacts
+                .syntax
+                .root
+                .child_nodes(crate::syntax::CstKind::Class)
+                .next()
+                .is_none()
+        );
+        assert_eq!(artifacts.ast.classes.len(), 1);
+        assert_eq!(artifacts.ast.classes[0].name, "<circle>");
+        assert_eq!(artifacts.ast.classes[0].slots[0].name, "radius");
+        assert_eq!(artifacts.sem.classes[0].name, "<circle>");
     }
 
     #[test]

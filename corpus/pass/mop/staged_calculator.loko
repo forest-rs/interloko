@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 // expect: dump eop contains grammar:calculator
 // expect: dump eop contains staged-region:calculator/r1
-// expect: dump syntax contains Ident "main"
+// expect: dump ast contains main()
 
 // grammar-activate: calculator
 
