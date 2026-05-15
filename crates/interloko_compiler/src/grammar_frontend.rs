@@ -1028,7 +1028,7 @@ struct StagedRegionEmission {
     diagnostics: Vec<Diagnostic>,
 }
 
-trait StagedGrammar {
+trait StagedGrammar: Sync {
     fn adapter_name(&self) -> &'static str;
     fn grammar_name(&self) -> &'static str;
     fn grammar_slug(&self) -> &'static str;
@@ -1041,6 +1041,7 @@ trait StagedGrammar {
 struct CalculatorStagedGrammar;
 
 static CALCULATOR_STAGED_GRAMMAR: CalculatorStagedGrammar = CalculatorStagedGrammar;
+static STAGED_GRAMMAR_REGISTRY: [&dyn StagedGrammar; 1] = [&CALCULATOR_STAGED_GRAMMAR];
 const CALCULATOR_PROVENANCE_RULES: &[&str] = &["calculator-region", "calculator-function"];
 
 impl StagedGrammar for CalculatorStagedGrammar {
@@ -1074,10 +1075,10 @@ impl StagedGrammar for CalculatorStagedGrammar {
 }
 
 fn lookup_staged_grammar(name: &str) -> Option<&'static dyn StagedGrammar> {
-    match name {
-        "calculator" => Some(&CALCULATOR_STAGED_GRAMMAR),
-        _ => None,
-    }
+    STAGED_GRAMMAR_REGISTRY
+        .iter()
+        .copied()
+        .find(|adapter| adapter.adapter_name() == name)
 }
 
 fn discover_staged_regions(source: &str) -> StagedRegionDiscovery<'_> {
