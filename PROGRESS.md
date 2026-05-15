@@ -1,5 +1,48 @@
 # Interloko Progress
 
+## Implemented: Tiny Staged Parse Prototype
+
+- Added `CalculatorRegionGrammar` and
+  `StagedCalculatorEnvironment` as the first grammar MOP slice where grammar
+  records participate in parsing, not only inspection.
+- A valid base-Loko prefix can select the staged grammar by containing the
+  symbol literal `#calculator`.
+- A later comment-delimited region:
+
+  ```text
+  // staged-loko: calculator
+  main = 40 + 2
+  // end-staged-loko
+  ```
+
+  is parsed by the calculator grammar and emits ordinary Loko source:
+
+  ```text
+  define function main()
+    40 + 2
+  end
+  ```
+
+- The existing pipeline still consumes normal `SyntaxTree` output:
+  syntax -> AST -> semantic IR -> lowered IR -> execution_tape. No AST, sem,
+  lower, or tape layer performs grammar lookup.
+- Parse trace now shows separate grammar activations for the base prefix and
+  calculator region, plus a `staged regions:` section with emitted source and
+  inert `source_data`.
+- MOP/EOP output includes `grammar:calculator` and activation objects such as
+  `grammar-activation:base-loko/prefix` and
+  `grammar-activation:calculator/calculator-region`.
+- Added lab and corpus fixtures showing that the staged calculator program runs
+  and remains inspectable.
+
+Deferred:
+
+- Source-authored grammar definitions.
+- General staged-region syntax and multiple regions per file.
+- Original-source span remapping for emitted ordinary Loko forms.
+- Semantic actions beyond inert structural source-data emission.
+- Capability policy for selecting/activating staged grammars.
+
 ## Implemented: Grammar MOP Follow-Up Slices
 
 - Added `DerivedHostEnvironment` and `DerivedHostGrammar` as a trusted

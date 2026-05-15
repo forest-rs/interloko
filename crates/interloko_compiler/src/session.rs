@@ -3317,6 +3317,20 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
         );
     }
 
+    let _ = writeln!(out, "staged regions:");
+    for region in &artifacts.grammar_parse.staged_regions {
+        let _ = writeln!(
+            out,
+            "  activation={} grammar={} span={}..{} emitted={:?} data={}",
+            region.activation,
+            region.grammar,
+            region.source_span.start,
+            region.source_span.end,
+            region.emitted_source,
+            region.data
+        );
+    }
+
     let _ = writeln!(out, "grammar diagnostics:");
     for fact in &artifacts.grammar_parse.grammar_diagnostics {
         let _ = writeln!(
@@ -3608,6 +3622,19 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
             activation.root_rule,
             activation.reason
         );
+    }
+    let _ = writeln!(out, "staged regions:");
+    for region in &report.staged_regions {
+        let _ = writeln!(
+            out,
+            "  activation={} grammar={} span={}..{} emitted={:?}",
+            region.activation,
+            region.grammar,
+            region.source_span.start,
+            region.source_span.end,
+            region.emitted_source
+        );
+        let _ = writeln!(out, "    data={}", region.data);
     }
     let _ = writeln!(out, "rule provenance:");
     for rule in &report.provenance.rules {

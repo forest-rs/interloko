@@ -326,6 +326,33 @@ fn grammar_header_selects_derived_host_stack() {
 }
 
 #[test]
+fn staged_calculator_region_runs_and_traces_activation_boundary() {
+    let file = fixture("staged_calculator.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let run = run_lab(&["run", path]);
+    assert_eq!(run.trim(), "42");
+
+    let eop = run_lab(&["eop", path]);
+    assert!(eop.contains("object language-environment:staged-calculator"));
+    assert!(eop.contains("object grammar:calculator"));
+    assert!(eop.contains("object grammar-activation:base-loko/prefix"));
+    assert!(eop.contains("object grammar-activation:calculator/calculator-region"));
+
+    let trace = run_lab(&[
+        "invoke-affordance",
+        path,
+        "language-environment:staged-calculator",
+        "show-parse-trace",
+    ]);
+    assert!(trace.contains("CalculatorRegionGrammar"));
+    assert!(trace.contains("staged regions:"));
+    assert!(trace.contains("calculator-function(name: main"));
+    assert!(trace.contains("define function main()"));
+    assert!(trace.contains("calculator staged region emitted ordinary Loko source"));
+}
+
+#[test]
 fn parse_trace_reports_grammar_diagnostic_facts() {
     let file = fixture("derived_grammar_syntax_error.loko");
     let path = file.to_str().expect("fixture path should be utf8");

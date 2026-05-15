@@ -1,0 +1,7 @@
+define function choose_grammar()
+  #calculator
+end
+
+// staged-loko: calculator
+main = 40 + 2
+// end-staged-loko

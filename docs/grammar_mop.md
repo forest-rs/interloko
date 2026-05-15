@@ -1,18 +1,18 @@
 # Grammar MOP
 
 Interloko exposes the current hand-written Loko parser as read-only grammar
-metaobjects. This is a projection layer, not a parser rewrite and not a macro
-system.
+metaobjects. It also has one tiny staged-parse prototype. This is still not a
+parser rewrite and not a macro system.
 
 ## Boundary
 
 `interloko_compiler::grammar_frontend` owns language-environment identity,
 grammar metaobjects, grammar-stack resolution, parser invocation, parse
-activations, and parse provenance.
+activations, structural staged emissions, and parse provenance.
 
 It explicitly does not own AST lowering, semantic lowering, source-authored
-grammars, semantic actions, staged parsing, host code execution, OMeta/Ohm
-compatibility, or user-defined parser rules.
+grammars, semantic actions, host code execution, OMeta/Ohm compatibility, or
+user-defined parser rules.
 
 ## Current Records
 
@@ -60,6 +60,18 @@ and effective rule records can be inspected separately. It still delegates CST
 construction to the base parser; it is a grammar-stack/provenance fixture, not
 new syntax.
 
+The staged prototype adds:
+
+```text
+language-environment:staged-calculator  StagedCalculatorEnvironment
+grammar:calculator                      CalculatorRegionGrammar extends BaseLokoGrammar
+```
+
+`CalculatorRegionGrammar` has direct rules for `calculator-region` and
+`calculator-function`. A valid base-Loko prefix selects it by containing the
+symbol literal `#calculator`; a later comment-delimited region is parsed by the
+calculator grammar and materialized as ordinary Loko function definitions.
+
 ## Parse Reports
 
 The grammar frontend wraps the existing `syntax::parse_file` path and returns a
@@ -72,6 +84,8 @@ That report contains:
 - the resolved grammar stack;
 - projected grammar, direct-rule, and effective-rule records;
 - grammar activations over source regions;
+- staged regions with emitted ordinary Loko source and inert source-data parse
+  results;
 - parse provenance with per-rule CST node counts;
 - grammar diagnostic facts that attach syntax diagnostics to the active
   grammar, activation, effective rule, source span, diagnostic code, and
@@ -109,6 +123,33 @@ header:
 
 The default is `// grammar: base-loko`. The header is workbench/corpus session
 input, not Loko syntax.
+
+Use the staged calculator prototype like this:
+
+```text
+define function choose_grammar()
+  #calculator
+end
+
+// staged-loko: calculator
+main = 40 + 2
+// end-staged-loko
+```
+
+The staged region emits this ordinary Loko form before AST lowering:
+
+```text
+define function main()
+  40 + 2
+end
+```
+
+Inspect it with:
+
+```sh
+cargo run -p interloko_lab -- run tools/interloko_lab/fixtures/staged_calculator.loko
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/staged_calculator.loko language-environment:staged-calculator show-parse-trace
+```
 
 The artifact graph now separates the frontend facts:
 
@@ -151,8 +192,9 @@ without running host code or pretending macros already exist.
 Later slices may add:
 
 - source-authored grammar declarations;
-- staged parsing over source regions;
 - structural semantic actions that emit forms or grammar deltas.
+- exact original-source span mapping for emitted forms;
+- more than one staged region per file;
 
 Those later actions must remain deterministic and inspectable. They should emit
 structural results, not run arbitrary host code.

@@ -1,10 +1,10 @@
 //! Read-only grammar frontend projection for the base Loko parser.
 //!
 //! This module owns language-environment identity, grammar metaobjects,
-//! grammar-stack resolution, parse activations, and parse provenance for the
-//! current hand-written parser. It intentionally does not own AST lowering,
-//! semantic lowering, source-authored grammars, macros, semantic actions,
-//! staged parsing, or parser rewriting.
+//! grammar-stack resolution, staged parse activations, structural parse
+//! emissions, and parse provenance for the current hand-written parser. It
+//! intentionally does not own AST lowering, semantic lowering, source-authored
+//! grammars, macros, host semantic actions, or parser rewriting.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -12,7 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{SourceFileId, StableIdBuilder};
 use crate::source_data::{self, SourceData};
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree};
@@ -31,6 +31,13 @@ pub const BASE_LOKO_GRAMMAR_NAME: &str = "BaseLokoGrammar";
 pub const DERIVED_HOST_ENVIRONMENT_NAME: &str = "DerivedHostEnvironment";
 /// Stable name for the trusted derived host grammar fixture.
 pub const DERIVED_HOST_GRAMMAR_NAME: &str = "DerivedHostGrammar";
+/// Stable name for the tiny staged calculator grammar prototype.
+pub const CALCULATOR_GRAMMAR_NAME: &str = "CalculatorRegionGrammar";
+/// Stable name for the source-selected staged calculator environment.
+pub const STAGED_CALCULATOR_ENVIRONMENT_NAME: &str = "StagedCalculatorEnvironment";
+
+const STAGED_CALCULATOR_START: &str = "// staged-loko: calculator";
+const STAGED_CALCULATOR_END: &str = "// end-staged-loko";
 
 /// Selects the grammar environment used by the frontend.
 ///
@@ -338,12 +345,31 @@ pub struct GrammarActivation {
     pub grammar: GrammarId,
     /// Active grammar slug used in object ids.
     pub grammar_slug: String,
+    /// Stable activation slug used in object ids.
+    pub object_slug: String,
     /// Source region parsed by this activation.
     pub span: Span,
     /// Rule that produced the root parse node.
     pub root_rule: GrammarRuleId,
     /// Stable reason text.
     pub reason: String,
+}
+
+/// One staged source region and its structural parse result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedParseRegion {
+    /// Grammar activation that parsed this region.
+    pub activation: GrammarActivationId,
+    /// Grammar used for this staged region.
+    pub grammar: GrammarId,
+    /// Grammar slug used in dumps.
+    pub grammar_slug: String,
+    /// Original source region parsed by the staged grammar.
+    pub source_span: Span,
+    /// Ordinary Loko source emitted by the staged grammar.
+    pub emitted_source: String,
+    /// Inert structural parse result.
+    pub data: SourceData,
 }
 
 /// Per-rule parse provenance summary.
@@ -416,6 +442,8 @@ pub struct GrammarParseReport {
     pub grammar_stack: GrammarStack,
     /// Grammar activations used by this parse.
     pub activations: Vec<GrammarActivation>,
+    /// Staged parse regions, if any.
+    pub staged_regions: Vec<StagedParseRegion>,
     /// Parse provenance facts.
     pub provenance: ParseProvenance,
     /// Grammar-specific diagnostic facts.
@@ -443,6 +471,11 @@ pub fn parse_file_with_environment(
     source: &str,
     environment: GrammarEnvironmentSelection,
 ) -> GrammarParseReport {
+    if environment == GrammarEnvironmentSelection::BaseLoko
+        && let Some(report) = parse_staged_calculator_file(source_file, source)
+    {
+        return report;
+    }
     let records = match environment {
         GrammarEnvironmentSelection::BaseLoko => base_loko_records(),
         GrammarEnvironmentSelection::DerivedHost => derived_host_records(),
@@ -472,6 +505,7 @@ fn parse_file_with_records(
         environment: records.environment.id,
         grammar: active_grammar,
         grammar_slug: active_grammar_slug,
+        object_slug: "source-file".to_string(),
         span: Span::new(0, source.len()),
         root_rule,
         reason: format!(
@@ -514,11 +548,307 @@ fn parse_file_with_records(
         effective_rules: records.effective_rules,
         grammar_stack,
         activations: vec![activation],
+        staged_regions: Vec::new(),
         provenance,
         grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
     }
+}
+
+fn parse_staged_calculator_file(
+    source_file: SourceFileId,
+    source: &str,
+) -> Option<GrammarParseReport> {
+    let region = find_staged_calculator_region(source)?;
+    let records = staged_calculator_records();
+    let base_grammar = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
+    let calculator_grammar = GrammarId::new(CALCULATOR_GRAMMAR_NAME);
+    let base_root_rule =
+        effective_rule_id_by_name(&records.effective_rules, base_grammar, "source-file")
+            .unwrap_or_else(|| GrammarRuleId::new(base_grammar, "effective:source-file"));
+    let calculator_root_rule = effective_rule_id_by_name(
+        &records.effective_rules,
+        calculator_grammar,
+        "calculator-region",
+    )
+    .unwrap_or_else(|| GrammarRuleId::new(calculator_grammar, "effective:calculator-region"));
+
+    let prefix_activation = GrammarActivation {
+        id: GrammarActivationId::new(source_file, base_grammar, "staged-prefix"),
+        environment: records.environment.id,
+        grammar: base_grammar,
+        grammar_slug: "base-loko".to_string(),
+        object_slug: "prefix".to_string(),
+        span: Span::new(0, region.start_marker.start),
+        root_rule: base_root_rule,
+        reason: "base-loko prefix parse selected calculator staged grammar".to_string(),
+    };
+    let staged_activation = GrammarActivation {
+        id: GrammarActivationId::new(source_file, calculator_grammar, "calculator-region"),
+        environment: records.environment.id,
+        grammar: calculator_grammar,
+        grammar_slug: "calculator".to_string(),
+        object_slug: "calculator-region".to_string(),
+        span: region.body_span,
+        root_rule: calculator_root_rule,
+        reason: "calculator staged region emitted ordinary Loko source".to_string(),
+    };
+
+    let mut diagnostics = Vec::new();
+    if !prefix_selects_calculator(source_file, region.prefix) {
+        diagnostics.push(
+            Diagnostic::error(region.start_marker, DiagnosticCode::SyntaxExpectedToken).with_arg(
+                DiagnosticArg::text("expected", "#calculator in staged prefix"),
+            ),
+        );
+    }
+    let emission = parse_calculator_region(region.body, region.body_span.start);
+    diagnostics.extend(emission.diagnostics);
+
+    let materialized_source = materialized_staged_source(region.prefix, &emission.emitted_source);
+    let mut syntax = syntax::parse_file(source_file, &materialized_source);
+    syntax.diagnostics.extend(diagnostics);
+
+    let active_effective_rules = records
+        .effective_rules
+        .iter()
+        .filter(|rule| rule.grammar == base_grammar || rule.grammar == calculator_grammar)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut provenance_rules = rule_provenance(&active_effective_rules, &syntax.root);
+    add_staged_rule_count(
+        &mut provenance_rules,
+        &records.effective_rules,
+        calculator_grammar,
+        "calculator-region",
+    );
+    add_staged_rule_count(
+        &mut provenance_rules,
+        &records.effective_rules,
+        calculator_grammar,
+        "calculator-function",
+    );
+
+    let activations = vec![prefix_activation, staged_activation.clone()];
+    let grammar_stack = GrammarStack {
+        environment: records.environment.id,
+        grammars: records.environment.grammar_stack.clone(),
+    };
+    let staged_effective_rules = records
+        .effective_rules
+        .iter()
+        .filter(|rule| rule.grammar == calculator_grammar)
+        .cloned()
+        .collect::<Vec<_>>();
+    let grammar_diagnostics = grammar_diagnostic_facts(
+        &syntax.diagnostics,
+        &syntax.root,
+        &staged_activation,
+        &staged_effective_rules,
+    );
+    let provenance = ParseProvenance {
+        id: ParseProvenanceId::new(source_file, records.environment.id),
+        source_file,
+        environment: records.environment.id,
+        grammar_stack: grammar_stack.clone(),
+        activations: activations.iter().map(|activation| activation.id).collect(),
+        rules: provenance_rules,
+        diagnostics: grammar_diagnostics.clone(),
+    };
+    let staged_regions = vec![StagedParseRegion {
+        activation: staged_activation.id,
+        grammar: calculator_grammar,
+        grammar_slug: "calculator".to_string(),
+        source_span: region.body_span,
+        emitted_source: emission.emitted_source,
+        data: emission.data,
+    }];
+
+    Some(GrammarParseReport {
+        source_file,
+        environment: records.environment,
+        grammars: records.grammars,
+        rules: records.rules,
+        effective_rules: records.effective_rules,
+        grammar_stack,
+        activations,
+        staged_regions,
+        provenance,
+        grammar_diagnostics,
+        diagnostics: syntax.diagnostics.clone(),
+        syntax,
+    })
+}
+
+struct StagedCalculatorRegion<'source> {
+    prefix: &'source str,
+    body: &'source str,
+    start_marker: Span,
+    body_span: Span,
+}
+
+struct CalculatorRegionEmission {
+    emitted_source: String,
+    data: SourceData,
+    diagnostics: Vec<Diagnostic>,
+}
+
+fn find_staged_calculator_region(source: &str) -> Option<StagedCalculatorRegion<'_>> {
+    let mut offset = 0_usize;
+    let mut start_marker = None;
+    let mut body_start = None;
+    for line in source.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        let trimmed = line.trim();
+        if trimmed == STAGED_CALCULATOR_START {
+            start_marker = Some(Span::new(line_start, line_end));
+            body_start = Some(line_end);
+            break;
+        }
+        offset = line_end;
+    }
+    let start_marker = start_marker?;
+    let body_start = body_start?;
+    let mut body_end = source.len();
+    offset = body_start;
+    for line in source[body_start..].split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        if line.trim() == STAGED_CALCULATOR_END {
+            body_end = line_start;
+            break;
+        }
+        offset = line_end;
+    }
+    Some(StagedCalculatorRegion {
+        prefix: &source[..start_marker.start],
+        body: &source[body_start..body_end],
+        start_marker,
+        body_span: Span::new(body_start, body_end),
+    })
+}
+
+fn prefix_selects_calculator(source_file: SourceFileId, prefix: &str) -> bool {
+    let syntax = syntax::parse_file(source_file, prefix);
+    syntax.tokens.iter().any(|token| {
+        token.kind == syntax::TokenKind::Symbol && token.text(&syntax.source) == "#calculator"
+    })
+}
+
+fn parse_calculator_region(body: &str, source_offset: usize) -> CalculatorRegionEmission {
+    let mut emitted_source = String::new();
+    let mut diagnostics = Vec::new();
+    let mut functions = Vec::new();
+    let mut offset = source_offset;
+
+    for line in body.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        offset = line_end;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        let leading = line.find(trimmed).unwrap_or(0);
+        let trimmed_start = line_start + leading;
+        let trimmed_span = Span::new(trimmed_start, trimmed_start + trimmed.len());
+        let Some((name, expression)) = trimmed.split_once('=') else {
+            diagnostics.push(calculator_diagnostic(trimmed_span, "`name = expression`"));
+            continue;
+        };
+        let name = name.trim();
+        let expression = expression.trim();
+        if name.is_empty() || expression.is_empty() || !valid_calculator_function_name(name) {
+            diagnostics.push(calculator_diagnostic(trimmed_span, "`name = expression`"));
+            continue;
+        }
+        emitted_source.push_str("define function ");
+        emitted_source.push_str(name);
+        emitted_source.push_str("()\n  ");
+        emitted_source.push_str(expression);
+        emitted_source.push_str("\nend\n");
+        functions.push(SourceData::record(
+            "calculator-function",
+            vec![
+                source_data::field("name", SourceData::symbol(name)),
+                source_data::field("expression", SourceData::string(expression)),
+                source_data::field(
+                    "source-start",
+                    SourceData::integer(usize_to_source_i64(trimmed_span.start)),
+                ),
+                source_data::field(
+                    "source-end",
+                    SourceData::integer(usize_to_source_i64(trimmed_span.end)),
+                ),
+            ],
+        ));
+    }
+
+    if functions.is_empty() && diagnostics.is_empty() {
+        diagnostics.push(calculator_diagnostic(
+            Span::new(source_offset, source_offset + body.len()),
+            "`name = expression`",
+        ));
+    }
+
+    CalculatorRegionEmission {
+        emitted_source,
+        data: SourceData::record(
+            "calculator-region",
+            vec![
+                source_data::field("grammar", SourceData::symbol(CALCULATOR_GRAMMAR_NAME)),
+                source_data::field("functions", SourceData::list(functions)),
+            ],
+        ),
+        diagnostics,
+    }
+}
+
+fn calculator_diagnostic(span: Span, expected: &str) -> Diagnostic {
+    Diagnostic::error(span, DiagnosticCode::SyntaxExpectedToken)
+        .with_arg(DiagnosticArg::text("expected", expected))
+}
+
+fn valid_calculator_function_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
+}
+
+fn materialized_staged_source(prefix: &str, emitted_source: &str) -> String {
+    let mut materialized = String::new();
+    materialized.push_str(prefix);
+    if !materialized.ends_with('\n') {
+        materialized.push('\n');
+    }
+    materialized.push_str(emitted_source);
+    materialized
+}
+
+fn add_staged_rule_count(
+    rules: &mut [GrammarRuleProvenance],
+    effective_rules: &[EffectiveGrammarRule],
+    grammar: GrammarId,
+    name: &str,
+) {
+    let Some(rule) = effective_rules
+        .iter()
+        .find(|rule| rule.grammar == grammar && rule.name == name)
+    else {
+        return;
+    };
+    if let Some(provenance) = rules.iter_mut().find(|item| item.rule == rule.id) {
+        provenance.node_count = provenance.node_count.saturating_add(1);
+    }
+}
+
+fn usize_to_source_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Returns the projected base Loko grammar records without parsing source.
@@ -611,6 +941,50 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
     GrammarFrontendRecords {
         environment,
         active_grammar: derived_grammar_id,
+        grammars,
+        rules,
+        effective_rules,
+    }
+}
+
+/// Returns the source-selected staged calculator records without parsing source.
+#[must_use]
+pub fn staged_calculator_records() -> GrammarFrontendRecords {
+    let base_environment = base_loko_records();
+    let base_grammar_id = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
+    let calculator_environment_id = LanguageEnvironmentId::new(STAGED_CALCULATOR_ENVIRONMENT_NAME);
+    let calculator_grammar_id = GrammarId::new(CALCULATOR_GRAMMAR_NAME);
+    let calculator_rules = calculator_rules(calculator_grammar_id, "calculator");
+    let calculator_direct_rule_ids = calculator_rules.iter().map(|rule| rule.id).collect();
+    let mut rules = base_environment.rules;
+    rules.extend(calculator_rules.clone());
+    let mut grammars = base_environment.grammars;
+    let base_effective_rules = base_environment.effective_rules;
+    let calculator_effective_rules =
+        calculator_effective_rules(base_grammar_id, calculator_grammar_id, "calculator", &rules);
+    let calculator_effective_rule_ids = calculator_effective_rules
+        .iter()
+        .map(|rule| rule.id)
+        .collect::<Vec<_>>();
+    grammars.push(Grammar {
+        id: calculator_grammar_id,
+        slug: "calculator".to_string(),
+        name: CALCULATOR_GRAMMAR_NAME.to_string(),
+        extends: vec![base_grammar_id],
+        direct_rules: calculator_direct_rule_ids,
+        effective_rules: calculator_effective_rule_ids,
+    });
+    let mut effective_rules = base_effective_rules;
+    effective_rules.extend(calculator_effective_rules);
+    let environment = LanguageEnvironment {
+        id: calculator_environment_id,
+        slug: "staged-calculator".to_string(),
+        name: STAGED_CALCULATOR_ENVIRONMENT_NAME.to_string(),
+        grammar_stack: vec![base_grammar_id, calculator_grammar_id],
+    };
+    GrammarFrontendRecords {
+        environment,
+        active_grammar: calculator_grammar_id,
         grammars,
         rules,
         effective_rules,
@@ -771,6 +1145,38 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         .collect()
 }
 
+fn calculator_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
+    const RULES: &[(&str, &str, &str)] = &[
+        (
+            "calculator-region",
+            "calculator-function*",
+            "grammar_frontend.rs:parse_calculator_region",
+        ),
+        (
+            "calculator-function",
+            "name `=` expression => `define function name() expression end`",
+            "grammar_frontend.rs:parse_calculator_region",
+        ),
+    ];
+
+    RULES
+        .iter()
+        .map(|(name, expression, location)| GrammarRule {
+            id: GrammarRuleId::new(grammar, name),
+            grammar,
+            grammar_slug: grammar_slug.to_string(),
+            name: (*name).to_string(),
+            expression: (*expression).to_string(),
+            expression_data: grammar_rule_expression_data(name, expression, location),
+            projection: GrammarProjection {
+                origin: "compiler-projected-prototype".to_string(),
+                location: (*location).to_string(),
+                source_span: None,
+            },
+        })
+        .collect()
+}
+
 fn grammar_rule_expression_data(name: &str, expression: &str, location: &str) -> SourceData {
     SourceData::record(
         "grammar-rule",
@@ -780,6 +1186,32 @@ fn grammar_rule_expression_data(name: &str, expression: &str, location: &str) ->
             source_data::field("location", SourceData::string(location)),
         ],
     )
+}
+
+fn calculator_effective_rules(
+    base_grammar: GrammarId,
+    calculator_grammar: GrammarId,
+    calculator_slug: &str,
+    rules: &[GrammarRule],
+) -> Vec<EffectiveGrammarRule> {
+    let mut effective_rules =
+        derived_effective_rules(base_grammar, calculator_grammar, calculator_slug, rules);
+    effective_rules.extend(
+        rules
+            .iter()
+            .filter(|rule| rule.grammar == calculator_grammar)
+            .map(|rule| EffectiveGrammarRule {
+                id: GrammarRuleId::new(calculator_grammar, &format!("effective:{}", rule.name)),
+                grammar: calculator_grammar,
+                grammar_slug: calculator_slug.to_string(),
+                name: rule.name.clone(),
+                selected_rule: rule.id,
+                selected_rule_grammar: rule.grammar,
+                overridden_rule: None,
+                resolution: EffectiveGrammarRuleResolution::Direct,
+            }),
+    );
+    effective_rules
 }
 
 fn direct_effective_rules(
@@ -1038,7 +1470,10 @@ pub fn effective_grammar_rule_object_id(rule: &EffectiveGrammarRule) -> String {
 /// Returns the stable EOP id for a grammar activation.
 #[must_use]
 pub fn grammar_activation_object_id(activation: &GrammarActivation) -> String {
-    format!("grammar-activation:{}/source-file", activation.grammar_slug)
+    format!(
+        "grammar-activation:{}/{}",
+        activation.grammar_slug, activation.object_slug
+    )
 }
 
 fn stable_name(name: &str) -> String {
@@ -1153,5 +1588,34 @@ mod tests {
         assert_eq!(fact.rule_name, "body");
         assert_eq!(fact.expected_fragment, None);
         assert_eq!(report.provenance.diagnostics, report.grammar_diagnostics);
+    }
+
+    #[test]
+    fn staged_calculator_region_emits_ordinary_loko_source() {
+        let source = "define function choose_grammar()\n  #calculator\nend\n\n\
+                      // staged-loko: calculator\n\
+                      main = 40 + 2\n\
+                      // end-staged-loko\n";
+        let report = parse_file(SourceFileId::from_path("staged.loko"), source);
+
+        assert_eq!(report.environment.name, STAGED_CALCULATOR_ENVIRONMENT_NAME);
+        assert_eq!(report.activations.len(), 2);
+        assert_eq!(report.staged_regions.len(), 1);
+        assert!(
+            report
+                .grammar_stack
+                .grammars
+                .contains(&GrammarId::new(CALCULATOR_GRAMMAR_NAME))
+        );
+        assert!(
+            report
+                .syntax
+                .source
+                .contains("define function main()\n  40 + 2\nend")
+        );
+        assert!(
+            source_data::dump(&report.staged_regions[0].data)
+                .contains("calculator-function(name: main")
+        );
     }
 }
