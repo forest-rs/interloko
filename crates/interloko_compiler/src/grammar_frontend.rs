@@ -699,6 +699,31 @@ pub struct GrammarFrontendRegistry {
     staged_adapters: &'static [&'static dyn StagedGrammarAdapter],
 }
 
+impl fmt::Debug for GrammarFrontendRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrammarFrontendRegistry")
+            .field("environment_slugs", &self.environment_slugs())
+            .field("staged_adapter_names", &self.staged_adapter_names())
+            .finish()
+    }
+}
+
+impl PartialEq for GrammarFrontendRegistry {
+    fn eq(&self, other: &Self) -> bool {
+        self.environment_slugs() == other.environment_slugs()
+            && self.staged_adapter_names() == other.staged_adapter_names()
+    }
+}
+
+impl Eq for GrammarFrontendRegistry {}
+
+impl Default for GrammarFrontendRegistry {
+    fn default() -> Self {
+        Self::builtin()
+    }
+}
+
 impl GrammarFrontendRegistry {
     /// Creates a registry from explicit static providers.
     #[must_use]

@@ -157,9 +157,12 @@ fn run(args: Vec<String>) -> Result<()> {
             let source_file = SourceFileId::from_path(&args[1]);
             let before = read_path(&args[1])?;
             let after = read_path(&args[2])?;
-            let before_grammar = parse_grammar_environment(Path::new(&args[1]), &before)?;
-            let after_grammar = parse_grammar_environment(Path::new(&args[2]), &after)?;
-            let mut session = IncrementalCompilerSession::new();
+            let grammar_registry = GrammarFrontendRegistry::builtin();
+            let before_grammar =
+                parse_grammar_environment(Path::new(&args[1]), &before, &grammar_registry)?;
+            let after_grammar =
+                parse_grammar_environment(Path::new(&args[2]), &after, &grammar_registry)?;
+            let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
             session.add_source_with_id_and_grammar(source_file, &args[1], &before, before_grammar);
             let _ = session
                 .compile(source_file, RuntimeMode::CompileOnly)
@@ -187,16 +190,16 @@ fn compile_path(path: &str, mode: RuntimeMode) -> Result<SessionArtifacts> {
 
 fn compile_workbench_path(path: &str, mode: RuntimeMode) -> Result<CompiledWorkbench> {
     let source = read_path(path)?;
-    let grammar_environment = parse_grammar_environment(Path::new(path), &source)?;
-    let registry = parse_host_registry(Path::new(path), &source)?;
+    let grammar_registry = GrammarFrontendRegistry::builtin();
+    let grammar_environment =
+        parse_grammar_environment(Path::new(path), &source, &grammar_registry)?;
+    let host_registry = parse_host_registry(Path::new(path), &source)?;
     let host_environment = parse_host_environment(Path::new(path), &source)?;
-    let artifacts = CompilerSession::compile_source_with_grammar_and_host_registry(
-        path,
-        &source,
-        mode,
-        grammar_environment,
-        &registry,
-    );
+    let mut session = CompilerSession::with_grammar_registry(grammar_registry);
+    let source_file = session.add_source_with_grammar(path, &source, grammar_environment);
+    let artifacts = session
+        .compile_with_host_registry(source_file, mode, &host_registry)
+        .expect("source was just added");
     Ok(CompiledWorkbench {
         artifacts,
         host_environment,
@@ -721,14 +724,17 @@ fn mop_section(artifacts: &SessionArtifacts, start: &str, end: &str) -> String {
         .map_or_else(|| section.into(), |end_index| section[..end_index].into())
 }
 
-fn parse_grammar_environment(path: &Path, source: &str) -> Result<GrammarEnvironmentSelection> {
-    let registry = GrammarFrontendRegistry::builtin();
+fn parse_grammar_environment(
+    path: &Path,
+    source: &str,
+    registry: &GrammarFrontendRegistry,
+) -> Result<GrammarEnvironmentSelection> {
     let mut selection = GrammarEnvironmentSelection::base_loko();
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             if let Some(rest) = trimmed.strip_prefix("// grammar:") {
-                selection = parse_grammar_selection(path, index + 1, rest.trim(), &registry)?;
+                selection = parse_grammar_selection(path, index + 1, rest.trim(), registry)?;
             }
             continue;
         }

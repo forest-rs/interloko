@@ -17,8 +17,8 @@ use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::grammar_frontend::{
-    self, GrammarActivation, GrammarEnvironmentSelection, GrammarParseReport, GrammarRule,
-    LanguageEnvironment,
+    self, GrammarActivation, GrammarEnvironmentSelection, GrammarFrontendRegistry,
+    GrammarParseReport, GrammarRule, LanguageEnvironment,
 };
 use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
@@ -653,6 +653,8 @@ pub trait HostEnvironmentProvider {
 pub struct SessionArtifacts {
     /// Source file.
     pub source: SourceFile,
+    /// Grammar frontend registry used for this compilation.
+    pub grammar_registry: GrammarFrontendRegistry,
     /// Parsed syntax tree.
     pub syntax: SyntaxTree,
     /// Grammar frontend parse report.
@@ -1001,13 +1003,29 @@ pub struct DefinitionChange {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompilerSession {
     files: Vec<SourceFile>,
+    grammar_registry: GrammarFrontendRegistry,
 }
 
 impl CompilerSession {
     /// Creates an empty session.
     #[must_use]
-    pub const fn new() -> Self {
-        Self { files: Vec::new() }
+    pub fn new() -> Self {
+        Self::with_grammar_registry(GrammarFrontendRegistry::builtin())
+    }
+
+    /// Creates an empty session with an explicit grammar frontend registry.
+    #[must_use]
+    pub const fn with_grammar_registry(grammar_registry: GrammarFrontendRegistry) -> Self {
+        Self {
+            files: Vec::new(),
+            grammar_registry,
+        }
+    }
+
+    /// Returns the grammar frontend registry owned by this session.
+    #[must_use]
+    pub const fn grammar_registry(&self) -> GrammarFrontendRegistry {
+        self.grammar_registry
     }
 
     /// Adds a named source file and returns its id.
@@ -1072,13 +1090,38 @@ impl CompilerSession {
     /// Compiles one source by id.
     #[must_use]
     pub fn compile(&self, id: SourceFileId, mode: RuntimeMode) -> Option<SessionArtifacts> {
-        self.source(id).map(|file| compile_file(file, mode))
+        self.source(id)
+            .map(|file| compile_file_with_grammar_registry(file, mode, self.grammar_registry))
+    }
+
+    /// Compiles one source by id with explicit host-backed metadata.
+    #[must_use]
+    pub fn compile_with_host_registry(
+        &self,
+        id: SourceFileId,
+        mode: RuntimeMode,
+        registry: &sem::HostMetaRegistry,
+    ) -> Option<SessionArtifacts> {
+        self.source(id)
+            .map(|file| compile_file_with_registries(file, mode, self.grammar_registry, registry))
     }
 
     /// Compiles a named source without storing it in the session.
     #[must_use]
     pub fn compile_source(name: &str, source: &str, mode: RuntimeMode) -> SessionArtifacts {
         compile_file(&SourceFile::named(name, source), mode)
+    }
+
+    /// Compiles a named source with an explicit grammar frontend registry
+    /// without storing it in a session.
+    #[must_use]
+    pub fn compile_source_with_registry(
+        name: &str,
+        source: &str,
+        mode: RuntimeMode,
+        grammar_registry: GrammarFrontendRegistry,
+    ) -> SessionArtifacts {
+        compile_file_with_grammar_registry(&SourceFile::named(name, source), mode, grammar_registry)
     }
 
     /// Compiles a named source with an explicit grammar environment without
@@ -1196,13 +1239,29 @@ impl CompilerSession {
 #[derive(Clone, Debug, Default)]
 pub struct IncrementalCompilerSession {
     files: Vec<CachedSourceFile>,
+    grammar_registry: GrammarFrontendRegistry,
 }
 
 impl IncrementalCompilerSession {
     /// Creates an empty incremental session.
     #[must_use]
-    pub const fn new() -> Self {
-        Self { files: Vec::new() }
+    pub fn new() -> Self {
+        Self::with_grammar_registry(GrammarFrontendRegistry::builtin())
+    }
+
+    /// Creates an empty incremental session with an explicit grammar frontend registry.
+    #[must_use]
+    pub const fn with_grammar_registry(grammar_registry: GrammarFrontendRegistry) -> Self {
+        Self {
+            files: Vec::new(),
+            grammar_registry,
+        }
+    }
+
+    /// Returns the grammar frontend registry owned by this session.
+    #[must_use]
+    pub const fn grammar_registry(&self) -> GrammarFrontendRegistry {
+        self.grammar_registry
     }
 
     /// Adds a named source file and returns its stable id.
@@ -1315,7 +1374,7 @@ impl IncrementalCompilerSession {
         let previous_source = previous_artifacts
             .as_ref()
             .map(|artifacts| artifacts.source.clone());
-        let artifacts = self.files[index].artifacts_for(&source, mode);
+        let artifacts = self.files[index].artifacts_for(&source, mode, self.grammar_registry);
         let diff = previous_artifacts
             .as_ref()
             .map(|before| CompilerSession::diff(before, &artifacts));
@@ -1361,13 +1420,19 @@ impl CachedSourceFile {
         }
     }
 
-    fn artifacts_for(&self, source: &SourceFile, mode: RuntimeMode) -> SessionArtifacts {
+    fn artifacts_for(
+        &self,
+        source: &SourceFile,
+        mode: RuntimeMode,
+        grammar_registry: GrammarFrontendRegistry,
+    ) -> SessionArtifacts {
         if let Some(previous) = &self.artifacts
             && previous.source == *source
+            && previous.grammar_registry == grammar_registry
         {
             return artifacts_for_mode(previous, mode);
         }
-        compile_file(source, mode)
+        compile_file_with_grammar_registry(source, mode, grammar_registry)
     }
 }
 
@@ -2929,12 +2994,29 @@ fn generic_contract_label(module: &sem::Module, generic_id: sem::GenericFunction
 }
 
 fn compile_file(file: &SourceFile, mode: RuntimeMode) -> SessionArtifacts {
-    compile_file_with_host_registry(file, mode, &sem::HostMetaRegistry::new())
+    compile_file_with_grammar_registry(file, mode, GrammarFrontendRegistry::builtin())
+}
+
+fn compile_file_with_grammar_registry(
+    file: &SourceFile,
+    mode: RuntimeMode,
+    grammar_registry: GrammarFrontendRegistry,
+) -> SessionArtifacts {
+    compile_file_with_registries(file, mode, grammar_registry, &sem::HostMetaRegistry::new())
 }
 
 fn compile_file_with_host_registry(
     file: &SourceFile,
     mode: RuntimeMode,
+    registry: &sem::HostMetaRegistry,
+) -> SessionArtifacts {
+    compile_file_with_registries(file, mode, GrammarFrontendRegistry::builtin(), registry)
+}
+
+fn compile_file_with_registries(
+    file: &SourceFile,
+    mode: RuntimeMode,
+    grammar_registry: GrammarFrontendRegistry,
     registry: &sem::HostMetaRegistry,
 ) -> SessionArtifacts {
     let mut timings = ArtifactTimingCollector::default();
@@ -2943,7 +3025,12 @@ fn compile_file_with_host_registry(
     let (grammar_environment, elapsed_nanos) = measure_elapsed(|| file.grammar_environment.clone());
     timings.record(QueryArtifact::EnvironmentResolution, elapsed_nanos);
     let (grammar_parse, elapsed_nanos) = measure_elapsed(|| {
-        grammar_frontend::parse_file_with_environment(file.id, &file.source, grammar_environment)
+        grammar_frontend::parse_file_with_registry(
+            file.id,
+            &file.source,
+            grammar_environment,
+            &grammar_registry,
+        )
     });
     timings.record(QueryArtifact::GrammarParse, elapsed_nanos);
     let (_, elapsed_nanos) = measure_elapsed(|| grammar_parse.grammar_stack.grammars.len());
@@ -2983,6 +3070,7 @@ fn compile_file_with_host_registry(
 
     let mut artifacts = SessionArtifacts {
         source,
+        grammar_registry,
         syntax,
         grammar_parse,
         ast,
@@ -6980,6 +7068,56 @@ mod tests {
         assert_eq!(grammar_parse.action, CacheAction::Recomputed);
         assert!(grammar_parse.invalidated);
         assert!(grammar_parse.affected);
+    }
+
+    #[test]
+    fn compiler_sessions_compile_through_their_owned_grammar_registry() {
+        static EMPTY_ENVIRONMENTS: [&dyn grammar_frontend::GrammarEnvironmentProvider; 0] = [];
+        static EMPTY_STAGED_ADAPTERS: [&dyn grammar_frontend::StagedGrammarAdapter; 0] = [];
+
+        let registry = GrammarFrontendRegistry::new(&EMPTY_ENVIRONMENTS, &EMPTY_STAGED_ADAPTERS);
+        let mut session = CompilerSession::with_grammar_registry(registry);
+        let source = session.add_source("empty-registry.loko", SIMPLE_MAIN);
+        let artifacts = session
+            .compile(source, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+
+        assert_eq!(session.grammar_registry(), registry);
+        assert_eq!(artifacts.grammar_registry, registry);
+        assert!(
+            artifacts
+                .grammar_parse
+                .diagnostics
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic
+                        .args
+                        .iter()
+                        .any(|arg| arg.name == "environment" && arg.value.render() == "base-loko")
+                })
+        );
+
+        let mut incremental = IncrementalCompilerSession::with_grammar_registry(registry);
+        let source = incremental.add_source("empty-registry.loko", SIMPLE_MAIN);
+        let update = incremental
+            .compile(source, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+
+        assert_eq!(incremental.grammar_registry(), registry);
+        assert_eq!(update.artifacts.grammar_registry, registry);
+        assert!(
+            update
+                .artifacts
+                .grammar_parse
+                .diagnostics
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic
+                        .args
+                        .iter()
+                        .any(|arg| arg.name == "environment" && arg.value.render() == "base-loko")
+                })
+        );
     }
 
     #[test]

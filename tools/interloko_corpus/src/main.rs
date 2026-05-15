@@ -90,15 +90,15 @@ fn dump_command(args: &[String]) -> Result<Outcome> {
         CorpusError::Usage("stage must be one of syntax|ast|sem|mop|eop|lowered|tape|all".into())
     })?;
     let source = read_to_string(Path::new(&args[1]))?;
-    let registry = parse_host_registry(Path::new(&args[1]), &source)?;
-    let grammar_environment = parse_grammar_environment(Path::new(&args[1]), &source)?;
-    let artifacts = CompilerSession::compile_source_with_grammar_and_host_registry(
-        &args[1],
-        &source,
-        RuntimeMode::CompileOnly,
-        grammar_environment,
-        &registry,
-    );
+    let grammar_registry = GrammarFrontendRegistry::builtin();
+    let host_registry = parse_host_registry(Path::new(&args[1]), &source)?;
+    let grammar_environment =
+        parse_grammar_environment(Path::new(&args[1]), &source, &grammar_registry)?;
+    let mut session = CompilerSession::with_grammar_registry(grammar_registry);
+    let source_file = session.add_source_with_grammar(&args[1], &source, grammar_environment);
+    let artifacts = session
+        .compile_with_host_registry(source_file, RuntimeMode::CompileOnly, &host_registry)
+        .expect("source was just added");
     print!("{}", artifacts.dump_stage(stage));
     Ok(Outcome::Success)
 }
@@ -200,14 +200,17 @@ fn parse_host_registry(path: &Path, source: &str) -> Result<HostMetaRegistry> {
     Ok(host_registry)
 }
 
-fn parse_grammar_environment(path: &Path, source: &str) -> Result<GrammarEnvironmentSelection> {
-    let registry = GrammarFrontendRegistry::builtin();
+fn parse_grammar_environment(
+    path: &Path,
+    source: &str,
+    registry: &GrammarFrontendRegistry,
+) -> Result<GrammarEnvironmentSelection> {
     let mut selection = GrammarEnvironmentSelection::base_loko();
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             if let Some(rest) = trimmed.strip_prefix("// grammar:") {
-                selection = parse_grammar_selection(path, index + 1, rest.trim(), &registry)?;
+                selection = parse_grammar_selection(path, index + 1, rest.trim(), registry)?;
             }
             continue;
         }
@@ -410,16 +413,19 @@ fn check_case(case: &Case) -> Vec<String> {
 }
 
 fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::SessionArtifacts {
+    let grammar_registry = GrammarFrontendRegistry::builtin();
     if has_host_registry(&case.host_registry) {
-        CompilerSession::compile_source_with_grammar_and_host_registry(
+        let mut session = CompilerSession::with_grammar_registry(grammar_registry);
+        let source_file = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
-            mode,
             case.grammar_environment.clone(),
-            &case.host_registry,
-        )
+        );
+        session
+            .compile_with_host_registry(source_file, mode, &case.host_registry)
+            .expect("source was just added")
     } else {
-        let mut session = IncrementalCompilerSession::new();
+        let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
         let source = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
