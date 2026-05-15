@@ -151,10 +151,12 @@ fn render_pipeline(artifacts: &SessionArtifacts) -> String {
             .map(|report| report.key.to_string())
             .unwrap_or_else(|| "not emitted".to_string());
         let metrics = artifacts.metrics_for(artifact);
+        let relation = artifact_relation_tokens(artifacts, artifact);
         let _ = writeln!(
             out,
-            "          <li class=\"pipeline__node\" data-node=\"artifact:{}\"><span>{}</span><code>{}</code><small>{} · {} work</small></li>",
+            "          <li class=\"pipeline__node\" data-node=\"artifact:{}\" data-rel=\"{}\"><span>{}</span><code>{}</code><small>{} · {} work</small></li>",
             escape_attr(&key),
+            escape_attr(&relation),
             escape_html(label),
             escape_html(&key),
             escape_html(&format_duration_nanos(metrics.elapsed_nanos)),
@@ -378,22 +380,23 @@ fn render_staged_region(
         out.push_str("                <div class=\"empty-state empty-state--small\">No generated semantic objects could be matched to this region.</div>\n");
     } else {
         out.push_str("                <ul class=\"object-links\">\n");
-        for (id, title) in ast_entries {
+        for entry in ast_entries {
             let _ = writeln!(
                 out,
-                "                  <li data-rel=\"{} {}\"><code>{}</code><span>{}</span></li>",
-                escape_attr(&region_rel),
-                escape_attr(&id),
-                escape_html(&id),
-                escape_html(&title)
+                "                  <li data-node=\"{}\" data-rel=\"{}\"><code>{}</code><span>{}</span></li>",
+                escape_attr(&entry.id),
+                escape_attr(&entry.relation),
+                escape_html(&entry.id),
+                escape_html(&entry.title)
             );
         }
         for object in generated {
+            let relations = relations_for_object_in_region(artifacts, region, object.id.as_str());
             let _ = writeln!(
                 out,
-                "                  <li data-rel=\"{} object:{}\"><code>{}</code><span>{}</span></li>",
-                escape_attr(&region_rel),
+                "                  <li data-node=\"object:{}\" data-rel=\"{}\"><code>{}</code><span>{}</span></li>",
                 escape_attr(object.id.as_str()),
+                escape_attr(&relations),
                 escape_html(object.id.as_str()),
                 escape_html(&object.presentation.title)
             );
@@ -401,43 +404,118 @@ fn render_staged_region(
         out.push_str("                </ul>\n");
     }
     out.push_str("              </div>\n");
+    out.push_str("              <div class=\"chain-step chain-step--artifacts\">\n");
+    out.push_str("                <span class=\"step-label\">Executable artifacts</span>\n");
+    out.push_str(&render_region_artifact_links(artifacts, region));
+    out.push_str("              </div>\n");
     out.push_str("            </div>\n");
     out.push_str("          </article>\n");
     out
 }
 
+fn relations_for_object_in_region(
+    artifacts: &SessionArtifacts,
+    region: &StagedParseRegion,
+    object_id: &str,
+) -> String {
+    let mut relations = vec![relation_for_region(region), format!("object:{object_id}")];
+    for (index, form) in region.forms.iter().enumerate() {
+        if object_ids_for_form(artifacts, form)
+            .iter()
+            .any(|id| id == object_id)
+        {
+            relations.push(relation_for_form(region, index));
+            relations.push(flow_relation_for_form(region, index));
+        }
+    }
+    relations.sort();
+    relations.dedup();
+    relations.join(" ")
+}
+
+struct GeneratedAstEntry {
+    id: String,
+    title: String,
+    relation: String,
+}
+
 fn generated_ast_entries_for_region(
     artifacts: &SessionArtifacts,
     region: &StagedParseRegion,
-) -> Vec<(String, String)> {
+) -> Vec<GeneratedAstEntry> {
     let mut entries = Vec::new();
-    for form in &region.forms {
+    for (index, form) in region.forms.iter().enumerate() {
+        let form_rel = relation_for_form(region, index);
+        let flow_rel = flow_relation_for_form(region, index);
+        let region_rel = relation_for_region(region);
         match &form.kind {
             FrontendFormKind::Function(function) => {
                 for ast_function in &artifacts.ast.functions {
                     if ast_function.name == function.name {
-                        entries.push((
-                            format!("ast-function:{}", ast_function.definition),
-                            format!("function {}", ast_function.name),
-                        ));
+                        let id = format!("ast-function:{}", ast_function.definition);
+                        entries.push(GeneratedAstEntry {
+                            relation: format!("{region_rel} {form_rel} {flow_rel} {id}"),
+                            id,
+                            title: format!("function {}", ast_function.name),
+                        });
                     }
                 }
             }
             FrontendFormKind::Class(class) => {
                 for ast_class in &artifacts.ast.classes {
                     if ast_class.name == class.name {
-                        entries.push((
-                            format!("ast-class:{}", ast_class.definition),
-                            format!("class {}", ast_class.name),
-                        ));
+                        let id = format!("ast-class:{}", ast_class.definition);
+                        entries.push(GeneratedAstEntry {
+                            relation: format!("{region_rel} {form_rel} {flow_rel} {id}"),
+                            id,
+                            title: format!("class {}", ast_class.name),
+                        });
                     }
                 }
             }
         }
     }
-    entries.sort();
-    entries.dedup();
+    entries.sort_by(|left, right| left.id.cmp(&right.id));
+    entries.dedup_by(|left, right| left.id == right.id);
     entries
+}
+
+fn render_region_artifact_links(
+    artifacts: &SessionArtifacts,
+    region: &StagedParseRegion,
+) -> String {
+    let reports = artifacts.artifact_reports();
+    let flow_relations = flow_relations_for_region(region);
+    let stages = [
+        (QueryArtifact::Ast, "AST"),
+        (QueryArtifact::Bind, "Semantic IR"),
+        (QueryArtifact::LoweredModule, "Lowered IR"),
+        (QueryArtifact::TapeProgram, "Tape"),
+        (QueryArtifact::RuntimeResult, "Runtime"),
+    ];
+    let mut out = String::new();
+    out.push_str("                <ul class=\"stage-links\">\n");
+    for (artifact, label) in stages {
+        let key = report_for(&reports, artifact)
+            .map(|report| report.key.to_string())
+            .unwrap_or_else(|| "not emitted".to_string());
+        let relation = format!(
+            "{} {} {}",
+            flow_relations,
+            artifact_stage_relation(artifact),
+            artifact_key_relation(&key)
+        );
+        let _ = writeln!(
+            out,
+            "                  <li data-node=\"artifact:{}\" data-rel=\"{}\"><span>{}</span><code>{}</code></li>",
+            escape_attr(&key),
+            escape_attr(&relation),
+            escape_html(label),
+            escape_html(&key)
+        );
+    }
+    out.push_str("                </ul>\n");
+    out
 }
 
 fn render_frontend_form(
@@ -447,6 +525,7 @@ fn render_frontend_form(
     form: &FrontendForm,
 ) -> String {
     let form_rel = relation_for_form(region, index);
+    let flow_rel = flow_relation_for_form(region, index);
     let region_rel = relation_for_region(region);
     let object_relations = object_ids_for_form(artifacts, form)
         .into_iter()
@@ -456,9 +535,10 @@ fn render_frontend_form(
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "                <div class=\"form-row\" data-node=\"{}\" data-rel=\"{} {}\">",
+        "                <div class=\"form-row\" data-node=\"{}\" data-rel=\"{} {} {}\">",
         escape_attr(&form_rel),
         escape_attr(&region_rel),
+        escape_attr(&flow_rel),
         escape_attr(&object_relations)
     );
     match &form.kind {
@@ -1156,10 +1236,12 @@ fn render_artifacts_section(artifacts: &SessionArtifacts) -> String {
     out.push_str("        <div class=\"artifact-grid\">\n");
     for report in artifacts.artifact_metrics() {
         let label = artifact_label(report.artifact);
+        let relation = artifact_relation_tokens(artifacts, report.artifact);
         let _ = writeln!(
             out,
-            "          <article class=\"artifact-card\" data-node=\"artifact:{}\"><span>{}</span><code>{}</code><dl><div><dt>time</dt><dd>{}</dd></div><div><dt>work</dt><dd>{}</dd></div></dl></article>",
+            "          <article class=\"artifact-card\" data-node=\"artifact:{}\" data-rel=\"{}\"><span>{}</span><code>{}</code><dl><div><dt>time</dt><dd>{}</dd></div><div><dt>work</dt><dd>{}</dd></div></dl></article>",
             escape_attr(&report.key.to_string()),
+            escape_attr(&relation),
             escape_html(&label),
             escape_html(&report.key.to_string()),
             escape_html(&format_duration_nanos(report.metrics.elapsed_nanos)),
@@ -1383,29 +1465,42 @@ fn render_ir_section(artifacts: &SessionArtifacts) -> String {
     out.push_str("          <p class=\"eyebrow\">Executable path</p>\n");
     out.push_str("          <h2>Lowered IR And Tape</h2>\n");
     out.push_str("        </div>\n");
-    out.push_str(&render_collapsible_dump(
+    out.push_str(&render_collapsible_dump_with_rel(
         "Lowered IR",
         "lowered-ir",
         &artifacts.dump_stage(DumpStage::Lowered),
         true,
+        &artifact_relation_tokens(artifacts, QueryArtifact::LoweredModule),
     ));
-    out.push_str(&render_collapsible_dump(
+    out.push_str(&render_collapsible_dump_with_rel(
         "Tape Disassembly",
         "tape-disassembly",
         &artifacts.dump_stage(DumpStage::Tape),
         false,
+        &artifact_relation_tokens(artifacts, QueryArtifact::TapeProgram),
     ));
     out.push_str("      </section>\n");
     out
 }
 
 fn render_collapsible_dump(title: &str, id: &str, dump: &str, open: bool) -> String {
+    render_collapsible_dump_with_rel(title, id, dump, open, "")
+}
+
+fn render_collapsible_dump_with_rel(
+    title: &str,
+    id: &str,
+    dump: &str,
+    open: bool,
+    relation: &str,
+) -> String {
     let mut out = String::new();
     let open_attr = if open { " open" } else { "" };
     let _ = writeln!(
         out,
-        "        <details class=\"dump\" id=\"{}\"{}>",
+        "        <details class=\"dump\" id=\"{}\" data-rel=\"{}\"{}>",
         escape_attr(id),
+        escape_attr(relation),
         open_attr
     );
     let _ = writeln!(out, "          <summary>{}</summary>", escape_html(title));
@@ -1661,10 +1756,13 @@ fn related_objects_by_id(artifacts: &SessionArtifacts) -> BTreeMap<String, Strin
         let region_rel = relation_for_region(region);
         for (index, form) in region.forms.iter().enumerate() {
             let form_rel = relation_for_form(region, index);
+            let flow_rel = flow_relation_for_form(region, index);
             for object_id in object_ids_for_form(artifacts, form) {
-                map.entry(object_id)
-                    .or_default()
-                    .extend([region_rel.clone(), form_rel.clone()]);
+                map.entry(object_id).or_default().extend([
+                    region_rel.clone(),
+                    form_rel.clone(),
+                    flow_rel.clone(),
+                ]);
             }
         }
     }
@@ -1890,6 +1988,78 @@ fn relation_for_form(region: &StagedParseRegion, index: usize) -> String {
     format!("form:{}:{}:{index}", region.adapter, region.object_slug)
 }
 
+fn flow_relation_for_form(region: &StagedParseRegion, index: usize) -> String {
+    format!("flow:{}:{}:{index}", region.adapter, region.object_slug)
+}
+
+fn flow_relations_for_region(region: &StagedParseRegion) -> String {
+    (0..region.forms.len())
+        .map(|index| flow_relation_for_form(region, index))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn all_flow_relations(artifacts: &SessionArtifacts) -> String {
+    artifacts
+        .grammar_parse
+        .staged_regions
+        .iter()
+        .map(flow_relations_for_region)
+        .filter(|relations| !relations.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn artifact_relation_tokens(artifacts: &SessionArtifacts, artifact: QueryArtifact) -> String {
+    let reports = artifacts.artifact_reports();
+    let key = report_for(&reports, artifact)
+        .map(|report| report.key.to_string())
+        .unwrap_or_else(|| "not-emitted".to_string());
+    let mut tokens = Vec::from([
+        artifact_stage_relation(artifact).to_string(),
+        artifact_key_relation(&key),
+    ]);
+    if matches!(
+        artifact,
+        QueryArtifact::Ast
+            | QueryArtifact::Bind
+            | QueryArtifact::LoweredModule
+            | QueryArtifact::TapeProgram
+            | QueryArtifact::RuntimeResult
+    ) {
+        tokens.extend(
+            all_flow_relations(artifacts)
+                .split_whitespace()
+                .map(ToString::to_string),
+        );
+    }
+    tokens.join(" ")
+}
+
+fn artifact_stage_relation(artifact: QueryArtifact) -> &'static str {
+    match artifact {
+        QueryArtifact::Source => "artifact-stage:source",
+        QueryArtifact::EnvironmentResolution => "artifact-stage:environment",
+        QueryArtifact::GrammarStack => "artifact-stage:grammar-stack",
+        QueryArtifact::GrammarParse => "artifact-stage:grammar-parse",
+        QueryArtifact::Parse => "artifact-stage:syntax",
+        QueryArtifact::Ast => "artifact-stage:ast",
+        QueryArtifact::Bind => "artifact-stage:sem",
+        QueryArtifact::Diagnostics => "artifact-stage:diagnostics",
+        QueryArtifact::MethodLookup(_) => "artifact-stage:method-lookup",
+        QueryArtifact::MethodLowering(_) => "artifact-stage:method-lowering",
+        QueryArtifact::MethodTape(_) => "artifact-stage:method-tape",
+        QueryArtifact::GenericDispatcher(_) => "artifact-stage:generic-dispatcher",
+        QueryArtifact::LoweredModule => "artifact-stage:lowered",
+        QueryArtifact::TapeProgram => "artifact-stage:tape",
+        QueryArtifact::RuntimeResult => "artifact-stage:runtime",
+    }
+}
+
+fn artifact_key_relation(key: &str) -> String {
+    format!("artifact-key:{key}")
+}
+
 #[derive(Clone)]
 struct SourceBand {
     start: usize,
@@ -1945,7 +2115,11 @@ fn source_marks(artifacts: &SessionArtifacts) -> Vec<SourceMark> {
             marks.push(SourceMark {
                 start: form.source_span.start,
                 end: form.source_span.end,
-                relation: relation_for_form(region, index),
+                relation: format!(
+                    "{} {}",
+                    relation_for_form(region, index),
+                    flow_relation_for_form(region, index)
+                ),
                 class: "source-mark--form",
                 label: "frontend form source",
             });
@@ -2412,7 +2586,7 @@ pre {
 
 .expansion-chain {
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) minmax(320px, 1fr) minmax(280px, 0.9fr);
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 12px;
   padding: 14px;
   background: var(--surface-strong);
@@ -2485,6 +2659,7 @@ pre {
 
 .slot-list,
 .object-links,
+.stage-links,
 .label-list {
   margin: 10px 0 0;
   padding: 0;
@@ -2492,7 +2667,8 @@ pre {
 }
 
 .slot-list li,
-.object-links li {
+.object-links li,
+.stage-links li {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -2512,18 +2688,22 @@ pre {
   white-space: normal;
 }
 
-.object-links li {
+.object-links li,
+.stage-links li {
   display: block;
 }
 
 .object-links code,
-.object-links span {
+.object-links span,
+.stage-links code,
+.stage-links span {
   display: block;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.object-links span {
+.object-links span,
+.stage-links span {
   margin-top: 4px;
   color: var(--muted);
 }

@@ -522,6 +522,9 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("Expansion Chain"));
     assert!(html.contains("RecordsRegionGrammar"));
     assert!(html.contains("frontend-class"));
+    assert!(html.contains("flow:records:r0:0"));
+    assert!(html.contains("artifact-stage:lowered"));
+    assert!(html.contains("artifact-stage:tape"));
     assert!(html.contains("define class &lt;circle&gt;"));
     assert!(html.contains("ast-class:"));
     assert!(html.contains("class:c"));
