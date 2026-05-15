@@ -1,7 +1,9 @@
-define function choose_grammar()
-  #calculator
-end
+// grammar-activate: calculator
 
 // staged-loko: calculator
-main = 40 + 2
+helper = 40
+// end-staged-loko
+
+// staged-loko: calculator
+main = helper() + 2
 // end-staged-loko

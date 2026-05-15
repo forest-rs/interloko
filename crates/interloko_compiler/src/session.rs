@@ -214,6 +214,8 @@ pub enum EnvironmentKind {
     EffectiveGrammarRule,
     /// A grammar activation over a parse region.
     GrammarActivation,
+    /// A staged source region parsed by a registered grammar adapter.
+    StagedRegion,
     /// A semantic class metaobject.
     Class,
     /// A semantic slot metaobject.
@@ -249,6 +251,7 @@ impl EnvironmentKind {
             Self::GrammarRule => "grammar-rule",
             Self::EffectiveGrammarRule => "effective-grammar-rule",
             Self::GrammarActivation => "grammar-activation",
+            Self::StagedRegion => "staged-region",
             Self::Class => "class",
             Self::Slot => "slot",
             Self::Accessor => "accessor",
@@ -3321,9 +3324,13 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
     for region in &artifacts.grammar_parse.staged_regions {
         let _ = writeln!(
             out,
-            "  activation={} grammar={} span={}..{} emitted={:?} data={}",
+            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} emitted={:?} data={}",
+            grammar_frontend::staged_parse_region_object_id(region),
+            region.adapter,
             region.activation,
             region.grammar,
+            region.activation_directive.start,
+            region.activation_directive.end,
             region.source_span.start,
             region.source_span.end,
             region.emitted_source,
@@ -3627,9 +3634,13 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
     for region in &report.staged_regions {
         let _ = writeln!(
             out,
-            "  activation={} grammar={} span={}..{} emitted={:?}",
+            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} emitted={:?}",
+            grammar_frontend::staged_parse_region_object_id(region),
+            region.adapter,
             region.activation,
             region.grammar,
+            region.activation_directive.start,
+            region.activation_directive.end,
             region.source_span.start,
             region.source_span.end,
             region.emitted_source
@@ -3962,6 +3973,9 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     for activation in &report.activations {
         project_grammar_activation(sink, activation);
     }
+    for region in &report.staged_regions {
+        project_staged_parse_region(sink, region);
+    }
 }
 
 fn project_language_environment(
@@ -4098,6 +4112,42 @@ fn project_grammar_activation(
             activation.span.end,
             activation.root_rule,
             activation.reason
+        ),
+    }));
+}
+
+fn project_staged_parse_region(
+    sink: &mut dyn EnvironmentObjectSink,
+    region: &grammar_frontend::StagedParseRegion,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_frontend::staged_parse_region_object_id(region),
+        kind: EnvironmentKind::StagedRegion,
+        meta_class: "<staged-region>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: format!("{} staged region {}", region.adapter, region.object_slug),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarStack,
+            Aff::ShowParseTrace,
+        ]),
+        execution: None,
+        inspection: format!(
+            "adapter={} activation={} grammar={} directive={}..{} span={}..{} emitted={:?} data={}",
+            region.adapter,
+            region.activation,
+            region.grammar,
+            region.activation_directive.start,
+            region.activation_directive.end,
+            region.source_span.start,
+            region.source_span.end,
+            region.emitted_source,
+            region.data
         ),
     }));
 }

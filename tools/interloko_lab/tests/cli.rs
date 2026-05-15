@@ -336,8 +336,12 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     let eop = run_lab(&["eop", path]);
     assert!(eop.contains("object language-environment:staged-calculator"));
     assert!(eop.contains("object grammar:calculator"));
-    assert!(eop.contains("object grammar-activation:base-loko/prefix"));
-    assert!(eop.contains("object grammar-activation:calculator/calculator-region"));
+    assert!(eop.contains("object grammar-activation:base-loko/source-file"));
+    assert!(eop.contains("object grammar-activation:calculator/r0"));
+    assert!(eop.contains("object grammar-activation:calculator/r1"));
+    assert!(eop.contains("object staged-region:calculator/r1"));
+    assert!(eop.contains("adapter=calculator"));
+    assert!(eop.contains("directive="));
 
     let trace = run_lab(&[
         "invoke-affordance",
@@ -348,6 +352,8 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert!(trace.contains("CalculatorRegionGrammar"));
     assert!(trace.contains("staged regions:"));
     assert!(trace.contains("calculator-function(name: main"));
+    assert!(trace.contains("adapter=calculator"));
+    assert!(trace.contains("directive="));
     assert!(trace.contains("define function main()"));
     assert!(trace.contains("calculator staged region emitted ordinary Loko source"));
 }

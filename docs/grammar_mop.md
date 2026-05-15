@@ -68,9 +68,10 @@ grammar:calculator                      CalculatorRegionGrammar extends BaseLoko
 ```
 
 `CalculatorRegionGrammar` has direct rules for `calculator-region` and
-`calculator-function`. A valid base-Loko prefix selects it by containing the
-symbol literal `#calculator`; a later comment-delimited region is parsed by the
-calculator grammar and materialized as ordinary Loko function definitions.
+`calculator-function`. A frontend metadata directive selects it by name:
+`// grammar-activate: calculator`. Later comment-delimited regions are routed
+through the registered calculator adapter and materialized as ordinary Loko
+function definitions.
 
 ## Parse Reports
 
@@ -127,20 +128,26 @@ input, not Loko syntax.
 Use the staged calculator prototype like this:
 
 ```text
-define function choose_grammar()
-  #calculator
-end
+// grammar-activate: calculator
 
 // staged-loko: calculator
-main = 40 + 2
+helper = 40
+// end-staged-loko
+
+// staged-loko: calculator
+main = helper() + 2
 // end-staged-loko
 ```
 
-The staged region emits this ordinary Loko form before AST lowering:
+The staged regions emit these ordinary Loko forms before AST lowering:
 
 ```text
+define function helper()
+  40
+end
+
 define function main()
-  40 + 2
+  helper() + 2
 end
 ```
 
@@ -163,6 +170,11 @@ edits look like grammar edits.
 `show-parse-trace` prints grammar diagnostic facts without rendering localized
 diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
+
+For staged regions, `show-parse-trace` and EOP records show the adapter name,
+activation directive span, source span, emitted source, and inert source-data
+result. The directive and `// staged-loko:` markers are frontend/workbench
+metadata; they are not part of the Loko language semantics.
 
 ## Source Data
 
@@ -194,7 +206,7 @@ Later slices may add:
 - source-authored grammar declarations;
 - structural semantic actions that emit forms or grammar deltas.
 - exact original-source span mapping for emitted forms;
-- more than one staged region per file;
+- a public registry/capability policy for choosing staged grammar adapters;
 
 Those later actions must remain deterministic and inspectable. They should emit
 structural results, not run arbitrary host code.

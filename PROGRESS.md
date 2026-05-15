@@ -1,47 +1,53 @@
 # Interloko Progress
 
-## Implemented: Tiny Staged Parse Prototype
+## Implemented: Staged Grammar Registry Prototype
 
 - Added `CalculatorRegionGrammar` and
   `StagedCalculatorEnvironment` as the first grammar MOP slice where grammar
   records participate in parsing, not only inspection.
-- A valid base-Loko prefix can select the staged grammar by containing the
-  symbol literal `#calculator`.
-- A later comment-delimited region:
+- Added an internal staged grammar adapter protocol and registry. The only
+  registered adapter today is `calculator`.
+- A frontend metadata directive selects the staged grammar:
+
+  ```text
+  // grammar-activate: calculator
+  ```
+
+  This is workbench/frontend metadata, not Loko syntax.
+- One or more later comment-delimited regions:
 
   ```text
   // staged-loko: calculator
-  main = 40 + 2
+  helper = 40
   // end-staged-loko
   ```
 
-  is parsed by the calculator grammar and emits ordinary Loko source:
+  are routed through the calculator adapter and emit ordinary Loko source:
 
   ```text
-  define function main()
-    40 + 2
+  define function helper()
+    40
   end
   ```
 
 - The existing pipeline still consumes normal `SyntaxTree` output:
   syntax -> AST -> semantic IR -> lowered IR -> execution_tape. No AST, sem,
   lower, or tape layer performs grammar lookup.
-- Parse trace now shows separate grammar activations for the base prefix and
-  calculator region, plus a `staged regions:` section with emitted source and
-  inert `source_data`.
-- MOP/EOP output includes `grammar:calculator` and activation objects such as
-  `grammar-activation:base-loko/prefix` and
-  `grammar-activation:calculator/calculator-region`.
+- Parse trace now shows grammar activations for the base source file and each
+  staged region, plus a `staged regions:` section with adapter name, activation
+  directive span, emitted source, and inert `source_data`.
+- MOP/EOP output includes `grammar:calculator`, activation objects such as
+  `grammar-activation:calculator/r0`, and staged-region objects such as
+  `staged-region:calculator/r0`.
 - Added lab and corpus fixtures showing that the staged calculator program runs
   and remains inspectable.
 
 Deferred:
 
 - Source-authored grammar definitions.
-- General staged-region syntax and multiple regions per file.
+- Public staged grammar registry and capability policy.
 - Original-source span remapping for emitted ordinary Loko forms.
 - Semantic actions beyond inert structural source-data emission.
-- Capability policy for selecting/activating staged grammars.
 
 ## Implemented: Grammar MOP Follow-Up Slices
 
@@ -76,7 +82,6 @@ Deferred:
 Deferred:
 
 - Source-authored grammar declarations.
-- Staged parsing over multiple source regions.
 - Semantic actions and macros.
 - Host execution from grammar actions.
 - Capability policy for grammar/action activation.
@@ -121,7 +126,6 @@ Deferred:
 - Source-authored grammar syntax.
 - Macros and semantic actions.
 - Actual grammar overriding or derived grammar execution.
-- Staged parsing over multiple source regions.
 - OMeta/Ohm compatibility.
 - Arbitrary host execution from grammar actions.
 - Parser rewrite.

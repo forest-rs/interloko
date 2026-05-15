@@ -1,65 +1,70 @@
 # Plans
 
-## Build Tiny Staged Parse Prototype
+## Generalize Staged Grammar Activation
 
 ### Goal
 
-Prove the grammar MOP can participate in parsing without building a macro
-system. A valid base-Loko prefix selects one tiny experimental grammar for a
-later comment-delimited source region. That region is parsed by the staged
-grammar and emits ordinary Loko source that continues through the existing
-syntax -> AST -> sem -> lower -> tape pipeline.
+Put the staged calculator prototype behind an internal grammar registry and
+make activation explicit frontend metadata. A `// grammar-activate: calculator`
+directive selects the registered adapter for one or more later staged regions.
+Each region is parsed by that adapter and emits ordinary Loko source that
+continues through the existing syntax -> AST -> sem -> lower -> tape pipeline.
 
 ### Fence
 
-`grammar_frontend` owns staged-region discovery, grammar-stack records,
-activation boundaries, structural emissions, and final parser invocation. It
-does not own AST lowering, semantic actions, source-authored grammar
-declarations, host code execution, capability policy, or a general parser
-generator.
+`grammar_frontend` owns the staged adapter protocol, built-in registry,
+activation directives, staged-region routing, grammar-stack records, structural
+emissions, and final parser invocation. It does not own Loko semantics, AST
+lowering, semantic actions, source-authored grammar declarations, host code
+execution, capability policy, or a general parser generator.
 
 ### Prototype Syntax
 
-The prefix is ordinary Loko and must contain `#calculator`. The later region is
-workbench/prototype syntax, not Loko syntax:
+The activation directive and staged markers are workbench/frontend metadata,
+not Loko syntax:
 
 ```text
-define function choose_grammar()
-  #calculator
-end
+// grammar-activate: calculator
 
 // staged-loko: calculator
-main = 40 + 2
+helper = 40
+// end-staged-loko
+
+// staged-loko: calculator
+main = helper() + 2
 // end-staged-loko
 ```
 
-The calculator region emits:
+The two calculator regions emit:
 
 ```text
+define function helper()
+  40
+end
+
 define function main()
-  40 + 2
+  helper() + 2
 end
 ```
 
 ### Steps
 
-1. Add `CalculatorRegionGrammar` records with direct/effective rules and
-   read-only MOP/EOP projection.
-2. Detect one staged calculator region after a base prefix and require the
-   prefix selection token.
-3. Parse the calculator region into structural source-data emissions and
-   materialize ordinary Loko source for the existing parser.
-4. Add separate prefix and staged-region grammar activations plus parse-trace
-   output showing the activation boundary and emitted source.
-5. Add lab/corpus fixtures and docs.
+1. Add an internal `StagedGrammar` adapter protocol and registry with the
+   calculator adapter as the only built-in entry.
+2. Replace prefix symbol scanning with `// grammar-activate: calculator`.
+3. Route one or more `// staged-loko: calculator` regions through the selected
+   adapter and materialize ordinary Loko source for the existing parser.
+4. Expose adapter name, activation directive span, source span, emitted source,
+   and structural source-data in parse trace and EOP inspection.
+5. Update lab/corpus fixtures, tests, and docs.
 6. Run fmt, clippy, workspace tests, docs, corpus, examples, and lab tests.
 
 ### Risks
 
-- Source spans for emitted ordinary Loko forms are materialized-source spans in
-  this prototype; exact original-source span mapping is deferred.
-- The calculator grammar must stay visibly inert and structural so this does
-  not imply macros or arbitrary host semantic actions.
+- Source spans for emitted ordinary Loko forms remain materialized-source spans
+  in this prototype; exact original-source span mapping is deferred.
+- Activation directives must stay visibly session/frontend metadata so this
+  does not imply source-authored macros or arbitrary host semantic actions.
 
 ## Build Grammar Follow-Up Slices
 
