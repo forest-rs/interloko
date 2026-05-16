@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::grammar_frontend::{
-    FrontendExpression, FrontendForm, FrontendFormKind, StagedParseRegion,
+    FrontendBinaryOp, FrontendExpression, FrontendForm, FrontendFormKind, StagedParseRegion,
 };
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
@@ -1876,8 +1876,6 @@ const GENERATED_FUNCTION_TAG: u64 = 0x1000;
 const GENERATED_BLOCK_TAG: u64 = 0x1001;
 const GENERATED_CLASS_TAG: u64 = 0x1002;
 const GENERATED_SLOT_TAG: u64 = 0x1003;
-const GENERATED_KEYWORD_ARG_TAG: u64 = 0x1004;
-const GENERATED_RESTART_TAG: u64 = 0x1005;
 const GENERATED_EXPR_TAG: u64 = 0x1100;
 
 struct FrontendFormLowering {
@@ -2002,343 +2000,45 @@ impl FrontendFormLowering {
 
     fn lower_frontend_expression(&mut self, expression: &FrontendExpression) -> Expr {
         match expression {
-            FrontendExpression::LokoText { text, source_span } => {
-                self.lower_loko_text_expression(text, *source_span)
-            }
-        }
-    }
-
-    fn lower_loko_text_expression(&mut self, text: &str, source_span: Span) -> Expr {
-        const WRAPPER_PREFIX: &str = "define function __frontend_expr__()\n  ";
-        let wrapper_source = format!("{WRAPPER_PREFIX}{text}\nend\n");
-        let wrapper_tree = crate::syntax::parse_file(self.source_file, &wrapper_source);
-        let wrapper_module = lower(&wrapper_tree);
-        self.diagnostics
-            .extend(wrapper_module.diagnostics.into_iter().map(|diagnostic| {
-                remap_wrapper_diagnostic(diagnostic, WRAPPER_PREFIX.len(), source_span)
-            }));
-        wrapper_module
-            .functions
-            .into_iter()
-            .next()
-            .map(|function| {
-                self.remap_wrapper_expr(function.body.result, WRAPPER_PREFIX.len(), source_span)
-            })
-            .unwrap_or_else(|| Expr::Error {
-                id: self.generated_id(GENERATED_EXPR_TAG, "frontend-expression-error", source_span),
-                span: source_span,
-            })
-    }
-
-    fn remap_wrapper_expr(&self, expr: Expr, wrapper_expr_start: usize, source_span: Span) -> Expr {
-        match expr {
-            Expr::Number { value, span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Number {
-                    id: self.expr_id("number", span),
-                    value,
-                    span,
-                }
-            }
-            Expr::Bool { value, span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Bool {
-                    id: self.expr_id("bool", span),
-                    value,
-                    span,
-                }
-            }
-            Expr::String { value, span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::String {
-                    id: self.expr_id("string", span),
-                    value,
-                    span,
-                }
-            }
-            Expr::Symbol { name, span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Symbol {
-                    id: self.expr_id("symbol", span),
-                    name,
-                    span,
-                }
-            }
-            Expr::Vector { elements, span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Vector {
-                    id: self.expr_id("vector", span),
-                    elements: elements
-                        .into_iter()
-                        .map(|expr| self.remap_wrapper_expr(expr, wrapper_expr_start, source_span))
-                        .collect(),
-                    span,
-                }
-            }
-            Expr::Name { name, span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Name {
-                    id: self.expr_id("name", span),
-                    name,
-                    span,
-                }
-            }
-            Expr::ClassName {
-                class_name, span, ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::ClassName {
-                    id: self.expr_id("class-name", span),
-                    class_name,
-                    span,
-                }
-            }
-            Expr::InstanceOf {
-                value,
-                class_name,
-                span,
-                ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::InstanceOf {
-                    id: self.expr_id("instance-of", span),
-                    value: Box::new(self.remap_wrapper_expr(
-                        *value,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    class_name,
-                    span,
-                }
-            }
-            Expr::Cast {
-                class_name,
-                value,
-                span,
-                ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Cast {
-                    id: self.expr_id("cast", span),
-                    class_name,
-                    value: Box::new(self.remap_wrapper_expr(
-                        *value,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    span,
-                }
-            }
-            Expr::Call {
-                callee, args, span, ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Call {
-                    id: self.expr_id("call", span),
-                    callee,
-                    args: args
-                        .into_iter()
-                        .map(|expr| self.remap_wrapper_expr(expr, wrapper_expr_start, source_span))
-                        .collect(),
-                    span,
-                }
-            }
-            Expr::Signal {
-                condition, span, ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Signal {
-                    id: self.expr_id("signal", span),
-                    condition: Box::new(self.remap_wrapper_expr(
-                        *condition,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    span,
-                }
-            }
-            Expr::MakeObject {
-                class,
-                fields,
-                span,
-                ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::MakeObject {
-                    id: self.expr_id("make-object", span),
-                    class: Box::new(self.remap_wrapper_expr(
-                        *class,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    fields: fields
-                        .into_iter()
-                        .map(|field| {
-                            self.remap_wrapper_keyword_arg(field, wrapper_expr_start, source_span)
-                        })
-                        .collect(),
-                    span,
-                }
-            }
-            Expr::SlotRead {
-                receiver,
-                slot,
-                span,
-                ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::SlotRead {
-                    id: self.expr_id("slot-read", span),
-                    receiver: Box::new(self.remap_wrapper_expr(
-                        *receiver,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    slot,
-                    span,
-                }
-            }
-            Expr::SlotAssign {
-                receiver,
-                slot,
-                value,
-                span,
-                ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::SlotAssign {
-                    id: self.expr_id("slot-assign", span),
-                    receiver: Box::new(self.remap_wrapper_expr(
-                        *receiver,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    slot,
-                    value: Box::new(self.remap_wrapper_expr(
-                        *value,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    span,
-                }
-            }
-            Expr::Binary {
-                op, lhs, rhs, span, ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Binary {
-                    id: self.expr_id("binary", span),
-                    op,
-                    lhs: Box::new(self.remap_wrapper_expr(*lhs, wrapper_expr_start, source_span)),
-                    rhs: Box::new(self.remap_wrapper_expr(*rhs, wrapper_expr_start, source_span)),
-                    span,
-                }
-            }
-            Expr::UnaryMinus { expr, span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::UnaryMinus {
-                    id: self.expr_id("unary-minus", span),
-                    expr: Box::new(self.remap_wrapper_expr(*expr, wrapper_expr_start, source_span)),
-                    span,
-                }
-            }
-            Expr::Compare {
-                op, lhs, rhs, span, ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Compare {
-                    id: self.expr_id("compare", span),
-                    op,
-                    lhs: Box::new(self.remap_wrapper_expr(*lhs, wrapper_expr_start, source_span)),
-                    rhs: Box::new(self.remap_wrapper_expr(*rhs, wrapper_expr_start, source_span)),
-                    span,
-                }
-            }
-            Expr::If {
-                condition,
-                then_branch,
-                else_branch,
-                span,
-                ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::If {
-                    id: self.expr_id("if", span),
-                    condition: Box::new(self.remap_wrapper_expr(
-                        *condition,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    then_branch: Box::new(self.remap_wrapper_expr(
-                        *then_branch,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    else_branch: Box::new(self.remap_wrapper_expr(
-                        *else_branch,
-                        wrapper_expr_start,
-                        source_span,
-                    )),
-                    span,
-                }
-            }
-            Expr::Handle {
-                body,
-                restart,
-                span,
-                ..
-            } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Handle {
-                    id: self.expr_id("handle", span),
-                    body: Box::new(self.remap_wrapper_expr(*body, wrapper_expr_start, source_span)),
-                    restart: self.remap_wrapper_restart(restart, wrapper_expr_start, source_span),
-                    span,
-                }
-            }
-            Expr::Error { span, .. } => {
-                let span = remap_wrapper_span(span, wrapper_expr_start, source_span);
-                Expr::Error {
-                    id: self.expr_id("error", span),
-                    span,
-                }
-            }
-        }
-    }
-
-    fn remap_wrapper_keyword_arg(
-        &self,
-        arg: KeywordArg,
-        wrapper_expr_start: usize,
-        source_span: Span,
-    ) -> KeywordArg {
-        let span = remap_wrapper_span(arg.span, wrapper_expr_start, source_span);
-        KeywordArg {
-            id: self.generated_id(GENERATED_KEYWORD_ARG_TAG, &arg.name, span),
-            name: arg.name,
-            value: self.remap_wrapper_expr(arg.value, wrapper_expr_start, source_span),
-            span,
-        }
-    }
-
-    fn remap_wrapper_restart(
-        &self,
-        restart: Restart,
-        wrapper_expr_start: usize,
-        source_span: Span,
-    ) -> Restart {
-        let span = remap_wrapper_span(restart.span, wrapper_expr_start, source_span);
-        Restart {
-            id: self.generated_id(GENERATED_RESTART_TAG, &restart.class_name, span),
-            condition_name: restart.condition_name,
-            condition_span: remap_wrapper_span(
-                restart.condition_span,
-                wrapper_expr_start,
+            FrontendExpression::Integer { value, source_span } => Expr::Number {
+                id: self.expr_id("frontend-integer", *source_span),
+                value: *value,
+                span: *source_span,
+            },
+            FrontendExpression::Name { name, source_span } => Expr::Name {
+                id: self.expr_id("frontend-name", *source_span),
+                name: name.clone(),
+                span: *source_span,
+            },
+            FrontendExpression::Call {
+                callee,
+                args,
                 source_span,
-            ),
-            class_name: restart.class_name,
-            body: Box::new(self.remap_wrapper_expr(*restart.body, wrapper_expr_start, source_span)),
-            span,
+            } => Expr::Call {
+                id: self.expr_id("frontend-call", *source_span),
+                callee: callee.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.lower_frontend_expression(arg))
+                    .collect(),
+                span: *source_span,
+            },
+            FrontendExpression::Binary {
+                op,
+                lhs,
+                rhs,
+                source_span,
+            } => Expr::Binary {
+                id: self.expr_id("frontend-binary", *source_span),
+                op: match op {
+                    FrontendBinaryOp::Add => BinaryOp::Add,
+                    FrontendBinaryOp::Sub => BinaryOp::Sub,
+                    FrontendBinaryOp::Mul => BinaryOp::Mul,
+                },
+                lhs: Box::new(self.lower_frontend_expression(lhs)),
+                rhs: Box::new(self.lower_frontend_expression(rhs)),
+                span: *source_span,
+            },
         }
     }
 
@@ -2353,34 +2053,6 @@ impl FrontendFormLowering {
     fn definition(&self, kind: DefinitionKind, name: &str, discriminator: &str) -> DefinitionId {
         DefinitionId::new(self.source_file, kind, name, discriminator)
     }
-}
-
-fn remap_wrapper_diagnostic(
-    mut diagnostic: Diagnostic,
-    wrapper_expr_start: usize,
-    source_span: Span,
-) -> Diagnostic {
-    diagnostic.span = remap_wrapper_span(diagnostic.span, wrapper_expr_start, source_span);
-    for label in &mut diagnostic.labels {
-        label.span = remap_wrapper_span(label.span, wrapper_expr_start, source_span);
-    }
-    diagnostic
-}
-
-fn remap_wrapper_span(span: Span, wrapper_expr_start: usize, source_span: Span) -> Span {
-    let source_len = source_span.end.saturating_sub(source_span.start);
-    if span.end <= wrapper_expr_start {
-        return source_span;
-    }
-    let start_offset = span
-        .start
-        .saturating_sub(wrapper_expr_start)
-        .min(source_len);
-    let end_offset = span.end.saturating_sub(wrapper_expr_start).min(source_len);
-    Span::new(
-        source_span.start + start_offset,
-        source_span.start + end_offset,
-    )
 }
 
 fn decode_string_literal(text: &str) -> Option<String> {
@@ -2409,6 +2081,7 @@ fn decode_string_literal(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grammar_frontend;
     use crate::identity::SourceFileId;
     use crate::syntax;
 
@@ -2473,6 +2146,42 @@ mod tests {
         };
         assert_eq!(callee, "add");
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn lowers_staged_frontend_expressions_without_text_reparse() {
+        let source = "// grammar-activate: calculator\n\n\
+                      // staged-loko: calculator\n\
+                      helper = 40\n\
+                      // end-staged-loko\n\n\
+                      // staged-loko: calculator\n\
+                      main = helper() + 2\n\
+                      // end-staged-loko\n";
+        let report = grammar_frontend::parse_file(SourceFileId::from_path("staged.loko"), source);
+        assert_eq!(report.diagnostics, Vec::new());
+        let module = lower_with_frontend_forms(&report.syntax, &report.staged_regions);
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.functions.len(), 2);
+
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("staged main function should be lowered");
+        let Expr::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+            ..
+        } = &main.body.result
+        else {
+            panic!("expected structural binary expression");
+        };
+        assert!(matches!(
+            lhs.as_ref(),
+            Expr::Call { callee, args, .. } if callee == "helper" && args.is_empty()
+        ));
+        assert!(matches!(rhs.as_ref(), Expr::Number { value: 2, .. }));
     }
 
     #[test]

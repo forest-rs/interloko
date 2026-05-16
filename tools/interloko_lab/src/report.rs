@@ -2004,7 +2004,12 @@ fn short_source_name(path: &str) -> &str {
 
 fn frontend_expression_label(expression: &FrontendExpression) -> String {
     match expression {
-        FrontendExpression::LokoText { text, .. } => format!("loko-text {text:?}"),
+        FrontendExpression::Integer { value, .. } => format!("integer {value}"),
+        FrontendExpression::Name { name, .. } => format!("name {name}"),
+        FrontendExpression::Call { callee, args, .. } => {
+            format!("call {callee}/{}", args.len())
+        }
+        FrontendExpression::Binary { op, .. } => format!("binary {}", op.as_str()),
     }
 }
 

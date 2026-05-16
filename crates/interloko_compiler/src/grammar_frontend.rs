@@ -534,22 +534,61 @@ impl FrontendSlot {
 /// Structural frontend expression form.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrontendExpression {
-    /// Transitional raw Loko expression text with original source span.
-    LokoText {
-        /// Expression source text.
-        text: String,
+    /// Integer literal.
+    Integer {
+        /// Literal value.
+        value: i64,
+        /// Original staged source span.
+        source_span: Span,
+    },
+    /// Name reference.
+    Name {
+        /// Referenced name.
+        name: String,
+        /// Original staged source span.
+        source_span: Span,
+    },
+    /// Direct call expression.
+    Call {
+        /// Callee name.
+        callee: String,
+        /// Argument expressions.
+        args: Vec<FrontendExpression>,
+        /// Original staged source span.
+        source_span: Span,
+    },
+    /// Binary expression.
+    Binary {
+        /// Operator.
+        op: FrontendBinaryOp,
+        /// Left operand.
+        lhs: alloc::boxed::Box<FrontendExpression>,
+        /// Right operand.
+        rhs: alloc::boxed::Box<FrontendExpression>,
         /// Original staged source span.
         source_span: Span,
     },
 }
 
-impl FrontendExpression {
-    /// Builds a transitional raw Loko expression form.
+/// Structural frontend binary operator.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FrontendBinaryOp {
+    /// Addition.
+    Add,
+    /// Subtraction.
+    Sub,
+    /// Multiplication.
+    Mul,
+}
+
+impl FrontendBinaryOp {
+    /// Returns this operator's debug source token.
     #[must_use]
-    pub fn loko_text(text: impl Into<String>, source_span: Span) -> Self {
-        Self::LokoText {
-            text: text.into(),
-            source_span,
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
         }
     }
 }
@@ -1169,8 +1208,63 @@ fn materialize_frontend_form(form: &FrontendForm, source: &mut String) {
 }
 
 fn materialize_frontend_expression(expression: &FrontendExpression, source: &mut String) {
+    materialize_frontend_expression_with_precedence(expression, source, 0);
+}
+
+fn materialize_frontend_expression_with_precedence(
+    expression: &FrontendExpression,
+    source: &mut String,
+    parent_precedence: u8,
+) {
+    let precedence = frontend_expression_precedence(expression);
+    let needs_parens = precedence < parent_precedence;
+    if needs_parens {
+        source.push('(');
+    }
     match expression {
-        FrontendExpression::LokoText { text, .. } => source.push_str(text),
+        FrontendExpression::Integer { value, .. } => source.push_str(&value.to_string()),
+        FrontendExpression::Name { name, .. } => source.push_str(name),
+        FrontendExpression::Call { callee, args, .. } => {
+            source.push_str(callee);
+            source.push('(');
+            for (index, arg) in args.iter().enumerate() {
+                if index != 0 {
+                    source.push_str(", ");
+                }
+                materialize_frontend_expression_with_precedence(arg, source, 0);
+            }
+            source.push(')');
+        }
+        FrontendExpression::Binary { op, lhs, rhs, .. } => {
+            materialize_frontend_expression_with_precedence(lhs, source, precedence);
+            source.push(' ');
+            source.push_str(op.as_str());
+            source.push(' ');
+            let rhs_precedence = match op {
+                FrontendBinaryOp::Sub => precedence + 1,
+                FrontendBinaryOp::Add | FrontendBinaryOp::Mul => precedence,
+            };
+            materialize_frontend_expression_with_precedence(rhs, source, rhs_precedence);
+        }
+    }
+    if needs_parens {
+        source.push(')');
+    }
+}
+
+const fn frontend_expression_precedence(expression: &FrontendExpression) -> u8 {
+    match expression {
+        FrontendExpression::Binary {
+            op: FrontendBinaryOp::Add | FrontendBinaryOp::Sub,
+            ..
+        } => 1,
+        FrontendExpression::Binary {
+            op: FrontendBinaryOp::Mul,
+            ..
+        } => 2,
+        FrontendExpression::Integer { .. }
+        | FrontendExpression::Name { .. }
+        | FrontendExpression::Call { .. } => 3,
     }
 }
 
@@ -1216,11 +1310,46 @@ fn frontend_form_source_data(form: &FrontendForm) -> SourceData {
 
 fn frontend_expression_source_data(expression: &FrontendExpression) -> SourceData {
     match expression {
-        FrontendExpression::LokoText { text, source_span } => SourceData::record(
-            "frontend-expression",
+        FrontendExpression::Integer { value, source_span } => SourceData::record(
+            "frontend-integer",
             vec![
-                source_data::field("kind", SourceData::symbol("loko-text")),
-                source_data::field("text", SourceData::string(text.as_str())),
+                source_data::field("value", SourceData::integer(*value)),
+                source_span_data(*source_span),
+            ],
+        ),
+        FrontendExpression::Name { name, source_span } => SourceData::record(
+            "frontend-name",
+            vec![
+                source_data::field("name", SourceData::symbol(name.as_str())),
+                source_span_data(*source_span),
+            ],
+        ),
+        FrontendExpression::Call {
+            callee,
+            args,
+            source_span,
+        } => SourceData::record(
+            "frontend-call",
+            vec![
+                source_data::field("callee", SourceData::symbol(callee.as_str())),
+                source_data::field(
+                    "args",
+                    SourceData::list(args.iter().map(frontend_expression_source_data).collect()),
+                ),
+                source_span_data(*source_span),
+            ],
+        ),
+        FrontendExpression::Binary {
+            op,
+            lhs,
+            rhs,
+            source_span,
+        } => SourceData::record(
+            "frontend-binary",
+            vec![
+                source_data::field("op", SourceData::symbol(op.as_str())),
+                source_data::field("lhs", frontend_expression_source_data(lhs)),
+                source_data::field("rhs", frontend_expression_source_data(rhs)),
                 source_span_data(*source_span),
             ],
         ),
@@ -1810,15 +1939,18 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
             continue;
         }
         let expression_offset = trimmed.find(expression).unwrap_or(0);
-        let expression_span = Span::new(
-            trimmed_start + expression_offset,
-            trimmed_start + expression_offset + expression.len(),
-        );
-        forms.push(FrontendForm::function(
-            name,
-            FrontendExpression::loko_text(expression, expression_span),
-            trimmed_span,
-        ));
+        let expression_start = trimmed_start + expression_offset;
+        let expression_span = Span::new(expression_start, expression_start + expression.len());
+        let Some(expression_form) = parse_calculator_expression(expression, expression_start)
+        else {
+            diagnostics.push(staged_expected_diagnostic(
+                expression_span,
+                "calculator",
+                "calculator expression",
+            ));
+            continue;
+        };
+        forms.push(FrontendForm::function(name, expression_form, trimmed_span));
         functions.push(SourceData::record(
             "calculator-function",
             vec![
@@ -1854,6 +1986,171 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
             ],
         ),
         diagnostics,
+    }
+}
+
+fn parse_calculator_expression(source: &str, source_offset: usize) -> Option<FrontendExpression> {
+    let mut parser = CalculatorExpressionParser {
+        source,
+        source_offset,
+        cursor: 0,
+    };
+    let expression = parser.parse_additive()?;
+    parser.skip_ws();
+    (parser.cursor == source.len()).then_some(expression)
+}
+
+struct CalculatorExpressionParser<'source> {
+    source: &'source str,
+    source_offset: usize,
+    cursor: usize,
+}
+
+impl CalculatorExpressionParser<'_> {
+    fn parse_additive(&mut self) -> Option<FrontendExpression> {
+        let mut lhs = self.parse_multiplicative()?;
+        loop {
+            self.skip_ws();
+            let op = if self.eat_byte(b'+') {
+                FrontendBinaryOp::Add
+            } else if self.eat_byte(b'-') {
+                FrontendBinaryOp::Sub
+            } else {
+                break;
+            };
+            let rhs = self.parse_multiplicative()?;
+            let source_span = Span::new(expr_span(&lhs).start, expr_span(&rhs).end);
+            lhs = FrontendExpression::Binary {
+                op,
+                lhs: alloc::boxed::Box::new(lhs),
+                rhs: alloc::boxed::Box::new(rhs),
+                source_span,
+            };
+        }
+        Some(lhs)
+    }
+
+    fn parse_multiplicative(&mut self) -> Option<FrontendExpression> {
+        let mut lhs = self.parse_primary()?;
+        loop {
+            self.skip_ws();
+            if !self.eat_byte(b'*') {
+                break;
+            }
+            let rhs = self.parse_primary()?;
+            let source_span = Span::new(expr_span(&lhs).start, expr_span(&rhs).end);
+            lhs = FrontendExpression::Binary {
+                op: FrontendBinaryOp::Mul,
+                lhs: alloc::boxed::Box::new(lhs),
+                rhs: alloc::boxed::Box::new(rhs),
+                source_span,
+            };
+        }
+        Some(lhs)
+    }
+
+    fn parse_primary(&mut self) -> Option<FrontendExpression> {
+        self.skip_ws();
+        if self.eat_byte(b'(') {
+            let expression = self.parse_additive()?;
+            self.skip_ws();
+            return self.eat_byte(b')').then_some(expression);
+        }
+        if self.peek_byte()?.is_ascii_digit() {
+            return self.parse_integer();
+        }
+        if self.peek_byte()?.is_ascii_alphabetic() || self.peek_byte()? == b'_' {
+            return self.parse_name_or_call();
+        }
+        None
+    }
+
+    fn parse_integer(&mut self) -> Option<FrontendExpression> {
+        let start = self.cursor;
+        while self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
+            self.cursor += 1;
+        }
+        let text = &self.source[start..self.cursor];
+        let value = text.parse().ok()?;
+        Some(FrontendExpression::Integer {
+            value,
+            source_span: self.span(start, self.cursor),
+        })
+    }
+
+    fn parse_name_or_call(&mut self) -> Option<FrontendExpression> {
+        let start = self.cursor;
+        while self
+            .peek_byte()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
+        {
+            self.cursor += 1;
+        }
+        let name = &self.source[start..self.cursor];
+        if !valid_calculator_function_name(name) {
+            return None;
+        }
+        self.skip_ws();
+        if !self.eat_byte(b'(') {
+            return Some(FrontendExpression::Name {
+                name: name.to_string(),
+                source_span: self.span(start, self.cursor),
+            });
+        }
+        let mut args = Vec::new();
+        self.skip_ws();
+        if !self.eat_byte(b')') {
+            loop {
+                args.push(self.parse_additive()?);
+                self.skip_ws();
+                if self.eat_byte(b')') {
+                    break;
+                }
+                if !self.eat_byte(b',') {
+                    return None;
+                }
+            }
+        }
+        Some(FrontendExpression::Call {
+            callee: name.to_string(),
+            args,
+            source_span: self.span(start, self.cursor),
+        })
+    }
+
+    fn skip_ws(&mut self) {
+        while self
+            .peek_byte()
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            self.cursor += 1;
+        }
+    }
+
+    fn eat_byte(&mut self, byte: u8) -> bool {
+        if self.peek_byte() == Some(byte) {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_byte(&self) -> Option<u8> {
+        self.source.as_bytes().get(self.cursor).copied()
+    }
+
+    fn span(&self, start: usize, end: usize) -> Span {
+        Span::new(self.source_offset + start, self.source_offset + end)
+    }
+}
+
+fn expr_span(expression: &FrontendExpression) -> Span {
+    match expression {
+        FrontendExpression::Integer { source_span, .. }
+        | FrontendExpression::Name { source_span, .. }
+        | FrontendExpression::Call { source_span, .. }
+        | FrontendExpression::Binary { source_span, .. } => *source_span,
     }
 }
 
@@ -3112,6 +3409,8 @@ mod tests {
             source_data::dump(&report.extension_emissions[1].data)
                 .contains("frontend-function(name: main")
         );
+        assert!(source_data::dump(&report.extension_emissions[1].data).contains("frontend-binary"));
+        assert!(!source_data::dump(&report.extension_emissions[1].data).contains("loko-text"));
         assert!(
             report
                 .extension_provenance

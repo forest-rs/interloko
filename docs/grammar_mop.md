@@ -24,14 +24,11 @@ The implemented grammar slice has three load-bearing pieces:
 - trusted Rust-hosted staged adapters that emit structural frontend forms.
 
 Those frontend forms are compiler data, not source text. `ast.rs` consumes
-staged function and class forms directly when building AST definitions.
-Materialized Loko is still carried for reports and debugging, but it is no
-longer the semantic input for staged definitions.
-
-The remaining text-shaped fallback is inside staged function bodies:
-`FrontendExpression::LokoText` is parsed by the existing expression parser.
-That keeps this slice small while leaving a clear follow-up path toward fully
-structural frontend expressions.
+staged function and class forms directly when building AST definitions, and the
+calculator adapter emits structural expression nodes for integers, names,
+calls, and simple arithmetic. Materialized Loko is still carried for reports
+and debugging, but it is no longer the semantic input for staged definitions or
+staged function bodies.
 
 ## Current Records
 
@@ -181,10 +178,10 @@ GrammarParseReport.syntax + staged frontend forms -> AST -> semantic IR -> lower
 ```
 
 `ast.rs` lowers staged `FrontendForm::Function` and `FrontendForm::Class`
-values into AST definitions. `FrontendExpression::LokoText` is still a
-transitional expression payload and is parsed through the existing expression
-parser under the hood. `sem.rs`, `lower.rs`, and `tape.rs` do not perform
-grammar lookup and continue to consume ordinary AST/semantic products.
+values into AST definitions. Staged function bodies lower from structural
+`FrontendExpression` records into AST expressions instead of generated text.
+`sem.rs`, `lower.rs`, and `tape.rs` do not perform grammar lookup and continue
+to consume ordinary AST/semantic products.
 
 ## Workbench Use
 
@@ -229,8 +226,7 @@ main = helper() + 2
 ```
 
 The staged regions emit structural `frontend-function` forms. AST lowering
-consumes those function forms directly, while each body is currently carried as
-`FrontendExpression::LokoText` and parsed by the existing expression parser.
+consumes those function forms and their structural expression bodies directly.
 Reports also show a materialized ordinary-Loko debug projection:
 
 ```text
@@ -329,6 +325,8 @@ Frontend forms currently project to source data such as:
 
 ```text
 frontend-function(name: main, ...)
+frontend-binary(op: +, ...)
+frontend-call(callee: helper, ...)
 frontend-class(name: <circle>, superclass: <object>, ...)
 frontend-slot(name: radius, type: <integer>, ...)
 ```
@@ -342,7 +340,8 @@ Later slices may add:
 
 - source-authored grammar declarations;
 - structural semantic actions that emit forms or grammar deltas;
-- fully structural frontend expressions with no `LokoText` body fallback;
+- a complete structural frontend expression model for the full Loko expression
+  language;
 - macro hygiene and name-introduction rules;
 - exact original-source span mapping for emitted forms;
 - a public registry/capability policy for choosing staged grammar adapters;

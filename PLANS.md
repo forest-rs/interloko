@@ -1,5 +1,49 @@
 # Plans
 
+## Eliminate Staged Expression Text Fallback
+
+### Goal
+
+Remove the transitional staged-expression text fallback. Trusted staged
+adapters should emit structural frontend expression nodes for the subset they
+need today, AST lowering should consume those nodes directly, and materialized
+Loko should remain only as an inspectable debug/report projection.
+
+### Fence
+
+`grammar_frontend` owns structural frontend forms, structural staged expression
+records, adapter parsing, and materialized debug source. `ast` owns lowering
+those forms into AST definitions and expressions. This slice does not add new
+Loko semantics, source-authored grammars, macro hygiene, semantic actions, or
+new lowering/tape behavior.
+
+### Invariants
+
+- Staged regions are not reparsed as generated Loko source.
+- Calculator staged bodies are structural frontend expressions.
+- Records staged forms remain structural class forms.
+- Materialized Loko is still available for reports and debugging.
+- `sem`, `lower`, and tape emission continue to consume ordinary AST and
+  semantic products.
+
+### Steps
+
+1. Replace the legacy staged-expression text variant with structural integer,
+   name, call, and binary expression nodes.
+2. Lower structural staged expressions directly into AST expressions.
+3. Update staged adapter source-data/report projection and regression tests.
+4. Update grammar MOP docs and progress notes to remove the text-fallback
+   caveat.
+5. Run fmt, clippy, workspace tests, docs, corpus checks, and commit in clean
+   slices.
+
+### Risks
+
+- The structural expression subset is intentionally small; docs must not imply
+  a complete source-authored macro system.
+- Debug materialized source should stay faithful enough for reports without
+  becoming the compiler input again.
+
 ## Add Runtime Object Protocol Helpers
 
 ### Goal

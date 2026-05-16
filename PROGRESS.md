@@ -1,5 +1,24 @@
 # Interloko Progress
 
+## Implemented: Structural Staged Expressions
+
+- The staged calculator adapter now emits structural frontend expression nodes
+  for integers, names, calls, and `+`, `-`, `*` binary expressions.
+- `ast::lower_with_frontend_forms` lowers those expression nodes directly into
+  AST expression bodies. It no longer reparses generated Loko text for staged
+  function bodies.
+- Source-data dumps and reports project calculator bodies as records such as
+  `frontend-integer`, `frontend-name`, `frontend-call`, and
+  `frontend-binary`.
+- Materialized Loko remains available on staged regions for dumps, reports,
+  and human comparison, but it is only a debug projection.
+
+Deferred:
+
+- A complete structural expression language for every ordinary Loko expression.
+- Source-authored grammar definitions, semantic actions, macro hygiene, and a
+  capability policy for user-provided grammar extensions.
+
 ## Implemented: Direct Frontend Forms To AST
 
 - Staged grammar regions are no longer materialized into the source that feeds
@@ -20,8 +39,6 @@
 
 Deferred:
 
-- Replacing transitional `FrontendExpression::LokoText` with richer structured
-  expression forms.
 - Source-authored grammar definitions, semantic actions, macro hygiene, and a
   capability policy for user-provided grammar extensions.
 
