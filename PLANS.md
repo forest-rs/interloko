@@ -1,5 +1,149 @@
 # Plans
 
+## Rewind The In-Memory Mutation Log
+
+### Goal
+
+Prove the mutation log is operational, not just inspectable, by adding the
+first non-append operation on it: rewind. A new
+`SessionArtifacts::rewind_to(target: Option<u32>)` truncates the live
+session's mutation log at `target` (or back to pristine when `None`),
+rebuilds session state from the pristine source plus the retained log
+through the same candidate-and-swap discipline used by `apply_mutation`,
+and returns a `RewindOutcome` describing what was dropped.
+
+Rewind is not a `SessionMutation`. The mutation log stays a forward
+transcript of domain mutations; rewind is an operation *on* that
+transcript and is never appended to it. This keeps the invariant
+"replaying the log against the base source reproduces current state"
+intact: a transcript that included rewind entries would require entries
+that erase prior entries, breaking the log's meaning.
+
+### Fence
+
+`SessionArtifacts` owns the pristine source, the log truncation
+operation, the rebuild-from-log helper, the candidate-and-swap rollback
+for rewind, and the `RewindOutcome` / `RewindError` shape. The new
+helper is the load-bearing piece; later replay-against-different-base
+and branch slices reuse it. This slice explicitly does not own:
+
+- exposing rewind as a `SessionMutation`, appending rewind entries to
+  the log, or any model where the log is anything other than a
+  forward transcript of domain mutations;
+- public replay against a changed base source file (the helper exists
+  internally, but the public API stays scoped to rewind on the
+  session's own pristine source);
+- branching: forking a session from a prefix of the log into a
+  separate session identity;
+- log persistence, serialization, or any on-disk format;
+- in-language (Loko-from-Loko) rewind calls;
+- a stateful `interloko_lab` subcommand for rewind. The lab is
+  stateless per invocation, so rewind has no useful CLI surface in
+  this slice; tests in the compiler crate are the verification.
+- `IncrementalCompilerSession::apply_mutation` cache reuse.
+
+### Invariants
+
+- `SessionArtifacts` privately stores the pristine source text once at
+  first compile and preserves it byte-for-byte across every
+  `apply_mutation` and `rewind_to` call. The pristine source is the
+  rebuild base; nothing else.
+- The internal `compose_source_from_log` helper deterministically
+  produces a composed source string from the pristine base and an
+  iterator of `&SessionMutation` requests. Both `apply_add_method` and
+  `rewind_to` use it as the source-side step of the
+  candidate-and-swap rebuild; the surrounding compile/validate/swap
+  orchestration stays per-call-site because the two paths have
+  different post-compile responsibilities (new-entry construction vs.
+  dropped/retained partitioning). The helper is request-only by
+  design: it does not see ids, so the later
+  replay-against-changed-base slice can supply its own
+  `AppliedMutation` set without inferring ids from log position.
+- `rewind_to(Some(id))` requires `id` to name an entry currently in
+  the live log; on success that entry and every earlier entry in log
+  order are retained and the strict suffix is dropped. A target that
+  does not name a live entry (because it was never assigned, or
+  because it was dropped by a prior rewind) returns
+  `RewindError::TargetOutOfRange`; rewind never silently re-interprets
+  a missing id as "retain everything with a smaller numeric value."
+  `rewind_to(None)` retains no entries and rebuilds from pristine.
+- Mutation ids are stable session event ids. `SessionArtifacts` carries
+  a private monotonic counter that advances on every successful
+  `apply_mutation` and is *preserved* across `rewind_to`. Retained log
+  entries keep their ids; dropped ids are permanently retired and
+  never reused. The next `apply_mutation` after a rewind assigns the
+  next never-used id, which is generally *not* equal to the live
+  retained count (the log can have gaps).
+- `MethodOrigin::Session` markers on retained methods are restored
+  from the retained log entries (same log-driven retag the existing
+  apply path uses).
+- A failed rewind (target id outside the log, runtime validation
+  failure on rebuild) leaves the live session untouched.
+- The mutation log is never appended to by rewind. Rewind only
+  truncates.
+- `interloko_runtime` is not touched; rewind is a session-layer
+  operation that uses the existing candidate-and-swap pipeline.
+
+### Steps
+
+1. Plan entry (this commit). No code, no docs surface.
+2. Add a private `pristine_source: String` field to `SessionArtifacts`
+   populated by the initial compile path. Refactor `apply_add_method`
+   to compose candidate source from `pristine + log entries` instead
+   of appending to `self.source.source`, and to preserve
+   `pristine_source` across the candidate-and-swap. No new public API;
+   all existing mutation-log tests pass unchanged.
+3. Add `SessionArtifacts::rewind_to(target: Option<u32>) ->
+   Result<RewindOutcome, RewindError>` plus the `RewindOutcome` and
+   `RewindError` types. Source composition is shared with
+   `apply_add_method` through the internal
+   `compose_source_from_log(pristine, requests)` helper; the
+   surrounding compile / validate / log-driven provenance retag /
+   swap stays per-call-site. Tests:
+   - applying two mutations and rewinding to the first id leaves the
+     first method dispatching and the second gone;
+   - rewinding to `None` returns the session to pristine: both methods
+     gone, original dispatch restored, log empty;
+   - rewinding to an out-of-range id returns `RewindError` and leaves
+     the live session unchanged;
+   - mutation log EOP records shrink in lockstep with the log
+     truncation;
+   - the next `apply_mutation` after a partial rewind assigns the
+     next never-used id (one past the highest ever assigned), not a
+     recycled dropped id; the post-rewind log has a deliberate gap
+     where the dropped id used to be.
+4. Update `docs/eop_mutation.md` with a "Rewind" section that makes
+   the operations-on-log boundary explicit: rewind is not a
+   `SessionMutation`, never appended to the log, and not exposed
+   through the lab CLI in this slice. Update `PROGRESS.md` with an
+   `Implemented: Rewind The In-Memory Mutation Log` section.
+
+### Risks
+
+- The pristine-source field is load-bearing. Any code path that
+  re-derives session state must compose from pristine; any path that
+  forgets to preserve pristine across a rebuild reintroduces the bug
+  class this slice is meant to keep closed.
+- The `compose_source_from_log` helper is the seed for replay-against-
+  different-base. Its shape must not bake in assumptions specific to
+  rewind: the source it composes against is "the session's pristine
+  source today," but the helper itself accepts an arbitrary pristine
+  string and a request iterator, so a replay slice can supply a
+  different base. The helper is deliberately request-only (no ids in
+  its signature) so replay cannot infer ids from log position.
+- `RewindOutcome` / `RewindError` are new public types; later
+  operations (retract-by-id, branch) must compose with the shape
+  chosen here. Adding fields later is fine; renaming is expensive.
+- The lab is stateless per invocation, so rewind has no useful CLI
+  surface today. Docs should make this clear so the absence is not
+  read as a missing feature.
+- Rewind must not silently re-derive identifiers. Retained log
+  entries' `mutation_id` values are stable across the rewind; the
+  next mutation gets the next never-used id (from a preserved
+  monotonic counter), *not* a recycled dropped id. Reusing ids would
+  break the log's forward-transcript meaning and quietly conflate
+  distinct historical events.
+
 ## Add Explicit In-Memory Mutation Log
 
 ### Goal

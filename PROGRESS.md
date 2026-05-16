@@ -1,5 +1,68 @@
 # Interloko Progress
 
+## Implemented: Rewind The In-Memory Mutation Log
+
+- `SessionArtifacts::rewind_to(target: Option<u32>) ->
+  Result<RewindOutcome, RewindError>` truncates the live mutation log
+  at `target` (or back to pristine when `None`) and rebuilds session
+  state through the existing candidate-and-swap discipline. Mutation
+  ids are stable session event ids: a private monotonic counter on
+  `SessionArtifacts` advances on every successful `apply_mutation`
+  and is preserved across every `rewind_to`. Retained log entries
+  keep their `mutation_id`; dropped ids are permanently retired. The
+  next `apply_mutation` after a partial rewind gets the next
+  never-used id (not `retained_count`); the live log can carry a
+  deliberate gap where a dropped id used to be. Rewinding to a
+  dropped id surfaces `RewindError::TargetOutOfRange`.
+- Rewind is an operation *on* the log, not an entry *in* it. The
+  truncated tail is reported in `RewindOutcome::dropped` but is never
+  appended to the log. The mutation log stays a forward transcript of
+  domain mutations; replaying it against the pristine source still
+  reproduces current state.
+- `SessionArtifacts` carries a private `pristine_source: String` field
+  fixed at first compile and preserved byte-for-byte across every
+  `apply_mutation` and `rewind_to` call. A new
+  `compose_source_from_log(pristine, requests)` helper deterministically
+  produces the composed source text from pristine plus any subset of
+  log requests; both `apply_add_method` and `rewind_to` use it. The
+  helper is also the seed for the future replay-against-changed-base
+  slice.
+- `RewindOutcome` carries `retained_count`, `dropped`, and
+  `recompute_strategy: RecomputeStrategy` (always
+  `FullCandidateRebuild` in this slice). `RewindError` carries
+  `TargetOutOfRange { target, current_count }` for invalid targets
+  and `RuntimeValidationFailed { error }` as a safety net.
+- `SessionMutation` and `AppliedMutation` gain `Eq + PartialEq` so
+  `RewindOutcome` is comparable and tests can `assert_eq!` on log
+  entries.
+- Five tests cover the rewind contract: rewind to first id keeps the
+  first method and drops the second (with the triangle method's
+  dispatch now trapping); rewind to pristine empties the log and
+  restores original dispatch; out-of-range target preserves state
+  byte-for-byte; next `apply_mutation` after partial rewind assigns
+  the expected id; EOP `mutation:m<id>` records shrink in lockstep
+  with the log.
+- Rewind has no `interloko_lab` surface in this slice. The lab is
+  stateless per invocation, so a standalone rewind would have nothing
+  to rewind; a stateful session subcommand is deferred along with the
+  rest of the long-lived session UX.
+- See [`docs/eop_mutation.md`](docs/eop_mutation.md) for the rewind
+  contract, the operations-on-log boundary, and the still-deferred
+  follow-ups (branch, public replay against changed base, persistence,
+  in-language mutation, stateful CLI session subcommand, incremental
+  cache reuse).
+
+Deferred:
+
+- Branch: forking a session from a prefix of the log into a separate
+  identity.
+- Public replay of a log against a changed base source.
+- Log persistence / on-disk serialization.
+- In-language (Loko-from-Loko) mutation calls.
+- A stateful `interloko_lab` session subcommand.
+- `RecomputeStrategy::IncrementalReuse` through
+  `IncrementalCompilerSession::apply_mutation`.
+
 ## Implemented: Explicit In-Memory Mutation Log
 
 - `SessionArtifacts` carries a private `mutations: Vec<AppliedMutation>`
