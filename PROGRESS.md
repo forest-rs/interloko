@@ -1,5 +1,45 @@
 # Interloko Progress
 
+## Implemented: Explicit In-Memory Mutation Log
+
+- `SessionArtifacts` carries a private `mutations: Vec<AppliedMutation>`
+  field exposed through `SessionArtifacts::mutations(&self) ->
+  &[AppliedMutation]`. Each `AppliedMutation` records the assigned
+  `mutation_id`, the original `SessionMutation` request, and the
+  returned `MutationOutcome`.
+- The log is the single source of truth for session-mutation provenance.
+  `apply_add_method` walks the log on every candidate-and-swap rebuild
+  and re-applies `MethodOrigin::Session { sequence: entry.mutation_id }`
+  to the method at `entry.outcome.inserted_method`. The
+  `saturating_sub`-based pristine-count arithmetic that quietly
+  underpinned the previous bug fix is gone; the redundant
+  `mutation_sequence: u32` field on `SessionArtifacts` is gone too.
+- Each `AppliedMutation` projects as an EOP environment object
+  `mutation:m<id>` with kind `Mutation`, origin `Session`, storage
+  `TransientInMemory`. Workbench dumps surface the log alongside
+  classes, generics, methods, dispatch sites, and diagnostics. The
+  storage label and inspection text never use "saved", "stored", or
+  "reused" wording.
+- `interloko_lab invoke-affordance ... add-method` reports
+  `log_size=<N>` on the outcome line. The lab is stateless per
+  invocation, so a successful add-method always shows `log_size=1`
+  today; the field exists so the log is visible from the CLI and so
+  future stateful surfaces report it with the same wording.
+- See [`docs/eop_mutation.md`](docs/eop_mutation.md) for the log shape,
+  the in-memory fence, and the deferred follow-ups (rewind, branch,
+  replay against a changed base, persistence, in-language mutation,
+  stateful CLI session surfaces, incremental cache reuse, and session
+  restore).
+
+Deferred:
+
+- Log rewind, undo, branch, and replay-against-changed-base.
+- Persistence or any on-disk log format.
+- In-language (Loko-from-Loko) mutation calls.
+- A stateful `mutations <file>` CLI subcommand.
+- `RecomputeStrategy::IncrementalReuse` cache reuse through
+  `IncrementalCompilerSession::apply_mutation`.
+
 ## Implemented: Live EOP Method Mutation
 
 - `interloko_runtime` carries generic arity on `RuntimeGeneric` and exposes

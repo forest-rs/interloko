@@ -1,5 +1,110 @@
 # Plans
 
+## Add Explicit In-Memory Mutation Log
+
+### Goal
+
+Promote the implicit per-session mutation history hidden inside the existing
+`add-method` slice into an explicit, structured, in-memory log. The session
+stores each successful mutation as an `AppliedMutation` record carrying the
+request, the resulting `MutationOutcome`, and the assigned mutation id. The
+log becomes the single source of truth for `MethodOrigin::Session`
+provenance, replacing the `ast.methods.len() - mutation_sequence` arithmetic
+that quietly underpinned the provenance retag fix. Each `AppliedMutation`
+also projects as an EOP environment object so workbench tools can inspect
+the mutation history through the same protocol surface they use for every
+other compiler fact.
+
+### Fence
+
+Compiler sessions own the log shape, append order, log-driven provenance
+retag, and log projection into EOP records. `interloko_lab` owns user-facing
+reporting of the log size in the existing `add-method` outcome line. This
+slice explicitly does not own:
+
+- rewind / undo across mutations;
+- branching: deriving a divergent session from a prefix of the log;
+- replay against a changed base source file;
+- log persistence, serialization, or any on-disk format;
+- merge or conflict policy for divergent logs;
+- in-language (Loko-from-Loko) mutation calls;
+- a stateful `interloko_lab mutations <file>` subcommand or any other
+  long-lived session surface;
+- `IncrementalCompilerSession::apply_mutation` cache reuse (still
+  `RecomputeStrategy::FullCandidateRebuild`).
+
+### Invariants
+
+- A successful `apply_mutation` appends exactly one `AppliedMutation` to the
+  log; a failed `apply_mutation` appends none.
+- The log is ordered by application; an entry's index equals its
+  `mutation_id` and equals the `sequence` carried by the inserted method's
+  `MethodOrigin::Session`.
+- `SessionArtifacts::mutations()` returns the log in application order and
+  is the public read surface.
+- After a candidate-and-swap rebuild, every method named by any log entry's
+  `outcome.inserted_method` carries `MethodOrigin::Session { sequence: id }`
+  with the matching id. Provenance is computed from the log, not from
+  method-count arithmetic.
+- Each `AppliedMutation` projects to one EOP environment object with a
+  stable id of the form `mutation:m<id>` and a kind/origin/storage facet
+  set consistent with other workbench-derived environment objects.
+- The log is in-memory only. No part of the slice writes log content to
+  disk, embeds it in dump or report output as serialization, or uses it as
+  a session resume input.
+- `interloko_runtime` continues to honor its `no_std` constraint and gains
+  no compiler dependencies.
+
+### Steps
+
+1. Plan entry (this commit). No code, no docs surface.
+2. Add `pub struct AppliedMutation { mutation_id, request, outcome }`,
+   `SessionArtifacts::mutations(&self) -> &[AppliedMutation]`, the
+   `mutations: Vec<AppliedMutation>` field, log append on successful
+   `apply_mutation`, and log-driven retag of every session-origin method
+   after every candidate-and-swap rebuild. Remove the
+   `saturating_sub`-based pristine-count computation now that the log is
+   authoritative. Tests prove: two successful mutations produce two log
+   entries with the expected ids and inserted methods; a failed mutation
+   leaves the log untouched; provenance is restored from the log after a
+   second mutation rebuild even when the recompile would otherwise reset
+   `MethodOrigin` to `Source`.
+3. Project each `AppliedMutation` as an EOP environment object with id
+   `mutation:m<id>`, kind `mutation`, origin `session`, storage
+   `transient-in-memory`, and an `inspection` facet that exposes the
+   request shape and the recorded outcome. Workbench EOP dumps surface
+   the log alongside existing environment objects. Tests cover EOP
+   visibility before and after one or more mutations.
+4. Extend the `interloko_lab invoke-affordance ... add-method` outcome
+   line with `log_size=<N>` reporting the post-mutation log length.
+   Update the existing CLI test to assert the new field. No new
+   subcommand.
+5. Update `docs/eop_mutation.md` with a "Mutation log" section describing
+   the log shape, the in-memory fence, and the deferred follow-ups
+   (rewind, branch, replay against changed base, persistence, in-language
+   mutation, incremental cache reuse). Update `PROGRESS.md` with an
+   `Implemented: Explicit In-Memory Mutation Log` section.
+
+### Risks
+
+- The log is the new ground truth for provenance. Any code that previously
+  derived `MethodOrigin::Session` from method counts must move to the log
+  in this slice; leaving even one arithmetic-based path resurrects the
+  bug class the slice is meant to eliminate.
+- The `AppliedMutation` shape is part of the public API. Later mutation
+  affordances (`retract-method`, `edit-body`, `define-class`) and the
+  eventual rewind/branch/replay slices must compose with this shape;
+  adding fields later is fine, renaming them is expensive.
+- EOP rendering of mutation records must not imply persistence. The
+  `transient-in-memory` storage facet (or equivalent) is the contract; CLI
+  and report wording must not call the log "saved" or "stored" outside
+  the running session.
+- The `interloko_lab` invocation is stateless: each invocation builds a
+  fresh session and applies at most one mutation. The `log_size=1` value
+  surfaced today is therefore always `1` for `add-method`. Documentation
+  should make that ergonomic limit explicit so users understand the log
+  is real even when the CLI cannot show multiple entries yet.
+
 ## Add Live EOP Method Mutation
 
 ### Goal

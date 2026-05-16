@@ -130,6 +130,67 @@ Session-origin methods participate in dispatch identically to
 source-origin methods. The only externally observable difference is the
 origin marker exposed in workbench projections.
 
+Provenance is computed from the mutation log, not from method-count
+arithmetic. The log entry's `outcome.inserted_method` names the sem
+method id that the mutation introduced; the candidate-and-swap retag
+walks the log on every rebuild and reasserts
+`MethodOrigin::Session { sequence: entry.mutation_id }` for each
+entry, so an earlier inserted method does not silently revert to
+`Source` when a later mutation rebuilds the candidate from the
+appended source.
+
+## Mutation log
+
+The session holds an in-memory mutation log:
+
+```rust
+pub struct AppliedMutation {
+    pub mutation_id: u32,
+    pub request: SessionMutation,
+    pub outcome: MutationOutcome,
+}
+
+impl SessionArtifacts {
+    pub fn mutations(&self) -> &[AppliedMutation];
+}
+```
+
+Each successful `apply_mutation` appends exactly one entry; failed
+mutations append none. The log is ordered by application; an entry's
+index equals its `mutation_id` and equals the `sequence` carried by the
+inserted method's `MethodOrigin::Session`.
+
+The log is the single source of truth for session-mutation provenance.
+Any earlier code that derived provenance from method-count arithmetic
+has been removed. If a caller hand-edits the origin field on a
+session-inserted method, the next candidate-and-swap rebuild restores
+the marker from the log entry.
+
+Each entry projects as an EOP environment object:
+
+```text
+object mutation:m0
+  kind=mutation meta-class=<mutation>
+  origin=session storage=transient-in-memory
+  inspection: mutation-id=0 request=add-method target=<area>
+              inserted=<method-id> affected-artifacts=13
+              strategy=full-candidate-rebuild
+```
+
+The `transient-in-memory` storage label is the contract: the log lives
+only in the running session. No part of the slice writes log content
+to disk, embeds it in dump or report output as serialization, or uses
+it as a session resume input. CLI and EOP wording for log entries does
+not say "saved", "stored", or "reused"; the strategy label always
+names what actually happened in the implementation.
+
+`interloko_lab invoke-affordance ... add-method` reports the
+post-mutation log size on the outcome line as `log_size=<N>`. The lab
+is stateless per invocation, so a successful add-method today always
+shows `log_size=1`; the field exists so the log is visible from the
+CLI and so future stateful surfaces can report cumulative log size
+with the same wording.
+
 ## Recompute strategy
 
 `RecomputeStrategy::FullCandidateRebuild` is the only variant in this
@@ -185,8 +246,18 @@ add-method mutation failed: unknown generic id g99
 
 Subsequent slices may add:
 
-- `retract-method`, `edit-body`, `define-class`, `redefine-class`;
+- `retract-method`, `edit-body`, `define-class`, `redefine-class`,
+  each landing as a new `SessionMutation` variant and a new log entry
+  shape rather than a parallel mutation system;
 - structural-form method sources (no text input at all);
+- log rewind / undo, branching from a prefix of the log, and replay
+  of a log against a different base source, each as its own plan;
+- log persistence and any on-disk serialization format;
+- in-language (Loko-from-Loko) mutation calls that append to the same
+  log as external CLI-driven mutations;
+- a stateful `interloko_lab mutations <file>` subcommand or other
+  long-lived session surface that can show multiple log entries from a
+  single CLI invocation;
 - mutation affordances on `IncrementalCompilerSession` that genuinely
   skip unrelated work through the query-cache (introducing
   `RecomputeStrategy::IncrementalReuse`);
@@ -196,5 +267,6 @@ Subsequent slices may add:
   mutations.
 
 These belong to their own plans. They share `SessionMutation`'s
-non-exhaustive enum, the candidate-and-swap discipline, and the
-`MutationOutcome`/`MutationError` shape so the family composes cleanly.
+non-exhaustive enum, the candidate-and-swap discipline, the
+`MutationOutcome` / `MutationError` shape, and the `AppliedMutation`
+log entry shape so the family composes cleanly.
