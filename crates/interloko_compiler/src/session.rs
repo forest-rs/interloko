@@ -379,6 +379,8 @@ pub enum EnvironmentKind {
     Artifact,
     /// An explicitly projected host-owned environment object.
     HostObject,
+    /// One entry in the session's in-memory mutation log.
+    Mutation,
 }
 
 impl EnvironmentKind {
@@ -411,6 +413,7 @@ impl EnvironmentKind {
             Self::RuntimeLayoutRow => "runtime-layout-row",
             Self::Artifact => "artifact",
             Self::HostObject => "host-object",
+            Self::Mutation => "mutation",
         }
     }
 }
@@ -426,6 +429,8 @@ pub enum EnvironmentOrigin {
     CompilerGenerated,
     /// The object is contributed by an explicit host projection adapter.
     HostProvided,
+    /// The object was introduced by an in-memory session mutation.
+    Session,
 }
 
 impl EnvironmentOrigin {
@@ -437,6 +442,7 @@ impl EnvironmentOrigin {
             Self::HostBacked => "host-backed",
             Self::CompilerGenerated => "compiler-generated",
             Self::HostProvided => "host-provided",
+            Self::Session => "session",
         }
     }
 }
@@ -456,6 +462,9 @@ pub enum EnvironmentStorage {
     CachedArtifact,
     /// The object is represented by host-owned state outside Interloko.
     HostOwned,
+    /// The object lives only in the session's in-memory mutation log; it is
+    /// not persisted, serialized, or carried across session boundaries.
+    TransientInMemory,
 }
 
 impl EnvironmentStorage {
@@ -469,6 +478,7 @@ impl EnvironmentStorage {
             Self::FrontendRegistry => "frontend-registry",
             Self::CachedArtifact => "cached-artifact",
             Self::HostOwned => "host-owned",
+            Self::TransientInMemory => "transient-in-memory",
         }
     }
 }
@@ -5475,6 +5485,9 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     for site in artifacts.dispatch_sites() {
         project_environment_dispatch_site(module, sink, &site);
     }
+    for entry in artifacts.mutations() {
+        project_environment_mutation(module, sink, entry);
+    }
     for (index, diagnostic) in artifacts.diagnostics.iter().enumerate() {
         sink.emit(environment_object(EnvironmentObjectParts {
             id: format!("diagnostic:d{index}"),
@@ -6356,6 +6369,39 @@ fn project_environment_dispatch_site(
             exact_classes,
             site.applicable.len(),
             site.rejected.len()
+        ),
+    }));
+}
+
+fn project_environment_mutation(
+    module: &sem::Module,
+    sink: &mut dyn EnvironmentObjectSink,
+    entry: &AppliedMutation,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let (request_label, target_label) = match &entry.request {
+        SessionMutation::AddMethod { generic, .. } => {
+            ("add-method", generic_label(module, *generic))
+        }
+    };
+    let inserted_label = method_label(module, entry.outcome.inserted_method);
+    let strategy_label = match entry.outcome.recompute_strategy {
+        RecomputeStrategy::FullCandidateRebuild => "full-candidate-rebuild",
+    };
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: format!("mutation:m{}", entry.mutation_id),
+        kind: EnvironmentKind::Mutation,
+        meta_class: "<mutation>",
+        origin: EnvironmentOrigin::Session,
+        storage: EnvironmentStorage::TransientInMemory,
+        title: format!("{request_label} on {target_label} (#{})", entry.mutation_id),
+        affordances: Vec::from([Aff::Inspect, Aff::DumpEop]),
+        execution: None,
+        inspection: format!(
+            "mutation-id={} request={request_label} target={target_label} inserted={inserted_label} affected-artifacts={} strategy={strategy_label}",
+            entry.mutation_id,
+            entry.outcome.affected_artifacts.len(),
         ),
     }));
 }
@@ -10204,6 +10250,59 @@ end;
             "log-driven retag should restore the tampered origin; got {:?}",
             square.origin
         );
+    }
+
+    #[test]
+    fn mutation_log_projects_one_eop_record_per_entry() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        // No mutations yet: no mutation:m* objects exist.
+        let initial_objects = artifacts.environment_objects();
+        assert!(
+            !initial_objects
+                .iter()
+                .any(|object| object.id.as_str().starts_with("mutation:")),
+            "no mutation EOP records should exist before any mutation is applied"
+        );
+
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+
+        let after_first = artifacts.environment_objects();
+        let first = eop_object(&after_first, "mutation:m0");
+        assert_eq!(first.kind, EnvironmentKind::Mutation);
+        assert_eq!(first.origin, EnvironmentOrigin::Session);
+        assert_eq!(first.storage, EnvironmentStorage::TransientInMemory);
+        assert_eq!(first.meta_class, "<mutation>");
+        let inspection = first.inspection.detail.as_str();
+        assert!(inspection.contains("mutation-id=0"));
+        assert!(inspection.contains("request=add-method"));
+        assert!(inspection.contains("strategy=full-candidate-rebuild"));
+        // The slice deliberately reports the strategy honestly; nothing in
+        // the EOP surface should claim cache reuse yet.
+        assert!(!inspection.contains("reused"));
+
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+
+        let after_second = artifacts.environment_objects();
+        let mutation_count = after_second
+            .iter()
+            .filter(|object| object.id.as_str().starts_with("mutation:"))
+            .count();
+        assert_eq!(mutation_count, 2);
+        let second = eop_object(&after_second, "mutation:m1");
+        assert_eq!(second.kind, EnvironmentKind::Mutation);
+        assert!(second.inspection.detail.as_str().contains("mutation-id=1"));
     }
 
     #[test]
