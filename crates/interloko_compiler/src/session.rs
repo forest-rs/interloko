@@ -712,8 +712,10 @@ pub struct SessionArtifacts {
     pub runtime_result: Option<RuntimeResult>,
     /// Captured runtime trace when traced execution was requested.
     pub runtime_trace: Option<ExecutionTrace>,
-    /// Number of live EOP mutations applied to this session so far.
-    pub mutation_sequence: u32,
+    /// Live EOP mutation log in application order. Read through
+    /// [`SessionArtifacts::mutations`]; the field stays private so the
+    /// invariant "log drives provenance" is enforced at the type level.
+    mutations: Vec<AppliedMutation>,
     invalidation: QueryInvalidation,
     artifact_metrics: Vec<ArtifactMetricEntry>,
 }
@@ -762,6 +764,25 @@ pub struct MutationOutcome {
     /// actually skips work through the incremental query cache will
     /// introduce additional variants.
     pub recompute_strategy: RecomputeStrategy,
+}
+
+/// One successful mutation as recorded in the session's mutation log.
+///
+/// The log is the single source of truth for session-mutation provenance.
+/// Entries appear in application order; an entry's `mutation_id` equals its
+/// position in the log and equals the `sequence` carried by the inserted
+/// method's [`sem::MethodOrigin::Session`].
+#[derive(Clone, Debug)]
+pub struct AppliedMutation {
+    /// Per-session monotonic mutation id assigned when this mutation was
+    /// applied. Matches `outcome.mutation_id`; surfaced on the wrapper so
+    /// callers can identify the entry without descending into the outcome.
+    pub mutation_id: u32,
+    /// Original [`SessionMutation`] request that produced this entry.
+    pub request: SessionMutation,
+    /// Outcome returned by [`SessionArtifacts::apply_mutation`] for this
+    /// entry.
+    pub outcome: MutationOutcome,
 }
 
 /// How the post-mutation artifacts were produced.
@@ -876,6 +897,18 @@ impl SessionArtifacts {
     #[must_use]
     pub fn dispatch_sites(&self) -> Vec<DispatchSiteRecord> {
         collect_dispatch_sites(self)
+    }
+
+    /// Returns the live EOP mutation log in application order.
+    ///
+    /// Each entry represents one successful
+    /// [`SessionArtifacts::apply_mutation`] call. The log is the single
+    /// source of truth for session-mutation provenance; the `sequence`
+    /// carried by a method's [`sem::MethodOrigin::Session`] matches the
+    /// `mutation_id` of the log entry that inserted it.
+    #[must_use]
+    pub fn mutations(&self) -> &[AppliedMutation] {
+        &self.mutations
     }
 
     /// Returns one dispatch-site record by friendly selector id.
@@ -1113,12 +1146,22 @@ impl SessionArtifacts {
         &mut self,
         mutation: SessionMutation,
     ) -> Result<MutationOutcome, MutationError> {
-        match mutation {
+        let outcome = match &mutation {
             SessionMutation::AddMethod {
                 generic,
                 method_source,
-            } => self.apply_add_method(generic, &method_source),
-        }
+            } => self.apply_add_method(*generic, method_source)?,
+        };
+        // The mutation log is the single source of truth for provenance.
+        // apply_add_method already swapped in the candidate with the prior
+        // log copied forward; this push records the new entry on top so
+        // SessionArtifacts::mutations() reflects the application order.
+        self.mutations.push(AppliedMutation {
+            mutation_id: outcome.mutation_id,
+            request: mutation,
+            outcome: outcome.clone(),
+        });
+        Ok(outcome)
     }
 
     fn apply_add_method(
@@ -1267,7 +1310,7 @@ impl SessionArtifacts {
             return Err(MutationError::RuntimeValidationFailed { error });
         }
 
-        let mutation_id = self.mutation_sequence;
+        let mutation_id = self.mutations.len() as u32;
         let new_method_definition = new_method.definition;
         let affected_generic_definition = candidate
             .sem
@@ -1276,26 +1319,31 @@ impl SessionArtifacts {
             .map(|g| g.definition)
             .unwrap_or(new_method.definition);
 
-        // The candidate compile parses all prior session-inserted methods
-        // out of the appended source as if they were ordinary source-origin
-        // definitions, which clears their MethodOrigin::Session marker.
-        // Re-tag every session-inserted method (including this one) so prior
-        // mutations preserve their provenance across the rebuild. AST methods
-        // are ordered as [pristine source methods..., session-inserted
-        // methods in mutation order], and sem::lower preserves that order
-        // before appending slot setters, so the inserted method for mutation
-        // `sequence` lives at sem index pristine_user_method_count + sequence.
-        let pristine_user_method_count = self
-            .ast
-            .methods
-            .len()
-            .saturating_sub(self.mutation_sequence as usize);
         let mut new_artifacts = candidate;
-        for sequence in 0..=mutation_id {
-            let idx = pristine_user_method_count + sequence as usize;
-            new_artifacts.sem.methods[idx].origin = sem::MethodOrigin::Session { sequence };
+
+        // Carry the mutation log forward onto the candidate so the new
+        // entry can be appended (in apply_mutation) after the swap.
+        new_artifacts.mutations = self.mutations.clone();
+
+        // The candidate compile parses prior session-inserted methods out of
+        // the appended source as ordinary source-origin definitions, which
+        // clears their MethodOrigin::Session marker. Restore the marker for
+        // every prior mutation by walking the log directly: each entry's
+        // outcome.inserted_method still points at the same method id in the
+        // recompiled sem module (slot setters move; user methods do not).
+        // Provenance is derived from the log, not from method-count
+        // arithmetic.
+        for entry in &new_artifacts.mutations {
+            let idx = entry.outcome.inserted_method.0 as usize;
+            new_artifacts.sem.methods[idx].origin = sem::MethodOrigin::Session {
+                sequence: entry.mutation_id,
+            };
         }
-        new_artifacts.mutation_sequence = mutation_id + 1;
+        // Tag the freshly inserted method. apply_mutation will push the
+        // matching AppliedMutation onto the log after the swap.
+        new_artifacts.sem.methods[new_method.id.0 as usize].origin = sem::MethodOrigin::Session {
+            sequence: mutation_id,
+        };
 
         // Affected list is the dependency-graph truth, not "what we just
         // recomputed". The top-level pipeline artifacts genuinely change
@@ -3566,7 +3614,7 @@ fn compile_file_with_registries(
         diagnostics,
         runtime_result,
         runtime_trace,
-        mutation_sequence: 0,
+        mutations: Vec::new(),
         invalidation,
         artifact_metrics: Vec::new(),
     };
@@ -9935,7 +9983,7 @@ end;
         let square_after = artifacts.run_zero_arg_function_i64("score_square");
         assert!(matches!(square_after, FunctionRunResult::ReturnedI64(49)));
 
-        assert_eq!(artifacts.mutation_sequence, 1);
+        assert_eq!(artifacts.mutations().len(), 1);
     }
 
     #[test]
@@ -9964,7 +10012,7 @@ end;
         // Class mutations are out of scope for this slice; the candidate AST
         // gained two definitions, so the structural-delta guard rejects.
         assert!(matches!(result, Err(MutationError::NotAMethodDefinition)));
-        assert_eq!(artifacts.mutation_sequence, 0);
+        assert_eq!(artifacts.mutations().len(), 0);
         assert!(
             !artifacts
                 .sem
@@ -9995,7 +10043,7 @@ end;
             })
             .expect("second mutation should succeed");
         assert_eq!(second.mutation_id, 1);
-        assert_eq!(artifacts.mutation_sequence, 2);
+        assert_eq!(artifacts.mutations().len(), 2);
 
         // Both inserted methods keep their MethodOrigin::Session marker
         // after the second candidate-and-swap rebuild. Without the
@@ -10039,6 +10087,126 @@ end;
     }
 
     #[test]
+    fn apply_mutation_records_one_log_entry_per_successful_mutation() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        assert!(artifacts.mutations().is_empty());
+
+        let first_outcome = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        assert_eq!(artifacts.mutations().len(), 1);
+        let first_entry = &artifacts.mutations()[0];
+        assert_eq!(first_entry.mutation_id, 0);
+        assert_eq!(first_entry.outcome.mutation_id, first_outcome.mutation_id);
+        assert_eq!(
+            first_entry.outcome.inserted_method,
+            first_outcome.inserted_method
+        );
+        match &first_entry.request {
+            SessionMutation::AddMethod {
+                generic: g,
+                method_source: src,
+            } => {
+                assert_eq!(*g, area);
+                assert!(src.contains("<square>"));
+            }
+        }
+
+        let second_outcome = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        assert_eq!(artifacts.mutations().len(), 2);
+        let entries = artifacts.mutations();
+        assert_eq!(entries[1].mutation_id, 1);
+        assert_eq!(entries[1].outcome.mutation_id, second_outcome.mutation_id);
+        assert_eq!(
+            entries[1].outcome.inserted_method,
+            second_outcome.inserted_method
+        );
+        // The first entry survives unchanged across the second
+        // candidate-and-swap rebuild.
+        assert_eq!(entries[0].mutation_id, 0);
+        assert_eq!(
+            entries[0].outcome.inserted_method,
+            first_outcome.inserted_method
+        );
+    }
+
+    #[test]
+    fn apply_mutation_failed_attempt_does_not_append_to_log() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        let first = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        assert_eq!(artifacts.mutations().len(), 1);
+
+        // Garbage source: should be rejected as a parse failure and must
+        // not leave a log entry behind.
+        let err = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: "define method !!! garbage".into(),
+            })
+            .expect_err("garbage source should be rejected");
+        assert!(matches!(err, MutationError::ParseFailed { .. }));
+        assert_eq!(artifacts.mutations().len(), 1);
+        assert_eq!(artifacts.mutations()[0].mutation_id, first.mutation_id);
+
+        // Duplicate-specializer: also a rejection mode; same invariant.
+        let err = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: "define method area(s :: <square>)\n  s.side\nend;".into(),
+            })
+            .expect_err("duplicate specializer should be rejected");
+        assert!(matches!(err, MutationError::DuplicateSpecializer { .. }));
+        assert_eq!(artifacts.mutations().len(), 1);
+    }
+
+    #[test]
+    fn mutation_log_drives_provenance_after_external_origin_tampering() {
+        // The log is the source of truth for MethodOrigin::Session. Even if
+        // a caller hand-edits the origin field between mutations, the next
+        // candidate-and-swap rebuild restores it from the log entry.
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        let first = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        artifacts.sem.methods[first.inserted_method.0 as usize].origin = sem::MethodOrigin::Source;
+
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+
+        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        assert!(
+            matches!(square.origin, sem::MethodOrigin::Session { sequence: 0 }),
+            "log-driven retag should restore the tampered origin; got {:?}",
+            square.origin
+        );
+    }
+
+    #[test]
     fn apply_add_method_rejects_parse_failure_and_preserves_state() {
         let mut artifacts = mutation_fixture();
         let area = generic_id(&artifacts, "area");
@@ -10059,7 +10227,7 @@ end;
         let after_circle = artifacts.run_zero_arg_function_i64("score_circle");
         assert!(matches!(before_circle, FunctionRunResult::ReturnedI64(100)));
         assert!(matches!(after_circle, FunctionRunResult::ReturnedI64(100)));
-        assert_eq!(artifacts.mutation_sequence, 0);
+        assert_eq!(artifacts.mutations().len(), 0);
     }
 
     #[test]
@@ -10079,7 +10247,7 @@ end;
 
         assert_eq!(artifacts.sem.methods, before_methods);
         assert_eq!(artifact_keys(&artifacts), before_keys);
-        assert_eq!(artifacts.mutation_sequence, 0);
+        assert_eq!(artifacts.mutations().len(), 0);
     }
 
     #[test]
@@ -10096,7 +10264,7 @@ end;
             .expect_err("unknown generic should be rejected");
         assert!(matches!(err, MutationError::UnknownGeneric { generic } if generic == missing));
         assert_eq!(artifacts.sem.methods, before_methods);
-        assert_eq!(artifacts.mutation_sequence, 0);
+        assert_eq!(artifacts.mutations().len(), 0);
     }
 
     #[test]
@@ -10117,7 +10285,7 @@ end;
 
         assert_eq!(artifacts.sem.methods, before_methods);
         assert_eq!(artifact_keys(&artifacts), before_keys);
-        assert_eq!(artifacts.mutation_sequence, 0);
+        assert_eq!(artifacts.mutations().len(), 0);
     }
 
     #[test]
