@@ -732,6 +732,11 @@ pub struct SessionArtifacts {
     /// (rewind uses this; the existing `apply_mutation` path uses it too,
     /// instead of appending in place to `source.source`).
     pristine_source: String,
+    /// Stable id counter for the next session event. Incremented on every
+    /// successful `apply_mutation` and preserved (not reset) across every
+    /// `rewind_to`. Together with the log, this guarantees mutation ids are
+    /// never reused: a dropped entry's id is permanently retired.
+    next_mutation_id: u32,
     invalidation: QueryInvalidation,
     artifact_metrics: Vec<ArtifactMetricEntry>,
 }
@@ -742,7 +747,7 @@ pub struct SessionArtifacts {
 /// with `RetractMethod`, `EditBody`, `DefineClass`, and others; each new
 /// variant should compose cleanly with the existing affordance surface.
 #[non_exhaustive]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionMutation {
     /// Add a new method to an existing generic. `method_source` is a full
     /// Loko `define method ...; end;` clause; it is parsed immediately
@@ -785,10 +790,13 @@ pub struct MutationOutcome {
 /// One successful mutation as recorded in the session's mutation log.
 ///
 /// The log is the single source of truth for session-mutation provenance.
-/// Entries appear in application order; an entry's `mutation_id` equals its
-/// position in the log and equals the `sequence` carried by the inserted
-/// method's [`sem::MethodOrigin::Session`].
-#[derive(Clone, Debug)]
+/// Entries appear in application order. An entry's `mutation_id` equals the
+/// `sequence` carried by the inserted method's
+/// [`sem::MethodOrigin::Session`]; it is *not* in general equal to the
+/// entry's position in the log. Mutation ids are stable session event ids,
+/// so a rewind that drops a tail entry leaves a permanent gap in the
+/// numbering of subsequent entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppliedMutation {
     /// Per-session monotonic mutation id assigned when this mutation was
     /// applied. Matches `outcome.mutation_id`; surfaced on the wrapper so
@@ -867,6 +875,61 @@ pub enum MutationError {
     },
     /// Runtime layout validation rejected the candidate layout. This is a
     /// safety net: the compiler bridge normally produces validated layouts.
+    RuntimeValidationFailed {
+        /// Underlying runtime layout error.
+        error: RuntimeLayoutError,
+    },
+}
+
+/// Successful outcome of [`SessionArtifacts::rewind_to`].
+///
+/// Rewind is an operation *on* the mutation log, not an entry *in* it. The
+/// outcome reports how many entries remain after the truncation and which
+/// entries were dropped, so callers can react to the change without reading
+/// the log themselves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RewindOutcome {
+    /// Number of mutation log entries retained after the rewind. This is
+    /// the live log length, *not* the next id to be assigned: mutation ids
+    /// are stable session event ids, so dropped ids are permanently retired
+    /// and the next `apply_mutation` gets the next never-used id (which is
+    /// in general greater than `retained_count` after a partial rewind).
+    pub retained_count: usize,
+    /// Mutation log entries that were dropped, in their original
+    /// application order.
+    pub dropped: Vec<AppliedMutation>,
+    /// How the post-rewind artifacts were produced. The slice always reports
+    /// [`RecomputeStrategy::FullCandidateRebuild`]; cache-reuse wording is
+    /// reserved for the follow-up `IncrementalReuse` variant.
+    pub recompute_strategy: RecomputeStrategy,
+}
+
+/// Structured failure returned by [`SessionArtifacts::rewind_to`].
+///
+/// On every variant the live session is left in its pre-rewind state with
+/// no partial updates visible.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub enum RewindError {
+    /// The target mutation id does not name an entry in the current log.
+    /// Either the id was never assigned, or it was assigned and later
+    /// dropped by a prior rewind (ids are not reused, so a dropped id
+    /// never reappears). Callers can enumerate valid targets through
+    /// [`SessionArtifacts::mutations`].
+    TargetOutOfRange {
+        /// Rejected target id.
+        target: u32,
+        /// Number of entries in the live log when the call was made.
+        /// Useful as a hint, but does not bound valid targets: with stable
+        /// session event ids the log can have gaps, so a small
+        /// `current_count` does not mean only ids `0..current_count` are
+        /// valid.
+        current_count: usize,
+    },
+    /// Runtime layout validation rejected the candidate produced by
+    /// rebuilding from the retained log. This is a safety net: a valid
+    /// retained log should produce a valid layout, so this variant
+    /// signals a compiler-bridge bug rather than an ordinary failure mode.
     RuntimeValidationFailed {
         /// Underlying runtime layout error.
         error: RuntimeLayoutError,
@@ -1340,7 +1403,12 @@ impl SessionArtifacts {
             return Err(MutationError::RuntimeValidationFailed { error });
         }
 
-        let mutation_id = self.mutations.len() as u32;
+        // Mutation ids are stable session event ids: they come from a
+        // monotonic counter, not from the log's current length. After a
+        // rewind that drops the tail, the next id is still
+        // `self.next_mutation_id`; the dropped ids are permanently retired
+        // and never reused.
+        let mutation_id = self.next_mutation_id;
         let new_method_definition = new_method.definition;
         let affected_generic_definition = candidate
             .sem
@@ -1359,6 +1427,10 @@ impl SessionArtifacts {
         // the live session's pristine_source is the rebuild base and must
         // not drift.
         new_artifacts.pristine_source = self.pristine_source.clone();
+        // Advance the stable id counter. apply_mutation appends the new
+        // AppliedMutation entry after the swap; the counter on
+        // new_artifacts already accounts for it.
+        new_artifacts.next_mutation_id = mutation_id + 1;
 
         // The candidate compile parses prior session-inserted methods out of
         // the appended source as ordinary source-origin definitions, which
@@ -1412,6 +1484,109 @@ impl SessionArtifacts {
             mutation_id,
             inserted_method: new_method.id,
             affected_artifacts,
+            recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
+        })
+    }
+
+    /// Truncates the live mutation log at `target` (or back to pristine when
+    /// `None`) and rebuilds session state through candidate-and-swap.
+    ///
+    /// Rewind is an operation *on* the log, not an entry *in* it. The
+    /// mutation log stays a forward transcript of domain mutations; the
+    /// truncated tail is reported in the returned [`RewindOutcome`] but is
+    /// never appended to the log.
+    ///
+    /// `target = Some(id)` requires `id` to name an entry currently in the
+    /// live log; on success that entry and every earlier entry are
+    /// retained, and the strict suffix is dropped. A target that does not
+    /// name a live entry (because it was never assigned, or because it was
+    /// dropped by a prior rewind) returns [`RewindError::TargetOutOfRange`].
+    /// `target = None` retains no entries and returns the session to its
+    /// pristine state. A no-op rewind (target names the current tail)
+    /// succeeds without recompiling.
+    ///
+    /// On any failure the live session is left in its pre-rewind state.
+    /// Mutation ids are stable session event ids: dropped ids are
+    /// permanently retired and the next
+    /// [`SessionArtifacts::apply_mutation`] gets the next never-used id,
+    /// not a recycled one. The post-rewind log can carry a deliberate gap
+    /// where a dropped id used to be.
+    pub fn rewind_to(&mut self, target: Option<u32>) -> Result<RewindOutcome, RewindError> {
+        let current_count = self.mutations.len();
+        let retained_count = match target {
+            None => 0,
+            Some(id) => {
+                // Stable session event ids mean the log can have gaps after
+                // earlier rewinds, so a target id has to be looked up by
+                // matching a live entry, not by treating the id as a log
+                // index.
+                let position = self
+                    .mutations
+                    .iter()
+                    .position(|entry| entry.mutation_id == id)
+                    .ok_or(RewindError::TargetOutOfRange {
+                        target: id,
+                        current_count,
+                    })?;
+                position + 1
+            }
+        };
+
+        // No-op: target names the current tail; the log already has the
+        // requested shape.
+        if retained_count == current_count {
+            return Ok(RewindOutcome {
+                retained_count,
+                dropped: Vec::new(),
+                recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
+            });
+        }
+
+        let retained_requests = self.mutations[..retained_count]
+            .iter()
+            .map(|entry| &entry.request);
+        let composed_source_text =
+            compose_source_from_log(&self.pristine_source, retained_requests);
+        let mut candidate_source_file = self.source.clone();
+        candidate_source_file.source = composed_source_text;
+
+        let candidate = compile_file_with_registries(
+            &candidate_source_file,
+            RuntimeMode::CompileOnly,
+            self.grammar_registry,
+            &self.host_registry,
+        );
+
+        let runtime_layout = runtime_bridge::runtime_layout_from_sem(&candidate.sem);
+        if let Err(error) = runtime_layout.validate() {
+            return Err(RewindError::RuntimeValidationFailed { error });
+        }
+
+        let mut new_artifacts = candidate;
+        new_artifacts.pristine_source = self.pristine_source.clone();
+        new_artifacts.mutations = self.mutations[..retained_count].to_vec();
+        // Preserve the stable id counter across rewind. Dropped ids are
+        // permanently retired; the next apply_mutation gets
+        // self.next_mutation_id, not a reused id.
+        new_artifacts.next_mutation_id = self.next_mutation_id;
+
+        // Log-driven retag: every retained session method gets its origin
+        // restored from the retained log entry. Same machinery as the
+        // apply path; the rebuild has no idea which methods came from
+        // mutations without the log.
+        for entry in &new_artifacts.mutations {
+            let idx = entry.outcome.inserted_method.0 as usize;
+            new_artifacts.sem.methods[idx].origin = sem::MethodOrigin::Session {
+                sequence: entry.mutation_id,
+            };
+        }
+
+        let dropped: Vec<AppliedMutation> = self.mutations[retained_count..].to_vec();
+        *self = new_artifacts;
+
+        Ok(RewindOutcome {
+            retained_count,
+            dropped,
             recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
         })
     }
@@ -3674,6 +3849,7 @@ fn compile_file_with_registries(
         runtime_trace,
         mutations: Vec::new(),
         pristine_source,
+        next_mutation_id: 0,
         invalidation,
         artifact_metrics: Vec::new(),
     };
@@ -10352,6 +10528,267 @@ end;
         let second = eop_object(&after_second, "mutation:m1");
         assert_eq!(second.kind, EnvironmentKind::Mutation);
         assert!(second.inspection.detail.as_str().contains("mutation-id=1"));
+    }
+
+    #[test]
+    fn rewind_to_first_id_keeps_first_and_drops_second_mutation() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        let first = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        assert_eq!(artifacts.mutations().len(), 2);
+
+        let outcome = artifacts
+            .rewind_to(Some(first.mutation_id))
+            .expect("rewind should succeed");
+        assert_eq!(outcome.retained_count, 1);
+        assert_eq!(outcome.dropped.len(), 1);
+        assert_eq!(outcome.dropped[0].mutation_id, 1);
+        assert_eq!(
+            outcome.recompute_strategy,
+            RecomputeStrategy::FullCandidateRebuild
+        );
+
+        // The first session method survives with its provenance intact.
+        assert_eq!(artifacts.mutations().len(), 1);
+        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        assert!(matches!(
+            square.origin,
+            sem::MethodOrigin::Session { sequence: 0 }
+        ));
+
+        // Dispatch through the surviving square method still works; the
+        // triangle path is gone, so score_triangle no longer finds an
+        // applicable method and traps at the runtime dispatcher.
+        let square_result = artifacts.run_zero_arg_function_i64("score_square");
+        assert!(matches!(square_result, FunctionRunResult::ReturnedI64(49)));
+        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
+        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
+        let triangle_result = artifacts.run_zero_arg_function_i64("score_triangle");
+        assert!(matches!(triangle_result, FunctionRunResult::Trap { .. }));
+    }
+
+    #[test]
+    fn rewind_to_pristine_drops_all_mutations() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+
+        let outcome = artifacts
+            .rewind_to(None)
+            .expect("rewind to pristine should succeed");
+        assert_eq!(outcome.retained_count, 0);
+        assert_eq!(outcome.dropped.len(), 2);
+
+        assert!(artifacts.mutations().is_empty());
+        // No session-origin methods remain on the area generic; the only
+        // method on area is the pristine source method (circle).
+        let area_methods: Vec<_> = artifacts
+            .sem
+            .methods
+            .iter()
+            .filter(|method| method.generic == area)
+            .collect();
+        assert_eq!(area_methods.len(), 1);
+        assert!(matches!(area_methods[0].origin, sem::MethodOrigin::Source));
+
+        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
+        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
+        let square_result = artifacts.run_zero_arg_function_i64("score_square");
+        assert!(matches!(square_result, FunctionRunResult::Trap { .. }));
+    }
+
+    #[test]
+    fn rewind_to_out_of_range_target_returns_error_and_preserves_state() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        let before_log = artifacts.mutations().to_vec();
+        let before_methods = artifacts.sem.methods.clone();
+        let before_artifact_keys = artifact_keys(&artifacts);
+
+        let err = artifacts
+            .rewind_to(Some(99))
+            .expect_err("out-of-range target should be rejected");
+        match err {
+            RewindError::TargetOutOfRange {
+                target,
+                current_count,
+            } => {
+                assert_eq!(target, 99);
+                assert_eq!(current_count, 1);
+            }
+            other => panic!("unexpected rewind error: {other:?}"),
+        }
+
+        // Live session is byte-for-byte unchanged.
+        assert_eq!(artifacts.mutations(), &before_log[..]);
+        assert_eq!(artifacts.sem.methods, before_methods);
+        assert_eq!(artifact_keys(&artifacts), before_artifact_keys);
+    }
+
+    #[test]
+    fn rewind_does_not_reuse_mutation_ids_for_subsequent_apply() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        let first = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        let dropped = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        artifacts
+            .rewind_to(Some(first.mutation_id))
+            .expect("rewind should succeed");
+
+        // Stable session event ids: the dropped id (1) is permanently
+        // retired. The next apply gets id 2, not the recycled id 1.
+        let next = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("post-rewind mutation should succeed");
+        assert_ne!(
+            next.mutation_id, dropped.mutation_id,
+            "the dropped mutation id must not be reused"
+        );
+        assert_eq!(next.mutation_id, 2);
+
+        // The current log carries [id 0, id 2] with a deliberate gap where
+        // the dropped id 1 used to be.
+        let log_ids: Vec<u32> = artifacts
+            .mutations()
+            .iter()
+            .map(|entry| entry.mutation_id)
+            .collect();
+        assert_eq!(log_ids, Vec::from([0, 2]));
+
+        // Provenance reflects the stable ids: the retained square method
+        // still carries Session { 0 } and the new triangle method carries
+        // Session { 2 }, not Session { 1 }.
+        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        assert!(matches!(
+            square.origin,
+            sem::MethodOrigin::Session { sequence: 0 }
+        ));
+        let triangle = &artifacts.sem.methods[next.inserted_method.0 as usize];
+        assert!(matches!(
+            triangle.origin,
+            sem::MethodOrigin::Session { sequence: 2 }
+        ));
+    }
+
+    #[test]
+    fn rewind_to_dropped_id_returns_target_out_of_range() {
+        // A dropped id is permanently retired; rewinding to it after the
+        // drop must surface TargetOutOfRange rather than silently treating
+        // the absent id as "rewind everything <= id".
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        let first = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        let second = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        artifacts
+            .rewind_to(Some(first.mutation_id))
+            .expect("rewind should succeed");
+
+        // id `second.mutation_id` was dropped by the rewind above. The
+        // next rewind_to that target must fail.
+        let err = artifacts
+            .rewind_to(Some(second.mutation_id))
+            .expect_err("rewinding to a dropped id should fail");
+        assert!(
+            matches!(err, RewindError::TargetOutOfRange { target, .. } if target == second.mutation_id)
+        );
+        // State unchanged after the failed rewind.
+        assert_eq!(artifacts.mutations().len(), 1);
+        assert_eq!(artifacts.mutations()[0].mutation_id, first.mutation_id);
+    }
+
+    #[test]
+    fn rewind_shrinks_mutation_log_eop_records() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        assert_eq!(
+            artifacts
+                .environment_objects()
+                .iter()
+                .filter(|object| object.id.as_str().starts_with("mutation:"))
+                .count(),
+            2
+        );
+
+        artifacts.rewind_to(Some(0)).expect("rewind should succeed");
+
+        let after_objects = artifacts.environment_objects();
+        let mutation_ids: Vec<_> = after_objects
+            .iter()
+            .filter_map(|object| {
+                let id = object.id.as_str();
+                id.starts_with("mutation:").then(|| id.to_string())
+            })
+            .collect();
+        assert_eq!(mutation_ids, Vec::from(["mutation:m0".to_string()]));
     }
 
     #[test]
