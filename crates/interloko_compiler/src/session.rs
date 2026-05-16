@@ -5803,7 +5803,7 @@ fn project_environment_method(
     let specializers = sem_specializer_vector_label(module, &method.specializers);
     let specializer_origins = sem_specializer_origin_vector_label(module, &method.specializers);
     let applicable = sem_dispatch_applicability_vector_label(module, &method.specializers);
-    let generated = !matches!(method.origin, sem::MethodOrigin::Source);
+    let generated = matches!(method.origin, sem::MethodOrigin::SlotSetter { .. });
     let mut affordances = Vec::from([
         Aff::Inspect,
         Aff::DumpSem,
@@ -6618,6 +6618,7 @@ fn sem_method_origin_label(origin: sem::MethodOrigin) -> String {
         sem::MethodOrigin::SlotSetter { class, slot } => {
             format!("slot-setter(c{}.s{})", class.0, slot.0)
         }
+        sem::MethodOrigin::Session { sequence } => format!("session(#{sequence})"),
     }
 }
 

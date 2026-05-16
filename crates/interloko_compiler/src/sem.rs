@@ -815,6 +815,15 @@ pub enum MethodOrigin {
         /// Effective slot written by the setter method.
         slot: SlotId,
     },
+    /// Method inserted into the running session by an EOP mutation, identified
+    /// by a per-session monotonic mutation sequence number. The sequence is
+    /// stable for the lifetime of the session and lets workbench records
+    /// distinguish multiple mutations without relying on wall-clock time.
+    Session {
+        /// Per-session mutation sequence number assigned when the method was
+        /// inserted.
+        sequence: u32,
+    },
 }
 
 /// Method definition specialized on one generic parameter vector.
@@ -5497,5 +5506,26 @@ mod tests {
             DiagnosticCode::UnresolvedLocal,
             &[("local", "x")]
         ));
+    }
+
+    #[test]
+    fn method_origin_session_distinguishes_mutation_sequence() {
+        let first = MethodOrigin::Session { sequence: 0 };
+        let same = MethodOrigin::Session { sequence: 0 };
+        let later = MethodOrigin::Session { sequence: 7 };
+
+        assert_eq!(first, same);
+        assert_ne!(first, later);
+        assert_ne!(first, MethodOrigin::Source);
+        assert_ne!(
+            first,
+            MethodOrigin::SlotSetter {
+                class: ClassId(1),
+                slot: SlotId(0),
+            }
+        );
+
+        let copied = first;
+        assert_eq!(copied, first);
     }
 }

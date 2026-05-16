@@ -1143,6 +1143,9 @@ fn method_origin_label(origin: MethodOrigin) -> String {
         MethodOrigin::SlotSetter { class, slot } => {
             format!("synthesized setter for c{}.s{}", class.0, slot.0)
         }
+        MethodOrigin::Session { sequence } => {
+            format!("session-inserted method (mutation #{sequence})")
+        }
     }
 }
 
