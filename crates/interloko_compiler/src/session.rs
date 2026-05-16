@@ -25,7 +25,9 @@ use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInval
 use crate::runtime as runtime_bridge;
 use crate::syntax::{CstElement, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, tape};
-use interloko_runtime::{self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout};
+use interloko_runtime::{
+    self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
+};
 
 /// Named source file accepted by a compiler session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -686,6 +688,8 @@ pub struct SessionArtifacts {
     pub source: SourceFile,
     /// Grammar frontend registry used for this compilation.
     pub grammar_registry: GrammarFrontendRegistry,
+    /// Host-backed metaobject registry used for this compilation.
+    pub host_registry: sem::HostMetaRegistry,
     /// Parsed syntax tree.
     pub syntax: SyntaxTree,
     /// Grammar frontend parse report.
@@ -708,8 +712,128 @@ pub struct SessionArtifacts {
     pub runtime_result: Option<RuntimeResult>,
     /// Captured runtime trace when traced execution was requested.
     pub runtime_trace: Option<ExecutionTrace>,
+    /// Number of live EOP mutations applied to this session so far.
+    pub mutation_sequence: u32,
     invalidation: QueryInvalidation,
     artifact_metrics: Vec<ArtifactMetricEntry>,
+}
+
+/// A structured EOP mutation request applied to a [`SessionArtifacts`].
+///
+/// This slice supports only `AddMethod`. Future slices may extend the enum
+/// with `RetractMethod`, `EditBody`, `DefineClass`, and others; each new
+/// variant should compose cleanly with the existing affordance surface.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub enum SessionMutation {
+    /// Add a new method to an existing generic. `method_source` is a full
+    /// Loko `define method ...; end;` clause; it is parsed immediately
+    /// through the ordinary parser and the resulting AST method is appended
+    /// to the session's AST before a full recompute. The named generic in
+    /// the source must match `generic` after resolution.
+    AddMethod {
+        /// Target generic the new method specializes.
+        generic: sem::GenericFunctionId,
+        /// Loko `define method ...; end;` source text for the inserted method.
+        method_source: String,
+    },
+}
+
+/// Successful outcome of [`SessionArtifacts::apply_mutation`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MutationOutcome {
+    /// Per-session monotonic mutation id assigned when this mutation is
+    /// applied. Matches the `sequence` carried by the inserted method's
+    /// [`sem::MethodOrigin::Session`].
+    pub mutation_id: u32,
+    /// Semantic method id of the inserted method in the post-mutation module.
+    /// In this slice the runtime layout's method id is the same value because
+    /// the layout is derived 1:1 from sem method ordering; a future slice
+    /// that introduces an asymmetry can extend this struct without breaking
+    /// the current contract.
+    pub inserted_method: sem::MethodId,
+    /// Query artifacts that the dependency graph identifies as touched by
+    /// this mutation. This is precise impact reporting, not a record of
+    /// what was reused from cache; per-method artifacts for unrelated
+    /// methods are deliberately absent.
+    pub affected_artifacts: Vec<QueryArtifact>,
+    /// How the candidate was produced and applied. This slice always reports
+    /// [`RecomputeStrategy::FullCandidateRebuild`]; a future slice that
+    /// actually skips work through the incremental query cache will
+    /// introduce additional variants.
+    pub recompute_strategy: RecomputeStrategy,
+}
+
+/// How the post-mutation artifacts were produced.
+///
+/// The field on [`MutationOutcome`] reports the strategy honestly. CLI and
+/// EOP wording should not surface cache-reuse claims until a variant that
+/// actually delivers reuse exists.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RecomputeStrategy {
+    /// The candidate was built by recompiling the appended source from
+    /// scratch and atomically swapped in. No cached query results were
+    /// reused.
+    FullCandidateRebuild,
+}
+
+/// Structured failure returned by [`SessionArtifacts::apply_mutation`].
+///
+/// On every variant the session is left in its pre-mutation state with no
+/// partial updates visible. Construction is via candidate-and-swap: a
+/// candidate set of artifacts is built and validated before any field on
+/// the live session is replaced.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub enum MutationError {
+    /// The mutation source did not parse, or its surface AST has structural
+    /// errors. Carries the diagnostics added by the candidate compile.
+    ParseFailed {
+        /// New diagnostics introduced by the candidate compile.
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// The mutation source parsed but no new method definition appeared in
+    /// the candidate AST. The most common cause is a `method_source` that
+    /// is not a `define method` clause.
+    NotAMethodDefinition,
+    /// The target generic id is not present in the current sem module.
+    UnknownGeneric {
+        /// Generic id supplied by the caller.
+        generic: sem::GenericFunctionId,
+    },
+    /// The parsed method names a different generic than the target id.
+    GenericNameMismatch {
+        /// Target generic id supplied by the caller.
+        generic: sem::GenericFunctionId,
+        /// Generic name resolved from the target id.
+        expected: String,
+        /// Generic name parsed from `method_source`.
+        actual: String,
+    },
+    /// Semantic resolution rejected the candidate module. Carries the new
+    /// diagnostics that fired between the pre-mutation and candidate compiles.
+    SemanticFailed {
+        /// New diagnostics introduced by the candidate compile.
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// The candidate method's specializer vector exactly matches an existing
+    /// method on the same generic. The lower runtime layer would silently
+    /// accept this and produce ambiguous dispatch; the affordance rejects it
+    /// instead. Lower-layer ambiguity remains structurally reachable via
+    /// direct [`RuntimeLayout::add_method`].
+    DuplicateSpecializer {
+        /// Existing method whose specializers the candidate duplicates.
+        existing_method: sem::MethodId,
+        /// Specializer vector shared by both methods.
+        specializers: Vec<sem::MethodSpecializer>,
+    },
+    /// Runtime layout validation rejected the candidate layout. This is a
+    /// safety net: the compiler bridge normally produces validated layouts.
+    RuntimeValidationFailed {
+        /// Underlying runtime layout error.
+        error: RuntimeLayoutError,
+    },
 }
 
 impl SessionArtifacts {
@@ -974,6 +1098,239 @@ impl SessionArtifacts {
             );
         }
         out
+    }
+
+    /// Applies one structured EOP mutation through candidate-and-swap.
+    ///
+    /// On success the live session is replaced with a fully recomputed set of
+    /// artifacts and a structured [`MutationOutcome`] is returned. On any
+    /// failure the live session is left unchanged and the structured
+    /// [`MutationError`] explains the rejection.
+    ///
+    /// This slice runs the full pipeline on every mutation; narrowing through
+    /// the artifact graph is intentionally a follow-up commit.
+    pub fn apply_mutation(
+        &mut self,
+        mutation: SessionMutation,
+    ) -> Result<MutationOutcome, MutationError> {
+        match mutation {
+            SessionMutation::AddMethod {
+                generic,
+                method_source,
+            } => self.apply_add_method(generic, &method_source),
+        }
+    }
+
+    fn apply_add_method(
+        &mut self,
+        generic: sem::GenericFunctionId,
+        method_source: &str,
+    ) -> Result<MutationOutcome, MutationError> {
+        let target_generic = self
+            .sem
+            .generics
+            .get(generic.0 as usize)
+            .ok_or(MutationError::UnknownGeneric { generic })?
+            .clone();
+
+        let original_class_count = self.ast.classes.len();
+        let original_generic_count = self.ast.generics.len();
+        let original_function_count = self.ast.functions.len();
+        let original_user_method_count = self.ast.methods.len();
+        let pre_mutation_diagnostic_codes: Vec<DiagnosticCode> =
+            self.diagnostics.iter().map(|diag| diag.code).collect();
+
+        let candidate_source_text = format!("{}\n\n{}\n", self.source.source, method_source.trim());
+        let mut candidate_source_file = self.source.clone();
+        candidate_source_file.source = candidate_source_text;
+
+        let candidate = compile_file_with_registries(
+            &candidate_source_file,
+            RuntimeMode::CompileOnly,
+            self.grammar_registry,
+            &self.host_registry,
+        );
+
+        let new_diagnostics: Vec<Diagnostic> = candidate
+            .diagnostics
+            .iter()
+            .filter(|diag| {
+                let code = diag.code;
+                let pre_count = pre_mutation_diagnostic_codes
+                    .iter()
+                    .filter(|c| **c == code)
+                    .count();
+                let after_count = candidate
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.code == code)
+                    .count();
+                after_count > pre_count
+            })
+            .cloned()
+            .collect();
+
+        // Parse failures must be reported before structural delta checks,
+        // because a malformed mutation source may not produce a new AST method
+        // at all.
+        let parse_failures: Vec<Diagnostic> = new_diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.code,
+                    DiagnosticCode::SyntaxExpectedExpression | DiagnosticCode::SyntaxExpectedToken
+                )
+            })
+            .cloned()
+            .collect();
+        if !parse_failures.is_empty() {
+            return Err(MutationError::ParseFailed {
+                diagnostics: parse_failures,
+            });
+        }
+
+        // After parse success, the only allowed shape change is exactly one
+        // new method appended. This rejects class/generic/function additions
+        // that share the mutation source, which are out of scope for this
+        // slice.
+        if candidate.ast.classes.len() != original_class_count
+            || candidate.ast.generics.len() != original_generic_count
+            || candidate.ast.functions.len() != original_function_count
+            || candidate.ast.methods.len() != original_user_method_count + 1
+        {
+            return Err(MutationError::NotAMethodDefinition);
+        }
+
+        // sem::lower_module lowers AST methods in source order before
+        // appending compiler-synthesized slot setters, so a candidate that
+        // appended exactly one AST method places the inserted method at sem
+        // index original_user_method_count.
+        let new_method_index = original_user_method_count;
+        let new_method = candidate
+            .sem
+            .methods
+            .get(new_method_index)
+            .ok_or(MutationError::NotAMethodDefinition)?
+            .clone();
+
+        if new_method.generic != generic {
+            let actual_name = candidate
+                .sem
+                .generics
+                .get(new_method.generic.0 as usize)
+                .map_or_else(|| String::from("<unresolved>"), |g| g.name.clone());
+            return Err(MutationError::GenericNameMismatch {
+                generic,
+                expected: target_generic.name,
+                actual: actual_name,
+            });
+        }
+
+        // Duplicate-specializer check runs before the general semantic-error
+        // check because an exact specializer match also fires sem's ambiguity
+        // diagnostic; the session-level affordance reports this specific
+        // failure mode rather than the broader semantic-failed bucket.
+        for (other_index, other) in candidate.sem.methods.iter().enumerate() {
+            if other_index == new_method_index {
+                continue;
+            }
+            if other.generic == new_method.generic && other.specializers == new_method.specializers
+            {
+                return Err(MutationError::DuplicateSpecializer {
+                    existing_method: other.id,
+                    specializers: other.specializers.clone(),
+                });
+            }
+        }
+
+        // Anything else new in the diagnostic set is a genuine semantic
+        // failure (unknown class, type mismatch, etc.).
+        let semantic_failures: Vec<Diagnostic> = new_diagnostics
+            .into_iter()
+            .filter(|d| {
+                !matches!(
+                    d.code,
+                    DiagnosticCode::SyntaxExpectedExpression
+                        | DiagnosticCode::SyntaxExpectedToken
+                        | DiagnosticCode::AmbiguousGenericMethodDispatch
+                )
+            })
+            .collect();
+        if !semantic_failures.is_empty() {
+            return Err(MutationError::SemanticFailed {
+                diagnostics: semantic_failures,
+            });
+        }
+
+        let runtime_layout = runtime_bridge::runtime_layout_from_sem(&candidate.sem);
+        if let Err(error) = runtime_layout.validate() {
+            return Err(MutationError::RuntimeValidationFailed { error });
+        }
+
+        let mutation_id = self.mutation_sequence;
+        let new_method_definition = new_method.definition;
+        let affected_generic_definition = candidate
+            .sem
+            .generics
+            .get(generic.0 as usize)
+            .map(|g| g.definition)
+            .unwrap_or(new_method.definition);
+
+        // The candidate compile parses all prior session-inserted methods
+        // out of the appended source as if they were ordinary source-origin
+        // definitions, which clears their MethodOrigin::Session marker.
+        // Re-tag every session-inserted method (including this one) so prior
+        // mutations preserve their provenance across the rebuild. AST methods
+        // are ordered as [pristine source methods..., session-inserted
+        // methods in mutation order], and sem::lower preserves that order
+        // before appending slot setters, so the inserted method for mutation
+        // `sequence` lives at sem index pristine_user_method_count + sequence.
+        let pristine_user_method_count = self
+            .ast
+            .methods
+            .len()
+            .saturating_sub(self.mutation_sequence as usize);
+        let mut new_artifacts = candidate;
+        for sequence in 0..=mutation_id {
+            let idx = pristine_user_method_count + sequence as usize;
+            new_artifacts.sem.methods[idx].origin = sem::MethodOrigin::Session { sequence };
+        }
+        new_artifacts.mutation_sequence = mutation_id + 1;
+
+        // Affected list is the dependency-graph truth, not "what we just
+        // recomputed". The top-level pipeline artifacts genuinely change
+        // because the source was appended; per-method artifacts for the
+        // inserted method are new; the affected generic's dispatcher table
+        // gained a method. Unrelated methods' per-method artifacts and
+        // unrelated generics' dispatchers are intentionally omitted.
+        //
+        // EnvironmentResolution and GrammarStack are derived from the source
+        // file's grammar environment, which is unchanged by an add-method
+        // mutation, so they are not affected.
+        let affected_artifacts = Vec::from([
+            QueryArtifact::Source,
+            QueryArtifact::GrammarParse,
+            QueryArtifact::Parse,
+            QueryArtifact::Ast,
+            QueryArtifact::Bind,
+            QueryArtifact::Diagnostics,
+            QueryArtifact::MethodLookup(new_method_definition),
+            QueryArtifact::MethodLowering(new_method_definition),
+            QueryArtifact::MethodTape(new_method_definition),
+            QueryArtifact::GenericDispatcher(affected_generic_definition),
+            QueryArtifact::LoweredModule,
+            QueryArtifact::TapeProgram,
+            QueryArtifact::RuntimeResult,
+        ]);
+
+        *self = new_artifacts;
+
+        Ok(MutationOutcome {
+            mutation_id,
+            inserted_method: new_method.id,
+            affected_artifacts,
+            recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
+        })
     }
 }
 
@@ -3197,6 +3554,7 @@ fn compile_file_with_registries(
     let mut artifacts = SessionArtifacts {
         source,
         grammar_registry,
+        host_registry: registry.clone(),
         syntax,
         grammar_parse,
         ast,
@@ -3208,6 +3566,7 @@ fn compile_file_with_registries(
         diagnostics,
         runtime_result,
         runtime_trace,
+        mutation_sequence: 0,
         invalidation,
         artifact_metrics: Vec::new(),
     };
@@ -9449,5 +9808,478 @@ mod tests {
             .reports
             .iter()
             .find(|report| report.artifact == artifact)
+    }
+
+    const MUTATION_FIXTURE: &str = "\
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define class <triangle> (<object>)
+  slot base :: <integer>;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define function score_circle()
+  area(make(<circle>, radius: 10))
+end;
+
+define function score_square()
+  area(make(<square>, side: 7))
+end;
+
+define function score_triangle()
+  area(make(<triangle>, base: 9))
+end;
+
+define function unrelated_constant()
+  4242
+end;
+";
+
+    const MUTATION_TRIANGLE_METHOD: &str = "\
+define method area(t :: <triangle>)
+  t.base * t.base
+end;
+";
+
+    const MUTATION_SQUARE_METHOD: &str = "\
+define method area(s :: <square>)
+  s.side * s.side
+end;
+";
+
+    fn mutation_fixture() -> SessionArtifacts {
+        CompilerSession::compile_source(
+            "mutation_fixture.loko",
+            MUTATION_FIXTURE,
+            RuntimeMode::CompileOnly,
+        )
+    }
+
+    fn generic_id(artifacts: &SessionArtifacts, name: &str) -> sem::GenericFunctionId {
+        artifacts
+            .sem
+            .generics
+            .iter()
+            .find(|generic| generic.name == name)
+            .map(|generic| generic.id)
+            .expect("generic should exist")
+    }
+
+    fn artifact_keys(artifacts: &SessionArtifacts) -> Vec<ArtifactKey> {
+        artifacts
+            .artifact_reports()
+            .into_iter()
+            .map(|report| report.key)
+            .collect()
+    }
+
+    #[test]
+    fn apply_add_method_inserts_method_and_routes_dispatch_to_it() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        let circle_method_count_before = artifacts
+            .sem
+            .methods
+            .iter()
+            .filter(|method| method.generic == area)
+            .count();
+        assert_eq!(circle_method_count_before, 1);
+
+        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
+        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
+
+        let outcome = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("mutation should succeed");
+
+        assert_eq!(outcome.mutation_id, 0);
+        assert_eq!(
+            outcome.recompute_strategy,
+            RecomputeStrategy::FullCandidateRebuild
+        );
+        assert!(!outcome.affected_artifacts.is_empty());
+
+        let inserted = &artifacts.sem.methods[outcome.inserted_method.0 as usize];
+        assert_eq!(inserted.generic, area);
+        assert!(matches!(
+            inserted.origin,
+            sem::MethodOrigin::Session { sequence: 0 }
+        ));
+
+        assert_eq!(
+            artifacts
+                .sem
+                .methods
+                .iter()
+                .filter(|method| method.generic == area)
+                .count(),
+            2
+        );
+
+        let circle_after = artifacts.run_zero_arg_function_i64("score_circle");
+        assert!(matches!(circle_after, FunctionRunResult::ReturnedI64(100)));
+        let square_after = artifacts.run_zero_arg_function_i64("score_square");
+        assert!(matches!(square_after, FunctionRunResult::ReturnedI64(49)));
+
+        assert_eq!(artifacts.mutation_sequence, 1);
+    }
+
+    #[test]
+    fn apply_add_method_rejects_extra_class_definition() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        // The mutation source defines a fresh class alongside the method.
+        // <pentagon> is not in the fixture, so this is a genuine class
+        // addition the affordance must reject.
+        let extra_class_and_method = "\
+define class <pentagon> (<object>)
+  slot edges :: <integer>;
+end;
+
+define method area(p :: <pentagon>)
+  p.edges
+end;
+";
+
+        let result = artifacts.apply_mutation(SessionMutation::AddMethod {
+            generic: area,
+            method_source: extra_class_and_method.into(),
+        });
+
+        // Class mutations are out of scope for this slice; the candidate AST
+        // gained two definitions, so the structural-delta guard rejects.
+        assert!(matches!(result, Err(MutationError::NotAMethodDefinition)));
+        assert_eq!(artifacts.mutation_sequence, 0);
+        assert!(
+            !artifacts
+                .sem
+                .classes
+                .iter()
+                .any(|class| class.name == "<pentagon>"),
+            "rejected class addition must not leak into the live session"
+        );
+    }
+
+    #[test]
+    fn apply_add_method_preserves_session_origin_across_multiple_mutations() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        let first = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        assert_eq!(first.mutation_id, 0);
+
+        let second = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        assert_eq!(second.mutation_id, 1);
+        assert_eq!(artifacts.mutation_sequence, 2);
+
+        // Both inserted methods keep their MethodOrigin::Session marker
+        // after the second candidate-and-swap rebuild. Without the
+        // re-tagging fix, the first method would silently revert to
+        // MethodOrigin::Source because the recompile parses its appended
+        // source as ordinary input.
+        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        assert!(
+            matches!(square.origin, sem::MethodOrigin::Session { sequence: 0 }),
+            "first session method should retain sequence 0, got {:?}",
+            square.origin
+        );
+        let triangle = &artifacts.sem.methods[second.inserted_method.0 as usize];
+        assert!(
+            matches!(triangle.origin, sem::MethodOrigin::Session { sequence: 1 }),
+            "second session method should carry sequence 1, got {:?}",
+            triangle.origin
+        );
+
+        // Source-origin method survives both rebuilds unchanged.
+        let circle_method = artifacts
+            .sem
+            .methods
+            .iter()
+            .find(|method| {
+                method.generic == area && matches!(method.origin, sem::MethodOrigin::Source)
+            })
+            .expect("source-origin circle method should still exist");
+        assert!(matches!(circle_method.origin, sem::MethodOrigin::Source));
+
+        // All three dispatch paths work after the two mutations.
+        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
+        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
+        let square_result = artifacts.run_zero_arg_function_i64("score_square");
+        assert!(matches!(square_result, FunctionRunResult::ReturnedI64(49)));
+        let triangle_result = artifacts.run_zero_arg_function_i64("score_triangle");
+        assert!(matches!(
+            triangle_result,
+            FunctionRunResult::ReturnedI64(81)
+        ));
+    }
+
+    #[test]
+    fn apply_add_method_rejects_parse_failure_and_preserves_state() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        let before_methods = artifacts.sem.methods.clone();
+        let before_keys = artifact_keys(&artifacts);
+        let before_circle = artifacts.run_zero_arg_function_i64("score_circle");
+
+        let err = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: "define method !!! garbage".into(),
+            })
+            .expect_err("garbage source should be rejected");
+        assert!(matches!(err, MutationError::ParseFailed { .. }));
+
+        assert_eq!(artifacts.sem.methods, before_methods);
+        assert_eq!(artifact_keys(&artifacts), before_keys);
+        let after_circle = artifacts.run_zero_arg_function_i64("score_circle");
+        assert!(matches!(before_circle, FunctionRunResult::ReturnedI64(100)));
+        assert!(matches!(after_circle, FunctionRunResult::ReturnedI64(100)));
+        assert_eq!(artifacts.mutation_sequence, 0);
+    }
+
+    #[test]
+    fn apply_add_method_rejects_semantic_failure_and_preserves_state() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        let before_methods = artifacts.sem.methods.clone();
+        let before_keys = artifact_keys(&artifacts);
+
+        let err = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: "define method area(x :: <does-not-exist>)\n  42\nend;".into(),
+            })
+            .expect_err("unknown class should be rejected");
+        assert!(matches!(err, MutationError::SemanticFailed { .. }));
+
+        assert_eq!(artifacts.sem.methods, before_methods);
+        assert_eq!(artifact_keys(&artifacts), before_keys);
+        assert_eq!(artifacts.mutation_sequence, 0);
+    }
+
+    #[test]
+    fn apply_add_method_rejects_unknown_generic_id() {
+        let mut artifacts = mutation_fixture();
+        let missing = sem::GenericFunctionId(u32::MAX);
+        let before_methods = artifacts.sem.methods.clone();
+
+        let err = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: missing,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect_err("unknown generic should be rejected");
+        assert!(matches!(err, MutationError::UnknownGeneric { generic } if generic == missing));
+        assert_eq!(artifacts.sem.methods, before_methods);
+        assert_eq!(artifacts.mutation_sequence, 0);
+    }
+
+    #[test]
+    fn apply_add_method_rejects_duplicate_specializer() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        let before_methods = artifacts.sem.methods.clone();
+        let before_keys = artifact_keys(&artifacts);
+
+        // Duplicate of the existing area(<circle>) method.
+        let err = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: "define method area(c :: <circle>)\n  c.radius\nend;".into(),
+            })
+            .expect_err("duplicate specializer should be rejected");
+        assert!(matches!(err, MutationError::DuplicateSpecializer { .. }));
+
+        assert_eq!(artifacts.sem.methods, before_methods);
+        assert_eq!(artifact_keys(&artifacts), before_keys);
+        assert_eq!(artifacts.mutation_sequence, 0);
+    }
+
+    #[test]
+    fn apply_add_method_affected_artifacts_include_new_method_and_affected_generic() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        let area_definition = artifacts.sem.generics[area.0 as usize].definition;
+
+        let outcome = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("mutation should succeed");
+
+        let new_method_definition =
+            artifacts.sem.methods[outcome.inserted_method.0 as usize].definition;
+
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::MethodLookup(new_method_definition))
+        );
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::MethodLowering(new_method_definition))
+        );
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::MethodTape(new_method_definition))
+        );
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::GenericDispatcher(area_definition))
+        );
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::LoweredModule)
+        );
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::TapeProgram)
+        );
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::RuntimeResult)
+        );
+
+        // The grammar environment is untouched by an add-method mutation,
+        // so EnvironmentResolution and GrammarStack must not be reported.
+        assert!(
+            !outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::EnvironmentResolution)
+        );
+        assert!(
+            !outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::GrammarStack)
+        );
+    }
+
+    #[test]
+    fn apply_add_method_affected_artifacts_exclude_unrelated_method_artifacts() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+
+        // Capture pre-mutation per-method definitions for the original
+        // source-origin method and the synthesized slot setters.
+        let other_method_definitions: Vec<DefinitionId> = artifacts
+            .sem
+            .methods
+            .iter()
+            .map(|method| method.definition)
+            .collect();
+
+        let outcome = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("mutation should succeed");
+
+        for definition in other_method_definitions {
+            assert!(
+                !outcome
+                    .affected_artifacts
+                    .contains(&QueryArtifact::MethodLookup(definition)),
+                "unrelated method {definition:?} should not be in affected_artifacts MethodLookup"
+            );
+            assert!(
+                !outcome
+                    .affected_artifacts
+                    .contains(&QueryArtifact::MethodLowering(definition)),
+                "unrelated method {definition:?} should not be in affected_artifacts MethodLowering"
+            );
+            assert!(
+                !outcome
+                    .affected_artifacts
+                    .contains(&QueryArtifact::MethodTape(definition)),
+                "unrelated method {definition:?} should not be in affected_artifacts MethodTape"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_add_method_leaves_unrelated_lowered_outputs_byte_equal() {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        let original_function_count = artifacts.sem.functions.len();
+        let original_ast_method_count = artifacts.ast.methods.len();
+        let unrelated_function_id = artifacts
+            .sem
+            .functions
+            .iter()
+            .position(|function| function.name == "unrelated_constant")
+            .map(|index| index as u32)
+            .expect("fixture must contain an unrelated function");
+
+        let before_lowered = artifacts
+            .lowered
+            .as_ref()
+            .expect("baseline should lower cleanly")
+            .clone();
+
+        let _ = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("mutation should succeed");
+
+        let after_lowered = artifacts
+            .lowered
+            .as_ref()
+            .expect("post-mutation should lower cleanly");
+
+        // A function that never invokes the affected generic stays
+        // byte-equal at the same FunctionId. score_circle / score_square
+        // call area() and so legitimately re-link to a shifted dispatcher
+        // id; they are not in the unrelated set for this mutation.
+        let before_unrelated = &before_lowered.functions[unrelated_function_id as usize];
+        let after_unrelated = &after_lowered.functions[unrelated_function_id as usize];
+        assert_eq!(
+            before_unrelated, after_unrelated,
+            "an unrelated user function must be byte-equal across an add-method mutation"
+        );
+
+        // Original source-origin method bodies sit at indices
+        // [F .. F + M_orig_ast]. They are not touched by adding a sibling
+        // method on the same generic, so they must also be byte-equal.
+        let original_methods_end = original_function_count + original_ast_method_count;
+        assert_eq!(
+            &before_lowered.functions[original_function_count..original_methods_end],
+            &after_lowered.functions[original_function_count..original_methods_end],
+            "unrelated source-origin methods must be byte-equal across an add-method mutation"
+        );
     }
 }
