@@ -777,7 +777,7 @@ fn invoke_add_method(file: &str, object_id: &str, method_source_path: &str) -> R
             summary: format_mutation_error(&error),
         })?;
 
-    print_mutation_outcome(&outcome);
+    print_mutation_outcome(&outcome, workbench.artifacts.mutations().len());
     Ok(())
 }
 
@@ -787,13 +787,13 @@ fn parse_generic_object_id(id: &str) -> Option<GenericFunctionId> {
     Some(GenericFunctionId(n))
 }
 
-fn print_mutation_outcome(outcome: &MutationOutcome) {
+fn print_mutation_outcome(outcome: &MutationOutcome, log_size: usize) {
     let strategy = match outcome.recompute_strategy {
         RecomputeStrategy::FullCandidateRebuild => "full-candidate-rebuild",
         _ => "unknown-strategy",
     };
     println!(
-        "applied add-method mutation_id={} inserted_method=m{} affected_artifacts={} strategy={strategy}",
+        "applied add-method mutation_id={} inserted_method=m{} affected_artifacts={} strategy={strategy} log_size={log_size}",
         outcome.mutation_id,
         outcome.inserted_method.0,
         outcome.affected_artifacts.len(),

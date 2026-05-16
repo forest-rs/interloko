@@ -1013,6 +1013,13 @@ fn invoke_affordance_add_method_inserts_method_and_reports_outcome() {
     assert!(trimmed.contains("mutation_id=0"));
     assert!(trimmed.contains("inserted_method=m1"));
     assert!(trimmed.contains("strategy=full-candidate-rebuild"));
+    // The session log gained one entry; the lab is stateless per-invocation,
+    // so log_size is always 1 for a successful add-method today. The field
+    // is reported anyway to make the log visible from the CLI.
+    assert!(
+        trimmed.contains("log_size=1"),
+        "outcome line should report the post-mutation log size: {trimmed}"
+    );
     // The reused word would be a leak from a future cache-reuse slice.
     assert!(
         !trimmed.contains("reused"),
