@@ -258,6 +258,9 @@ pub enum RuntimeSlotWriteRejection {
 pub struct RuntimeGeneric {
     /// Generic function name.
     pub name: String,
+    /// Number of positional parameters the generic declares. Every method
+    /// listed under this generic must have exactly this many specializers.
+    pub arity: usize,
     /// Method ids implementing this generic in semantic order.
     pub methods: Vec<MethodId>,
 }
@@ -329,6 +332,15 @@ pub enum RuntimeError {
         /// Expected layout field count.
         expected: usize,
         /// Actual field count.
+        actual: usize,
+    },
+    /// Method insertion specializer count does not match the generic's arity.
+    MethodArityMismatch {
+        /// Target generic.
+        generic: GenericFunctionId,
+        /// Generic's declared arity.
+        expected: usize,
+        /// Specializer count supplied by the caller.
         actual: usize,
     },
     /// A host object handle did not use the Interloko object host type.
@@ -482,6 +494,17 @@ pub enum RuntimeLayoutError {
         method: MethodId,
         /// Generic implemented by the method.
         generic: GenericFunctionId,
+    },
+    /// A method's specializer count does not match the owning generic's arity.
+    MethodArityMismatch {
+        /// Method whose specializer count disagrees with the generic arity.
+        method: MethodId,
+        /// Owning generic.
+        generic: GenericFunctionId,
+        /// Generic's declared arity.
+        expected: usize,
+        /// Method specializer count.
+        actual: usize,
     },
     /// A method contains a legacy empty specializer.
     MissingMethodSpecializer {
@@ -856,6 +879,14 @@ impl RuntimeLayout {
                     generic: method.generic,
                 });
             }
+            if method.specializers.len() != generic.arity {
+                return Err(RuntimeLayoutError::MethodArityMismatch {
+                    method: method_id,
+                    generic: method.generic,
+                    expected: generic.arity,
+                    actual: method.specializers.len(),
+                });
+            }
             for (argument, specializer) in method.specializers.iter().enumerate() {
                 let Some(class) = specializer else {
                     return Err(RuntimeLayoutError::MissingMethodSpecializer {
@@ -984,6 +1015,49 @@ impl RuntimeLayout {
     ) -> Result<RuntimeMethodSelection, RuntimeDispatchError> {
         self.dispatch_lookup(generic, actuals)
             .map(|lookup| lookup.selection)
+    }
+
+    /// Inserts a new method into an existing generic and returns its new id.
+    ///
+    /// The generic must already be present in the layout, and every concrete
+    /// specializer class must be present. The returned [`MethodId`] is
+    /// appended both to [`RuntimeLayout::methods`] and to the generic's
+    /// method list, so subsequent [`Self::dispatch_lookup`] calls see the
+    /// inserted method as an ordinary candidate.
+    ///
+    /// Repeated insertions with identical specializers each produce a
+    /// distinct method id; ambiguity resolution is left to dispatch and
+    /// to higher layers. This mirrors source `define method` semantics
+    /// where each definition is its own method until explicitly removed.
+    pub fn add_method(
+        &mut self,
+        generic: GenericFunctionId,
+        specializers: Vec<MethodSpecializer>,
+    ) -> Result<MethodId, RuntimeError> {
+        let generic_info = self
+            .generic(generic)
+            .ok_or(RuntimeError::InvalidGeneric { generic })?;
+        if specializers.len() != generic_info.arity {
+            return Err(RuntimeError::MethodArityMismatch {
+                generic,
+                expected: generic_info.arity,
+                actual: specializers.len(),
+            });
+        }
+        for specializer in &specializers {
+            if let Some(class) = specializer
+                && self.class(*class).is_none()
+            {
+                return Err(RuntimeError::InvalidClass { class: *class });
+            }
+        }
+        let method_id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+        self.methods.push(RuntimeMethod {
+            generic,
+            specializers,
+        });
+        self.generics[generic.0 as usize].methods.push(method_id);
+        Ok(method_id)
     }
 
     fn method_applies_to_classes(&self, method: &RuntimeMethod, actuals: &[ClassId]) -> bool {
@@ -2350,6 +2424,7 @@ mod tests {
             ],
             generics: vec![RuntimeGeneric {
                 name: "score".into(),
+                arity: 1,
                 methods: vec![MethodId(0), MethodId(1), MethodId(2)],
             }],
             methods: vec![
@@ -2580,5 +2655,153 @@ mod tests {
 
         assert_eq!(lookup.selection, RuntimeMethodSelection::Ambiguous);
         assert_eq!(lookup.selected_method(), None);
+    }
+
+    #[test]
+    fn add_method_inserts_and_dispatches_new_method() {
+        let mut layout = dispatch_layout();
+        let scratch_class = ClassId(u32::try_from(layout.classes.len()).unwrap());
+        layout.classes.push(class(
+            "<triangle>",
+            Some(ClassId(1)),
+            vec![
+                slot("size", ValueKind::I64, ClassId(1), SlotId(0)),
+                slot("base", ValueKind::I64, scratch_class, SlotId(0)),
+            ],
+        ));
+        assert_eq!(layout.validate(), Ok(()));
+
+        let method_id = layout
+            .add_method(GenericFunctionId(0), vec![Some(scratch_class)])
+            .expect("add_method should succeed");
+
+        assert_eq!(method_id, MethodId(3));
+        assert_eq!(
+            layout.method(method_id).map(|m| m.generic),
+            Some(GenericFunctionId(0))
+        );
+        assert_eq!(
+            layout.methods_for_generic(GenericFunctionId(0)),
+            Some([MethodId(0), MethodId(1), MethodId(2), method_id].as_slice())
+        );
+        assert_eq!(layout.validate(), Ok(()));
+
+        let lookup = layout
+            .dispatch_lookup(GenericFunctionId(0), &[scratch_class])
+            .expect("dispatch lookup should succeed");
+        assert_eq!(
+            lookup.selection,
+            RuntimeMethodSelection::Selected(method_id)
+        );
+    }
+
+    #[test]
+    fn add_method_rejects_unknown_generic_or_specializer() {
+        let mut layout = dispatch_layout();
+        let missing_generic = GenericFunctionId(99);
+        assert_eq!(
+            layout.add_method(missing_generic, vec![Some(ClassId(1))]),
+            Err(RuntimeError::InvalidGeneric {
+                generic: missing_generic
+            })
+        );
+
+        let missing_class = ClassId(99);
+        assert_eq!(
+            layout.add_method(GenericFunctionId(0), vec![Some(missing_class)]),
+            Err(RuntimeError::InvalidClass {
+                class: missing_class
+            })
+        );
+
+        // Layout must be untouched after each failed insertion.
+        assert_eq!(layout.methods().len(), 3);
+        assert_eq!(
+            layout
+                .methods_for_generic(GenericFunctionId(0))
+                .map(<[_]>::len),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn add_method_rejects_arity_mismatch() {
+        let mut layout = dispatch_layout();
+        let before = layout.methods().len();
+
+        // dispatch_layout's `score` generic has arity 1; a two-specializer
+        // insertion must be rejected before any layout state changes.
+        let result = layout.add_method(
+            GenericFunctionId(0),
+            vec![Some(ClassId(2)), Some(ClassId(2))],
+        );
+        assert_eq!(
+            result,
+            Err(RuntimeError::MethodArityMismatch {
+                generic: GenericFunctionId(0),
+                expected: 1,
+                actual: 2
+            })
+        );
+        assert_eq!(layout.methods().len(), before);
+        assert_eq!(
+            layout
+                .methods_for_generic(GenericFunctionId(0))
+                .map(<[_]>::len),
+            Some(3)
+        );
+
+        // Zero specializers is just as wrong as too many.
+        let result = layout.add_method(GenericFunctionId(0), Vec::new());
+        assert_eq!(
+            result,
+            Err(RuntimeError::MethodArityMismatch {
+                generic: GenericFunctionId(0),
+                expected: 1,
+                actual: 0
+            })
+        );
+        assert_eq!(layout.methods().len(), before);
+        assert_eq!(layout.validate(), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_method_with_arity_disagreeing_with_generic() {
+        let mut layout = dispatch_layout();
+        layout.methods[0].specializers.push(Some(ClassId(1)));
+
+        assert_eq!(
+            layout.validate(),
+            Err(RuntimeLayoutError::MethodArityMismatch {
+                method: MethodId(0),
+                generic: GenericFunctionId(0),
+                expected: 1,
+                actual: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn add_method_two_calls_produce_distinct_methods() {
+        let mut layout = dispatch_layout();
+        let first = layout
+            .add_method(GenericFunctionId(0), vec![Some(ClassId(2))])
+            .expect("first add_method should succeed");
+        let second = layout
+            .add_method(GenericFunctionId(0), vec![Some(ClassId(2))])
+            .expect("second add_method should succeed");
+
+        assert_ne!(first, second);
+        assert_eq!(first, MethodId(3));
+        assert_eq!(second, MethodId(4));
+        assert_eq!(layout.validate(), Ok(()));
+
+        // Two methods with identical specializers correctly produce ambiguity;
+        // resolving that ambiguity is the caller's responsibility, not the
+        // runtime's.
+        let lookup = layout
+            .dispatch_lookup(GenericFunctionId(0), &[ClassId(2)])
+            .expect("dispatch lookup should succeed");
+        assert_eq!(lookup.selection, RuntimeMethodSelection::Ambiguous);
     }
 }

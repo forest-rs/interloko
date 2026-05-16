@@ -53,6 +53,7 @@ pub fn runtime_layout_from_sem(module: &sem::Module) -> RtRuntimeLayout {
             .iter()
             .map(|generic| RtRuntimeGeneric {
                 name: generic.name.clone(),
+                arity: generic.arity,
                 methods: module
                     .methods
                     .iter()
