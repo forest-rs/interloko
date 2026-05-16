@@ -990,3 +990,114 @@ fn diff_reports_parent_slot_edit_affecting_child_artifacts() {
     assert!(changed.contains("lowered-module"));
     assert!(changed.contains("tape-program"));
 }
+
+#[test]
+fn invoke_affordance_add_method_inserts_method_and_reports_outcome() {
+    let target = fixture("add_method_target.loko");
+    let source = fixture("add_method_square.loko");
+
+    let output = run_lab(&[
+        "invoke-affordance",
+        target.to_str().expect("fixture path should be utf8"),
+        "generic:g0",
+        "add-method",
+        "--source",
+        source.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    let trimmed = output.trim();
+    assert!(
+        trimmed.starts_with("applied add-method"),
+        "unexpected outcome line: {trimmed}"
+    );
+    assert!(trimmed.contains("mutation_id=0"));
+    assert!(trimmed.contains("inserted_method=m1"));
+    assert!(trimmed.contains("strategy=full-candidate-rebuild"));
+    // The reused word would be a leak from a future cache-reuse slice.
+    assert!(
+        !trimmed.contains("reused"),
+        "outcome wording must not claim cache reuse yet: {trimmed}"
+    );
+}
+
+#[test]
+fn invoke_affordance_add_method_reports_parse_failure() {
+    let target = fixture("add_method_target.loko");
+    let garbage = fixture("add_method_garbage.loko");
+
+    let stderr = run_lab_failure(&[
+        "invoke-affordance",
+        target.to_str().expect("fixture path should be utf8"),
+        "generic:g0",
+        "add-method",
+        "--source",
+        garbage.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    assert!(
+        stderr.contains("add-method mutation failed"),
+        "stderr should explain mutation failure: {stderr}"
+    );
+    assert!(
+        stderr.contains("parse failure") || stderr.contains("not a single"),
+        "stderr should mention the parse-time failure shape: {stderr}"
+    );
+}
+
+#[test]
+fn invoke_affordance_add_method_reports_duplicate_specializer() {
+    let target = fixture("add_method_target.loko");
+    let duplicate = fixture("add_method_duplicate_circle.loko");
+
+    let stderr = run_lab_failure(&[
+        "invoke-affordance",
+        target.to_str().expect("fixture path should be utf8"),
+        "generic:g0",
+        "add-method",
+        "--source",
+        duplicate.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    assert!(stderr.contains("add-method mutation failed"));
+    assert!(
+        stderr.contains("duplicates existing method"),
+        "stderr should explain duplicate-specializer rejection: {stderr}"
+    );
+}
+
+#[test]
+fn invoke_affordance_add_method_rejects_unknown_generic_object_id() {
+    let target = fixture("add_method_target.loko");
+    let source = fixture("add_method_square.loko");
+
+    let stderr = run_lab_failure(&[
+        "invoke-affordance",
+        target.to_str().expect("fixture path should be utf8"),
+        "generic:g99",
+        "add-method",
+        "--source",
+        source.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    assert!(
+        stderr.contains("unknown object id `generic:g99`"),
+        "stderr should report the unknown object id: {stderr}"
+    );
+}
+
+#[test]
+fn invoke_affordance_add_method_requires_source_flag() {
+    let target = fixture("add_method_target.loko");
+
+    let stderr = run_lab_failure(&[
+        "invoke-affordance",
+        target.to_str().expect("fixture path should be utf8"),
+        "generic:g0",
+        "add-method",
+    ]);
+
+    assert!(
+        stderr.contains("`--source <path>`"),
+        "stderr should explain that --source is required: {stderr}"
+    );
+}

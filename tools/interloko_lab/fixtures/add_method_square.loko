@@ -1,0 +1,3 @@
+define method area(s :: <square>)
+  s.side * s.side
+end;

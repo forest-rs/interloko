@@ -1,0 +1,17 @@
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define function score_circle()
+  area(make(<circle>, radius: 10))
+end;

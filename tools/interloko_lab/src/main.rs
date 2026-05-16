@@ -8,12 +8,15 @@ use std::path::Path;
 
 use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
 use interloko_compiler::identity::SourceFileId;
-use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
+use interloko_compiler::sem::{
+    GenericFunctionId, HostClass, HostMetaRegistry, HostSlot, ValueKind,
+};
 use interloko_compiler::session::{
     AffordanceFacet, CompilerSession, DumpStage, EnvironmentAffordance, EnvironmentKind,
     EnvironmentObject, EnvironmentObjectId, EnvironmentObjectSink, EnvironmentOrigin,
     EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession, InspectionFacet,
-    PresentationFacet, RuntimeMode, RuntimeResult, SessionArtifacts, execution_trace_mask,
+    MutationError, MutationOutcome, PresentationFacet, RecomputeStrategy, RuntimeMode,
+    RuntimeResult, SessionArtifacts, SessionMutation, execution_trace_mask,
 };
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 
@@ -137,8 +140,8 @@ fn run(args: Vec<String>) -> Result<()> {
             Ok(())
         }
         "invoke-affordance" => {
-            let (file, object_id, affordance) = invoke_args(&args)?;
-            invoke_affordance(file, object_id, affordance)?;
+            let (file, object_id, affordance, extra) = invoke_args(&args)?;
+            invoke_affordance(file, object_id, affordance, extra)?;
             Ok(())
         }
         "artifacts" => {
@@ -344,16 +347,16 @@ fn report_args(args: &[String]) -> Result<(&str, &str)> {
     Ok((&args[1], &args[3]))
 }
 
-fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance)> {
-    if args.len() != 4 {
+fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance, &[String])> {
+    if args.len() < 4 {
         return Err(LabError::Usage(
-            "usage: interloko_lab invoke-affordance <file.loko> <object-id> <affordance>".into(),
+            "usage: interloko_lab invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]".into(),
         ));
     }
     let affordance = parse_affordance(&args[3]).ok_or_else(|| LabError::UnknownAffordance {
         name: args[3].clone(),
     })?;
-    Ok((&args[1], &args[2], affordance))
+    Ok((&args[1], &args[2], affordance, &args[4..]))
 }
 
 fn parse_affordance(input: &str) -> Option<EnvironmentAffordance> {
@@ -562,13 +565,36 @@ fn affordance_csv(object: &EnvironmentObject) -> String {
     out
 }
 
-fn invoke_affordance(file: &str, object_id: &str, affordance: EnvironmentAffordance) -> Result<()> {
+fn invoke_affordance(
+    file: &str,
+    object_id: &str,
+    affordance: EnvironmentAffordance,
+    extra: &[String],
+) -> Result<()> {
     if affordance == EnvironmentAffordance::Run {
+        if !extra.is_empty() {
+            return Err(LabError::Usage(format!(
+                "affordance `{}` does not accept extra arguments",
+                affordance.as_str()
+            )));
+        }
         let workbench = compile_workbench_path(file, RuntimeMode::RunMain)?;
         print_diagnostics(&workbench.artifacts.diagnostics)?;
         let object = workbench.object(object_id)?;
         ensure_object_has_affordance(&object, affordance)?;
         return print_runtime_result(&workbench.artifacts);
+    }
+
+    if affordance == EnvironmentAffordance::AddMethod {
+        let source_path = parse_add_method_args(extra)?;
+        return invoke_add_method(file, object_id, source_path);
+    }
+
+    if !extra.is_empty() {
+        return Err(LabError::Usage(format!(
+            "affordance `{}` does not accept extra arguments",
+            affordance.as_str()
+        )));
     }
 
     let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
@@ -695,6 +721,116 @@ fn dispatch_explanation(artifacts: &SessionArtifacts, dispatch_id: &str) -> Resu
                 .map(|site| site.id.clone())
                 .collect(),
         })
+}
+
+fn parse_add_method_args(extra: &[String]) -> Result<&str> {
+    let mut source = None;
+    let mut iter = extra.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--source" => {
+                let value = iter.next().ok_or_else(|| {
+                    LabError::Usage(
+                        "affordance `add-method` flag `--source` requires a path argument".into(),
+                    )
+                })?;
+                if source.replace(value.as_str()).is_some() {
+                    return Err(LabError::Usage(
+                        "affordance `add-method` accepts only one `--source` argument".into(),
+                    ));
+                }
+            }
+            other => {
+                return Err(LabError::Usage(format!(
+                    "affordance `add-method` got unexpected argument `{other}`; expected `--source <path>`"
+                )));
+            }
+        }
+    }
+    source.ok_or_else(|| {
+        LabError::Usage(
+            "affordance `add-method` requires `--source <path>` naming a Loko `define method ... end;` file".into(),
+        )
+    })
+}
+
+fn invoke_add_method(file: &str, object_id: &str, method_source_path: &str) -> Result<()> {
+    let mut workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
+    let object = workbench.object(object_id)?;
+    ensure_object_has_affordance(&object, EnvironmentAffordance::AddMethod)?;
+    let generic = parse_generic_object_id(object_id).ok_or_else(|| {
+        LabError::Usage(format!(
+            "affordance `add-method` requires a generic:gN object id, got `{object_id}`"
+        ))
+    })?;
+
+    let method_source = read_path(method_source_path)?;
+
+    let outcome = workbench
+        .artifacts
+        .apply_mutation(SessionMutation::AddMethod {
+            generic,
+            method_source,
+        })
+        .map_err(|error| LabError::MutationFailed {
+            summary: format_mutation_error(&error),
+        })?;
+
+    print_mutation_outcome(&outcome);
+    Ok(())
+}
+
+fn parse_generic_object_id(id: &str) -> Option<GenericFunctionId> {
+    let suffix = id.strip_prefix("generic:g")?;
+    let n: u32 = suffix.parse().ok()?;
+    Some(GenericFunctionId(n))
+}
+
+fn print_mutation_outcome(outcome: &MutationOutcome) {
+    let strategy = match outcome.recompute_strategy {
+        RecomputeStrategy::FullCandidateRebuild => "full-candidate-rebuild",
+        _ => "unknown-strategy",
+    };
+    println!(
+        "applied add-method mutation_id={} inserted_method=m{} affected_artifacts={} strategy={strategy}",
+        outcome.mutation_id,
+        outcome.inserted_method.0,
+        outcome.affected_artifacts.len(),
+    );
+}
+
+fn format_mutation_error(error: &MutationError) -> String {
+    match error {
+        MutationError::ParseFailed { diagnostics } => {
+            format!("parse failure ({} new diagnostics)", diagnostics.len())
+        }
+        MutationError::NotAMethodDefinition => {
+            "not a single `define method ... end;` clause".into()
+        }
+        MutationError::UnknownGeneric { generic } => format!("unknown generic id g{}", generic.0),
+        MutationError::GenericNameMismatch {
+            generic,
+            expected,
+            actual,
+        } => format!(
+            "method names generic `{actual}` but target g{} is `{expected}`",
+            generic.0
+        ),
+        MutationError::SemanticFailed { diagnostics } => {
+            format!("semantic failure ({} new diagnostics)", diagnostics.len())
+        }
+        MutationError::DuplicateSpecializer {
+            existing_method, ..
+        } => format!(
+            "specializer vector duplicates existing method m{}",
+            existing_method.0
+        ),
+        MutationError::RuntimeValidationFailed { error } => {
+            format!("runtime layout validation failed: {error:?}")
+        }
+        _ => "unknown mutation failure".into(),
+    }
 }
 
 fn ensure_object_has_affordance(
@@ -1027,7 +1163,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]\n  {binary} invoke-affordance <file.loko> <generic:gN> add-method --source <method.loko>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 
@@ -1071,6 +1207,9 @@ enum LabError {
     UnsupportedAffordance {
         name: String,
     },
+    MutationFailed {
+        summary: String,
+    },
     Runtime(String),
     DiagnosticCatalog(String),
 }
@@ -1086,7 +1225,8 @@ impl LabError {
             | Self::UnknownDispatchSite { .. }
             | Self::UnknownAffordance { .. }
             | Self::AffordanceUnavailable { .. }
-            | Self::UnsupportedAffordance { .. } => 2,
+            | Self::UnsupportedAffordance { .. }
+            | Self::MutationFailed { .. } => 2,
             Self::Io { .. } | Self::Runtime(_) | Self::DiagnosticCatalog(_) => 1,
         }
     }
@@ -1141,6 +1281,9 @@ impl fmt::Display for LabError {
                     f,
                     "affordance `{name}` is not executable by interloko_lab in this slice"
                 )
+            }
+            Self::MutationFailed { summary } => {
+                write!(f, "add-method mutation failed: {summary}")
             }
             Self::Runtime(message) => write!(f, "runtime failed: {message}"),
             Self::DiagnosticCatalog(message) => write!(f, "diagnostic catalog failed: {message}"),
