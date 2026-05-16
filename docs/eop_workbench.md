@@ -125,8 +125,11 @@ Supported read-only invocations are:
 - `dump-tape`
 - `run`
 
-Mutation-oriented affordances such as `edit-body` and `add-method` can appear
-in records but are intentionally not executable by `interloko_lab` in this slice.
+The `add-method` mutation is now executable through `invoke-affordance` on
+`generic:gN` objects; see [`eop_mutation.md`](eop_mutation.md) for the
+contract. Other mutation-oriented affordances such as `edit-body` can appear
+in records but are intentionally not executable by `interloko_lab` in this
+slice.
 
 ## Dispatch Sites
 

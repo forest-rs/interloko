@@ -1,5 +1,44 @@
 # Interloko Progress
 
+## Implemented: Live EOP Method Mutation
+
+- `interloko_runtime` carries generic arity on `RuntimeGeneric` and exposes
+  `RuntimeLayout::add_method`, which inserts a method into an existing
+  generic and rejects unknown generics, unknown specializer classes, and
+  specializer vectors whose arity disagrees with the target generic.
+- Semantic IR has a `MethodOrigin::Session { sequence }` provenance marker
+  so session-inserted methods are distinguishable from source-origin and
+  slot-setter methods without losing any dispatch-equivalent behavior.
+- `SessionArtifacts::apply_mutation(SessionMutation::AddMethod { generic,
+  method_source })` accepts a full Loko `define method ...; end;` clause,
+  parses it through the ordinary parser, compiles a candidate session
+  state, validates it, and atomically swaps it in. Failures (parse,
+  semantic, runtime, duplicate specializer, unknown generic, generic-name
+  mismatch, or accidental class/generic/function addition) leave the live
+  session untouched.
+- `MutationOutcome` reports the mutation id, inserted method id, precise
+  `affected_artifacts` (top-level pipeline + the new method's
+  `MethodLookup`/`MethodLowering`/`MethodTape` + the affected generic's
+  `GenericDispatcher`), and a `RecomputeStrategy`. The only current
+  strategy is `FullCandidateRebuild`; CLI and EOP wording must not surface
+  cache-reuse claims yet.
+- `interloko_lab invoke-affordance <file.loko> <generic:gN> add-method
+  --source <method.loko>` executes the affordance and prints a one-line
+  outcome summary including the strategy name.
+- See [`docs/eop_mutation.md`](docs/eop_mutation.md) for the boundary,
+  validation order, provenance, and the deferred mutations
+  (`retract-method`, `edit-body`, `define-class`, structural method
+  sources, incremental-cache reuse, and session restore).
+
+Deferred:
+
+- True `IncrementalCompilerSession::apply_mutation` cache reuse with a
+  new `RecomputeStrategy::IncrementalReuse` variant.
+- Mutation affordances other than `add-method`.
+- Structural frontend-form method sources (no text input).
+- A capability policy for which callers can request which mutations.
+- Any persistent-image or session-restore path.
+
 ## Implemented: Structural Staged Expressions
 
 - The staged calculator adapter now emits structural frontend expression nodes

@@ -1,5 +1,145 @@
 # Plans
 
+## Add Live EOP Method Mutation
+
+### Goal
+
+Make an Interloko compiler+runtime session a live mutable image for one narrow
+case: adding a method to an existing generic through an EOP affordance. The
+mutation updates semantic IR, runtime layout, and dispatch artifacts in place,
+with incremental invalidation limited to the dispatch sites, runtime layout,
+and downstream tape functions that actually depend on the mutated generic's
+method table. This is the smallest slice that proves EOP can be a real mutation
+protocol, not only an inspection surface.
+
+### Fence
+
+Compiler sessions own structured mutation requests, provenance, candidate
+construction, rollback, diagnostics, and artifact-graph invalidation.
+`interloko_runtime` owns executable method-table mutation, dispatch behavior,
+and the layout invariants that mutation must preserve. `interloko_lab` owns
+the user-facing executable affordance surface and result rendering only.
+This slice explicitly does not own:
+
+- persistent images, on-disk session storage, or session serialization;
+- mutation affordances other than `add-method` (no `retract-method`,
+  `edit-body`, `define-class`, or `redefine-class` in this slice);
+- source-authored grammar changes or staged-region mutation;
+- multi-session collaboration, locking, or capability policy;
+- object migration, slot reshape, generic-signature change, or class-graph
+  mutation;
+- new tape opcodes; dispatch continues to lower through ordinary host calls;
+- a new text-as-structure escape hatch. The affordance accepts a full Loko
+  `define method ... end;` clause as user input, which is parsed immediately
+  into structured AST through the ordinary parser. Method bodies do not bypass
+  the AST/sem pipeline.
+
+### Invariants
+
+- A session that has not received a mutation produces bit-identical artifacts
+  to a fresh session for the same source.
+- After `add-method` succeeds, the inserted method participates in dispatch
+  exactly like a source-origin method, distinguishable only via its
+  `MethodOrigin::Session` provenance marker exposed in EOP records.
+- `RuntimeLayout::add_method` rejects specializer vectors whose length does
+  not match the target generic's parameter arity. Generic arity is a runtime
+  layout fact carried by `RuntimeGeneric`, not a sem-only fact.
+- The session-layer `add-method` mutation rejects insertions whose specializer
+  vector exactly matches an existing method on the same generic. Direct
+  runtime-layer ambiguity remains structurally possible for advanced callers
+  but is not reachable through the affordance.
+- `MutationOutcome::affected_artifacts` lists only artifacts that the
+  dependency graph identifies as touched by the mutated generic's method
+  table: the top-level pipeline artifacts that genuinely change (source,
+  parse, AST, bind, lowered module, tape program, runtime result,
+  diagnostics), the inserted method's per-method artifacts
+  (`MethodLookup`, `MethodLowering`, `MethodTape`), and the affected
+  generic's `GenericDispatcher`. Unrelated per-method and per-generic
+  artifacts are not reported as affected.
+- For artifacts not in `affected_artifacts`, post-mutation outputs are
+  byte-equal to pre-mutation outputs. This slice does not yet skip their
+  recomputation; the outcome reports a `RecomputeStrategy` that names the
+  approach honestly (currently `FullCandidateRebuild`) and does not claim
+  cache reuse.
+- Mutation failures (parse, semantic, runtime validation, duplicate
+  specializer) leave the session in its pre-mutation state with no partial
+  updates visible. Rollback is achieved by computing a candidate session state
+  and only swapping it in on success.
+- All mutations remain in-memory; no on-disk persistence is introduced and no
+  existing dump/report path is repurposed as implicit serialization.
+- `interloko_runtime` honors its `no_std` constraint and gains no compiler
+  dependencies.
+
+### Steps
+
+1. Plan entry. No code, no docs surface yet. *(landed as cea52f6.)*
+2. `RuntimeLayout::add_method` with structured errors and baseline runtime
+   tests. *(landed as 0da1d47.)*
+3. Semantic IR `MethodOrigin::Session { sequence }` vocabulary plus label
+   wiring; no session wiring yet. *(landed as 6e38ca5.)*
+4. Add `arity: usize` to `RuntimeGeneric`, update all construction sites, and
+   enforce arity in `RuntimeLayout::add_method`. Runtime tests cover an
+   arity-mismatched insertion being rejected without mutating layout.
+5. Add `SessionMutation::AddMethod { generic, method_source }` and
+   `Session::apply_mutation(SessionMutation) -> Result<MutationOutcome,
+   MutationError>`. `method_source` is a full `define method ...; end;`
+   clause parsed immediately into structured AST. `MutationOutcome` carries
+   the inserted method id, the mutation id, `affected_artifacts`, and the
+   `RecomputeStrategy` actually used. Implementation is candidate-and-swap
+   with full recompute. Tests prove successful insertion plus rollback for
+   parse failure, semantic failure, runtime validation failure, and
+   duplicate-specializer rejection, each checking that dispatch results and
+   artifact ids are unchanged after the failed mutation.
+6. Narrow mutation impact *reporting*, not cache reuse. Refine
+   `MutationOutcome.affected_artifacts` to precisely list what the
+   dependency graph says the mutation touches (top-level pipeline artifacts
+   that genuinely change plus the new method's `MethodLookup`,
+   `MethodLowering`, `MethodTape` and the affected generic's
+   `GenericDispatcher`). Introduce `RecomputeStrategy` with a
+   `FullCandidateRebuild` variant; the API does not claim cache reuse.
+   Tests verify the affected list includes the new method's per-method
+   artifacts and the affected generic's dispatcher, excludes unrelated
+   methods' per-method artifacts, and asserts that unrelated lowered/tape
+   outputs are byte-equal before vs after. True
+   `IncrementalCompilerSession::apply_mutation` cache reuse is deferred to
+   a follow-up plan/commit.
+7. Expose `add-method` as an executable EOP affordance on `generic:gN`
+   objects; wire through `interloko_lab invoke-affordance`; CLI tests cover
+   success, parse failure, unknown-generic, arity mismatch, and duplicate
+   specializer.
+8. Update `PROGRESS.md`, add `docs/eop_mutation.md` describing the in-memory
+   fence and the affordance contract, and confirm `docs/eop_workbench.md`
+   reflects the now-executable affordance.
+
+### Risks
+
+- The fence between live mutable image and persistent image is load-bearing.
+  Without explicit non-persistence enforcement, the slice will drift toward
+  implicit serialization through reports, dumps, or session resume paths.
+- Impact-reporting correctness is subtle. The dependency model in
+  `affected_artifacts` must be honest in both directions: omitting an
+  affected artifact silently lies about what the mutation touched, and
+  including unrelated artifacts dilutes the contract and complicates the
+  later incremental-reuse slice. Tests must cover both directions.
+- The slice deliberately reports `RecomputeStrategy::FullCandidateRebuild`
+  rather than claiming cache reuse. CLI and EOP rendering must not paper
+  over this distinction with "reused" wording; that wording is reserved
+  for the follow-up slice that actually wires
+  `IncrementalCompilerSession::apply_mutation`.
+- Affordance naming hardens early. Later mutation slices (`retract-method`,
+  `edit-body`, `define-class`) must compose cleanly with `add-method`;
+  affordance shape should be designed for the whole family, not just this
+  case.
+- The workbench `generated` flag is becoming load-bearing. This slice routes
+  `MethodOrigin::Session` methods through it via a `SlotSetter`-specific
+  match so user affordances stay available. Before more origin variants
+  accumulate, the predicate should become a named accessor (for example
+  `method_affordance_policy`) so each new origin makes an explicit policy
+  choice rather than inheriting one through pattern shape.
+- Mutation-rollback semantics must be tested explicitly. A failed mutation
+  that leaves any visible state behind silently undermines every later
+  mutation affordance.
+
 ## Eliminate Staged Expression Text Fallback
 
 ### Goal

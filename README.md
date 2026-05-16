@@ -152,6 +152,8 @@ Useful docs:
   projection, grammar registry, and staged adapter boundary.
 - [`docs/eop_workbench.md`](docs/eop_workbench.md) describes environment object
   records and workbench affordances.
+- [`docs/eop_mutation.md`](docs/eop_mutation.md) describes the in-memory
+  live-mutation contract for the executable `add-method` EOP affordance.
 - [`docs/interloko_report.md`](docs/interloko_report.md) explains the static
   HTML report command and its staged-grammar demo path.
 - [`corpus/README.md`](corpus/README.md) explains corpus expectations.
