@@ -726,6 +726,12 @@ pub struct SessionArtifacts {
     /// [`SessionArtifacts::mutations`]; the field stays private so the
     /// invariant "log drives provenance" is enforced at the type level.
     mutations: Vec<AppliedMutation>,
+    /// Pristine source text fixed at first compile. Preserved byte-for-byte
+    /// across every mutation rebuild so the session can recompose
+    /// `source.source` from `pristine_source + mutations` on demand
+    /// (rewind uses this; the existing `apply_mutation` path uses it too,
+    /// instead of appending in place to `source.source`).
+    pristine_source: String,
     invalidation: QueryInvalidation,
     artifact_metrics: Vec<ArtifactMetricEntry>,
 }
@@ -1193,7 +1199,21 @@ impl SessionArtifacts {
         let pre_mutation_diagnostic_codes: Vec<DiagnosticCode> =
             self.diagnostics.iter().map(|diag| diag.code).collect();
 
-        let candidate_source_text = format!("{}\n\n{}\n", self.source.source, method_source.trim());
+        // Compose the candidate source deterministically from the pristine
+        // source plus the existing log plus the pending request. This keeps
+        // `self.source.source` from growing in place: pristine is the
+        // rebuild base; the composed text is recomputed every time.
+        let pending_request = SessionMutation::AddMethod {
+            generic,
+            method_source: method_source.to_string(),
+        };
+        let candidate_source_text = compose_source_from_log(
+            &self.pristine_source,
+            self.mutations
+                .iter()
+                .map(|entry| &entry.request)
+                .chain(core::iter::once(&pending_request)),
+        );
         let mut candidate_source_file = self.source.clone();
         candidate_source_file.source = candidate_source_text;
 
@@ -1334,6 +1354,11 @@ impl SessionArtifacts {
         // Carry the mutation log forward onto the candidate so the new
         // entry can be appended (in apply_mutation) after the swap.
         new_artifacts.mutations = self.mutations.clone();
+        // Preserve the pristine source across the rebuild. The candidate's
+        // pristine_source was initialized to the composed candidate text;
+        // the live session's pristine_source is the rebuild base and must
+        // not drift.
+        new_artifacts.pristine_source = self.pristine_source.clone();
 
         // The candidate compile parses prior session-inserted methods out of
         // the appended source as ordinary source-origin definitions, which
@@ -1390,6 +1415,28 @@ impl SessionArtifacts {
             recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
         })
     }
+}
+
+/// Composes session source by appending each retained mutation's source onto
+/// the pristine base. The format mirrors what `apply_add_method` produced when
+/// it appended in place: a blank line between definitions plus a trailing
+/// newline. The helper is the source-side seed for log-driven rebuilds;
+/// rewind reuses it once the log has been truncated.
+fn compose_source_from_log<'a>(
+    pristine: &str,
+    requests: impl IntoIterator<Item = &'a SessionMutation>,
+) -> String {
+    let mut composed = String::from(pristine);
+    for request in requests {
+        match request {
+            SessionMutation::AddMethod { method_source, .. } => {
+                composed.push_str("\n\n");
+                composed.push_str(method_source.trim());
+                composed.push('\n');
+            }
+        }
+    }
+    composed
 }
 
 /// Diff between two compiled source versions.
@@ -3609,6 +3656,7 @@ fn compile_file_with_registries(
     });
     timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
 
+    let pristine_source = source.source.clone();
     let mut artifacts = SessionArtifacts {
         source,
         grammar_registry,
@@ -3625,6 +3673,7 @@ fn compile_file_with_registries(
         runtime_result,
         runtime_trace,
         mutations: Vec::new(),
+        pristine_source,
         invalidation,
         artifact_metrics: Vec::new(),
     };
