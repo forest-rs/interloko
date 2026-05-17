@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use interloko_compiler::diagnostic::Diagnostic;
@@ -33,6 +34,9 @@ const COMMANDS: &[&str] = &[
     ":source",
     ":forms",
     ":run",
+    ":load",
+    ":write",
+    ":reload",
     ":reset",
     ":clear",
     ":cancel",
@@ -180,6 +184,9 @@ struct Repl {
     source_buffer: ReplSourceBuffer,
     pending_definition: String,
     last_artifacts: Option<SessionArtifacts>,
+    last_loaded_path: Option<PathBuf>,
+    last_checkpoint: Option<BufferCheckpoint>,
+    dirty: bool,
     renderer: DiagnosticRenderer,
     style: OutputStyle,
 }
@@ -195,6 +202,9 @@ impl Repl {
             source_buffer: ReplSourceBuffer::default(),
             pending_definition: String::new(),
             last_artifacts: None,
+            last_loaded_path: None,
+            last_checkpoint: None,
+            dirty: false,
             renderer: diagnostic_renderer()?,
             style,
         })
@@ -273,6 +283,9 @@ impl Repl {
             ":source" => self.print_source(stdout)?,
             ":forms" => self.print_forms(stdout)?,
             ":run" => self.run_function(&args, stdout, stderr)?,
+            ":load" => self.load_file(&args, stdout, stderr)?,
+            ":write" => self.write_file(&args, stdout, stderr)?,
+            ":reload" => self.reload_file(&args, stdout, stderr)?,
             ":reset" => {
                 self.reset();
                 writeln!(stdout, "reset")?;
@@ -281,7 +294,7 @@ impl Repl {
                 self.reset();
                 writeln!(stdout, "cleared")?;
             }
-            ":cancel" => {
+            ":cancel" | ":clear-pending" => {
                 if self.cancel_pending_definition() {
                     writeln!(stdout, "cancelled pending definition")?;
                 } else {
@@ -366,6 +379,7 @@ impl Repl {
         if artifacts.diagnostics.is_empty() {
             self.source_buffer = candidate_buffer;
             self.last_artifacts = Some(artifacts);
+            self.dirty = true;
             writeln!(stdout, "{}", self.style.status("ok"))?;
         } else {
             self.restore_accepted_cache()?;
@@ -393,6 +407,119 @@ impl Repl {
                 self.style.error_label("runtime error:"),
                 function_run_message(&result)
             )?,
+        }
+        Ok(())
+    }
+
+    fn load_file<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(path) = single_path(args, ":load <file>", stderr)? else {
+            return Ok(());
+        };
+        let path = PathBuf::from(path);
+        let source = match read_source_file(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                writeln!(stderr, "error: {error}")?;
+                return Ok(());
+            }
+        };
+        let artifacts = self.compile_source(source.clone(), stderr, false)?;
+        if !artifacts.diagnostics.is_empty() {
+            self.restore_accepted_cache()?;
+            return Ok(());
+        }
+
+        self.source_buffer = ReplSourceBuffer::from_source(&source, SourceOrigin::Loaded);
+        self.pending_definition.clear();
+        self.last_artifacts = Some(artifacts);
+        self.last_loaded_path = Some(path.clone());
+        self.last_checkpoint = Some(BufferCheckpoint::Load);
+        self.dirty = false;
+        writeln!(
+            stdout,
+            "loaded {} ({} forms)",
+            path.display(),
+            self.source_buffer.len()
+        )?;
+        Ok(())
+    }
+
+    fn write_file<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(path) = single_path(args, ":write <file>", stderr)? else {
+            return Ok(());
+        };
+        let path = PathBuf::from(path);
+        let source = self.source_buffer.rendered_source();
+        if let Err(error) = fs::write(&path, source) {
+            writeln!(stderr, "error: {}: {error}", path.display())?;
+            return Ok(());
+        }
+        self.last_checkpoint = Some(BufferCheckpoint::Write);
+        self.dirty = false;
+        writeln!(
+            stdout,
+            "wrote {} ({} forms)",
+            path.display(),
+            self.source_buffer.len()
+        )?;
+        Ok(())
+    }
+
+    fn reload_file<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        if !args.is_empty() {
+            writeln!(stderr, "usage: :reload")?;
+            return Ok(());
+        }
+        let Some(path) = self.last_loaded_path.clone() else {
+            writeln!(stderr, "error: no file has been loaded")?;
+            return Ok(());
+        };
+        let discarded_typed = self.source_buffer.count_origin(SourceOrigin::Typed);
+        let source = match read_source_file(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                writeln!(stderr, "error: {error}")?;
+                return Ok(());
+            }
+        };
+        let artifacts = self.compile_source(source.clone(), stderr, false)?;
+        if !artifacts.diagnostics.is_empty() {
+            self.restore_accepted_cache()?;
+            return Ok(());
+        }
+
+        self.source_buffer = ReplSourceBuffer::from_source(&source, SourceOrigin::Loaded);
+        self.pending_definition.clear();
+        self.last_artifacts = Some(artifacts);
+        self.last_checkpoint = Some(BufferCheckpoint::Load);
+        self.dirty = false;
+        if discarded_typed == 0 {
+            writeln!(
+                stdout,
+                "reloaded {} ({} forms)",
+                path.display(),
+                self.source_buffer.len()
+            )?;
+        } else {
+            writeln!(
+                stdout,
+                "reloaded {} ({} forms); discarded {} typed definitions",
+                path.display(),
+                self.source_buffer.len(),
+                discarded_typed
+            )?;
         }
         Ok(())
     }
@@ -511,9 +638,10 @@ impl Repl {
         } else {
             writeln!(
                 stdout,
-                "source {SOURCE_NAME} ({} forms, {} lines)",
+                "source {SOURCE_NAME} ({} forms, {} lines, {})",
                 self.source_buffer.len(),
-                source.lines().count()
+                source.lines().count(),
+                self.buffer_status()
             )?;
             for (index, line) in source.lines().enumerate() {
                 writeln!(stdout, "{:>4} | {line}", index + 1)?;
@@ -535,8 +663,13 @@ impl Repl {
             let form = &entry.form;
             writeln!(
                 stdout,
-                "  f{} {} {} lines {}..{}",
-                form.index, form.kind, form.name, form.line_start, form.line_end
+                "  f{} {} {} {} lines {}..{}",
+                form.index,
+                entry.origin.as_str(),
+                form.kind,
+                form.name,
+                form.line_start,
+                form.line_end
             )?;
         }
         Ok(())
@@ -622,9 +755,27 @@ impl Repl {
         self.source_buffer.clear();
         self.pending_definition.clear();
         self.last_artifacts = None;
+        self.last_loaded_path = None;
+        self.last_checkpoint = None;
+        self.dirty = false;
         self.session = IncrementalCompilerSession::new();
         self.session
             .add_source_with_id(self.source_file, SOURCE_NAME, "");
+    }
+
+    fn buffer_status(&self) -> &'static str {
+        if self.dirty {
+            match self.last_checkpoint {
+                Some(BufferCheckpoint::Load) => "dirty since load",
+                Some(BufferCheckpoint::Write) => "dirty since write",
+                None => "unsaved",
+            }
+        } else {
+            match self.last_checkpoint {
+                Some(_) => "clean",
+                None => "unsaved",
+            }
+        }
     }
 }
 
@@ -647,10 +798,52 @@ impl ReplSourceBuffer {
     }
 
     fn push_definition(&mut self, source: String) {
+        self.push_definition_with_origin(source, SourceOrigin::Typed);
+    }
+
+    fn push_definition_with_origin(&mut self, source: String, origin: SourceOrigin) {
         let line_start = self.next_source_line();
         let line_end = line_start + source.lines().count().saturating_sub(1);
         let form = FormRecord::from_definition(self.entries.len(), &source, line_start, line_end);
-        self.entries.push(AcceptedDefinition { source, form });
+        self.entries.push(AcceptedDefinition {
+            source,
+            origin,
+            form,
+        });
+    }
+
+    fn from_source(source: &str, origin: SourceOrigin) -> Self {
+        let mut buffer = Self::default();
+        let mut chunk = String::new();
+        let mut in_definition = false;
+
+        for line in source.lines() {
+            if chunk.trim().is_empty() && line.trim().is_empty() {
+                continue;
+            }
+
+            let trimmed = line.trim_start();
+            if !in_definition && trimmed.starts_with("define ") {
+                in_definition = true;
+            }
+
+            if !chunk.is_empty() {
+                chunk.push('\n');
+            }
+            chunk.push_str(line);
+
+            if in_definition && definition_is_complete(&chunk) {
+                buffer.push_definition_with_origin(chunk.trim_end().to_string(), origin);
+                chunk.clear();
+                in_definition = false;
+            }
+        }
+
+        if !chunk.trim().is_empty() {
+            buffer.push_definition_with_origin(chunk.trim_end().to_string(), origin);
+        }
+
+        buffer
     }
 
     fn rendered_source(&self) -> String {
@@ -666,6 +859,13 @@ impl ReplSourceBuffer {
         self.entries.clear();
     }
 
+    fn count_origin(&self, origin: SourceOrigin) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.origin == origin)
+            .count()
+    }
+
     fn next_source_line(&self) -> usize {
         let source = self.rendered_source();
         if source.trim().is_empty() {
@@ -679,7 +879,29 @@ impl ReplSourceBuffer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AcceptedDefinition {
     source: String,
+    origin: SourceOrigin,
     form: FormRecord,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SourceOrigin {
+    Typed,
+    Loaded,
+}
+
+impl SourceOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Typed => "typed",
+            Self::Loaded => "loaded",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum BufferCheckpoint {
+    Load,
+    Write,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -788,6 +1010,26 @@ where
     }
 }
 
+fn single_path<'a, E>(args: &'a [&str], usage: &str, stderr: &mut E) -> Result<Option<&'a str>>
+where
+    E: Write,
+{
+    match args {
+        [path] => Ok(Some(*path)),
+        _ => {
+            writeln!(stderr, "usage: {usage}")?;
+            Ok(None)
+        }
+    }
+}
+
+fn read_source_file(path: &Path) -> Result<String> {
+    fs::read_to_string(path).map_err(|error| ReplError::Io {
+        path: path.display().to_string(),
+        error,
+    })
+}
+
 fn find_object(artifacts: &SessionArtifacts, id: &str) -> Option<EnvironmentObject> {
     artifacts
         .environment_objects()
@@ -871,6 +1113,9 @@ fn help_text() -> &'static str {
   :source                       show accepted source with line numbers
   :forms                        list accepted top-level forms
   :run <zero-arg-function>      run a named zero-argument function
+  :load <file>                  replace accepted source from a Loko source file
+  :write <file>                 write rendered accepted source to a Loko source file
+  :reload                       reload the last loaded source file
   :reset                        clear accepted source and cached artifacts
   :clear                        alias for :reset
   :cancel                       cancel a pending multiline definition

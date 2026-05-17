@@ -1,6 +1,8 @@
 //! CLI transcript tests for `interloko_repl`.
 
+use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 fn run_repl(input: &str) -> (String, String) {
@@ -24,6 +26,15 @@ fn run_repl(input: &str) -> (String, String) {
         String::from_utf8(output.stdout).expect("stdout utf8"),
         String::from_utf8(output.stderr).expect("stderr utf8"),
     )
+}
+
+fn temp_loko_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "interloko_repl_{}_{}_{}",
+        std::process::id(),
+        name,
+        line!()
+    ))
 }
 
 #[test]
@@ -129,8 +140,8 @@ fn session_commands_list_forms_run_functions_and_reset() {
 
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("accepted forms"));
-    assert!(stdout.contains("f0 function answer lines 1..3"));
-    assert!(stdout.contains("source repl.loko (1 forms, 4 lines)"));
+    assert!(stdout.contains("f0 typed function answer lines 1..3"));
+    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, unsaved)"));
     assert!(stdout.contains("   1 | define function answer()"));
     assert!(stdout.lines().any(|line| line == "42"));
     assert!(stdout.contains("reset"));
@@ -165,4 +176,147 @@ fn quit_discards_pending_definition_and_exits() {
 
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn load_replaces_the_source_buffer_with_loaded_forms() {
+    let path = temp_loko_path("load_replace.loko");
+    fs::write(&path, "define function loaded-answer()\n  42\nend;\n").expect("write source");
+
+    let (stdout, stderr) = run_repl(&format!(
+        "define function typed-answer()\n  1\nend;\n\
+         :load {}\n\
+         :forms\n\
+         :source\n\
+         :run loaded-answer\n\
+         :quit\n",
+        path.display()
+    ));
+
+    let _ = fs::remove_file(&path);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("loaded "));
+    assert!(stdout.contains("f0 loaded function loaded-answer lines 1..3"));
+    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
+    assert!(stdout.contains("define function loaded-answer()"));
+    assert!(!stdout.contains("define function typed-answer()"));
+    assert!(stdout.lines().any(|line| line == "42"));
+}
+
+#[test]
+fn failed_load_preserves_the_existing_source_buffer() {
+    let path = temp_loko_path("bad_load.loko");
+    fs::write(&path, "define function broken(\nend;\n").expect("write bad source");
+
+    let (stdout, stderr) = run_repl(&format!(
+        "define function answer()\n  42\nend;\n\
+         :load {}\n\
+         :run answer\n\
+         :source\n\
+         :quit\n",
+        path.display()
+    ));
+
+    let _ = fs::remove_file(&path);
+    assert!(stderr.contains("diagnostics:"), "{stderr}");
+    assert!(stderr.contains("syntax.expected-token"), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "42"));
+    assert!(stdout.contains("define function answer()"));
+    assert!(!stdout.contains("define function broken("));
+}
+
+#[test]
+fn load_records_semicolon_terminated_generic_forms() {
+    let path = temp_loko_path("generic_load.loko");
+    fs::write(
+        &path,
+        "define generic score(x :: <object>) => <integer>;\n\
+         define function main()\n  1\nend;\n",
+    )
+    .expect("write source");
+
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {}\n\
+         :forms\n\
+         :run main\n\
+         :quit\n",
+        path.display()
+    ));
+
+    let _ = fs::remove_file(&path);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("f0 loaded generic score lines 1..1"));
+    assert!(stdout.contains("f1 loaded function main lines 3..5"));
+    assert!(stdout.lines().any(|line| line == "1"));
+}
+
+#[test]
+fn write_emits_the_rendered_source_buffer() {
+    let path = temp_loko_path("write_source.loko");
+    let _ = fs::remove_file(&path);
+
+    let (stdout, stderr) = run_repl(&format!(
+        "define function answer()\n  42\nend;\n\
+         :write {}\n\
+         :source\n\
+         :quit\n",
+        path.display()
+    ));
+
+    let written = fs::read_to_string(&path).expect("read written source");
+    let _ = fs::remove_file(&path);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("wrote "));
+    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
+    assert_eq!(written, "define function answer()\n  42\nend;\n\n");
+}
+
+#[test]
+fn failed_write_preserves_dirty_state() {
+    let path = temp_loko_path("failed_write_source.loko");
+    let rejected_path = path.join("missing-directory").join("out.loko");
+    fs::write(&path, "define function loaded-answer()\n  10\nend;\n").expect("write source");
+
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {}\n\
+         define function typed-answer()\n  99\nend;\n\
+         :write {}\n\
+         :source\n\
+         :quit\n",
+        path.display(),
+        rejected_path.display()
+    ));
+
+    let _ = fs::remove_file(&path);
+    assert!(stderr.contains("error:"), "{stderr}");
+    assert!(stdout.contains("source repl.loko (2 forms, 8 lines, dirty since load)"));
+    assert!(stdout.contains("define function loaded-answer()"));
+    assert!(stdout.contains("define function typed-answer()"));
+}
+
+#[test]
+fn reload_discards_typed_definitions_after_the_last_load() {
+    let path = temp_loko_path("reload.loko");
+    fs::write(&path, "define function loaded-answer()\n  10\nend;\n").expect("write source");
+
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {}\n\
+         define function typed-answer()\n  99\nend;\n\
+         :source\n\
+         :reload\n\
+         :forms\n\
+         :source\n\
+         :run loaded-answer\n\
+         :quit\n",
+        path.display()
+    ));
+
+    let _ = fs::remove_file(&path);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("source repl.loko (2 forms, 8 lines, dirty since load)"));
+    assert!(stdout.contains("reloaded "));
+    assert!(stdout.contains("discarded 1 typed definitions"));
+    assert!(stdout.contains("f0 loaded function loaded-answer lines 1..3"));
+    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
+    assert!(stdout.lines().any(|line| line == "10"));
 }

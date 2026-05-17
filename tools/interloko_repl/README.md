@@ -53,6 +53,9 @@ Commands:
 :source
 :forms
 :run <zero-arg-function>
+:load <file>
+:write <file>
+:reload
 :reset
 :clear
 :cancel
@@ -68,9 +71,15 @@ Commands:
 ```
 
 `:source` prints the rendered accepted source with line numbers. `:forms` lists
-the top-level forms that have been accepted into the source buffer. `:reset`
-clears accepted definitions and cached artifacts; `:clear` is kept as an alias.
-`:pending` shows an unfinished multiline definition. `:cancel` and
+the top-level forms that have been accepted into the source buffer, including
+whether each form was typed or loaded from a file. `:load <file>` replaces the
+source buffer with a Loko source file after compiling it through the normal
+session pipeline; diagnostics leave the previous buffer unchanged. `:write
+<file>` writes the same rendered source that `:source` displays without line
+numbering; it does not change which file `:reload` uses. `:reload` reloads the
+last loaded file and discards later typed definitions with an explicit message.
+`:reset` clears accepted definitions and cached artifacts; `:clear` is kept as
+an alias. `:pending` shows an unfinished multiline definition. `:cancel` and
 `:clear-pending` discard it without changing accepted source.
 
 Current limits:
@@ -79,6 +88,9 @@ Current limits:
 - no modules, macros, persistent image, or persistent history;
 - expression evaluation currently prints integer results and reports
   non-integer runtime results as runtime errors;
+- source-buffer form splitting is line-oriented; it should move to
+  compiler-reported source/form spans when those are exposed through the session
+  API;
 - host-backed declarations are not parsed from REPL comments yet; use
   `interloko_lab` for file-based host registry examples.
 
