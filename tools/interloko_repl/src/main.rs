@@ -50,6 +50,7 @@ const COMMANDS: &[&str] = &[
     ":inspect",
     ":affordances",
     ":show-form",
+    ":drop-form",
     ":invoke",
 ];
 const DUMP_STAGES: &[&str] = &[
@@ -327,6 +328,7 @@ impl Repl {
             ":inspect" => self.print_object(&args, stdout, stderr)?,
             ":affordances" => self.print_affordances(&args, stdout, stderr)?,
             ":show-form" => self.show_form(&args, stdout, stderr)?,
+            ":drop-form" => self.drop_form_command(&args, stdout, stderr)?,
             ":invoke" => self.invoke_affordance(&args, stdout, stderr)?,
             _ => writeln!(stderr, "error: unknown command `{command}`")?,
         }
@@ -813,6 +815,7 @@ impl Repl {
         if let Some(entry) = self.source_buffer.find_form(&id) {
             match affordance.as_str() {
                 "show-source" => write_form_source(entry, stdout)?,
+                "drop" => self.drop_form_by_id(&id, stdout, stderr)?,
                 _ => writeln!(
                     stderr,
                     "error: object `{}` has no affordance `{affordance}`",
@@ -825,6 +828,52 @@ impl Repl {
             stderr,
             "error: invoke currently supports REPL form objects, not `{id}`"
         )?;
+        Ok(())
+    }
+
+    fn drop_form_command<W, E>(
+        &mut self,
+        args: &[&str],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(id) = single_object_id(args, ":drop-form <form-id>", stderr)? else {
+            return Ok(());
+        };
+        self.drop_form_by_id(&id, stdout, stderr)
+    }
+
+    fn drop_form_by_id<W, E>(&mut self, id: &str, stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(index) = self.source_buffer.form_index(id) else {
+            writeln!(stderr, "error: unknown form `{id}`")?;
+            return Ok(());
+        };
+        let dropped_id = self.source_buffer.entries()[index].form.id();
+        let Some(mut candidate_buffer) = self.source_buffer.without_form(index) else {
+            writeln!(stderr, "error: unknown form `{id}`")?;
+            return Ok(());
+        };
+        let candidate_source = candidate_buffer.rendered_source();
+        let artifacts = self.compile_source(candidate_source, stderr, false)?;
+        if !artifacts.diagnostics.is_empty() {
+            self.restore_accepted_cache()?;
+            return Ok(());
+        }
+
+        candidate_buffer
+            .rebuild_from_form_spans(&artifacts.syntax.source, &artifacts.top_level_forms());
+        self.source_buffer = candidate_buffer;
+        self.last_artifacts = Some(artifacts);
+        self.dirty = true;
+        writeln!(stdout, "dropped {dropped_id}")?;
         Ok(())
     }
 
@@ -878,8 +927,25 @@ impl ReplSourceBuffer {
         self.entries.iter().map(|entry| entry.form.id())
     }
 
+    fn form_index(&self, id: &str) -> Option<usize> {
+        parse_form_id(id).filter(|index| *index < self.entries.len())
+    }
+
     fn find_form(&self, id: &str) -> Option<&AcceptedDefinition> {
-        parse_form_id(id).and_then(|index| self.entries.get(index))
+        self.form_index(id)
+            .and_then(|index| self.entries.get(index))
+    }
+
+    fn without_form(&self, index: usize) -> Option<Self> {
+        if index >= self.entries.len() {
+            return None;
+        }
+        let mut buffer = self.clone();
+        buffer.entries.remove(index);
+        for (index, entry) in buffer.entries.iter_mut().enumerate() {
+            entry.form.index = index;
+        }
+        Some(buffer)
     }
 
     fn push_definition(&mut self, source: String) {
@@ -1328,7 +1394,7 @@ fn entry_line_start(entry: &AcceptedDefinition) -> usize {
     entry.form.line_start.saturating_sub(leading_lines)
 }
 
-const FORM_AFFORDANCES: &[&str] = &["show-source"];
+const FORM_AFFORDANCES: &[&str] = &["show-source", "drop"];
 
 fn function_run_message(result: &FunctionRunResult) -> String {
     match result {
@@ -1391,6 +1457,7 @@ inspection:
   :inspect <object-id>
   :affordances <object-id>
   :show-form <form-id>
+  :drop-form <form-id>
   :invoke <object-id> <affordance>"
 }
 
@@ -1682,7 +1749,7 @@ impl Completer for InterlokoCompleter {
                     .lock()
                     .map(|state| state.object_ids.clone())
                     .unwrap_or_default(),
-                ":show-form" => self
+                ":show-form" | ":drop-form" => self
                     .state
                     .lock()
                     .map(|state| {

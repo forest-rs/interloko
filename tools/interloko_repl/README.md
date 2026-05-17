@@ -70,6 +70,7 @@ Commands:
 :inspect <object-id>
 :affordances <object-id>
 :show-form <form-id>
+:drop-form <form-id>
 :invoke <object-id> <affordance>
 ```
 
@@ -78,7 +79,12 @@ the top-level forms that have been accepted into the source buffer, including
 whether each form was typed or loaded from a file. Each listed `form:fN` is an
 inspectable REPL source-form object. `:inspect form:f0` describes the accepted
 form, `:affordances form:f0` lists editor actions, and `:show-form form:f0` is
-the direct spelling for `:invoke form:f0 show-source`.
+the direct spelling for `:invoke form:f0 show-source`. `:drop-form form:f0` is
+the direct spelling for `:invoke form:f0 drop`; it compiles the candidate source
+first, so diagnostics leave the previous buffer unchanged. Dropping a form
+renumbers later forms; `:forms` always shows the current IDs. Today `:invoke`
+only runs REPL form affordances; environment-object affordance invocation is
+deferred.
 
 `:load <file>` replaces the source buffer with a Loko source file after
 compiling it through the normal session pipeline; diagnostics leave the previous

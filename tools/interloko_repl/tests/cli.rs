@@ -192,6 +192,62 @@ fn unknown_source_form_ids_report_unknown_form() {
 }
 
 #[test]
+fn drop_form_affordance_removes_an_unused_form() {
+    let (stdout, stderr) = run_repl(
+        "define function unused()\n  1\nend;\n\
+         define function answer()\n  42\nend;\n\
+         :invoke form:f0 drop\n\
+         :forms\n\
+         :source\n\
+         :run answer\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("dropped form:f0"));
+    assert!(stdout.contains("form:f0 typed function answer lines 1..3"));
+    assert!(!stdout.contains("define function unused()"));
+    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, unsaved)"));
+    assert!(stdout.lines().any(|line| line == "42"));
+}
+
+#[test]
+fn drop_form_can_remove_the_only_accepted_form() {
+    let (stdout, stderr) = run_repl(
+        "define function answer()\n  42\nend;\n\
+         :drop-form form:f0\n\
+         :forms\n\
+         :source\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("dropped form:f0"));
+    assert!(stdout.contains("(no accepted forms)"));
+    assert!(stdout.contains("(empty)"));
+}
+
+#[test]
+fn drop_form_rolls_back_when_candidate_source_does_not_compile() {
+    let (stdout, stderr) = run_repl(
+        "define function helper()\n  41\nend;\n\
+         define function answer()\n  helper() + 1\nend;\n\
+         :drop-form f0\n\
+         :forms\n\
+         :source\n\
+         :run answer\n\
+         :quit\n",
+    );
+
+    assert!(stderr.contains("diagnostics:"), "{stderr}");
+    assert!(stdout.contains("form:f0 typed function helper lines 1..3"));
+    assert!(stdout.contains("form:f1 typed function answer lines 5..7"));
+    assert!(stdout.contains("define function helper()"));
+    assert!(stdout.contains("define function answer()"));
+    assert!(stdout.lines().any(|line| line == "42"));
+}
+
+#[test]
 fn pending_definition_can_be_inspected_and_cancelled() {
     let (stdout, stderr) = run_repl(
         "define function broken()\n\
