@@ -2281,19 +2281,40 @@ impl OutputStyle {
 struct CompletionState {
     object_ids: Vec<String>,
     dispatch_ids: Vec<String>,
+    affordances_by_object: Vec<(String, Vec<String>)>,
 }
 
 impl CompletionState {
     fn from_repl(repl: &Repl) -> Self {
         let mut object_ids: Vec<String> = repl.source_buffer.form_ids().collect();
+        let mut affordances_by_object: Vec<(String, Vec<String>)> = repl
+            .source_buffer
+            .form_ids()
+            .map(|id| {
+                (
+                    id,
+                    FORM_AFFORDANCES
+                        .iter()
+                        .map(|affordance| (*affordance).to_string())
+                        .collect(),
+                )
+            })
+            .collect();
         let mut dispatch_ids = Vec::new();
         if let Some(artifacts) = &repl.last_artifacts {
-            object_ids.extend(
-                artifacts
-                    .environment_objects()
-                    .into_iter()
-                    .map(|object| object.id.as_str().to_string()),
-            );
+            for object in artifacts.environment_objects() {
+                let id = object.id.as_str().to_string();
+                object_ids.push(id.clone());
+                affordances_by_object.push((
+                    id,
+                    object
+                        .affordances
+                        .names
+                        .iter()
+                        .map(|affordance| affordance.as_str().to_string())
+                        .collect(),
+                ));
+            }
 
             dispatch_ids = artifacts
                 .dispatch_sites()
@@ -2306,7 +2327,16 @@ impl CompletionState {
         Self {
             object_ids,
             dispatch_ids,
+            affordances_by_object,
         }
+    }
+
+    fn affordances_for(&self, object_id: &str) -> Vec<String> {
+        self.affordances_by_object
+            .iter()
+            .find(|(id, _)| id == object_id)
+            .map(|(_, affordances)| affordances.clone())
+            .unwrap_or_else(all_invokable_affordance_names)
     }
 }
 
@@ -2370,12 +2400,20 @@ impl Completer for InterlokoCompleter {
                             .collect()
                     })
                     .unwrap_or_default(),
-                ":invoke" if before_cursor[..token_start].split_whitespace().count() <= 1 => self
-                    .state
-                    .lock()
-                    .map(|state| state.object_ids.clone())
-                    .unwrap_or_default(),
-                ":invoke" => all_invokable_affordance_names(),
+                ":invoke" => {
+                    let preceding: Vec<&str> =
+                        before_cursor[..token_start].split_whitespace().collect();
+                    self.state
+                        .lock()
+                        .map(|state| {
+                            if preceding.len() <= 1 {
+                                state.object_ids.clone()
+                            } else {
+                                state.affordances_for(preceding[1])
+                            }
+                        })
+                        .unwrap_or_default()
+                }
                 _ => Vec::new(),
             }
         };
@@ -2624,6 +2662,14 @@ mod tests {
             completion_values(&mut completer, ":dispatch dispatch:")
                 .contains(&"dispatch:d0".to_string())
         );
+        let function_affordances = completion_values(&mut completer, ":invoke function:f0 ");
+        assert!(function_affordances.contains(&"run".to_string()));
+        assert!(function_affordances.contains(&"dump-sem".to_string()));
+        assert!(!function_affordances.contains(&"drop".to_string()));
+        let form_affordances = completion_values(&mut completer, ":invoke form:f0 ");
+        assert!(form_affordances.contains(&"show-source".to_string()));
+        assert!(form_affordances.contains(&"drop".to_string()));
+        assert!(!form_affordances.contains(&"run".to_string()));
     }
 
     #[test]
