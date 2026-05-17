@@ -171,6 +171,27 @@ fn pending_definition_can_be_inspected_and_cancelled() {
 }
 
 #[test]
+fn multiline_definitions_finish_from_parser_state_without_semicolons() {
+    let (stdout, stderr) = run_repl(
+        "define class <circle> (<object>)\n\
+           slot radius :: <integer>;\n\
+         end\n\
+         define generic area(x :: <object>) => <integer>;\n\
+         define method area(c :: <circle>) => <integer>\n\
+           c.radius * c.radius\n\
+         end\n\
+         define function main()\n\
+           area(make(<circle>, radius: 3))\n\
+         end\n\
+         :run main\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "9"));
+}
+
+#[test]
 fn quit_discards_pending_definition_and_exits() {
     let (stdout, stderr) = run_repl("define function broken()\n:quit\n");
 
@@ -226,6 +247,34 @@ fn failed_load_preserves_the_existing_source_buffer() {
 }
 
 #[test]
+fn load_preserves_inter_form_comments_with_parser_line_ranges() {
+    let path = temp_loko_path("comments_load.loko");
+    fs::write(
+        &path,
+        "define function first()\n  1\nend;\n\
+         \n\
+         // explain second\n\
+         define function second()\n  2\nend;\n",
+    )
+    .expect("write source");
+
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {}\n\
+         :forms\n\
+         :source\n\
+         :quit\n",
+        path.display()
+    ));
+
+    let _ = fs::remove_file(&path);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("f0 loaded function first lines 1..3"));
+    assert!(stdout.contains("f1 loaded function second lines 8..10"));
+    assert!(stdout.contains("// explain second"));
+    assert!(stdout.contains("   8 | define function second()"));
+}
+
+#[test]
 fn load_records_semicolon_terminated_generic_forms() {
     let path = temp_loko_path("generic_load.loko");
     fs::write(
@@ -248,6 +297,20 @@ fn load_records_semicolon_terminated_generic_forms() {
     assert!(stdout.contains("f0 loaded generic score lines 1..1"));
     assert!(stdout.contains("f1 loaded function main lines 3..5"));
     assert!(stdout.lines().any(|line| line == "1"));
+}
+
+#[test]
+fn malformed_pending_definition_reports_immediately() {
+    let (stdout, stderr) = run_repl(
+        "define function broken()\n\
+           let x = ;\n\
+         1 + 2\n\
+         :quit\n",
+    );
+
+    assert!(stderr.contains("diagnostics:"), "{stderr}");
+    assert!(stderr.contains("syntax.expected-expression"), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "3"));
 }
 
 #[test]

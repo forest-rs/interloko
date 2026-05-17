@@ -15,7 +15,8 @@ Run it with:
 cargo run -p interloko_repl
 ```
 
-Definitions are entered as multiline `define ... end;` forms:
+Definitions are entered as multiline `define ... end` or `define ... end;`
+forms:
 
 ```loko
 define function square(x)
@@ -88,9 +89,8 @@ Current limits:
 - no modules, macros, persistent image, or persistent history;
 - expression evaluation currently prints integer results and reports
   non-integer runtime results as runtime errors;
-- source-buffer form splitting is line-oriented; it should move to
-  compiler-reported source/form spans when those are exposed through the session
-  API;
+- source-buffer form splitting uses compiler-reported top-level form spans, but
+  editing individual loaded forms is still deferred;
 - host-backed declarations are not parsed from REPL comments yet; use
   `interloko_lab` for file-based host registry examples.
 

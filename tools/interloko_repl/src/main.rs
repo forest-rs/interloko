@@ -8,11 +8,11 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use interloko_compiler::diagnostic::Diagnostic;
+use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
 use interloko_compiler::identity::SourceFileId;
 use interloko_compiler::session::{
     DumpStage, EnvironmentObject, FunctionRunResult, IncrementalCompilerSession, RuntimeMode,
-    SessionArtifacts,
+    SessionArtifacts, TopLevelFormSpan,
 };
 use interloko_compiler::syntax::{self, TokenKind};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -234,7 +234,7 @@ impl Repl {
             }
             self.pending_definition.push_str(line);
             self.pending_definition.push('\n');
-            if definition_is_complete(&self.pending_definition) {
+            if pending_definition_state(&self.pending_definition) == PendingDefinitionState::Ready {
                 self.finish_pending_definition(stdout, stderr)?;
             }
             return Ok(true);
@@ -251,7 +251,7 @@ impl Repl {
         if trimmed.starts_with("define ") {
             self.pending_definition.push_str(line);
             self.pending_definition.push('\n');
-            if definition_is_complete(&self.pending_definition) {
+            if pending_definition_state(&self.pending_definition) == PendingDefinitionState::Ready {
                 self.finish_pending_definition(stdout, stderr)?;
             }
             return Ok(true);
@@ -377,6 +377,8 @@ impl Repl {
 
         let artifacts = self.compile_source(candidate_source, stderr, false)?;
         if artifacts.diagnostics.is_empty() {
+            candidate_buffer
+                .rebuild_from_form_spans(&artifacts.syntax.source, &artifacts.top_level_forms());
             self.source_buffer = candidate_buffer;
             self.last_artifacts = Some(artifacts);
             self.dirty = true;
@@ -433,7 +435,11 @@ impl Repl {
             return Ok(());
         }
 
-        self.source_buffer = ReplSourceBuffer::from_source(&source, SourceOrigin::Loaded);
+        self.source_buffer = ReplSourceBuffer::from_form_spans(
+            &source,
+            &artifacts.top_level_forms(),
+            SourceOrigin::Loaded,
+        );
         self.pending_definition.clear();
         self.last_artifacts = Some(artifacts);
         self.last_loaded_path = Some(path.clone());
@@ -500,7 +506,11 @@ impl Repl {
             return Ok(());
         }
 
-        self.source_buffer = ReplSourceBuffer::from_source(&source, SourceOrigin::Loaded);
+        self.source_buffer = ReplSourceBuffer::from_form_spans(
+            &source,
+            &artifacts.top_level_forms(),
+            SourceOrigin::Loaded,
+        );
         self.pending_definition.clear();
         self.last_artifacts = Some(artifacts);
         self.last_checkpoint = Some(BufferCheckpoint::Load);
@@ -812,38 +822,46 @@ impl ReplSourceBuffer {
         });
     }
 
-    fn from_source(source: &str, origin: SourceOrigin) -> Self {
+    fn from_form_spans(source: &str, forms: &[TopLevelFormSpan], origin: SourceOrigin) -> Self {
         let mut buffer = Self::default();
-        let mut chunk = String::new();
-        let mut in_definition = false;
-
-        for line in source.lines() {
-            if chunk.trim().is_empty() && line.trim().is_empty() {
-                continue;
-            }
-
-            let trimmed = line.trim_start();
-            if !in_definition && trimmed.starts_with("define ") {
-                in_definition = true;
-            }
-
-            if !chunk.is_empty() {
-                chunk.push('\n');
-            }
-            chunk.push_str(line);
-
-            if in_definition && definition_is_complete(&chunk) {
-                buffer.push_definition_with_origin(chunk.trim_end().to_string(), origin);
-                chunk.clear();
-                in_definition = false;
-            }
+        for entry in source_entries_from_form_spans(source, forms) {
+            buffer.push_span_backed_entry(entry, origin);
         }
-
-        if !chunk.trim().is_empty() {
-            buffer.push_definition_with_origin(chunk.trim_end().to_string(), origin);
-        }
-
         buffer
+    }
+
+    fn rebuild_from_form_spans(&mut self, source: &str, forms: &[TopLevelFormSpan]) {
+        let origins: Vec<_> = self.entries.iter().map(|entry| entry.origin).collect();
+        let entries = source_entries_from_form_spans(source, forms);
+        if entries.len() != forms.len() || forms.len() != origins.len() {
+            return;
+        }
+
+        self.entries.clear();
+        // Parser forms and buffer entries are both source-ordered; keep origins
+        // paired by index when a successful typed edit refreshes span facts.
+        for (entry, origin) in entries.into_iter().zip(origins) {
+            self.push_span_backed_entry(entry, origin);
+        }
+    }
+
+    fn push_span_backed_entry(&mut self, entry: SourceBufferEntry, origin: SourceOrigin) {
+        let next_line = self.next_source_line();
+        let form_start = entry.form_start.saturating_sub(entry.chunk_start);
+        let form_end = entry.form_end.saturating_sub(entry.chunk_start);
+        let line_start = next_line + line_number_for_offset(&entry.source, form_start) - 1;
+        let line_end = next_line + line_number_for_offset(&entry.source, form_end) - 1;
+        let form = FormRecord::from_definition(
+            self.entries.len(),
+            &entry.source[form_start..form_end],
+            line_start,
+            line_end,
+        );
+        self.entries.push(AcceptedDefinition {
+            source: entry.source,
+            origin,
+            form,
+        });
     }
 
     fn rendered_source(&self) -> String {
@@ -874,6 +892,60 @@ impl ReplSourceBuffer {
             source.lines().count() + 1
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceBufferEntry {
+    source: String,
+    chunk_start: usize,
+    form_start: usize,
+    form_end: usize,
+}
+
+fn source_entries_from_form_spans(
+    source: &str,
+    forms: &[TopLevelFormSpan],
+) -> Vec<SourceBufferEntry> {
+    // Preserve meaningful inter-form material without inventing syntax:
+    // comments/directives before a form attach to that following form, while
+    // trailing material after the last form remains with the previous entry.
+    let mut entries = Vec::new();
+    let mut chunk_start = 0;
+    for form in forms {
+        let chunk_end = form.span.end.min(source.len());
+        let entry_start = if source[chunk_start..form.span.start.min(source.len())]
+            .trim()
+            .is_empty()
+        {
+            form.span.start
+        } else {
+            chunk_start
+        };
+        if entry_start <= chunk_end {
+            entries.push(SourceBufferEntry {
+                source: source[entry_start..chunk_end].trim_end().to_string(),
+                chunk_start: entry_start,
+                form_start: form.span.start,
+                form_end: form.span.end,
+            });
+            chunk_start = chunk_end;
+        }
+    }
+
+    if let Some(last) = entries.last_mut() {
+        last.source.push_str(&source[chunk_start..]);
+    }
+
+    debug_assert_eq!(entries.len(), forms.len());
+    entries
+}
+
+fn line_number_for_offset(source: &str, offset: usize) -> usize {
+    source[..offset.min(source.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -952,9 +1024,33 @@ fn definition_header_label(header: &str) -> (String, String) {
     (kind.to_string(), name)
 }
 
-fn definition_is_complete(source: &str) -> bool {
-    let trimmed = source.trim_end();
-    trimmed.ends_with("end;") || (trimmed.starts_with("define generic ") && trimmed.ends_with(';'))
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PendingDefinitionState {
+    Incomplete,
+    Ready,
+}
+
+fn pending_definition_state(source: &str) -> PendingDefinitionState {
+    let tree = syntax::parse_file(SourceFileId::ANONYMOUS, source);
+    if tree.diagnostics.is_empty() {
+        return PendingDefinitionState::Ready;
+    }
+
+    let trimmed_end = source.trim_end().len();
+    // Keep this at-EOF allowlist in sync when the parser grows new syntax
+    // diagnostic codes. Otherwise genuinely incomplete input, such as a future
+    // unterminated string diagnostic, could stop waiting and print too early.
+    if tree.diagnostics.iter().all(|diagnostic| {
+        matches!(
+            diagnostic.code,
+            DiagnosticCode::SyntaxExpectedToken | DiagnosticCode::SyntaxExpectedExpression
+        ) && diagnostic.span.start >= trimmed_end
+            && diagnostic.span.end >= trimmed_end
+    }) {
+        PendingDefinitionState::Incomplete
+    } else {
+        PendingDefinitionState::Ready
+    }
 }
 
 fn parse_optional_stage<E>(args: &[&str], stderr: &mut E) -> Result<Option<DumpStage>>
