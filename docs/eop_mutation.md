@@ -275,6 +275,82 @@ surface; tests in `interloko_compiler` are the verification. A
 stateful session subcommand is deferred to a future slice along with
 the rest of the "long-lived session" UX.
 
+## Replay
+
+Replay turns the mutation log from a session-local history into a
+portable transcript:
+
+```rust
+pub struct ReplayOutcome {
+    pub applied: Vec<AppliedMutation>,
+    pub failed: Option<ReplayFailure>,
+    pub artifacts: SessionArtifacts,
+}
+
+pub struct ReplayFailure {
+    pub mutation_id: u32,
+    pub log_index: usize,
+    pub request: SessionMutation,
+    pub cause: MutationError,
+}
+
+impl SessionArtifacts {
+    pub fn replay_against(&self, new_source: &SourceFile) -> ReplayOutcome;
+}
+```
+
+`replay_against` builds an ephemeral session from `new_source`, walks
+the live mutation log in order, applies each entry's request through
+the existing candidate-and-swap discipline using the entry's *original*
+mutation id, and stops at the first failure. The returned
+`ReplayOutcome` carries the entries that applied (in order), the first
+failure (if any), and the ephemeral session's artifacts. The caller
+may inspect `artifacts.sem` / `artifacts.tape`, adopt them as a new
+session, or discard them; the original session is unchanged either
+way.
+
+**Prefix replay only.** Replay does not silently skip entries that
+fail to apply. A skip-failed mode would change the meaning of a
+transcript — "this log applies modulo these gaps" is a different
+contract from "this log applies in order, up to this point" — and
+would quietly conflate replay with arbitrary conflict-resolution
+policy. A later slice can introduce explicit skip / strict / drop
+modes if there is a real need; until then, callers that want to
+recover from a partial failure can `rewind_to` and try again on the
+adopted artifacts.
+
+**Original ids are preserved.** Applied entries keep their original
+`mutation_id`. The ephemeral session's `MethodOrigin::Session`
+markers carry the same `sequence` values they had on the source log.
+The ephemeral session's `next_mutation_id` is finalized as
+`max(applied_ids) + 1`, so subsequent `apply_mutation` calls on the
+adopted artifacts never collide with replayed ids and never pretend
+the new mutation is older than the replayed history.
+
+**The original session is not mutated.** `replay_against` takes
+`&self`. The original log, pristine source, sem module, lowered
+module, and tape are all byte-for-byte unchanged regardless of replay
+outcome. The `ReplayOutcome::artifacts` field is the only new state.
+
+The internal `compose_source_from_log(pristine, requests)` helper —
+the one rewind already uses — is the source-side machinery here too.
+Its deliberate request-only signature (no `AppliedMutation`, no ids
+in its input) is the structural reason replay can supply any pristine
+without inferring ids from log position.
+
+Concrete failure modes today are the ordinary apply-time
+[`MutationError`] variants: `UnknownGeneric` when the target generic
+no longer resolves at the original id; `GenericNameMismatch` when an
+id now points at a different-named generic; `SemanticFailed` when a
+specializer class is gone; `DuplicateSpecializer` when the new base
+already defines the method the mutation was adding; and so on. The
+slice does not try to "rebind by name" when ids drift; that would
+be a different (and richer) contract.
+
+Replay is not exposed through `interloko_lab` in this slice. The lab
+is stateless per invocation, so a standalone replay has no useful CLI
+surface; tests in `interloko_compiler` are the verification.
+
 ## Recompute strategy
 
 `RecomputeStrategy::FullCandidateRebuild` is the only variant in this
@@ -336,18 +412,20 @@ Subsequent slices may add:
 - structural-form method sources (no text input at all);
 - branching: forking a session from a prefix of the log into a
   separate session identity (rewind already proves the log can be
-  truncated; branch adds a second live session that shares a prefix);
-- replay against a changed base source file: applying a session's
-  mutation log to v2 of the source it was originally compiled against
-  (the `compose_source_from_log` helper already accepts an arbitrary
-  pristine; the public API stays private until this slice lands);
-- log persistence and any on-disk serialization format;
+  truncated; replay already proves the log can travel; branch adds a
+  second live session that shares a prefix);
+- explicit conflict-resolution modes for replay beyond prefix-only
+  (skip-failed, strict-prefix, drop-after-id, etc.) if a real need
+  for them emerges;
+- replay with rebind-by-name semantics for cases where the new base
+  has reordered generics or classes but kept the names;
+- log persistence and any on-disk serialization format (replay makes
+  this much easier, but it stays a separate slice);
 - in-language (Loko-from-Loko) mutation calls that append to the same
   log as external CLI-driven mutations;
-- a stateful `interloko_lab mutations <file>` subcommand or other
-  long-lived session surface that can show multiple log entries from a
-  single CLI invocation (rewind has no useful CLI surface today
-  because each lab invocation is stateless);
+- a stateful `interloko_lab` subcommand or other long-lived session
+  surface that can show multiple log entries and exercise rewind /
+  replay from a single CLI invocation;
 - mutation affordances on `IncrementalCompilerSession` that genuinely
   skip unrelated work through the query-cache (introducing
   `RecomputeStrategy::IncrementalReuse`);
@@ -359,5 +437,5 @@ Subsequent slices may add:
 These belong to their own plans. They share `SessionMutation`'s
 non-exhaustive enum, the candidate-and-swap discipline, the
 `MutationOutcome` / `MutationError` / `RewindOutcome` / `RewindError`
-shapes, and the `AppliedMutation` log entry shape so the family
-composes cleanly.
+/ `ReplayOutcome` / `ReplayFailure` shapes, and the
+`AppliedMutation` log entry shape so the family composes cleanly.

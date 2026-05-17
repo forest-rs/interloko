@@ -1,5 +1,83 @@
 # Interloko Progress
 
+## Implemented: Replay Mutation Logs Against A New Base Source
+
+- `SessionArtifacts::replay_against(new_source: &SourceFile) ->
+  ReplayOutcome` turns the mutation log from a session-local history
+  into a portable transcript. Replay builds an ephemeral session from
+  `new_source`, walks the live mutation log in application order,
+  applies each entry's request through the existing candidate-and-swap
+  discipline using the entry's *original* mutation id, stops at the
+  first failure, and returns the applied prefix plus the failure (if
+  any) plus the ephemeral artifacts. The original session is byte-for-
+  byte unchanged regardless of replay outcome.
+- Prefix replay only. Replay does not silently skip failed entries;
+  skip-failed would change the meaning of a transcript and is deferred
+  to its own explicit named mode if it ever lands.
+- Original mutation ids are preserved. Applied entries keep their
+  `mutation_id`; the ephemeral session's `MethodOrigin::Session`
+  markers match the original log; the ephemeral session's
+  `next_mutation_id` is finalized as `max(applied_ids) + 1` so
+  subsequent `apply_mutation` calls on adopted artifacts never collide
+  with replayed ids.
+- The apply path is refactored so replay can supply explicit ids:
+  `apply_mutation` becomes a thin wrapper that supplies
+  `self.next_mutation_id` and delegates to the new internal
+  `apply_session_mutation_with_id(mutation, id)`. Replay loops over
+  the log calling that helper with each entry's original id. The
+  next-id counter advances via `max(current, id + 1)` so normal apply
+  behavior is unchanged and replay never rolls the counter backward.
+- `ReplayOutcome` carries `applied: Vec<AppliedMutation>`, `failed:
+  Option<ReplayFailure>`, and `artifacts: SessionArtifacts`.
+  `ReplayFailure` carries `mutation_id`, `log_index`, the original
+  `request`, and a structured `cause: MutationError` (reusing the
+  existing apply-time error taxonomy: `UnknownGeneric` when the target
+  generic no longer resolves, `GenericNameMismatch` when an id now
+  points at a different-named generic, `SemanticFailed` when a
+  specializer class is gone, `DuplicateSpecializer` when the new base
+  already defines the method, and so on).
+- Seven tests pin the contract: replay against the pristine base
+  reproduces full log + dispatch; a harmless base edit still replays;
+  a base with no classes and no generics fails at mutation 0 with
+  `cause = UnknownGeneric`; a base where `area` has been reordered
+  behind a fresh `score` generic surfaces
+  `cause = GenericNameMismatch { expected: "score", actual: "area" }`
+  rather than silently applying onto the wrong generic; a base
+  without a specializer class fails at the relevant later mutation
+  with `cause = SemanticFailed` carrying a `DiagnosticCode::UnresolvedClass`
+  (and the earlier mutation has already applied to the ephemeral
+  session); a base that already defines the method a replayed mutation
+  would add fails with `cause = DuplicateSpecializer` at the
+  colliding entry; replay preserves ids across a log with gaps and
+  finalizes `next_mutation_id` to `max(applied) + 1` so a subsequent
+  apply on adopted artifacts gets the right id. The success-path
+  tests and the failure-path tests both assert the original session
+  is byte-for-byte unchanged.
+- The 172 pre-existing apply/rewind tests pass against the refactored
+  apply path unchanged.
+- Replay has no `interloko_lab` surface in this slice for the same
+  reason rewind doesn't: each lab invocation is stateless.
+- See [`docs/eop_mutation.md`](docs/eop_mutation.md) for the replay
+  contract, the prefix-only framing, the id-preservation rule, and
+  the still-deferred follow-ups (explicit conflict-resolution modes,
+  rebind-by-name replay, branch, log persistence, in-language
+  mutation, stateful CLI session subcommand, incremental cache reuse).
+
+Deferred:
+
+- Explicit conflict-resolution modes for replay beyond prefix-only
+  (skip-failed, strict-prefix, drop-after-id, etc.).
+- Rebind-by-name replay for cases where the new base reordered
+  generics or classes but kept the names.
+- Branch: forking a session from a prefix of the log into a separate
+  identity.
+- Log persistence / on-disk serialization (replay makes this much
+  easier; it stays a separate slice).
+- In-language (Loko-from-Loko) mutation calls.
+- A stateful `interloko_lab` session subcommand.
+- `RecomputeStrategy::IncrementalReuse` through
+  `IncrementalCompilerSession::apply_mutation`.
+
 ## Implemented: Rewind The In-Memory Mutation Log
 
 - `SessionArtifacts::rewind_to(target: Option<u32>) ->
