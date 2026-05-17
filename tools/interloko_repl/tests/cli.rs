@@ -70,7 +70,7 @@ fn diagnostics_are_rendered_and_repl_continues() {
 }
 
 #[test]
-fn malformed_definitions_are_not_committed_to_the_durable_source() {
+fn malformed_definitions_are_not_committed_to_the_source_buffer() {
     let (stdout, stderr) = run_repl("define function broken(\nend;\n1 + 2\n:source\n:quit\n");
 
     assert!(stdout.lines().any(|line| line == "3"));
@@ -112,4 +112,57 @@ fn rich_values_work_in_expressions_and_dumps() {
     assert!(stdout.lines().any(|line| line == "7"));
     assert!(stdout.contains("literal.string"));
     assert!(stdout.contains("value-eq"));
+}
+
+#[test]
+fn session_commands_list_forms_run_functions_and_reset() {
+    let (stdout, stderr) = run_repl(
+        "define function answer()\n  42\nend;\n\
+         :forms\n\
+         :source\n\
+         :run answer\n\
+         :reset\n\
+         :forms\n\
+         :source\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("accepted forms"));
+    assert!(stdout.contains("f0 function answer lines 1..3"));
+    assert!(stdout.contains("source repl.loko (1 forms, 4 lines)"));
+    assert!(stdout.contains("   1 | define function answer()"));
+    assert!(stdout.lines().any(|line| line == "42"));
+    assert!(stdout.contains("reset"));
+    assert!(stdout.contains("(no accepted forms)"));
+    assert!(stdout.contains("(empty)"));
+}
+
+#[test]
+fn pending_definition_can_be_inspected_and_cancelled() {
+    let (stdout, stderr) = run_repl(
+        "define function broken()\n\
+         :pending\n\
+         :cancel\n\
+         :forms\n\
+         :source\n\
+         1 + 2\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("pending definition"));
+    assert!(stdout.contains("   1 | define function broken()"));
+    assert!(stdout.contains("cancelled pending definition"));
+    assert!(stdout.contains("(no accepted forms)"));
+    assert!(stdout.contains("(empty)"));
+    assert!(stdout.lines().any(|line| line == "3"));
+}
+
+#[test]
+fn quit_discards_pending_definition_and_exits() {
+    let (stdout, stderr) = run_repl("define function broken()\n:quit\n");
+
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.is_empty(), "{stderr}");
 }

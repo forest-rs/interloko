@@ -5,9 +5,9 @@ Interactive terminal sessions use `reedline` for line editing, local in-memory
 history, Ctrl-C/Ctrl-D handling, and completions. Piped input keeps the plain
 stdio transcript mode used by tests and scripts.
 
-The REPL keeps one durable in-memory source buffer for definitions, then
-evaluates expression input by compiling that durable source plus one generated
-zero-argument scratch function.
+The REPL keeps an in-memory source buffer of accepted definitions. Aggregate
+source is rendered from those entries for compilation, `:source`, and expression
+evaluation with one generated zero-argument scratch function.
 
 Run it with:
 
@@ -51,7 +51,13 @@ Commands:
 :help
 :quit
 :source
+:forms
+:run <zero-arg-function>
+:reset
 :clear
+:cancel
+:clear-pending
+:pending
 :dump [syntax|ast|sem|mop|eop|lowered|tape|all]
 :mop
 :eop
@@ -60,6 +66,12 @@ Commands:
 :inspect <object-id>
 :affordances <object-id>
 ```
+
+`:source` prints the rendered accepted source with line numbers. `:forms` lists
+the top-level forms that have been accepted into the source buffer. `:reset`
+clears accepted definitions and cached artifacts; `:clear` is kept as an alias.
+`:pending` shows an unfinished multiline definition. `:cancel` and
+`:clear-pending` discard it without changing accepted source.
 
 Current limits:
 

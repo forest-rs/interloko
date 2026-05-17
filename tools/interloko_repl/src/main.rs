@@ -31,7 +31,13 @@ const COMMANDS: &[&str] = &[
     ":help",
     ":quit",
     ":source",
+    ":forms",
+    ":run",
+    ":reset",
     ":clear",
+    ":cancel",
+    ":clear-pending",
+    ":pending",
     ":dump",
     ":mop",
     ":eop",
@@ -171,7 +177,7 @@ fn add_menu_keybindings(keybindings: &mut Keybindings) {
 struct Repl {
     session: IncrementalCompilerSession,
     source_file: SourceFileId,
-    durable_source: String,
+    source_buffer: ReplSourceBuffer,
     pending_definition: String,
     last_artifacts: Option<SessionArtifacts>,
     renderer: DiagnosticRenderer,
@@ -186,7 +192,7 @@ impl Repl {
         Ok(Self {
             session,
             source_file,
-            durable_source: String::new(),
+            source_buffer: ReplSourceBuffer::default(),
             pending_definition: String::new(),
             last_artifacts: None,
             renderer: diagnostic_renderer()?,
@@ -213,6 +219,9 @@ impl Repl {
     {
         let trimmed = line.trim();
         if self.has_pending_definition() {
+            if trimmed.starts_with(':') {
+                return self.handle_pending_command(trimmed, stdout, stderr);
+            }
             self.pending_definition.push_str(line);
             self.pending_definition.push('\n');
             if definition_is_complete(&self.pending_definition) {
@@ -262,10 +271,24 @@ impl Repl {
             }
             ":quit" => return Ok(false),
             ":source" => self.print_source(stdout)?,
+            ":forms" => self.print_forms(stdout)?,
+            ":run" => self.run_function(&args, stdout, stderr)?,
+            ":reset" => {
+                self.reset();
+                writeln!(stdout, "reset")?;
+            }
             ":clear" => {
-                self.clear();
+                self.reset();
                 writeln!(stdout, "cleared")?;
             }
+            ":cancel" => {
+                if self.cancel_pending_definition() {
+                    writeln!(stdout, "cancelled pending definition")?;
+                } else {
+                    writeln!(stdout, "no pending definition")?;
+                }
+            }
+            ":pending" => self.print_pending(stdout)?,
             ":dump" => {
                 let Some(stage) = parse_optional_stage(&args, stderr)? else {
                     return Ok(true);
@@ -294,26 +317,82 @@ impl Repl {
         Ok(true)
     }
 
+    fn handle_pending_command<W, E>(
+        &mut self,
+        command_line: &str,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<bool>
+    where
+        W: Write,
+        E: Write,
+    {
+        match command_line {
+            ":cancel" | ":clear-pending" => {
+                self.pending_definition.clear();
+                writeln!(stdout, "cancelled pending definition")?;
+            }
+            ":pending" => self.print_pending(stdout)?,
+            ":help" => writeln!(
+                stdout,
+                "definition pending; finish with `end;`, view with :pending, or use :cancel"
+            )?,
+            ":quit" => {
+                self.pending_definition.clear();
+                return Ok(false);
+            }
+            _ => {
+                writeln!(
+                    stderr,
+                    "error: definition pending; finish with `end;` or use :cancel"
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
     fn finish_pending_definition<W, E>(&mut self, stdout: &mut W, stderr: &mut E) -> Result<()>
     where
         W: Write,
         E: Write,
     {
-        let mut candidate_source = self.durable_source.clone();
-        if !candidate_source.is_empty() && !candidate_source.ends_with("\n\n") {
-            candidate_source.push('\n');
-        }
-        candidate_source.push_str(self.pending_definition.trim_end());
-        candidate_source.push_str("\n\n");
+        let definition_text = self.pending_definition.trim_end().to_string();
+        let mut candidate_buffer = self.source_buffer.clone();
+        candidate_buffer.push_definition(definition_text);
+        let candidate_source = candidate_buffer.rendered_source();
         self.pending_definition.clear();
 
-        let artifacts = self.compile_source(candidate_source.clone(), stderr, false)?;
+        let artifacts = self.compile_source(candidate_source, stderr, false)?;
         if artifacts.diagnostics.is_empty() {
-            self.durable_source = candidate_source;
+            self.source_buffer = candidate_buffer;
             self.last_artifacts = Some(artifacts);
             writeln!(stdout, "{}", self.style.status("ok"))?;
         } else {
-            self.restore_durable_cache()?;
+            self.restore_accepted_cache()?;
+        }
+        Ok(())
+    }
+
+    fn run_function<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let [name] = args else {
+            writeln!(stderr, "usage: :run <zero-arg-function>")?;
+            return Ok(());
+        };
+        let artifacts = self.ensure_artifacts(stderr)?;
+        match artifacts.run_zero_arg_function_i64(name) {
+            FunctionRunResult::ReturnedI64(value) => {
+                writeln!(stdout, "{}", self.style.value(value))?
+            }
+            result => writeln!(
+                stderr,
+                "{} {}",
+                self.style.error_label("runtime error:"),
+                function_run_message(&result)
+            )?,
         }
         Ok(())
     }
@@ -349,7 +428,7 @@ impl Repl {
     }
 
     fn source_with_scratch(&self, expression: &str) -> String {
-        let mut source = self.durable_source.clone();
+        let mut source = self.source_buffer.rendered_source();
         if !source.is_empty() && !source.ends_with('\n') {
             source.push('\n');
         }
@@ -386,17 +465,14 @@ impl Repl {
         if let Some(artifacts) = &self.last_artifacts {
             return Ok(artifacts.clone());
         }
-        self.compile_source(self.durable_source.clone(), stderr, true)
+        self.compile_source(self.source_buffer.rendered_source(), stderr, true)
     }
 
-    fn restore_durable_cache(&mut self) -> Result<()> {
+    fn restore_accepted_cache(&mut self) -> Result<()> {
+        let source = self.source_buffer.rendered_source();
         let update = self
             .session
-            .edit_and_compile(
-                self.source_file,
-                &self.durable_source,
-                RuntimeMode::CompileOnly,
-            )
+            .edit_and_compile(self.source_file, &source, RuntimeMode::CompileOnly)
             .ok_or(ReplError::MissingSource)?;
         self.last_artifacts = Some(update.artifacts);
         Ok(())
@@ -429,10 +505,54 @@ impl Repl {
     where
         W: Write,
     {
-        if self.durable_source.trim().is_empty() {
+        let source = self.source_buffer.rendered_source();
+        if source.trim().is_empty() {
             writeln!(stdout, "(empty)")?;
         } else {
-            write!(stdout, "{}", self.durable_source)?;
+            writeln!(
+                stdout,
+                "source {SOURCE_NAME} ({} forms, {} lines)",
+                self.source_buffer.len(),
+                source.lines().count()
+            )?;
+            for (index, line) in source.lines().enumerate() {
+                writeln!(stdout, "{:>4} | {line}", index + 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn print_forms<W>(&self, stdout: &mut W) -> Result<()>
+    where
+        W: Write,
+    {
+        if self.source_buffer.is_empty() {
+            writeln!(stdout, "(no accepted forms)")?;
+            return Ok(());
+        }
+        writeln!(stdout, "accepted forms")?;
+        for entry in self.source_buffer.entries() {
+            let form = &entry.form;
+            writeln!(
+                stdout,
+                "  f{} {} {} lines {}..{}",
+                form.index, form.kind, form.name, form.line_start, form.line_end
+            )?;
+        }
+        Ok(())
+    }
+
+    fn print_pending<W>(&self, stdout: &mut W) -> Result<()>
+    where
+        W: Write,
+    {
+        if self.pending_definition.trim().is_empty() {
+            writeln!(stdout, "(no pending definition)")?;
+        } else {
+            writeln!(stdout, "pending definition")?;
+            for (index, line) in self.pending_definition.lines().enumerate() {
+                writeln!(stdout, "{:>4} | {line}", index + 1)?;
+            }
         }
         Ok(())
     }
@@ -498,14 +618,116 @@ impl Repl {
         Ok(())
     }
 
-    fn clear(&mut self) {
-        self.durable_source.clear();
+    fn reset(&mut self) {
+        self.source_buffer.clear();
         self.pending_definition.clear();
         self.last_artifacts = None;
         self.session = IncrementalCompilerSession::new();
         self.session
             .add_source_with_id(self.source_file, SOURCE_NAME, "");
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ReplSourceBuffer {
+    entries: Vec<AcceptedDefinition>,
+}
+
+impl ReplSourceBuffer {
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn entries(&self) -> &[AcceptedDefinition] {
+        &self.entries
+    }
+
+    fn push_definition(&mut self, source: String) {
+        let line_start = self.next_source_line();
+        let line_end = line_start + source.lines().count().saturating_sub(1);
+        let form = FormRecord::from_definition(self.entries.len(), &source, line_start, line_end);
+        self.entries.push(AcceptedDefinition { source, form });
+    }
+
+    fn rendered_source(&self) -> String {
+        let mut source = String::new();
+        for entry in &self.entries {
+            source.push_str(entry.source.trim_end());
+            source.push_str("\n\n");
+        }
+        source
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn next_source_line(&self) -> usize {
+        let source = self.rendered_source();
+        if source.trim().is_empty() {
+            1
+        } else {
+            source.lines().count() + 1
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AcceptedDefinition {
+    source: String,
+    form: FormRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FormRecord {
+    // This is a display position within the current REPL source buffer, not a stable session id.
+    index: usize,
+    kind: String,
+    name: String,
+    line_start: usize,
+    line_end: usize,
+}
+
+impl FormRecord {
+    fn from_definition(index: usize, source: &str, line_start: usize, line_end: usize) -> Self {
+        let header = source
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or_default();
+        let (kind, name) = definition_header_label(header);
+        Self {
+            index,
+            kind,
+            name,
+            line_start,
+            line_end,
+        }
+    }
+}
+
+fn definition_header_label(header: &str) -> (String, String) {
+    let mut parts = header.split_whitespace();
+    if parts.next() != Some("define") {
+        return ("definition".into(), "<unknown>".into());
+    }
+    // This intentionally summarizes the first header line only; the compiler owns real parsing.
+    let kind = parts.next().unwrap_or("definition");
+    let name = parts
+        .next()
+        .map(|raw| {
+            raw.trim_end_matches(';')
+                .split_once('(')
+                .map_or(raw, |(before, _)| before)
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "<unknown>".into());
+    (kind.to_string(), name)
 }
 
 fn definition_is_complete(source: &str) -> bool {
@@ -643,11 +865,19 @@ fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
 }
 
 fn help_text() -> &'static str {
-    "commands:
-  :help
-  :quit
-  :source
-  :clear
+    "session:
+  :help                         show this help
+  :quit                         exit
+  :source                       show accepted source with line numbers
+  :forms                        list accepted top-level forms
+  :run <zero-arg-function>      run a named zero-argument function
+  :reset                        clear accepted source and cached artifacts
+  :clear                        alias for :reset
+  :cancel                       cancel a pending multiline definition
+  :clear-pending                alias for :cancel
+  :pending                      show pending multiline definition
+
+inspection:
   :dump [syntax|ast|sem|mop|eop|lowered|tape|all]
   :mop
   :eop
@@ -1099,7 +1329,61 @@ mod tests {
 
         assert!(completion_values(&mut completer, ":du").contains(&":dump".to_string()));
         assert!(completion_values(&mut completer, ":dump l").contains(&"lowered".to_string()));
+        assert!(completion_values(&mut completer, ":fo").contains(&":forms".to_string()));
+        assert!(completion_values(&mut completer, ":ru").contains(&":run".to_string()));
         assert!(completion_values(&mut completer, "not-a-command").is_empty());
+    }
+
+    #[test]
+    fn form_records_summarize_accepted_definitions() {
+        let mut repl = Repl::new(OutputStyle::Plain).expect("create repl");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        for line in [
+            "define class <circle> (<object>)",
+            "  slot radius :: <integer>;",
+            "end;",
+            "define generic area(shape :: <object>) => <integer>;",
+            "define function answer()",
+            "  42",
+            "end;",
+        ] {
+            assert!(
+                repl.handle_line(line, &mut stdout, &mut stderr)
+                    .expect("handle line")
+            );
+        }
+
+        assert_eq!(stderr, Vec::<u8>::new());
+        let forms: Vec<&FormRecord> = repl
+            .source_buffer
+            .entries()
+            .iter()
+            .map(|entry| &entry.form)
+            .collect();
+        assert_eq!(forms.len(), 3);
+        assert_eq!(forms[0].kind, "class");
+        assert_eq!(forms[0].name, "<circle>");
+        assert_eq!(forms[1].kind, "generic");
+        assert_eq!(forms[1].name, "area");
+        assert_eq!(forms[2].kind, "function");
+        assert_eq!(forms[2].name, "answer");
+    }
+
+    #[test]
+    fn source_buffer_renders_accepted_definitions() {
+        let mut buffer = ReplSourceBuffer::default();
+        buffer.push_definition("define function first()\n  1\nend;".to_string());
+        buffer.push_definition("define function second()\n  2\nend;".to_string());
+
+        assert_eq!(
+            buffer.rendered_source(),
+            "define function first()\n  1\nend;\n\ndefine function second()\n  2\nend;\n\n"
+        );
+        assert_eq!(buffer.entries()[0].form.line_start, 1);
+        assert_eq!(buffer.entries()[0].form.line_end, 3);
+        assert_eq!(buffer.entries()[1].form.line_start, 5);
+        assert_eq!(buffer.entries()[1].form.line_end, 7);
     }
 
     #[test]
