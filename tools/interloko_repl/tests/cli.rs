@@ -156,6 +156,7 @@ fn source_forms_are_inspectable_and_show_source_affordance_objects() {
          :forms\n\
          :inspect form:f0\n\
          :affordances form:f0\n\
+         :invoke form:f0 inspect\n\
          :invoke form:f0 show-source\n\
          :show-form f0\n\
          :quit\n",
@@ -169,6 +170,7 @@ fn source_forms_are_inspectable_and_show_source_affordance_objects() {
     assert!(stdout.contains("origin: typed"));
     assert!(stdout.contains("form-kind: function"));
     assert!(stdout.contains("affordances form:f0"));
+    assert!(stdout.contains("inspect"));
     assert!(stdout.contains("show-source"));
     assert!(stdout.contains("source form:f0 function answer"));
     assert!(stdout.contains("   1 | define function answer()"));
@@ -189,6 +191,84 @@ fn unknown_source_form_ids_report_unknown_form() {
         "{stderr}"
     );
     assert!(stderr.contains("error: unknown form `f99`"), "{stderr}");
+}
+
+#[test]
+fn invoke_runs_supported_environment_object_affordances() {
+    let (stdout, stderr) = run_repl(
+        "define function answer()\n  42\nend;\n\
+         :invoke function:f0 inspect\n\
+         :invoke function:f0 dump-sem\n\
+         :invoke function:f0 show-dependencies\n\
+         :invoke function:f0 run\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("object function:f0"));
+    assert!(stdout.contains("sem "));
+    assert!(stdout.contains("artifact graph"));
+    assert!(stdout.lines().any(|line| line == "42"));
+}
+
+#[test]
+fn invoke_runs_linked_object_and_dispatch_affordances() {
+    let (stdout, stderr) = run_repl(
+        "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+         define generic area(shape :: <object>) => <integer>;\n\
+         define method area(shape :: <circle>) => <integer>\n  shape.radius * shape.radius\nend;\n\
+         define function main()\n  area(make(<circle>, radius: 3))\nend;\n\
+         :run main\n\
+         :invoke slot:c1.s0 show-accessor\n\
+         :invoke accessor:c1.s0 show-slot\n\
+         :invoke generic:g0 show-dispatch\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "9"));
+    assert!(stdout.contains("object accessor:c1.s0"));
+    assert!(stdout.contains("object slot:c1.s0"));
+    assert!(stdout.contains("dispatch table:"));
+}
+
+#[test]
+fn invoke_reports_unsupported_environment_mutations() {
+    let (stdout, stderr) = run_repl(
+        "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+         define function answer()\n  42\nend;\n\
+         define generic area(shape :: <object>) => <integer>;\n\
+         define method area(shape :: <circle>) => <integer>\n  shape.radius\nend;\n\
+         define function main()\n  area(make(<circle>, radius: 3))\nend;\n\
+         :invoke generic:g0 add-method\n\
+         :invoke generic:g0 bogus-affordance\n\
+         :invoke generic:g0 show-slot\n\
+         :invoke dispatch:d0 open-source\n\
+         :invoke class:c1 show-slots\n\
+         :quit\n",
+    );
+
+    assert!(stdout.contains("ok"));
+    assert!(
+        stderr.contains("mutating affordance `add-method` is not executable by interloko_repl"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("error: unknown affordance `bogus-affordance`"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("object `generic:g0` does not expose affordance `show-slot`"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("affordance `open-source` needs editor integration"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("read-only affordance `show-slots` is not implemented"),
+        "{stderr}"
+    );
 }
 
 #[test]

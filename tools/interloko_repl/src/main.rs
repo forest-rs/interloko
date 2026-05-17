@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
 use interloko_compiler::identity::SourceFileId;
 use interloko_compiler::session::{
-    DumpStage, EnvironmentObject, FunctionRunResult, IncrementalCompilerSession, RuntimeMode,
-    SessionArtifacts, TopLevelFormSpan,
+    DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, FunctionRunResult,
+    IncrementalCompilerSession, RuntimeMode, SessionArtifacts, TopLevelFormSpan,
 };
 use interloko_compiler::syntax::{self, TokenKind};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -814,6 +814,7 @@ impl Repl {
         };
         if let Some(entry) = self.source_buffer.find_form(&id) {
             match affordance.as_str() {
+                "inspect" => write!(stdout, "{}", format_form_object(entry))?,
                 "show-source" => write_form_source(entry, stdout)?,
                 "drop" => self.drop_form_by_id(&id, stdout, stderr)?,
                 _ => writeln!(
@@ -824,10 +825,223 @@ impl Repl {
             }
             return Ok(());
         }
-        writeln!(
-            stderr,
-            "error: invoke currently supports REPL form objects, not `{id}`"
-        )?;
+        let Some(environment_affordance) = EnvironmentAffordance::from_name(&affordance) else {
+            writeln!(stderr, "error: unknown affordance `{affordance}`")?;
+            return Ok(());
+        };
+        self.invoke_environment_affordance(&id, environment_affordance, stdout, stderr)?;
+        Ok(())
+    }
+
+    fn invoke_environment_affordance<W, E>(
+        &mut self,
+        id: &str,
+        affordance: EnvironmentAffordance,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let artifacts = self.ensure_artifacts(stderr)?;
+        let Some(object) = find_object(&artifacts, id) else {
+            writeln!(stderr, "error: unknown object `{id}`")?;
+            return Ok(());
+        };
+        if !object.affordances.contains(affordance) {
+            writeln!(
+                stderr,
+                "error: object `{id}` does not expose affordance `{}`",
+                affordance.as_str()
+            )?;
+            return Ok(());
+        }
+
+        match affordance {
+            EnvironmentAffordance::Inspect => {
+                write!(stdout, "{}", format_environment_object(&object))?
+            }
+            EnvironmentAffordance::DumpSyntax => {
+                write!(stdout, "{}", artifacts.dump_stage(DumpStage::Syntax))?
+            }
+            EnvironmentAffordance::DumpAst => {
+                write!(stdout, "{}", artifacts.dump_stage(DumpStage::Ast))?
+            }
+            EnvironmentAffordance::DumpSem => {
+                write!(stdout, "{}", artifacts.dump_stage(DumpStage::Sem))?
+            }
+            EnvironmentAffordance::DumpMop => {
+                write!(stdout, "{}", artifacts.dump_stage(DumpStage::Mop))?
+            }
+            EnvironmentAffordance::DumpEop => {
+                write!(stdout, "{}", artifacts.dump_stage(DumpStage::Eop))?
+            }
+            EnvironmentAffordance::DumpLowered => {
+                write!(stdout, "{}", artifacts.dump_stage(DumpStage::Lowered))?
+            }
+            EnvironmentAffordance::DumpTape => {
+                write!(stdout, "{}", artifacts.dump_stage(DumpStage::Tape))?
+            }
+            EnvironmentAffordance::ShowDependencies | EnvironmentAffordance::DumpArtifacts => {
+                write!(stdout, "{}", artifacts.dump_artifact_graph())?
+            }
+            EnvironmentAffordance::Artifacts => {
+                write!(stdout, "{}", artifacts.dump_artifact_graph())?
+            }
+            EnvironmentAffordance::ShowSlot => self.print_linked_environment_object(
+                &artifacts,
+                &object,
+                "accessor:",
+                "slot:",
+                stdout,
+                stderr,
+            )?,
+            EnvironmentAffordance::ShowAccessor => self.print_linked_environment_object(
+                &artifacts,
+                &object,
+                "slot:",
+                "accessor:",
+                stdout,
+                stderr,
+            )?,
+            EnvironmentAffordance::ShowDispatch => {
+                if object.kind == EnvironmentKind::DispatchSite {
+                    if let Some(explanation) = artifacts.explain_dispatch_site(object.id.as_str()) {
+                        write!(stdout, "{explanation}")?;
+                    } else {
+                        writeln!(
+                            stderr,
+                            "error: unknown dispatch site `{}`",
+                            object.id.as_str()
+                        )?;
+                    }
+                } else {
+                    write!(stdout, "{}", artifacts.dump_mop_dispatch_table())?;
+                }
+            }
+            EnvironmentAffordance::ShowRuntimeLayout => {
+                write!(stdout, "{}", artifacts.dump_mop_runtime_layout())?
+            }
+            EnvironmentAffordance::ShowGrammarStack => {
+                write!(stdout, "{}", artifacts.dump_grammar_stack())?
+            }
+            EnvironmentAffordance::ShowGrammarRule => {
+                if let Some(explanation) = artifacts.explain_grammar_rule(object.id.as_str()) {
+                    write!(stdout, "{explanation}")?;
+                } else {
+                    writeln!(
+                        stderr,
+                        "error: affordance `{}` is not available for `{}`",
+                        affordance.as_str(),
+                        object.id.as_str()
+                    )?;
+                }
+            }
+            EnvironmentAffordance::ShowParseTrace => {
+                write!(stdout, "{}", artifacts.dump_parse_trace())?
+            }
+            EnvironmentAffordance::ShowGrammarRegistry => {
+                write!(stdout, "{}", artifacts.dump_grammar_registry())?
+            }
+            EnvironmentAffordance::ShowGrammarExtension => {
+                if let Some(explanation) = artifacts.explain_grammar_extension(object.id.as_str()) {
+                    write!(stdout, "{explanation}")?;
+                } else {
+                    writeln!(
+                        stderr,
+                        "error: affordance `{}` is not available for `{}`",
+                        affordance.as_str(),
+                        object.id.as_str()
+                    )?;
+                }
+            }
+            EnvironmentAffordance::Run => {
+                self.run_environment_object(&artifacts, &object, stdout, stderr)?
+            }
+            EnvironmentAffordance::AddMethod | EnvironmentAffordance::EditBody => writeln!(
+                stderr,
+                "error: mutating affordance `{}` is not executable by interloko_repl in this slice",
+                affordance.as_str()
+            )?,
+            EnvironmentAffordance::Diff => writeln!(
+                stderr,
+                "error: affordance `{}` needs a second source version and is not executable by interloko_repl in this slice",
+                affordance.as_str()
+            )?,
+            EnvironmentAffordance::OpenSource => writeln!(
+                stderr,
+                "error: affordance `{}` needs editor integration and is not executable by interloko_repl in this slice",
+                affordance.as_str()
+            )?,
+            EnvironmentAffordance::ShowSlots => writeln!(
+                stderr,
+                "error: read-only affordance `{}` is not implemented by interloko_repl yet",
+                affordance.as_str()
+            )?,
+        }
+        Ok(())
+    }
+
+    fn print_linked_environment_object<W, E>(
+        &self,
+        artifacts: &SessionArtifacts,
+        object: &EnvironmentObject,
+        from_prefix: &str,
+        to_prefix: &str,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(suffix) = object.id.as_str().strip_prefix(from_prefix) else {
+            writeln!(
+                stderr,
+                "error: affordance is not linked from `{}`",
+                object.id.as_str()
+            )?;
+            return Ok(());
+        };
+        let linked_id = format!("{to_prefix}{suffix}");
+        if let Some(linked) = find_object(artifacts, &linked_id) {
+            write!(stdout, "{}", format_environment_object(&linked))?;
+        } else {
+            writeln!(stderr, "error: unknown object `{linked_id}`")?;
+        }
+        Ok(())
+    }
+
+    fn run_environment_object<W, E>(
+        &self,
+        artifacts: &SessionArtifacts,
+        object: &EnvironmentObject,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(name) = function_name_for_object(artifacts, object) else {
+            writeln!(
+                stderr,
+                "error: affordance `run` requires a named function object"
+            )?;
+            return Ok(());
+        };
+        match artifacts.run_zero_arg_function_i64(name) {
+            FunctionRunResult::ReturnedI64(value) => {
+                writeln!(stdout, "{}", self.style.value(value))?
+            }
+            result => writeln!(
+                stderr,
+                "{} {}",
+                self.style.error_label("runtime error:"),
+                function_run_message(&result)
+            )?,
+        }
         Ok(())
     }
 
@@ -1334,6 +1548,41 @@ fn format_affordances(object: &EnvironmentObject) -> String {
     out
 }
 
+fn all_invokable_affordance_names() -> Vec<String> {
+    let mut names: Vec<String> = FORM_AFFORDANCES
+        .iter()
+        .map(|affordance| (*affordance).to_string())
+        .chain(
+            EnvironmentAffordance::all()
+                .iter()
+                .map(|affordance| affordance.as_str().to_string()),
+        )
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn function_name_for_object<'a>(
+    artifacts: &'a SessionArtifacts,
+    object: &EnvironmentObject,
+) -> Option<&'a str> {
+    if object.kind != EnvironmentKind::Function {
+        return None;
+    }
+    let index: usize = object
+        .id
+        .as_str()
+        .strip_prefix("function:f")?
+        .parse()
+        .ok()?;
+    artifacts
+        .sem
+        .functions
+        .get(index)
+        .map(|function| function.name.as_str())
+}
+
 fn format_form_object(entry: &AcceptedDefinition) -> String {
     let form = &entry.form;
     let mut out = String::new();
@@ -1394,7 +1643,7 @@ fn entry_line_start(entry: &AcceptedDefinition) -> usize {
     entry.form.line_start.saturating_sub(leading_lines)
 }
 
-const FORM_AFFORDANCES: &[&str] = &["show-source", "drop"];
+const FORM_AFFORDANCES: &[&str] = &["inspect", "show-source", "drop"];
 
 fn function_run_message(result: &FunctionRunResult) -> String {
     match result {
@@ -1766,10 +2015,7 @@ impl Completer for InterlokoCompleter {
                     .lock()
                     .map(|state| state.object_ids.clone())
                     .unwrap_or_default(),
-                ":invoke" => FORM_AFFORDANCES
-                    .iter()
-                    .map(|affordance| (*affordance).to_string())
-                    .collect(),
+                ":invoke" => all_invokable_affordance_names(),
                 _ => Vec::new(),
             }
         };

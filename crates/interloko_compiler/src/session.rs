@@ -541,6 +541,48 @@ pub enum EnvironmentAffordance {
 }
 
 impl EnvironmentAffordance {
+    /// Returns every stable environment affordance in canonical order.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::Inspect,
+            Self::DumpSyntax,
+            Self::DumpAst,
+            Self::DumpSem,
+            Self::DumpMop,
+            Self::DumpEop,
+            Self::DumpLowered,
+            Self::DumpTape,
+            Self::ShowDispatch,
+            Self::ShowRuntimeLayout,
+            Self::ShowDependencies,
+            Self::ShowAccessor,
+            Self::ShowSlot,
+            Self::Run,
+            Self::EditBody,
+            Self::AddMethod,
+            Self::Artifacts,
+            Self::Diff,
+            Self::OpenSource,
+            Self::DumpArtifacts,
+            Self::ShowSlots,
+            Self::ShowGrammarStack,
+            Self::ShowGrammarRule,
+            Self::ShowParseTrace,
+            Self::ShowGrammarRegistry,
+            Self::ShowGrammarExtension,
+        ]
+    }
+
+    /// Parses a stable environment affordance name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|affordance| affordance.as_str() == name)
+    }
+
     /// Returns the stable affordance name used in EOP dumps.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -1281,6 +1323,18 @@ impl SessionArtifacts {
                 out
             }
         }
+    }
+
+    /// Dumps the MOP dispatch-table section.
+    #[must_use]
+    pub fn dump_mop_dispatch_table(&self) -> String {
+        dump_mop_dispatch_table(&self.sem)
+    }
+
+    /// Dumps the MOP runtime-layout section.
+    #[must_use]
+    pub fn dump_mop_runtime_layout(&self) -> String {
+        dump_mop_runtime_layout(self)
     }
 
     /// Dumps stable artifact keys and dependencies.
@@ -5147,6 +5201,14 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
         }
     }
 
+    out.push_str(&dump_mop_dispatch_table(module));
+    out.push_str(&dump_mop_runtime_layout(artifacts));
+
+    out
+}
+
+fn dump_mop_dispatch_table(module: &sem::Module) -> String {
+    let mut out = String::new();
     let _ = writeln!(out, "dispatch table:");
     for generic in &module.generics {
         let _ = writeln!(out, "  g{} {}", generic.id.0, generic.name);
@@ -5162,7 +5224,13 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             );
         }
     }
+    out
+}
 
+fn dump_mop_runtime_layout(artifacts: &SessionArtifacts) -> String {
+    let module = &artifacts.sem;
+    let runtime = runtime_bridge::runtime_layout_from_sem(module);
+    let mut out = String::new();
     let _ = writeln!(out, "runtime layout:");
     for (index, class) in runtime.classes().iter().enumerate() {
         let sem_class = module.classes.get(index);
@@ -5196,7 +5264,6 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             );
         }
     }
-
     out
 }
 
@@ -8462,9 +8529,14 @@ mod tests {
             ),
         ];
 
+        let all = EnvironmentAffordance::all();
+        assert_eq!(all.len(), names.len());
         for (affordance, name) in names {
             assert_eq!(affordance.as_str(), name);
+            assert_eq!(EnvironmentAffordance::from_name(name), Some(affordance));
+            assert!(all.contains(&affordance));
         }
+        assert_eq!(EnvironmentAffordance::from_name("bogus"), None);
     }
 
     #[test]

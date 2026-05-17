@@ -82,9 +82,13 @@ form, `:affordances form:f0` lists editor actions, and `:show-form form:f0` is
 the direct spelling for `:invoke form:f0 show-source`. `:drop-form form:f0` is
 the direct spelling for `:invoke form:f0 drop`; it compiles the candidate source
 first, so diagnostics leave the previous buffer unchanged. Dropping a form
-renumbers later forms; `:forms` always shows the current IDs. Today `:invoke`
-only runs REPL form affordances; environment-object affordance invocation is
-deferred.
+renumbers later forms; `:forms` always shows the current IDs.
+
+`:invoke <object-id> <affordance>` also runs supported compiler/session
+environment-object affordances, including `inspect`, stage dumps, linked
+slot/accessor views, dispatch views, dependency/artifact views, grammar views,
+and `run` for zero-argument function objects. Mutating environment affordances
+such as `add-method` and `edit-body` are still left to `interloko_lab` for now.
 
 `:load <file>` replaces the source buffer with a Loko source file after
 compiling it through the normal session pipeline; diagnostics leave the previous

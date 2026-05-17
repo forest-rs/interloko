@@ -360,43 +360,7 @@ fn invoke_args(args: &[String]) -> Result<(&str, &str, EnvironmentAffordance, &[
 }
 
 fn parse_affordance(input: &str) -> Option<EnvironmentAffordance> {
-    all_affordances()
-        .iter()
-        .copied()
-        .find(|affordance| affordance.as_str() == input)
-}
-
-fn all_affordances() -> &'static [EnvironmentAffordance] {
-    use EnvironmentAffordance as Aff;
-
-    &[
-        Aff::Inspect,
-        Aff::DumpSyntax,
-        Aff::DumpAst,
-        Aff::DumpSem,
-        Aff::DumpMop,
-        Aff::DumpEop,
-        Aff::DumpLowered,
-        Aff::DumpTape,
-        Aff::ShowDispatch,
-        Aff::ShowRuntimeLayout,
-        Aff::ShowDependencies,
-        Aff::ShowAccessor,
-        Aff::ShowSlot,
-        Aff::Run,
-        Aff::EditBody,
-        Aff::AddMethod,
-        Aff::Artifacts,
-        Aff::Diff,
-        Aff::OpenSource,
-        Aff::DumpArtifacts,
-        Aff::ShowSlots,
-        Aff::ShowGrammarStack,
-        Aff::ShowGrammarRule,
-        Aff::ShowParseTrace,
-        Aff::ShowGrammarRegistry,
-        Aff::ShowGrammarExtension,
-    ]
+    EnvironmentAffordance::from_name(input)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -651,18 +615,12 @@ fn invoke_affordance(
                     dispatch_explanation(&workbench.artifacts, object.id.as_str())?
                 );
             } else {
-                print!(
-                    "{}",
-                    mop_section(&workbench.artifacts, "dispatch table:", "runtime layout:")
-                );
+                print!("{}", workbench.artifacts.dump_mop_dispatch_table());
             }
             Ok(())
         }
         EnvironmentAffordance::ShowRuntimeLayout => {
-            print!(
-                "{}",
-                mop_section(&workbench.artifacts, "runtime layout:", "")
-            );
+            print!("{}", workbench.artifacts.dump_mop_runtime_layout());
             Ok(())
         }
         EnvironmentAffordance::ShowDependencies => {
@@ -874,20 +832,6 @@ fn print_linked_object(
     let linked = workbench.object(&format!("{to_prefix}{suffix}"))?;
     print!("{}", format_environment_object(&linked));
     Ok(())
-}
-
-fn mop_section(artifacts: &SessionArtifacts, start: &str, end: &str) -> String {
-    let dump = artifacts.dump_stage(DumpStage::Mop);
-    let Some(start_index) = dump.find(start) else {
-        return dump;
-    };
-    let section = &dump[start_index..];
-    if end.is_empty() {
-        return section.into();
-    }
-    section
-        .find(end)
-        .map_or_else(|| section.into(), |end_index| section[..end_index].into())
 }
 
 fn parse_grammar_environment(
