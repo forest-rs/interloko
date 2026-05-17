@@ -976,11 +976,9 @@ impl Repl {
                 "error: affordance `{}` needs editor integration and is not executable by interloko_repl in this slice",
                 affordance.as_str()
             )?,
-            EnvironmentAffordance::ShowSlots => writeln!(
-                stderr,
-                "error: read-only affordance `{}` is not implemented by interloko_repl yet",
-                affordance.as_str()
-            )?,
+            EnvironmentAffordance::ShowSlots => {
+                write_class_slots(&artifacts, &object, stdout, stderr)?
+            }
         }
         Ok(())
     }
@@ -1852,6 +1850,83 @@ where
     Ok(())
 }
 
+fn write_class_slots<W, E>(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+    out: &mut W,
+    err: &mut E,
+) -> Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    let Some(index) = object_index(object, "class:c") else {
+        writeln!(
+            err,
+            "slots unavailable: `{}` is not a class object",
+            object.id.as_str()
+        )?;
+        return Ok(());
+    };
+    let Some(class) = artifacts.sem.classes.get(index) else {
+        writeln!(
+            err,
+            "slots unavailable: unknown class `{}`",
+            object.id.as_str()
+        )?;
+        return Ok(());
+    };
+
+    writeln!(out, "slots {} {}", object.id.as_str(), class.name)?;
+    writeln!(out, "direct-slots: {}", class.direct_slots.len())?;
+    for slot in &class.direct_slots {
+        writeln!(
+            out,
+            "  slot:c{}.s{} {} :: {} init-keyword: {}:{} allocation={} mutability={}",
+            class.id.0,
+            slot.id.0,
+            slot.name,
+            slot.type_name,
+            slot.init_keyword,
+            if slot.required_init_keyword {
+                " required"
+            } else {
+                ""
+            },
+            slot_allocation_label(slot.allocation),
+            slot_mutability_label(slot.mutability)
+        )?;
+    }
+    writeln!(out, "effective-slots: {}", class.effective_slots.len())?;
+    for slot in &class.effective_slots {
+        let source = if slot.source_class == class.id {
+            "direct"
+        } else {
+            "inherited"
+        };
+        writeln!(
+            out,
+            "  slot:c{}.s{} {} :: {} source={} from c{}.s{} init-keyword: {}:{} allocation={} mutability={}",
+            class.id.0,
+            slot.id.0,
+            slot.name,
+            slot.type_name,
+            source,
+            slot.source_class.0,
+            slot.source_slot.0,
+            slot.init_keyword,
+            if slot.required_init_keyword {
+                " required"
+            } else {
+                ""
+            },
+            slot_allocation_label(slot.allocation),
+            slot_mutability_label(slot.mutability)
+        )?;
+    }
+    Ok(())
+}
+
 fn write_object_summary<W>(object: &EnvironmentObject, out: &mut W) -> Result<()>
 where
     W: Write,
@@ -1916,6 +1991,19 @@ fn class_label(artifacts: &SessionArtifacts, id: sem::ClassId) -> String {
         .classes
         .get(id.0 as usize)
         .map_or_else(|| format!("c{}", id.0), |class| class.name.clone())
+}
+
+fn slot_allocation_label(allocation: sem::SlotAllocation) -> &'static str {
+    match allocation {
+        sem::SlotAllocation::Instance => "instance",
+    }
+}
+
+fn slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
+    match mutability {
+        sem::SlotMutability::Mutable => "mutable",
+        sem::SlotMutability::Constant => "constant",
+    }
 }
 
 fn value_kind_label(artifacts: &SessionArtifacts, kind: sem::ValueKind) -> String {

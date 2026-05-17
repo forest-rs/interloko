@@ -236,7 +236,7 @@ fn invoke_runs_linked_object_and_dispatch_affordances() {
 }
 
 #[test]
-fn invoke_reports_unsupported_environment_mutations() {
+fn invoke_handles_supported_and_rejected_environment_affordances() {
     let (stdout, stderr) = run_repl(
         "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
          define function answer()\n  42\nend;\n\
@@ -268,9 +268,10 @@ fn invoke_reports_unsupported_environment_mutations() {
         stderr.contains("affordance `open-source` needs editor integration"),
         "{stderr}"
     );
+    assert!(stdout.contains("slots class:c1 <circle>"), "{stdout}");
     assert!(
-        stderr.contains("read-only affordance `show-slots` is not implemented"),
-        "{stderr}"
+        stdout.contains("slot:c1.s0 radius :: <integer>"),
+        "{stdout}"
     );
 }
 
