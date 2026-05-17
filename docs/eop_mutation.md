@@ -351,6 +351,136 @@ Replay is not exposed through `interloko_lab` in this slice. The lab
 is stateless per invocation, so a standalone replay has no useful CLI
 surface; tests in `interloko_compiler` are the verification.
 
+## Transcript
+
+A `SessionTranscript` makes the mutation log durable: a base source
+plus the ordered sequence of mutation events plus the session's
+`next_mutation_id` at capture time. Restoration is
+`compile(base) + replay(events)` through the existing strict-replay
+machinery; the live image stays ephemeral, only the transcript is
+durable.
+
+The framing is the conservative version of three well-known patterns:
+write-ahead log without checkpoints, event sourcing with a single
+event type, and the minimal git-init / git-clone for a programmable
+image. The transcript records history, not a snapshot of derived
+runtime state.
+
+```rust
+pub struct SessionTranscript {
+    pub format_version: u32,
+    pub source_file_name: String,
+    pub base_source: String,
+    pub next_mutation_id: u32,
+    pub events: Vec<TranscriptEvent>,
+}
+
+pub struct TranscriptEvent {
+    pub mutation_id: u32,
+    pub kind: TranscriptEventKind,
+    pub generic_name: String,
+    pub generic_id_hint: u32,
+    pub source: String,
+}
+
+pub enum TranscriptEventKind {
+    AddMethod,
+}
+
+impl SessionArtifacts {
+    pub fn to_transcript(&self) -> SessionTranscript;
+}
+
+impl SessionTranscript {
+    pub fn save(&self, dir: &Path) -> Result<(), TranscriptSaveError>;
+    pub fn open(dir: &Path) -> Result<Self, TranscriptLoadError>;
+    pub fn restore(
+        &self,
+        grammar_registry: GrammarFrontendRegistry,
+        host_registry: &HostMetaRegistry,
+    ) -> ReplayOutcome;
+}
+```
+
+The on-disk layout is a structured directory:
+
+```text
+session.iloko/
+  transcript.toml
+  base.loko
+  mutations/
+    000000-add-method.loko
+    000002-add-method.loko
+```
+
+`transcript.toml` is the manifest: `format_version`, `source_file_name`,
+`next_mutation_id`, and one `[[events]]` table per mutation carrying
+`mutation_id`, `kind`, `generic_name`, `generic_id_hint`, and a
+relative `source` path. `base.loko` is the pristine source text.
+Each event's source file under `mutations/` is the full Loko clause
+applied by that mutation; the `NNNNNN-<kind>.loko` filename pattern
+preserves stable session event ids and any gaps left by rewind.
+
+**Strict replay only on restore.** `generic_id_hint` is used verbatim
+as the request's `GenericFunctionId`. `generic_name` is recorded for
+human inspection and future conflict-handling slices, but this slice
+does not rebind by name when ids drift between save and open. If
+the base source's sem has reordered generic ids since save, restore
+surfaces the standard replay failure (`GenericNameMismatch` or
+`UnknownGeneric`) rather than guessing which generic the original
+mutation meant. Silent rebind would be a different, richer contract.
+
+**Rewind high-water mark is preserved.** The transcript records the
+originating session's `next_mutation_id` explicitly. Restore sets the
+ephemeral session's counter to that value, not to `max(applied) + 1`
+that the apply loop would otherwise compute. This matters when the
+originating session was rewound: dropped ids stay retired across save
+and open, and subsequent apply calls on the adopted artifacts get
+the next never-used id.
+
+**Nothing else is persisted.** The save path writes only the manifest,
+the base source, and the event source files. No cached artifacts, no
+lowered IR, no tape, no runtime trace, no diagnostic state, no host
+registry contents. The live image is derived from the transcript at
+restore time; only the transcript is durable.
+
+**Format stability.** `format_version` is the migration bump point.
+This build requires exact equality with the build's
+[`FORMAT_VERSION`] — both newer and older / 0 / unknown versions are
+rejected. Schema changes must be migration-compatible; a slice that
+bumps the version must also explain how older transcripts are read.
+
+**Open validates the manifest before touching the filesystem for
+events.** A hand-edited or hostile manifest cannot coerce `open`
+into:
+
+- reading outside the transcript directory: each event's `source`
+  field must equal the canonical
+  `mutations/<NNNNNN>-<kind>.loko` path derived from its
+  `mutation_id` and `kind`. Absolute paths, `..` components, and
+  any non-canonical filename surface
+  `TranscriptLoadError::InvalidEventSourcePath`;
+- silently re-using ids: events must be strictly increasing in
+  `mutation_id`. Duplicates and reordered ids both surface
+  `TranscriptLoadError::EventIdsNotStrictlyIncreasing`;
+- rolling the id counter backward: `next_mutation_id` must be
+  strictly greater than the largest event id. Equality or lower
+  would let the next `apply_mutation` on restored artifacts recycle
+  an already-assigned id; the check surfaces
+  `TranscriptLoadError::NextMutationIdNotAboveMaxEvent`;
+- claiming a different schema version: `format_version` must match
+  this build's `FORMAT_VERSION` exactly.
+
+These validations live in `open`, before the events are dereferenced
+as file paths, so a manifest that would have caused unsafe I/O is
+rejected before any I/O happens.
+
+Transcripts are not exposed through `interloko_lab` in this slice. The
+lab is stateless per invocation, so a `save` or `open` subcommand
+would have no useful state to persist or restore from. A stateful
+session subcommand stays deferred along with the rest of the
+long-lived session UX.
+
 ## Recompute strategy
 
 `RecomputeStrategy::FullCandidateRebuild` is the only variant in this
@@ -412,30 +542,33 @@ Subsequent slices may add:
 - structural-form method sources (no text input at all);
 - branching: forking a session from a prefix of the log into a
   separate session identity (rewind already proves the log can be
-  truncated; replay already proves the log can travel; branch adds a
-  second live session that shares a prefix);
-- explicit conflict-resolution modes for replay beyond prefix-only
-  (skip-failed, strict-prefix, drop-after-id, etc.) if a real need
-  for them emerges;
-- replay with rebind-by-name semantics for cases where the new base
-  has reordered generics or classes but kept the names;
-- log persistence and any on-disk serialization format (replay makes
-  this much easier, but it stays a separate slice);
+  truncated; replay already proves the log can travel; transcripts
+  already make sessions portable across processes; branch adds a
+  second live session that shares a prefix in the same process);
+- explicit conflict-resolution modes for replay and transcript
+  restore beyond prefix-only (skip-failed, strict-prefix,
+  drop-after-id, etc.) if a real need for them emerges;
+- replay / restore with rebind-by-name semantics for cases where the
+  new base has reordered generics or classes but kept the names;
+- transcript checkpoints / packfiles / binary packing for sessions
+  with very long histories where replaying everything on each open
+  becomes expensive;
+- transcript schema migration tooling once `format_version` is bumped
+  for the first time;
 - in-language (Loko-from-Loko) mutation calls that append to the same
   log as external CLI-driven mutations;
 - a stateful `interloko_lab` subcommand or other long-lived session
-  surface that can show multiple log entries and exercise rewind /
-  replay from a single CLI invocation;
+  surface that can save / open transcripts, exercise rewind / replay,
+  and show multiple log entries from a single CLI invocation;
 - mutation affordances on `IncrementalCompilerSession` that genuinely
   skip unrelated work through the query-cache (introducing
   `RecomputeStrategy::IncrementalReuse`);
-- session restore, including how to interact with a future persistent
-  image without dissolving the in-memory fence;
 - a capability policy that decides which callers can request which
   mutations.
 
 These belong to their own plans. They share `SessionMutation`'s
 non-exhaustive enum, the candidate-and-swap discipline, the
 `MutationOutcome` / `MutationError` / `RewindOutcome` / `RewindError`
-/ `ReplayOutcome` / `ReplayFailure` shapes, and the
-`AppliedMutation` log entry shape so the family composes cleanly.
+/ `ReplayOutcome` / `ReplayFailure` / `TranscriptSaveError` /
+`TranscriptLoadError` shapes, and the `AppliedMutation` and
+`TranscriptEvent` shapes so the family composes cleanly.

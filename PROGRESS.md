@@ -1,5 +1,123 @@
 # Interloko Progress
 
+## Implemented: Save And Open Session Transcripts
+
+- A new `interloko_compiler::transcript` module (gated behind the
+  existing `std` feature) makes the session mutation log durable.
+  `SessionArtifacts::to_transcript()` captures the live session as a
+  `SessionTranscript { format_version, source_file_name, base_source,
+  next_mutation_id, events }`. `SessionTranscript::save(dir)` writes
+  the on-disk layout; `SessionTranscript::open(dir)` reads it back;
+  `SessionTranscript::restore(grammar_registry, host_registry)`
+  rehydrates a live `SessionArtifacts` by compiling the base source
+  and replaying the events through the existing strict-replay
+  machinery.
+- The on-disk layout is a structured directory:
+  `transcript.toml` + `base.loko` + `mutations/NNNNNN-add-method.loko`
+  files. The manifest is TOML, human-readable, line-diffable, and
+  carries one `[[events]]` table per mutation. The
+  `NNNNNN-<kind>.loko` filename pattern preserves stable session
+  event ids and any gaps left by rewind.
+- The transcript records history, not a snapshot of derived runtime
+  state. No cached artifacts, no lowered IR, no tape, no runtime
+  trace, no diagnostic state, no host registry contents. The live
+  image is reconstructed via replay at restore time; only the
+  transcript is durable.
+- Strict replay only on restore. The recorded `generic_id_hint` is
+  used verbatim as the request's `GenericFunctionId`. The
+  `generic_name` field is recorded for human inspection and future
+  conflict-handling work, but this slice does not silently rebind by
+  name when ids drift between save and open; restore surfaces the
+  standard `ReplayFailure` taxonomy instead.
+- Rewind high-water mark is preserved across save / open / restore.
+  The transcript records `next_mutation_id` explicitly; the
+  ephemeral restored session sets its counter to that value, not to
+  `max(applied) + 1`. Dropped ids stay retired across persistence.
+- Errors are structured. Save returns `TranscriptSaveError {Io,
+  Serialize}`. Open returns `TranscriptLoadError {Io, Manifest,
+  UnsupportedFormatVersion, UnknownEventKind, MissingEventSource,
+  InvalidEventSourcePath, EventIdsNotStrictlyIncreasing,
+  NextMutationIdNotAboveMaxEvent}`.
+- `open` validates the manifest before touching the filesystem for
+  any event source. A hand-edited or hostile manifest cannot make
+  `open` read outside the transcript directory (each event's
+  `source` must equal the canonical
+  `mutations/<NNNNNN>-<kind>.loko` path), recycle ids (events must
+  be strictly increasing in `mutation_id`), roll the id counter
+  backward (`next_mutation_id` must be `> max(event_id)`), or
+  claim a mismatched schema version (`format_version` must equal
+  `FORMAT_VERSION` exactly — both newer and older are rejected
+  until migrations exist).
+- Internal plumbing: `apply_session_mutation_with_id` and
+  `compile_file_with_registries` gain `pub(crate)` visibility so the
+  transcript module can reuse the apply-with-explicit-id and compile
+  paths without duplicating them. `SessionArtifacts` gains public
+  accessors `pristine_source()` and `next_mutation_id()` and a
+  `pub(crate)` `set_next_mutation_id` setter for the restore path.
+- Optional dependencies `toml` and `serde` are added behind the
+  `std` feature; `tempfile` is a new dev-dependency for disk
+  round-trip tests.
+- Sixteen tests pin the contract:
+  - in-memory round trip (`to_transcript + save + open` is
+    byte-equal);
+  - dispatch reproducibility (`save + open + restore` produces the
+    same dispatch behavior as the original session);
+  - id-gap preservation (apply, apply, rewind, apply -> log `[0, 2]`,
+    `next_mutation_id = 3` all survive the round trip);
+  - high-water mark preservation when `max(applied) + 1` is lower
+    (apply, apply, rewind to first -> log `[0]`, `next_mutation_id =
+    2`; restored session keeps `next = 2` so dropped id 1 stays
+    retired);
+  - restore against a base modified to remove the target generic
+    surfaces a structured `ReplayFailure`;
+  - on-disk layout discipline (the directory contains exactly
+    `transcript.toml`, `base.loko`, and the `mutations/` subdirectory
+    with one `NNNNNN-add-method.loko` file per event; no cached
+    artifacts, no runtime state, no tape);
+  - malformed manifest surfaces `TranscriptLoadError::Manifest`;
+  - deleting an event source file surfaces
+    `TranscriptLoadError::MissingEventSource` with the right
+    `mutation_id` and path;
+  - manifest claiming an unknown event kind surfaces
+    `TranscriptLoadError::UnknownEventKind`;
+  - manifest event source containing `..` is rejected with
+    `TranscriptLoadError::InvalidEventSourcePath`;
+  - absolute manifest event source path is rejected with
+    `TranscriptLoadError::InvalidEventSourcePath`;
+  - duplicate `mutation_id` in events is rejected with
+    `TranscriptLoadError::EventIdsNotStrictlyIncreasing`;
+  - out-of-order `mutation_id` in events is rejected with
+    `TranscriptLoadError::EventIdsNotStrictlyIncreasing`;
+  - `next_mutation_id <= max(event_id)` is rejected with
+    `TranscriptLoadError::NextMutationIdNotAboveMaxEvent`;
+  - `format_version = 0` is rejected with
+    `TranscriptLoadError::UnsupportedFormatVersion`;
+  - the two-pass discipline holds: a structural error on a later
+    event surfaces without triggering a file-read attempt on any
+    earlier event.
+- All 179 pre-existing tests continue to pass against the relaxed
+  visibility of the apply / compile internals.
+- See [`docs/eop_mutation.md`](docs/eop_mutation.md) for the
+  transcript contract, the directory layout, the strict-replay-only
+  rule, and the still-deferred follow-ups (branch, checkpoints,
+  schema migration tooling, rebind-by-name, in-language mutation,
+  stateful CLI session subcommand, incremental cache reuse).
+
+Deferred:
+
+- Branch: forking a session from a prefix into a separate identity
+  in the same process.
+- Explicit conflict-resolution modes for replay and restore beyond
+  prefix-only.
+- Rebind-by-name semantics for replay / restore.
+- Transcript checkpoints / packfiles / binary packing.
+- Transcript schema migration tooling (becomes load-bearing the
+  first time `format_version` is bumped).
+- In-language (Loko-from-Loko) mutation calls.
+- A stateful `interloko_lab` session subcommand.
+- `RecomputeStrategy::IncrementalReuse` through
+  `IncrementalCompilerSession::apply_mutation`.
+
 ## Implemented: Replay Mutation Logs Against A New Base Source
 
 - `SessionArtifacts::replay_against(new_source: &SourceFile) ->
