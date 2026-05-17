@@ -972,6 +972,31 @@ pub struct ReplayFailure {
     pub cause: MutationError,
 }
 
+/// Kind of top-level source form reported by a session artifact.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TopLevelFormKind {
+    /// `define class`.
+    Class,
+    /// `define generic`.
+    Generic,
+    /// `define method`.
+    Method,
+    /// `define function`.
+    Function,
+}
+
+/// Source span for one parser-recognized top-level form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TopLevelFormSpan {
+    /// Zero-based index among parser-recognized top-level forms.
+    pub index: usize,
+    /// Form kind.
+    pub kind: TopLevelFormKind,
+    /// Byte span of the parsed form, excluding leading/trailing trivia.
+    pub span: Span,
+}
+
 impl SessionArtifacts {
     /// Returns stable artifact reports for this compilation.
     #[must_use]
@@ -1012,6 +1037,15 @@ impl SessionArtifacts {
     #[must_use]
     pub fn dispatch_sites(&self) -> Vec<DispatchSiteRecord> {
         collect_dispatch_sites(self)
+    }
+
+    /// Returns parser-recognized top-level source forms in source order.
+    ///
+    /// These spans come from the compiler's CST, so tools can anchor their
+    /// source-buffer views to parser facts rather than rescanning source text.
+    #[must_use]
+    pub fn top_level_forms(&self) -> Vec<TopLevelFormSpan> {
+        collect_top_level_forms(&self.syntax)
     }
 
     /// Returns the live EOP mutation log in application order.
@@ -4311,6 +4345,33 @@ fn dump_syntax(tree: &SyntaxTree) -> String {
     let _ = writeln!(out, "syntax {} ({})", tree.source_file, tree.source.len());
     dump_cst_node(&mut out, tree, &tree.root, 0);
     out
+}
+
+fn collect_top_level_forms(tree: &SyntaxTree) -> Vec<TopLevelFormSpan> {
+    tree.root
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            CstElement::Node(node) => top_level_form_kind(node.kind).map(|kind| (kind, node)),
+            CstElement::Token(_) => None,
+        })
+        .enumerate()
+        .map(|(index, (kind, node))| TopLevelFormSpan {
+            index,
+            kind,
+            span: node.span,
+        })
+        .collect()
+}
+
+fn top_level_form_kind(kind: crate::syntax::CstKind) -> Option<TopLevelFormKind> {
+    match kind {
+        crate::syntax::CstKind::Class => Some(TopLevelFormKind::Class),
+        crate::syntax::CstKind::Generic => Some(TopLevelFormKind::Generic),
+        crate::syntax::CstKind::Method => Some(TopLevelFormKind::Method),
+        crate::syntax::CstKind::Function => Some(TopLevelFormKind::Function),
+        _ => None,
+    }
 }
 
 fn dump_cst_node(out: &mut String, tree: &SyntaxTree, node: &CstNode, indent: usize) {
@@ -8404,6 +8465,43 @@ mod tests {
         for (affordance, name) in names {
             assert_eq!(affordance.as_str(), name);
         }
+    }
+
+    #[test]
+    fn session_reports_top_level_form_spans_from_syntax() {
+        let source = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define generic area(x :: <object>) => <integer>;\n\
+                      define method area(c :: <circle>) => <integer>\n  c.radius\nend\n\
+                      define function main()\n  1\nend\n";
+        let artifacts =
+            CompilerSession::compile_source("forms.loko", source, RuntimeMode::CompileOnly);
+
+        let forms = artifacts.top_level_forms();
+        assert_eq!(
+            forms.iter().map(|form| form.kind).collect::<Vec<_>>(),
+            Vec::from([
+                TopLevelFormKind::Class,
+                TopLevelFormKind::Generic,
+                TopLevelFormKind::Method,
+                TopLevelFormKind::Function,
+            ])
+        );
+        assert_eq!(
+            &artifacts.syntax.source[forms[0].span.start..forms[0].span.end],
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;"
+        );
+        assert_eq!(
+            &artifacts.syntax.source[forms[1].span.start..forms[1].span.end],
+            "define generic area(x :: <object>) => <integer>;"
+        );
+        assert_eq!(
+            &artifacts.syntax.source[forms[2].span.start..forms[2].span.end],
+            "define method area(c :: <circle>) => <integer>\n  c.radius\nend"
+        );
+        assert_eq!(
+            &artifacts.syntax.source[forms[3].span.start..forms[3].span.end],
+            "define function main()\n  1\nend"
+        );
     }
 
     #[test]
