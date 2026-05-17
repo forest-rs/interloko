@@ -936,6 +936,42 @@ pub enum RewindError {
     },
 }
 
+/// Result of replaying a mutation log against a new base source.
+///
+/// Replay is *prefix replay*: entries are applied in order and the loop
+/// stops at the first failure. `applied` contains the entries that
+/// succeeded; `failed` is `Some` iff a later entry would have come next;
+/// `artifacts` is the ephemeral session built from the new base plus the
+/// successfully replayed prefix. The original session is unchanged.
+#[derive(Clone, Debug)]
+pub struct ReplayOutcome {
+    /// Log entries that applied cleanly against the new base, in order.
+    /// Each entry's `mutation_id` is the original id from the source log;
+    /// replay never re-allocates ids.
+    pub applied: Vec<AppliedMutation>,
+    /// First entry that failed to apply, if any. When `None`, the entire
+    /// log replayed cleanly.
+    pub failed: Option<ReplayFailure>,
+    /// Ephemeral session derived from the new base plus the successfully
+    /// replayed prefix. Callers may inspect or adopt it; nothing about the
+    /// original session has changed.
+    pub artifacts: SessionArtifacts,
+}
+
+/// First log entry that failed to replay against a new base source.
+#[derive(Clone, Debug)]
+pub struct ReplayFailure {
+    /// Original `mutation_id` of the failing entry.
+    pub mutation_id: u32,
+    /// Position of the failing entry in the original log.
+    pub log_index: usize,
+    /// Original [`SessionMutation`] request that failed to apply.
+    pub request: SessionMutation,
+    /// Structured cause from the apply path, reusing the same error
+    /// taxonomy that [`SessionArtifacts::apply_mutation`] uses.
+    pub cause: MutationError,
+}
+
 impl SessionArtifacts {
     /// Returns stable artifact reports for this compilation.
     #[must_use]
@@ -1225,11 +1261,30 @@ impl SessionArtifacts {
         &mut self,
         mutation: SessionMutation,
     ) -> Result<MutationOutcome, MutationError> {
+        let mutation_id = self.next_mutation_id;
+        self.apply_session_mutation_with_id(mutation, mutation_id)
+    }
+
+    /// Applies one structured EOP mutation through candidate-and-swap with
+    /// an explicit mutation id.
+    ///
+    /// This is the internal entry point used by both [`Self::apply_mutation`]
+    /// (which supplies `self.next_mutation_id`) and [`Self::replay_against`]
+    /// (which supplies each replayed entry's original id). Replay must
+    /// preserve original ids so the ephemeral session's
+    /// [`sem::MethodOrigin::Session`] markers match the log it was derived
+    /// from; allocating fresh ids during replay would silently break that
+    /// correspondence.
+    fn apply_session_mutation_with_id(
+        &mut self,
+        mutation: SessionMutation,
+        mutation_id: u32,
+    ) -> Result<MutationOutcome, MutationError> {
         let outcome = match &mutation {
             SessionMutation::AddMethod {
                 generic,
                 method_source,
-            } => self.apply_add_method(*generic, method_source)?,
+            } => self.apply_add_method(*generic, method_source, mutation_id)?,
         };
         // The mutation log is the single source of truth for provenance.
         // apply_add_method already swapped in the candidate with the prior
@@ -1247,6 +1302,7 @@ impl SessionArtifacts {
         &mut self,
         generic: sem::GenericFunctionId,
         method_source: &str,
+        mutation_id: u32,
     ) -> Result<MutationOutcome, MutationError> {
         let target_generic = self
             .sem
@@ -1403,12 +1459,12 @@ impl SessionArtifacts {
             return Err(MutationError::RuntimeValidationFailed { error });
         }
 
-        // Mutation ids are stable session event ids: they come from a
-        // monotonic counter, not from the log's current length. After a
-        // rewind that drops the tail, the next id is still
-        // `self.next_mutation_id`; the dropped ids are permanently retired
-        // and never reused.
-        let mutation_id = self.next_mutation_id;
+        // Mutation ids are stable session event ids supplied by the caller
+        // (apply_mutation uses self.next_mutation_id; replay uses each
+        // entry's original id). The next-id counter advances to one past
+        // whichever id is larger, so a normal apply increments by one and
+        // a replay that uses out-of-order historical ids still leaves the
+        // counter strictly above the max ever assigned.
         let new_method_definition = new_method.definition;
         let affected_generic_definition = candidate
             .sem
@@ -1420,17 +1476,20 @@ impl SessionArtifacts {
         let mut new_artifacts = candidate;
 
         // Carry the mutation log forward onto the candidate so the new
-        // entry can be appended (in apply_mutation) after the swap.
+        // entry can be appended (in apply_session_mutation_with_id) after
+        // the swap.
         new_artifacts.mutations = self.mutations.clone();
         // Preserve the pristine source across the rebuild. The candidate's
         // pristine_source was initialized to the composed candidate text;
         // the live session's pristine_source is the rebuild base and must
         // not drift.
         new_artifacts.pristine_source = self.pristine_source.clone();
-        // Advance the stable id counter. apply_mutation appends the new
-        // AppliedMutation entry after the swap; the counter on
-        // new_artifacts already accounts for it.
-        new_artifacts.next_mutation_id = mutation_id + 1;
+        // Advance the stable id counter. apply_session_mutation_with_id
+        // appends the new AppliedMutation entry after the swap; the counter
+        // on new_artifacts already accounts for it. max() against
+        // self.next_mutation_id ensures replay's out-of-order ids do not
+        // accidentally roll the counter backward.
+        new_artifacts.next_mutation_id = self.next_mutation_id.max(mutation_id.saturating_add(1));
 
         // The candidate compile parses prior session-inserted methods out of
         // the appended source as ordinary source-origin definitions, which
@@ -1589,6 +1648,67 @@ impl SessionArtifacts {
             dropped,
             recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
         })
+    }
+
+    /// Replays this session's mutation log against a new base source,
+    /// returning the resulting ephemeral session and a per-entry report.
+    ///
+    /// Replay is prefix replay: log entries are applied in order, using
+    /// each entry's *original* mutation id (so the ephemeral session's
+    /// [`sem::MethodOrigin::Session`] markers match the original log),
+    /// and the loop stops at the first failure. The returned
+    /// [`ReplayOutcome`] carries the successfully applied entries, the
+    /// failure (if any), and the ephemeral artifacts the caller may
+    /// adopt.
+    ///
+    /// This method does not mutate `self`. The original session's log,
+    /// pristine source, and artifacts are byte-for-byte unchanged
+    /// regardless of replay outcome.
+    ///
+    /// `replay_against` deliberately does not silently skip failed entries.
+    /// Skip-failed replay would change the meaning of a transcript
+    /// ("this log applies modulo these gaps"); it can land later as an
+    /// explicit named mode.
+    #[must_use]
+    pub fn replay_against(&self, new_source: &SourceFile) -> ReplayOutcome {
+        let mut ephemeral = compile_file_with_registries(
+            new_source,
+            RuntimeMode::CompileOnly,
+            self.grammar_registry,
+            &self.host_registry,
+        );
+
+        let mut applied: Vec<AppliedMutation> = Vec::new();
+        let mut failed: Option<ReplayFailure> = None;
+
+        for (log_index, entry) in self.mutations.iter().enumerate() {
+            let request = entry.request.clone();
+            match ephemeral.apply_session_mutation_with_id(request.clone(), entry.mutation_id) {
+                Ok(_outcome) => {
+                    // The ephemeral session's mutations vector just gained
+                    // the new entry; mirror it into `applied` so callers
+                    // do not need to dig into artifacts.mutations().
+                    if let Some(last) = ephemeral.mutations.last() {
+                        applied.push(last.clone());
+                    }
+                }
+                Err(cause) => {
+                    failed = Some(ReplayFailure {
+                        mutation_id: entry.mutation_id,
+                        log_index,
+                        request,
+                        cause,
+                    });
+                    break;
+                }
+            }
+        }
+
+        ReplayOutcome {
+            applied,
+            failed,
+            artifacts: ephemeral,
+        }
     }
 }
 
@@ -10789,6 +10909,378 @@ end;
             })
             .collect();
         assert_eq!(mutation_ids, Vec::from(["mutation:m0".to_string()]));
+    }
+
+    fn build_source_file(text: &str) -> SourceFile {
+        SourceFile::named("mutation_fixture.loko", text)
+    }
+
+    fn fixture_with_two_session_mutations() -> SessionArtifacts {
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        artifacts
+    }
+
+    #[test]
+    fn replay_against_pristine_base_reproduces_full_log_and_dispatch() {
+        let artifacts = fixture_with_two_session_mutations();
+        let pristine = build_source_file(&artifacts.pristine_source);
+        let snapshot_log = artifacts.mutations().to_vec();
+        let snapshot_sem_methods = artifacts.sem.methods.clone();
+
+        let outcome = artifacts.replay_against(&pristine);
+
+        assert!(
+            outcome.failed.is_none(),
+            "replay against pristine should succeed: {:?}",
+            outcome.failed
+        );
+        assert_eq!(outcome.applied.len(), 2);
+        assert_eq!(outcome.applied[0].mutation_id, 0);
+        assert_eq!(outcome.applied[1].mutation_id, 1);
+
+        // Original session is unchanged.
+        assert_eq!(artifacts.mutations(), snapshot_log.as_slice());
+        assert_eq!(artifacts.sem.methods, snapshot_sem_methods);
+
+        // Ephemeral artifacts reproduce dispatch behavior.
+        let square = outcome.artifacts.run_zero_arg_function_i64("score_square");
+        assert!(matches!(square, FunctionRunResult::ReturnedI64(49)));
+        let triangle = outcome
+            .artifacts
+            .run_zero_arg_function_i64("score_triangle");
+        assert!(matches!(triangle, FunctionRunResult::ReturnedI64(81)));
+    }
+
+    #[test]
+    fn replay_against_harmless_base_edit_still_replays_full_log() {
+        let artifacts = fixture_with_two_session_mutations();
+        // Add an unrelated function and a comment to the base. Neither
+        // affects the mutations' targets.
+        let edited = format!(
+            "{}\n\n// harmless\n\ndefine function answer()\n  42\nend;\n",
+            artifacts.pristine_source
+        );
+        let new_base = build_source_file(&edited);
+
+        let outcome = artifacts.replay_against(&new_base);
+
+        assert!(
+            outcome.failed.is_none(),
+            "harmless edit should still replay: {:?}",
+            outcome.failed
+        );
+        assert_eq!(outcome.applied.len(), 2);
+
+        let square = outcome.artifacts.run_zero_arg_function_i64("score_square");
+        assert!(matches!(square, FunctionRunResult::ReturnedI64(49)));
+        let triangle = outcome
+            .artifacts
+            .run_zero_arg_function_i64("score_triangle");
+        assert!(matches!(triangle, FunctionRunResult::ReturnedI64(81)));
+        // The unrelated function is reachable on the ephemeral artifacts.
+        let answer = outcome.artifacts.run_zero_arg_function_i64("answer");
+        assert!(matches!(answer, FunctionRunResult::ReturnedI64(42)));
+    }
+
+    #[test]
+    fn replay_against_base_without_target_generic_fails_at_first_mutation() {
+        let artifacts = fixture_with_two_session_mutations();
+        // New base has no classes and no generics; sem.generics is empty,
+        // so the original GenericFunctionId(0) is out of range. (Leaving
+        // the fixture's classes in would synthesize setter generics that
+        // occupy id 0, turning this into the GenericNameMismatch case
+        // covered by the swap-name test below.)
+        let new_text = "\
+define function noop()
+  0
+end;
+";
+        let new_base = build_source_file(new_text);
+        let snapshot_log = artifacts.mutations().to_vec();
+
+        let outcome = artifacts.replay_against(&new_base);
+
+        let failure = outcome
+            .failed
+            .expect("removed-generic base should surface a replay failure");
+        // First mutation targets the area generic; with area gone, the
+        // first entry fails. mutation_id 0, log_index 0, cause is
+        // UnknownGeneric because the original GenericFunctionId no
+        // longer resolves in the new base's sem module.
+        assert_eq!(failure.mutation_id, 0);
+        assert_eq!(failure.log_index, 0);
+        assert!(
+            matches!(failure.cause, MutationError::UnknownGeneric { .. }),
+            "expected UnknownGeneric, got {:?}",
+            failure.cause
+        );
+        assert!(outcome.applied.is_empty());
+
+        // Original session is unchanged after the failed replay.
+        assert_eq!(artifacts.mutations(), snapshot_log.as_slice());
+    }
+
+    #[test]
+    fn replay_against_base_with_reordered_generic_id_fails_with_name_mismatch() {
+        // Construct a new base where the area generic is still present but
+        // a fresh generic `score` is declared before it, pushing area to
+        // id 1. The replay still carries the original
+        // GenericFunctionId(0) on each entry; in the new sem id 0 is now
+        // `score`, while the method source resolves `area` to id 1.
+        // 1 != 0 triggers GenericNameMismatch, which is the right
+        // failure to surface: a silent application onto whatever generic
+        // happens to sit at id 0 would be a worse outcome than a
+        // structured "you reordered generics; replay can't tell whether
+        // you meant the old id or the same-named one" error.
+        let artifacts = fixture_with_two_session_mutations();
+        let new_text = "\
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define class <triangle> (<object>)
+  slot base :: <integer>;
+end;
+
+define generic score(x);
+
+define generic area(x);
+
+define method score(c :: <circle>)
+  c.radius
+end;
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+";
+        let new_base = build_source_file(new_text);
+
+        let outcome = artifacts.replay_against(&new_base);
+
+        let failure = outcome
+            .failed
+            .expect("reordered-generic base should surface a replay failure");
+        assert_eq!(failure.mutation_id, 0);
+        assert_eq!(failure.log_index, 0);
+        match &failure.cause {
+            MutationError::GenericNameMismatch {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected, "score");
+                assert_eq!(actual, "area");
+            }
+            other => panic!("expected GenericNameMismatch, got {other:?}"),
+        }
+        assert!(outcome.applied.is_empty());
+    }
+
+    #[test]
+    fn replay_against_base_without_specializer_class_fails_at_second_mutation() {
+        let artifacts = fixture_with_two_session_mutations();
+        // New base removes the <triangle> class. The first mutation
+        // (area on <square>) still applies; the second (area on
+        // <triangle>) does not.
+        let new_text = "\
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define function score_circle()
+  area(make(<circle>, radius: 10))
+end;
+
+define function score_square()
+  area(make(<square>, side: 7))
+end;
+";
+        let new_base = build_source_file(new_text);
+        let snapshot_log = artifacts.mutations().to_vec();
+
+        let outcome = artifacts.replay_against(&new_base);
+
+        let failure = outcome
+            .failed
+            .expect("removed-class base should surface a replay failure");
+        assert_eq!(failure.mutation_id, 1);
+        assert_eq!(failure.log_index, 1);
+        // Cause is SemanticFailed and carries an UnresolvedClass
+        // diagnostic naming the missing <triangle> class. The error
+        // taxonomy is the valuable part of replay: callers can
+        // distinguish "this generic is gone" from "this class is gone"
+        // without parsing diagnostic prose.
+        match &failure.cause {
+            MutationError::SemanticFailed { diagnostics } => {
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|d| d.code == DiagnosticCode::UnresolvedClass),
+                    "expected UnresolvedClass diagnostic, got {:?}",
+                    diagnostics.iter().map(|d| d.code).collect::<Vec<_>>()
+                );
+            }
+            other => panic!("expected SemanticFailed, got {other:?}"),
+        }
+        // The first mutation succeeded against the edited base.
+        assert_eq!(outcome.applied.len(), 1);
+        assert_eq!(outcome.applied[0].mutation_id, 0);
+
+        // The ephemeral session has the first mutation applied; dispatch
+        // for square works there even though the original session is
+        // unchanged.
+        let square = outcome.artifacts.run_zero_arg_function_i64("score_square");
+        assert!(matches!(square, FunctionRunResult::ReturnedI64(49)));
+
+        assert_eq!(artifacts.mutations(), snapshot_log.as_slice());
+    }
+
+    #[test]
+    fn replay_against_base_that_already_defines_square_method_fails_with_duplicate() {
+        // The session's mutation log adds area(<square>) at id 0. If the
+        // replay's new base already defines area(<square>) as a source
+        // method, the replayed entry collides with the pre-existing
+        // method on the same specializer vector. The apply path surfaces
+        // DuplicateSpecializer, and replay must propagate that cause
+        // unchanged - the error taxonomy is the load-bearing part of
+        // replay, and DuplicateSpecializer is listed in eop_mutation.md
+        // as a concrete replay failure mode.
+        let artifacts = fixture_with_two_session_mutations();
+        let new_text = "\
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define class <triangle> (<object>)
+  slot base :: <integer>;
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  c.radius * c.radius
+end;
+
+define method area(s :: <square>)
+  s.side + 1
+end;
+";
+        let new_base = build_source_file(new_text);
+        let snapshot_log = artifacts.mutations().to_vec();
+
+        let outcome = artifacts.replay_against(&new_base);
+
+        let failure = outcome
+            .failed
+            .expect("duplicate-square base should surface a replay failure");
+        assert_eq!(failure.mutation_id, 0);
+        assert_eq!(failure.log_index, 0);
+        assert!(
+            matches!(failure.cause, MutationError::DuplicateSpecializer { .. }),
+            "expected DuplicateSpecializer, got {:?}",
+            failure.cause
+        );
+        assert!(outcome.applied.is_empty());
+        assert_eq!(artifacts.mutations(), snapshot_log.as_slice());
+    }
+
+    #[test]
+    fn replay_preserves_original_mutation_ids_and_finalizes_next_id_counter() {
+        // Apply two mutations, rewind to the first, apply a third. The
+        // live log is [id 0, id 2] with a gap at id 1 (the rewind dropped
+        // id 1; the post-rewind apply got id 2 from the preserved
+        // counter).
+        let mut artifacts = mutation_fixture();
+        let area = generic_id(&artifacts, "area");
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_SQUARE_METHOD.into(),
+            })
+            .expect("first mutation should succeed");
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("second mutation should succeed");
+        artifacts.rewind_to(Some(0)).expect("rewind should succeed");
+        let next = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: MUTATION_TRIANGLE_METHOD.into(),
+            })
+            .expect("post-rewind mutation should succeed");
+        assert_eq!(next.mutation_id, 2);
+        let log_ids: Vec<u32> = artifacts
+            .mutations()
+            .iter()
+            .map(|entry| entry.mutation_id)
+            .collect();
+        assert_eq!(log_ids, Vec::from([0u32, 2u32]));
+
+        // Replay against the pristine base. The replayed log should
+        // preserve the same ids (0 and 2), not reassign sequential ids.
+        let pristine = build_source_file(&artifacts.pristine_source);
+        let outcome = artifacts.replay_against(&pristine);
+
+        assert!(
+            outcome.failed.is_none(),
+            "pristine replay should succeed: {:?}",
+            outcome.failed
+        );
+        let replayed_ids: Vec<u32> = outcome
+            .applied
+            .iter()
+            .map(|entry| entry.mutation_id)
+            .collect();
+        assert_eq!(replayed_ids, Vec::from([0u32, 2u32]));
+        let ephemeral_ids: Vec<u32> = outcome
+            .artifacts
+            .mutations()
+            .iter()
+            .map(|entry| entry.mutation_id)
+            .collect();
+        assert_eq!(ephemeral_ids, Vec::from([0u32, 2u32]));
+
+        // The ephemeral session's next-id counter is finalized to
+        // max(applied_ids) + 1 = 3, not retained_count = 2. A subsequent
+        // apply on the adopted artifacts would therefore get id 3; this
+        // test asserts the counter directly to avoid having to invent a
+        // fresh mutation that does not collide with the replayed log
+        // (all three classes' area methods are already present, so any
+        // ordinary apply on the area generic would be rejected).
+        assert_eq!(outcome.artifacts.next_mutation_id, 3);
     }
 
     #[test]
