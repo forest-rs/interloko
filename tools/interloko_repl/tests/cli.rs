@@ -197,6 +197,7 @@ fn unknown_source_form_ids_report_unknown_form() {
 fn invoke_runs_supported_environment_object_affordances() {
     let (stdout, stderr) = run_repl(
         "define function answer()\n  42\nend;\n\
+         define function other()\n  7\nend;\n\
          :invoke function:f0 inspect\n\
          :invoke function:f0 dump-sem\n\
          :invoke function:f0 show-dependencies\n\
@@ -206,7 +207,9 @@ fn invoke_runs_supported_environment_object_affordances() {
 
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("object function:f0"));
-    assert!(stdout.contains("sem "));
+    assert!(stdout.contains("sem object function:f0"));
+    assert!(stdout.contains("name: answer"));
+    assert!(!stdout.contains("name: other"), "{stdout}");
     assert!(stdout.contains("artifact graph"));
     assert!(stdout.lines().any(|line| line == "42"));
 }
