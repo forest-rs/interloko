@@ -1026,6 +1026,40 @@ impl SessionArtifacts {
         &self.mutations
     }
 
+    /// Returns the pristine source text fixed at first compile and
+    /// preserved byte-for-byte across every mutation rebuild. This is
+    /// the rebuild base used by `apply_mutation`, `rewind_to`, and
+    /// `replay_against`; durable transcripts persist it as `base.loko`.
+    #[must_use]
+    pub fn pristine_source(&self) -> &str {
+        &self.pristine_source
+    }
+
+    /// Returns the next session event id that would be assigned to a
+    /// fresh `apply_mutation`. Preserved across rewind; may be strictly
+    /// greater than `self.mutations().last().map(|e| e.mutation_id) + 1`
+    /// when a tail of mutations was dropped.
+    #[must_use]
+    pub const fn next_mutation_id(&self) -> u32 {
+        self.next_mutation_id
+    }
+
+    /// Overrides the next mutation id counter.
+    ///
+    /// Used by transcript restore to set the ephemeral session's
+    /// counter to the originating session's recorded high-water mark,
+    /// rather than the `max(applied) + 1` value the replay loop would
+    /// otherwise leave behind. Crate-private because the only honest
+    /// caller is the restore path; an outside caller setting an
+    /// arbitrary counter could silently allow id reuse. Gated on the
+    /// `std` feature because the transcript module that uses it is
+    /// itself `std`-gated, and a default/no-std build would otherwise
+    /// see this as dead code.
+    #[cfg(feature = "std")]
+    pub(crate) fn set_next_mutation_id(&mut self, value: u32) {
+        self.next_mutation_id = value;
+    }
+
     /// Returns one dispatch-site record by friendly selector id.
     #[must_use]
     pub fn dispatch_site(&self, id: &str) -> Option<DispatchSiteRecord> {
@@ -1268,14 +1302,15 @@ impl SessionArtifacts {
     /// Applies one structured EOP mutation through candidate-and-swap with
     /// an explicit mutation id.
     ///
-    /// This is the internal entry point used by both [`Self::apply_mutation`]
-    /// (which supplies `self.next_mutation_id`) and [`Self::replay_against`]
-    /// (which supplies each replayed entry's original id). Replay must
-    /// preserve original ids so the ephemeral session's
-    /// [`sem::MethodOrigin::Session`] markers match the log it was derived
-    /// from; allocating fresh ids during replay would silently break that
-    /// correspondence.
-    fn apply_session_mutation_with_id(
+    /// This is the internal entry point used by [`Self::apply_mutation`]
+    /// (which supplies `self.next_mutation_id`), [`Self::replay_against`]
+    /// (which supplies each replayed entry's original id), and the
+    /// transcript restore path (which supplies each persisted event's
+    /// recorded id). Replay must preserve original ids so the ephemeral
+    /// session's [`sem::MethodOrigin::Session`] markers match the log it
+    /// was derived from; allocating fresh ids during replay would
+    /// silently break that correspondence.
+    pub(crate) fn apply_session_mutation_with_id(
         &mut self,
         mutation: SessionMutation,
         mutation_id: u32,
@@ -3895,7 +3930,7 @@ fn compile_file_with_host_registry(
     compile_file_with_registries(file, mode, GrammarFrontendRegistry::builtin(), registry)
 }
 
-fn compile_file_with_registries(
+pub(crate) fn compile_file_with_registries(
     file: &SourceFile,
     mode: RuntimeMode,
     grammar_registry: GrammarFrontendRegistry,

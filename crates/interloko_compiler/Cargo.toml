@@ -7,13 +7,18 @@ description = "Milestone-0 Interloko compiler frontend prototype."
 
 [features]
 default = []
-std = []
+std = ["dep:serde", "dep:toml"]
 
 [dependencies]
 execution_tape = { path = "../../../execution/execution_tape" }
 invalidation = { version = "0.2", path = "../../../invalidation/crates/invalidation" }
 interloko_model = { path = "../interloko_model" }
 interloko_runtime = { path = "../interloko_runtime" }
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "0.8", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

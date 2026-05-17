@@ -37,3 +37,8 @@ pub mod source_data;
 pub mod syntax;
 /// `execution_tape` emission.
 pub mod tape;
+/// Durable session transcripts: structured save / open / restore of the
+/// session mutation log. Requires the `std` feature for file I/O and
+/// TOML serialization.
+#[cfg(feature = "std")]
+pub mod transcript;
