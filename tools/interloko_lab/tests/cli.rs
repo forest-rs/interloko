@@ -816,7 +816,7 @@ fn invoke_affordance_runs_read_only_views() {
 
     let sem = run_lab(&["invoke-affordance", path, "method:m0", "dump-sem"]);
     assert!(sem.contains("sem"));
-    assert!(sem.contains("method m0"));
+    assert!(sem.contains("sem object method:m0"));
 
     let grammar_stack = run_lab(&[
         "invoke-affordance",

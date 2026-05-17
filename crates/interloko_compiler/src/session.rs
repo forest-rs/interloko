@@ -1379,6 +1379,28 @@ impl SessionArtifacts {
         }
     }
 
+    /// Dumps one stage for a single projected environment object.
+    ///
+    /// This is the object-scoped counterpart to [`Self::dump_stage`]. Whole
+    /// stage dumps remain available through [`Self::dump_stage`]; this method
+    /// keeps workbench tools from slicing broad text dumps when the user has
+    /// already selected an environment object.
+    #[must_use]
+    pub fn dump_environment_object_stage(
+        &self,
+        object_id: &str,
+        stage: DumpStage,
+    ) -> Option<String> {
+        let object = self
+            .environment_objects()
+            .into_iter()
+            .find(|object| object.id.as_str() == object_id)?;
+        if object.kind == EnvironmentKind::SourceFile {
+            return Some(self.dump_stage(stage));
+        }
+        Some(dump_environment_object_stage(self, &object, stage))
+    }
+
     /// Dumps the MOP dispatch-table section.
     #[must_use]
     pub fn dump_mop_dispatch_table(&self) -> String {
@@ -5962,6 +5984,356 @@ fn render_artifact_facet(artifacts: &ArtifactFacet) -> String {
     out
 }
 
+fn dump_environment_object_stage(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+    stage: DumpStage,
+) -> String {
+    match stage {
+        DumpStage::Sem => dump_sem_environment_object(artifacts, object),
+        DumpStage::Lowered => dump_lowered_environment_object(artifacts, object),
+        DumpStage::Tape => dump_tape_environment_object(artifacts, object),
+        DumpStage::Mop => dump_mop_environment_object(object),
+        DumpStage::Eop => dump_environment_object_record(object),
+        DumpStage::Syntax | DumpStage::Ast => {
+            let mut out = String::new();
+            let _ = writeln!(
+                out,
+                "{} summary {}",
+                dump_stage_name(stage),
+                object.id.as_str()
+            );
+            let _ = writeln!(out, "kind: {}", object.kind.as_str());
+            let _ = writeln!(out, "title: {}", object.presentation.title);
+            let _ = writeln!(out, "source {}", render_source_facet(&object.source));
+            let _ = writeln!(out, "detail: {}", object.inspection.detail);
+            out
+        }
+        DumpStage::All => {
+            let mut out = String::new();
+            for stage in [
+                DumpStage::Syntax,
+                DumpStage::Ast,
+                DumpStage::Sem,
+                DumpStage::Mop,
+                DumpStage::Eop,
+                DumpStage::Lowered,
+                DumpStage::Tape,
+            ] {
+                out.push_str(&dump_environment_object_stage(artifacts, object, stage));
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            out
+        }
+    }
+}
+
+fn dump_sem_environment_object(artifacts: &SessionArtifacts, object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "sem object {}", object.id.as_str());
+    match object.kind {
+        EnvironmentKind::Function => {
+            if let Some(function) = object_index(object.id.as_str(), "function:f")
+                .and_then(|index| artifacts.sem.functions.get(index))
+            {
+                let _ = writeln!(out, "kind: function");
+                let _ = writeln!(out, "name: {}", function.name);
+                let _ = writeln!(out, "definition: {}", function.definition);
+                let _ = writeln!(
+                    out,
+                    "result: {}",
+                    sem_kind_label(&artifacts.sem, function.result_kind)
+                );
+                let _ = writeln!(out, "params:");
+                for local_id in &function.params {
+                    if let Some(local) = function.locals.get(local_id.0 as usize) {
+                        let _ = writeln!(
+                            out,
+                            "  l{} {}: {}",
+                            local.id.0,
+                            local.name,
+                            sem_kind_label(&artifacts.sem, local.kind)
+                        );
+                    }
+                }
+                let _ = writeln!(out, "locals: {}", function.locals.len());
+            } else {
+                dump_environment_object_summary(object, &mut out);
+            }
+        }
+        EnvironmentKind::Method => {
+            if let Some(method) = object_index(object.id.as_str(), "method:m")
+                .and_then(|index| artifacts.sem.methods.get(index))
+            {
+                let generic = artifacts
+                    .sem
+                    .generics
+                    .get(method.generic.0 as usize)
+                    .map_or("<unknown>", |generic| generic.name.as_str());
+                let specializers = method
+                    .specializers
+                    .iter()
+                    .map(|specializer| match specializer {
+                        Some(class) => class_label(&artifacts.sem, *class),
+                        None => "<invalid>".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "kind: method");
+                let _ = writeln!(out, "generic: g{} {generic}", method.generic.0);
+                let _ = writeln!(out, "definition: {}", method.definition);
+                let _ = writeln!(out, "specializers: {specializers}");
+                let _ = writeln!(
+                    out,
+                    "result: {}",
+                    sem_kind_label(&artifacts.sem, method.result_kind)
+                );
+                let _ = writeln!(out, "locals: {}", method.locals.len());
+            } else {
+                dump_environment_object_summary(object, &mut out);
+            }
+        }
+        EnvironmentKind::Generic => {
+            if let Some(generic) = object_index(object.id.as_str(), "generic:g")
+                .and_then(|index| artifacts.sem.generics.get(index))
+            {
+                let _ = writeln!(out, "kind: generic");
+                let _ = writeln!(out, "name: {}", generic.name);
+                let _ = writeln!(out, "definition: {}", generic.definition);
+                let _ = writeln!(out, "arity: {}", generic.arity);
+                let _ = writeln!(
+                    out,
+                    "dispatch-params: {}",
+                    generic
+                        .dispatch_params
+                        .iter()
+                        .map(|index| index.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                let _ = writeln!(out, "params:");
+                for (name, kind) in generic.params.iter().zip(&generic.param_kinds) {
+                    let kind = kind.map_or_else(
+                        || "untyped".to_string(),
+                        |kind| sem_kind_label(&artifacts.sem, kind),
+                    );
+                    let _ = writeln!(out, "  {name}: {kind}");
+                }
+                let _ = writeln!(out, "methods:");
+                for method in artifacts
+                    .sem
+                    .methods
+                    .iter()
+                    .filter(|method| method.generic == generic.id)
+                {
+                    let _ = writeln!(out, "  method:m{}", method.id.0);
+                }
+            } else {
+                dump_environment_object_summary(object, &mut out);
+            }
+        }
+        EnvironmentKind::Class => {
+            if let Some(class) = object_index(object.id.as_str(), "class:c")
+                .and_then(|index| artifacts.sem.classes.get(index))
+            {
+                let _ = writeln!(out, "kind: class");
+                let _ = writeln!(out, "name: {}", class.name);
+                let _ = writeln!(out, "definition: {}", class.definition);
+                let _ = writeln!(
+                    out,
+                    "superclass: {}",
+                    class.superclass.map_or_else(
+                        || "<none>".to_string(),
+                        |id| class_label(&artifacts.sem, id)
+                    )
+                );
+                let _ = writeln!(out, "direct-slots: {}", class.direct_slots.len());
+                for slot in &class.direct_slots {
+                    let _ = writeln!(out, "  s{} {} :: {}", slot.id.0, slot.name, slot.type_name);
+                }
+                let _ = writeln!(out, "effective-slots: {}", class.effective_slots.len());
+                for slot in &class.effective_slots {
+                    let _ = writeln!(out, "  s{} {} :: {}", slot.id.0, slot.name, slot.type_name);
+                }
+            } else {
+                dump_environment_object_summary(object, &mut out);
+            }
+        }
+        EnvironmentKind::DispatchSite => {
+            if let Some(explanation) = artifacts.explain_dispatch_site(object.id.as_str()) {
+                out.push_str(&explanation);
+            } else {
+                dump_environment_object_summary(object, &mut out);
+            }
+        }
+        _ => dump_environment_object_summary(object, &mut out),
+    }
+    out
+}
+
+fn dump_lowered_environment_object(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "lowered object {}", object.id.as_str());
+    let Some(lowered) = &artifacts.lowered else {
+        let _ = writeln!(out, "unavailable: {:?}", artifacts.lower_error);
+        return out;
+    };
+    if let Some(function) = lowered_function_for_object(lowered, object) {
+        let _ = writeln!(out, "fn l{} {}", function.id.0, function.name);
+        let _ = writeln!(out, "kind: {}", lowered_function_kind_label(function.kind));
+        let _ = writeln!(out, "params: {}", function.params.len());
+        let _ = writeln!(out, "locals: {}", function.locals.len());
+        let _ = writeln!(out, "instructions: {}", function.instructions.len());
+    } else {
+        dump_environment_object_summary(object, &mut out);
+    }
+    out
+}
+
+fn dump_tape_environment_object(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "tape object {}", object.id.as_str());
+    let Some(lowered) = &artifacts.lowered else {
+        let _ = writeln!(out, "lowered unavailable: {:?}", artifacts.lower_error);
+        return out;
+    };
+    let Some(tape) = &artifacts.tape else {
+        let _ = writeln!(out, "tape unavailable: {:?}", artifacts.tape_error);
+        return out;
+    };
+    if let Some(function) = lowered_function_for_object(lowered, object) {
+        let tape_function = tape
+            .functions
+            .get(function.id.0 as usize)
+            .map_or("missing".to_string(), |_| {
+                format!("lowered-order-index {}", function.id.0)
+            });
+        let _ = writeln!(
+            out,
+            "lowered-function: l{} {}",
+            function.id.0, function.name
+        );
+        let _ = writeln!(out, "tape-function: {tape_function}");
+        let _ = writeln!(out, "instructions: {}", function.instructions.len());
+    } else {
+        dump_environment_object_summary(object, &mut out);
+    }
+    out
+}
+
+fn dump_mop_environment_object(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "mop object {}", object.id.as_str());
+    let _ = writeln!(out, "kind: {}", object.kind.as_str());
+    let _ = writeln!(out, "meta-class: {}", object.meta_class);
+    let _ = writeln!(out, "origin: {}", object.origin.as_str());
+    let _ = writeln!(out, "storage: {}", object.storage.as_str());
+    let _ = writeln!(out, "source {}", render_source_facet(&object.source));
+    let _ = writeln!(
+        out,
+        "artifacts {}",
+        render_artifact_facet(&object.artifacts)
+    );
+    let _ = writeln!(out, "inspection: {}", object.inspection.detail);
+    out
+}
+
+fn dump_environment_object_record(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "object {}", object.id);
+    let _ = writeln!(out, "kind: {}", object.kind.as_str());
+    let _ = writeln!(out, "class: {}", object.meta_class);
+    let _ = writeln!(out, "origin: {}", object.origin.as_str());
+    let _ = writeln!(out, "storage: {}", object.storage.as_str());
+    let _ = writeln!(out, "presentation:");
+    let _ = writeln!(out, "  title: {}", object.presentation.title);
+    let _ = writeln!(out, "source:");
+    let _ = writeln!(out, "  {}", render_source_facet(&object.source));
+    let _ = writeln!(out, "artifacts:");
+    if object.artifacts.keys.is_empty() {
+        let _ = writeln!(out, "  <none>");
+    } else {
+        for key in &object.artifacts.keys {
+            let _ = writeln!(out, "  {key}");
+        }
+    }
+    let _ = writeln!(out, "affordances:");
+    for affordance in &object.affordances.names {
+        let _ = writeln!(out, "  {}", affordance.as_str());
+    }
+    let _ = writeln!(out, "execution:");
+    if let Some(execution) = &object.execution {
+        let _ = writeln!(out, "  {}", execution.detail);
+    } else {
+        let _ = writeln!(out, "  <none>");
+    }
+    let _ = writeln!(out, "inspection:");
+    let _ = writeln!(out, "  {}", object.inspection.detail);
+    out
+}
+
+fn dump_environment_object_summary(object: &EnvironmentObject, out: &mut String) {
+    let _ = writeln!(out, "kind: {}", object.kind.as_str());
+    let _ = writeln!(out, "title: {}", object.presentation.title);
+    let _ = writeln!(out, "source {}", render_source_facet(&object.source));
+    let _ = writeln!(out, "inspection: {}", object.inspection.detail);
+}
+
+fn lowered_function_for_object<'a>(
+    lowered: &'a lower::Module,
+    object: &EnvironmentObject,
+) -> Option<&'a lower::Function> {
+    let kind = match object.kind {
+        EnvironmentKind::Function => lower::FunctionKind::Function(sem::FunctionId(object_index(
+            object.id.as_str(),
+            "function:f",
+        )?
+            as u32)),
+        EnvironmentKind::Method => lower::FunctionKind::Method(sem::MethodId(object_index(
+            object.id.as_str(),
+            "method:m",
+        )? as u32)),
+        EnvironmentKind::Generic => lower::FunctionKind::Dispatcher(sem::GenericFunctionId(
+            object_index(object.id.as_str(), "generic:g")? as u32,
+        )),
+        _ => return None,
+    };
+    lowered
+        .functions
+        .iter()
+        .find(|function| function.kind == kind)
+}
+
+fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
+    match kind {
+        lower::FunctionKind::Function(id) => format!("function:f{}", id.0),
+        lower::FunctionKind::Method(id) => format!("method:m{}", id.0),
+        lower::FunctionKind::Dispatcher(id) => format!("dispatcher generic:g{}", id.0),
+    }
+}
+
+fn dump_stage_name(stage: DumpStage) -> &'static str {
+    match stage {
+        DumpStage::Syntax => "syntax",
+        DumpStage::Ast => "ast",
+        DumpStage::Sem => "sem",
+        DumpStage::Mop => "mop",
+        DumpStage::Eop => "eop",
+        DumpStage::Lowered => "lowered",
+        DumpStage::Tape => "tape",
+        DumpStage::All => "all",
+    }
+}
+
 fn render_affordances(affordances: &AffordanceFacet) -> String {
     let mut out = String::new();
     for (index, affordance) in affordances.names.iter().enumerate() {
@@ -9660,6 +10032,35 @@ mod tests {
                 .iter()
                 .any(|object| object.kind == EnvironmentKind::Artifact
                     && object.storage == EnvironmentStorage::CachedArtifact)
+        );
+    }
+
+    #[test]
+    fn session_dumps_stages_for_selected_environment_objects() {
+        let artifacts = CompilerSession::compile_source(
+            "functions.loko",
+            "define function answer()\n  42\nend;\n\
+             define function other()\n  7\nend;",
+            RuntimeMode::CompileOnly,
+        );
+
+        let sem = artifacts
+            .dump_environment_object_stage("function:f0", DumpStage::Sem)
+            .expect("function object should dump");
+        assert!(sem.contains("sem object function:f0"));
+        assert!(sem.contains("name: answer"));
+        assert!(!sem.contains("name: other"));
+
+        let lowered = artifacts
+            .dump_environment_object_stage("function:f0", DumpStage::Lowered)
+            .expect("function object should dump lowered");
+        assert!(lowered.contains("lowered object function:f0"));
+        assert!(lowered.contains("kind: function:f0"));
+
+        assert!(
+            artifacts
+                .dump_environment_object_stage("missing:object", DumpStage::Sem)
+                .is_none()
         );
     }
 

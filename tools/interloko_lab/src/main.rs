@@ -601,31 +601,31 @@ fn invoke_affordance(
     ensure_object_has_affordance(&object, affordance)?;
     match affordance {
         EnvironmentAffordance::DumpSyntax => {
-            print!("{}", workbench.dump_stage(DumpStage::Syntax));
+            print_invoked_object_stage(&workbench, object.id.as_str(), DumpStage::Syntax)?;
             Ok(())
         }
         EnvironmentAffordance::DumpAst => {
-            print!("{}", workbench.dump_stage(DumpStage::Ast));
+            print_invoked_object_stage(&workbench, object.id.as_str(), DumpStage::Ast)?;
             Ok(())
         }
         EnvironmentAffordance::DumpSem => {
-            print!("{}", workbench.dump_stage(DumpStage::Sem));
+            print_invoked_object_stage(&workbench, object.id.as_str(), DumpStage::Sem)?;
             Ok(())
         }
         EnvironmentAffordance::DumpMop => {
-            print!("{}", workbench.dump_stage(DumpStage::Mop));
+            print_invoked_object_stage(&workbench, object.id.as_str(), DumpStage::Mop)?;
             Ok(())
         }
         EnvironmentAffordance::DumpEop => {
-            print!("{}", workbench.dump_stage(DumpStage::Eop));
+            print_invoked_object_stage(&workbench, object.id.as_str(), DumpStage::Eop)?;
             Ok(())
         }
         EnvironmentAffordance::DumpLowered => {
-            print!("{}", workbench.dump_stage(DumpStage::Lowered));
+            print_invoked_object_stage(&workbench, object.id.as_str(), DumpStage::Lowered)?;
             Ok(())
         }
         EnvironmentAffordance::DumpTape => {
-            print!("{}", workbench.dump_stage(DumpStage::Tape));
+            print_invoked_object_stage(&workbench, object.id.as_str(), DumpStage::Tape)?;
             Ok(())
         }
         EnvironmentAffordance::ShowSlot => print_linked_object(
@@ -713,6 +713,26 @@ fn dispatch_explanation(artifacts: &SessionArtifacts, dispatch_id: &str) -> Resu
                 .map(|site| site.id.clone())
                 .collect(),
         })
+}
+
+fn print_invoked_object_stage(
+    workbench: &CompiledWorkbench,
+    object_id: &str,
+    stage: DumpStage,
+) -> Result<()> {
+    let dump = workbench
+        .artifacts
+        .dump_environment_object_stage(object_id, stage)
+        .ok_or_else(|| LabError::UnknownObject {
+            id: object_id.into(),
+            available: workbench
+                .environment_objects()
+                .iter()
+                .map(|object| object.id.as_str().to_string())
+                .collect(),
+        })?;
+    print!("{dump}");
+    Ok(())
 }
 
 fn parse_add_method_args(extra: &[String]) -> Result<&str> {

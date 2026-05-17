@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
 use interloko_compiler::identity::SourceFileId;
-use interloko_compiler::lower;
 use interloko_compiler::sem;
 use interloko_compiler::session::{
     DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, FunctionRunResult,
@@ -865,25 +864,25 @@ impl Repl {
                 write!(stdout, "{}", format_environment_object(&object))?
             }
             EnvironmentAffordance::DumpSyntax => {
-                write_object_stage_dump(&artifacts, &object, DumpStage::Syntax, stdout)?
+                write_invoked_object_stage(&artifacts, &object, DumpStage::Syntax, stdout)?
             }
             EnvironmentAffordance::DumpAst => {
-                write_object_stage_dump(&artifacts, &object, DumpStage::Ast, stdout)?
+                write_invoked_object_stage(&artifacts, &object, DumpStage::Ast, stdout)?
             }
             EnvironmentAffordance::DumpSem => {
-                write_object_stage_dump(&artifacts, &object, DumpStage::Sem, stdout)?
+                write_invoked_object_stage(&artifacts, &object, DumpStage::Sem, stdout)?
             }
             EnvironmentAffordance::DumpMop => {
-                write_object_stage_dump(&artifacts, &object, DumpStage::Mop, stdout)?
+                write_invoked_object_stage(&artifacts, &object, DumpStage::Mop, stdout)?
             }
             EnvironmentAffordance::DumpEop => {
-                write_object_stage_dump(&artifacts, &object, DumpStage::Eop, stdout)?
+                write_invoked_object_stage(&artifacts, &object, DumpStage::Eop, stdout)?
             }
             EnvironmentAffordance::DumpLowered => {
-                write_object_stage_dump(&artifacts, &object, DumpStage::Lowered, stdout)?
+                write_invoked_object_stage(&artifacts, &object, DumpStage::Lowered, stdout)?
             }
             EnvironmentAffordance::DumpTape => {
-                write_object_stage_dump(&artifacts, &object, DumpStage::Tape, stdout)?
+                write_invoked_object_stage(&artifacts, &object, DumpStage::Tape, stdout)?
             }
             EnvironmentAffordance::ShowDependencies | EnvironmentAffordance::DumpArtifacts => {
                 write!(stdout, "{}", artifacts.dump_artifact_graph())?
@@ -1616,7 +1615,7 @@ fn function_name_for_object<'a>(
         .map(|function| function.name.as_str())
 }
 
-fn write_object_stage_dump<W>(
+fn write_invoked_object_stage<W>(
     artifacts: &SessionArtifacts,
     object: &EnvironmentObject,
     stage: DumpStage,
@@ -1625,261 +1624,10 @@ fn write_object_stage_dump<W>(
 where
     W: Write,
 {
-    match stage {
-        DumpStage::Sem => write_sem_object_dump(artifacts, object, out)?,
-        DumpStage::Lowered => write_lowered_object_dump(artifacts, object, out)?,
-        DumpStage::Tape => write_tape_object_dump(artifacts, object, out)?,
-        DumpStage::Mop => write_mop_object_dump(object, out)?,
-        DumpStage::Eop => write!(out, "{}", format_environment_object(object))?,
-        DumpStage::Syntax | DumpStage::Ast => {
-            writeln!(
-                out,
-                "{} summary {}",
-                dump_stage_label(stage),
-                object.id.as_str()
-            )?;
-            writeln!(out, "kind: {}", object.kind.as_str())?;
-            writeln!(out, "title: {}", object.presentation.title)?;
-            writeln!(out, "detail: {}", object.inspection.detail)?;
-        }
-        DumpStage::All => {
-            for stage in [
-                DumpStage::Syntax,
-                DumpStage::Ast,
-                DumpStage::Sem,
-                DumpStage::Mop,
-                DumpStage::Eop,
-                DumpStage::Lowered,
-                DumpStage::Tape,
-            ] {
-                write_object_stage_dump(artifacts, object, stage, out)?;
-                writeln!(out)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_sem_object_dump<W>(
-    artifacts: &SessionArtifacts,
-    object: &EnvironmentObject,
-    out: &mut W,
-) -> Result<()>
-where
-    W: Write,
-{
-    writeln!(out, "sem object {}", object.id.as_str())?;
-    match object.kind {
-        EnvironmentKind::Function => {
-            let Some(index) = object_index(object, "function:f") else {
-                return write_object_summary(object, out);
-            };
-            let Some(function) = artifacts.sem.functions.get(index) else {
-                return write_object_summary(object, out);
-            };
-            writeln!(out, "kind: function")?;
-            writeln!(out, "name: {}", function.name)?;
-            writeln!(out, "definition: {}", function.definition)?;
-            writeln!(
-                out,
-                "result: {}",
-                value_kind_label(artifacts, function.result_kind)
-            )?;
-            writeln!(out, "params:")?;
-            for local_id in &function.params {
-                if let Some(local) = function.locals.get(local_id.0 as usize) {
-                    writeln!(
-                        out,
-                        "  l{} {}: {}",
-                        local.id.0,
-                        local.name,
-                        value_kind_label(artifacts, local.kind)
-                    )?;
-                }
-            }
-            writeln!(out, "locals: {}", function.locals.len())?;
-        }
-        EnvironmentKind::Method => {
-            let Some(index) = object_index(object, "method:m") else {
-                return write_object_summary(object, out);
-            };
-            let Some(method) = artifacts.sem.methods.get(index) else {
-                return write_object_summary(object, out);
-            };
-            let generic = artifacts
-                .sem
-                .generics
-                .get(method.generic.0 as usize)
-                .map_or("<unknown>", |generic| generic.name.as_str());
-            let specializers = method
-                .specializers
-                .iter()
-                .map(|specializer| match specializer {
-                    Some(class) => class_label(artifacts, *class),
-                    None => "<invalid>".to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(out, "kind: method")?;
-            writeln!(out, "generic: g{} {generic}", method.generic.0)?;
-            writeln!(out, "definition: {}", method.definition)?;
-            writeln!(out, "specializers: {specializers}")?;
-            writeln!(
-                out,
-                "result: {}",
-                value_kind_label(artifacts, method.result_kind)
-            )?;
-            writeln!(out, "locals: {}", method.locals.len())?;
-        }
-        EnvironmentKind::Generic => {
-            let Some(index) = object_index(object, "generic:g") else {
-                return write_object_summary(object, out);
-            };
-            let Some(generic) = artifacts.sem.generics.get(index) else {
-                return write_object_summary(object, out);
-            };
-            writeln!(out, "kind: generic")?;
-            writeln!(out, "name: {}", generic.name)?;
-            writeln!(out, "definition: {}", generic.definition)?;
-            writeln!(out, "arity: {}", generic.arity)?;
-            writeln!(
-                out,
-                "dispatch-params: {}",
-                generic
-                    .dispatch_params
-                    .iter()
-                    .map(|index| index.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )?;
-            writeln!(out, "params:")?;
-            for (name, kind) in generic.params.iter().zip(&generic.param_kinds) {
-                let kind = kind.map_or("untyped".to_string(), |kind| {
-                    value_kind_label(artifacts, kind)
-                });
-                writeln!(out, "  {name}: {kind}")?;
-            }
-            writeln!(out, "methods:")?;
-            for method in artifacts
-                .sem
-                .methods
-                .iter()
-                .filter(|method| method.generic == generic.id)
-            {
-                writeln!(out, "  method:m{}", method.id.0)?;
-            }
-        }
-        EnvironmentKind::Class => {
-            let Some(index) = object_index(object, "class:c") else {
-                return write_object_summary(object, out);
-            };
-            let Some(class) = artifacts.sem.classes.get(index) else {
-                return write_object_summary(object, out);
-            };
-            writeln!(out, "kind: class")?;
-            writeln!(out, "name: {}", class.name)?;
-            writeln!(out, "definition: {}", class.definition)?;
-            writeln!(
-                out,
-                "superclass: {}",
-                class
-                    .superclass
-                    .map_or_else(|| "<none>".to_string(), |id| class_label(artifacts, id))
-            )?;
-            writeln!(out, "direct-slots: {}", class.direct_slots.len())?;
-            for slot in &class.direct_slots {
-                writeln!(out, "  s{} {} :: {}", slot.id.0, slot.name, slot.type_name)?;
-            }
-            writeln!(out, "effective-slots: {}", class.effective_slots.len())?;
-            for slot in &class.effective_slots {
-                writeln!(out, "  s{} {} :: {}", slot.id.0, slot.name, slot.type_name)?;
-            }
-        }
-        EnvironmentKind::Slot | EnvironmentKind::Accessor => write_object_summary(object, out)?,
-        EnvironmentKind::DispatchSite => {
-            if let Some(explanation) = artifacts.explain_dispatch_site(object.id.as_str()) {
-                write!(out, "{explanation}")?;
-            } else {
-                write_object_summary(object, out)?;
-            }
-        }
-        _ => write_object_summary(object, out)?,
-    }
-    Ok(())
-}
-
-fn write_lowered_object_dump<W>(
-    artifacts: &SessionArtifacts,
-    object: &EnvironmentObject,
-    out: &mut W,
-) -> Result<()>
-where
-    W: Write,
-{
-    writeln!(out, "lowered object {}", object.id.as_str())?;
-    let Some(lowered) = &artifacts.lowered else {
-        writeln!(out, "unavailable: {:?}", artifacts.lower_error)?;
-        return Ok(());
-    };
-    if let Some(function) = lowered_function_for_object(lowered, object) {
-        writeln!(out, "fn l{} {}", function.id.0, function.name)?;
-        writeln!(out, "kind: {}", lowered_function_kind_label(function.kind))?;
-        writeln!(out, "params: {}", function.params.len())?;
-        writeln!(out, "locals: {}", function.locals.len())?;
-        writeln!(out, "instructions: {}", function.instructions.len())?;
-    } else {
-        write_object_summary(object, out)?;
-    }
-    Ok(())
-}
-
-fn write_tape_object_dump<W>(
-    artifacts: &SessionArtifacts,
-    object: &EnvironmentObject,
-    out: &mut W,
-) -> Result<()>
-where
-    W: Write,
-{
-    writeln!(out, "tape object {}", object.id.as_str())?;
-    let Some(lowered) = &artifacts.lowered else {
-        writeln!(out, "lowered unavailable: {:?}", artifacts.lower_error)?;
-        return Ok(());
-    };
-    let Some(tape) = &artifacts.tape else {
-        writeln!(out, "tape unavailable: {:?}", artifacts.tape_error)?;
-        return Ok(());
-    };
-    if let Some(function) = lowered_function_for_object(lowered, object) {
-        let tape_function = tape
-            .functions
-            .get(function.id.0 as usize)
-            .map_or("missing".to_string(), |_| {
-                format!("lowered-order-index {}", function.id.0)
-            });
-        writeln!(
-            out,
-            "lowered-function: l{} {}",
-            function.id.0, function.name
-        )?;
-        writeln!(out, "tape-function: {tape_function}")?;
-        writeln!(out, "instructions: {}", function.instructions.len())?;
-    } else {
-        write_object_summary(object, out)?;
-    }
-    Ok(())
-}
-
-fn write_mop_object_dump<W>(object: &EnvironmentObject, out: &mut W) -> Result<()>
-where
-    W: Write,
-{
-    writeln!(out, "mop object {}", object.id.as_str())?;
-    writeln!(out, "kind: {}", object.kind.as_str())?;
-    writeln!(out, "meta-class: {}", object.meta_class)?;
-    writeln!(out, "origin: {}", object.origin.as_str())?;
-    writeln!(out, "storage: {}", object.storage.as_str())?;
-    writeln!(out, "inspection: {}", object.inspection.detail)?;
+    let dump = artifacts
+        .dump_environment_object_stage(object.id.as_str(), stage)
+        .unwrap_or_else(|| format!("unknown object `{}`\n", object.id.as_str()));
+    write!(out, "{dump}")?;
     Ok(())
 }
 
@@ -1960,70 +1708,8 @@ where
     Ok(())
 }
 
-fn write_object_summary<W>(object: &EnvironmentObject, out: &mut W) -> Result<()>
-where
-    W: Write,
-{
-    writeln!(out, "kind: {}", object.kind.as_str())?;
-    writeln!(out, "title: {}", object.presentation.title)?;
-    writeln!(out, "inspection: {}", object.inspection.detail)?;
-    Ok(())
-}
-
-fn lowered_function_for_object<'a>(
-    lowered: &'a lower::Module,
-    object: &EnvironmentObject,
-) -> Option<&'a lower::Function> {
-    let kind =
-        match object.kind {
-            EnvironmentKind::Function => lower::FunctionKind::Function(sem::FunctionId(
-                object_index(object, "function:f")? as u32,
-            )),
-            EnvironmentKind::Method => {
-                lower::FunctionKind::Method(sem::MethodId(object_index(object, "method:m")? as u32))
-            }
-            EnvironmentKind::Generic => lower::FunctionKind::Dispatcher(sem::GenericFunctionId(
-                object_index(object, "generic:g")? as u32,
-            )),
-            _ => return None,
-        };
-    lowered
-        .functions
-        .iter()
-        .find(|function| function.kind == kind)
-}
-
-fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
-    match kind {
-        lower::FunctionKind::Function(id) => format!("function:f{}", id.0),
-        lower::FunctionKind::Method(id) => format!("method:m{}", id.0),
-        lower::FunctionKind::Dispatcher(id) => format!("dispatcher generic:g{}", id.0),
-    }
-}
-
 fn object_index(object: &EnvironmentObject, prefix: &str) -> Option<usize> {
     object.id.as_str().strip_prefix(prefix)?.parse().ok()
-}
-
-fn dump_stage_label(stage: DumpStage) -> &'static str {
-    match stage {
-        DumpStage::Syntax => "syntax",
-        DumpStage::Ast => "ast",
-        DumpStage::Sem => "sem",
-        DumpStage::Mop => "mop",
-        DumpStage::Eop => "eop",
-        DumpStage::Lowered => "lowered",
-        DumpStage::Tape => "tape",
-        DumpStage::All => "all",
-    }
-}
-
-fn class_label(artifacts: &SessionArtifacts, id: sem::ClassId) -> String {
-    artifacts
-        .sem
-        .classes
-        .get(id.0 as usize)
-        .map_or_else(|| format!("c{}", id.0), |class| class.name.clone())
 }
 
 fn slot_allocation_label(allocation: sem::SlotAllocation) -> &'static str {
@@ -2036,31 +1722,6 @@ fn slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
     match mutability {
         sem::SlotMutability::Mutable => "mutable",
         sem::SlotMutability::Constant => "constant",
-    }
-}
-
-fn value_kind_label(artifacts: &SessionArtifacts, kind: sem::ValueKind) -> String {
-    match kind {
-        sem::ValueKind::Any => "<object>".to_string(),
-        sem::ValueKind::I64 => "<integer>".to_string(),
-        sem::ValueKind::Bool => "<boolean>".to_string(),
-        sem::ValueKind::String(class)
-        | sem::ValueKind::Symbol(class)
-        | sem::ValueKind::Vector(class)
-        | sem::ValueKind::Object(class)
-        | sem::ValueKind::ClassObject(class) => class_label(artifacts, class),
-        sem::ValueKind::GenericFunctionObject(generic) => {
-            artifacts.sem.generics.get(generic.0 as usize).map_or_else(
-                || format!("generic:g{}", generic.0),
-                |generic| generic.name.clone(),
-            )
-        }
-        sem::ValueKind::MethodObject(method) => format!("method:m{}", method.0),
-        sem::ValueKind::SlotDescriptorObject { class, slot } => {
-            format!("slot:{} s{}", class_label(artifacts, class), slot.0)
-        }
-        sem::ValueKind::KnownCallable(callable) => format!("{callable:?}"),
-        sem::ValueKind::Error => "<error>".to_string(),
     }
 }
 
