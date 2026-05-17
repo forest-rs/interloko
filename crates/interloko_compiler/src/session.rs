@@ -634,6 +634,56 @@ impl PresentationFacet {
     }
 }
 
+/// Source provenance carried by an environment object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFacet {
+    /// Source file that owns the source span, when the object is source-backed.
+    pub source_file: Option<SourceFileId>,
+    /// Stable source definition identity, when the object corresponds to one
+    /// definition.
+    pub definition: Option<DefinitionId>,
+    /// Source span for this object, when the projection can identify one
+    /// directly.
+    pub span: Option<Span>,
+}
+
+impl SourceFacet {
+    /// Creates a source facet.
+    #[must_use]
+    pub const fn new(
+        source_file: Option<SourceFileId>,
+        definition: Option<DefinitionId>,
+        span: Option<Span>,
+    ) -> Self {
+        Self {
+            source_file,
+            definition,
+            span,
+        }
+    }
+
+    /// Creates an empty source facet for objects without source provenance.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self::new(None, None, None)
+    }
+}
+
+/// Query artifacts related to an environment object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactFacet {
+    /// Stable artifact keys related to this object.
+    pub keys: Vec<ArtifactKey>,
+}
+
+impl ArtifactFacet {
+    /// Creates an artifact facet.
+    #[must_use]
+    pub fn new(keys: Vec<ArtifactKey>) -> Self {
+        Self { keys }
+    }
+}
+
 /// Action names exposed by an environment object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AffordanceFacet {
@@ -704,6 +754,10 @@ pub struct EnvironmentObject {
     pub storage: EnvironmentStorage,
     /// Presentation hints.
     pub presentation: PresentationFacet,
+    /// Source provenance.
+    pub source: SourceFacet,
+    /// Related compiler artifacts.
+    pub artifacts: ArtifactFacet,
     /// Supported environment actions.
     pub affordances: AffordanceFacet,
     /// Executable behavior summary, when applicable.
@@ -5858,6 +5912,12 @@ fn render_environment_objects(source: &SourceFile, objects: &[EnvironmentObject]
             "    presentation title=\"{}\"",
             object.presentation.title
         );
+        let _ = writeln!(out, "    source {}", render_source_facet(&object.source));
+        let _ = writeln!(
+            out,
+            "    artifacts {}",
+            render_artifact_facet(&object.artifacts)
+        );
         let _ = writeln!(
             out,
             "    affordances {}",
@@ -5868,6 +5928,37 @@ fn render_environment_objects(source: &SourceFile, objects: &[EnvironmentObject]
         }
         let _ = writeln!(out, "    inspection {}", object.inspection.detail);
     }
+    out
+}
+
+fn render_source_facet(source: &SourceFacet) -> String {
+    let source_file = source.source_file.map_or_else(
+        || "<none>".to_string(),
+        |source_file| source_file.to_string(),
+    );
+    let definition = source
+        .definition
+        .map_or_else(|| "<none>".to_string(), |definition| definition.to_string());
+    let span = source.span.map_or_else(
+        || "<none>".to_string(),
+        |span| format!("{}..{}", span.start, span.end),
+    );
+    format!("file={source_file} definition={definition} span={span}")
+}
+
+fn render_artifact_facet(artifacts: &ArtifactFacet) -> String {
+    if artifacts.keys.is_empty() {
+        return "[]".into();
+    }
+    let mut out = String::new();
+    out.push('[');
+    for (index, key) in artifacts.keys.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{key}");
+    }
+    out.push(']');
     out
 }
 
@@ -5935,17 +6026,24 @@ fn environment_object(parts: EnvironmentObjectParts) -> EnvironmentObject {
         origin: parts.origin,
         storage: parts.storage,
         presentation: PresentationFacet::new(parts.title),
+        source: SourceFacet::none(),
+        artifacts: ArtifactFacet::new(Vec::new()),
         affordances: AffordanceFacet::new(parts.affordances),
         execution: parts.execution.map(ExecutionFacet::new),
         inspection: InspectionFacet::new(parts.inspection),
     }
 }
 
-fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
+fn project_session_environment(
+    artifacts: &SessionArtifacts,
+    output: &mut dyn EnvironmentObjectSink,
+) {
     use EnvironmentAffordance as Aff;
 
     let module = &artifacts.sem;
     let runtime = runtime_bridge::runtime_layout_from_sem(module);
+    let mut objects = Vec::new();
+    let sink: &mut dyn EnvironmentObjectSink = &mut objects;
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("source:{}", artifacts.source.id),
         kind: EnvironmentKind::SourceFile,
@@ -6034,6 +6132,189 @@ fn project_session_environment(artifacts: &SessionArtifacts, sink: &mut dyn Envi
             inspection: format!("key={} artifact={artifact}", report.key),
         }));
     }
+    for mut object in objects {
+        enrich_environment_object(artifacts, &mut object);
+        output.emit(object);
+    }
+}
+
+fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut EnvironmentObject) {
+    let source_file = artifacts.source.id;
+    match object.kind {
+        EnvironmentKind::SourceFile => {
+            object.source = SourceFacet::new(
+                Some(source_file),
+                None,
+                Some(Span::new(0, artifacts.source.source.len())),
+            );
+            object.artifacts = artifact_facet(source_file, &[QueryArtifact::Source]);
+        }
+        EnvironmentKind::Class => {
+            if let Some(class) = object_index(object.id.as_str(), "class:c")
+                .and_then(|index| artifacts.sem.classes.get(index))
+            {
+                object.source =
+                    SourceFacet::new(Some(source_file), Some(class.definition), Some(class.span));
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[
+                        QueryArtifact::Bind,
+                        QueryArtifact::LoweredModule,
+                        QueryArtifact::TapeProgram,
+                    ],
+                );
+            }
+        }
+        EnvironmentKind::Slot | EnvironmentKind::Accessor => {
+            if let Some((class_index, slot_index)) = slot_object_indices(object.id.as_str())
+                && let Some(slot) = artifacts
+                    .sem
+                    .classes
+                    .get(class_index)
+                    .and_then(|class| class.effective_slots.get(slot_index))
+            {
+                object.source =
+                    SourceFacet::new(Some(source_file), Some(slot.definition), Some(slot.span));
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[
+                        QueryArtifact::Bind,
+                        QueryArtifact::LoweredModule,
+                        QueryArtifact::TapeProgram,
+                    ],
+                );
+            }
+        }
+        EnvironmentKind::Generic => {
+            if let Some(generic) = object_index(object.id.as_str(), "generic:g")
+                .and_then(|index| artifacts.sem.generics.get(index))
+            {
+                object.source = SourceFacet::new(
+                    Some(source_file),
+                    Some(generic.definition),
+                    Some(generic.span),
+                );
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[
+                        QueryArtifact::Bind,
+                        QueryArtifact::GenericDispatcher(generic.definition),
+                        QueryArtifact::LoweredModule,
+                        QueryArtifact::TapeProgram,
+                    ],
+                );
+            }
+        }
+        EnvironmentKind::Method => {
+            if let Some(method) = object_index(object.id.as_str(), "method:m")
+                .and_then(|index| artifacts.sem.methods.get(index))
+            {
+                object.source = SourceFacet::new(
+                    Some(source_file),
+                    Some(method.definition),
+                    Some(method.span),
+                );
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[
+                        QueryArtifact::Bind,
+                        QueryArtifact::MethodLookup(method.definition),
+                        QueryArtifact::MethodLowering(method.definition),
+                        QueryArtifact::MethodTape(method.definition),
+                        QueryArtifact::LoweredModule,
+                        QueryArtifact::TapeProgram,
+                    ],
+                );
+            }
+        }
+        EnvironmentKind::Function => {
+            if let Some(function) = object_index(object.id.as_str(), "function:f")
+                .and_then(|index| artifacts.sem.functions.get(index))
+            {
+                object.source = SourceFacet::new(
+                    Some(source_file),
+                    Some(function.definition),
+                    Some(function.span),
+                );
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[
+                        QueryArtifact::Bind,
+                        QueryArtifact::LoweredModule,
+                        QueryArtifact::TapeProgram,
+                        QueryArtifact::RuntimeResult,
+                    ],
+                );
+            }
+        }
+        EnvironmentKind::DispatchSite => {
+            if let Some(site) = artifacts
+                .dispatch_sites()
+                .into_iter()
+                .find(|site| site.id == object.id.as_str())
+            {
+                object.source = SourceFacet::new(
+                    Some(source_file),
+                    Some(site.owner.definition),
+                    Some(site.span),
+                );
+                object.artifacts = ArtifactFacet::new(
+                    site.related_artifacts
+                        .iter()
+                        .map(|report| report.key)
+                        .collect(),
+                );
+            }
+        }
+        EnvironmentKind::Diagnostic => {
+            if let Some(diagnostic) = object_index(object.id.as_str(), "diagnostic:d")
+                .and_then(|index| artifacts.diagnostics.get(index))
+            {
+                object.source = SourceFacet::new(Some(source_file), None, Some(diagnostic.span));
+            }
+            object.artifacts = artifact_facet(source_file, &[QueryArtifact::Diagnostics]);
+        }
+        EnvironmentKind::Artifact => {
+            if let Some(report) = artifacts
+                .artifact_reports()
+                .into_iter()
+                .find(|report| object.id.as_str() == format!("artifact:{}", report.key))
+            {
+                object.artifacts = ArtifactFacet::new(Vec::from([report.key]));
+            }
+        }
+        EnvironmentKind::GrammarActivation | EnvironmentKind::StagedRegion => {
+            object.artifacts = artifact_facet(
+                source_file,
+                &[QueryArtifact::GrammarStack, QueryArtifact::GrammarParse],
+            )
+        }
+        EnvironmentKind::GrammarExtensionEmission | EnvironmentKind::GrammarExtensionProvenance => {
+            object.artifacts = artifact_facet(source_file, &[QueryArtifact::GrammarParse]);
+        }
+        _ => {}
+    }
+}
+
+fn artifact_facet(source_file: SourceFileId, artifacts: &[QueryArtifact]) -> ArtifactFacet {
+    ArtifactFacet::new(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.key(source_file))
+            .collect(),
+    )
+}
+
+fn object_index(id: &str, prefix: &str) -> Option<usize> {
+    id.strip_prefix(prefix)?.parse().ok()
+}
+
+fn slot_object_indices(id: &str) -> Option<(usize, usize)> {
+    let suffix = id
+        .strip_prefix("slot:c")
+        .or_else(|| id.strip_prefix("accessor:c"))?;
+    let (class, slot) = suffix.split_once(".s")?;
+    Some((class.parse().ok()?, slot.parse().ok()?))
 }
 
 fn project_grammar_registry(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
@@ -9205,6 +9486,12 @@ mod tests {
         assert_eq!(source.origin, EnvironmentOrigin::SourceAuthored);
         assert_eq!(source.storage, EnvironmentStorage::SourceDefined);
         assert!(source.affordances.contains(EnvironmentAffordance::DumpEop));
+        assert_eq!(source.source.source_file, Some(artifacts.source.id));
+        assert_eq!(source.source.span, Some(Span::new(0, AREA.len())));
+        assert_eq!(
+            source.artifacts.keys,
+            Vec::from([QueryArtifact::Source.key(artifacts.source.id)])
+        );
 
         let grammar_registry = eop_object(&objects, "grammar-registry:session");
         assert_eq!(grammar_registry.kind, EnvironmentKind::GrammarRegistry);
@@ -9257,6 +9544,17 @@ mod tests {
         assert_eq!(class.kind, EnvironmentKind::Class);
         assert_eq!(class.origin, EnvironmentOrigin::SourceAuthored);
         assert_eq!(class.storage, EnvironmentStorage::SourceDefined);
+        assert_eq!(
+            class.source.definition,
+            Some(artifacts.sem.classes[1].definition)
+        );
+        assert_eq!(class.source.span, Some(artifacts.sem.classes[1].span));
+        assert!(
+            class
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::Bind.key(artifacts.source.id))
+        );
         assert!(
             class
                 .affordances
@@ -9299,6 +9597,12 @@ mod tests {
                 .affordances
                 .contains(EnvironmentAffordance::AddMethod)
         );
+        assert!(
+            generic.artifacts.keys.contains(
+                &QueryArtifact::GenericDispatcher(artifacts.sem.generics[0].definition)
+                    .key(artifacts.source.id)
+            )
+        );
 
         let method = eop_object(&objects, "method:m0");
         assert_eq!(method.kind, EnvironmentKind::Method);
@@ -9307,6 +9611,12 @@ mod tests {
                 .execution
                 .as_ref()
                 .is_some_and(|execution| execution.detail.contains("participates-in=generic:g0"))
+        );
+        assert!(
+            method.artifacts.keys.contains(
+                &QueryArtifact::MethodLowering(artifacts.sem.methods[0].definition)
+                    .key(artifacts.source.id)
+            )
         );
 
         let function = eop_object(&objects, "function:f0");
@@ -9321,6 +9631,16 @@ mod tests {
                 .contains(EnvironmentAffordance::ShowDispatch)
         );
         assert!(dispatch.inspection.detail.contains("generic=g0:area"));
+        assert_eq!(
+            dispatch.source.definition,
+            Some(artifacts.sem.functions[0].definition)
+        );
+        assert!(
+            dispatch
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::TapeProgram.key(artifacts.source.id))
+        );
 
         let runtime_root_class = eop_object(&objects, "runtime-class:c0");
         assert_eq!(runtime_root_class.kind, EnvironmentKind::RuntimeLayoutRow);
@@ -9489,6 +9809,8 @@ mod tests {
                 origin: EnvironmentOrigin::HostProvided,
                 storage: EnvironmentStorage::HostOwned,
                 presentation: PresentationFacet::new("Rust circle instance"),
+                source: SourceFacet::none(),
+                artifacts: ArtifactFacet::new(Vec::new()),
                 affordances: AffordanceFacet::new(Vec::from([
                     EnvironmentAffordance::Inspect,
                     EnvironmentAffordance::DumpEop,

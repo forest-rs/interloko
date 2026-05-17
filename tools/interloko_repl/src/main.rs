@@ -1524,6 +1524,39 @@ fn format_environment_object(object: &EnvironmentObject) -> String {
     let _ = writeln!(out, "storage: {}", object.storage.as_str());
     let _ = writeln!(out, "presentation:");
     let _ = writeln!(out, "  title: {}", object.presentation.title);
+    let _ = writeln!(out, "source:");
+    let _ = writeln!(
+        out,
+        "  file: {}",
+        object.source.source_file.map_or_else(
+            || "<none>".to_string(),
+            |source_file| source_file.to_string()
+        )
+    );
+    let _ = writeln!(
+        out,
+        "  definition: {}",
+        object
+            .source
+            .definition
+            .map_or_else(|| "<none>".to_string(), |definition| definition.to_string())
+    );
+    let _ = writeln!(
+        out,
+        "  span: {}",
+        object.source.span.map_or_else(
+            || "<none>".to_string(),
+            |span| format!("{}..{}", span.start, span.end)
+        )
+    );
+    let _ = writeln!(out, "artifacts:");
+    if object.artifacts.keys.is_empty() {
+        let _ = writeln!(out, "  <none>");
+    } else {
+        for key in &object.artifacts.keys {
+            let _ = writeln!(out, "  {key}");
+        }
+    }
     let _ = writeln!(out, "affordances:");
     for affordance in &object.affordances.names {
         let _ = writeln!(out, "  {}", affordance.as_str());

@@ -12,11 +12,12 @@ use interloko_compiler::sem::{
     GenericFunctionId, HostClass, HostMetaRegistry, HostSlot, ValueKind,
 };
 use interloko_compiler::session::{
-    AffordanceFacet, CompilerSession, DumpStage, EnvironmentAffordance, EnvironmentKind,
-    EnvironmentObject, EnvironmentObjectId, EnvironmentObjectSink, EnvironmentOrigin,
-    EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession, InspectionFacet,
-    MutationError, MutationOutcome, PresentationFacet, RecomputeStrategy, RuntimeMode,
-    RuntimeResult, SessionArtifacts, SessionMutation, execution_trace_mask,
+    AffordanceFacet, ArtifactFacet, CompilerSession, DumpStage, EnvironmentAffordance,
+    EnvironmentKind, EnvironmentObject, EnvironmentObjectId, EnvironmentObjectSink,
+    EnvironmentOrigin, EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession,
+    InspectionFacet, MutationError, MutationOutcome, PresentationFacet, RecomputeStrategy,
+    RuntimeMode, RuntimeResult, SessionArtifacts, SessionMutation, SourceFacet,
+    execution_trace_mask,
 };
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 
@@ -494,6 +495,39 @@ fn format_environment_object(object: &EnvironmentObject) -> String {
     let _ = writeln!(out, "storage: {}", object.storage.as_str());
     let _ = writeln!(out, "presentation:");
     let _ = writeln!(out, "  title: {}", object.presentation.title);
+    let _ = writeln!(out, "source:");
+    let _ = writeln!(
+        out,
+        "  file: {}",
+        object.source.source_file.map_or_else(
+            || "<none>".to_string(),
+            |source_file| source_file.to_string()
+        )
+    );
+    let _ = writeln!(
+        out,
+        "  definition: {}",
+        object
+            .source
+            .definition
+            .map_or_else(|| "<none>".to_string(), |definition| definition.to_string())
+    );
+    let _ = writeln!(
+        out,
+        "  span: {}",
+        object.source.span.map_or_else(
+            || "<none>".to_string(),
+            |span| format!("{}..{}", span.start, span.end)
+        )
+    );
+    let _ = writeln!(out, "artifacts:");
+    if object.artifacts.keys.is_empty() {
+        let _ = writeln!(out, "  <none>");
+    } else {
+        for key in &object.artifacts.keys {
+            let _ = writeln!(out, "  {key}");
+        }
+    }
     let _ = writeln!(out, "affordances:");
     for affordance in &object.affordances.names {
         let _ = writeln!(out, "  {}", affordance.as_str());
@@ -1011,6 +1045,8 @@ fn host_environment_object(
         origin: EnvironmentOrigin::HostProvided,
         storage: EnvironmentStorage::HostOwned,
         presentation: PresentationFacet::new(title),
+        source: SourceFacet::none(),
+        artifacts: ArtifactFacet::new(Vec::new()),
         affordances: AffordanceFacet::new(vec![
             EnvironmentAffordance::Inspect,
             EnvironmentAffordance::DumpEop,
