@@ -140,13 +140,55 @@ fn session_commands_list_forms_run_functions_and_reset() {
 
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("accepted forms"));
-    assert!(stdout.contains("f0 typed function answer lines 1..3"));
+    assert!(stdout.contains("form:f0 typed function answer lines 1..3"));
     assert!(stdout.contains("source repl.loko (1 forms, 4 lines, unsaved)"));
     assert!(stdout.contains("   1 | define function answer()"));
     assert!(stdout.lines().any(|line| line == "42"));
     assert!(stdout.contains("reset"));
     assert!(stdout.contains("(no accepted forms)"));
     assert!(stdout.contains("(empty)"));
+}
+
+#[test]
+fn source_forms_are_inspectable_and_show_source_affordance_objects() {
+    let (stdout, stderr) = run_repl(
+        "define function answer()\n  42\nend;\n\
+         :forms\n\
+         :inspect form:f0\n\
+         :affordances form:f0\n\
+         :invoke form:f0 show-source\n\
+         :show-form f0\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("form:f0 typed function answer lines 1..3"));
+    assert!(stdout.contains("object form:f0"));
+    assert!(stdout.contains("kind: repl-source-form"));
+    assert!(stdout.contains("category: editor-state"));
+    assert!(stdout.contains("origin: typed"));
+    assert!(stdout.contains("form-kind: function"));
+    assert!(stdout.contains("affordances form:f0"));
+    assert!(stdout.contains("show-source"));
+    assert!(stdout.contains("source form:f0 function answer"));
+    assert!(stdout.contains("   1 | define function answer()"));
+}
+
+#[test]
+fn unknown_source_form_ids_report_unknown_form() {
+    let (stdout, stderr) = run_repl(
+        "define function answer()\n  42\nend;\n\
+         :inspect form:f99\n\
+         :affordances f99\n\
+         :quit\n",
+    );
+
+    assert!(stdout.contains("ok"));
+    assert!(
+        stderr.contains("error: unknown form `form:f99`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("error: unknown form `f99`"), "{stderr}");
 }
 
 #[test]
@@ -217,7 +259,7 @@ fn load_replaces_the_source_buffer_with_loaded_forms() {
     let _ = fs::remove_file(&path);
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("loaded "));
-    assert!(stdout.contains("f0 loaded function loaded-answer lines 1..3"));
+    assert!(stdout.contains("form:f0 loaded function loaded-answer lines 1..3"));
     assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
     assert!(stdout.contains("define function loaded-answer()"));
     assert!(!stdout.contains("define function typed-answer()"));
@@ -268,8 +310,8 @@ fn load_preserves_inter_form_comments_with_parser_line_ranges() {
 
     let _ = fs::remove_file(&path);
     assert!(stderr.is_empty(), "{stderr}");
-    assert!(stdout.contains("f0 loaded function first lines 1..3"));
-    assert!(stdout.contains("f1 loaded function second lines 8..10"));
+    assert!(stdout.contains("form:f0 loaded function first lines 1..3"));
+    assert!(stdout.contains("form:f1 loaded function second lines 8..10"));
     assert!(stdout.contains("// explain second"));
     assert!(stdout.contains("   8 | define function second()"));
 }
@@ -294,8 +336,8 @@ fn load_records_semicolon_terminated_generic_forms() {
 
     let _ = fs::remove_file(&path);
     assert!(stderr.is_empty(), "{stderr}");
-    assert!(stdout.contains("f0 loaded generic score lines 1..1"));
-    assert!(stdout.contains("f1 loaded function main lines 3..5"));
+    assert!(stdout.contains("form:f0 loaded generic score lines 1..1"));
+    assert!(stdout.contains("form:f1 loaded function main lines 3..5"));
     assert!(stdout.lines().any(|line| line == "1"));
 }
 
@@ -379,7 +421,7 @@ fn reload_discards_typed_definitions_after_the_last_load() {
     assert!(stdout.contains("source repl.loko (2 forms, 8 lines, dirty since load)"));
     assert!(stdout.contains("reloaded "));
     assert!(stdout.contains("discarded 1 typed definitions"));
-    assert!(stdout.contains("f0 loaded function loaded-answer lines 1..3"));
+    assert!(stdout.contains("form:f0 loaded function loaded-answer lines 1..3"));
     assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
     assert!(stdout.lines().any(|line| line == "10"));
 }

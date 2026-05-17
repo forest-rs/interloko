@@ -69,19 +69,26 @@ Commands:
 :dispatch [dispatch-site-id]
 :inspect <object-id>
 :affordances <object-id>
+:show-form <form-id>
+:invoke <object-id> <affordance>
 ```
 
 `:source` prints the rendered accepted source with line numbers. `:forms` lists
 the top-level forms that have been accepted into the source buffer, including
-whether each form was typed or loaded from a file. `:load <file>` replaces the
-source buffer with a Loko source file after compiling it through the normal
-session pipeline; diagnostics leave the previous buffer unchanged. `:write
-<file>` writes the same rendered source that `:source` displays without line
-numbering; it does not change which file `:reload` uses. `:reload` reloads the
-last loaded file and discards later typed definitions with an explicit message.
-`:reset` clears accepted definitions and cached artifacts; `:clear` is kept as
-an alias. `:pending` shows an unfinished multiline definition. `:cancel` and
-`:clear-pending` discard it without changing accepted source.
+whether each form was typed or loaded from a file. Each listed `form:fN` is an
+inspectable REPL source-form object. `:inspect form:f0` describes the accepted
+form, `:affordances form:f0` lists editor actions, and `:show-form form:f0` is
+the direct spelling for `:invoke form:f0 show-source`.
+
+`:load <file>` replaces the source buffer with a Loko source file after
+compiling it through the normal session pipeline; diagnostics leave the previous
+buffer unchanged. `:write <file>` writes the same rendered source that `:source`
+displays without line numbering; it does not change which file `:reload` uses.
+`:reload` reloads the last loaded file and discards later typed definitions with
+an explicit message. `:reset` clears accepted definitions and cached artifacts;
+`:clear` is kept as an alias. `:pending` shows an unfinished multiline
+definition. `:cancel` and `:clear-pending` discard it without changing accepted
+source.
 
 Current limits:
 

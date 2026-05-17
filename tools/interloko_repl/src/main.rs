@@ -49,6 +49,8 @@ const COMMANDS: &[&str] = &[
     ":dispatch",
     ":inspect",
     ":affordances",
+    ":show-form",
+    ":invoke",
 ];
 const DUMP_STAGES: &[&str] = &[
     "syntax", "ast", "sem", "mop", "eop", "lowered", "tape", "all",
@@ -324,6 +326,8 @@ impl Repl {
             ":dispatch" => self.print_dispatch(&args, stdout, stderr)?,
             ":inspect" => self.print_object(&args, stdout, stderr)?,
             ":affordances" => self.print_affordances(&args, stdout, stderr)?,
+            ":show-form" => self.show_form(&args, stdout, stderr)?,
+            ":invoke" => self.invoke_affordance(&args, stdout, stderr)?,
             _ => writeln!(stderr, "error: unknown command `{command}`")?,
         }
 
@@ -673,8 +677,8 @@ impl Repl {
             let form = &entry.form;
             writeln!(
                 stdout,
-                "  f{} {} {} {} lines {}..{}",
-                form.index,
+                "  {} {} {} {} lines {}..{}",
+                form.id(),
                 entry.origin.as_str(),
                 form.kind,
                 form.name,
@@ -730,6 +734,14 @@ impl Repl {
         let Some(id) = single_object_id(args, ":inspect <object-id>", stderr)? else {
             return Ok(());
         };
+        if let Some(entry) = self.source_buffer.find_form(&id) {
+            write!(stdout, "{}", format_form_object(entry))?;
+            return Ok(());
+        }
+        if is_form_like_id(&id) {
+            writeln!(stderr, "error: unknown form `{id}`")?;
+            return Ok(());
+        }
         let artifacts = self.ensure_artifacts(stderr)?;
         if let Some(object) = find_object(&artifacts, &id) {
             write!(stdout, "{}", format_environment_object(&object))?;
@@ -752,12 +764,67 @@ impl Repl {
         let Some(id) = single_object_id(args, ":affordances <object-id>", stderr)? else {
             return Ok(());
         };
+        if let Some(entry) = self.source_buffer.find_form(&id) {
+            write!(stdout, "{}", format_form_affordances(entry))?;
+            return Ok(());
+        }
+        if is_form_like_id(&id) {
+            writeln!(stderr, "error: unknown form `{id}`")?;
+            return Ok(());
+        }
         let artifacts = self.ensure_artifacts(stderr)?;
         if let Some(object) = find_object(&artifacts, &id) {
             write!(stdout, "{}", format_affordances(&object))?;
         } else {
             writeln!(stderr, "error: unknown object `{id}`")?;
         }
+        Ok(())
+    }
+
+    fn show_form<W, E>(&self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(id) = single_object_id(args, ":show-form <form-id>", stderr)? else {
+            return Ok(());
+        };
+        if let Some(entry) = self.source_buffer.find_form(&id) {
+            write_form_source(entry, stdout)?;
+        } else {
+            writeln!(stderr, "error: unknown form `{id}`")?;
+        }
+        Ok(())
+    }
+
+    fn invoke_affordance<W, E>(
+        &mut self,
+        args: &[&str],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some((id, affordance)) = object_id_and_affordance(args, stderr)? else {
+            return Ok(());
+        };
+        if let Some(entry) = self.source_buffer.find_form(&id) {
+            match affordance.as_str() {
+                "show-source" => write_form_source(entry, stdout)?,
+                _ => writeln!(
+                    stderr,
+                    "error: object `{}` has no affordance `{affordance}`",
+                    entry.form.id()
+                )?,
+            }
+            return Ok(());
+        }
+        writeln!(
+            stderr,
+            "error: invoke currently supports REPL form objects, not `{id}`"
+        )?;
         Ok(())
     }
 
@@ -805,6 +872,14 @@ impl ReplSourceBuffer {
 
     fn entries(&self) -> &[AcceptedDefinition] {
         &self.entries
+    }
+
+    fn form_ids(&self) -> impl Iterator<Item = String> + '_ {
+        self.entries.iter().map(|entry| entry.form.id())
+    }
+
+    fn find_form(&self, id: &str) -> Option<&AcceptedDefinition> {
+        parse_form_id(id).and_then(|index| self.entries.get(index))
     }
 
     fn push_definition(&mut self, source: String) {
@@ -1002,6 +1077,20 @@ impl FormRecord {
             line_end,
         }
     }
+
+    fn id(&self) -> String {
+        format!("form:f{}", self.index)
+    }
+}
+
+fn parse_form_id(id: &str) -> Option<usize> {
+    let raw = id.strip_prefix("form:").unwrap_or(id);
+    raw.strip_prefix('f')?.parse().ok()
+}
+
+fn is_form_like_id(id: &str) -> bool {
+    let raw = id.strip_prefix("form:").unwrap_or(id);
+    raw.starts_with('f') && raw[1..].chars().all(|value| value.is_ascii_digit())
 }
 
 fn definition_header_label(header: &str) -> (String, String) {
@@ -1106,6 +1195,19 @@ where
     }
 }
 
+fn object_id_and_affordance<E>(args: &[&str], stderr: &mut E) -> Result<Option<(String, String)>>
+where
+    E: Write,
+{
+    match args {
+        [id, affordance] => Ok(Some(((*id).to_string(), (*affordance).to_string()))),
+        _ => {
+            writeln!(stderr, "usage: :invoke <object-id> <affordance>")?;
+            Ok(None)
+        }
+    }
+}
+
 fn single_path<'a, E>(args: &'a [&str], usage: &str, stderr: &mut E) -> Result<Option<&'a str>>
 where
     E: Write,
@@ -1166,6 +1268,68 @@ fn format_affordances(object: &EnvironmentObject) -> String {
     out
 }
 
+fn format_form_object(entry: &AcceptedDefinition) -> String {
+    let form = &entry.form;
+    let mut out = String::new();
+    let _ = writeln!(out, "object {}", form.id());
+    let _ = writeln!(out, "kind: repl-source-form");
+    let _ = writeln!(out, "category: editor-state");
+    let _ = writeln!(out, "origin: {}", entry.origin.as_str());
+    let _ = writeln!(out, "form-kind: {}", form.kind);
+    let _ = writeln!(out, "name: {}", form.name);
+    let _ = writeln!(out, "lines: {}..{}", form.line_start, form.line_end);
+    let _ = writeln!(out, "affordances:");
+    for affordance in FORM_AFFORDANCES {
+        let _ = writeln!(out, "  {affordance}");
+    }
+    let _ = writeln!(out, "inspection:");
+    let _ = writeln!(
+        out,
+        "  accepted {} {} `{}` in the REPL source buffer",
+        entry.origin.as_str(),
+        form.kind,
+        form.name
+    );
+    out
+}
+
+fn format_form_affordances(entry: &AcceptedDefinition) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "affordances {}", entry.form.id());
+    for affordance in FORM_AFFORDANCES {
+        let _ = writeln!(out, "{affordance}");
+    }
+    out
+}
+
+fn write_form_source<W>(entry: &AcceptedDefinition, stdout: &mut W) -> Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        stdout,
+        "source {} {} {}",
+        entry.form.id(),
+        entry.form.kind,
+        entry.form.name
+    )?;
+    for (offset, line) in entry.source.lines().enumerate() {
+        writeln!(stdout, "{:>4} | {line}", entry_line_start(entry) + offset)?;
+    }
+    Ok(())
+}
+
+fn entry_line_start(entry: &AcceptedDefinition) -> usize {
+    let leading_lines = entry
+        .source
+        .lines()
+        .position(|line| line.trim_start().starts_with("define "))
+        .unwrap_or_default();
+    entry.form.line_start.saturating_sub(leading_lines)
+}
+
+const FORM_AFFORDANCES: &[&str] = &["show-source"];
+
 fn function_run_message(result: &FunctionRunResult) -> String {
     match result {
         FunctionRunResult::ReturnedI64(value) => format!("returned {value}"),
@@ -1225,7 +1389,9 @@ inspection:
   :artifacts
   :dispatch [dispatch-site-id]
   :inspect <object-id>
-  :affordances <object-id>"
+  :affordances <object-id>
+  :show-form <form-id>
+  :invoke <object-id> <affordance>"
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1443,16 +1609,15 @@ struct CompletionState {
 
 impl CompletionState {
     fn from_repl(repl: &Repl) -> Self {
-        let mut object_ids = Vec::new();
+        let mut object_ids: Vec<String> = repl.source_buffer.form_ids().collect();
         let mut dispatch_ids = Vec::new();
         if let Some(artifacts) = &repl.last_artifacts {
-            object_ids = artifacts
-                .environment_objects()
-                .into_iter()
-                .map(|object| object.id.as_str().to_string())
-                .collect();
-            object_ids.sort();
-            object_ids.dedup();
+            object_ids.extend(
+                artifacts
+                    .environment_objects()
+                    .into_iter()
+                    .map(|object| object.id.as_str().to_string()),
+            );
 
             dispatch_ids = artifacts
                 .dispatch_sites()
@@ -1460,6 +1625,8 @@ impl CompletionState {
                 .map(|site| site.id)
                 .collect();
         }
+        object_ids.sort();
+        object_ids.dedup();
         Self {
             object_ids,
             dispatch_ids,
@@ -1515,6 +1682,27 @@ impl Completer for InterlokoCompleter {
                     .lock()
                     .map(|state| state.object_ids.clone())
                     .unwrap_or_default(),
+                ":show-form" => self
+                    .state
+                    .lock()
+                    .map(|state| {
+                        state
+                            .object_ids
+                            .iter()
+                            .filter(|id| id.starts_with("form:"))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                ":invoke" if before_cursor[..token_start].split_whitespace().count() <= 1 => self
+                    .state
+                    .lock()
+                    .map(|state| state.object_ids.clone())
+                    .unwrap_or_default(),
+                ":invoke" => FORM_AFFORDANCES
+                    .iter()
+                    .map(|affordance| (*affordance).to_string())
+                    .collect(),
                 _ => Vec::new(),
             }
         };
