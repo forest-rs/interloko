@@ -8,8 +8,8 @@ use crate::source_data::{self, SourceData};
 use crate::syntax::Span;
 
 use super::interpreter::{
-    InterpretedParse, InterpretedRuleNode, interpret_region, interpreted_rule_counts,
-    interpreted_rule_node_source_data, parse_source_authored_grammar,
+    InterpretedParse, InterpretedParseError, InterpretedRuleNode, interpret_region_result,
+    interpreted_rule_counts, interpreted_rule_node_source_data, parse_source_authored_grammar,
 };
 use super::{
     FrontendForm, FrontendSlot, GrammarId, GrammarProjection, GrammarRule, GrammarRuleId,
@@ -25,31 +25,26 @@ rule record-definition = `record` name record-field* `end` => frontend-class\n\
 rule record-field = name `:` type-name `;`? => frontend-slot\n\
 end\n";
 
-struct RecordBuilder {
-    name: String,
-    header_span: Span,
-    fields: Vec<FrontendSlot>,
-    field_data: Vec<SourceData>,
-}
-
 pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmission {
-    if let Some(parse) = interpret_records_region(body, source_offset) {
-        return emission_from_interpreted_parse(body, source_offset, &parse)
-            .unwrap_or_else(|| parse_region_legacy(body, source_offset));
+    match interpret_records_region(body, source_offset) {
+        Ok(parse) => emission_from_interpreted_parse(body, source_offset, &parse),
+        Err(error) => records_parse_error_emission(body, source_offset, error),
     }
-    parse_region_legacy(body, source_offset)
 }
 
-fn interpret_records_region(body: &str, source_offset: usize) -> Option<InterpretedParse> {
+fn interpret_records_region(
+    body: &str,
+    source_offset: usize,
+) -> Result<InterpretedParse, InterpretedParseError> {
     let rules = parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE);
-    interpret_region(&rules, "records-region", body, source_offset)
+    interpret_region_result(&rules, "records-region", body, source_offset)
 }
 
 fn emission_from_interpreted_parse(
     body: &str,
     source_offset: usize,
     parse: &InterpretedParse,
-) -> Option<StagedRegionEmission> {
+) -> StagedRegionEmission {
     let mut forms = Vec::new();
     let mut diagnostics = Vec::new();
     let mut records = Vec::new();
@@ -73,7 +68,7 @@ fn emission_from_interpreted_parse(
             "`record name`",
         ));
     }
-    Some(StagedRegionEmission {
+    StagedRegionEmission {
         forms,
         data: SourceData::record(
             "records-region",
@@ -86,7 +81,7 @@ fn emission_from_interpreted_parse(
         ),
         rule_counts: interpreted_rule_counts(&parse.root),
         diagnostics,
-    })
+    }
 }
 
 fn frontend_record_from_interpreted_node(
@@ -190,165 +185,122 @@ fn parse_interpreted_record_field(
     ));
 }
 
-fn parse_region_legacy(body: &str, source_offset: usize) -> StagedRegionEmission {
-    let mut forms = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut records = Vec::new();
-    let mut current: Option<RecordBuilder> = None;
-    let mut offset = source_offset;
+fn records_parse_error_emission(
+    body: &str,
+    source_offset: usize,
+    error: InterpretedParseError,
+) -> StagedRegionEmission {
+    let diagnostic = records_parse_error_diagnostic(body, source_offset, &error);
+    StagedRegionEmission {
+        forms: Vec::new(),
+        data: SourceData::record(
+            "records-region",
+            vec![
+                source_data::field("grammar", SourceData::symbol(RECORDS_GRAMMAR_NAME)),
+                source_data::field("driver", SourceData::symbol("interpreted-grammar")),
+                source_data::field(
+                    "parse-error",
+                    SourceData::record(
+                        "parse-error",
+                        vec![
+                            source_span_data(error.span),
+                            source_data::field(
+                                "expected",
+                                SourceData::list(
+                                    error
+                                        .expected
+                                        .iter()
+                                        .map(|item| SourceData::string(item.as_str()))
+                                        .collect(),
+                                ),
+                            ),
+                        ],
+                    ),
+                ),
+                source_data::field("records", SourceData::list(Vec::new())),
+            ],
+        ),
+        rule_counts: Vec::new(),
+        diagnostics: Vec::from([diagnostic]),
+    }
+}
 
+fn records_parse_error_diagnostic(
+    body: &str,
+    source_offset: usize,
+    error: &InterpretedParseError,
+) -> Diagnostic {
+    if let Some(diagnostic) = record_shape_diagnostic(body, source_offset) {
+        return diagnostic;
+    }
+    let expected = joined_expected(error);
+    staged_expected_diagnostic(
+        fallback_error_span(body, source_offset, error.span),
+        "records",
+        &expected,
+    )
+}
+
+fn record_shape_diagnostic(body: &str, source_offset: usize) -> Option<Diagnostic> {
+    let mut in_record = false;
+    let mut offset = source_offset;
     for line in body.split_inclusive('\n') {
         let line_start = offset;
-        let line_end = offset + line.len();
-        offset = line_end;
+        offset += line.len();
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
         let leading = line.find(trimmed).unwrap_or(0);
-        let trimmed_start = line_start + leading;
-        let trimmed_span = Span::new(trimmed_start, trimmed_start + trimmed.len());
-
-        if current.is_some() {
-            if trimmed == "end" {
-                let record = current.take().expect("record was just matched");
-                let source_span = Span::new(record.header_span.start, trimmed_span.end);
-                let fields_data = SourceData::list(record.field_data);
-                forms.push(FrontendForm::class(
-                    record.name.clone(),
-                    "<object>",
-                    record.fields,
-                    source_span,
-                ));
-                records.push(SourceData::record(
-                    "record-definition",
-                    vec![
-                        source_data::field("name", SourceData::symbol(record.name.as_str())),
-                        source_span_data(source_span),
-                        source_data::field("fields", fields_data),
-                    ],
-                ));
+        let span = Span::new(line_start + leading, line_start + leading + trimmed.len());
+        if !in_record {
+            if trimmed.starts_with("record ") {
+                in_record = true;
                 continue;
             }
-            let record = current.as_mut().expect("record was just matched");
-            parse_record_field(trimmed, trimmed_span, record, &mut diagnostics);
+            return Some(staged_expected_diagnostic(span, "records", "`record name`"));
+        }
+        if trimmed == "end" {
+            in_record = false;
             continue;
         }
-
-        let Some(name) = trimmed.strip_prefix("record ") else {
-            diagnostics.push(staged_expected_diagnostic(
-                trimmed_span,
+        let Some((name, _)) = trimmed.split_once(':') else {
+            return Some(staged_expected_diagnostic(
+                span,
                 "records",
-                "`record name`",
+                "`field: <type>`",
             ));
-            continue;
         };
         let name = name.trim();
-        let Some(class_name) = normalize_record_class_name(name) else {
-            diagnostics.push(staged_expected_diagnostic(
-                trimmed_span,
-                "records",
-                "valid record name",
-            ));
-            continue;
-        };
-        current = Some(RecordBuilder {
-            name: class_name,
-            header_span: trimmed_span,
-            fields: Vec::new(),
-            field_data: Vec::new(),
-        });
-    }
-
-    if let Some(record) = current {
-        diagnostics.push(staged_expected_diagnostic(
-            record.header_span,
-            "records",
-            "`end`",
-        ));
-    }
-
-    if records.is_empty() && diagnostics.is_empty() {
-        diagnostics.push(staged_expected_diagnostic(
-            Span::new(source_offset, source_offset + body.len()),
-            "records",
-            "`record name`",
-        ));
-    }
-
-    let record_count = forms.len();
-    StagedRegionEmission {
-        forms,
-        data: SourceData::record(
-            "records-region",
-            vec![
-                source_data::field("grammar", SourceData::symbol(RECORDS_GRAMMAR_NAME)),
-                source_data::field("records", SourceData::list(records)),
-            ],
-        ),
-        rule_counts: Vec::from([
-            super::StagedRuleCount {
-                rule_name: "records-region".to_string(),
-                node_count: 1,
-            },
-            super::StagedRuleCount {
-                rule_name: "record-definition".to_string(),
-                node_count: record_count,
-            },
-        ]),
-        diagnostics,
-    }
-}
-
-fn parse_record_field(
-    trimmed: &str,
-    span: Span,
-    record: &mut RecordBuilder,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some((name, type_name)) = trimmed.split_once(':') else {
-        diagnostics.push(staged_expected_diagnostic(
+        if !valid_record_field_name(name) {
+            return Some(
+                staged_expected_diagnostic(span, "records", "valid record field")
+                    .with_arg(DiagnosticArg::text("field", name)),
+            );
+        }
+        return Some(staged_expected_diagnostic(
             span,
             "records",
             "`field: <type>`",
         ));
-        return;
-    };
-    let name = name.trim();
-    let type_name = type_name.trim().trim_end_matches(';').trim();
-    if !valid_record_field_name(name) {
-        diagnostics.push(
-            staged_expected_diagnostic(span, "records", "valid record field")
-                .with_arg(DiagnosticArg::text("field", name)),
-        );
-        return;
     }
-    if record.fields.iter().any(|field| field.name == name) {
-        diagnostics.push(
-            staged_expected_diagnostic(span, "records", "unique record field")
-                .with_arg(DiagnosticArg::text("field", name)),
-        );
-        return;
-    }
-    if !valid_type_name(type_name) {
-        diagnostics.push(
-            staged_expected_diagnostic(span, "records", "field type name")
-                .with_arg(DiagnosticArg::text("field", name)),
-        );
-        return;
-    }
+    None
+}
 
-    record
-        .fields
-        .push(FrontendSlot::new(name, type_name, span).with_init_keyword(name, true));
-    record.field_data.push(SourceData::record(
-        "record-field",
-        vec![
-            source_data::field("name", SourceData::symbol(name)),
-            source_data::field("type", SourceData::symbol(type_name)),
-            source_span_data(span),
-        ],
-    ));
+fn joined_expected(error: &InterpretedParseError) -> String {
+    if error.expected.is_empty() {
+        "records grammar".to_string()
+    } else {
+        error.expected.join(" or ")
+    }
+}
+
+fn fallback_error_span(body: &str, source_offset: usize, span: Span) -> Span {
+    if span.start == span.end && span.start == source_offset {
+        Span::new(source_offset, source_offset + body.len())
+    } else {
+        span
+    }
 }
 
 pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
