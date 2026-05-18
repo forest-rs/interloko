@@ -359,6 +359,71 @@ pub enum RuleExpression {
     },
 }
 
+/// A deterministic structural action attached to a grammar rule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarAction {
+    /// Action name, such as `emit-class`.
+    pub name: String,
+    /// Named action arguments.
+    pub args: Vec<GrammarActionArg>,
+}
+
+/// One named grammar action argument.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarActionArg {
+    /// Argument name.
+    pub name: String,
+    /// Argument value expression.
+    pub value: GrammarActionTerm,
+}
+
+/// A small grammar action value expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GrammarActionTerm {
+    /// Capture the first child rule with this name.
+    Capture {
+        /// Captured rule name.
+        rule: String,
+    },
+    /// Capture all child rules with this name.
+    CaptureAll {
+        /// Captured rule name.
+        rule: String,
+    },
+    /// Literal string/symbol data.
+    Literal(String),
+    /// Literal boolean data.
+    Bool(bool),
+}
+
+impl GrammarAction {
+    /// Creates a grammar action.
+    #[must_use]
+    pub fn new(name: impl Into<String>, args: Vec<GrammarActionArg>) -> Self {
+        Self {
+            name: name.into(),
+            args,
+        }
+    }
+
+    /// Returns inert source data for this action.
+    #[must_use]
+    pub fn source_data(&self) -> SourceData {
+        grammar_action_source_data(self)
+    }
+}
+
+impl GrammarActionArg {
+    /// Creates a named grammar action argument.
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: GrammarActionTerm) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
+}
+
 impl RuleExpression {
     /// Creates a rule reference.
     #[must_use]
@@ -548,6 +613,65 @@ fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
                 source_data::field("input", rule_expression_source_data(input)),
                 source_data::field("output", output.clone()),
             ],
+        ),
+    }
+}
+
+fn grammar_action_source_data(action: &GrammarAction) -> SourceData {
+    SourceData::record(
+        "grammar-action",
+        vec![
+            source_data::field("name", SourceData::symbol(action.name.as_str())),
+            source_data::field(
+                "args",
+                SourceData::list(
+                    action
+                        .args
+                        .iter()
+                        .map(grammar_action_arg_source_data)
+                        .collect(),
+                ),
+            ),
+        ],
+    )
+}
+
+fn grammar_action_arg_source_data(arg: &GrammarActionArg) -> SourceData {
+    SourceData::record(
+        "grammar-action-arg",
+        vec![
+            source_data::field("name", SourceData::symbol(arg.name.as_str())),
+            source_data::field("value", grammar_action_term_source_data(&arg.value)),
+        ],
+    )
+}
+
+fn grammar_action_term_source_data(term: &GrammarActionTerm) -> SourceData {
+    match term {
+        GrammarActionTerm::Capture { rule } => SourceData::record(
+            "capture",
+            vec![source_data::field(
+                "rule",
+                SourceData::symbol(rule.as_str()),
+            )],
+        ),
+        GrammarActionTerm::CaptureAll { rule } => SourceData::record(
+            "capture-all",
+            vec![source_data::field(
+                "rule",
+                SourceData::symbol(rule.as_str()),
+            )],
+        ),
+        GrammarActionTerm::Literal(value) => SourceData::record(
+            "literal",
+            vec![source_data::field(
+                "value",
+                SourceData::string(value.as_str()),
+            )],
+        ),
+        GrammarActionTerm::Bool(value) => SourceData::record(
+            "bool",
+            vec![source_data::field("value", SourceData::bool(*value))],
         ),
     }
 }
@@ -1691,7 +1815,7 @@ pub fn frontend_form_kind_name(form: &FrontendForm) -> &'static str {
     }
 }
 
-fn frontend_form_source_data(form: &FrontendForm) -> SourceData {
+pub(super) fn frontend_form_source_data(form: &FrontendForm) -> SourceData {
     match &form.kind {
         FrontendFormKind::Function(function) => SourceData::record(
             "frontend-function",
@@ -1716,7 +1840,7 @@ fn frontend_form_source_data(form: &FrontendForm) -> SourceData {
     }
 }
 
-fn frontend_expression_source_data(expression: &FrontendExpression) -> SourceData {
+pub(super) fn frontend_expression_source_data(expression: &FrontendExpression) -> SourceData {
     match expression {
         FrontendExpression::Integer { value, source_span } => SourceData::record(
             "frontend-integer",
@@ -1764,7 +1888,7 @@ fn frontend_expression_source_data(expression: &FrontendExpression) -> SourceDat
     }
 }
 
-fn frontend_slot_source_data(slot: &FrontendSlot) -> SourceData {
+pub(super) fn frontend_slot_source_data(slot: &FrontendSlot) -> SourceData {
     let init_keyword = slot
         .init_keyword
         .as_deref()
@@ -2836,10 +2960,83 @@ fn projected_rule_expression(expression: &str) -> RuleExpression {
 }
 
 fn transform_output_source_data(output: &str) -> SourceData {
+    if let Some(action) = parse_grammar_action(output) {
+        return action.source_data();
+    }
     output
         .strip_prefix('`')
         .and_then(|inner| inner.strip_suffix('`'))
         .map_or_else(|| SourceData::symbol(output), SourceData::string)
+}
+
+fn parse_grammar_action(output: &str) -> Option<GrammarAction> {
+    let trimmed = output.trim();
+    let (name, args) = trimmed.split_once('(')?;
+    let args = args.strip_suffix(')')?;
+    Some(GrammarAction::new(
+        name.trim(),
+        split_action_args(args)
+            .into_iter()
+            .filter_map(parse_grammar_action_arg)
+            .collect(),
+    ))
+}
+
+fn parse_grammar_action_arg(arg: &str) -> Option<GrammarActionArg> {
+    let (name, value) = arg.split_once(':')?;
+    Some(GrammarActionArg::new(
+        name.trim(),
+        parse_grammar_action_term(value.trim()),
+    ))
+}
+
+fn parse_grammar_action_term(value: &str) -> GrammarActionTerm {
+    let trimmed = value.trim();
+    if trimmed == "true" {
+        return GrammarActionTerm::Bool(true);
+    }
+    if trimmed == "false" {
+        return GrammarActionTerm::Bool(false);
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('`')
+                .and_then(|inner| inner.strip_suffix('`'))
+        })
+    {
+        return GrammarActionTerm::Literal(inner.to_string());
+    }
+    if let Some(rule) = trimmed.strip_suffix('*') {
+        return GrammarActionTerm::CaptureAll {
+            rule: rule.trim().to_string(),
+        };
+    }
+    GrammarActionTerm::Capture {
+        rule: trimmed.to_string(),
+    }
+}
+
+fn split_action_args(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_string = false;
+    let mut in_literal = false;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '"' if !in_literal => in_string = !in_string,
+            '`' if !in_string => in_literal = !in_literal,
+            ',' if !in_string && !in_literal => {
+                parts.push(input[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(input[start..].trim());
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
 fn projected_rule_term(term: &str) -> RuleExpression {
@@ -3472,7 +3669,7 @@ mod tests {
         assert!(record_definition.projection.source_span.is_some());
         assert_eq!(
             record_definition.expression.to_string(),
-            "`record` record-name record-field* `end` => frontend-class"
+            "`record` record-name record-field* `end` => grammar-action(name: emit-class, args: [grammar-action-arg(name: name, value: capture(rule: record-name)), grammar-action-arg(name: superclass, value: literal(value: \"<object>\")), grammar-action-arg(name: slots, value: capture-all(rule: record-field))])"
         );
     }
 

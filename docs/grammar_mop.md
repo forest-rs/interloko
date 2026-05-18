@@ -170,9 +170,12 @@ embedded grammar source:
 ```text
 grammar records
 rule records-region = record-definition*
-rule record-definition = `record` record-name record-field* `end` => frontend-class
+rule record-definition = `record` record-name record-field* `end`
+  => emit-class(name: record-name, superclass: "<object>", slots: record-field*)
 rule record-name = type-name | identifier
-rule record-field = field-name `:` type-name `;`? => frontend-slot
+rule record-field = field-name `:` type-name `;`?
+  => emit-slot(name: field-name, type: type-name, init-keyword: field-name,
+               required-init-keyword: true)
 rule field-name = identifier
 rule type-name = `<` identifier `>`
 rule identifier = [A-Za-z_] [A-Za-z0-9_?-]*
@@ -181,14 +184,16 @@ end
 
 It is selected with `// grammar-activate: records`; later
 `// staged-loko: records` regions are recognized by the interpreted grammar,
-which produces a parse tree with rule names and spans. A small host projection
-then converts that parse tree into structural class forms with typed slots.
+which produces a parse tree with rule names and spans. The `emit-class` and
+`emit-slot` actions convert captures from that parse tree into structural class
+forms with typed slots.
 `ast.rs` consumes those structural forms directly as compiler-generated
 definitions with source spans from the staged region. Materialized Loko is still
 stored on each staged region for dumps, reports, and debugging, but the semantic
-pipeline no longer reparses it as the source of truth. Rust still performs
-parse-tree to `FrontendForm::Class` conversion and records-specific validation,
-but it is no longer a duplicate records parser.
+pipeline no longer reparses it as the source of truth. Rust still implements
+the safe `emit-class`/`emit-slot` action primitives and records-specific
+validation, but it is no longer a duplicate records parser or a bespoke
+record-to-form walker.
 
 `CalculatorRegionGrammar` follows the same source-authored/interpreted grammar
 path for recognition, while Rust still converts the interpreted expression tree

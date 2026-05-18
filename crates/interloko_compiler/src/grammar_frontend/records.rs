@@ -8,22 +8,22 @@ use crate::source_data::{self, SourceData};
 use crate::syntax::Span;
 
 use super::interpreter::{
-    InterpretedParse, InterpretedParseError, InterpretedRuleNode, interpret_region_result,
-    interpreted_rule_counts, interpreted_rule_node_source_data, parse_source_authored_grammar,
+    GrammarActionValue, InterpretedParse, InterpretedParseError, evaluate_rule_action,
+    interpret_region_result, interpreted_rule_counts, interpreted_rule_node_source_data,
+    parse_source_authored_grammar,
 };
 use super::{
-    FrontendForm, FrontendSlot, GrammarId, GrammarProjection, GrammarRule, GrammarRuleId,
-    ProjectionOrigin, RECORDS_GRAMMAR_NAME, StagedRegionEmission,
-    grammar_rule_expression_data_from_expr, source_span_data, staged_expected_diagnostic,
-    valid_record_field_name, valid_record_type_fragment, valid_type_name,
+    GrammarId, GrammarProjection, GrammarRule, GrammarRuleId, ProjectionOrigin,
+    RECORDS_GRAMMAR_NAME, StagedRegionEmission, grammar_rule_expression_data_from_expr,
+    source_span_data, staged_expected_diagnostic, valid_record_field_name,
 };
 
 const RECORDS_GRAMMAR_SOURCE: &str = "\
 grammar records\n\
 rule records-region = record-definition*\n\
-rule record-definition = `record` record-name record-field* `end` => frontend-class\n\
+rule record-definition = `record` record-name record-field* `end` => emit-class(name: record-name, superclass: \"<object>\", slots: record-field*)\n\
 rule record-name = type-name | identifier\n\
-rule record-field = field-name `:` type-name `;`? => frontend-slot\n\
+rule record-field = field-name `:` type-name `;`? => emit-slot(name: field-name, type: type-name, init-keyword: field-name, required-init-keyword: true)\n\
 rule field-name = identifier\n\
 rule type-name = `<` identifier `>`\n\
 rule identifier = [A-Za-z_] [A-Za-z0-9_?-]*\n\
@@ -52,18 +52,39 @@ fn emission_from_interpreted_parse(
     let mut forms = Vec::new();
     let mut diagnostics = Vec::new();
     let mut records = Vec::new();
+    let grammar_rules = parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE);
     for record in parse
         .root
         .children
         .iter()
         .filter(|node| node.rule_name == "record-definition")
     {
-        let Some((form, data)) = frontend_record_from_interpreted_node(record, &mut diagnostics)
-        else {
-            continue;
-        };
-        forms.push(form);
-        records.push(data);
+        match evaluate_rule_action(&grammar_rules, record) {
+            Ok(Some(output)) => match output.value {
+                GrammarActionValue::FrontendForm(form) => {
+                    forms.push(form);
+                    records.push(output.data);
+                }
+                _ => diagnostics.push(staged_expected_diagnostic(
+                    record.span,
+                    "records",
+                    "frontend class action output",
+                )),
+            },
+            Ok(None) => diagnostics.push(staged_expected_diagnostic(
+                record.span,
+                "records",
+                "record action",
+            )),
+            Err(error) => {
+                let mut diagnostic =
+                    staged_expected_diagnostic(error.span, "records", &error.expected);
+                if let Some(field) = error.field {
+                    diagnostic = diagnostic.with_arg(DiagnosticArg::text("field", field));
+                }
+                diagnostics.push(diagnostic);
+            }
+        }
     }
     if records.is_empty() && diagnostics.is_empty() {
         diagnostics.push(staged_expected_diagnostic(
@@ -85,130 +106,6 @@ fn emission_from_interpreted_parse(
         ),
         rule_counts: interpreted_rule_counts(&parse.root),
         diagnostics,
-    }
-}
-
-fn frontend_record_from_interpreted_node(
-    record: &InterpretedRuleNode,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Option<(FrontendForm, SourceData)> {
-    let name = record
-        .children
-        .iter()
-        .find(|node| node.rule_name == "record-name")?;
-    let Some(class_name) = record_class_name(name) else {
-        diagnostics.push(staged_expected_diagnostic(
-            name.span,
-            "records",
-            "valid record name",
-        ));
-        return None;
-    };
-    let mut fields = Vec::new();
-    let mut field_data = Vec::new();
-    for field in record
-        .children
-        .iter()
-        .filter(|node| node.rule_name == "record-field")
-    {
-        parse_interpreted_record_field(field, &mut fields, &mut field_data, diagnostics);
-    }
-    let fields_data = SourceData::list(field_data);
-    Some((
-        FrontendForm::class(class_name.clone(), "<object>", fields, record.span),
-        SourceData::record(
-            "record-definition",
-            vec![
-                source_data::field("name", SourceData::symbol(class_name.as_str())),
-                source_span_data(record.span),
-                source_data::field("fields", fields_data),
-            ],
-        ),
-    ))
-}
-
-fn parse_interpreted_record_field(
-    field: &InterpretedRuleNode,
-    fields: &mut Vec<FrontendSlot>,
-    field_data: &mut Vec<SourceData>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some(name) = field
-        .children
-        .iter()
-        .find(|node| node.rule_name == "field-name")
-    else {
-        diagnostics.push(staged_expected_diagnostic(
-            field.span,
-            "records",
-            "`field: <type>`",
-        ));
-        return;
-    };
-    parse_interpreted_record_field_parts(field, name, fields, field_data, diagnostics);
-}
-
-fn parse_interpreted_record_field_parts(
-    field: &InterpretedRuleNode,
-    name: &InterpretedRuleNode,
-    fields: &mut Vec<FrontendSlot>,
-    field_data: &mut Vec<SourceData>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some(type_name) = field
-        .children
-        .iter()
-        .find(|node| node.rule_name == "type-name")
-    else {
-        diagnostics.push(staged_expected_diagnostic(
-            field.span,
-            "records",
-            "`field: <type>`",
-        ));
-        return;
-    };
-    let name_text = name.text.trim();
-    let type_text = type_name.text.trim();
-    if !valid_record_field_name(name_text) {
-        diagnostics.push(
-            staged_expected_diagnostic(name.span, "records", "valid record field")
-                .with_arg(DiagnosticArg::text("field", name_text)),
-        );
-        return;
-    }
-    if fields.iter().any(|field| field.name == name_text) {
-        diagnostics.push(
-            staged_expected_diagnostic(name.span, "records", "unique record field")
-                .with_arg(DiagnosticArg::text("field", name_text)),
-        );
-        return;
-    }
-    if !valid_type_name(type_text) {
-        diagnostics.push(
-            staged_expected_diagnostic(type_name.span, "records", "field type name")
-                .with_arg(DiagnosticArg::text("field", name_text)),
-        );
-        return;
-    }
-    fields.push(
-        FrontendSlot::new(name_text, type_text, field.span).with_init_keyword(name_text, true),
-    );
-    field_data.push(SourceData::record(
-        "record-field",
-        vec![
-            source_data::field("name", SourceData::symbol(name_text)),
-            source_data::field("type", SourceData::symbol(type_text)),
-            source_span_data(field.span),
-        ],
-    ));
-}
-
-fn record_class_name(name: &InterpretedRuleNode) -> Option<String> {
-    let text = name.text.trim();
-    if text.starts_with('<') {
-        valid_type_name(text).then(|| text.to_string())
-    } else {
-        valid_record_type_fragment(text).then(|| format!("<{text}>"))
     }
 }
 

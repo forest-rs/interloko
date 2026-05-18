@@ -6,12 +6,18 @@ use alloc::vec::Vec;
 use crate::source_data::{self, SourceData};
 use crate::syntax::Span;
 
-use super::{RuleExpression, StagedRuleCount, projected_rule_expression, source_span_data};
+use super::{
+    FrontendForm, FrontendSlot, GrammarAction, GrammarActionTerm, RuleExpression, StagedRuleCount,
+    frontend_form_source_data, frontend_slot_source_data, parse_grammar_action,
+    projected_rule_expression, source_span_data, valid_record_field_name,
+    valid_record_type_fragment, valid_type_name,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SourceAuthoredRule {
     pub(super) name: String,
     pub(super) expression: RuleExpression,
+    pub(super) action: Option<GrammarAction>,
     pub(super) source_span: Span,
 }
 
@@ -32,6 +38,27 @@ pub(super) struct InterpretedParse {
 pub(super) struct InterpretedParseError {
     pub(super) span: Span,
     pub(super) expected: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum GrammarActionValue {
+    Text { value: String, span: Span },
+    FrontendSlot(FrontendSlot),
+    FrontendForm(FrontendForm),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct GrammarActionOutput {
+    pub(super) action: GrammarAction,
+    pub(super) value: GrammarActionValue,
+    pub(super) data: SourceData,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct GrammarActionError {
+    pub(super) span: Span,
+    pub(super) expected: String,
+    pub(super) field: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,11 +94,15 @@ pub(super) fn parse_source_authored_grammar(source: &str) -> Vec<SourceAuthoredR
         let Some((name, expression)) = rest.split_once('=') else {
             continue;
         };
+        let action = expression
+            .split_once("=>")
+            .and_then(|(_, output)| parse_grammar_action(output.trim()));
         let leading = line.find(trimmed).unwrap_or(0);
         let trimmed_start = line_start + leading;
         rules.push(SourceAuthoredRule {
             name: name.trim().to_string(),
             expression: projected_rule_expression(expression),
+            action,
             source_span: Span::new(trimmed_start, line_end.saturating_sub(1)),
         });
     }
@@ -91,6 +122,236 @@ pub(super) fn interpret_region_result(
         Ok(InterpretedParse { root })
     } else {
         Err(ParseFailure::expected(trailing, "end of region").into_error(source_offset))
+    }
+}
+
+pub(super) fn evaluate_rule_action(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+) -> Result<Option<GrammarActionOutput>, GrammarActionError> {
+    let Some(action) = rules
+        .iter()
+        .find(|rule| rule.name == node.rule_name)
+        .and_then(|rule| rule.action.clone())
+    else {
+        return Ok(None);
+    };
+    let value = match action.name.as_str() {
+        "emit-class" => {
+            GrammarActionValue::FrontendForm(evaluate_emit_class(rules, node, &action)?)
+        }
+        "emit-slot" => GrammarActionValue::FrontendSlot(evaluate_emit_slot(node, &action)?),
+        _ => {
+            return Err(GrammarActionError {
+                span: node.span,
+                expected: format!("known grammar action `{}`", action.name),
+                field: None,
+            });
+        }
+    };
+    Ok(Some(GrammarActionOutput {
+        data: grammar_action_output_source_data(&action, &value),
+        action,
+        value,
+    }))
+}
+
+fn evaluate_emit_class(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<FrontendForm, GrammarActionError> {
+    let name = action_text_arg(node, action, "name")?;
+    let class_name =
+        class_name_from_action_text(&name.value).ok_or_else(|| GrammarActionError {
+            span: name.span,
+            expected: "valid class name".to_string(),
+            field: None,
+        })?;
+    let superclass = action_text_arg(node, action, "superclass")
+        .map(|value| value.value)
+        .unwrap_or_else(|_| "<object>".to_string());
+    let slots = action_list_arg(rules, node, action, "slots")?
+        .into_iter()
+        .map(|value| match value {
+            GrammarActionValue::FrontendSlot(slot) => Ok(slot),
+            _ => Err(GrammarActionError {
+                span: node.span,
+                expected: "slot action output".to_string(),
+                field: None,
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, slot) in slots.iter().enumerate() {
+        if slots[..index].iter().any(|prior| prior.name == slot.name) {
+            return Err(GrammarActionError {
+                span: slot.source_span,
+                expected: "unique record field".to_string(),
+                field: Some(slot.name.clone()),
+            });
+        }
+    }
+    Ok(FrontendForm::class(
+        class_name, superclass, slots, node.span,
+    ))
+}
+
+fn evaluate_emit_slot(
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<FrontendSlot, GrammarActionError> {
+    let name = action_text_arg(node, action, "name")?;
+    let type_name = action_text_arg(node, action, "type")?;
+    if !valid_record_field_name(name.value.trim()) {
+        return Err(GrammarActionError {
+            span: name.span,
+            expected: "valid record field".to_string(),
+            field: Some(name.value.clone()),
+        });
+    }
+    if !valid_type_name(type_name.value.trim()) {
+        return Err(GrammarActionError {
+            span: type_name.span,
+            expected: "field type name".to_string(),
+            field: Some(name.value.clone()),
+        });
+    }
+    let init_keyword = action_text_arg(node, action, "init-keyword")
+        .map(|value| value.value)
+        .ok();
+    let required = action_bool_arg(action, "required-init-keyword").unwrap_or(false);
+    let mut slot = FrontendSlot::new(name.value.trim(), type_name.value.trim(), node.span);
+    if let Some(init_keyword) = init_keyword {
+        slot = slot.with_init_keyword(init_keyword.trim(), required);
+    }
+    Ok(slot)
+}
+
+fn action_text_arg(
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+    name: &str,
+) -> Result<TextValue, GrammarActionError> {
+    let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
+        return Err(GrammarActionError {
+            span: node.span,
+            expected: format!("grammar action argument `{name}`"),
+            field: None,
+        });
+    };
+    match &arg.value {
+        GrammarActionTerm::Capture { rule } => node
+            .children
+            .iter()
+            .find(|child| child.rule_name == *rule)
+            .map(|child| TextValue {
+                value: child.text.trim().to_string(),
+                span: child.span,
+            })
+            .ok_or_else(|| GrammarActionError {
+                span: node.span,
+                expected: format!("capture `{rule}`"),
+                field: None,
+            }),
+        GrammarActionTerm::Literal(value) => Ok(TextValue {
+            value: value.clone(),
+            span: node.span,
+        }),
+        _ => Err(GrammarActionError {
+            span: node.span,
+            expected: format!("text argument `{name}`"),
+            field: None,
+        }),
+    }
+}
+
+fn action_bool_arg(action: &GrammarAction, name: &str) -> Option<bool> {
+    action
+        .args
+        .iter()
+        .find(|arg| arg.name == name)
+        .and_then(|arg| match arg.value {
+            GrammarActionTerm::Bool(value) => Some(value),
+            _ => None,
+        })
+}
+
+fn action_list_arg(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+    name: &str,
+) -> Result<Vec<GrammarActionValue>, GrammarActionError> {
+    let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
+        return Err(GrammarActionError {
+            span: node.span,
+            expected: format!("grammar action argument `{name}`"),
+            field: None,
+        });
+    };
+    let GrammarActionTerm::CaptureAll { rule } = &arg.value else {
+        return Err(GrammarActionError {
+            span: node.span,
+            expected: format!("list argument `{name}`"),
+            field: None,
+        });
+    };
+    node.children
+        .iter()
+        .filter(|child| child.rule_name == *rule)
+        .map(|child| {
+            evaluate_rule_action(rules, child)?.map_or_else(
+                || {
+                    Ok(GrammarActionValue::Text {
+                        value: child.text.trim().to_string(),
+                        span: child.span,
+                    })
+                },
+                |output| Ok(output.value),
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TextValue {
+    value: String,
+    span: Span,
+}
+
+fn class_name_from_action_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.starts_with('<') {
+        valid_type_name(text).then(|| text.to_string())
+    } else {
+        valid_record_type_fragment(text).then(|| format!("<{text}>"))
+    }
+}
+
+fn grammar_action_output_source_data(
+    action: &GrammarAction,
+    value: &GrammarActionValue,
+) -> SourceData {
+    SourceData::record(
+        "grammar-action-output",
+        vec![
+            source_data::field("action", action.source_data()),
+            source_data::field("value", grammar_action_value_source_data(value)),
+        ],
+    )
+}
+
+fn grammar_action_value_source_data(value: &GrammarActionValue) -> SourceData {
+    match value {
+        GrammarActionValue::Text { value, span } => SourceData::record(
+            "action-text",
+            vec![
+                source_data::field("value", SourceData::string(value.as_str())),
+                source_span_data(*span),
+            ],
+        ),
+        GrammarActionValue::FrontendSlot(slot) => frontend_slot_source_data(slot),
+        GrammarActionValue::FrontendForm(form) => frontend_form_source_data(form),
     }
 }
 
