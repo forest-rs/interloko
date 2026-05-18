@@ -1,5 +1,70 @@
 # Plans
 
+## Make Grammar Actions Inspectable And Presentable
+
+### Goal
+
+Make staged grammar actions understandable as first-class compiler facts. A user
+should be able to start from a staged source region and follow the chain through
+grammar package, rule, action, captures, action output, emitted frontend form,
+and downstream AST/semantic object without reading raw source-data dumps.
+
+This slice also removes the remaining staged-language line-scanning diagnostic
+helpers once shared interpreter/action diagnostics carry enough structure.
+
+### Non-Goals
+
+- No base-Loko parser flip.
+- No source-authored grammar package loading from arbitrary project files.
+- No new staged language semantics.
+- No arbitrary host callbacks from grammar actions.
+- No persistent grammar package manager.
+- No report UI framework rewrite.
+
+### Fence
+
+`grammar_frontend::interpreter` owns action failure facts, capture facts, and
+action output data. It explicitly does not render localized diagnostics or own
+HTML/report presentation.
+
+`grammar_frontend` owns grammar package/action metaobjects and affordance names.
+It explicitly does not execute actions during inspection.
+
+`interloko_lab` owns report links and visual explanation. It explicitly does not
+invent new compiler facts by parsing prose dumps.
+
+### Invariants
+
+- Records and calculator still compile valid staged regions to the same
+  frontend forms.
+- Malformed staged regions report useful source spans without line-scanning
+  helper parsers.
+- Grammar packages for `records` and `calculator` have stable object IDs and
+  point at checked-in resource paths.
+- Grammar actions are visible as structured records with captures and output.
+- Existing grammar/rule/package reports stay deterministic and testable.
+
+### Sequence
+
+1. Add structured action diagnostic facts: action, arg, capture rule, and
+   expected structural value.
+2. Replace `record_shape_diagnostic` and `calculator_shape_diagnostic` with
+   interpreter/action diagnostics.
+3. Project grammar package and grammar action records into MOP/EOP.
+4. Add inspectable affordances for grammar actions: show-captures and
+   show-action-output.
+5. Link HTML report sections from staged source to grammar resource, rules,
+   actions, action outputs, emitted frontend forms, and resulting objects.
+6. Update docs/tests and run the full workspace checks.
+
+### Risks
+
+- Action diagnostics can become too generic if they only say "expected action
+  output". Include action/arg/rule names in structured args.
+- First-class action objects can overpromise mutability. Keep them read-only.
+- HTML links can become noisy. Prefer one clear provenance path over trying to
+  visualize every rule node.
+
 ## Build Structural Grammar Actions And Packages
 
 ### Goal
