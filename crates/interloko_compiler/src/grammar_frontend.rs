@@ -338,12 +338,16 @@ pub enum RuleExpression {
     Rule(String),
     /// A literal token or delimiter.
     Literal(String),
+    /// A character class over a single character.
+    CharacterClass(String),
     /// A sequence of expressions.
     Sequence(Vec<RuleExpression>),
     /// An ordered choice between alternatives.
     Choice(Vec<RuleExpression>),
     /// An optional expression.
     Optional(Box<RuleExpression>),
+    /// One or more repetitions.
+    OneOrMore(Box<RuleExpression>),
     /// Zero or more repetitions.
     ZeroOrMore(Box<RuleExpression>),
     /// A structural input expression plus an inert output description.
@@ -368,6 +372,12 @@ impl RuleExpression {
         Self::Literal(value.into())
     }
 
+    /// Creates a character class expression.
+    #[must_use]
+    pub fn character_class(value: impl Into<String>) -> Self {
+        Self::CharacterClass(value.into())
+    }
+
     /// Creates a sequence, collapsing a single item to that item.
     #[must_use]
     pub fn sequence(items: Vec<Self>) -> Self {
@@ -384,6 +394,12 @@ impl RuleExpression {
     #[must_use]
     pub fn optional(item: Self) -> Self {
         Self::Optional(Box::new(item))
+    }
+
+    /// Creates a one-or-more repetition expression.
+    #[must_use]
+    pub fn one_or_more(item: Self) -> Self {
+        Self::OneOrMore(Box::new(item))
     }
 
     /// Creates a zero-or-more repetition expression.
@@ -413,6 +429,7 @@ impl fmt::Display for RuleExpression {
         match self {
             Self::Rule(name) => formatter.write_str(name),
             Self::Literal(value) => write!(formatter, "`{value}`"),
+            Self::CharacterClass(value) => write!(formatter, "[{value}]"),
             Self::Sequence(items) => {
                 for (index, item) in items.iter().enumerate() {
                     if index > 0 {
@@ -432,6 +449,7 @@ impl fmt::Display for RuleExpression {
                 Ok(())
             }
             Self::Optional(item) => write!(formatter, "{}?", grouped_rule_expression(item)),
+            Self::OneOrMore(item) => write!(formatter, "{}+", grouped_rule_expression(item)),
             Self::ZeroOrMore(item) => write!(formatter, "{}*", grouped_rule_expression(item)),
             Self::Transform { input, output } => write!(formatter, "{input} => {output}"),
         }
@@ -482,6 +500,13 @@ fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
                 SourceData::string(value.as_str()),
             )],
         ),
+        RuleExpression::CharacterClass(value) => SourceData::record(
+            "character-class",
+            vec![source_data::field(
+                "value",
+                SourceData::string(value.as_str()),
+            )],
+        ),
         RuleExpression::Sequence(items) => SourceData::record(
             "sequence",
             vec![source_data::field(
@@ -505,6 +530,13 @@ fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
         ),
         RuleExpression::ZeroOrMore(item) => SourceData::record(
             "zero-or-more",
+            vec![source_data::field(
+                "item",
+                rule_expression_source_data(item),
+            )],
+        ),
+        RuleExpression::OneOrMore(item) => SourceData::record(
+            "one-or-more",
             vec![source_data::field(
                 "item",
                 rule_expression_source_data(item),
@@ -2825,6 +2857,9 @@ fn projected_rule_term(term: &str) -> RuleExpression {
     if let Some(inner) = trimmed.strip_suffix('*') {
         return RuleExpression::zero_or_more(projected_rule_expression(inner));
     }
+    if let Some(inner) = trimmed.strip_suffix('+') {
+        return RuleExpression::one_or_more(projected_rule_expression(inner));
+    }
     if let Some(inner) = trimmed.strip_suffix('?') {
         return RuleExpression::optional(projected_rule_expression(inner));
     }
@@ -2839,6 +2874,12 @@ fn projected_rule_term(term: &str) -> RuleExpression {
         .and_then(|inner| inner.strip_suffix('`'))
     {
         return RuleExpression::literal(inner);
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+    {
+        return RuleExpression::character_class(inner);
     }
     RuleExpression::rule(trimmed)
 }
@@ -3465,6 +3506,41 @@ mod tests {
                 .collect::<Vec<_>>(),
             Vec::from([("name", "radius"), ("type-name", "<integer>")])
         );
+    }
+
+    #[test]
+    fn source_authored_rule_interpreter_matches_character_classes_and_plus() {
+        let grammar = "grammar tiny\n\
+                       rule identifier = [A-Za-z_] [A-Za-z0-9_?-]*\n\
+                       rule digits = [0-9]+\n\
+                       end\n";
+        let rules = interpreter::parse_source_authored_grammar(grammar);
+
+        let identifier = interpreter::interpret_region_result(&rules, "identifier", "area?", 10)
+            .expect("identifier parses")
+            .root;
+        assert_eq!(identifier.span, Span::new(10, 15));
+        assert_eq!(identifier.text, "area?");
+        assert_eq!(
+            identifier
+                .children
+                .iter()
+                .filter(|child| child.rule_name.starts_with("class:"))
+                .map(|child| child.text.as_str())
+                .collect::<Vec<_>>(),
+            Vec::from(["a", "r", "e", "a", "?"])
+        );
+
+        let digits = interpreter::interpret_region_result(&rules, "digits", "123", 20)
+            .expect("digits parse")
+            .root;
+        assert_eq!(digits.span, Span::new(20, 23));
+        assert_eq!(digits.text, "123");
+
+        let error = interpreter::interpret_region_result(&rules, "digits", "", 30)
+            .expect_err("one-or-more requires one match");
+        assert_eq!(error.span, Span::new(30, 30));
+        assert_eq!(error.expected, Vec::from(["[0-9]".to_string()]));
     }
 
     #[test]

@@ -148,6 +148,24 @@ fn interpret_expression(
                 }],
             })
         }
+        RuleExpression::CharacterClass(value) => {
+            let start = position;
+            let ch = source[start..]
+                .chars()
+                .next()
+                .filter(|ch| character_class_contains(value, *ch))
+                .ok_or_else(|| ParseFailure::expected(start, character_class_expected(value)))?;
+            let end = start + ch.len_utf8();
+            Ok(ExpressionMatch {
+                end,
+                children: vec![InterpretedRuleNode {
+                    rule_name: format!("class:{value}"),
+                    span: Span::new(source_offset + start, source_offset + end),
+                    text: source[start..end].to_string(),
+                    children: Vec::new(),
+                }],
+            })
+        }
         RuleExpression::Sequence(items) => {
             let mut end = position;
             let mut children = Vec::new();
@@ -177,6 +195,19 @@ fn interpret_expression(
                     },
                 ),
             )
+        }
+        RuleExpression::OneOrMore(item) => {
+            let first = interpret_expression(rules, item, source, position, source_offset)?;
+            let mut end = first.end;
+            let mut children = first.children;
+            while let Ok(matched) = interpret_expression(rules, item, source, end, source_offset) {
+                if matched.end == end {
+                    break;
+                }
+                end = matched.end;
+                children.extend(matched.children);
+            }
+            Ok(ExpressionMatch { end, children })
         }
         RuleExpression::ZeroOrMore(item) => {
             let mut end = position;
@@ -230,6 +261,32 @@ fn literal_expected(value: &str) -> String {
     format!("`{value}`")
 }
 
+fn character_class_expected(value: &str) -> String {
+    format!("[{value}]")
+}
+
+fn character_class_contains(class: &str, ch: char) -> bool {
+    let mut chars = class.chars().peekable();
+    let mut previous = None;
+    while let Some(current) = chars.next() {
+        if current == '-'
+            && let (Some(start), Some(&end)) = (previous, chars.peek())
+        {
+            let _ = chars.next();
+            if start <= ch && ch <= end {
+                return true;
+            }
+            previous = Some(end);
+            continue;
+        }
+        if current == ch {
+            return true;
+        }
+        previous = Some(current);
+    }
+    false
+}
+
 fn interpret_builtin_rule(
     name: &str,
     source: &str,
@@ -237,9 +294,8 @@ fn interpret_builtin_rule(
     source_offset: usize,
 ) -> Option<InterpretedRuleNode> {
     let start = skip_interpreter_trivia(source, position);
-    // Keep these builtins intentionally tiny. They stand in for character-class
-    // rules until source-authored grammars can express identifiers, type names,
-    // and numbers structurally.
+    // Keep these builtins intentionally tiny. Calculator still uses them while
+    // staged grammars gain enough lexical PEG surface to define tokens directly.
     let end = match name {
         "name" => match source.as_bytes().get(start).copied() {
             Some(b'<') => parse_angle_name(source, start)?,

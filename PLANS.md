@@ -1,5 +1,57 @@
 # Plans
 
+## Make Records Grammar Lexical Rules Interpreted
+
+### Goal
+
+Make the records staged grammar more PEG-like by moving record names, field
+names, and type names out of Rust builtins and into source-authored grammar
+rules. The records parser should still emit the same structural class forms,
+but the recognizable token shapes should be inspectable grammar expressions.
+
+### Non-Goals
+
+- No base Loko parser flip.
+- No external grammar package loading.
+- No generalized lexer mode, predicates, captures, or semantic actions.
+- No removal of Rust parse-tree to frontend-form conversion.
+- No diagnostic rewrite.
+
+### Fence
+
+`grammar_frontend::interpreter` owns small generic PEG primitives such as
+character classes and one-or-more repetition. `grammar_frontend::records` owns
+the records grammar source and conversion from interpreted rule nodes into
+frontend class forms. Neither owns new class semantics or arbitrary grammar
+actions.
+
+### Invariants
+
+- Existing valid records staged regions keep producing the same class and slot
+  forms.
+- Malformed records diagnostics remain useful.
+- Records direct rules expose lexical grammar rules for names and type names.
+- Calculator can continue using the older tiny builtins until it moves its
+  lexical rules over in a separate slice.
+
+### Sequence
+
+1. Add character-class and one-or-more `RuleExpression` primitives plus
+   interpreter support.
+2. Rewrite the records grammar source to define record-name, field-name,
+   type-name, and identifier rules.
+3. Keep records-specific validation in Rust conversion code for duplicate
+   fields and semantically invalid type names.
+4. Update tests and grammar MOP docs to show the source-authored lexical rules.
+
+### Risks
+
+- Named lexical subrules currently skip trivia on entry. Keep directly repeated
+  character classes inline until the interpreter grows an explicit lexical
+  mode.
+- Character classes are intentionally ASCII-only for this slice; broader
+  identifier policy should be designed before changing user-facing syntax.
+
 ## Retire Staged Grammar Legacy Parsers
 
 ### Goal
