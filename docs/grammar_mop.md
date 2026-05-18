@@ -1,8 +1,9 @@
 # Grammar MOP
 
 Interloko exposes the current hand-written Loko parser as read-only grammar
-metaobjects. It also has trusted staged grammar adapters that emit structural
-frontend forms that are lowered directly into AST definitions.
+metaobjects inside a selected language environment. It also has trusted staged
+grammar extensions that emit structural frontend forms that are lowered
+directly into AST definitions.
 This is still not a parser rewrite and not a macro system.
 
 ## Boundary
@@ -20,8 +21,12 @@ user-defined parser rules.
 The implemented grammar slice has three load-bearing pieces:
 
 - a read-only grammar MOP projection for the base hand-written parser;
-- an explicit session-owned grammar registry and grammar-stack selection path;
-- trusted Rust-hosted staged adapters that emit structural frontend forms.
+- language environments that own resolved grammar stacks, activations, and
+  provenance;
+- a session-owned host registry used as catalog plumbing for available
+  environments and staged extensions;
+- trusted Rust-hosted staged grammar extensions that emit structural frontend
+  forms.
 
 Those frontend forms are compiler data, not source text. `ast.rs` consumes
 staged function and class forms directly when building AST definitions, and the
@@ -32,9 +37,12 @@ staged function bodies.
 
 ## Current Records
 
-The frontend selects language environments and staged region grammars through
-`GrammarFrontendRegistry`. The built-in registry exposes these environment
-tokens:
+The frontend selects language environments and staged region grammars through a
+host-side `GrammarFrontendRegistry`, but the registry is not the center of the
+model. It is a catalog of providers. The active `LanguageEnvironment` is the
+object that owns the grammar stack for a compile.
+
+The built-in registry exposes these environment tokens:
 
 ```text
 base-loko
@@ -46,8 +54,8 @@ hardcoded strings. `GrammarEnvironmentSelection` is a registry token; callers
 can use `GrammarEnvironmentSelection::base_loko()`,
 `GrammarEnvironmentSelection::derived_host()`, or
 `GrammarFrontendRegistry::builtin().environment_selection(token)`.
-Compiler sessions own the registry they compile with, and EOP projection exposes
-that session registry as inspectable objects:
+Compiler sessions own the registry they compile with, and EOP projection still
+exposes the session registry as inspectable plumbing:
 
 ```text
 grammar-registry:session
@@ -57,7 +65,8 @@ staged-grammar-adapter:calculator
 staged-grammar-adapter:records
 ```
 
-The default projection names one language environment and one grammar:
+The active projection names the selected language environment and its grammar
+stack:
 
 ```text
 language-environment:base-loko  BaseLokoEnvironment
@@ -87,6 +96,22 @@ Each rule records:
   `syntax.rs:Parser::parse_function`;
 - optional source span information, currently `none` because these rules are
   compiler-projected Rust facts rather than source-authored grammar forms.
+
+Environment and grammar objects expose navigation affordances:
+
+```text
+show-grammars         environment or grammar summary
+show-direct-rules     direct rules projected by a grammar
+show-effective-rules  resolved inherited/overridden rules for a grammar
+show-activations      source activations for an environment or grammar
+show-grammar-stack    active stack for the compile
+show-parse-trace      full parse provenance
+```
+
+This keeps the Ohm/OMeta-like path visible: start at the active environment,
+follow the grammar stack, inspect direct rules versus effective rules, then
+follow activations back to source regions and emitted frontend forms. The
+current rules are still compiler/host projected, not source-authored.
 
 There is also a trusted host fixture:
 
@@ -195,7 +220,11 @@ cargo run -p interloko_lab -- extensions tools/interloko_lab/fixtures/staged_rec
 cargo run -p interloko_lab -- inspect corpus/pass/generics/two_class_dispatch.loko grammar-registry:session
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar-registry:session show-grammar-registry
 cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/staged_records.loko grammar-extension:records show-grammar-extension
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/staged_records.loko language-environment:staged-loko
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/staged_records.loko language-environment:staged-loko show-grammars
 cargo run -p interloko_lab -- inspect corpus/pass/generics/two_class_dispatch.loko grammar:base-loko
+cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar:base-loko show-direct-rules
+cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar:base-loko show-effective-rules
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar:base-loko show-grammar-stack
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko grammar-rule:base-loko/function-definition show-grammar-rule
 cargo run -p interloko_lab -- invoke-affordance corpus/pass/generics/two_class_dispatch.loko language-environment:base-loko show-parse-trace
