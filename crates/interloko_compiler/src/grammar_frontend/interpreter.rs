@@ -78,15 +78,6 @@ pub(super) fn parse_source_authored_grammar(source: &str) -> Vec<SourceAuthoredR
     rules
 }
 
-pub(super) fn interpret_region(
-    rules: &[SourceAuthoredRule],
-    root_rule: &str,
-    source: &str,
-    source_offset: usize,
-) -> Option<InterpretedParse> {
-    interpret_region_result(rules, root_rule, source, source_offset).ok()
-}
-
 pub(super) fn interpret_region_result(
     rules: &[SourceAuthoredRule],
     root_rule: &str,
