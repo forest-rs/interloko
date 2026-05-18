@@ -520,8 +520,15 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("Compiler Artifact Path"));
     assert!(html.contains("<dt>time</dt>"));
     assert!(html.contains("<dt>work</dt>"));
+    assert!(html.contains("id=\"source-line-"));
+    assert!(html.contains("id=\"object-class-c"));
+    assert!(html.contains("href=\"#object-class-c"));
+    assert!(html.contains("id=\"artifact-art"));
+    assert!(html.contains("href=\"#artifact-art"));
     assert!(html.contains("id=\"interloko-report-data\""));
     assert!(html.contains("\"stagedRegions\""));
+    assert!(html.contains("\"sourceSpan\""));
+    assert!(html.contains("\"artifactKeys\""));
     assert!(html.contains("\"elapsedNanos\""));
     assert!(html.contains("\"executionTrace\""));
     assert!(html.contains("Expansion Chain"));

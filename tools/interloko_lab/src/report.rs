@@ -257,7 +257,8 @@ fn render_source_lines(artifacts: &SessionArtifacts) -> String {
         };
         let _ = write!(
             out,
-            "<span class=\"{class}\" data-rel=\"{}\"><span class=\"source-line__num\">{}</span><span class=\"source-line__text\">",
+            "<span class=\"{class}\" id=\"source-line-{}\" data-rel=\"{}\"><span class=\"source-line__num\">{}</span><span class=\"source-line__text\">",
+            line_index + 1,
             escape_attr(&relations.join(" ")),
             line_index + 1
         );
@@ -416,9 +417,10 @@ fn render_staged_region(
             let relations = relations_for_object_in_region(artifacts, region, object.id.as_str());
             let _ = writeln!(
                 out,
-                "                  <li data-node=\"object:{}\" data-rel=\"{}\"><code>{}</code><span>{}</span></li>",
+                "                  <li data-node=\"object:{}\" data-rel=\"{}\"><code><a href=\"#{}\">{}</a></code><span>{}</span></li>",
                 escape_attr(object.id.as_str()),
                 escape_attr(&relations),
+                escape_attr(&object_anchor(object.id.as_str())),
                 escape_html(object.id.as_str()),
                 escape_html(&object.presentation.title)
             );
@@ -529,10 +531,11 @@ fn render_region_artifact_links(
         );
         let _ = writeln!(
             out,
-            "                  <li data-node=\"artifact:{}\" data-rel=\"{}\"><span>{}</span><code>{}</code></li>",
+            "                  <li data-node=\"artifact:{}\" data-rel=\"{}\"><span>{}</span><code><a href=\"#{}\">{}</a></code></li>",
             escape_attr(&key),
             escape_attr(&relation),
             escape_html(label),
+            escape_attr(&artifact_anchor(&key)),
             escape_html(&key)
         );
     }
@@ -685,7 +688,8 @@ fn render_object_card(
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "          <article class=\"object-card\" data-node=\"object:{}\" data-rel=\"{}\">",
+        "          <article class=\"object-card\" id=\"{}\" data-node=\"object:{}\" data-rel=\"{}\">",
+        escape_attr(&object_anchor(object.id.as_str())),
         escape_attr(object.id.as_str()),
         escape_attr(relation)
     );
@@ -696,6 +700,7 @@ fn render_object_card(
         escape_html(object.id.as_str())
     );
     out.push_str(&render_object_meta_chips(object));
+    out.push_str(&render_object_links(artifacts, object));
     out.push_str(&render_object_facts(artifacts, object));
     let _ = writeln!(
         out,
@@ -712,6 +717,34 @@ fn render_object_card(
     }
     out.push_str("            </div>\n");
     out.push_str("          </article>\n");
+    out
+}
+
+fn render_object_links(artifacts: &SessionArtifacts, object: &EnvironmentObject) -> String {
+    if object.source.span.is_none() && object.artifacts.keys.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str("            <div class=\"object-link-row\">\n");
+    if let Some(span) = object.source.span {
+        let line = source_line_for_byte(&artifacts.source.source, span.start);
+        let _ = writeln!(
+            out,
+            "              <a href=\"#source-line-{}\" title=\"Source span {}..{}\">source line {}</a>",
+            line, span.start, span.end, line
+        );
+    }
+    for key in &object.artifacts.keys {
+        let key = key.to_string();
+        let _ = writeln!(
+            out,
+            "              <a href=\"#{}\" title=\"Compiler artifact key\"><code>{}</code></a>",
+            escape_attr(&artifact_anchor(&key)),
+            escape_html(&key)
+        );
+    }
+    out.push_str("            </div>\n");
     out
 }
 
@@ -1273,7 +1306,8 @@ fn render_artifacts_section(artifacts: &SessionArtifacts) -> String {
         let relation = artifact_relation_tokens(artifacts, report.artifact);
         let _ = writeln!(
             out,
-            "          <article class=\"artifact-card\" data-node=\"artifact:{}\" data-rel=\"{}\"><span>{}</span><code>{}</code><dl><div><dt>time</dt><dd>{}</dd></div><div><dt>work</dt><dd>{}</dd></div></dl></article>",
+            "          <article class=\"artifact-card\" id=\"{}\" data-node=\"artifact:{}\" data-rel=\"{}\"><span>{}</span><code>{}</code><dl><div><dt>time</dt><dd>{}</dd></div><div><dt>work</dt><dd>{}</dd></div></dl></article>",
+            escape_attr(&artifact_anchor(&report.key.to_string())),
             escape_attr(&report.key.to_string()),
             escape_attr(&relation),
             escape_html(&label),
@@ -1614,11 +1648,22 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
         }
         let _ = write!(
             out,
-            "{{\"id\":{},\"kind\":{},\"title\":{},\"affordances\":[",
+            "{{\"id\":{},\"kind\":{},\"title\":{},\"sourceSpan\":{},\"artifactKeys\":[",
             json_string(object.id.as_str()),
             json_string(object.kind.as_str()),
-            json_string(&object.presentation.title)
+            json_string(&object.presentation.title),
+            object
+                .source
+                .span
+                .map_or_else(|| "null".to_string(), span_json)
         );
+        for (key_index, key) in object.artifacts.keys.iter().enumerate() {
+            if key_index > 0 {
+                out.push(',');
+            }
+            out.push_str(&json_string(&key.to_string()));
+        }
+        out.push_str("],\"affordances\":[");
         for (affordance_index, affordance) in object.affordances.names.iter().enumerate() {
             if affordance_index > 0 {
                 out.push(',');
@@ -1926,23 +1971,7 @@ fn report_for(reports: &[ArtifactReport], artifact: QueryArtifact) -> Option<&Ar
 }
 
 fn artifact_label(artifact: QueryArtifact) -> String {
-    match artifact {
-        QueryArtifact::Source => "source".into(),
-        QueryArtifact::EnvironmentResolution => "environment-resolution".into(),
-        QueryArtifact::GrammarStack => "grammar-stack".into(),
-        QueryArtifact::GrammarParse => "grammar-parse".into(),
-        QueryArtifact::Parse => "parse".into(),
-        QueryArtifact::Ast => "ast".into(),
-        QueryArtifact::Bind => "bind".into(),
-        QueryArtifact::Diagnostics => "diagnostics".into(),
-        QueryArtifact::MethodLookup(id) => format!("method-lookup {id}"),
-        QueryArtifact::MethodLowering(id) => format!("method-lowering {id}"),
-        QueryArtifact::MethodTape(id) => format!("method-tape {id}"),
-        QueryArtifact::GenericDispatcher(id) => format!("generic-dispatcher {id}"),
-        QueryArtifact::LoweredModule => "lowered-module".into(),
-        QueryArtifact::TapeProgram => "tape-program".into(),
-        QueryArtifact::RuntimeResult => "runtime-result".into(),
-    }
+    artifact.label()
 }
 
 fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
@@ -2099,6 +2128,38 @@ fn artifact_stage_relation(artifact: QueryArtifact) -> &'static str {
 
 fn artifact_key_relation(key: &str) -> String {
     format!("artifact-key:{key}")
+}
+
+fn object_anchor(object_id: &str) -> String {
+    format!("object-{}", anchor_slug(object_id))
+}
+
+fn artifact_anchor(key: &str) -> String {
+    format!("artifact-{}", anchor_slug(key))
+}
+
+fn anchor_slug(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('-');
+        }
+    }
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn source_line_for_byte(source: &str, byte: usize) -> usize {
+    source
+        .char_indices()
+        .take_while(|(index, _)| *index < byte)
+        .filter(|(_, ch)| *ch == '\n')
+        .count()
+        + 1
 }
 
 #[derive(Clone)]
@@ -2268,6 +2329,12 @@ body {
 code,
 pre {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+a {
+  color: inherit;
+  text-decoration-color: rgba(18, 109, 101, 0.42);
+  text-underline-offset: 2px;
 }
 
 .report-shell {
@@ -2810,6 +2877,32 @@ pre {
   flex-wrap: wrap;
   gap: 6px;
   margin: 10px 0;
+}
+
+.object-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.object-link-row a {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--teal);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.object-link-row code {
+  overflow-wrap: anywhere;
 }
 
 .meta-chip {
