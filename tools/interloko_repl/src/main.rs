@@ -739,20 +739,21 @@ impl Repl {
         let Some(id) = single_object_id(args, ":inspect <object-id>", stderr)? else {
             return Ok(());
         };
-        if let Some(entry) = self.source_buffer.find_form(&id).cloned() {
-            let artifacts = self.ensure_artifacts(stderr)?;
-            write!(stdout, "{}", format_form_object(&entry, &artifacts))?;
-            return Ok(());
-        }
-        if is_form_like_id(&id) {
-            writeln!(stderr, "error: unknown form `{id}`")?;
-            return Ok(());
-        }
         let artifacts = self.ensure_artifacts(stderr)?;
-        if let Some(object) = find_object(&artifacts, &id) {
-            write!(stdout, "{}", format_environment_object(&object))?;
-        } else {
-            writeln!(stderr, "error: unknown object `{id}`")?;
+        match self.resolve_repl_object_reference(&artifacts, &id) {
+            ReplObjectReference::Form(entry) => {
+                write!(stdout, "{}", format_form_object(&entry, &artifacts))?;
+            }
+            ReplObjectReference::Environment(object) => {
+                write!(stdout, "{}", format_environment_object(&object))?;
+            }
+            ReplObjectReference::AmbiguousEnvironment(objects) => {
+                write_ambiguous_object_reference(stderr, &id, &objects)?;
+            }
+            ReplObjectReference::UnknownEnvironment => {
+                writeln!(stderr, "error: unknown object `{id}`")?;
+            }
+            ReplObjectReference::UnknownForm => writeln!(stderr, "error: unknown form `{id}`")?,
         }
         Ok(())
     }
@@ -770,19 +771,21 @@ impl Repl {
         let Some(id) = single_object_id(args, ":affordances <object-id>", stderr)? else {
             return Ok(());
         };
-        if let Some(entry) = self.source_buffer.find_form(&id) {
-            write!(stdout, "{}", format_form_affordances(entry))?;
-            return Ok(());
-        }
-        if is_form_like_id(&id) {
-            writeln!(stderr, "error: unknown form `{id}`")?;
-            return Ok(());
-        }
         let artifacts = self.ensure_artifacts(stderr)?;
-        if let Some(object) = find_object(&artifacts, &id) {
-            write!(stdout, "{}", format_affordances(&object))?;
-        } else {
-            writeln!(stderr, "error: unknown object `{id}`")?;
+        match self.resolve_repl_object_reference(&artifacts, &id) {
+            ReplObjectReference::Form(entry) => {
+                write!(stdout, "{}", format_form_affordances(&entry))?;
+            }
+            ReplObjectReference::Environment(object) => {
+                write!(stdout, "{}", format_affordances(&object))?;
+            }
+            ReplObjectReference::AmbiguousEnvironment(objects) => {
+                write_ambiguous_object_reference(stderr, &id, &objects)?;
+            }
+            ReplObjectReference::UnknownEnvironment => {
+                writeln!(stderr, "error: unknown object `{id}`")?;
+            }
+            ReplObjectReference::UnknownForm => writeln!(stderr, "error: unknown form `{id}`")?,
         }
         Ok(())
     }
@@ -816,14 +819,13 @@ impl Repl {
         let Some((id, affordance)) = object_id_and_affordance(args, stderr)? else {
             return Ok(());
         };
-        if let Some(entry) = self.source_buffer.find_form(&id).cloned() {
-            match affordance.as_str() {
+        let artifacts = self.ensure_artifacts(stderr)?;
+        match self.resolve_repl_object_reference(&artifacts, &id) {
+            ReplObjectReference::Form(entry) => match affordance.as_str() {
                 "inspect" => {
-                    let artifacts = self.ensure_artifacts(stderr)?;
                     write!(stdout, "{}", format_form_object(&entry, &artifacts))?;
                 }
                 "show-defined-objects" => {
-                    let artifacts = self.ensure_artifacts(stderr)?;
                     write!(
                         stdout,
                         "{}",
@@ -831,7 +833,6 @@ impl Repl {
                     )?;
                 }
                 "show-grammar" => {
-                    let artifacts = self.ensure_artifacts(stderr)?;
                     write!(stdout, "{}", format_form_grammar(&entry, &artifacts))?;
                 }
                 "show-source" => write_form_source(&entry, stdout)?,
@@ -841,20 +842,61 @@ impl Repl {
                     "error: object `{}` has no affordance `{affordance}`",
                     entry.form.id()
                 )?,
+            },
+            ReplObjectReference::Environment(object) => {
+                let Some(environment_affordance) = EnvironmentAffordance::from_name(&affordance)
+                else {
+                    writeln!(stderr, "error: unknown affordance `{affordance}`")?;
+                    return Ok(());
+                };
+                self.invoke_environment_affordance(
+                    &artifacts,
+                    &object,
+                    environment_affordance,
+                    stdout,
+                    stderr,
+                )?;
             }
-            return Ok(());
+            ReplObjectReference::AmbiguousEnvironment(objects) => {
+                write_ambiguous_object_reference(stderr, &id, &objects)?;
+            }
+            ReplObjectReference::UnknownEnvironment => {
+                let Some(_) = EnvironmentAffordance::from_name(&affordance) else {
+                    writeln!(stderr, "error: unknown affordance `{affordance}`")?;
+                    return Ok(());
+                };
+                writeln!(stderr, "error: unknown object `{id}`")?;
+            }
+            ReplObjectReference::UnknownForm => writeln!(stderr, "error: unknown form `{id}`")?,
         }
-        let Some(environment_affordance) = EnvironmentAffordance::from_name(&affordance) else {
-            writeln!(stderr, "error: unknown affordance `{affordance}`")?;
-            return Ok(());
-        };
-        self.invoke_environment_affordance(&id, environment_affordance, stdout, stderr)?;
         Ok(())
+    }
+
+    fn resolve_repl_object_reference(
+        &self,
+        artifacts: &SessionArtifacts,
+        reference: &str,
+    ) -> ReplObjectReference {
+        if let Some(entry) = self.source_buffer.find_form(reference).cloned() {
+            return ReplObjectReference::Form(entry);
+        }
+        if is_form_like_id(reference) {
+            return ReplObjectReference::UnknownForm;
+        }
+
+        match resolve_environment_object_reference(artifacts, reference) {
+            EnvironmentObjectReference::One(object) => ReplObjectReference::Environment(object),
+            EnvironmentObjectReference::Ambiguous(objects) => {
+                ReplObjectReference::AmbiguousEnvironment(objects)
+            }
+            EnvironmentObjectReference::None => ReplObjectReference::UnknownEnvironment,
+        }
     }
 
     fn invoke_environment_affordance<W, E>(
         &mut self,
-        id: &str,
+        artifacts: &SessionArtifacts,
+        object: &EnvironmentObject,
         affordance: EnvironmentAffordance,
         stdout: &mut W,
         stderr: &mut E,
@@ -863,15 +905,11 @@ impl Repl {
         W: Write,
         E: Write,
     {
-        let artifacts = self.ensure_artifacts(stderr)?;
-        let Some(object) = find_object(&artifacts, id) else {
-            writeln!(stderr, "error: unknown object `{id}`")?;
-            return Ok(());
-        };
         if !object.affordances.contains(affordance) {
             writeln!(
                 stderr,
-                "error: object `{id}` does not expose affordance `{}`",
+                "error: object `{}` does not expose affordance `{}`",
+                object.id.as_str(),
                 affordance.as_str()
             )?;
             return Ok(());
@@ -879,28 +917,28 @@ impl Repl {
 
         match affordance {
             EnvironmentAffordance::Inspect => {
-                write!(stdout, "{}", format_environment_object(&object))?
+                write!(stdout, "{}", format_environment_object(object))?
             }
             EnvironmentAffordance::DumpSyntax => {
-                write_invoked_object_stage(&artifacts, &object, DumpStage::Syntax, stdout)?
+                write_invoked_object_stage(artifacts, object, DumpStage::Syntax, stdout)?
             }
             EnvironmentAffordance::DumpAst => {
-                write_invoked_object_stage(&artifacts, &object, DumpStage::Ast, stdout)?
+                write_invoked_object_stage(artifacts, object, DumpStage::Ast, stdout)?
             }
             EnvironmentAffordance::DumpSem => {
-                write_invoked_object_stage(&artifacts, &object, DumpStage::Sem, stdout)?
+                write_invoked_object_stage(artifacts, object, DumpStage::Sem, stdout)?
             }
             EnvironmentAffordance::DumpMop => {
-                write_invoked_object_stage(&artifacts, &object, DumpStage::Mop, stdout)?
+                write_invoked_object_stage(artifacts, object, DumpStage::Mop, stdout)?
             }
             EnvironmentAffordance::DumpEop => {
-                write_invoked_object_stage(&artifacts, &object, DumpStage::Eop, stdout)?
+                write_invoked_object_stage(artifacts, object, DumpStage::Eop, stdout)?
             }
             EnvironmentAffordance::DumpLowered => {
-                write_invoked_object_stage(&artifacts, &object, DumpStage::Lowered, stdout)?
+                write_invoked_object_stage(artifacts, object, DumpStage::Lowered, stdout)?
             }
             EnvironmentAffordance::DumpTape => {
-                write_invoked_object_stage(&artifacts, &object, DumpStage::Tape, stdout)?
+                write_invoked_object_stage(artifacts, object, DumpStage::Tape, stdout)?
             }
             EnvironmentAffordance::ShowDependencies | EnvironmentAffordance::DumpArtifacts => {
                 write!(stdout, "{}", artifacts.dump_artifact_graph())?
@@ -909,16 +947,16 @@ impl Repl {
                 write!(stdout, "{}", artifacts.dump_artifact_graph())?
             }
             EnvironmentAffordance::ShowSlot => self.print_linked_environment_object(
-                &artifacts,
-                &object,
+                artifacts,
+                object,
                 "accessor:",
                 "slot:",
                 stdout,
                 stderr,
             )?,
             EnvironmentAffordance::ShowAccessor => self.print_linked_environment_object(
-                &artifacts,
-                &object,
+                artifacts,
+                object,
                 "slot:",
                 "accessor:",
                 stdout,
@@ -976,7 +1014,7 @@ impl Repl {
                 }
             }
             EnvironmentAffordance::Run => {
-                self.run_environment_object(&artifacts, &object, stdout, stderr)?
+                self.run_environment_object(artifacts, object, stdout, stderr)?
             }
             EnvironmentAffordance::AddMethod | EnvironmentAffordance::EditBody => writeln!(
                 stderr,
@@ -994,7 +1032,7 @@ impl Repl {
                 affordance.as_str()
             )?,
             EnvironmentAffordance::ShowSlots => {
-                write_class_slots(&artifacts, &object, stdout, stderr)?
+                write_class_slots(artifacts, object, stdout, stderr)?
             }
         }
         Ok(())
@@ -1556,6 +1594,112 @@ fn find_object(artifacts: &SessionArtifacts, id: &str) -> Option<EnvironmentObje
         .find(|object| object.id.as_str() == id)
 }
 
+enum ReplObjectReference {
+    Form(AcceptedDefinition),
+    Environment(Box<EnvironmentObject>),
+    AmbiguousEnvironment(Vec<EnvironmentObject>),
+    UnknownEnvironment,
+    UnknownForm,
+}
+
+enum EnvironmentObjectReference {
+    One(Box<EnvironmentObject>),
+    Ambiguous(Vec<EnvironmentObject>),
+    None,
+}
+
+fn resolve_environment_object_reference(
+    artifacts: &SessionArtifacts,
+    reference: &str,
+) -> EnvironmentObjectReference {
+    if let Some(object) = find_object(artifacts, reference) {
+        return EnvironmentObjectReference::One(Box::new(object));
+    }
+
+    let mut objects = artifacts
+        .environment_objects()
+        .into_iter()
+        .filter(|object| object_matches_reference(object, reference))
+        .collect::<Vec<_>>();
+    objects.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    objects.dedup_by(|left, right| left.id == right.id);
+
+    match objects.len() {
+        0 => EnvironmentObjectReference::None,
+        1 => EnvironmentObjectReference::One(Box::new(objects.remove(0))),
+        _ => EnvironmentObjectReference::Ambiguous(objects),
+    }
+}
+
+fn object_matches_reference(object: &EnvironmentObject, reference: &str) -> bool {
+    if is_class_reference(reference) {
+        return object.kind == EnvironmentKind::Class && object.presentation.title == reference;
+    }
+
+    if reference.contains(':') {
+        return false;
+    }
+
+    object_lookup_names(object)
+        .iter()
+        .any(|name| name == reference)
+}
+
+fn is_class_reference(reference: &str) -> bool {
+    reference.starts_with('<') && reference.ends_with('>') && reference.len() > 2
+}
+
+fn object_lookup_names(object: &EnvironmentObject) -> Vec<String> {
+    match object.kind {
+        // Only objects with language-facing names participate in this lookup.
+        // Grammar, artifact, diagnostic, mutation, and source objects still use
+        // their stable EOP ids so future named kinds have to opt in here.
+        EnvironmentKind::Class => Vec::new(),
+        EnvironmentKind::Generic
+        | EnvironmentKind::Method
+        | EnvironmentKind::Function
+        | EnvironmentKind::Accessor => presentation_title_name(&object.presentation.title)
+            .into_iter()
+            .collect(),
+        EnvironmentKind::Slot => object
+            .presentation
+            .title
+            .rsplit_once('.')
+            .map_or_else(Vec::new, |(_, slot)| vec![slot.to_string()]),
+        _ => Vec::new(),
+    }
+}
+
+fn presentation_title_name(title: &str) -> Option<String> {
+    let end = title
+        .find('(')
+        .or_else(|| title.find(char::is_whitespace))
+        .unwrap_or(title.len());
+    let name = title[..end].trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn write_ambiguous_object_reference<W>(
+    stderr: &mut W,
+    reference: &str,
+    objects: &[EnvironmentObject],
+) -> Result<()>
+where
+    W: Write,
+{
+    writeln!(stderr, "error: ambiguous object reference `{reference}`")?;
+    writeln!(stderr, "candidates:")?;
+    for object in objects {
+        writeln!(
+            stderr,
+            "  {} {}",
+            object.id.as_str(),
+            object.presentation.title
+        )?;
+    }
+    Ok(())
+}
+
 fn format_environment_object(object: &EnvironmentObject) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "object {}", object.id);
@@ -2102,8 +2246,8 @@ inspection:
   :eop
   :artifacts
   :dispatch [dispatch-site-id]
-  :inspect <object-id>
-  :affordances <object-id>
+  :inspect <object-id|name>
+  :affordances <object-id|name>
   :show-form <form-id>
   :drop-form <form-id>
   :invoke <object-id> <affordance>"

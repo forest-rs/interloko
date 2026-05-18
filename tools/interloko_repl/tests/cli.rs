@@ -232,6 +232,49 @@ fn source_forms_report_defined_environment_objects() {
 }
 
 #[test]
+fn inspect_and_affordances_resolve_language_names() {
+    let (stdout, stderr) = run_repl(
+        "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+         define generic area(shape :: <object>) => <integer>;\n\
+         define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
+         define function main()\n  area(make(<circle>, radius: 10))\nend;\n\
+         :inspect <circle>\n\
+         :affordances <circle>\n\
+         :invoke <circle> show-slots\n\
+         :inspect class:c1\n\
+         :inspect main\n\
+         :inspect area\n\
+         :inspect radius\n\
+         :inspect missing\n\
+         :quit\n",
+    );
+
+    assert!(stdout.contains("object class:c1"));
+    assert!(stdout.contains("title: <circle>"));
+    assert!(stdout.contains("affordances class:c1"));
+    assert!(stdout.contains("show-slots"));
+    assert!(stdout.contains("slots class:c1 <circle>"));
+    assert!(stdout.contains("object function:f0"));
+    assert!(stdout.contains("title: main() -> integer"));
+    assert!(
+        stderr.contains("error: ambiguous object reference `area`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("generic:g0 area"), "{stderr}");
+    assert!(stderr.contains("method:m0 area"), "{stderr}");
+    assert!(
+        stderr.contains("error: ambiguous object reference `radius`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("accessor:c1.s0 radius"), "{stderr}");
+    assert!(stderr.contains("slot:c1.s0 <circle>.radius"), "{stderr}");
+    assert!(
+        stderr.contains("error: unknown object `missing`"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn unknown_source_form_ids_report_unknown_form() {
     let (stdout, stderr) = run_repl(
         "define function answer()\n  42\nend;\n\
