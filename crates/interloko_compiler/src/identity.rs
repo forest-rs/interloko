@@ -237,6 +237,28 @@ pub enum ArtifactKind {
 }
 
 impl ArtifactKind {
+    /// Returns the stable kebab-case artifact kind label used in dumps and tools.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::EnvironmentResolution => "environment-resolution",
+            Self::GrammarStack => "grammar-stack",
+            Self::GrammarParse => "grammar-parse",
+            Self::Parse => "parse",
+            Self::Ast => "ast",
+            Self::Bind => "bind",
+            Self::Diagnostics => "diagnostics",
+            Self::MethodLookup => "method-lookup",
+            Self::MethodLowering => "method-lowering",
+            Self::MethodTape => "method-tape",
+            Self::GenericDispatcher => "generic-dispatcher",
+            Self::LoweredModule => "lowered-module",
+            Self::TapeProgram => "tape-program",
+            Self::RuntimeResult => "runtime-result",
+        }
+    }
+
     const fn tag(self) -> u64 {
         match self {
             Self::Source => 1,

@@ -6661,17 +6661,139 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
                 object.artifacts = ArtifactFacet::new(Vec::from([report.key]));
             }
         }
-        EnvironmentKind::GrammarActivation | EnvironmentKind::StagedRegion => {
+        EnvironmentKind::GrammarRegistry
+        | EnvironmentKind::RegisteredGrammarEnvironment
+        | EnvironmentKind::StagedGrammarAdapter
+        | EnvironmentKind::GrammarExtension => {
+            object.artifacts = artifact_facet(
+                source_file,
+                &[
+                    QueryArtifact::EnvironmentResolution,
+                    QueryArtifact::GrammarStack,
+                ],
+            );
+        }
+        EnvironmentKind::LanguageEnvironment | EnvironmentKind::Grammar => {
+            object.artifacts = artifact_facet(
+                source_file,
+                &[QueryArtifact::GrammarStack, QueryArtifact::GrammarParse],
+            );
+        }
+        EnvironmentKind::GrammarRule => {
+            if let Some(rule) =
+                artifacts.grammar_parse.rules.iter().find(|rule| {
+                    grammar_frontend::grammar_rule_object_id(rule) == object.id.as_str()
+                })
+            {
+                object.source =
+                    SourceFacet::new(Some(source_file), None, rule.projection.source_span);
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[QueryArtifact::GrammarStack, QueryArtifact::GrammarParse],
+                );
+            }
+        }
+        EnvironmentKind::EffectiveGrammarRule => {
+            object.artifacts = artifact_facet(
+                source_file,
+                &[QueryArtifact::GrammarStack, QueryArtifact::GrammarParse],
+            );
+        }
+        EnvironmentKind::GrammarActivation => {
+            if let Some(activation) =
+                artifacts
+                    .grammar_parse
+                    .activations
+                    .iter()
+                    .find(|activation| {
+                        grammar_frontend::grammar_activation_object_id(activation)
+                            == object.id.as_str()
+                    })
+            {
+                object.source = SourceFacet::new(Some(source_file), None, Some(activation.span));
+            }
             object.artifacts = artifact_facet(
                 source_file,
                 &[QueryArtifact::GrammarStack, QueryArtifact::GrammarParse],
             )
         }
-        EnvironmentKind::GrammarExtensionEmission | EnvironmentKind::GrammarExtensionProvenance => {
+        EnvironmentKind::StagedRegion => {
+            if let Some(region) = artifacts
+                .grammar_parse
+                .staged_regions
+                .iter()
+                .find(|region| {
+                    grammar_frontend::staged_parse_region_object_id(region) == object.id.as_str()
+                })
+            {
+                object.source = SourceFacet::new(Some(source_file), None, Some(region.source_span));
+            }
+            object.artifacts = artifact_facet(
+                source_file,
+                &[QueryArtifact::GrammarStack, QueryArtifact::GrammarParse],
+            )
+        }
+        EnvironmentKind::GrammarExtensionActivation => {
+            if let Some(activation) =
+                artifacts
+                    .grammar_parse
+                    .extension_activations
+                    .iter()
+                    .find(|activation| {
+                        grammar_frontend::grammar_extension_activation_object_id(activation)
+                            == object.id.as_str()
+                    })
+            {
+                object.source =
+                    SourceFacet::new(Some(source_file), None, Some(activation.source_span));
+            }
             object.artifacts = artifact_facet(source_file, &[QueryArtifact::GrammarParse]);
         }
-        _ => {}
+        EnvironmentKind::GrammarExtensionEmission | EnvironmentKind::GrammarExtensionProvenance => {
+            if let Some(span) = grammar_extension_object_source_span(artifacts, object) {
+                object.source = SourceFacet::new(Some(source_file), None, Some(span));
+            }
+            object.artifacts = artifact_facet(source_file, &[QueryArtifact::GrammarParse]);
+        }
+        EnvironmentKind::RuntimeLayoutRow
+        | EnvironmentKind::HostObject
+        | EnvironmentKind::Mutation => {}
     }
+}
+
+fn grammar_extension_object_source_span(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+) -> Option<Span> {
+    artifacts
+        .grammar_parse
+        .extension_emissions
+        .iter()
+        .find(|emission| {
+            grammar_frontend::grammar_extension_emission_object_id(emission) == object.id.as_str()
+        })
+        .map(|emission| emission.source_span)
+        .or_else(|| {
+            artifacts
+                .grammar_parse
+                .extension_provenance
+                .iter()
+                .find(|provenance| {
+                    grammar_frontend::grammar_extension_provenance_object_id(provenance)
+                        == object.id.as_str()
+                })
+                .and_then(|provenance| {
+                    artifacts
+                        .grammar_parse
+                        .extension_activations
+                        .iter()
+                        .find(|activation| {
+                            activation.activation == provenance.activation
+                                && activation.object_slug == provenance.object_slug
+                        })
+                        .map(|activation| activation.source_span)
+                })
+        })
 }
 
 fn artifact_facet(source_file: SourceFileId, artifacts: &[QueryArtifact]) -> ArtifactFacet {
@@ -9075,23 +9197,7 @@ fn fingerprint_args(module: &sem::Module, args: &[sem::Expr], out: &mut String) 
 }
 
 fn artifact_label(artifact: QueryArtifact) -> String {
-    match artifact {
-        QueryArtifact::Source => "source".into(),
-        QueryArtifact::EnvironmentResolution => "environment-resolution".into(),
-        QueryArtifact::GrammarStack => "grammar-stack".into(),
-        QueryArtifact::GrammarParse => "grammar-parse".into(),
-        QueryArtifact::Parse => "parse".into(),
-        QueryArtifact::Ast => "ast".into(),
-        QueryArtifact::Bind => "bind".into(),
-        QueryArtifact::Diagnostics => "diagnostics".into(),
-        QueryArtifact::MethodLookup(id) => format!("method-lookup {id}"),
-        QueryArtifact::MethodLowering(id) => format!("method-lowering {id}"),
-        QueryArtifact::MethodTape(id) => format!("method-tape {id}"),
-        QueryArtifact::GenericDispatcher(id) => format!("generic-dispatcher {id}"),
-        QueryArtifact::LoweredModule => "lowered-module".into(),
-        QueryArtifact::TapeProgram => "tape-program".into(),
-        QueryArtifact::RuntimeResult => "runtime-result".into(),
-    }
+    artifact.label()
 }
 
 fn sem_field_init_source_label(source: sem::FieldInitSource) -> &'static str {
@@ -9888,6 +9994,12 @@ mod tests {
                 .detail
                 .contains("environments=[base-loko,derived-host]")
         );
+        assert!(
+            grammar_registry
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::EnvironmentResolution.key(artifacts.source.id))
+        );
 
         let registered_environment =
             eop_object(&objects, "registered-grammar-environment:base-loko");
@@ -9899,6 +10011,12 @@ mod tests {
             registered_environment.storage,
             EnvironmentStorage::FrontendRegistry
         );
+        assert!(
+            registered_environment
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::GrammarStack.key(artifacts.source.id))
+        );
 
         let staged_adapter = eop_object(&objects, "staged-grammar-adapter:records");
         assert_eq!(staged_adapter.kind, EnvironmentKind::StagedGrammarAdapter);
@@ -9908,8 +10026,67 @@ mod tests {
         assert_eq!(grammar_extension.kind, EnvironmentKind::GrammarExtension);
         assert!(
             grammar_extension
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::EnvironmentResolution.key(artifacts.source.id))
+        );
+        assert!(
+            grammar_extension
                 .affordances
                 .contains(EnvironmentAffordance::ShowGrammarExtension)
+        );
+
+        let language_environment = eop_object(&objects, "language-environment:base-loko");
+        assert_eq!(
+            language_environment.kind,
+            EnvironmentKind::LanguageEnvironment
+        );
+        assert!(
+            language_environment
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::GrammarParse.key(artifacts.source.id))
+        );
+
+        let grammar = eop_object(&objects, "grammar:base-loko");
+        assert_eq!(grammar.kind, EnvironmentKind::Grammar);
+        assert!(
+            grammar
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::GrammarStack.key(artifacts.source.id))
+        );
+
+        let grammar_rule = eop_object(&objects, "grammar-rule:base-loko/function-definition");
+        assert_eq!(grammar_rule.kind, EnvironmentKind::GrammarRule);
+        assert!(
+            grammar_rule
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::GrammarParse.key(artifacts.source.id))
+        );
+
+        let effective_rule = eop_object(
+            &objects,
+            "effective-grammar-rule:base-loko/function-definition",
+        );
+        assert_eq!(effective_rule.kind, EnvironmentKind::EffectiveGrammarRule);
+        assert!(
+            effective_rule
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::GrammarParse.key(artifacts.source.id))
+        );
+
+        let grammar_activation = eop_object(&objects, "grammar-activation:base-loko/source-file");
+        assert_eq!(grammar_activation.kind, EnvironmentKind::GrammarActivation);
+        assert_eq!(
+            grammar_activation.source.source_file,
+            Some(artifacts.source.id)
+        );
+        assert_eq!(
+            grammar_activation.source.span,
+            Some(Span::new(0, AREA.len()))
         );
 
         let root_class = eop_object(&objects, "class:c0");
@@ -10124,6 +10301,14 @@ mod tests {
                 .detail
                 .contains("capabilities=[emit-frontend-forms]")
         );
+        assert_eq!(activation.source.source_file, Some(artifacts.source.id));
+        assert!(activation.source.span.is_some());
+        assert!(
+            activation
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::GrammarParse.key(artifacts.source.id))
+        );
 
         let emission = eop_object(&objects, "grammar-extension-emission:calculator/r0/f0");
         assert_eq!(emission.kind, EnvironmentKind::GrammarExtensionEmission);
@@ -10134,6 +10319,8 @@ mod tests {
                 .contains("kind=frontend-function")
         );
         assert!(emission.inspection.detail.contains("generated=function:f0"));
+        assert_eq!(emission.source.source_file, Some(artifacts.source.id));
+        assert!(emission.source.span.is_some());
 
         let provenance = eop_object(
             &objects,
@@ -10141,6 +10328,8 @@ mod tests {
         );
         assert_eq!(provenance.kind, EnvironmentKind::GrammarExtensionProvenance);
         assert!(provenance.inspection.detail.contains("nodes=1"));
+        assert_eq!(provenance.source.source_file, Some(artifacts.source.id));
+        assert!(provenance.source.span.is_some());
 
         let dump = artifacts.dump_grammar_extensions();
         assert!(dump.contains("grammar extensions"));

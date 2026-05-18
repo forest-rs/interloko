@@ -3,7 +3,7 @@
 //! Interloko owns artifacts and scheduling. This module only maps compiler query
 //! artifacts into `invalidation` keys and exposes affected-order drains.
 
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
 
 use invalidation::{Channel, InvalidationTracker, LazyPolicy};
 
@@ -66,6 +66,30 @@ pub struct ArtifactEdge {
 }
 
 impl QueryArtifact {
+    /// Returns the stable label used by dumps and presentation tools.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Source => ArtifactKind::Source.as_str().into(),
+            Self::EnvironmentResolution => ArtifactKind::EnvironmentResolution.as_str().into(),
+            Self::GrammarStack => ArtifactKind::GrammarStack.as_str().into(),
+            Self::GrammarParse => ArtifactKind::GrammarParse.as_str().into(),
+            Self::Parse => ArtifactKind::Parse.as_str().into(),
+            Self::Ast => ArtifactKind::Ast.as_str().into(),
+            Self::Bind => ArtifactKind::Bind.as_str().into(),
+            Self::Diagnostics => ArtifactKind::Diagnostics.as_str().into(),
+            Self::MethodLookup(id) => format!("{} {id}", ArtifactKind::MethodLookup.as_str()),
+            Self::MethodLowering(id) => format!("{} {id}", ArtifactKind::MethodLowering.as_str()),
+            Self::MethodTape(id) => format!("{} {id}", ArtifactKind::MethodTape.as_str()),
+            Self::GenericDispatcher(id) => {
+                format!("{} {id}", ArtifactKind::GenericDispatcher.as_str())
+            }
+            Self::LoweredModule => ArtifactKind::LoweredModule.as_str().into(),
+            Self::TapeProgram => ArtifactKind::TapeProgram.as_str().into(),
+            Self::RuntimeResult => ArtifactKind::RuntimeResult.as_str().into(),
+        }
+    }
+
     /// Returns the stable artifact key for this query artifact in `source_file`.
     #[must_use]
     pub fn key(self, source_file: SourceFileId) -> ArtifactKey {
