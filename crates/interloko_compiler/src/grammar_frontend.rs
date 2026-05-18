@@ -719,6 +719,8 @@ pub struct GrammarRule {
     pub name: String,
     /// Structured projected expression.
     pub expression: RuleExpression,
+    /// Deterministic structural action attached to this rule, when any.
+    pub action: Option<GrammarAction>,
     /// Inert structural expression data.
     pub expression_data: SourceData,
     /// Projection/source location information.
@@ -2643,6 +2645,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
                 source_data::field("delegates-to", SourceData::symbol("BaseLokoGrammar")),
             ],
         ),
+        action: None,
         projection: GrammarProjection {
             origin: ProjectionOrigin::TrustedHostFixture,
             location: "host:DerivedHostGrammar/function-definition".to_string(),
@@ -2897,6 +2900,11 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             grammar_slug: grammar_slug.to_string(),
             name: (*name).to_string(),
             expression: projected_rule_expression(expression),
+            action: parse_grammar_action(
+                expression
+                    .split_once("=>")
+                    .map_or("", |(_, output)| output.trim()),
+            ),
             expression_data: grammar_rule_expression_data(name, expression, location),
             projection: GrammarProjection {
                 origin: ProjectionOrigin::CompilerProjected,
@@ -3503,6 +3511,14 @@ pub fn grammar_object_id(grammar: &Grammar) -> String {
 #[must_use]
 pub fn grammar_rule_object_id(rule: &GrammarRule) -> String {
     format!("grammar-rule:{}/{}", rule.grammar_slug, rule.name)
+}
+
+/// Returns the stable EOP id for a grammar action attached to a rule.
+#[must_use]
+pub fn grammar_action_object_id(rule: &GrammarRule) -> Option<String> {
+    rule.action
+        .as_ref()
+        .map(|_| format!("grammar-action:{}/{}", rule.grammar_slug, rule.name))
 }
 
 /// Returns the stable EOP id for an effective grammar rule.

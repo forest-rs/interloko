@@ -737,6 +737,42 @@ fn invoke_affordance(
             );
             Ok(())
         }
+        EnvironmentAffordance::ShowAction => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_grammar_action(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowCaptures => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_grammar_action_captures(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowActionOutput => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_grammar_action_output(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
         EnvironmentAffordance::ShowParseTrace => {
             print!("{}", workbench.artifacts.dump_parse_trace());
             Ok(())

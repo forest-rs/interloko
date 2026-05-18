@@ -1025,6 +1025,27 @@ impl Repl {
                 affordance,
                 object.id.as_str(),
             )?,
+            EnvironmentAffordance::ShowAction => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_grammar_action(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
+            EnvironmentAffordance::ShowCaptures => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_grammar_action_captures(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
+            EnvironmentAffordance::ShowActionOutput => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_grammar_action_output(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
             EnvironmentAffordance::ShowParseTrace => {
                 write!(stdout, "{}", artifacts.dump_parse_trace())?
             }

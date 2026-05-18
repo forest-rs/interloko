@@ -1185,7 +1185,16 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
         EnvironmentKind::Grammar => {
             "Grammar metaobject in the active environment's resolved grammar stack."
         }
+        EnvironmentKind::GrammarPackage => {
+            "Source-authored grammar package bundled into the frontend."
+        }
+        EnvironmentKind::GrammarResource => {
+            "Source-authored grammar resource file loaded for a package."
+        }
         EnvironmentKind::GrammarRule => "Direct grammar rule projected from a grammar.",
+        EnvironmentKind::GrammarAction => {
+            "Deterministic structural action attached to a grammar rule."
+        }
         EnvironmentKind::EffectiveGrammarRule => {
             "Grammar rule after stack resolution and inheritance."
         }

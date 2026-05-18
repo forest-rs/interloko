@@ -349,8 +349,14 @@ pub enum EnvironmentKind {
     LanguageEnvironment,
     /// A grammar metaobject.
     Grammar,
+    /// A source-authored grammar package.
+    GrammarPackage,
+    /// A source-authored grammar resource file.
+    GrammarResource,
     /// A direct grammar rule metaobject.
     GrammarRule,
+    /// A deterministic action attached to a grammar rule.
+    GrammarAction,
     /// An effective grammar rule after grammar-stack resolution.
     EffectiveGrammarRule,
     /// A grammar activation over a parse region.
@@ -398,7 +404,10 @@ impl EnvironmentKind {
             Self::GrammarExtensionProvenance => "grammar-extension-provenance",
             Self::LanguageEnvironment => "language-environment",
             Self::Grammar => "grammar",
+            Self::GrammarPackage => "grammar-package",
+            Self::GrammarResource => "grammar-resource",
             Self::GrammarRule => "grammar-rule",
+            Self::GrammarAction => "grammar-action",
             Self::EffectiveGrammarRule => "effective-grammar-rule",
             Self::GrammarActivation => "grammar-activation",
             Self::StagedRegion => "staged-region",
@@ -542,6 +551,12 @@ pub enum EnvironmentAffordance {
     ShowGrammarRule,
     /// Show the structured expression for a grammar rule.
     ShowExpression,
+    /// Show the deterministic action attached to a grammar rule.
+    ShowAction,
+    /// Show the captures consumed by a grammar action.
+    ShowCaptures,
+    /// Show the output shape produced by a grammar action.
+    ShowActionOutput,
     /// Show parse provenance and grammar activations.
     ShowParseTrace,
     /// Show the primary/oracle parser shadow report.
@@ -585,6 +600,9 @@ impl EnvironmentAffordance {
             Self::ShowActivations,
             Self::ShowGrammarRule,
             Self::ShowExpression,
+            Self::ShowAction,
+            Self::ShowCaptures,
+            Self::ShowActionOutput,
             Self::ShowParseTrace,
             Self::ShowParserShadow,
             Self::ShowGrammarRegistry,
@@ -633,6 +651,9 @@ impl EnvironmentAffordance {
             Self::ShowActivations => "show-activations",
             Self::ShowGrammarRule => "show-grammar-rule",
             Self::ShowExpression => "show-expression",
+            Self::ShowAction => "show-action",
+            Self::ShowCaptures => "show-captures",
+            Self::ShowActionOutput => "show-action-output",
             Self::ShowParseTrace => "show-parse-trace",
             Self::ShowParserShadow => "show-parser-shadow",
             Self::ShowGrammarRegistry => "show-grammar-registry",
@@ -1311,6 +1332,24 @@ impl SessionArtifacts {
     #[must_use]
     pub fn explain_grammar_expression(&self, id: &str) -> Option<String> {
         explain_grammar_expression(self, id)
+    }
+
+    /// Explains a grammar action object or the action attached to a rule.
+    #[must_use]
+    pub fn explain_grammar_action(&self, id: &str) -> Option<String> {
+        explain_grammar_action(self, id)
+    }
+
+    /// Explains captures consumed by a grammar action object or rule.
+    #[must_use]
+    pub fn explain_grammar_action_captures(&self, id: &str) -> Option<String> {
+        explain_grammar_action_captures(self, id)
+    }
+
+    /// Explains the output shape produced by a grammar action object or rule.
+    #[must_use]
+    pub fn explain_grammar_action_output(&self, id: &str) -> Option<String> {
+        explain_grammar_action_output(self, id)
     }
 
     /// Explains one generic dispatch site by friendly selector id.
@@ -5699,6 +5738,118 @@ fn explain_grammar_expression(artifacts: &SessionArtifacts, id: &str) -> Option<
         })
 }
 
+fn explain_grammar_action(artifacts: &SessionArtifacts, id: &str) -> Option<String> {
+    let rule = grammar_action_rule(artifacts, id)?;
+    let action = rule.action.as_ref()?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar action {}",
+        grammar_frontend::grammar_action_object_id(rule)
+            .unwrap_or_else(|| grammar_frontend::grammar_rule_object_id(rule))
+    );
+    let _ = writeln!(
+        out,
+        "rule {}",
+        grammar_frontend::grammar_rule_object_id(rule)
+    );
+    let _ = writeln!(out, "name {}", action.name);
+    let _ = writeln!(out, "args {}", action.args.len());
+    for arg in &action.args {
+        let _ = writeln!(
+            out,
+            "  {} {}",
+            arg.name,
+            grammar_action_term_label(&arg.value)
+        );
+    }
+    let _ = writeln!(out, "data {}", action.source_data());
+    out.push_str(&explain_grammar_action_output(artifacts, id).unwrap_or_default());
+    Some(out)
+}
+
+fn explain_grammar_action_captures(artifacts: &SessionArtifacts, id: &str) -> Option<String> {
+    let rule = grammar_action_rule(artifacts, id)?;
+    let action = rule.action.as_ref()?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar action captures {}",
+        grammar_frontend::grammar_action_object_id(rule)
+            .unwrap_or_else(|| grammar_frontend::grammar_rule_object_id(rule))
+    );
+    let mut any = false;
+    for arg in &action.args {
+        match &arg.value {
+            grammar_frontend::GrammarActionTerm::Capture { rule } => {
+                any = true;
+                let _ = writeln!(out, "  {} captures first {}", arg.name, rule);
+            }
+            grammar_frontend::GrammarActionTerm::CaptureAll { rule } => {
+                any = true;
+                let _ = writeln!(out, "  {} captures all {}", arg.name, rule);
+            }
+            grammar_frontend::GrammarActionTerm::Literal(_)
+            | grammar_frontend::GrammarActionTerm::Bool(_) => {}
+        }
+    }
+    if !any {
+        let _ = writeln!(out, "  <none>");
+    }
+    Some(out)
+}
+
+fn explain_grammar_action_output(artifacts: &SessionArtifacts, id: &str) -> Option<String> {
+    let rule = grammar_action_rule(artifacts, id)?;
+    let action = rule.action.as_ref()?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar action output {}",
+        grammar_frontend::grammar_action_object_id(rule)
+            .unwrap_or_else(|| grammar_frontend::grammar_rule_object_id(rule))
+    );
+    let _ = writeln!(out, "action {}", action.name);
+    let _ = writeln!(
+        out,
+        "produces {}",
+        grammar_action_output_label(&action.name)
+    );
+    let _ = writeln!(out, "rule-expression {}", rule.expression);
+    Some(out)
+}
+
+fn grammar_action_rule<'a>(artifacts: &'a SessionArtifacts, id: &str) -> Option<&'a GrammarRule> {
+    artifacts.grammar_parse.rules.iter().find(|rule| {
+        rule.action.is_some()
+            && (grammar_frontend::grammar_action_object_id(rule).as_deref() == Some(id)
+                || grammar_frontend::grammar_rule_object_id(rule) == id)
+    })
+}
+
+fn grammar_action_term_label(term: &grammar_frontend::GrammarActionTerm) -> String {
+    match term {
+        grammar_frontend::GrammarActionTerm::Capture { rule } => format!("capture({rule})"),
+        grammar_frontend::GrammarActionTerm::CaptureAll { rule } => {
+            format!("capture-all({rule})")
+        }
+        grammar_frontend::GrammarActionTerm::Literal(value) => format!("literal({value:?})"),
+        grammar_frontend::GrammarActionTerm::Bool(value) => value.to_string(),
+    }
+}
+
+fn grammar_action_output_label(action: &str) -> &'static str {
+    match action {
+        "emit-class" => "frontend class form",
+        "emit-slot" => "frontend slot",
+        "emit-function" => "frontend function form",
+        "emit-integer" | "emit-name" | "emit-call" | "fold-binary" => "frontend expression",
+        "emit-argument-list" | "emit-argument-tail" => "frontend expression list",
+        "emit-binary-tail" => "binary-tail helper",
+        _ => "unknown structural value",
+    }
+}
+
 fn render_grammar_activation_summary(
     report: &GrammarParseReport,
     grammar: &grammar_frontend::Grammar,
@@ -6647,9 +6798,12 @@ fn dump_grammar_mop_environment_object(
             dump_language_environment_object(artifacts, object.id.as_str())
         }
         EnvironmentKind::Grammar => dump_grammar_object(artifacts, object.id.as_str()),
+        EnvironmentKind::GrammarPackage => dump_grammar_package_object(artifacts, object),
+        EnvironmentKind::GrammarResource => dump_grammar_resource_object(artifacts, object),
         EnvironmentKind::GrammarRule | EnvironmentKind::EffectiveGrammarRule => {
             artifacts.explain_grammar_rule(object.id.as_str())
         }
+        EnvironmentKind::GrammarAction => artifacts.explain_grammar_action(object.id.as_str()),
         EnvironmentKind::GrammarActivation => {
             dump_grammar_activation_object(artifacts, object.id.as_str())
         }
@@ -6779,6 +6933,63 @@ fn dump_grammar_object(artifacts: &SessionArtifacts, object_id: &str) -> Option<
         &artifacts.grammar_parse,
         grammar,
     ));
+    Some(out)
+}
+
+fn dump_grammar_package_object(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+) -> Option<String> {
+    let grammar = artifacts
+        .grammar_parse
+        .grammars
+        .iter()
+        .find(|grammar| grammar_package_object_id(grammar) == object.id.as_str())?;
+    let mut out = String::new();
+    let _ = writeln!(out, "grammar package {}", object.id);
+    let _ = writeln!(out, "grammar {}", grammar.id);
+    let _ = writeln!(out, "resources:");
+    for resource in grammar_resource_paths(artifacts, grammar) {
+        let _ = writeln!(out, "  {}", grammar_resource_object_id(grammar, &resource));
+    }
+    let _ = writeln!(out, "actions:");
+    for rule in artifacts
+        .grammar_parse
+        .rules
+        .iter()
+        .filter(|rule| rule.grammar == grammar.id && rule.action.is_some())
+    {
+        if let Some(action_id) = grammar_frontend::grammar_action_object_id(rule) {
+            let _ = writeln!(out, "  {action_id}");
+        }
+    }
+    Some(out)
+}
+
+fn dump_grammar_resource_object(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+) -> Option<String> {
+    let (grammar_slug, resource) = object
+        .id
+        .as_str()
+        .strip_prefix("grammar-resource:")?
+        .split_once('/')?;
+    let grammar = artifacts
+        .grammar_parse
+        .grammars
+        .iter()
+        .find(|grammar| grammar.slug == grammar_slug)?;
+    let mut out = String::new();
+    let _ = writeln!(out, "grammar resource {}", object.id);
+    let _ = writeln!(out, "grammar {}", grammar.id);
+    let _ = writeln!(out, "resource {resource}");
+    let _ = writeln!(out, "rules:");
+    for rule in artifacts.grammar_parse.rules.iter().filter(|rule| {
+        rule.grammar == grammar.id && grammar_rule_resource_path(rule).as_deref() == Some(resource)
+    }) {
+        let _ = writeln!(out, "  {}", grammar_frontend::grammar_rule_object_id(rule));
+    }
     Some(out)
 }
 
@@ -7275,18 +7486,21 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
                 ],
             );
         }
-        EnvironmentKind::LanguageEnvironment | EnvironmentKind::Grammar => {
+        EnvironmentKind::LanguageEnvironment
+        | EnvironmentKind::Grammar
+        | EnvironmentKind::GrammarPackage
+        | EnvironmentKind::GrammarResource => {
             object.artifacts = artifact_facet(
                 source_file,
                 &[QueryArtifact::GrammarStack, QueryArtifact::GrammarParse],
             );
         }
-        EnvironmentKind::GrammarRule => {
-            if let Some(rule) =
-                artifacts.grammar_parse.rules.iter().find(|rule| {
-                    grammar_frontend::grammar_rule_object_id(rule) == object.id.as_str()
-                })
-            {
+        EnvironmentKind::GrammarRule | EnvironmentKind::GrammarAction => {
+            if let Some(rule) = artifacts.grammar_parse.rules.iter().find(|rule| {
+                grammar_frontend::grammar_rule_object_id(rule) == object.id.as_str()
+                    || grammar_frontend::grammar_action_object_id(rule).as_deref()
+                        == Some(object.id.as_str())
+            }) {
                 object.source =
                     SourceFacet::new(Some(source_file), None, rule.projection.source_span);
                 object.artifacts = artifact_facet(
@@ -7573,6 +7787,7 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     let report = &artifacts.grammar_parse;
     project_language_environment(artifacts, sink, &report.environment);
     for grammar in &report.grammars {
+        project_grammar_package(artifacts, sink, grammar);
         let id = grammar_frontend::grammar_object_id(grammar);
         sink.emit(environment_object(EnvironmentObjectParts {
             id,
@@ -7611,6 +7826,9 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     }
     for rule in &report.rules {
         project_grammar_rule(sink, rule);
+        if rule.action.is_some() {
+            project_grammar_action(sink, rule);
+        }
     }
     for rule in &report.effective_rules {
         project_effective_grammar_rule(sink, rule);
@@ -7629,6 +7847,79 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     }
     for provenance in &report.extension_provenance {
         project_grammar_extension_provenance(sink, provenance);
+    }
+}
+
+fn project_grammar_package(
+    artifacts: &SessionArtifacts,
+    sink: &mut dyn EnvironmentObjectSink,
+    grammar: &grammar_frontend::Grammar,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let resources = grammar_resource_paths(artifacts, grammar);
+    if resources.is_empty() {
+        return;
+    }
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: grammar_package_object_id(grammar),
+        kind: EnvironmentKind::GrammarPackage,
+        meta_class: "<grammar-package>",
+        origin: EnvironmentOrigin::SourceAuthored,
+        storage: EnvironmentStorage::FrontendRegistry,
+        title: format!("{} grammar package", grammar.slug),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammars,
+            Aff::ShowDirectRules,
+            Aff::ShowGrammarStack,
+        ]),
+        execution: None,
+        inspection: format!(
+            "grammar={} resources=[{}] direct-rules={} actions={}",
+            grammar.id,
+            resources.join(","),
+            grammar.direct_rules.len(),
+            artifacts
+                .grammar_parse
+                .rules
+                .iter()
+                .filter(|rule| rule.grammar == grammar.id && rule.action.is_some())
+                .count()
+        ),
+    }));
+    for resource in resources {
+        sink.emit(environment_object(EnvironmentObjectParts {
+            id: grammar_resource_object_id(grammar, &resource),
+            kind: EnvironmentKind::GrammarResource,
+            meta_class: "<grammar-resource>",
+            origin: EnvironmentOrigin::SourceAuthored,
+            storage: EnvironmentStorage::FrontendRegistry,
+            title: resource.clone(),
+            affordances: Vec::from([
+                Aff::Inspect,
+                Aff::DumpMop,
+                Aff::DumpEop,
+                Aff::ShowDirectRules,
+                Aff::ShowExpression,
+            ]),
+            execution: None,
+            inspection: format!(
+                "grammar={} package={} resource={} rules={}",
+                grammar.id,
+                grammar_package_object_id(grammar),
+                resource,
+                artifacts
+                    .grammar_parse
+                    .rules
+                    .iter()
+                    .filter(|rule| rule.grammar == grammar.id
+                        && grammar_rule_resource_path(rule).as_deref() == Some(resource.as_str()))
+                    .count()
+            ),
+        }));
     }
 }
 
@@ -7703,6 +7994,7 @@ fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule
             Aff::DumpEop,
             Aff::ShowGrammarRule,
             Aff::ShowExpression,
+            Aff::ShowAction,
             Aff::ShowParseTrace,
         ]),
         execution: None,
@@ -7714,6 +8006,42 @@ fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule
             rule.projection.location,
             rule.expression,
             rule.expression_data
+        ),
+    }));
+}
+
+fn project_grammar_action(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule) {
+    use EnvironmentAffordance as Aff;
+
+    let Some(action) = &rule.action else {
+        return;
+    };
+    let Some(id) = grammar_frontend::grammar_action_object_id(rule) else {
+        return;
+    };
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id,
+        kind: EnvironmentKind::GrammarAction,
+        meta_class: "<grammar-action>",
+        origin: grammar_rule_origin(rule),
+        storage: EnvironmentStorage::CachedArtifact,
+        title: format!("{} for {}", action.name, rule.name),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowAction,
+            Aff::ShowCaptures,
+            Aff::ShowActionOutput,
+            Aff::ShowExpression,
+        ]),
+        execution: None,
+        inspection: format!(
+            "rule={} action={} args={} expression={}",
+            grammar_frontend::grammar_rule_object_id(rule),
+            action.name,
+            action.args.len(),
+            action.source_data()
         ),
     }));
 }
@@ -7763,6 +8091,40 @@ fn grammar_rule_origin(rule: &GrammarRule) -> EnvironmentOrigin {
             EnvironmentOrigin::CompilerGenerated
         }
     }
+}
+
+fn grammar_package_object_id(grammar: &grammar_frontend::Grammar) -> String {
+    format!("grammar-package:{}", grammar.slug)
+}
+
+fn grammar_resource_object_id(grammar: &grammar_frontend::Grammar, resource: &str) -> String {
+    format!("grammar-resource:{}/{resource}", grammar.slug)
+}
+
+fn grammar_resource_paths(
+    artifacts: &SessionArtifacts,
+    grammar: &grammar_frontend::Grammar,
+) -> Vec<String> {
+    let mut resources = Vec::new();
+    for rule in artifacts
+        .grammar_parse
+        .rules
+        .iter()
+        .filter(|rule| rule.grammar == grammar.id)
+    {
+        if let Some(resource) = grammar_rule_resource_path(rule)
+            && !resources.contains(&resource)
+        {
+            resources.push(resource);
+        }
+    }
+    resources
+}
+
+fn grammar_rule_resource_path(rule: &GrammarRule) -> Option<String> {
+    let suffix = rule.projection.location.strip_prefix("resource:")?;
+    let (resource, _) = suffix.rsplit_once('/')?;
+    Some(resource.to_string())
 }
 
 fn project_grammar_activation(
@@ -9941,6 +10303,12 @@ mod tests {
             (EnvironmentAffordance::ShowActivations, "show-activations"),
             (EnvironmentAffordance::ShowGrammarRule, "show-grammar-rule"),
             (EnvironmentAffordance::ShowExpression, "show-expression"),
+            (EnvironmentAffordance::ShowAction, "show-action"),
+            (EnvironmentAffordance::ShowCaptures, "show-captures"),
+            (
+                EnvironmentAffordance::ShowActionOutput,
+                "show-action-output",
+            ),
             (EnvironmentAffordance::ShowParseTrace, "show-parse-trace"),
             (
                 EnvironmentAffordance::ShowParserShadow,
@@ -11063,6 +11431,43 @@ mod tests {
                 .contains(&QueryArtifact::GrammarParse.key(artifacts.source.id))
         );
 
+        let package = eop_object(&objects, "grammar-package:calculator");
+        assert_eq!(package.kind, EnvironmentKind::GrammarPackage);
+        assert!(
+            package
+                .inspection
+                .detail
+                .contains("resources=[grammars/calculator.grammar]")
+        );
+
+        let resource = eop_object(
+            &objects,
+            "grammar-resource:calculator/grammars/calculator.grammar",
+        );
+        assert_eq!(resource.kind, EnvironmentKind::GrammarResource);
+        assert!(resource.inspection.detail.contains("rules=14"));
+
+        let action = eop_object(&objects, "grammar-action:calculator/calculator-function");
+        assert_eq!(action.kind, EnvironmentKind::GrammarAction);
+        assert!(
+            action
+                .affordances
+                .contains(EnvironmentAffordance::ShowAction)
+        );
+        assert!(
+            action
+                .affordances
+                .contains(EnvironmentAffordance::ShowCaptures)
+        );
+        assert!(
+            action
+                .affordances
+                .contains(EnvironmentAffordance::ShowActionOutput)
+        );
+        assert!(action.inspection.detail.contains("action=emit-function"));
+        assert_eq!(action.source.source_file, Some(artifacts.source.id));
+        assert!(action.source.span.is_some());
+
         let emission = eop_object(&objects, "grammar-extension-emission:calculator/r0/f0");
         assert_eq!(emission.kind, EnvironmentKind::GrammarExtensionEmission);
         assert!(
@@ -11103,6 +11508,18 @@ mod tests {
             .expect("extension emission object should dump");
         assert!(emission_dump.contains("grammar extension emission"));
         assert!(emission_dump.contains("generated function:f0"));
+
+        let action_dump = artifacts
+            .explain_grammar_action("grammar-action:calculator/calculator-function")
+            .expect("grammar action should explain");
+        assert!(action_dump.contains("name emit-function"));
+        assert!(action_dump.contains("body capture(expression)"));
+        assert!(
+            artifacts
+                .explain_grammar_action_output("grammar-action:calculator/calculator-function")
+                .expect("grammar action output should explain")
+                .contains("produces frontend function form")
+        );
     }
 
     #[test]

@@ -199,6 +199,7 @@ pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
                     &location,
                 ),
                 expression: rule.expression,
+                action: rule.action,
                 projection: GrammarProjection {
                     origin: ProjectionOrigin::SourceAuthored,
                     location,
