@@ -138,8 +138,8 @@ grammar:calculator                CalculatorRegionGrammar extends BaseLokoGramma
 grammar:records                   RecordsRegionGrammar extends BaseLokoGrammar
 ```
 
-`CalculatorRegionGrammar` is grammar-driven. Its direct rules are parsed from
-embedded grammar source:
+`CalculatorRegionGrammar` is grammar-driven. Its direct rules are loaded from
+`crates/interloko_compiler/grammars/calculator.grammar`:
 
 ```text
 grammar calculator
@@ -173,8 +173,8 @@ actions. Rust still implements those safe action primitives and
 calculator-specific validation, but it is no longer a duplicate recognizer or a
 bespoke expression-tree walker.
 
-`RecordsRegionGrammar` is also grammar-driven. Its direct rules are parsed from
-embedded grammar source:
+`RecordsRegionGrammar` is also grammar-driven. Its direct rules are loaded from
+`crates/interloko_compiler/grammars/records.grammar`:
 
 ```text
 grammar records

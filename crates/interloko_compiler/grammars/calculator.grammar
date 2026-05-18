@@ -1,0 +1,16 @@
+grammar calculator
+rule calculator-region = calculator-function*
+rule calculator-function = name `=` expression => emit-function(name: name, body: expression)
+rule expression = term additive-tail* => fold-binary(lhs: term, tails: additive-tail*)
+rule additive-tail = add-op term => emit-binary-tail(op: add-op, rhs: term)
+rule add-op = `+` | `-`
+rule term = factor multiplicative-tail* => fold-binary(lhs: factor, tails: multiplicative-tail*)
+rule multiplicative-tail = `*` factor => emit-binary-tail(op: "*", rhs: factor)
+rule factor = parenthesized | call | number-literal | name-ref
+rule parenthesized = `(` expression `)`
+rule number-literal = number => emit-integer(value: number)
+rule name-ref = name => emit-name(name: name)
+rule call = name `(` argument-list? `)` => emit-call(callee: name, args: argument-list*)
+rule argument-list = expression argument-tail* => emit-argument-list(first: expression, rest: argument-tail*)
+rule argument-tail = `,` expression => emit-argument-tail(value: expression)
+end

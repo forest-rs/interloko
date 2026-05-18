@@ -18,16 +18,8 @@ use super::{
     source_span_data, staged_expected_diagnostic, valid_record_field_name,
 };
 
-const RECORDS_GRAMMAR_SOURCE: &str = "\
-grammar records\n\
-rule records-region = record-definition*\n\
-rule record-definition = `record` record-name record-field* `end` => emit-class(name: record-name, superclass: \"<object>\", slots: record-field*)\n\
-rule record-name = type-name | identifier\n\
-rule record-field = field-name `:` type-name `;`? => emit-slot(name: field-name, type: type-name, init-keyword: field-name, required-init-keyword: true)\n\
-rule field-name = identifier\n\
-rule type-name = `<` identifier `>`\n\
-rule identifier = [A-Za-z_] [A-Za-z0-9_?-]*\n\
-end\n";
+const RECORDS_GRAMMAR_RESOURCE: &str = "grammars/records.grammar";
+const RECORDS_GRAMMAR_SOURCE: &str = include_str!("../../grammars/records.grammar");
 
 pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmission {
     match interpret_records_region(body, source_offset) {
@@ -231,7 +223,7 @@ pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
     parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE)
         .into_iter()
         .map(|rule| {
-            let location = format!("source-grammar:{grammar_slug}/{}", rule.name);
+            let location = format!("resource:{RECORDS_GRAMMAR_RESOURCE}/{}", rule.name);
             GrammarRule {
                 id: GrammarRuleId::new(grammar, &rule.name),
                 grammar,

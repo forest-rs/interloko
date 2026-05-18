@@ -1,0 +1,9 @@
+grammar records
+rule records-region = record-definition*
+rule record-definition = `record` record-name record-field* `end` => emit-class(name: record-name, superclass: "<object>", slots: record-field*)
+rule record-name = type-name | identifier
+rule record-field = field-name `:` type-name `;`? => emit-slot(name: field-name, type: type-name, init-keyword: field-name, required-init-keyword: true)
+rule field-name = identifier
+rule type-name = `<` identifier `>`
+rule identifier = [A-Za-z_] [A-Za-z0-9_?-]*
+end

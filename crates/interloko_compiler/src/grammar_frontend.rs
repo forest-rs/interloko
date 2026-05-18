@@ -3650,6 +3650,10 @@ mod tests {
         );
         assert!(calculator_function.projection.source_span.is_some());
         assert_eq!(
+            calculator_function.projection.location,
+            "resource:grammars/calculator.grammar/calculator-function"
+        );
+        assert_eq!(
             calculator_function.expression.to_string(),
             "name `=` expression => grammar-action(name: emit-function, args: [grammar-action-arg(name: name, value: capture(rule: name)), grammar-action-arg(name: body, value: capture(rule: expression))])"
         );
@@ -3667,6 +3671,10 @@ mod tests {
             ProjectionOrigin::SourceAuthored
         );
         assert!(record_definition.projection.source_span.is_some());
+        assert_eq!(
+            record_definition.projection.location,
+            "resource:grammars/records.grammar/record-definition"
+        );
         assert_eq!(
             record_definition.expression.to_string(),
             "`record` record-name record-field* `end` => grammar-action(name: emit-class, args: [grammar-action-arg(name: name, value: capture(rule: record-name)), grammar-action-arg(name: superclass, value: literal(value: \"<object>\")), grammar-action-arg(name: slots, value: capture-all(rule: record-field))])"

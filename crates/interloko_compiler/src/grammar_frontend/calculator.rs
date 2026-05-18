@@ -18,23 +18,8 @@ use super::{
     source_span_data, staged_expected_diagnostic, valid_calculator_function_name,
 };
 
-const CALCULATOR_GRAMMAR_SOURCE: &str = "\
-grammar calculator\n\
-rule calculator-region = calculator-function*\n\
-rule calculator-function = name `=` expression => emit-function(name: name, body: expression)\n\
-rule expression = term additive-tail* => fold-binary(lhs: term, tails: additive-tail*)\n\
-rule additive-tail = add-op term => emit-binary-tail(op: add-op, rhs: term)\n\
-rule add-op = `+` | `-`\n\
-rule term = factor multiplicative-tail* => fold-binary(lhs: factor, tails: multiplicative-tail*)\n\
-rule multiplicative-tail = `*` factor => emit-binary-tail(op: \"*\", rhs: factor)\n\
-rule factor = parenthesized | call | number-literal | name-ref\n\
-rule parenthesized = `(` expression `)`\n\
-rule number-literal = number => emit-integer(value: number)\n\
-rule name-ref = name => emit-name(name: name)\n\
-rule call = name `(` argument-list? `)` => emit-call(callee: name, args: argument-list*)\n\
-rule argument-list = expression argument-tail* => emit-argument-list(first: expression, rest: argument-tail*)\n\
-rule argument-tail = `,` expression => emit-argument-tail(value: expression)\n\
-end\n";
+const CALCULATOR_GRAMMAR_RESOURCE: &str = "grammars/calculator.grammar";
+const CALCULATOR_GRAMMAR_SOURCE: &str = include_str!("../../grammars/calculator.grammar");
 
 pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmission {
     match interpret_calculator_region(body, source_offset) {
@@ -212,7 +197,7 @@ pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
     parse_source_authored_grammar(CALCULATOR_GRAMMAR_SOURCE)
         .into_iter()
         .map(|rule| {
-            let location = format!("source-grammar:{grammar_slug}/{}", rule.name);
+            let location = format!("resource:{CALCULATOR_GRAMMAR_RESOURCE}/{}", rule.name);
             GrammarRule {
                 id: GrammarRuleId::new(grammar, &rule.name),
                 grammar,
