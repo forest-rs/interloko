@@ -1039,6 +1039,101 @@ pub struct GrammarParseReport {
     pub syntax: SyntaxTree,
 }
 
+/// Normalized parser product used by parser shadow comparison.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParserProductSummary {
+    /// Stable parser implementation label.
+    pub implementation: String,
+    /// Number of CST nodes in the parsed tree.
+    pub cst_node_count: usize,
+    /// Number of top-level CST definition nodes.
+    pub top_level_node_count: usize,
+    /// Number of diagnostics produced by the parser.
+    pub diagnostic_count: usize,
+    /// Number of recorded grammar rule applications.
+    pub rule_application_count: usize,
+}
+
+impl ParserProductSummary {
+    /// Creates a normalized parser product summary.
+    #[must_use]
+    pub fn new(
+        implementation: impl Into<String>,
+        cst_node_count: usize,
+        top_level_node_count: usize,
+        diagnostic_count: usize,
+        rule_application_count: usize,
+    ) -> Self {
+        Self {
+            implementation: implementation.into(),
+            cst_node_count,
+            top_level_node_count,
+            diagnostic_count,
+            rule_application_count,
+        }
+    }
+}
+
+/// Status for parser shadow comparison.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParserShadowStatus {
+    /// No oracle parser is available yet.
+    OracleUnavailable,
+    /// Primary and oracle summaries match.
+    Equivalent,
+    /// Primary and oracle summaries differ.
+    Diverged,
+}
+
+impl ParserShadowStatus {
+    /// Returns the stable status token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OracleUnavailable => "oracle-unavailable",
+            Self::Equivalent => "equivalent",
+            Self::Diverged => "diverged",
+        }
+    }
+}
+
+/// One parser shadow comparison difference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParserShadowDivergence {
+    /// Compared field name.
+    pub field: String,
+    /// Primary parser value.
+    pub primary: String,
+    /// Oracle parser value.
+    pub oracle: String,
+}
+
+/// Parser shadow comparison report.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParserShadowReport {
+    /// Primary parser product.
+    pub primary: ParserProductSummary,
+    /// Optional oracle parser product.
+    pub oracle: Option<ParserProductSummary>,
+    /// Comparison status.
+    pub status: ParserShadowStatus,
+    /// Diffable summary divergences.
+    pub divergences: Vec<ParserShadowDivergence>,
+}
+
+impl ParserShadowReport {
+    /// Builds a report for a primary parser without an available oracle.
+    #[must_use]
+    pub fn oracle_unavailable(primary: ParserProductSummary) -> Self {
+        Self {
+            primary,
+            oracle: None,
+            status: ParserShadowStatus::OracleUnavailable,
+            divergences: Vec::new(),
+        }
+    }
+}
+
 /// Provider for a registered language environment.
 ///
 /// A provider contributes the grammar records for one environment token. The
@@ -1318,6 +1413,42 @@ pub fn parse_file_with_registry(
         unknown_environment_diagnostic(Span::new(0, 0), environment.as_str(), registry),
     );
     report
+}
+
+/// Builds the current parser shadow report for a grammar parse report.
+///
+/// This is intentionally conservative: the Rust parser is still the primary
+/// parser and no source-authored grammar interpreter is available yet. The
+/// report gives future interpreter work a stable comparison surface.
+#[must_use]
+pub fn parser_shadow_report(report: &GrammarParseReport) -> ParserShadowReport {
+    ParserShadowReport::oracle_unavailable(ParserProductSummary::new(
+        "rust-recursive-descent",
+        cst_node_count(&report.syntax.root),
+        top_level_node_count(&report.syntax.root),
+        report.diagnostics.len(),
+        report.provenance.applications.len(),
+    ))
+}
+
+/// Compares two normalized parser products.
+#[must_use]
+pub fn compare_parser_products(
+    primary: ParserProductSummary,
+    oracle: ParserProductSummary,
+) -> ParserShadowReport {
+    let divergences = parser_product_divergences(&primary, &oracle);
+    let status = if divergences.is_empty() {
+        ParserShadowStatus::Equivalent
+    } else {
+        ParserShadowStatus::Diverged
+    };
+    ParserShadowReport {
+        primary,
+        oracle: Some(oracle),
+        status,
+        divergences,
+    }
 }
 
 fn parse_file_with_records(
@@ -3332,6 +3463,80 @@ fn rule_applications(
     applications
 }
 
+fn cst_node_count(node: &CstNode) -> usize {
+    1 + node
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            CstElement::Node(child) => Some(cst_node_count(child)),
+            CstElement::Token(_) => None,
+        })
+        .sum::<usize>()
+}
+
+fn top_level_node_count(root: &CstNode) -> usize {
+    root.children
+        .iter()
+        .filter_map(|child| match child {
+            CstElement::Node(child) => Some(child.kind),
+            CstElement::Token(_) => None,
+        })
+        .filter(|kind| {
+            matches!(
+                kind,
+                CstKind::Class | CstKind::Generic | CstKind::Method | CstKind::Function
+            )
+        })
+        .count()
+}
+
+fn parser_product_divergences(
+    primary: &ParserProductSummary,
+    oracle: &ParserProductSummary,
+) -> Vec<ParserShadowDivergence> {
+    let mut divergences = Vec::new();
+    push_parser_product_divergence(
+        &mut divergences,
+        "cst-node-count",
+        primary.cst_node_count,
+        oracle.cst_node_count,
+    );
+    push_parser_product_divergence(
+        &mut divergences,
+        "top-level-node-count",
+        primary.top_level_node_count,
+        oracle.top_level_node_count,
+    );
+    push_parser_product_divergence(
+        &mut divergences,
+        "diagnostic-count",
+        primary.diagnostic_count,
+        oracle.diagnostic_count,
+    );
+    push_parser_product_divergence(
+        &mut divergences,
+        "rule-application-count",
+        primary.rule_application_count,
+        oracle.rule_application_count,
+    );
+    divergences
+}
+
+fn push_parser_product_divergence(
+    divergences: &mut Vec<ParserShadowDivergence>,
+    field: &str,
+    primary: usize,
+    oracle: usize,
+) {
+    if primary != oracle {
+        divergences.push(ParserShadowDivergence {
+            field: field.to_string(),
+            primary: primary.to_string(),
+            oracle: oracle.to_string(),
+        });
+    }
+}
+
 fn collect_rule_applications(
     rules: &[EffectiveGrammarRule],
     activation: &GrammarActivation,
@@ -4008,6 +4213,46 @@ mod tests {
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
                     == Some("`record name`".to_string())
                     && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string()))
+        );
+    }
+
+    #[test]
+    fn parser_shadow_report_summarizes_primary_parser_until_oracle_exists() {
+        let source_file = SourceFileId::from_path("shadow.loko");
+        let source = "define function main()\n  1\nend";
+        let report = parse_file(source_file, source);
+
+        let shadow = parser_shadow_report(&report);
+        assert_eq!(shadow.status, ParserShadowStatus::OracleUnavailable);
+        assert_eq!(shadow.primary.implementation, "rust-recursive-descent");
+        assert!(shadow.primary.cst_node_count > 0);
+        assert_eq!(shadow.primary.top_level_node_count, 1);
+        assert_eq!(shadow.primary.diagnostic_count, 0);
+        assert!(shadow.primary.rule_application_count > 0);
+        assert_eq!(shadow.oracle, None);
+        assert_eq!(shadow.divergences, Vec::new());
+    }
+
+    #[test]
+    fn parser_shadow_comparison_reports_equivalence_and_divergence() {
+        let primary = ParserProductSummary::new("primary", 10, 2, 0, 8);
+        let equivalent = compare_parser_products(
+            primary.clone(),
+            ParserProductSummary::new("oracle", 10, 2, 0, 8),
+        );
+        assert_eq!(equivalent.status, ParserShadowStatus::Equivalent);
+        assert_eq!(equivalent.divergences, Vec::new());
+
+        let diverged =
+            compare_parser_products(primary, ParserProductSummary::new("oracle", 9, 2, 1, 8));
+        assert_eq!(diverged.status, ParserShadowStatus::Diverged);
+        assert_eq!(
+            diverged
+                .divergences
+                .iter()
+                .map(|divergence| divergence.field.as_str())
+                .collect::<Vec<_>>(),
+            Vec::from(["cst-node-count", "diagnostic-count"])
         );
     }
 }

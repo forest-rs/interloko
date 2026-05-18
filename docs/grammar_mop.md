@@ -106,6 +106,8 @@ show-effective-rules  resolved inherited/overridden rules for a grammar
 show-activations      source activations for an environment or grammar
 show-grammar-stack    active stack for the compile
 show-parse-trace      full parse provenance
+show-expression       structured expression for a direct grammar rule
+show-parser-shadow    primary/oracle parser shadow report
 ```
 
 This keeps the Ohm/OMeta-like path visible: start at the active environment,
@@ -190,7 +192,8 @@ That report contains:
   and inert source-data parse results;
 - staged grammar extension activations, emitted frontend forms, and charged
   provenance rules;
-- parse provenance with per-rule CST node counts;
+- parse provenance with individual rule applications and per-rule CST node
+  counts;
 - grammar diagnostic facts that attach syntax diagnostics to the active
   grammar, activation, effective rule, source span, diagnostic code, and
   structured expected fragment when present;
@@ -322,6 +325,14 @@ edits look like grammar edits.
 diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
 
+`show-parser-shadow` is the first self-hosting harness surface. Today it
+reports the Rust recursive-descent parser as the primary parser and marks the
+source-authored grammar interpreter oracle as unavailable. That is intentional:
+the hand-written parser remains trusted while the grammar interpreter is
+brought up behind a stable report shape. Future source-authored grammar work
+plugs into this same report and compares normalized parser products before any
+primary-parser flip.
+
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
 activation directive span, source span, frontend forms, debug materialized
 source, and inert source-data result. The directive and `// staged-loko:` markers are
@@ -343,8 +354,12 @@ tagged record
 The grammar MOP uses this for rule expression records, for example:
 
 ```text
-grammar-rule(name: function-definition, expression: "...", location: "syntax.rs:Parser::parse_function")
+grammar-rule(name: function-definition, expression: sequence(...), text: "...", location: "syntax.rs:Parser::parse_function")
 ```
+
+Direct grammar rules also carry a typed `RuleExpression`. `show-expression`
+renders both the readable expression and the inert `SourceData` form so tools
+do not have to parse display text to understand the grammar projection.
 
 This is deliberately not Loko syntax. It is a structural carrier for frontend
 facts so later staged parsing or semantic actions can exchange data-like forms

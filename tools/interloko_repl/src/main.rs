@@ -1028,6 +1028,9 @@ impl Repl {
             EnvironmentAffordance::ShowParseTrace => {
                 write!(stdout, "{}", artifacts.dump_parse_trace())?
             }
+            EnvironmentAffordance::ShowParserShadow => {
+                write!(stdout, "{}", artifacts.dump_parser_shadow_report())?
+            }
             EnvironmentAffordance::ShowGrammarRegistry => {
                 write!(stdout, "{}", artifacts.dump_grammar_registry())?
             }

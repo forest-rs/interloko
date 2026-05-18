@@ -741,6 +741,10 @@ fn invoke_affordance(
             print!("{}", workbench.artifacts.dump_parse_trace());
             Ok(())
         }
+        EnvironmentAffordance::ShowParserShadow => {
+            print!("{}", workbench.artifacts.dump_parser_shadow_report());
+            Ok(())
+        }
         EnvironmentAffordance::ShowGrammarRegistry => {
             print!("{}", workbench.artifacts.dump_grammar_registry());
             Ok(())

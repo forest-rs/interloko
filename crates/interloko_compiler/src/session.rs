@@ -544,6 +544,8 @@ pub enum EnvironmentAffordance {
     ShowExpression,
     /// Show parse provenance and grammar activations.
     ShowParseTrace,
+    /// Show the primary/oracle parser shadow report.
+    ShowParserShadow,
     /// Show registered language environments and staged grammar adapters.
     ShowGrammarRegistry,
     /// Show staged grammar extension descriptors and concrete emissions.
@@ -584,6 +586,7 @@ impl EnvironmentAffordance {
             Self::ShowGrammarRule,
             Self::ShowExpression,
             Self::ShowParseTrace,
+            Self::ShowParserShadow,
             Self::ShowGrammarRegistry,
             Self::ShowGrammarExtension,
         ]
@@ -631,6 +634,7 @@ impl EnvironmentAffordance {
             Self::ShowGrammarRule => "show-grammar-rule",
             Self::ShowExpression => "show-expression",
             Self::ShowParseTrace => "show-parse-trace",
+            Self::ShowParserShadow => "show-parser-shadow",
             Self::ShowGrammarRegistry => "show-grammar-registry",
             Self::ShowGrammarExtension => "show-grammar-extension",
         }
@@ -1248,6 +1252,12 @@ impl SessionArtifacts {
     #[must_use]
     pub fn dump_parse_trace(&self) -> String {
         dump_parse_trace(&self.grammar_parse)
+    }
+
+    /// Dumps the parser shadow report for this compile.
+    #[must_use]
+    pub fn dump_parser_shadow_report(&self) -> String {
+        dump_parser_shadow_report(&self.grammar_parse)
     }
 
     /// Explains a staged grammar extension environment object id.
@@ -6176,6 +6186,48 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
     out
 }
 
+fn dump_parser_shadow_report(report: &GrammarParseReport) -> String {
+    let shadow = grammar_frontend::parser_shadow_report(report);
+    let mut out = String::new();
+    let _ = writeln!(out, "parser shadow status={}", shadow.status.as_str());
+    let _ = writeln!(out, "primary:");
+    write_parser_product_summary(&mut out, &shadow.primary);
+    let _ = writeln!(out, "oracle:");
+    if let Some(oracle) = &shadow.oracle {
+        write_parser_product_summary(&mut out, oracle);
+    } else {
+        let _ = writeln!(out, "  <unavailable>");
+    }
+    let _ = writeln!(out, "divergences:");
+    if shadow.divergences.is_empty() {
+        let _ = writeln!(out, "  <none>");
+    } else {
+        for divergence in &shadow.divergences {
+            let _ = writeln!(
+                out,
+                "  {} primary={} oracle={}",
+                divergence.field, divergence.primary, divergence.oracle
+            );
+        }
+    }
+    out
+}
+
+fn write_parser_product_summary(
+    out: &mut String,
+    summary: &grammar_frontend::ParserProductSummary,
+) {
+    let _ = writeln!(out, "  implementation {}", summary.implementation);
+    let _ = writeln!(out, "  cst-nodes {}", summary.cst_node_count);
+    let _ = writeln!(out, "  top-level-nodes {}", summary.top_level_node_count);
+    let _ = writeln!(out, "  diagnostics {}", summary.diagnostic_count);
+    let _ = writeln!(
+        out,
+        "  rule-applications {}",
+        summary.rule_application_count
+    );
+}
+
 fn grammar_expected_label(expected: Option<&str>) -> String {
     expected.map_or_else(|| "none".into(), |value| format!("{value:?}"))
 }
@@ -7602,6 +7654,7 @@ fn project_language_environment(
             Aff::ShowActivations,
             Aff::ShowGrammarStack,
             Aff::ShowParseTrace,
+            Aff::ShowParserShadow,
         ]),
         execution: None,
         inspection: format!(
@@ -7733,6 +7786,7 @@ fn project_grammar_activation(
             Aff::ShowActivations,
             Aff::ShowGrammarStack,
             Aff::ShowParseTrace,
+            Aff::ShowParserShadow,
         ]),
         execution: None,
         inspection: format!(
@@ -9889,6 +9943,10 @@ mod tests {
             (EnvironmentAffordance::ShowExpression, "show-expression"),
             (EnvironmentAffordance::ShowParseTrace, "show-parse-trace"),
             (
+                EnvironmentAffordance::ShowParserShadow,
+                "show-parser-shadow",
+            ),
+            (
                 EnvironmentAffordance::ShowGrammarRegistry,
                 "show-grammar-registry",
             ),
@@ -10056,6 +10114,10 @@ mod tests {
         assert!(parse_trace.contains("rule provenance:"));
         assert!(parse_trace.contains("rule applications:"));
         assert!(parse_trace.contains("rule-name=function-definition"));
+        let shadow = artifacts.dump_parser_shadow_report();
+        assert!(shadow.contains("parser shadow status=oracle-unavailable"));
+        assert!(shadow.contains("implementation rust-recursive-descent"));
+        assert!(shadow.contains("oracle:\n  <unavailable>"));
         assert!(
             artifacts
                 .explain_grammar_rule("grammar-rule:base-loko/function-definition")

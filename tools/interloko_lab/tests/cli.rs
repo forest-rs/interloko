@@ -903,6 +903,15 @@ fn invoke_affordance_runs_read_only_views() {
     assert!(parse_trace.contains("parse trace"));
     assert!(parse_trace.contains("rule provenance:"));
 
+    let shadow = run_lab(&[
+        "invoke-affordance",
+        path,
+        "language-environment:base-loko",
+        "show-parser-shadow",
+    ]);
+    assert!(shadow.contains("parser shadow status=oracle-unavailable"));
+    assert!(shadow.contains("implementation rust-recursive-descent"));
+
     let registry = run_lab(&[
         "invoke-affordance",
         path,
