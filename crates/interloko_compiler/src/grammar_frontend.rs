@@ -6,6 +6,7 @@
 //! intentionally does not own AST lowering, semantic lowering, source-authored
 //! grammars, macros, host semantic actions, or parser rewriting.
 
+mod calculator;
 mod interpreter;
 mod records;
 
@@ -2120,11 +2121,11 @@ impl StagedGrammarAdapter for CalculatorStagedGrammar {
     }
 
     fn direct_rules(&self, grammar: GrammarId) -> Vec<GrammarRule> {
-        calculator_rules(grammar, self.grammar_slug())
+        calculator::rules(grammar, self.grammar_slug())
     }
 
     fn parse_region(&self, body: &str, source_offset: usize) -> StagedRegionEmission {
-        parse_calculator_region(body, source_offset)
+        calculator::parse_region(body, source_offset)
     }
 }
 
@@ -2293,268 +2294,6 @@ fn missing_activation_diagnostic(span: Span, name: &str) -> Diagnostic {
         "expected",
         format!("{GRAMMAR_ACTIVATE_PREFIX} {name}"),
     ))
-}
-
-fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmission {
-    let mut forms = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut functions = Vec::new();
-    let mut offset = source_offset;
-
-    for line in body.split_inclusive('\n') {
-        let line_start = offset;
-        let line_end = offset + line.len();
-        offset = line_end;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            continue;
-        }
-        let leading = line.find(trimmed).unwrap_or(0);
-        let trimmed_start = line_start + leading;
-        let trimmed_span = Span::new(trimmed_start, trimmed_start + trimmed.len());
-        let Some((name, expression)) = trimmed.split_once('=') else {
-            diagnostics.push(staged_expected_diagnostic(
-                trimmed_span,
-                "calculator",
-                "`name = expression`",
-            ));
-            continue;
-        };
-        let name = name.trim();
-        let expression = expression.trim();
-        if name.is_empty() || expression.is_empty() || !valid_calculator_function_name(name) {
-            diagnostics.push(staged_expected_diagnostic(
-                trimmed_span,
-                "calculator",
-                "`name = expression`",
-            ));
-            continue;
-        }
-        let expression_offset = trimmed.find(expression).unwrap_or(0);
-        let expression_start = trimmed_start + expression_offset;
-        let expression_span = Span::new(expression_start, expression_start + expression.len());
-        let Some(expression_form) = parse_calculator_expression(expression, expression_start)
-        else {
-            diagnostics.push(staged_expected_diagnostic(
-                expression_span,
-                "calculator",
-                "calculator expression",
-            ));
-            continue;
-        };
-        forms.push(FrontendForm::function(name, expression_form, trimmed_span));
-        functions.push(SourceData::record(
-            "calculator-function",
-            vec![
-                source_data::field("name", SourceData::symbol(name)),
-                source_data::field("expression", SourceData::string(expression)),
-                source_data::field(
-                    "source-start",
-                    SourceData::integer(usize_to_source_i64(trimmed_span.start)),
-                ),
-                source_data::field(
-                    "source-end",
-                    SourceData::integer(usize_to_source_i64(trimmed_span.end)),
-                ),
-            ],
-        ));
-    }
-
-    if functions.is_empty() && diagnostics.is_empty() {
-        diagnostics.push(staged_expected_diagnostic(
-            Span::new(source_offset, source_offset + body.len()),
-            "calculator",
-            "`name = expression`",
-        ));
-    }
-
-    let function_count = forms.len();
-    StagedRegionEmission {
-        forms,
-        data: SourceData::record(
-            "calculator-region",
-            vec![
-                source_data::field("grammar", SourceData::symbol(CALCULATOR_GRAMMAR_NAME)),
-                source_data::field("functions", SourceData::list(functions)),
-            ],
-        ),
-        rule_counts: Vec::from([
-            StagedRuleCount {
-                rule_name: "calculator-region".to_string(),
-                node_count: 1,
-            },
-            StagedRuleCount {
-                rule_name: "calculator-function".to_string(),
-                node_count: function_count,
-            },
-        ]),
-        diagnostics,
-    }
-}
-
-fn parse_calculator_expression(source: &str, source_offset: usize) -> Option<FrontendExpression> {
-    let mut parser = CalculatorExpressionParser {
-        source,
-        source_offset,
-        cursor: 0,
-    };
-    let expression = parser.parse_additive()?;
-    parser.skip_ws();
-    (parser.cursor == source.len()).then_some(expression)
-}
-
-struct CalculatorExpressionParser<'source> {
-    source: &'source str,
-    source_offset: usize,
-    cursor: usize,
-}
-
-impl CalculatorExpressionParser<'_> {
-    fn parse_additive(&mut self) -> Option<FrontendExpression> {
-        let mut lhs = self.parse_multiplicative()?;
-        loop {
-            self.skip_ws();
-            let op = if self.eat_byte(b'+') {
-                FrontendBinaryOp::Add
-            } else if self.eat_byte(b'-') {
-                FrontendBinaryOp::Sub
-            } else {
-                break;
-            };
-            let rhs = self.parse_multiplicative()?;
-            let source_span = Span::new(expr_span(&lhs).start, expr_span(&rhs).end);
-            lhs = FrontendExpression::Binary {
-                op,
-                lhs: alloc::boxed::Box::new(lhs),
-                rhs: alloc::boxed::Box::new(rhs),
-                source_span,
-            };
-        }
-        Some(lhs)
-    }
-
-    fn parse_multiplicative(&mut self) -> Option<FrontendExpression> {
-        let mut lhs = self.parse_primary()?;
-        loop {
-            self.skip_ws();
-            if !self.eat_byte(b'*') {
-                break;
-            }
-            let rhs = self.parse_primary()?;
-            let source_span = Span::new(expr_span(&lhs).start, expr_span(&rhs).end);
-            lhs = FrontendExpression::Binary {
-                op: FrontendBinaryOp::Mul,
-                lhs: alloc::boxed::Box::new(lhs),
-                rhs: alloc::boxed::Box::new(rhs),
-                source_span,
-            };
-        }
-        Some(lhs)
-    }
-
-    fn parse_primary(&mut self) -> Option<FrontendExpression> {
-        self.skip_ws();
-        if self.eat_byte(b'(') {
-            let expression = self.parse_additive()?;
-            self.skip_ws();
-            return self.eat_byte(b')').then_some(expression);
-        }
-        if self.peek_byte()?.is_ascii_digit() {
-            return self.parse_integer();
-        }
-        if self.peek_byte()?.is_ascii_alphabetic() || self.peek_byte()? == b'_' {
-            return self.parse_name_or_call();
-        }
-        None
-    }
-
-    fn parse_integer(&mut self) -> Option<FrontendExpression> {
-        let start = self.cursor;
-        while self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
-            self.cursor += 1;
-        }
-        let text = &self.source[start..self.cursor];
-        let value = text.parse().ok()?;
-        Some(FrontendExpression::Integer {
-            value,
-            source_span: self.span(start, self.cursor),
-        })
-    }
-
-    fn parse_name_or_call(&mut self) -> Option<FrontendExpression> {
-        let start = self.cursor;
-        while self
-            .peek_byte()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
-        {
-            self.cursor += 1;
-        }
-        let name = &self.source[start..self.cursor];
-        if !valid_calculator_function_name(name) {
-            return None;
-        }
-        self.skip_ws();
-        if !self.eat_byte(b'(') {
-            return Some(FrontendExpression::Name {
-                name: name.to_string(),
-                source_span: self.span(start, self.cursor),
-            });
-        }
-        let mut args = Vec::new();
-        self.skip_ws();
-        if !self.eat_byte(b')') {
-            loop {
-                args.push(self.parse_additive()?);
-                self.skip_ws();
-                if self.eat_byte(b')') {
-                    break;
-                }
-                if !self.eat_byte(b',') {
-                    return None;
-                }
-            }
-        }
-        Some(FrontendExpression::Call {
-            callee: name.to_string(),
-            args,
-            source_span: self.span(start, self.cursor),
-        })
-    }
-
-    fn skip_ws(&mut self) {
-        while self
-            .peek_byte()
-            .is_some_and(|byte| byte.is_ascii_whitespace())
-        {
-            self.cursor += 1;
-        }
-    }
-
-    fn eat_byte(&mut self, byte: u8) -> bool {
-        if self.peek_byte() == Some(byte) {
-            self.cursor += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn peek_byte(&self) -> Option<u8> {
-        self.source.as_bytes().get(self.cursor).copied()
-    }
-
-    fn span(&self, start: usize, end: usize) -> Span {
-        Span::new(self.source_offset + start, self.source_offset + end)
-    }
-}
-
-fn expr_span(expression: &FrontendExpression) -> Span {
-    match expression {
-        FrontendExpression::Integer { source_span, .. }
-        | FrontendExpression::Name { source_span, .. }
-        | FrontendExpression::Call { source_span, .. }
-        | FrontendExpression::Binary { source_span, .. } => *source_span,
-    }
 }
 
 fn expected_syntax_diagnostic(span: Span, expected: &str) -> Diagnostic {
@@ -3015,38 +2754,6 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             expression_data: grammar_rule_expression_data(name, expression, location),
             projection: GrammarProjection {
                 origin: ProjectionOrigin::CompilerProjected,
-                location: (*location).to_string(),
-                source_span: None,
-            },
-        })
-        .collect()
-}
-
-fn calculator_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
-    const RULES: &[(&str, &str, &str)] = &[
-        (
-            "calculator-region",
-            "calculator-function*",
-            "grammar_frontend.rs:parse_calculator_region",
-        ),
-        (
-            "calculator-function",
-            "name `=` expression => `define function name() expression end`",
-            "grammar_frontend.rs:parse_calculator_region",
-        ),
-    ];
-
-    RULES
-        .iter()
-        .map(|(name, expression, location)| GrammarRule {
-            id: GrammarRuleId::new(grammar, name),
-            grammar,
-            grammar_slug: grammar_slug.to_string(),
-            name: (*name).to_string(),
-            expression: projected_rule_expression(expression),
-            expression_data: grammar_rule_expression_data(name, expression, location),
-            projection: GrammarProjection {
-                origin: ProjectionOrigin::CompilerProjectedPrototype,
                 location: (*location).to_string(),
                 source_span: None,
             },
@@ -3697,6 +3404,24 @@ mod tests {
             vec!["records-region", "record-definition", "record-field"]
         );
 
+        let calculator_grammar = registry.staged_records(&[CALCULATOR_GRAMMAR_SLUG]);
+        let calculator_function = calculator_grammar
+            .rules
+            .iter()
+            .find(|rule| {
+                rule.grammar_slug == CALCULATOR_GRAMMAR_SLUG && rule.name == "calculator-function"
+            })
+            .expect("calculator rule");
+        assert_eq!(
+            calculator_function.projection.origin,
+            ProjectionOrigin::SourceAuthored
+        );
+        assert!(calculator_function.projection.source_span.is_some());
+        assert_eq!(
+            calculator_function.expression.to_string(),
+            "name `=` expression => frontend-function"
+        );
+
         let records_grammar = registry.staged_records(&[RECORDS_GRAMMAR_SLUG]);
         let record_definition = records_grammar
             .rules
@@ -3730,6 +3455,7 @@ mod tests {
         assert_eq!(
             node.children
                 .iter()
+                .filter(|child| !child.rule_name.starts_with("literal:"))
                 .map(|child| (child.rule_name.as_str(), child.text.as_str()))
                 .collect::<Vec<_>>(),
             Vec::from([("name", "radius"), ("type-name", "<integer>")])
@@ -3891,6 +3617,14 @@ mod tests {
         assert!(!report.syntax.source.contains("define function main()"));
         assert_eq!(report.staged_regions[0].adapter, "calculator");
         assert_eq!(report.staged_regions[0].object_slug, "r0");
+        assert!(
+            source_data::dump(&report.staged_regions[0].data)
+                .contains("driver: interpreted-grammar")
+        );
+        assert!(
+            source_data::dump(&report.staged_regions[1].data)
+                .contains("rule-node(rule: calculator-region")
+        );
         assert_eq!(report.extension_activations.len(), 2);
         assert_eq!(report.extension_activations[0].adapter, "calculator");
         assert_eq!(report.extension_activations[0].emitted_form_count, 1);

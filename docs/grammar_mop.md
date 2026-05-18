@@ -3,8 +3,8 @@
 Interloko exposes the current hand-written Loko parser as read-only grammar
 metaobjects inside a selected language environment. It also has staged grammar
 extensions that emit structural frontend forms lowered directly into AST
-definitions. The `records` staged grammar is now parsed by a tiny interpreted
-grammar path; base Loko is still parsed by the Rust parser.
+definitions. The `records` and `calculator` staged grammars are now parsed by
+a tiny interpreted grammar path; base Loko is still parsed by the Rust parser.
 This is still not a full parser rewrite and not a macro system.
 
 ## Boundary
@@ -27,8 +27,8 @@ The implemented grammar slice has three load-bearing pieces:
 - a session-owned host registry used as catalog plumbing for available
   environments and staged extensions;
 - trusted staged grammar extensions that emit structural frontend forms;
-- one source-authored staged grammar, `records`, whose grammar source is parsed
-  into `RuleExpression` and interpreted over records regions.
+- source-authored staged grammars, `records` and `calculator`, whose grammar
+  source is parsed into `RuleExpression` and interpreted over staged regions.
 
 Those frontend forms are compiler data, not source text. `ast.rs` consumes
 staged function and class forms directly when building AST definitions, and the
@@ -138,13 +138,33 @@ grammar:calculator                CalculatorRegionGrammar extends BaseLokoGramma
 grammar:records                   RecordsRegionGrammar extends BaseLokoGrammar
 ```
 
-`CalculatorRegionGrammar` has direct rules for `calculator-region` and
-`calculator-function`. A frontend metadata directive selects it by name:
-`// grammar-activate: calculator`. Later comment-delimited regions are routed
-through the registered calculator adapter and emit structural function forms.
+`CalculatorRegionGrammar` is grammar-driven. Its direct rules are parsed from
+embedded grammar source:
 
-`RecordsRegionGrammar` is the first grammar-driven staged language. Its direct
-rules are parsed from embedded grammar source:
+```text
+grammar calculator
+rule calculator-region = calculator-function*
+rule calculator-function = name `=` expression => frontend-function
+rule expression = term additive-tail*
+rule additive-tail = add-op term
+rule add-op = `+` | `-`
+rule term = factor multiplicative-tail*
+rule multiplicative-tail = `*` factor
+rule factor = parenthesized | call | number | name
+rule parenthesized = `(` expression `)`
+rule call = name `(` argument-list? `)`
+rule argument-list = expression argument-tail*
+rule argument-tail = `,` expression
+end
+```
+
+A frontend metadata directive selects it by name:
+`// grammar-activate: calculator`. Later comment-delimited regions are
+recognized by the interpreted grammar and converted into structural function
+forms. The legacy Rust calculator parser remains as a diagnostic fallback.
+
+`RecordsRegionGrammar` is also grammar-driven. Its direct rules are parsed from
+embedded grammar source:
 
 ```text
 grammar records
@@ -351,10 +371,10 @@ primary-parser flip.
 
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
 activation directive span, source span, frontend forms, debug materialized
-source, and inert source-data result. For `records`, the inert result includes
-`driver: interpreted-grammar` and a `rule-node` parse tree. The directive and
-`// staged-loko:` markers are frontend/workbench metadata; they are not part of
-the Loko language semantics.
+source, and inert source-data result. For interpreted staged grammars, the
+inert result includes `driver: interpreted-grammar` and a `rule-node` parse
+tree. The directive and `// staged-loko:` markers are frontend/workbench
+metadata; they are not part of the Loko language semantics.
 
 ## Source Data
 

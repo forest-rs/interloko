@@ -1,3 +1,4 @@
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -124,7 +125,12 @@ fn interpret_expression(
                 .filter(|end| literal_boundary_ok(source, *end, value))
                 .map(|end| ExpressionMatch {
                     end,
-                    children: Vec::new(),
+                    children: vec![InterpretedRuleNode {
+                        rule_name: format!("literal:{value}"),
+                        span: Span::new(source_offset + start, source_offset + end),
+                        text: source[start..end].to_string(),
+                        children: Vec::new(),
+                    }],
                 })
         }
         RuleExpression::Sequence(items) => {
@@ -180,6 +186,7 @@ fn interpret_builtin_rule(
             _ => parse_identifier_like(source, start)?,
         },
         "type-name" => parse_angle_name(source, start)?,
+        "number" => parse_number(source, start)?,
         _ => return None,
     };
     Some(InterpretedRuleNode {
@@ -246,6 +253,18 @@ fn parse_angle_name(source: &str, start: usize) -> Option<usize> {
         return None;
     }
     rest.find('>').map(|index| start + index + 1)
+}
+
+fn parse_number(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if !bytes.get(start).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut end = start + 1;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    Some(end)
 }
 
 pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode) -> SourceData {
