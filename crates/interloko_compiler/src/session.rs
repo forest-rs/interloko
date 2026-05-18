@@ -10071,6 +10071,42 @@ mod tests {
     }
 
     #[test]
+    fn session_dumps_semantic_objects_by_kind() {
+        let artifacts =
+            CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
+
+        let class = artifacts
+            .dump_environment_object_stage("class:c1", DumpStage::Sem)
+            .expect("class object should dump");
+        assert!(class.contains("sem object class:c1"));
+        assert!(class.contains("kind: class"));
+        assert!(class.contains("effective-slots: 1"));
+        assert!(class.contains("radius :: <integer>"));
+
+        let generic = artifacts
+            .dump_environment_object_stage("generic:g0", DumpStage::Sem)
+            .expect("generic object should dump");
+        assert!(generic.contains("kind: generic"));
+        assert!(generic.contains("name: area"));
+        assert!(generic.contains("dispatch-params:"));
+        assert!(generic.contains("method:m0"));
+
+        let method = artifacts
+            .dump_environment_object_stage("method:m0", DumpStage::Sem)
+            .expect("method object should dump");
+        assert!(method.contains("kind: method"));
+        assert!(method.contains("generic: g0 area"));
+        assert!(method.contains("specializers: c1:<circle>"));
+
+        let dispatch = artifacts
+            .dump_environment_object_stage("dispatch:d0", DumpStage::Sem)
+            .expect("dispatch object should dump");
+        assert!(dispatch.contains("dispatch dispatch:d0"));
+        assert!(dispatch.contains("generic: g0:area"));
+        assert!(dispatch.contains("selected: m0:area(c1:<circle>)"));
+    }
+
+    #[test]
     fn session_projects_staged_extension_records() {
         let source = "// grammar-activate: calculator\n\
                       // staged-loko: calculator\n\
