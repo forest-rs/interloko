@@ -21,8 +21,9 @@ The rest of the report shows:
 - original source with line numbers and provenance highlights;
 - a source legend for activation directives, staged regions, frontend-form
   spans, and diagnostics;
+- the active language environment, grammar stack, and host grammar catalog;
 - staged grammar regions, when present;
-- adapter -> frontend forms -> generated AST/semantic object links, with
+- active grammar -> frontend forms -> generated AST/semantic object links, with
   materialized Loko shown as a debug projection;
 - generated classes, slots, accessors, generics, methods, functions, EOP ids,
   readable object facts, raw inspection facts, and affordances;
@@ -40,8 +41,12 @@ relation.
 ## Concepts
 
 - **Report:** a static HTML presentation of one compiler session.
+- **Language environment:** the selected parsing context. It owns the resolved
+  grammar stack and activation provenance for this compile.
+- **Grammar catalog:** host-side registry plumbing used to discover available
+  environments and staged grammar extensions.
 - **Frontend form:** an inert structured form emitted by a trusted staged
-  adapter and lowered directly into AST definitions.
+  grammar extension and lowered directly into AST definitions.
 - **Materialized Loko:** debug text generated from frontend forms for
   inspection and reports. It is not the semantic compiler input.
 - **EOP object:** an inspectable environment object with stable id, kind,

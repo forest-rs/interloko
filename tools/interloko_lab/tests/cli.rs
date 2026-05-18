@@ -322,6 +322,9 @@ fn eop_reports_environment_objects_and_affordances() {
     assert!(out.contains("kind=language-environment"));
     assert!(out.contains("object grammar:base-loko"));
     assert!(out.contains("kind=grammar"));
+    assert!(out.contains("show-grammars"));
+    assert!(out.contains("show-direct-rules"));
+    assert!(out.contains("show-effective-rules"));
     assert!(out.contains("object grammar-rule:base-loko/function-definition"));
     assert!(out.contains("show-grammar-rule"));
     assert!(out.contains("object grammar-activation:base-loko/source-file"));
@@ -516,6 +519,9 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("object-model view of what the compiler built"));
     assert!(html.contains("Runtime result"));
     assert!(html.contains("returned 143"));
+    assert!(html.contains("Active Language Environment"));
+    assert!(html.contains("language-environment:staged-loko"));
+    assert!(html.contains("Host grammar catalog"));
     assert!(html.contains("id=\"artifact-pipeline\""));
     assert!(html.contains("Compiler Artifact Path"));
     assert!(html.contains("<dt>time</dt>"));
@@ -833,6 +839,42 @@ fn invoke_affordance_runs_read_only_views() {
     ]);
     assert!(grammar_stack.contains("grammar stack"));
     assert!(grammar_stack.contains("BaseLokoGrammar"));
+
+    let grammars = run_lab(&[
+        "invoke-affordance",
+        path,
+        "language-environment:base-loko",
+        "show-grammars",
+    ]);
+    assert!(grammars.contains("language environment grammars"));
+    assert!(grammars.contains("grammar:base-loko"));
+
+    let direct_rules = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar:base-loko",
+        "show-direct-rules",
+    ]);
+    assert!(direct_rules.contains("direct grammar rules grammar:base-loko"));
+    assert!(direct_rules.contains("grammar-rule:base-loko/function-definition"));
+
+    let effective_rules = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar:base-loko",
+        "show-effective-rules",
+    ]);
+    assert!(effective_rules.contains("effective grammar rules grammar:base-loko"));
+    assert!(effective_rules.contains("effective-grammar-rule:base-loko/function-definition"));
+
+    let activations = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar:base-loko",
+        "show-activations",
+    ]);
+    assert!(activations.contains("grammar activations grammar:base-loko"));
+    assert!(activations.contains("grammar-activation:base-loko/source-file"));
 
     let grammar_rule = run_lab(&[
         "invoke-affordance",

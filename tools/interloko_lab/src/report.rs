@@ -48,6 +48,7 @@ fn render_report(workbench: &CompiledWorkbench) -> String {
     out.push_str(&render_hero(artifacts));
     out.push_str("    <main class=\"report-main\">\n");
     out.push_str(&render_source_section(artifacts));
+    out.push_str(&render_grammar_environment_section(artifacts, &objects));
     out.push_str(&render_staged_section(artifacts, &objects));
     out.push_str(&render_model_section(artifacts, &objects, &related_objects));
     out.push_str(&render_diagnostics_section(artifacts));
@@ -203,6 +204,103 @@ fn render_source_section(artifacts: &SessionArtifacts) -> String {
     out
 }
 
+fn render_grammar_environment_section(
+    artifacts: &SessionArtifacts,
+    objects: &[EnvironmentObject],
+) -> String {
+    let environment = &artifacts.grammar_parse.environment;
+    let environment_id = grammar_frontend::language_environment_object_id(environment);
+    let mut out = String::new();
+    out.push_str("      <section class=\"section\" id=\"grammar-environment\">\n");
+    out.push_str(&render_section_heading(
+        "Grammar environment",
+        "Active Language Environment",
+        "The language environment owns the grammar stack that parsed this source. The registry is shown as host/catalog plumbing; the environment and grammars are the objects a user follows.",
+    ));
+    out.push_str("        <div class=\"grammar-layout\">\n");
+    out.push_str("          <article class=\"grammar-panel grammar-panel--environment\">\n");
+    let _ = writeln!(
+        out,
+        "            <div class=\"grammar-panel__title\"><span>{}</span><code><a href=\"#{}\">{}</a></code></div>",
+        escape_html(&environment.name),
+        escape_attr(&object_anchor(&environment_id)),
+        escape_html(&environment_id)
+    );
+    out.push_str("            <p>Selected environment for this compile. It resolves grammar inheritance, activations, and staged-region provenance before AST lowering begins.</p>\n");
+    out.push_str("            <ol class=\"grammar-stack-list\">\n");
+    for (index, grammar_id) in environment.grammar_stack.iter().enumerate() {
+        if let Some(grammar) = artifacts
+            .grammar_parse
+            .grammars
+            .iter()
+            .find(|grammar| grammar.id == *grammar_id)
+        {
+            let grammar_object_id = grammar_frontend::grammar_object_id(grammar);
+            let role = if index + 1 == environment.grammar_stack.len() {
+                "active"
+            } else {
+                "base"
+            };
+            let activation_count = artifacts
+                .grammar_parse
+                .activations
+                .iter()
+                .filter(|activation| activation.grammar == grammar.id)
+                .count();
+            let _ = writeln!(
+                out,
+                "              <li data-node=\"object:{}\"><a href=\"#{}\">{}</a><span>{}</span><small>{} direct · {} effective · {} activations</small></li>",
+                escape_attr(&grammar_object_id),
+                escape_attr(&object_anchor(&grammar_object_id)),
+                escape_html(&grammar.name),
+                role,
+                grammar.direct_rules.len(),
+                grammar.effective_rules.len(),
+                activation_count
+            );
+        }
+    }
+    out.push_str("            </ol>\n");
+    out.push_str("          </article>\n");
+    out.push_str("          <article class=\"grammar-panel grammar-panel--registry\">\n");
+    out.push_str(
+        "            <div class=\"grammar-panel__title\"><span>Host grammar catalog</span>",
+    );
+    if let Some(registry) = object_by_id(objects, "grammar-registry:session") {
+        let _ = writeln!(
+            out,
+            "<code><a href=\"#{}\">{}</a></code></div>",
+            escape_attr(&object_anchor(registry.id.as_str())),
+            escape_html(registry.id.as_str())
+        );
+    } else {
+        out.push_str("<code>grammar-registry:session</code></div>\n");
+    }
+    out.push_str("            <p>Registry entries are trusted host-side catalog entries used to choose environments and staged grammar extensions. They are inspectable, but they are not the active parsing context.</p>\n");
+    out.push_str("            <div class=\"grammar-registry-links\">\n");
+    for object in objects.iter().filter(|object| {
+        matches!(
+            object.kind,
+            EnvironmentKind::RegisteredGrammarEnvironment
+                | EnvironmentKind::StagedGrammarAdapter
+                | EnvironmentKind::GrammarExtension
+        )
+    }) {
+        let _ = writeln!(
+            out,
+            "              <a href=\"#{}\"><span>{}</span><code>{}</code></a>",
+            escape_attr(&object_anchor(object.id.as_str())),
+            escape_html(&object.presentation.title),
+            escape_html(object.id.as_str())
+        );
+    }
+    out.push_str("            </div>\n");
+    out.push_str("          </article>\n");
+    out.push_str("        </div>\n");
+    out.push_str("      </section>\n");
+    out
+}
+
 fn render_source_legend(artifacts: &SessionArtifacts) -> String {
     let has_staged_regions = !artifacts.grammar_parse.staged_regions.is_empty();
     let has_diagnostics = !artifacts.diagnostics.is_empty();
@@ -324,7 +422,7 @@ fn render_staged_section(artifacts: &SessionArtifacts, objects: &[EnvironmentObj
     out.push_str(&render_section_heading(
         "Staged grammar",
         "Expansion Chain",
-        "A staged grammar adapter turns selected source regions into structured frontend forms. This section shows that path from adapter to forms, debug Loko text, generated objects, and executable artifacts.",
+        "A staged grammar extension turns selected source regions into structured frontend forms. This section shows that path from active grammar to forms, debug Loko text, generated objects, and executable artifacts.",
     ));
     if artifacts.grammar_parse.staged_regions.is_empty() {
         out.push_str("        <div class=\"empty-state\">No staged regions were activated in this source. The report still shows the normal source-to-tape pipeline.</div>\n");
@@ -1059,13 +1157,13 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
     match kind {
         EnvironmentKind::SourceFile => "Named source file known to this session.",
         EnvironmentKind::GrammarRegistry => {
-            "Session-owned registry of language environments and staged grammar adapters."
+            "Host catalog of available language environments and staged grammar extensions."
         }
         EnvironmentKind::RegisteredGrammarEnvironment => {
-            "Language environment available through the session grammar registry."
+            "Language environment template available through the host grammar catalog."
         }
         EnvironmentKind::StagedGrammarAdapter => {
-            "Trusted staged grammar adapter available through the session grammar registry."
+            "Trusted host adapter that implements one staged grammar extension."
         }
         EnvironmentKind::GrammarExtension => {
             "Structured descriptor for a registered staged grammar extension."
@@ -1080,9 +1178,11 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
             "Grammar rule provenance charged to a staged grammar extension."
         }
         EnvironmentKind::LanguageEnvironment => {
-            "Language environment selected for parsing this source."
+            "Active language environment selected for parsing this source."
         }
-        EnvironmentKind::Grammar => "Grammar metaobject used by the staged parser.",
+        EnvironmentKind::Grammar => {
+            "Grammar metaobject in the active environment's resolved grammar stack."
+        }
         EnvironmentKind::GrammarRule => "Direct grammar rule projected from a grammar.",
         EnvironmentKind::EffectiveGrammarRule => {
             "Grammar rule after stack resolution and inheritance."
@@ -2134,6 +2234,10 @@ fn object_anchor(object_id: &str) -> String {
     format!("object-{}", anchor_slug(object_id))
 }
 
+fn object_by_id<'a>(objects: &'a [EnvironmentObject], id: &str) -> Option<&'a EnvironmentObject> {
+    objects.iter().find(|object| object.id.as_str() == id)
+}
+
 fn artifact_anchor(key: &str) -> String {
     format!("artifact-{}", anchor_slug(key))
 }
@@ -2676,6 +2780,92 @@ a {
   gap: 18px;
 }
 
+.grammar-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.85fr);
+  gap: 14px;
+}
+
+.grammar-panel {
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.grammar-panel__title {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.grammar-panel__title span {
+  font-weight: 850;
+  font-size: 1.1rem;
+}
+
+.grammar-panel__title code {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.grammar-panel p {
+  margin: 0 0 14px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.grammar-stack-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grammar-stack-list li,
+.grammar-registry-links a {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  background: var(--surface-strong);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.grammar-stack-list a,
+.grammar-registry-links a {
+  color: var(--ink);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.grammar-stack-list span {
+  justify-self: start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #d8ebe7;
+  color: #2c635c;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.grammar-stack-list small,
+.grammar-registry-links code {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.grammar-registry-links {
+  display: grid;
+  gap: 8px;
+}
+
 .region-card {
   overflow: hidden;
 }
@@ -3171,6 +3361,7 @@ a {
   }
 
   .hero__metrics,
+  .grammar-layout,
   .pipeline-panel__copy,
   .object-card__title,
   .section__heading,
