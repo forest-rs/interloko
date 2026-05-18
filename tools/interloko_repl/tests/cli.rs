@@ -152,13 +152,14 @@ fn session_commands_list_forms_run_functions_and_reset() {
 }
 
 #[test]
-fn source_forms_are_inspectable_and_show_source_affordance_objects() {
+fn source_forms_are_inspectable_and_invokable() {
     let (stdout, stderr) = run_repl(
         "define function answer()\n  42\nend;\n\
          :forms\n\
          :inspect form:f0\n\
          :affordances form:f0\n\
          :invoke form:f0 inspect\n\
+         :invoke form:f0 show-defined-objects\n\
          :invoke form:f0 show-source\n\
          :show-form f0\n\
          :quit\n",
@@ -171,11 +172,43 @@ fn source_forms_are_inspectable_and_show_source_affordance_objects() {
     assert!(stdout.contains("category: editor-state"));
     assert!(stdout.contains("origin: typed"));
     assert!(stdout.contains("form-kind: function"));
+    assert!(stdout.contains("span: "));
+    assert!(stdout.contains("defines:"));
+    assert!(stdout.contains("function:f0 answer() -> integer primary"));
     assert!(stdout.contains("affordances form:f0"));
     assert!(stdout.contains("inspect"));
     assert!(stdout.contains("show-source"));
+    assert!(stdout.contains("show-defined-objects"));
+    assert!(stdout.contains("defined objects form:f0"));
     assert!(stdout.contains("source form:f0 function answer"));
     assert!(stdout.contains("   1 | define function answer()"));
+}
+
+#[test]
+fn source_forms_report_defined_environment_objects() {
+    let (stdout, stderr) = run_repl(
+        "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+         define generic area(shape :: <object>) => <integer>;\n\
+         define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
+         define function main()\n  area(make(<circle>, radius: 10))\nend;\n\
+         :invoke form:f0 show-defined-objects\n\
+         :invoke form:f1 show-defined-objects\n\
+         :invoke form:f2 show-defined-objects\n\
+         :invoke form:f3 show-defined-objects\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("defined objects form:f0"));
+    assert!(stdout.contains("class:c1 <circle> primary"));
+    assert!(stdout.contains("slot:c1.s0"));
+    assert!(stdout.contains("accessor:c1.s0"));
+    assert!(stdout.contains("defined objects form:f1"));
+    assert!(stdout.contains("generic:g0 area(shape:object-top) -> integer primary"));
+    assert!(stdout.contains("defined objects form:f2"));
+    assert!(stdout.contains("method:m0 area(c1:<circle>) -> integer primary"));
+    assert!(stdout.contains("defined objects form:f3"));
+    assert!(stdout.contains("function:f0 main() -> integer primary"));
 }
 
 #[test]

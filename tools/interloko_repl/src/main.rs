@@ -12,8 +12,9 @@ use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
 use interloko_compiler::identity::{ArtifactKey, SourceFileId};
 use interloko_compiler::sem;
 use interloko_compiler::session::{
-    DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, FunctionRunResult,
-    IncrementalCompilerSession, RuntimeMode, SessionArtifacts, TopLevelFormSpan,
+    DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, EnvironmentOrigin,
+    FunctionRunResult, IncrementalCompilerSession, RuntimeMode, SessionArtifacts, TopLevelFormKind,
+    TopLevelFormSpan,
 };
 use interloko_compiler::syntax::{self, TokenKind};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -737,8 +738,9 @@ impl Repl {
         let Some(id) = single_object_id(args, ":inspect <object-id>", stderr)? else {
             return Ok(());
         };
-        if let Some(entry) = self.source_buffer.find_form(&id) {
-            write!(stdout, "{}", format_form_object(entry))?;
+        if let Some(entry) = self.source_buffer.find_form(&id).cloned() {
+            let artifacts = self.ensure_artifacts(stderr)?;
+            write!(stdout, "{}", format_form_object(&entry, &artifacts))?;
             return Ok(());
         }
         if is_form_like_id(&id) {
@@ -813,10 +815,21 @@ impl Repl {
         let Some((id, affordance)) = object_id_and_affordance(args, stderr)? else {
             return Ok(());
         };
-        if let Some(entry) = self.source_buffer.find_form(&id) {
+        if let Some(entry) = self.source_buffer.find_form(&id).cloned() {
             match affordance.as_str() {
-                "inspect" => write!(stdout, "{}", format_form_object(entry))?,
-                "show-source" => write_form_source(entry, stdout)?,
+                "inspect" => {
+                    let artifacts = self.ensure_artifacts(stderr)?;
+                    write!(stdout, "{}", format_form_object(&entry, &artifacts))?;
+                }
+                "show-defined-objects" => {
+                    let artifacts = self.ensure_artifacts(stderr)?;
+                    write!(
+                        stdout,
+                        "{}",
+                        format_form_defined_objects(&entry, &artifacts)
+                    )?;
+                }
+                "show-source" => write_form_source(&entry, stdout)?,
                 "drop" => self.drop_form_by_id(&id, stdout, stderr)?,
                 _ => writeln!(
                     stderr,
@@ -1166,9 +1179,18 @@ impl ReplSourceBuffer {
     }
 
     fn push_definition_with_origin(&mut self, source: String, origin: SourceOrigin) {
+        let span_start = self.rendered_source().len();
+        let span_end = span_start + source.trim_end().len();
         let line_start = self.next_source_line();
         let line_end = line_start + source.lines().count().saturating_sub(1);
-        let form = FormRecord::from_definition(self.entries.len(), &source, line_start, line_end);
+        let form = FormRecord::from_definition(
+            self.entries.len(),
+            &source,
+            line_start,
+            line_end,
+            syntax::Span::new(span_start, span_end),
+            None,
+        );
         self.entries.push(AcceptedDefinition {
             source,
             origin,
@@ -1210,6 +1232,8 @@ impl ReplSourceBuffer {
             &entry.source[form_start..form_end],
             line_start,
             line_end,
+            syntax::Span::new(entry.form_start, entry.form_end),
+            Some(entry.kind),
         );
         self.entries.push(AcceptedDefinition {
             source: entry.source,
@@ -1254,6 +1278,7 @@ struct SourceBufferEntry {
     chunk_start: usize,
     form_start: usize,
     form_end: usize,
+    kind: TopLevelFormKind,
 }
 
 fn source_entries_from_form_spans(
@@ -1281,6 +1306,7 @@ fn source_entries_from_form_spans(
                 chunk_start: entry_start,
                 form_start: form.span.start,
                 form_end: form.span.end,
+                kind: form.kind,
             });
             chunk_start = chunk_end;
         }
@@ -1338,10 +1364,19 @@ struct FormRecord {
     name: String,
     line_start: usize,
     line_end: usize,
+    span: syntax::Span,
+    parsed_kind: Option<TopLevelFormKind>,
 }
 
 impl FormRecord {
-    fn from_definition(index: usize, source: &str, line_start: usize, line_end: usize) -> Self {
+    fn from_definition(
+        index: usize,
+        source: &str,
+        line_start: usize,
+        line_end: usize,
+        span: syntax::Span,
+        parsed_kind: Option<TopLevelFormKind>,
+    ) -> Self {
         let header = source
             .lines()
             .find(|line| !line.trim().is_empty())
@@ -1354,6 +1389,8 @@ impl FormRecord {
             name,
             line_start,
             line_end,
+            span,
+            parsed_kind,
         }
     }
 
@@ -1738,8 +1775,9 @@ fn slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
     }
 }
 
-fn format_form_object(entry: &AcceptedDefinition) -> String {
+fn format_form_object(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
     let form = &entry.form;
+    let defined = form_defined_objects(entry, artifacts);
     let mut out = String::new();
     let _ = writeln!(out, "object {}", form.id());
     let _ = writeln!(out, "kind: repl-source-form");
@@ -1748,6 +1786,26 @@ fn format_form_object(entry: &AcceptedDefinition) -> String {
     let _ = writeln!(out, "form-kind: {}", form.kind);
     let _ = writeln!(out, "name: {}", form.name);
     let _ = writeln!(out, "lines: {}..{}", form.line_start, form.line_end);
+    let _ = writeln!(out, "span: {}..{}", form.span.start, form.span.end);
+    let _ = writeln!(out, "defines:");
+    if defined.is_empty() {
+        let _ = writeln!(out, "  <none>");
+    } else {
+        for object in &defined {
+            let primary = if form_primary_object(entry, object) {
+                " primary"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "  {} {}{}",
+                object.id.as_str(),
+                object.presentation.title,
+                primary
+            );
+        }
+    }
     let _ = writeln!(out, "affordances:");
     for affordance in FORM_AFFORDANCES {
         let _ = writeln!(out, "  {affordance}");
@@ -1760,6 +1818,31 @@ fn format_form_object(entry: &AcceptedDefinition) -> String {
         form.kind,
         form.name
     );
+    out
+}
+
+fn format_form_defined_objects(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "defined objects {}", entry.form.id());
+    let defined = form_defined_objects(entry, artifacts);
+    if defined.is_empty() {
+        let _ = writeln!(out, "<none>");
+    } else {
+        for object in defined {
+            let primary = if form_primary_object(entry, &object) {
+                " primary"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "{} {}{}",
+                object.id.as_str(),
+                object.presentation.title,
+                primary
+            );
+        }
+    }
     out
 }
 
@@ -1798,7 +1881,51 @@ fn entry_line_start(entry: &AcceptedDefinition) -> usize {
     entry.form.line_start.saturating_sub(leading_lines)
 }
 
-const FORM_AFFORDANCES: &[&str] = &["inspect", "show-source", "drop"];
+fn form_defined_objects(
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+) -> Vec<EnvironmentObject> {
+    let mut objects = artifacts
+        .environment_objects()
+        .into_iter()
+        .filter(|object| form_defines_object(entry, object))
+        .collect::<Vec<_>>();
+    objects.sort_by(|left, right| {
+        form_primary_object(entry, right)
+            .cmp(&form_primary_object(entry, left))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    objects
+}
+
+fn form_defines_object(entry: &AcceptedDefinition, object: &EnvironmentObject) -> bool {
+    if object.origin != EnvironmentOrigin::SourceAuthored {
+        return false;
+    }
+    let Some(span) = object.source.span else {
+        return false;
+    };
+    span.start >= entry.form.span.start && span.end <= entry.form.span.end
+}
+
+fn form_primary_object(entry: &AcceptedDefinition, object: &EnvironmentObject) -> bool {
+    form_primary_kind_matches(entry.form.parsed_kind, object.kind)
+}
+
+fn form_primary_kind_matches(kind: Option<TopLevelFormKind>, object: EnvironmentKind) -> bool {
+    // Keep this paired with TopLevelFormKind when new top-level definition forms
+    // are added. Non-primary source-authored objects from the same form are still
+    // reported by span containment.
+    matches!(
+        (kind, object),
+        (Some(TopLevelFormKind::Class), EnvironmentKind::Class)
+            | (Some(TopLevelFormKind::Generic), EnvironmentKind::Generic)
+            | (Some(TopLevelFormKind::Method), EnvironmentKind::Method)
+            | (Some(TopLevelFormKind::Function), EnvironmentKind::Function)
+    )
+}
+
+const FORM_AFFORDANCES: &[&str] = &["inspect", "show-source", "show-defined-objects", "drop"];
 
 fn function_run_message(result: &FunctionRunResult) -> String {
     match result {
