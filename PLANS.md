@@ -1,5 +1,73 @@
 # Plans
 
+## Split Grammar Frontend And Interpret Calculator
+
+### Goal
+
+Make the staged grammar work easier to extend by splitting the oversized
+grammar frontend into a facade plus focused staged-grammar modules, then move
+the calculator staged grammar onto the same source-authored/interpreted path as
+records.
+
+The useful result should be concrete: both `records` and `calculator` staged
+regions are recognized by source-authored grammar rules, while their legacy
+Rust parsers remain available as diagnostic and compatibility backstops.
+
+### Non-Goals
+
+- No base Loko parser flip.
+- No removal of the hand-written records or calculator parsers.
+- No new grammar package loading story.
+- No new user-facing staged language semantics.
+- No parser-theory expansion beyond what calculator currently needs.
+- No diagnostic rewrite.
+
+### Fence
+
+`grammar_frontend.rs` remains the public facade, registry, environment
+resolver, and staged-region orchestrator. It explicitly does not own
+grammar-specific parsing details.
+
+`grammar_frontend::interpreter` owns grammar-source loading and interpreted
+`RuleExpression` matching. It explicitly does not own frontend form conversion
+for any staged language.
+
+`grammar_frontend::records` and `grammar_frontend::calculator` own conversion
+from interpreted parse trees into existing structural frontend forms. They
+explicitly do not own new language semantics or diagnostics beyond their staged
+grammar adapters.
+
+### Invariants
+
+- The first split commit is behavior-preserving.
+- Records remains interpreted first, legacy fallback second.
+- Calculator becomes interpreted first, legacy fallback second.
+- Legacy fallback keeps existing diagnostic quality when the interpreted path
+  cannot explain malformed input yet.
+- Projected direct rules for source-authored staged grammars carry
+  `SourceAuthored` origin and source spans.
+- Every commit remains bisectable.
+
+### Sequence
+
+1. Split interpreter and records code into focused submodules with no behavior
+   change.
+2. Add calculator grammar source and interpreted parse-tree conversion.
+3. Route calculator through the interpreter, preserving the legacy parser as a
+   fallback.
+4. Update tests, docs, and review-note comments around parser fallbacks and
+   builtin rules.
+
+### Risks
+
+- Moving code can accidentally change visibility or test-only access. Keep the
+  facade API stable and use `pub(super)` only where the parent needs a helper.
+- Calculator expressions need operator tokens in the interpreted tree. Keep
+  literal nodes inert and avoid making them public grammar rules.
+- Diagnostics can regress if the interpreted calculator path accepts partial
+  input. Fall back to the legacy parser unless the interpreted path consumes the
+  whole staged region and converts cleanly.
+
 ## Make The Records Grammar Actually Run
 
 ### Goal
