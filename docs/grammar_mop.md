@@ -1,10 +1,11 @@
 # Grammar MOP
 
 Interloko exposes the current hand-written Loko parser as read-only grammar
-metaobjects inside a selected language environment. It also has trusted staged
-grammar extensions that emit structural frontend forms that are lowered
-directly into AST definitions.
-This is still not a parser rewrite and not a macro system.
+metaobjects inside a selected language environment. It also has staged grammar
+extensions that emit structural frontend forms lowered directly into AST
+definitions. The `records` staged grammar is now parsed by a tiny interpreted
+grammar path; base Loko is still parsed by the Rust parser.
+This is still not a full parser rewrite and not a macro system.
 
 ## Boundary
 
@@ -12,9 +13,9 @@ This is still not a parser rewrite and not a macro system.
 grammar metaobjects, grammar-stack resolution, parser invocation, parse
 activations, structural staged emissions, and parse provenance.
 
-It explicitly does not own AST lowering, semantic lowering, source-authored
-grammars, semantic actions, host code execution, OMeta/Ohm compatibility, or
-user-defined parser rules.
+It explicitly does not own AST lowering, semantic lowering, user grammar
+package loading, semantic actions, host code execution, OMeta/Ohm
+compatibility, or a replacement for the base Loko parser.
 
 ## What Is Real Now
 
@@ -25,8 +26,9 @@ The implemented grammar slice has three load-bearing pieces:
   provenance;
 - a session-owned host registry used as catalog plumbing for available
   environments and staged extensions;
-- trusted Rust-hosted staged grammar extensions that emit structural frontend
-  forms.
+- trusted staged grammar extensions that emit structural frontend forms;
+- one source-authored staged grammar, `records`, whose grammar source is parsed
+  into `RuleExpression` and interpreted over records regions.
 
 Those frontend forms are compiler data, not source text. `ast.rs` consumes
 staged function and class forms directly when building AST definitions, and the
@@ -141,15 +143,29 @@ grammar:records                   RecordsRegionGrammar extends BaseLokoGrammar
 `// grammar-activate: calculator`. Later comment-delimited regions are routed
 through the registered calculator adapter and emit structural function forms.
 
-`RecordsRegionGrammar` has direct rules for `records-region`,
-`record-definition`, and `record-field`. It is selected with
-`// grammar-activate: records` and emits structural class forms with typed
-slots. `ast.rs` consumes those structural forms directly as compiler-generated
+`RecordsRegionGrammar` is the first grammar-driven staged language. Its direct
+rules are parsed from embedded grammar source:
+
+```text
+grammar records
+rule records-region = record-definition*
+rule record-definition = `record` name record-field* `end` => frontend-class
+rule record-field = name `:` type-name `;`? => frontend-slot
+end
+```
+
+It is selected with `// grammar-activate: records`; later
+`// staged-loko: records` regions are recognized by the interpreted grammar,
+which produces a parse tree with rule names and spans. A small host projection
+then converts that parse tree into structural class forms with typed slots.
+`ast.rs` consumes those structural forms directly as compiler-generated
 definitions with source spans from the staged region. Materialized Loko is still
 stored on each staged region for dumps, reports, and debugging, but the semantic
-pipeline no longer reparses it as the source of truth. Both adapters are trusted
-Rust-hosted entries in the same explicit registry protocol; there is no
-source-authored grammar definition syntax yet.
+pipeline no longer reparses it as the source of truth.
+
+`CalculatorRegionGrammar` remains Rust-hosted. Both grammars still live behind
+the same explicit registry protocol; there is no user package/loading story for
+external grammar files yet.
 
 Each staged adapter also exposes a `GrammarExtensionDescriptor`. The descriptor
 is the readable protocol record for the extension:
@@ -172,9 +188,9 @@ Concrete parses add three more record families:
 - extension emissions, one per frontend form emitted by the adapter;
 - extension provenance, one per charged staged grammar rule.
 
-These records are deliberately still read-only. They make trusted Rust-hosted
-extensions visible as protocol data without claiming that source-authored
-grammars, semantic actions, or a macro system exist yet.
+These records are deliberately still read-only. They make staged extensions
+visible as protocol data without claiming that semantic actions, arbitrary user
+grammar packages, or a macro system exist yet.
 
 ## Parse Reports
 
@@ -325,7 +341,7 @@ edits look like grammar edits.
 diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
 
-`show-parser-shadow` is the first self-hosting harness surface. Today it
+`show-parser-shadow` is the base-Loko self-hosting harness surface. Today it
 reports the Rust recursive-descent parser as the primary parser and marks the
 source-authored grammar interpreter oracle as unavailable. That is intentional:
 the hand-written parser remains trusted while the grammar interpreter is
@@ -335,8 +351,10 @@ primary-parser flip.
 
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
 activation directive span, source span, frontend forms, debug materialized
-source, and inert source-data result. The directive and `// staged-loko:` markers are
-frontend/workbench metadata; they are not part of the Loko language semantics.
+source, and inert source-data result. For `records`, the inert result includes
+`driver: interpreted-grammar` and a `rule-node` parse tree. The directive and
+`// staged-loko:` markers are frontend/workbench metadata; they are not part of
+the Loko language semantics.
 
 ## Source Data
 
@@ -382,7 +400,7 @@ semantic actions, and they do not bypass the existing parser.
 
 Later slices may add:
 
-- source-authored grammar declarations;
+- user-authored grammar declarations loaded from ordinary source files;
 - structural semantic actions that emit forms or grammar deltas;
 - a complete structural frontend expression model for the full Loko expression
   language;

@@ -1,5 +1,97 @@
 # Plans
 
+## Make The Records Grammar Actually Run
+
+### Goal
+
+Turn one grammar projection into a real parser path. The `records` staged
+grammar should be authored as grammar source, parsed by a tiny bootstrap
+grammar loader, interpreted over `// staged-loko: records` regions, and used as
+the primary recognizer for records syntax. The existing Rust records parser
+stays as oracle/projection backstop until the interpreted parse tree proves it
+can drive all current records behavior.
+
+This is the first "use, not decoration" grammar slice. It does not self-host
+base Loko. It makes a small, useful staged language actually grammar-driven.
+
+### Non-Goals
+
+- No `base-loko` parser flip.
+- No removal of `interloko_compiler::syntax`.
+- No general macro system.
+- No arbitrary semantic actions or host callbacks from grammar source.
+- No left recursion, predicates, parameterized rules, captures, or precedence.
+- No user package/loading story for grammar files.
+- No diagnostic-system rewrite.
+
+### Fence
+
+`interloko_compiler::grammar_frontend` owns the tiny bootstrap grammar loader,
+interpreted `RuleExpression` matching, source-authored staged grammar records,
+parse-tree provenance, and the records staged grammar handoff. It explicitly
+does not own AST/semantic lowering, host callback execution, persistent grammar
+packages, or the decision to replace the Rust Loko parser.
+
+The records adapter owns conversion from an interpreted parse tree into
+existing structural `FrontendForm::Class` values. It explicitly does not own
+new class semantics or a new record language beyond the current fixture syntax.
+
+### Invariants
+
+- `records` staged regions are accepted/rejected by the interpreted grammar,
+  not by the legacy line parser.
+- The grammar source is parsed into `RuleExpression`; projected direct rules
+  come from that source.
+- Grammar interpretation returns a structural parse tree with spans and rule
+  names.
+- Existing records frontend forms remain structural data, not materialized Loko.
+- The Rust records parser remains available as an oracle until a later cleanup.
+- Diagnostics remain at least as specific as current records diagnostics for
+  malformed record headers, malformed fields, duplicate fields, invalid names,
+  invalid field types, missing `end`, and empty regions.
+- Every commit is bisectable with `records` examples/tests passing.
+
+### Commit Sequence
+
+1. Bootstrap grammar source:
+   - add a tiny grammar-source parser for `grammar`, `rule`, literals, rule
+     refs, sequence, choice, `?`, `*`, and `=>` output tags;
+   - author the `records` grammar as source text;
+   - project `records` direct rules from parsed grammar source with source
+     spans and `SourceAuthored` origin.
+2. Interpreted recognizer:
+   - add a small PEG-style interpreter over `RuleExpression`;
+   - produce parse tree nodes with rule names, spans, and matched text;
+   - keep the interpreter deterministic and backtracking-limited by the current
+     grammar surface.
+3. Records handoff:
+   - make the records adapter call the interpreter first;
+   - convert the interpreted tree into `FrontendForm::Class`;
+   - keep the legacy Rust parser as oracle/comparison and fallback only for
+     diagnostics the interpreted tree cannot yet explain.
+4. Provenance and inspection:
+   - charge staged extension provenance from interpreted parse tree rule nodes;
+   - expose source-authored grammar origin, expression, and parse-tree summary
+     in MOP/EOP/show-expression/show-parse-trace.
+5. Tests/docs:
+   - preserve all current records tests;
+   - add tests proving a grammar source edit changes the projected rules;
+   - add one direct interpreter unit test for an imaginary small grammar;
+   - update grammar MOP docs to say what is now genuinely grammar-driven.
+
+### Risks
+
+- A tiny PEG interpreter can grow sideways into parser theory work. Keep it just
+  powerful enough for records and small future staged grammars.
+- Diagnostics can regress if recognition and validation get conflated. Keep
+  semantic validation for duplicate fields and valid type names outside the
+  grammar interpreter.
+- "Source-authored" can overpromise if the source is embedded. Wording must be
+  honest: this slice parses grammar source text but does not yet load user
+  grammar packages from ordinary project files.
+- The Rust oracle can become a crutch. Use it for comparison/diagnostic safety,
+  not as the primary acceptance path.
+
 ## Build The Self-Hosting Grammar Spine
 
 ### Goal

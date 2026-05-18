@@ -57,6 +57,12 @@ const EMIT_FRONTEND_FORMS_CAPABILITIES: &[GrammarExtensionCapability] =
     &[GrammarExtensionCapability::EmitFrontendForms];
 const CALCULATOR_EMITTED_FORM_KINDS: &[&str] = &["frontend-function"];
 const RECORDS_EMITTED_FORM_KINDS: &[&str] = &["frontend-class"];
+const RECORDS_GRAMMAR_SOURCE: &str = "\
+grammar records\n\
+rule records-region = record-definition*\n\
+rule record-definition = `record` name record-field* `end` => frontend-class\n\
+rule record-field = name `:` type-name `;`? => frontend-slot\n\
+end\n";
 
 /// Capability required by a staged grammar extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1846,7 +1852,12 @@ fn parse_staged_file(
             .parse_region(region.body, region.body_span.start);
         diagnostics.extend(emission.diagnostics);
         let region_materialized_source = materialize_frontend_forms(&emission.forms);
-        staged_rule_counts.push((grammar, region.adapter.provenance_rule_names()));
+        staged_rule_counts.extend(
+            emission
+                .rule_counts
+                .iter()
+                .map(|count| (grammar, count.rule_name.clone(), count.node_count)),
+        );
         let forms_data = frontend_forms_source_data(&emission.forms);
 
         extension_activations.push(GrammarExtensionActivation {
@@ -1897,15 +1908,14 @@ fn parse_staged_file(
     let active_effective_rules = records.effective_rules.to_vec();
     let applications = rule_applications(&active_effective_rules, &activations[0], &syntax.root);
     let mut provenance_rules = rule_provenance(&active_effective_rules, &applications);
-    for (grammar, rule_names) in staged_rule_counts {
-        for rule_name in rule_names {
-            add_staged_rule_count(
-                &mut provenance_rules,
-                &records.effective_rules,
-                grammar,
-                rule_name,
-            );
-        }
+    for (grammar, rule_name, count) in staged_rule_counts {
+        add_staged_rule_count(
+            &mut provenance_rules,
+            &records.effective_rules,
+            grammar,
+            &rule_name,
+            count,
+        );
     }
     let extension_provenance = extension_provenance_records(
         &staged_regions,
@@ -2017,8 +2027,19 @@ pub struct StagedRegionEmission {
     pub forms: Vec<FrontendForm>,
     /// Inert structured protocol data describing the adapter parse.
     pub data: SourceData,
+    /// Rule counts charged by the staged grammar parser.
+    pub rule_counts: Vec<StagedRuleCount>,
     /// Diagnostics emitted while parsing the staged region.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Number of parser nodes charged to one staged grammar rule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedRuleCount {
+    /// Stable grammar rule name.
+    pub rule_name: String,
+    /// Number of parse tree nodes for this rule.
+    pub node_count: usize,
 }
 
 struct BaseLokoEnvironmentProvider;
@@ -2350,6 +2371,7 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
         ));
     }
 
+    let function_count = forms.len();
     StagedRegionEmission {
         forms,
         data: SourceData::record(
@@ -2359,6 +2381,16 @@ fn parse_calculator_region(body: &str, source_offset: usize) -> StagedRegionEmis
                 source_data::field("functions", SourceData::list(functions)),
             ],
         ),
+        rule_counts: Vec::from([
+            StagedRuleCount {
+                rule_name: "calculator-region".to_string(),
+                node_count: 1,
+            },
+            StagedRuleCount {
+                rule_name: "calculator-function".to_string(),
+                node_count: function_count,
+            },
+        ]),
         diagnostics,
     }
 }
@@ -2535,7 +2567,399 @@ struct RecordBuilder {
     field_data: Vec<SourceData>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InterpretedRuleNode {
+    rule_name: String,
+    span: Span,
+    text: String,
+    children: Vec<InterpretedRuleNode>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InterpretedParse {
+    root: InterpretedRuleNode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExpressionMatch {
+    end: usize,
+    children: Vec<InterpretedRuleNode>,
+}
+
 fn parse_records_region(body: &str, source_offset: usize) -> StagedRegionEmission {
+    if let Some(parse) = interpret_records_region(body, source_offset) {
+        return records_emission_from_interpreted_parse(body, source_offset, &parse)
+            .unwrap_or_else(|| parse_records_region_legacy(body, source_offset));
+    }
+    parse_records_region_legacy(body, source_offset)
+}
+
+fn interpret_records_region(body: &str, source_offset: usize) -> Option<InterpretedParse> {
+    let rules = parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE);
+    let root = interpret_rule(&rules, "records-region", body, 0, source_offset)?;
+    if skip_interpreter_trivia(body, root.span.end.saturating_sub(source_offset)) == body.len() {
+        Some(InterpretedParse { root })
+    } else {
+        None
+    }
+}
+
+fn interpret_rule(
+    rules: &[SourceAuthoredRule],
+    name: &str,
+    source: &str,
+    position: usize,
+    source_offset: usize,
+) -> Option<InterpretedRuleNode> {
+    if let Some(rule) = rules.iter().find(|rule| rule.name == name) {
+        let start = skip_interpreter_trivia(source, position);
+        let matched = interpret_expression(rules, &rule.expression, source, start, source_offset)?;
+        let end = matched.end;
+        return Some(InterpretedRuleNode {
+            rule_name: name.to_string(),
+            span: Span::new(source_offset + start, source_offset + end),
+            text: source[start..end].to_string(),
+            children: matched.children,
+        });
+    }
+    interpret_builtin_rule(name, source, position, source_offset)
+}
+
+fn interpret_expression(
+    rules: &[SourceAuthoredRule],
+    expression: &RuleExpression,
+    source: &str,
+    position: usize,
+    source_offset: usize,
+) -> Option<ExpressionMatch> {
+    match expression {
+        RuleExpression::Rule(name) => {
+            let node = interpret_rule(rules, name, source, position, source_offset)?;
+            Some(ExpressionMatch {
+                end: node.span.end.saturating_sub(source_offset),
+                children: vec![node],
+            })
+        }
+        RuleExpression::Literal(value) => {
+            let start = skip_interpreter_trivia(source, position);
+            source[start..]
+                .starts_with(value)
+                .then_some(start + value.len())
+                .filter(|end| literal_boundary_ok(source, *end, value))
+                .map(|end| ExpressionMatch {
+                    end,
+                    children: Vec::new(),
+                })
+        }
+        RuleExpression::Sequence(items) => {
+            let mut end = position;
+            let mut children = Vec::new();
+            for item in items {
+                let matched = interpret_expression(rules, item, source, end, source_offset)?;
+                end = matched.end;
+                children.extend(matched.children);
+            }
+            Some(ExpressionMatch { end, children })
+        }
+        RuleExpression::Choice(items) => items
+            .iter()
+            .find_map(|item| interpret_expression(rules, item, source, position, source_offset)),
+        RuleExpression::Optional(item) => {
+            interpret_expression(rules, item, source, position, source_offset).or_else(|| {
+                Some(ExpressionMatch {
+                    end: position,
+                    children: Vec::new(),
+                })
+            })
+        }
+        RuleExpression::ZeroOrMore(item) => {
+            let mut end = position;
+            let mut children = Vec::new();
+            while let Some(matched) = interpret_expression(rules, item, source, end, source_offset)
+            {
+                if matched.end == end {
+                    break;
+                }
+                end = matched.end;
+                children.extend(matched.children);
+            }
+            Some(ExpressionMatch { end, children })
+        }
+        RuleExpression::Transform { input, .. } => {
+            interpret_expression(rules, input, source, position, source_offset)
+        }
+    }
+}
+
+fn interpret_builtin_rule(
+    name: &str,
+    source: &str,
+    position: usize,
+    source_offset: usize,
+) -> Option<InterpretedRuleNode> {
+    let start = skip_interpreter_trivia(source, position);
+    let end = match name {
+        "name" => match source.as_bytes().get(start).copied() {
+            Some(b'<') => parse_angle_name(source, start)?,
+            _ => parse_identifier_like(source, start)?,
+        },
+        "type-name" => parse_angle_name(source, start)?,
+        _ => return None,
+    };
+    Some(InterpretedRuleNode {
+        rule_name: name.to_string(),
+        span: Span::new(source_offset + start, source_offset + end),
+        text: source[start..end].to_string(),
+        children: Vec::new(),
+    })
+}
+
+fn skip_interpreter_trivia(source: &str, mut position: usize) -> usize {
+    loop {
+        let rest = &source[position..];
+        let skipped = rest
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_whitespace())
+            .last()
+            .map_or(0, |(index, ch)| index + ch.len_utf8());
+        position += skipped;
+        if source[position..].starts_with("//") {
+            if let Some(newline) = source[position..].find('\n') {
+                position += newline + 1;
+                continue;
+            }
+            return source.len();
+        }
+        return position;
+    }
+}
+
+fn literal_boundary_ok(source: &str, end: usize, literal: &str) -> bool {
+    if !literal
+        .bytes()
+        .last()
+        .is_some_and(|byte| byte.is_ascii_alphabetic())
+    {
+        return true;
+    }
+    source
+        .as_bytes()
+        .get(end)
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'?'))
+}
+
+fn parse_identifier_like(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let first = *bytes.get(start)?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut end = start + 1;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
+    {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn parse_angle_name(source: &str, start: usize) -> Option<usize> {
+    let rest = source.get(start..)?;
+    if !rest.starts_with('<') {
+        return None;
+    }
+    rest.find('>').map(|index| start + index + 1)
+}
+
+fn records_emission_from_interpreted_parse(
+    body: &str,
+    source_offset: usize,
+    parse: &InterpretedParse,
+) -> Option<StagedRegionEmission> {
+    let mut forms = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut records = Vec::new();
+    for record in parse
+        .root
+        .children
+        .iter()
+        .filter(|node| node.rule_name == "record-definition")
+    {
+        let Some((form, data)) = frontend_record_from_interpreted_node(record, &mut diagnostics)
+        else {
+            continue;
+        };
+        forms.push(form);
+        records.push(data);
+    }
+    if records.is_empty() && diagnostics.is_empty() {
+        diagnostics.push(staged_expected_diagnostic(
+            Span::new(source_offset, source_offset + body.len()),
+            "records",
+            "`record name`",
+        ));
+    }
+    Some(StagedRegionEmission {
+        forms,
+        data: SourceData::record(
+            "records-region",
+            vec![
+                source_data::field("grammar", SourceData::symbol(RECORDS_GRAMMAR_NAME)),
+                source_data::field("driver", SourceData::symbol("interpreted-grammar")),
+                source_data::field("parse-tree", interpreted_rule_node_source_data(&parse.root)),
+                source_data::field("records", SourceData::list(records)),
+            ],
+        ),
+        rule_counts: interpreted_rule_counts(&parse.root),
+        diagnostics,
+    })
+}
+
+fn frontend_record_from_interpreted_node(
+    record: &InterpretedRuleNode,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<(FrontendForm, SourceData)> {
+    let name = record
+        .children
+        .iter()
+        .find(|node| node.rule_name == "name")?;
+    let Some(class_name) = normalize_record_class_name(name.text.trim()) else {
+        diagnostics.push(staged_expected_diagnostic(
+            name.span,
+            "records",
+            "valid record name",
+        ));
+        return None;
+    };
+    let mut fields = Vec::new();
+    let mut field_data = Vec::new();
+    for field in record
+        .children
+        .iter()
+        .filter(|node| node.rule_name == "record-field")
+    {
+        parse_interpreted_record_field(field, &mut fields, &mut field_data, diagnostics);
+    }
+    let fields_data = SourceData::list(field_data);
+    Some((
+        FrontendForm::class(class_name.clone(), "<object>", fields, record.span),
+        SourceData::record(
+            "record-definition",
+            vec![
+                source_data::field("name", SourceData::symbol(class_name.as_str())),
+                source_span_data(record.span),
+                source_data::field("fields", fields_data),
+            ],
+        ),
+    ))
+}
+
+fn parse_interpreted_record_field(
+    field: &InterpretedRuleNode,
+    fields: &mut Vec<FrontendSlot>,
+    field_data: &mut Vec<SourceData>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(name) = field.children.iter().find(|node| node.rule_name == "name") else {
+        diagnostics.push(staged_expected_diagnostic(
+            field.span,
+            "records",
+            "`field: <type>`",
+        ));
+        return;
+    };
+    let Some(type_name) = field
+        .children
+        .iter()
+        .find(|node| node.rule_name == "type-name")
+    else {
+        diagnostics.push(staged_expected_diagnostic(
+            field.span,
+            "records",
+            "`field: <type>`",
+        ));
+        return;
+    };
+    let name_text = name.text.trim();
+    let type_text = type_name.text.trim();
+    if !valid_record_field_name(name_text) {
+        diagnostics.push(
+            staged_expected_diagnostic(name.span, "records", "valid record field")
+                .with_arg(DiagnosticArg::text("field", name_text)),
+        );
+        return;
+    }
+    if fields.iter().any(|field| field.name == name_text) {
+        diagnostics.push(
+            staged_expected_diagnostic(name.span, "records", "unique record field")
+                .with_arg(DiagnosticArg::text("field", name_text)),
+        );
+        return;
+    }
+    if !valid_type_name(type_text) {
+        diagnostics.push(
+            staged_expected_diagnostic(type_name.span, "records", "field type name")
+                .with_arg(DiagnosticArg::text("field", name_text)),
+        );
+        return;
+    }
+    fields.push(
+        FrontendSlot::new(name_text, type_text, field.span).with_init_keyword(name_text, true),
+    );
+    field_data.push(SourceData::record(
+        "record-field",
+        vec![
+            source_data::field("name", SourceData::symbol(name_text)),
+            source_data::field("type", SourceData::symbol(type_text)),
+            source_span_data(field.span),
+        ],
+    ));
+}
+
+fn interpreted_rule_node_source_data(node: &InterpretedRuleNode) -> SourceData {
+    SourceData::record(
+        "rule-node",
+        vec![
+            source_data::field("rule", SourceData::symbol(node.rule_name.as_str())),
+            source_span_data(node.span),
+            source_data::field(
+                "children",
+                SourceData::list(
+                    node.children
+                        .iter()
+                        .map(interpreted_rule_node_source_data)
+                        .collect(),
+                ),
+            ),
+        ],
+    )
+}
+
+fn interpreted_rule_counts(root: &InterpretedRuleNode) -> Vec<StagedRuleCount> {
+    let mut counts = Vec::<StagedRuleCount>::new();
+    count_interpreted_rule(root, &mut counts);
+    counts
+}
+
+fn count_interpreted_rule(node: &InterpretedRuleNode, counts: &mut Vec<StagedRuleCount>) {
+    if let Some(count) = counts
+        .iter_mut()
+        .find(|count| count.rule_name == node.rule_name)
+    {
+        count.node_count = count.node_count.saturating_add(1);
+    } else {
+        counts.push(StagedRuleCount {
+            rule_name: node.rule_name.clone(),
+            node_count: 1,
+        });
+    }
+    for child in &node.children {
+        count_interpreted_rule(child, counts);
+    }
+}
+
+fn parse_records_region_legacy(body: &str, source_offset: usize) -> StagedRegionEmission {
     let mut forms = Vec::new();
     let mut diagnostics = Vec::new();
     let mut records = Vec::new();
@@ -2621,6 +3045,7 @@ fn parse_records_region(body: &str, source_offset: usize) -> StagedRegionEmissio
         ));
     }
 
+    let record_count = forms.len();
     StagedRegionEmission {
         forms,
         data: SourceData::record(
@@ -2630,6 +3055,16 @@ fn parse_records_region(body: &str, source_offset: usize) -> StagedRegionEmissio
                 source_data::field("records", SourceData::list(records)),
             ],
         ),
+        rule_counts: Vec::from([
+            StagedRuleCount {
+                rule_name: "records-region".to_string(),
+                node_count: 1,
+            },
+            StagedRuleCount {
+                rule_name: "record-definition".to_string(),
+                node_count: record_count,
+            },
+        ]),
         diagnostics,
     }
 }
@@ -2770,6 +3205,7 @@ fn add_staged_rule_count(
     effective_rules: &[EffectiveGrammarRule],
     grammar: GrammarId,
     name: &str,
+    count: usize,
 ) {
     let Some(rule) = effective_rules
         .iter()
@@ -2778,7 +3214,7 @@ fn add_staged_rule_count(
         return;
     };
     if let Some(provenance) = rules.iter_mut().find(|item| item.rule == rule.id) {
-        provenance.node_count = provenance.node_count.saturating_add(1);
+        provenance.node_count = provenance.node_count.saturating_add(count);
     }
 }
 
@@ -3010,6 +3446,45 @@ pub struct GrammarFrontendRecords {
     pub effective_rules: Vec<EffectiveGrammarRule>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceAuthoredRule {
+    name: String,
+    expression: RuleExpression,
+    source_span: Span,
+}
+
+fn parse_source_authored_grammar(source: &str) -> Vec<SourceAuthoredRule> {
+    let mut rules = Vec::new();
+    let mut offset = 0_usize;
+    for line in source.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        offset = line_end;
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("grammar ")
+            || trimmed == "end"
+        {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("rule ") else {
+            continue;
+        };
+        let Some((name, expression)) = rest.split_once('=') else {
+            continue;
+        };
+        let leading = line.find(trimmed).unwrap_or(0);
+        let trimmed_start = line_start + leading;
+        rules.push(SourceAuthoredRule {
+            name: name.trim().to_string(),
+            expression: projected_rule_expression(expression),
+            source_span: Span::new(trimmed_start, line_end.saturating_sub(1)),
+        });
+    }
+    rules
+}
+
 fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
     const RULES: &[(&str, &str, &str)] = &[
         ("source-file", "definition*", "syntax.rs:Parser::parse"),
@@ -3182,53 +3657,52 @@ fn calculator_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
 }
 
 fn records_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
-    const RULES: &[(&str, &str, &str)] = &[
-        (
-            "records-region",
-            "record-definition*",
-            "grammar_frontend.rs:parse_records_region",
-        ),
-        (
-            "record-definition",
-            "`record` name record-field* `end` => class form",
-            "grammar_frontend.rs:parse_records_region",
-        ),
-        (
-            "record-field",
-            "name `:` type-name => required slot form",
-            "grammar_frontend.rs:parse_records_region",
-        ),
-    ];
-
-    RULES
-        .iter()
-        .map(|(name, expression, location)| GrammarRule {
-            id: GrammarRuleId::new(grammar, name),
-            grammar,
-            grammar_slug: grammar_slug.to_string(),
-            name: (*name).to_string(),
-            expression: projected_rule_expression(expression),
-            expression_data: grammar_rule_expression_data(name, expression, location),
-            projection: GrammarProjection {
-                origin: ProjectionOrigin::CompilerProjectedPrototype,
-                location: (*location).to_string(),
-                source_span: None,
-            },
+    parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE)
+        .into_iter()
+        .map(|rule| {
+            let location = format!("source-grammar:{grammar_slug}/{}", rule.name);
+            GrammarRule {
+                id: GrammarRuleId::new(grammar, &rule.name),
+                grammar,
+                grammar_slug: grammar_slug.to_string(),
+                name: rule.name.clone(),
+                expression_data: grammar_rule_expression_data_from_expr(
+                    &rule.name,
+                    &rule.expression,
+                    None,
+                    &location,
+                ),
+                expression: rule.expression,
+                projection: GrammarProjection {
+                    origin: ProjectionOrigin::SourceAuthored,
+                    location,
+                    source_span: Some(rule.source_span),
+                },
+            }
         })
         .collect()
 }
 
 fn grammar_rule_expression_data(name: &str, expression: &str, location: &str) -> SourceData {
     let structured = projected_rule_expression(expression);
-    SourceData::record(
-        "grammar-rule",
-        vec![
-            source_data::field("name", SourceData::symbol(name)),
-            source_data::field("expression", structured.source_data()),
-            source_data::field("text", SourceData::string(expression)),
-            source_data::field("location", SourceData::string(location)),
-        ],
-    )
+    grammar_rule_expression_data_from_expr(name, &structured, Some(expression), location)
+}
+
+fn grammar_rule_expression_data_from_expr(
+    name: &str,
+    expression: &RuleExpression,
+    text: Option<&str>,
+    location: &str,
+) -> SourceData {
+    let mut fields = vec![
+        source_data::field("name", SourceData::symbol(name)),
+        source_data::field("expression", expression.source_data()),
+    ];
+    if let Some(text) = text {
+        fields.push(source_data::field("text", SourceData::string(text)));
+    }
+    fields.push(source_data::field("location", SourceData::string(location)));
+    SourceData::record("grammar-rule", fields)
 }
 
 fn projected_rule_expression(expression: &str) -> RuleExpression {
@@ -3236,7 +3710,7 @@ fn projected_rule_expression(expression: &str) -> RuleExpression {
     if let Some((input, output)) = trimmed.split_once("=>") {
         return RuleExpression::transform(
             projected_rule_expression(input),
-            SourceData::string(output.trim()),
+            transform_output_source_data(output.trim()),
         );
     }
     let choices = split_top_level(trimmed, '|');
@@ -3255,6 +3729,13 @@ fn projected_rule_expression(expression: &str) -> RuleExpression {
             .map(projected_rule_term)
             .collect::<Vec<_>>(),
     )
+}
+
+fn transform_output_source_data(output: &str) -> SourceData {
+    output
+        .strip_prefix('`')
+        .and_then(|inner| inner.strip_suffix('`'))
+        .map_or_else(|| SourceData::symbol(output), SourceData::string)
 }
 
 fn projected_rule_term(term: &str) -> RuleExpression {
@@ -3844,6 +4325,44 @@ mod tests {
             records.provenance_rule_names,
             vec!["records-region", "record-definition", "record-field"]
         );
+
+        let records_grammar = registry.staged_records(&[RECORDS_GRAMMAR_SLUG]);
+        let record_definition = records_grammar
+            .rules
+            .iter()
+            .find(|rule| {
+                rule.grammar_slug == RECORDS_GRAMMAR_SLUG && rule.name == "record-definition"
+            })
+            .expect("records rule");
+        assert_eq!(
+            record_definition.projection.origin,
+            ProjectionOrigin::SourceAuthored
+        );
+        assert!(record_definition.projection.source_span.is_some());
+        assert_eq!(
+            record_definition.expression.to_string(),
+            "`record` name record-field* `end` => frontend-class"
+        );
+    }
+
+    #[test]
+    fn source_authored_rule_interpreter_matches_tiny_grammar() {
+        let grammar = "grammar tiny\n\
+                       rule pair = name `:` type-name => pair-form\n\
+                       end\n";
+        let rules = parse_source_authored_grammar(grammar);
+        let node =
+            interpret_rule(&rules, "pair", "radius: <integer>", 0, 100).expect("pair parses");
+
+        assert_eq!(node.rule_name, "pair");
+        assert_eq!(node.span, Span::new(100, 117));
+        assert_eq!(
+            node.children
+                .iter()
+                .map(|child| (child.rule_name.as_str(), child.text.as_str()))
+                .collect::<Vec<_>>(),
+            Vec::from([("name", "radius"), ("type-name", "<integer>")])
+        );
     }
 
     #[test]
@@ -4117,6 +4636,21 @@ mod tests {
         );
         assert_eq!(report.staged_regions.len(), 1);
         assert_eq!(report.staged_regions[0].adapter, "records");
+        assert!(
+            source_data::dump(&report.staged_regions[0].data)
+                .contains("driver: interpreted-grammar")
+        );
+        assert!(
+            source_data::dump(&report.staged_regions[0].data)
+                .contains("rule-node(rule: records-region")
+        );
+        assert!(
+            report
+                .extension_provenance
+                .iter()
+                .any(|provenance| provenance.rule_name == "record-field"
+                    && provenance.node_count == 1)
+        );
         assert!(
             source_data::dump(&report.staged_regions[0].forms_data)
                 .contains("frontend-class(name: <circle>")
