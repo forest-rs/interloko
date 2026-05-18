@@ -663,6 +663,9 @@ impl SourceFacet {
     }
 
     /// Creates an empty source facet for objects without source provenance.
+    ///
+    /// This is intentional for host-owned, runtime-only, and session-transient
+    /// objects whose identity is real but not tied to a source span.
     #[must_use]
     pub const fn none() -> Self {
         Self::new(None, None, None)
@@ -754,7 +757,8 @@ pub struct EnvironmentObject {
     pub storage: EnvironmentStorage,
     /// Presentation hints.
     pub presentation: PresentationFacet,
-    /// Source provenance.
+    /// Source provenance. Some projected objects intentionally carry an empty
+    /// facet when they are host-owned, runtime-only, or session-transient.
     pub source: SourceFacet,
     /// Related compiler artifacts.
     pub artifacts: ArtifactFacet,
@@ -6543,6 +6547,8 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
                     .sem
                     .classes
                     .get(class_index)
+                    // EOP slot/accessor ids address effective layout slots, so
+                    // inherited slots still resolve through the selected class.
                     .and_then(|class| class.effective_slots.get(slot_index))
             {
                 object.source =

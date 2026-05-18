@@ -1626,7 +1626,7 @@ where
 {
     let dump = artifacts
         .dump_environment_object_stage(object.id.as_str(), stage)
-        .unwrap_or_else(|| format!("unknown object `{}`\n", object.id.as_str()));
+        .expect("environment object existence was checked before invoking affordance");
     write!(out, "{dump}")?;
     Ok(())
 }
