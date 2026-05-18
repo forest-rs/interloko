@@ -3451,8 +3451,9 @@ mod tests {
                        rule pair = name `:` type-name => pair-form\n\
                        end\n";
         let rules = interpreter::parse_source_authored_grammar(grammar);
-        let node = interpreter::interpret_rule(&rules, "pair", "radius: <integer>", 0, 100)
+        let parse = interpreter::interpret_region_result(&rules, "pair", "radius: <integer>", 100)
             .expect("pair parses");
+        let node = parse.root;
 
         assert_eq!(node.rule_name, "pair");
         assert_eq!(node.span, Span::new(100, 117));

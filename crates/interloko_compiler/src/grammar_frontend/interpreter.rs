@@ -94,16 +94,6 @@ pub(super) fn interpret_region_result(
     }
 }
 
-pub(super) fn interpret_rule(
-    rules: &[SourceAuthoredRule],
-    name: &str,
-    source: &str,
-    position: usize,
-    source_offset: usize,
-) -> Option<InterpretedRuleNode> {
-    interpret_rule_result(rules, name, source, position, source_offset).ok()
-}
-
 fn interpret_rule_result(
     rules: &[SourceAuthoredRule],
     name: &str,

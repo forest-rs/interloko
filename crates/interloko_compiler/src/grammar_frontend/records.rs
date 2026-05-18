@@ -235,7 +235,7 @@ fn records_parse_error_diagnostic(
     }
     let expected = joined_expected(error);
     staged_expected_diagnostic(
-        fallback_error_span(body, source_offset, error.span),
+        parse_error_span(body, source_offset, error.span),
         "records",
         &expected,
     )
@@ -295,7 +295,7 @@ fn joined_expected(error: &InterpretedParseError) -> String {
     }
 }
 
-fn fallback_error_span(body: &str, source_offset: usize, span: Span) -> Span {
+fn parse_error_span(body: &str, source_offset: usize, span: Span) -> Span {
     if span.start == span.end && span.start == source_offset {
         Span::new(source_offset, source_offset + body.len())
     } else {

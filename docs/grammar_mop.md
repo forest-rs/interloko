@@ -161,7 +161,8 @@ end
 A frontend metadata directive selects it by name:
 `// grammar-activate: calculator`. Later comment-delimited regions are
 recognized by the interpreted grammar and converted into structural function
-forms. The legacy Rust calculator parser remains as a diagnostic fallback.
+forms. Rust still performs parse-tree to `FrontendExpression` conversion and
+calculator-specific validation, but it is no longer a duplicate recognizer.
 
 `RecordsRegionGrammar` is also grammar-driven. Its direct rules are parsed from
 embedded grammar source:
@@ -181,7 +182,9 @@ then converts that parse tree into structural class forms with typed slots.
 `ast.rs` consumes those structural forms directly as compiler-generated
 definitions with source spans from the staged region. Materialized Loko is still
 stored on each staged region for dumps, reports, and debugging, but the semantic
-pipeline no longer reparses it as the source of truth.
+pipeline no longer reparses it as the source of truth. Rust still performs
+parse-tree to `FrontendForm::Class` conversion and records-specific validation,
+but it is no longer a duplicate records parser.
 
 `CalculatorRegionGrammar` remains Rust-hosted. Both grammars still live behind
 the same explicit registry protocol; there is no user package/loading story for

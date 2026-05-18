@@ -5,10 +5,10 @@
 ### Goal
 
 Make interpreted staged grammars load-bearing enough to remove duplicated
-legacy parser paths, starting with records. The interpreter should return
-structured failures with spans and expected fragments, and staged adapters
-should use those failures directly instead of falling back to hand-written
-parsers whenever recognition fails.
+legacy parser paths. The interpreter should return structured failures with
+spans and expected fragments, and staged adapters should use those failures
+directly instead of falling back to hand-written parsers whenever recognition
+fails.
 
 ### Non-Goals
 
@@ -32,20 +32,19 @@ failure tracking.
 ### Invariants
 
 - Records no longer has a duplicate line parser.
-- Calculator keeps a clearly named fallback only while expression diagnostics
-  still depend on it.
+- Calculator no longer has a duplicate expression parser.
 - Interpreted parse failures become structured diagnostics with source spans.
 - Existing valid staged records/calculator programs keep producing the same
   structural frontend forms.
-- Malformed staged records tests continue to produce useful diagnostics without
-  legacy fallback.
+- Malformed staged records/calculator tests continue to produce useful
+  diagnostics without legacy fallback.
 
 ### Sequence
 
 1. Add `InterpretedParseError` and `interpret_region_result`.
 2. Move records to interpreter-only recognition and delete records legacy code.
-3. Decide whether calculator fallback can be deleted in this slice; if not,
-   rename it as a temporary legacy diagnostic path.
+3. Move calculator to interpreter-only recognition and delete calculator legacy
+   code.
 4. Update docs/tests to identify the remaining Rust adapter code as semantic
    action/conversion, not parsing.
 
