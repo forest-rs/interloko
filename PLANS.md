@@ -1,5 +1,54 @@
 # Plans
 
+## Retire Staged Grammar Legacy Parsers
+
+### Goal
+
+Make interpreted staged grammars load-bearing enough to remove duplicated
+legacy parser paths, starting with records. The interpreter should return
+structured failures with spans and expected fragments, and staged adapters
+should use those failures directly instead of falling back to hand-written
+parsers whenever recognition fails.
+
+### Non-Goals
+
+- No base Loko parser flip.
+- No source-authored semantic actions.
+- No full diagnostic-system rewrite.
+- No parser-theory expansion beyond the current staged grammar surface.
+- No removal of Rust adapter code that converts parse trees into frontend
+  forms.
+
+### Fence
+
+`grammar_frontend::interpreter` owns recognition failures: furthest position,
+expected fragments, and interpreted parse trees. It explicitly does not own
+records/calculator semantic validation or frontend form construction.
+
+The records and calculator modules own staged-language validation and parse
+tree to frontend-form conversion. They explicitly do not own generic grammar
+failure tracking.
+
+### Invariants
+
+- Records no longer has a duplicate line parser.
+- Calculator keeps a clearly named fallback only while expression diagnostics
+  still depend on it.
+- Interpreted parse failures become structured diagnostics with source spans.
+- Existing valid staged records/calculator programs keep producing the same
+  structural frontend forms.
+- Malformed staged records tests continue to produce useful diagnostics without
+  legacy fallback.
+
+### Sequence
+
+1. Add `InterpretedParseError` and `interpret_region_result`.
+2. Move records to interpreter-only recognition and delete records legacy code.
+3. Decide whether calculator fallback can be deleted in this slice; if not,
+   rename it as a temporary legacy diagnostic path.
+4. Update docs/tests to identify the remaining Rust adapter code as semantic
+   action/conversion, not parsing.
+
 ## Split Grammar Frontend And Interpret Calculator
 
 ### Goal

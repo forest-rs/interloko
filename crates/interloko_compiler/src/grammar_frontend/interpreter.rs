@@ -29,9 +29,21 @@ pub(super) struct InterpretedParse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct InterpretedParseError {
+    pub(super) span: Span,
+    pub(super) expected: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ExpressionMatch {
     end: usize,
     children: Vec<InterpretedRuleNode>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParseFailure {
+    position: usize,
+    expected: Vec<String>,
 }
 
 pub(super) fn parse_source_authored_grammar(source: &str) -> Vec<SourceAuthoredRule> {
@@ -72,12 +84,22 @@ pub(super) fn interpret_region(
     source: &str,
     source_offset: usize,
 ) -> Option<InterpretedParse> {
-    let root = interpret_rule(rules, root_rule, source, 0, source_offset)?;
-    if skip_interpreter_trivia(source, root.span.end.saturating_sub(source_offset)) == source.len()
-    {
-        Some(InterpretedParse { root })
+    interpret_region_result(rules, root_rule, source, source_offset).ok()
+}
+
+pub(super) fn interpret_region_result(
+    rules: &[SourceAuthoredRule],
+    root_rule: &str,
+    source: &str,
+    source_offset: usize,
+) -> Result<InterpretedParse, InterpretedParseError> {
+    let root = interpret_rule_result(rules, root_rule, source, 0, source_offset)
+        .map_err(|failure| failure.into_error(source_offset))?;
+    let trailing = skip_interpreter_trivia(source, root.span.end.saturating_sub(source_offset));
+    if trailing == source.len() {
+        Ok(InterpretedParse { root })
     } else {
-        None
+        Err(ParseFailure::expected(trailing, "end of region").into_error(source_offset))
     }
 }
 
@@ -88,11 +110,21 @@ pub(super) fn interpret_rule(
     position: usize,
     source_offset: usize,
 ) -> Option<InterpretedRuleNode> {
+    interpret_rule_result(rules, name, source, position, source_offset).ok()
+}
+
+fn interpret_rule_result(
+    rules: &[SourceAuthoredRule],
+    name: &str,
+    source: &str,
+    position: usize,
+    source_offset: usize,
+) -> Result<InterpretedRuleNode, ParseFailure> {
     if let Some(rule) = rules.iter().find(|rule| rule.name == name) {
         let start = skip_interpreter_trivia(source, position);
         let matched = interpret_expression(rules, &rule.expression, source, start, source_offset)?;
         let end = matched.end;
-        return Some(InterpretedRuleNode {
+        return Ok(InterpretedRuleNode {
             rule_name: name.to_string(),
             span: Span::new(source_offset + start, source_offset + end),
             text: source[start..end].to_string(),
@@ -100,6 +132,7 @@ pub(super) fn interpret_rule(
         });
     }
     interpret_builtin_rule(name, source, position, source_offset)
+        .ok_or_else(|| ParseFailure::expected(skip_interpreter_trivia(source, position), name))
 }
 
 fn interpret_expression(
@@ -108,30 +141,31 @@ fn interpret_expression(
     source: &str,
     position: usize,
     source_offset: usize,
-) -> Option<ExpressionMatch> {
+) -> Result<ExpressionMatch, ParseFailure> {
     match expression {
         RuleExpression::Rule(name) => {
-            let node = interpret_rule(rules, name, source, position, source_offset)?;
-            Some(ExpressionMatch {
+            let node = interpret_rule_result(rules, name, source, position, source_offset)?;
+            Ok(ExpressionMatch {
                 end: node.span.end.saturating_sub(source_offset),
                 children: vec![node],
             })
         }
         RuleExpression::Literal(value) => {
             let start = skip_interpreter_trivia(source, position);
-            source[start..]
+            let end = source[start..]
                 .starts_with(value)
                 .then_some(start + value.len())
                 .filter(|end| literal_boundary_ok(source, *end, value))
-                .map(|end| ExpressionMatch {
-                    end,
-                    children: vec![InterpretedRuleNode {
-                        rule_name: format!("literal:{value}"),
-                        span: Span::new(source_offset + start, source_offset + end),
-                        text: source[start..end].to_string(),
-                        children: Vec::new(),
-                    }],
-                })
+                .ok_or_else(|| ParseFailure::expected(start, literal_expected(value)))?;
+            Ok(ExpressionMatch {
+                end,
+                children: vec![InterpretedRuleNode {
+                    rule_name: format!("literal:{value}"),
+                    span: Span::new(source_offset + start, source_offset + end),
+                    text: source[start..end].to_string(),
+                    children: Vec::new(),
+                }],
+            })
         }
         RuleExpression::Sequence(items) => {
             let mut end = position;
@@ -141,36 +175,78 @@ fn interpret_expression(
                 end = matched.end;
                 children.extend(matched.children);
             }
-            Some(ExpressionMatch { end, children })
+            Ok(ExpressionMatch { end, children })
         }
-        RuleExpression::Choice(items) => items
-            .iter()
-            .find_map(|item| interpret_expression(rules, item, source, position, source_offset)),
+        RuleExpression::Choice(items) => {
+            let mut failure = None;
+            for item in items {
+                match interpret_expression(rules, item, source, position, source_offset) {
+                    Ok(matched) => return Ok(matched),
+                    Err(error) => merge_failure(&mut failure, error),
+                }
+            }
+            Err(failure.unwrap_or_else(|| ParseFailure::expected(position, "choice")))
+        }
         RuleExpression::Optional(item) => {
-            interpret_expression(rules, item, source, position, source_offset).or_else(|| {
-                Some(ExpressionMatch {
-                    end: position,
-                    children: Vec::new(),
-                })
-            })
+            Ok(
+                interpret_expression(rules, item, source, position, source_offset).unwrap_or_else(
+                    |_| ExpressionMatch {
+                        end: position,
+                        children: Vec::new(),
+                    },
+                ),
+            )
         }
         RuleExpression::ZeroOrMore(item) => {
             let mut end = position;
             let mut children = Vec::new();
-            while let Some(matched) = interpret_expression(rules, item, source, end, source_offset)
-            {
+            while let Ok(matched) = interpret_expression(rules, item, source, end, source_offset) {
                 if matched.end == end {
                     break;
                 }
                 end = matched.end;
                 children.extend(matched.children);
             }
-            Some(ExpressionMatch { end, children })
+            Ok(ExpressionMatch { end, children })
         }
         RuleExpression::Transform { input, .. } => {
             interpret_expression(rules, input, source, position, source_offset)
         }
     }
+}
+
+impl ParseFailure {
+    fn expected(position: usize, expected: impl Into<String>) -> Self {
+        Self {
+            position,
+            expected: vec![expected.into()],
+        }
+    }
+
+    fn into_error(self, source_offset: usize) -> InterpretedParseError {
+        InterpretedParseError {
+            span: Span::new(source_offset + self.position, source_offset + self.position),
+            expected: self.expected,
+        }
+    }
+}
+
+fn merge_failure(failure: &mut Option<ParseFailure>, next: ParseFailure) {
+    match failure {
+        Some(current) if current.position > next.position => {}
+        Some(current) if current.position == next.position => {
+            for expected in next.expected {
+                if !current.expected.contains(&expected) {
+                    current.expected.push(expected);
+                }
+            }
+        }
+        _ => *failure = Some(next),
+    }
+}
+
+fn literal_expected(value: &str) -> String {
+    format!("`{value}`")
 }
 
 fn interpret_builtin_rule(
