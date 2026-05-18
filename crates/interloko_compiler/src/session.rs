@@ -5997,7 +5997,7 @@ fn dump_environment_object_stage(
         DumpStage::Sem => dump_sem_environment_object(artifacts, object),
         DumpStage::Lowered => dump_lowered_environment_object(artifacts, object),
         DumpStage::Tape => dump_tape_environment_object(artifacts, object),
-        DumpStage::Mop => dump_mop_environment_object(object),
+        DumpStage::Mop => dump_mop_environment_object(artifacts, object),
         DumpStage::Eop => dump_environment_object_record(object),
         DumpStage::Syntax | DumpStage::Ast => {
             let mut out = String::new();
@@ -6234,7 +6234,11 @@ fn dump_tape_environment_object(
     out
 }
 
-fn dump_mop_environment_object(object: &EnvironmentObject) -> String {
+fn dump_mop_environment_object(artifacts: &SessionArtifacts, object: &EnvironmentObject) -> String {
+    if let Some(grammar_dump) = dump_grammar_mop_environment_object(artifacts, object) {
+        return grammar_dump;
+    }
+
     let mut out = String::new();
     let _ = writeln!(out, "mop object {}", object.id.as_str());
     let _ = writeln!(out, "kind: {}", object.kind.as_str());
@@ -6249,6 +6253,204 @@ fn dump_mop_environment_object(object: &EnvironmentObject) -> String {
     );
     let _ = writeln!(out, "inspection: {}", object.inspection.detail);
     out
+}
+
+fn dump_grammar_mop_environment_object(
+    artifacts: &SessionArtifacts,
+    object: &EnvironmentObject,
+) -> Option<String> {
+    match object.kind {
+        EnvironmentKind::GrammarRegistry => Some(artifacts.dump_grammar_registry()),
+        EnvironmentKind::RegisteredGrammarEnvironment => {
+            dump_registered_grammar_environment_object(artifacts, object.id.as_str())
+        }
+        EnvironmentKind::StagedGrammarAdapter
+        | EnvironmentKind::GrammarExtension
+        | EnvironmentKind::GrammarExtensionActivation
+        | EnvironmentKind::GrammarExtensionEmission
+        | EnvironmentKind::GrammarExtensionProvenance => {
+            artifacts.explain_grammar_extension(object.id.as_str())
+        }
+        EnvironmentKind::LanguageEnvironment => {
+            dump_language_environment_object(artifacts, object.id.as_str())
+        }
+        EnvironmentKind::Grammar => dump_grammar_object(artifacts, object.id.as_str()),
+        EnvironmentKind::GrammarRule | EnvironmentKind::EffectiveGrammarRule => {
+            artifacts.explain_grammar_rule(object.id.as_str())
+        }
+        EnvironmentKind::GrammarActivation => {
+            dump_grammar_activation_object(artifacts, object.id.as_str())
+        }
+        EnvironmentKind::StagedRegion => dump_staged_region_object(artifacts, object.id.as_str()),
+        _ => None,
+    }
+}
+
+fn dump_registered_grammar_environment_object(
+    artifacts: &SessionArtifacts,
+    object_id: &str,
+) -> Option<String> {
+    let slug = object_id.strip_prefix("registered-grammar-environment:")?;
+    let provider = artifacts
+        .grammar_registry
+        .environment_providers()
+        .iter()
+        .find(|provider| provider.environment_slug() == slug)?;
+    let records = provider.records();
+    let mut out = String::new();
+    let _ = writeln!(out, "registered grammar environment {object_id}");
+    let _ = writeln!(out, "slug {}", provider.environment_slug());
+    let _ = writeln!(out, "name {}", provider.environment_name());
+    let _ = writeln!(
+        out,
+        "discovers-staged-regions {}",
+        provider.discovers_staged_regions()
+    );
+    let _ = writeln!(out, "grammar-stack:");
+    for grammar_id in &records.environment.grammar_stack {
+        let name = records
+            .grammars
+            .iter()
+            .find(|grammar| grammar.id == *grammar_id)
+            .map_or("<unknown>", |grammar| grammar.name.as_str());
+        let _ = writeln!(out, "  {grammar_id} {name}");
+    }
+    Some(out)
+}
+
+fn dump_language_environment_object(
+    artifacts: &SessionArtifacts,
+    object_id: &str,
+) -> Option<String> {
+    if grammar_frontend::language_environment_object_id(&artifacts.grammar_parse.environment)
+        != object_id
+    {
+        return None;
+    }
+
+    let environment = &artifacts.grammar_parse.environment;
+    let mut out = String::new();
+    let _ = writeln!(out, "language environment {object_id}");
+    let _ = writeln!(out, "id {}", environment.id);
+    let _ = writeln!(out, "name {}", environment.name);
+    let _ = writeln!(out, "grammar-stack:");
+    for grammar_id in &environment.grammar_stack {
+        let name = artifacts
+            .grammar_parse
+            .grammars
+            .iter()
+            .find(|grammar| grammar.id == *grammar_id)
+            .map_or("<unknown>", |grammar| grammar.name.as_str());
+        let _ = writeln!(out, "  {grammar_id} {name}");
+    }
+    Some(out)
+}
+
+fn dump_grammar_object(artifacts: &SessionArtifacts, object_id: &str) -> Option<String> {
+    let grammar = artifacts
+        .grammar_parse
+        .grammars
+        .iter()
+        .find(|grammar| grammar_frontend::grammar_object_id(grammar) == object_id)?;
+    let mut out = String::new();
+    let _ = writeln!(out, "grammar {object_id}");
+    let _ = writeln!(out, "id {}", grammar.id);
+    let _ = writeln!(out, "name {}", grammar.name);
+    let _ = writeln!(
+        out,
+        "extends {}",
+        if grammar.extends.is_empty() {
+            "none".to_string()
+        } else {
+            grammar
+                .extends
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    );
+    let _ = writeln!(out, "direct-rules:");
+    for rule in &grammar.direct_rules {
+        let label = artifacts
+            .grammar_parse
+            .rules
+            .iter()
+            .find(|direct_rule| direct_rule.id == *rule)
+            .map_or_else(
+                || rule.to_string(),
+                grammar_frontend::grammar_rule_object_id,
+            );
+        let _ = writeln!(out, "  {label}");
+    }
+    let _ = writeln!(out, "effective-rules:");
+    for rule in &grammar.effective_rules {
+        let label = artifacts
+            .grammar_parse
+            .effective_rules
+            .iter()
+            .find(|effective_rule| effective_rule.id == *rule)
+            .map_or_else(
+                || rule.to_string(),
+                grammar_frontend::effective_grammar_rule_object_id,
+            );
+        let _ = writeln!(out, "  {label}");
+    }
+    Some(out)
+}
+
+fn dump_grammar_activation_object(artifacts: &SessionArtifacts, object_id: &str) -> Option<String> {
+    let activation = artifacts
+        .grammar_parse
+        .activations
+        .iter()
+        .find(|activation| {
+            grammar_frontend::grammar_activation_object_id(activation) == object_id
+        })?;
+    let mut out = String::new();
+    let _ = writeln!(out, "grammar activation {object_id}");
+    let _ = writeln!(out, "id {}", activation.id);
+    let _ = writeln!(out, "environment {}", activation.environment);
+    let _ = writeln!(
+        out,
+        "grammar {} {}",
+        activation.grammar, activation.grammar_slug
+    );
+    let _ = writeln!(
+        out,
+        "span {}..{}",
+        activation.span.start, activation.span.end
+    );
+    let _ = writeln!(out, "root-rule {}", activation.root_rule);
+    let _ = writeln!(out, "reason {}", activation.reason);
+    Some(out)
+}
+
+fn dump_staged_region_object(artifacts: &SessionArtifacts, object_id: &str) -> Option<String> {
+    let region = artifacts
+        .grammar_parse
+        .staged_regions
+        .iter()
+        .find(|region| grammar_frontend::staged_parse_region_object_id(region) == object_id)?;
+    let mut out = String::new();
+    let _ = writeln!(out, "staged region {object_id}");
+    let _ = writeln!(out, "adapter {}", region.adapter);
+    let _ = writeln!(out, "activation {}", region.activation);
+    let _ = writeln!(out, "grammar {} {}", region.grammar, region.grammar_slug);
+    let _ = writeln!(
+        out,
+        "activation-directive {}..{}",
+        region.activation_directive.start, region.activation_directive.end
+    );
+    let _ = writeln!(
+        out,
+        "source-span {}..{}",
+        region.source_span.start, region.source_span.end
+    );
+    let _ = writeln!(out, "forms {}", region.forms_data);
+    let _ = writeln!(out, "materialized {}", region.materialized_source);
+    let _ = writeln!(out, "data {}", region.data);
+    Some(out)
 }
 
 fn dump_environment_object_record(object: &EnvironmentObject) -> String {
@@ -10240,6 +10442,22 @@ mod tests {
         assert!(lowered.contains("lowered object function:f0"));
         assert!(lowered.contains("kind: function:f0"));
 
+        let grammar = artifacts
+            .dump_environment_object_stage("grammar:base-loko", DumpStage::Mop)
+            .expect("grammar object should dump");
+        assert!(grammar.contains("grammar grammar:base-loko"));
+        assert!(grammar.contains("direct-rules:"));
+        assert!(grammar.contains("base-loko/function-definition"));
+
+        let grammar_rule = artifacts
+            .dump_environment_object_stage(
+                "grammar-rule:base-loko/function-definition",
+                DumpStage::Mop,
+            )
+            .expect("grammar rule object should dump");
+        assert!(grammar_rule.contains("grammar rule grammar-rule:base-loko/function-definition"));
+        assert!(grammar_rule.contains("expression"));
+
         assert!(
             artifacts
                 .dump_environment_object_stage("missing:object", DumpStage::Sem)
@@ -10342,6 +10560,14 @@ mod tests {
                 .expect("extension descriptor explanation")
                 .contains("capabilities emit-frontend-forms")
         );
+        let emission_dump = artifacts
+            .dump_environment_object_stage(
+                "grammar-extension-emission:calculator/r0/f0",
+                DumpStage::Mop,
+            )
+            .expect("extension emission object should dump");
+        assert!(emission_dump.contains("grammar extension emission"));
+        assert!(emission_dump.contains("generated function:f0"));
     }
 
     #[test]
