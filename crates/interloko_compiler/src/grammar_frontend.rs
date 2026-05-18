@@ -2785,6 +2785,10 @@ fn grammar_rule_expression_data_from_expr(
 
 fn projected_rule_expression(expression: &str) -> RuleExpression {
     let trimmed = expression.trim();
+    // This parser handles the small presentational grammar strings projected by
+    // the compiler and the embedded staged grammar sources. It is not a public
+    // grammar-file parser; malformed controlled strings may degrade to odd rule
+    // trees rather than user-facing diagnostics.
     if let Some((input, output)) = trimmed.split_once("=>") {
         return RuleExpression::transform(
             projected_rule_expression(input),

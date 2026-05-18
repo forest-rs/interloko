@@ -521,6 +521,7 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("returned 143"));
     assert!(html.contains("Active Language Environment"));
     assert!(html.contains("language-environment:staged-loko"));
+    assert!(html.contains("source-authored"));
     assert!(html.contains("Host grammar catalog"));
     assert!(html.contains("id=\"artifact-pipeline\""));
     assert!(html.contains("Compiler Artifact Path"));

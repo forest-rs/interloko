@@ -7,7 +7,7 @@ use std::path::Path;
 
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticLabelStyle};
 use interloko_compiler::grammar_frontend::{
-    self, FrontendExpression, FrontendForm, FrontendFormKind, StagedParseRegion,
+    self, FrontendExpression, FrontendForm, FrontendFormKind, ProjectionOrigin, StagedParseRegion,
 };
 use interloko_compiler::incremental::{ArtifactReport, QueryArtifact};
 use interloko_compiler::sem::{
@@ -241,6 +241,7 @@ fn render_grammar_environment_section(
             } else {
                 "base"
             };
+            let source_kind = grammar_source_kind(artifacts, grammar.id);
             let activation_count = artifacts
                 .grammar_parse
                 .activations
@@ -249,11 +250,12 @@ fn render_grammar_environment_section(
                 .count();
             let _ = writeln!(
                 out,
-                "              <li data-node=\"object:{}\"><a href=\"#{}\">{}</a><span>{}</span><small>{} direct · {} effective · {} activations</small></li>",
+                "              <li data-node=\"object:{}\"><a href=\"#{}\">{}</a><span>{}</span><span>{}</span><small>{} direct · {} effective · {} activations</small></li>",
                 escape_attr(&grammar_object_id),
                 escape_attr(&object_anchor(&grammar_object_id)),
                 escape_html(&grammar.name),
                 role,
+                source_kind,
                 grammar.direct_rules.len(),
                 grammar.effective_rules.len(),
                 activation_count
@@ -2130,6 +2132,23 @@ fn grammar_stack_summary(artifacts: &SessionArtifacts) -> String {
         })
         .collect::<Vec<_>>()
         .join(" -> ")
+}
+
+fn grammar_source_kind(
+    artifacts: &SessionArtifacts,
+    grammar: grammar_frontend::GrammarId,
+) -> &'static str {
+    if artifacts.grammar_parse.rules.iter().any(|rule| {
+        rule.grammar == grammar && rule.projection.origin == ProjectionOrigin::SourceAuthored
+    }) {
+        "source-authored"
+    } else if artifacts.grammar_parse.rules.iter().any(|rule| {
+        rule.grammar == grammar && rule.projection.origin == ProjectionOrigin::CompilerProjected
+    }) {
+        "compiler-projected"
+    } else {
+        "host-provided"
+    }
 }
 
 fn short_source_name(path: &str) -> &str {

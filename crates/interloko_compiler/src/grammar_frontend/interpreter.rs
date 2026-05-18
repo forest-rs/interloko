@@ -180,6 +180,9 @@ fn interpret_builtin_rule(
     source_offset: usize,
 ) -> Option<InterpretedRuleNode> {
     let start = skip_interpreter_trivia(source, position);
+    // Keep these builtins intentionally tiny. They stand in for character-class
+    // rules until source-authored grammars can express identifiers, type names,
+    // and numbers structurally.
     let end = match name {
         "name" => match source.as_bytes().get(start).copied() {
             Some(b'<') => parse_angle_name(source, start)?,

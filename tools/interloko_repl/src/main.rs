@@ -2213,10 +2213,15 @@ fn form_rule_application<'a>(
         .applications
         .iter()
         .filter(|application| application.activation == activation.id)
+        // Prefer the exact grammar application for this top-level form. The
+        // source-file rule usually has the same span for whole-file forms, so
+        // skip it unless it is the only exact match.
         .find(|application| {
             application.span == entry.form.span && application.rule_name != "source-file"
         })
         .or_else(|| {
+            // Fall back to an exact source-file match for parsers that only
+            // recorded the root application.
             artifacts
                 .grammar_parse
                 .provenance
@@ -2226,6 +2231,9 @@ fn form_rule_application<'a>(
                 .find(|application| application.span == entry.form.span)
         })
         .or_else(|| {
+            // Staged regions can wrap emitted forms in an outer activation
+            // span. In that case use the smallest rule application that still
+            // contains the accepted form.
             artifacts
                 .grammar_parse
                 .provenance
