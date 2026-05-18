@@ -160,6 +160,7 @@ fn source_forms_are_inspectable_and_invokable() {
          :affordances form:f0\n\
          :invoke form:f0 inspect\n\
          :invoke form:f0 show-defined-objects\n\
+         :invoke form:f0 show-grammar\n\
          :invoke form:f0 show-source\n\
          :show-form f0\n\
          :quit\n",
@@ -175,11 +176,20 @@ fn source_forms_are_inspectable_and_invokable() {
     assert!(stdout.contains("span: "));
     assert!(stdout.contains("defines:"));
     assert!(stdout.contains("function:f0 answer() -> integer primary"));
+    assert!(stdout.contains("grammar:"));
+    assert!(stdout.contains("environment: language-environment:base-loko"));
+    assert!(stdout.contains("activation: grammar-activation:base-loko/source-file"));
+    assert!(stdout.contains("grammar: grammar:base-loko"));
+    assert!(
+        stdout.contains("effective-rule: effective-grammar-rule:base-loko/function-definition")
+    );
     assert!(stdout.contains("affordances form:f0"));
     assert!(stdout.contains("inspect"));
     assert!(stdout.contains("show-source"));
     assert!(stdout.contains("show-defined-objects"));
+    assert!(stdout.contains("show-grammar"));
     assert!(stdout.contains("defined objects form:f0"));
+    assert!(stdout.contains("grammar form:f0"));
     assert!(stdout.contains("source form:f0 function answer"));
     assert!(stdout.contains("   1 | define function answer()"));
 }
@@ -195,6 +205,10 @@ fn source_forms_report_defined_environment_objects() {
          :invoke form:f1 show-defined-objects\n\
          :invoke form:f2 show-defined-objects\n\
          :invoke form:f3 show-defined-objects\n\
+         :invoke form:f0 show-grammar\n\
+         :invoke form:f1 show-grammar\n\
+         :invoke form:f2 show-grammar\n\
+         :invoke form:f3 show-grammar\n\
          :quit\n",
     );
 
@@ -209,6 +223,12 @@ fn source_forms_report_defined_environment_objects() {
     assert!(stdout.contains("method:m0 area(c1:<circle>) -> integer primary"));
     assert!(stdout.contains("defined objects form:f3"));
     assert!(stdout.contains("function:f0 main() -> integer primary"));
+    assert!(stdout.contains("effective-rule: effective-grammar-rule:base-loko/class-definition"));
+    assert!(stdout.contains("effective-rule: effective-grammar-rule:base-loko/generic-definition"));
+    assert!(stdout.contains("effective-rule: effective-grammar-rule:base-loko/method-definition"));
+    assert!(
+        stdout.contains("effective-rule: effective-grammar-rule:base-loko/function-definition")
+    );
 }
 
 #[test]

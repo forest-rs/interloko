@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
+use interloko_compiler::grammar_frontend;
 use interloko_compiler::identity::{ArtifactKey, SourceFileId};
 use interloko_compiler::sem;
 use interloko_compiler::session::{
@@ -828,6 +829,10 @@ impl Repl {
                         "{}",
                         format_form_defined_objects(&entry, &artifacts)
                     )?;
+                }
+                "show-grammar" => {
+                    let artifacts = self.ensure_artifacts(stderr)?;
+                    write!(stdout, "{}", format_form_grammar(&entry, &artifacts))?;
                 }
                 "show-source" => write_form_source(&entry, stdout)?,
                 "drop" => self.drop_form_by_id(&id, stdout, stderr)?,
@@ -1778,6 +1783,7 @@ fn slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
 fn format_form_object(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
     let form = &entry.form;
     let defined = form_defined_objects(entry, artifacts);
+    let grammar = form_grammar_context(entry, artifacts);
     let mut out = String::new();
     let _ = writeln!(out, "object {}", form.id());
     let _ = writeln!(out, "kind: repl-source-form");
@@ -1806,6 +1812,8 @@ fn format_form_object(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) 
             );
         }
     }
+    let _ = writeln!(out, "grammar:");
+    write_form_grammar_context(&mut out, &grammar, "  ");
     let _ = writeln!(out, "affordances:");
     for affordance in FORM_AFFORDANCES {
         let _ = writeln!(out, "  {affordance}");
@@ -1844,6 +1852,33 @@ fn format_form_defined_objects(entry: &AcceptedDefinition, artifacts: &SessionAr
         }
     }
     out
+}
+
+fn format_form_grammar(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "grammar {}", entry.form.id());
+    write_form_grammar_context(&mut out, &form_grammar_context(entry, artifacts), "");
+    out
+}
+
+fn write_form_grammar_context(out: &mut String, context: &[FormGrammarContext], indent: &str) {
+    if context.is_empty() {
+        let _ = writeln!(out, "{indent}<none>");
+        return;
+    }
+    for (index, item) in context.iter().enumerate() {
+        if index > 0 {
+            let _ = writeln!(out, "{indent}---");
+        }
+        let _ = writeln!(out, "{indent}environment: {}", item.environment_object);
+        let _ = writeln!(out, "{indent}activation: {}", item.activation_object);
+        let _ = writeln!(out, "{indent}grammar: {}", item.grammar_object);
+        let _ = writeln!(out, "{indent}root-rule: {}", item.root_rule);
+        if let Some(rule_object) = &item.effective_rule_object {
+            let _ = writeln!(out, "{indent}effective-rule: {rule_object}");
+        }
+        let _ = writeln!(out, "{indent}span: {}..{}", item.span.start, item.span.end);
+    }
 }
 
 fn format_form_affordances(entry: &AcceptedDefinition) -> String {
@@ -1898,6 +1933,82 @@ fn form_defined_objects(
     objects
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FormGrammarContext {
+    environment_object: String,
+    activation_object: String,
+    grammar_object: String,
+    root_rule: String,
+    effective_rule_object: Option<String>,
+    span: syntax::Span,
+}
+
+fn form_grammar_context(
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+) -> Vec<FormGrammarContext> {
+    let mut contexts = artifacts
+        .grammar_parse
+        .activations
+        .iter()
+        .filter(|activation| span_contains(activation.span, entry.form.span))
+        .map(|activation| FormGrammarContext {
+            environment_object: grammar_frontend::language_environment_object_id(
+                &artifacts.grammar_parse.environment,
+            ),
+            activation_object: grammar_frontend::grammar_activation_object_id(activation),
+            grammar_object: artifacts
+                .grammar_parse
+                .grammars
+                .iter()
+                .find(|grammar| grammar.id == activation.grammar)
+                .map(grammar_frontend::grammar_object_id)
+                .unwrap_or_else(|| format!("grammar:{}", activation.grammar_slug)),
+            root_rule: activation.root_rule.to_string(),
+            effective_rule_object: form_effective_grammar_rule(entry, artifacts, activation),
+            span: activation.span,
+        })
+        .collect::<Vec<_>>();
+    contexts.sort_by_key(|context| {
+        (
+            context.span.end.saturating_sub(context.span.start),
+            context.activation_object.clone(),
+        )
+    });
+    contexts
+}
+
+fn form_effective_grammar_rule(
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+    activation: &grammar_frontend::GrammarActivation,
+) -> Option<String> {
+    let rule_name = form_grammar_rule_name(entry.form.parsed_kind)?;
+    artifacts
+        .grammar_parse
+        .effective_rules
+        .iter()
+        .find(|rule| rule.grammar == activation.grammar && rule.name == rule_name)
+        .map(grammar_frontend::effective_grammar_rule_object_id)
+}
+
+fn form_grammar_rule_name(kind: Option<TopLevelFormKind>) -> Option<&'static str> {
+    // Keep this paired with TopLevelFormKind and the base grammar's projected
+    // rule names. A fuller parse trace should eventually answer this from
+    // span-to-rule provenance instead of this top-level-form heuristic.
+    match kind {
+        Some(TopLevelFormKind::Class) => Some("class-definition"),
+        Some(TopLevelFormKind::Generic) => Some("generic-definition"),
+        Some(TopLevelFormKind::Method) => Some("method-definition"),
+        Some(TopLevelFormKind::Function) => Some("function-definition"),
+        _ => None,
+    }
+}
+
+fn span_contains(outer: syntax::Span, inner: syntax::Span) -> bool {
+    inner.start >= outer.start && inner.end <= outer.end
+}
+
 fn form_defines_object(entry: &AcceptedDefinition, object: &EnvironmentObject) -> bool {
     if object.origin != EnvironmentOrigin::SourceAuthored {
         return false;
@@ -1905,7 +2016,7 @@ fn form_defines_object(entry: &AcceptedDefinition, object: &EnvironmentObject) -
     let Some(span) = object.source.span else {
         return false;
     };
-    span.start >= entry.form.span.start && span.end <= entry.form.span.end
+    span_contains(entry.form.span, span)
 }
 
 fn form_primary_object(entry: &AcceptedDefinition, object: &EnvironmentObject) -> bool {
@@ -1925,7 +2036,13 @@ fn form_primary_kind_matches(kind: Option<TopLevelFormKind>, object: Environment
     )
 }
 
-const FORM_AFFORDANCES: &[&str] = &["inspect", "show-source", "show-defined-objects", "drop"];
+const FORM_AFFORDANCES: &[&str] = &[
+    "inspect",
+    "show-source",
+    "show-defined-objects",
+    "show-grammar",
+    "drop",
+];
 
 fn function_run_message(result: &FunctionRunResult) -> String {
     match result {
