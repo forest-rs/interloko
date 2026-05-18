@@ -541,6 +541,14 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("\"executionTrace\""));
     assert!(html.contains("Expansion Chain"));
     assert!(html.contains("RecordsRegionGrammar"));
+    assert!(html.contains("Grammar package, rules, and actions"));
+    assert!(html.contains("grammar-package:records"));
+    assert!(html.contains("grammar-resource:records/grammars/records.grammar"));
+    assert!(html.contains("grammar-rule:records/record-definition"));
+    assert!(html.contains("effective-grammar-rule:records/record-definition"));
+    assert!(html.contains("grammar-action:records/record-definition"));
+    assert!(html.contains("action output"));
+    assert!(html.contains("grammar-extension-emission:records/r0/f0"));
     assert!(html.contains("frontend-class"));
     assert!(html.contains("flow:records:r0:0"));
     assert!(html.contains("artifact-stage:lowered"));

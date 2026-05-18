@@ -481,6 +481,7 @@ fn render_staged_region(
         escape_html(&region.grammar.to_string())
     );
     out.push_str("              </div>\n");
+    out.push_str(&render_region_grammar_flow(artifacts, objects, region));
     out.push_str("              <div class=\"chain-step chain-step--forms\">\n");
     out.push_str("                <span class=\"step-label\">Frontend forms</span>\n");
     for (index, form) in region.forms.iter().enumerate() {
@@ -534,6 +535,94 @@ fn render_staged_region(
     out.push_str("              </div>\n");
     out.push_str("            </div>\n");
     out.push_str("          </article>\n");
+    out
+}
+
+fn render_region_grammar_flow(
+    artifacts: &SessionArtifacts,
+    objects: &[EnvironmentObject],
+    region: &StagedParseRegion,
+) -> String {
+    let region_rel = relation_for_region(region);
+    let flow_relations = flow_relations_for_region(region);
+    let package_id = format!("grammar-package:{}", region.grammar_slug);
+    let resource_prefix = format!("grammar-resource:{}/", region.grammar_slug);
+    let resources = objects
+        .iter()
+        .filter(|object| {
+            object.kind == EnvironmentKind::GrammarResource
+                && object.id.as_str().starts_with(&resource_prefix)
+        })
+        .collect::<Vec<_>>();
+    let rule_names = artifacts
+        .grammar_parse
+        .extension_provenance
+        .iter()
+        .filter(|provenance| {
+            provenance.activation == region.activation
+                && provenance.object_slug == region.object_slug
+        })
+        .map(|provenance| provenance.rule_name.as_str())
+        .collect::<Vec<_>>();
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "              <div class=\"chain-step chain-step--grammar\" data-rel=\"{} {}\">",
+        escape_attr(&region_rel),
+        escape_attr(&flow_relations)
+    );
+    out.push_str(
+        "                <span class=\"step-label\">Grammar package, rules, and actions</span>\n",
+    );
+    out.push_str("                <ul class=\"object-links\">\n");
+    if object_by_id(objects, &package_id).is_some() {
+        let _ = writeln!(
+            out,
+            "                  <li data-node=\"object:{}\" data-rel=\"{}\"><code><a href=\"#{}\">{}</a></code><span>source-authored grammar package</span></li>",
+            escape_attr(&package_id),
+            escape_attr(&format!("{region_rel} {flow_relations}")),
+            escape_attr(&object_anchor(&package_id)),
+            escape_html(&package_id)
+        );
+    }
+    for resource in resources {
+        let _ = writeln!(
+            out,
+            "                  <li data-node=\"object:{}\" data-rel=\"{}\"><code><a href=\"#{}\">{}</a></code><span>checked-in grammar resource</span></li>",
+            escape_attr(resource.id.as_str()),
+            escape_attr(&format!("{region_rel} {flow_relations}")),
+            escape_attr(&object_anchor(resource.id.as_str())),
+            escape_html(resource.id.as_str())
+        );
+    }
+    for rule_name in rule_names {
+        let rule_id = format!("grammar-rule:{}/{}", region.grammar_slug, rule_name);
+        let effective_rule_id = format!(
+            "effective-grammar-rule:{}/{}",
+            region.grammar_slug, rule_name
+        );
+        let action_id = format!("grammar-action:{}/{}", region.grammar_slug, rule_name);
+        for (id, label) in [
+            (rule_id, "direct rule"),
+            (effective_rule_id, "effective rule"),
+            (action_id, "structural action"),
+        ] {
+            if object_by_id(objects, &id).is_some() {
+                let _ = writeln!(
+                    out,
+                    "                  <li data-node=\"object:{}\" data-rel=\"{}\"><code><a href=\"#{}\">{}</a></code><span>{}</span></li>",
+                    escape_attr(&id),
+                    escape_attr(&format!("{region_rel} {flow_relations}")),
+                    escape_attr(&object_anchor(&id)),
+                    escape_html(&id),
+                    escape_html(label)
+                );
+            }
+        }
+    }
+    out.push_str("                </ul>\n");
+    out.push_str("              </div>\n");
     out
 }
 
@@ -713,6 +802,16 @@ fn render_frontend_form(
         "                  <small>source span {}..{}</small>",
         form.source_span.start, form.source_span.end
     );
+    let emission_id = format!(
+        "grammar-extension-emission:{}/{}/f{}",
+        region.adapter, region.object_slug, index
+    );
+    let _ = writeln!(
+        out,
+        "                  <small>action output <a href=\"#{}\">{}</a></small>",
+        escape_attr(&object_anchor(&emission_id)),
+        escape_html(&emission_id)
+    );
     out.push_str("                </div>\n");
     out
 }
@@ -741,6 +840,9 @@ fn render_model_section(
             EnvironmentKind::RegisteredGrammarEnvironment,
             "Registered Grammar Environments",
         ),
+        (EnvironmentKind::GrammarPackage, "Grammar Packages"),
+        (EnvironmentKind::GrammarResource, "Grammar Resources"),
+        (EnvironmentKind::GrammarAction, "Grammar Actions"),
         (
             EnvironmentKind::StagedGrammarAdapter,
             "Staged Grammar Adapters",
@@ -1946,9 +2048,44 @@ fn related_objects_by_id(artifacts: &SessionArtifacts) -> BTreeMap<String, Strin
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for region in &artifacts.grammar_parse.staged_regions {
         let region_rel = relation_for_region(region);
+        map.entry(format!("grammar-package:{}", region.grammar_slug))
+            .or_default()
+            .push(region_rel.clone());
+        for provenance in artifacts
+            .grammar_parse
+            .extension_provenance
+            .iter()
+            .filter(|provenance| {
+                provenance.activation == region.activation
+                    && provenance.object_slug == region.object_slug
+            })
+        {
+            for id in [
+                format!(
+                    "grammar-rule:{}/{}",
+                    region.grammar_slug, provenance.rule_name
+                ),
+                format!(
+                    "effective-grammar-rule:{}/{}",
+                    region.grammar_slug, provenance.rule_name
+                ),
+                format!(
+                    "grammar-action:{}/{}",
+                    region.grammar_slug, provenance.rule_name
+                ),
+            ] {
+                map.entry(id).or_default().push(region_rel.clone());
+            }
+        }
         for (index, form) in region.forms.iter().enumerate() {
             let form_rel = relation_for_form(region, index);
             let flow_rel = flow_relation_for_form(region, index);
+            map.entry(format!(
+                "grammar-extension-emission:{}/{}/f{}",
+                region.adapter, region.object_slug, index
+            ))
+            .or_default()
+            .extend([region_rel.clone(), form_rel.clone(), flow_rel.clone()]);
             for object_id in object_ids_for_form(artifacts, form) {
                 map.entry(object_id).or_default().extend([
                     region_rel.clone(),
