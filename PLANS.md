@@ -1,5 +1,88 @@
 # Plans
 
+## Build Structural Grammar Actions And Packages
+
+### Goal
+
+Make staged grammars emit structural frontend forms through declared grammar
+actions instead of bespoke Rust control flow. Records and calculator should
+recognize source with interpreted grammar rules, bind captures into a shared
+action-value model, evaluate safe structural actions, and hand the existing AST
+pipeline frontend forms that carry source spans and action provenance.
+
+The useful end state for this slice: records and calculator still behave the
+same for users, but their grammar source explains both recognition and emission.
+The remaining Rust code should be generic grammar infrastructure, resource
+loading, validation helpers, or narrow host-provided emit primitives.
+
+### Non-Goals
+
+- No base-Loko parser flip.
+- No arbitrary host callbacks from grammar source.
+- No user package manager or untrusted grammar loading policy.
+- No left recursion, predicates, parameterized rules, captures beyond the
+  action needs, or precedence engine rewrite.
+- No optimizer or performance pass.
+- No full diagnostic localization/catalog redesign.
+
+### Fence
+
+`grammar_frontend::interpreter` owns recognition, captures, parse trees,
+action-value construction, and structural action evaluation. It explicitly does
+not own AST, semantic IR, runtime layout, or arbitrary host execution.
+
+Staged grammar modules own grammar resources and any staged-language semantic
+validation that cannot honestly be expressed as structural grammar actions yet.
+They explicitly do not own duplicate parser paths.
+
+Session/workbench surfaces own inspection, parse traces, reports, and artifact
+projection. They explicitly do not re-evaluate grammar actions.
+
+### Invariants
+
+- Records and calculator valid programs keep producing the same frontend forms.
+- Parse traces expose action inputs, action outputs, and emitted frontend forms.
+- Actions are deterministic structural data transforms, not Rust callbacks.
+- Action emit targets are explicit and small: class, slot, function, and
+  expression forms needed by records/calculator.
+- Grammar source moves out of embedded Rust strings into loadable repo resources
+  with stable package/provenance records.
+- Records/calculator hand-written shape diagnostics are removed only when the
+  shared interpreter/action diagnostics can preserve useful failure locations.
+- Base-Loko shadow work is allowed only as a stretch after records/calculator
+  no longer need bespoke conversion control flow.
+
+### Sequence
+
+1. Add `GrammarAction`, captures, and `GrammarActionValue` records.
+2. Parse `=>` action syntax into structured action data instead of inert
+   symbols, preserving existing rule-expression display.
+3. Evaluate records actions for classes and slots, then remove records-specific
+   parse-tree conversion loops that the action evaluator replaces.
+4. Evaluate calculator actions for function and expression forms, keeping
+   precedence and validation explicit.
+5. Thread action output into staged emission source data, parse traces, MOP/EOP,
+   and HTML reports.
+6. Move records/calculator grammar source into resource files and load them
+   through the grammar registry/session path with stable package provenance.
+7. Retire records/calculator shape diagnostics that duplicate shared
+   interpreter/action diagnostics.
+8. Stretch: add a small base-Loko shadow grammar subset for class, generic, and
+   function headers, with Rust parser remaining primary and oracle comparison
+   still report-only.
+
+### Risks
+
+- If actions become opaque host callbacks, the grammar MOP becomes decoration
+  again. Keep actions data-like and inspectable.
+- If captures are too weak, staged grammars will keep bespoke Rust adapters.
+  Add only the capture shapes records/calculator need, then stop.
+- If diagnostics regress, do not remove the staged-language helper yet.
+- Resource loading can sprawl into package management. Keep this slice to
+  checked-in grammar resources owned by the compiler crate.
+- Base-Loko shadowing can consume the whole goal. It is a stretch item, not a
+  blocker for records/calculator action completion.
+
 ## Make Records Grammar Lexical Rules Interpreted
 
 ### Goal
