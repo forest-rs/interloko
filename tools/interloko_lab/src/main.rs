@@ -725,6 +725,18 @@ fn invoke_affordance(
             );
             Ok(())
         }
+        EnvironmentAffordance::ShowExpression => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_grammar_expression(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
         EnvironmentAffordance::ShowParseTrace => {
             print!("{}", workbench.artifacts.dump_parse_trace());
             Ok(())

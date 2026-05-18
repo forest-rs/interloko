@@ -885,6 +885,15 @@ fn invoke_affordance_runs_read_only_views() {
     assert!(grammar_rule.contains("grammar rule grammar-rule:base-loko/function-definition"));
     assert!(grammar_rule.contains("syntax.rs:Parser::parse_function"));
 
+    let expression = run_lab(&[
+        "invoke-affordance",
+        path,
+        "grammar-rule:base-loko/function-definition",
+        "show-expression",
+    ]);
+    assert!(expression.contains("grammar expression grammar-rule:base-loko/function-definition"));
+    assert!(expression.contains("data sequence("));
+
     let parse_trace = run_lab(&[
         "invoke-affordance",
         path,

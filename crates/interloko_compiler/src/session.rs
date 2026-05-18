@@ -540,6 +540,8 @@ pub enum EnvironmentAffordance {
     ShowActivations,
     /// Show a projected grammar rule.
     ShowGrammarRule,
+    /// Show the structured expression for a grammar rule.
+    ShowExpression,
     /// Show parse provenance and grammar activations.
     ShowParseTrace,
     /// Show registered language environments and staged grammar adapters.
@@ -580,6 +582,7 @@ impl EnvironmentAffordance {
             Self::ShowEffectiveRules,
             Self::ShowActivations,
             Self::ShowGrammarRule,
+            Self::ShowExpression,
             Self::ShowParseTrace,
             Self::ShowGrammarRegistry,
             Self::ShowGrammarExtension,
@@ -626,6 +629,7 @@ impl EnvironmentAffordance {
             Self::ShowEffectiveRules => "show-effective-rules",
             Self::ShowActivations => "show-activations",
             Self::ShowGrammarRule => "show-grammar-rule",
+            Self::ShowExpression => "show-expression",
             Self::ShowParseTrace => "show-parse-trace",
             Self::ShowGrammarRegistry => "show-grammar-registry",
             Self::ShowGrammarExtension => "show-grammar-extension",
@@ -1291,6 +1295,12 @@ impl SessionArtifacts {
                     .find(|rule| grammar_frontend::effective_grammar_rule_object_id(rule) == id)
                     .map(explain_effective_grammar_rule)
             })
+    }
+
+    /// Explains the structured expression for a grammar rule object id.
+    #[must_use]
+    pub fn explain_grammar_expression(&self, id: &str) -> Option<String> {
+        explain_grammar_expression(self, id)
     }
 
     /// Explains one generic dispatch site by friendly selector id.
@@ -5659,6 +5669,26 @@ fn render_effective_grammar_rule_row(rule: &grammar_frontend::EffectiveGrammarRu
     )
 }
 
+fn explain_grammar_expression(artifacts: &SessionArtifacts, id: &str) -> Option<String> {
+    artifacts
+        .grammar_parse
+        .rules
+        .iter()
+        .find(|rule| grammar_frontend::grammar_rule_object_id(rule) == id)
+        .map(|rule| {
+            let mut out = String::new();
+            let _ = writeln!(
+                out,
+                "grammar expression {}",
+                grammar_frontend::grammar_rule_object_id(rule)
+            );
+            let _ = writeln!(out, "rule {}", rule.name);
+            let _ = writeln!(out, "text {}", rule.expression);
+            let _ = writeln!(out, "data {}", rule.expression.source_data());
+            out
+        })
+}
+
 fn render_grammar_activation_summary(
     report: &GrammarParseReport,
     grammar: &grammar_frontend::Grammar,
@@ -7606,6 +7636,7 @@ fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule
             Aff::DumpMop,
             Aff::DumpEop,
             Aff::ShowGrammarRule,
+            Aff::ShowExpression,
             Aff::ShowParseTrace,
         ]),
         execution: None,
@@ -7658,10 +7689,13 @@ fn project_effective_grammar_rule(
 }
 
 fn grammar_rule_origin(rule: &GrammarRule) -> EnvironmentOrigin {
-    if rule.projection.origin == "trusted-host-fixture" {
-        EnvironmentOrigin::HostProvided
-    } else {
-        EnvironmentOrigin::CompilerGenerated
+    match rule.projection.origin {
+        grammar_frontend::ProjectionOrigin::TrustedHostFixture => EnvironmentOrigin::HostProvided,
+        grammar_frontend::ProjectionOrigin::SourceAuthored => EnvironmentOrigin::SourceAuthored,
+        grammar_frontend::ProjectionOrigin::CompilerProjected
+        | grammar_frontend::ProjectionOrigin::CompilerProjectedPrototype => {
+            EnvironmentOrigin::CompilerGenerated
+        }
     }
 }
 
@@ -9839,6 +9873,7 @@ mod tests {
             ),
             (EnvironmentAffordance::ShowActivations, "show-activations"),
             (EnvironmentAffordance::ShowGrammarRule, "show-grammar-rule"),
+            (EnvironmentAffordance::ShowExpression, "show-expression"),
             (EnvironmentAffordance::ShowParseTrace, "show-parse-trace"),
             (
                 EnvironmentAffordance::ShowGrammarRegistry,
@@ -9999,6 +10034,14 @@ mod tests {
                 .explain_grammar_rule("grammar-rule:base-loko/function-definition")
                 .is_some()
         );
+        let expression = artifacts
+            .explain_grammar_expression("grammar-rule:base-loko/function-definition")
+            .expect("grammar rule expression");
+        assert!(
+            expression.contains("grammar expression grammar-rule:base-loko/function-definition")
+        );
+        assert!(expression.contains("rule function-definition"));
+        assert!(expression.contains("data sequence("));
         assert!(
             artifacts
                 .explain_grammar_environment("language-environment:base-loko")

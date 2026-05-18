@@ -1,5 +1,91 @@
 # Plans
 
+## Build The Self-Hosting Grammar Spine
+
+### Goal
+
+Move Interloko toward "Loko grammar as data" without flipping away from the
+trusted Rust parser yet. The immediate slice makes grammar rules structurally
+inspectable, records span-to-rule applications from the Rust parser, removes
+REPL grammar-rule heuristics, and creates the first shadow-equivalence harness
+that a future source-authored `base-loko` grammar can plug into.
+
+This is deliberately bolder than a presentation cleanup: after this slice,
+the report and REPL should be able to answer "which rule produced this source
+span?" from parse facts, and the compiler should have a named place where a
+source-authored grammar interpreter can be checked against the Rust parser.
+
+### Non-Goals
+
+- No interpreter primary flip.
+- No removal of `interloko_compiler::syntax`.
+- No source-authored full `base-loko` grammar in this slice.
+- No parser-theory feature expansion: no parameterized rules, left-recursion,
+  semantic predicates, or host callbacks.
+- No diagnostic-system rewrite.
+- No text-emitting grammar actions.
+- No performance work beyond keeping the harness cheap enough for tests.
+
+### Fence
+
+`interloko_compiler::grammar_frontend` owns structured grammar rule data,
+rule-expression reflection, parser rule applications, and the future
+interpreter/oracle boundary. It explicitly does not own AST/semantic lowering,
+diagnostic rendering, source-authored grammar package loading, or the policy
+decision to remove the Rust parser.
+
+The session, REPL, lab, and corpus layers own presentation, command surfaces,
+equivalence reporting, and user-facing demos over those facts. They explicitly
+do not invent grammar semantics or re-parse source independently.
+
+### Invariants
+
+- The Rust parser remains primary and trusted throughout this goal.
+- Rule expressions are structural data first; string dumps are projections.
+- Span-to-rule provenance records actual parser/CST spans, not inferred
+  top-level form kinds.
+- REPL form grammar lookup uses provenance facts, with heuristics removed.
+- Shadow equivalence compares normalized parser products and reports
+  diffable divergence; it is allowed to be "no source-authored grammar yet"
+  until the interpreter plugs in.
+- Grammar actions, when added later, produce structural frontend forms only.
+- Every commit is bisectable with the Rust parser as primary.
+
+### Commit Sequence
+
+1. Structured rule reflection:
+   - add `RuleExpression` and projection-origin types;
+   - replace grammar-rule expression strings as the canonical data;
+   - expose `show-expression`/MOP dumps from structured expressions.
+2. Span-to-rule provenance:
+   - record rule applications `(activation, grammar, rule, span, rule-name)`;
+   - include them in parse traces and object dumps;
+   - keep count summaries derived from applications.
+3. Consumer migration:
+   - remove REPL `TopLevelFormKind -> rule-name` lookup;
+   - resolve form grammar context by contained rule applications;
+   - update report links where a staged/source span can point at a rule.
+4. Shadow harness scaffold:
+   - introduce a parser-shadow report type with primary/oracle roles;
+   - compare Rust parser output against the available projected grammar path;
+   - leave interpreter-plug-in status explicit rather than pretending it exists.
+5. Tests/docs:
+   - unit tests for structured rule expressions and provenance spans;
+   - REPL/lab tests showing form -> grammar rule traceback;
+   - grammar MOP docs explaining the self-hosting path and oracle fence.
+
+### Risks
+
+- Expression structure can become parser theory cosplay. Keep the first
+  variants only as rich as existing projected rules require.
+- Provenance can still be too coarse for expressions if it only mirrors CST
+  node kinds. Make the coarseness visible and improve it incrementally.
+- Shadow mode can look fake before the interpreter lands. Name the missing
+  interpreter explicitly and make the harness useful as soon as a source
+  grammar is supplied.
+- Diagnostics remain the flip gate. This slice should not claim the interpreter
+  is ready to replace the Rust parser.
+
 ## Make Grammar Environments the Visible Frontend Center
 
 ### Goal

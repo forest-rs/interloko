@@ -6,6 +6,7 @@
 //! intentionally does not own AST lowering, semantic lowering, source-authored
 //! grammars, macros, host semantic actions, or parser rewriting.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -286,12 +287,233 @@ impl fmt::Display for ParseProvenanceId {
 /// Projection information for a grammar rule record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarProjection {
-    /// Stable origin label.
-    pub origin: String,
+    /// Stable projection origin.
+    pub origin: ProjectionOrigin,
     /// Implementation location or conceptual parser entry.
     pub location: String,
     /// Optional source span when a rule is source-authored.
     pub source_span: Option<Span>,
+}
+
+/// Stable source of a projected grammar fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionOrigin {
+    /// Projected from the compiler's hand-written base parser.
+    CompilerProjected,
+    /// Projected from a compiler-shipped staged grammar prototype.
+    CompilerProjectedPrototype,
+    /// Projected from a trusted host fixture or adapter.
+    TrustedHostFixture,
+    /// Projected from source-authored grammar data.
+    SourceAuthored,
+}
+
+impl ProjectionOrigin {
+    /// Returns the stable origin token used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CompilerProjected => "compiler-projected",
+            Self::CompilerProjectedPrototype => "compiler-projected-prototype",
+            Self::TrustedHostFixture => "trusted-host-fixture",
+            Self::SourceAuthored => "source-authored",
+        }
+    }
+}
+
+impl fmt::Display for ProjectionOrigin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Structured grammar expression used by projected grammar rules.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuleExpression {
+    /// A named grammar rule reference.
+    Rule(String),
+    /// A literal token or delimiter.
+    Literal(String),
+    /// A sequence of expressions.
+    Sequence(Vec<RuleExpression>),
+    /// An ordered choice between alternatives.
+    Choice(Vec<RuleExpression>),
+    /// An optional expression.
+    Optional(Box<RuleExpression>),
+    /// Zero or more repetitions.
+    ZeroOrMore(Box<RuleExpression>),
+    /// A structural input expression plus an inert output description.
+    Transform {
+        /// Matched input expression.
+        input: Box<RuleExpression>,
+        /// Inert output description.
+        output: SourceData,
+    },
+}
+
+impl RuleExpression {
+    /// Creates a rule reference.
+    #[must_use]
+    pub fn rule(name: impl Into<String>) -> Self {
+        Self::Rule(name.into())
+    }
+
+    /// Creates a literal token/delimiter expression.
+    #[must_use]
+    pub fn literal(value: impl Into<String>) -> Self {
+        Self::Literal(value.into())
+    }
+
+    /// Creates a sequence, collapsing a single item to that item.
+    #[must_use]
+    pub fn sequence(items: Vec<Self>) -> Self {
+        collapse_expression(Self::Sequence(items))
+    }
+
+    /// Creates an ordered choice, collapsing a single item to that item.
+    #[must_use]
+    pub fn choice(items: Vec<Self>) -> Self {
+        collapse_expression(Self::Choice(items))
+    }
+
+    /// Creates an optional expression.
+    #[must_use]
+    pub fn optional(item: Self) -> Self {
+        Self::Optional(Box::new(item))
+    }
+
+    /// Creates a zero-or-more repetition expression.
+    #[must_use]
+    pub fn zero_or_more(item: Self) -> Self {
+        Self::ZeroOrMore(Box::new(item))
+    }
+
+    /// Creates a transform expression with inert output data.
+    #[must_use]
+    pub fn transform(input: Self, output: SourceData) -> Self {
+        Self::Transform {
+            input: Box::new(input),
+            output,
+        }
+    }
+
+    /// Returns inert source data for this expression.
+    #[must_use]
+    pub fn source_data(&self) -> SourceData {
+        rule_expression_source_data(self)
+    }
+}
+
+impl fmt::Display for RuleExpression {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rule(name) => formatter.write_str(name),
+            Self::Literal(value) => write!(formatter, "`{value}`"),
+            Self::Sequence(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(" ")?;
+                    }
+                    write!(formatter, "{}", grouped_rule_expression(item))?;
+                }
+                Ok(())
+            }
+            Self::Choice(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(" | ")?;
+                    }
+                    write!(formatter, "{item}")?;
+                }
+                Ok(())
+            }
+            Self::Optional(item) => write!(formatter, "{}?", grouped_rule_expression(item)),
+            Self::ZeroOrMore(item) => write!(formatter, "{}*", grouped_rule_expression(item)),
+            Self::Transform { input, output } => write!(formatter, "{input} => {output}"),
+        }
+    }
+}
+
+fn collapse_expression(expression: RuleExpression) -> RuleExpression {
+    match expression {
+        RuleExpression::Sequence(mut items) | RuleExpression::Choice(mut items)
+            if items.len() == 1 =>
+        {
+            items.remove(0)
+        }
+        expression => expression,
+    }
+}
+
+fn grouped_rule_expression(expression: &RuleExpression) -> RuleExpressionDisplay<'_> {
+    RuleExpressionDisplay(expression)
+}
+
+struct RuleExpressionDisplay<'a>(&'a RuleExpression);
+
+impl fmt::Display for RuleExpressionDisplay<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            RuleExpression::Choice(_) | RuleExpression::Transform { .. } => {
+                write!(formatter, "({})", self.0)
+            }
+            expression => write!(formatter, "{expression}"),
+        }
+    }
+}
+
+fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
+    match expression {
+        RuleExpression::Rule(name) => SourceData::record(
+            "rule-ref",
+            vec![source_data::field(
+                "name",
+                SourceData::symbol(name.as_str()),
+            )],
+        ),
+        RuleExpression::Literal(value) => SourceData::record(
+            "literal",
+            vec![source_data::field(
+                "value",
+                SourceData::string(value.as_str()),
+            )],
+        ),
+        RuleExpression::Sequence(items) => SourceData::record(
+            "sequence",
+            vec![source_data::field(
+                "items",
+                SourceData::list(items.iter().map(rule_expression_source_data).collect()),
+            )],
+        ),
+        RuleExpression::Choice(items) => SourceData::record(
+            "choice",
+            vec![source_data::field(
+                "items",
+                SourceData::list(items.iter().map(rule_expression_source_data).collect()),
+            )],
+        ),
+        RuleExpression::Optional(item) => SourceData::record(
+            "optional",
+            vec![source_data::field(
+                "item",
+                rule_expression_source_data(item),
+            )],
+        ),
+        RuleExpression::ZeroOrMore(item) => SourceData::record(
+            "zero-or-more",
+            vec![source_data::field(
+                "item",
+                rule_expression_source_data(item),
+            )],
+        ),
+        RuleExpression::Transform { input, output } => SourceData::record(
+            "transform",
+            vec![
+                source_data::field("input", rule_expression_source_data(input)),
+                source_data::field("output", output.clone()),
+            ],
+        ),
+    }
 }
 
 /// Read-only language environment metaobject.
@@ -335,8 +557,8 @@ pub struct GrammarRule {
     pub grammar_slug: String,
     /// Rule name.
     pub name: String,
-    /// Human-readable projected expression.
-    pub expression: String,
+    /// Structured projected expression.
+    pub expression: RuleExpression,
     /// Inert structural expression data.
     pub expression_data: SourceData,
     /// Projection/source location information.
@@ -2492,9 +2714,17 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
         grammar: derived_grammar_id,
         grammar_slug: DERIVED_HOST_ENVIRONMENT_SLUG.to_string(),
         name: "function-definition".to_string(),
-        expression:
-            "host-projected override delegates function-definition parsing to BaseLokoGrammar"
-                .to_string(),
+        expression: RuleExpression::transform(
+            RuleExpression::rule("function-definition"),
+            SourceData::record(
+                "host-grammar-rule",
+                vec![
+                    source_data::field("name", SourceData::symbol("function-definition")),
+                    source_data::field("extends", SourceData::symbol("BaseLokoGrammar")),
+                    source_data::field("delegates-to", SourceData::symbol("BaseLokoGrammar")),
+                ],
+            ),
+        ),
         expression_data: SourceData::record(
             "host-grammar-rule",
             vec![
@@ -2504,7 +2734,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
             ],
         ),
         projection: GrammarProjection {
-            origin: "trusted-host-fixture".to_string(),
+            origin: ProjectionOrigin::TrustedHostFixture,
             location: "host:DerivedHostGrammar/function-definition".to_string(),
             source_span: None,
         },
@@ -2756,10 +2986,10 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             grammar,
             grammar_slug: grammar_slug.to_string(),
             name: (*name).to_string(),
-            expression: (*expression).to_string(),
+            expression: projected_rule_expression(expression),
             expression_data: grammar_rule_expression_data(name, expression, location),
             projection: GrammarProjection {
-                origin: "compiler-projected".to_string(),
+                origin: ProjectionOrigin::CompilerProjected,
                 location: (*location).to_string(),
                 source_span: None,
             },
@@ -2788,10 +3018,10 @@ fn calculator_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
             grammar,
             grammar_slug: grammar_slug.to_string(),
             name: (*name).to_string(),
-            expression: (*expression).to_string(),
+            expression: projected_rule_expression(expression),
             expression_data: grammar_rule_expression_data(name, expression, location),
             projection: GrammarProjection {
-                origin: "compiler-projected-prototype".to_string(),
+                origin: ProjectionOrigin::CompilerProjectedPrototype,
                 location: (*location).to_string(),
                 source_span: None,
             },
@@ -2825,10 +3055,10 @@ fn records_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             grammar,
             grammar_slug: grammar_slug.to_string(),
             name: (*name).to_string(),
-            expression: (*expression).to_string(),
+            expression: projected_rule_expression(expression),
             expression_data: grammar_rule_expression_data(name, expression, location),
             projection: GrammarProjection {
-                origin: "compiler-projected-prototype".to_string(),
+                origin: ProjectionOrigin::CompilerProjectedPrototype,
                 location: (*location).to_string(),
                 source_span: None,
             },
@@ -2837,14 +3067,121 @@ fn records_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
 }
 
 fn grammar_rule_expression_data(name: &str, expression: &str, location: &str) -> SourceData {
+    let structured = projected_rule_expression(expression);
     SourceData::record(
         "grammar-rule",
         vec![
             source_data::field("name", SourceData::symbol(name)),
-            source_data::field("expression", SourceData::string(expression)),
+            source_data::field("expression", structured.source_data()),
+            source_data::field("text", SourceData::string(expression)),
             source_data::field("location", SourceData::string(location)),
         ],
     )
+}
+
+fn projected_rule_expression(expression: &str) -> RuleExpression {
+    let trimmed = expression.trim();
+    if let Some((input, output)) = trimmed.split_once("=>") {
+        return RuleExpression::transform(
+            projected_rule_expression(input),
+            SourceData::string(output.trim()),
+        );
+    }
+    let choices = split_top_level(trimmed, '|');
+    if choices.len() > 1 {
+        return RuleExpression::choice(
+            choices
+                .into_iter()
+                .map(projected_rule_expression)
+                .collect::<Vec<_>>(),
+        );
+    }
+    let terms = split_whitespace_top_level(trimmed);
+    RuleExpression::sequence(
+        terms
+            .into_iter()
+            .map(projected_rule_term)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn projected_rule_term(term: &str) -> RuleExpression {
+    let trimmed = term.trim();
+    if let Some(inner) = trimmed.strip_suffix('*') {
+        return RuleExpression::zero_or_more(projected_rule_expression(inner));
+    }
+    if let Some(inner) = trimmed.strip_suffix('?') {
+        return RuleExpression::optional(projected_rule_expression(inner));
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        return projected_rule_expression(inner);
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('`')
+        .and_then(|inner| inner.strip_suffix('`'))
+    {
+        return RuleExpression::literal(inner);
+    }
+    RuleExpression::rule(trimmed)
+}
+
+fn split_top_level(input: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_i32;
+    let mut in_literal = false;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '`' => in_literal = !in_literal,
+            '(' if !in_literal => depth += 1,
+            ')' if !in_literal => depth -= 1,
+            _ if ch == delimiter && !in_literal && depth == 0 => {
+                parts.push(input[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(input[start..].trim());
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
+fn split_whitespace_top_level(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = None;
+    let mut depth = 0_i32;
+    let mut in_literal = false;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '`' => {
+                if start.is_none() {
+                    start = Some(index);
+                }
+                in_literal = !in_literal;
+            }
+            '(' if !in_literal => {
+                if start.is_none() {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            ')' if !in_literal => depth -= 1,
+            _ if ch.is_whitespace() && !in_literal && depth == 0 => {
+                if let Some(term_start) = start.take() {
+                    parts.push(input[term_start..index].trim());
+                }
+            }
+            _ if start.is_none() => start = Some(index),
+            _ => {}
+        }
+    }
+    if let Some(term_start) = start {
+        parts.push(input[term_start..].trim());
+    }
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
 fn staged_effective_rules(
@@ -3300,10 +3637,21 @@ mod tests {
             .iter()
             .find(|rule| rule.grammar == derived_grammar && rule.name == "function-definition")
             .expect("derived direct override");
-        assert_eq!(direct_override.projection.origin, "trusted-host-fixture");
+        assert_eq!(
+            direct_override.projection.origin,
+            ProjectionOrigin::TrustedHostFixture
+        );
         assert_eq!(
             source_data::dump(&direct_override.expression_data),
             "host-grammar-rule(name: function-definition, extends: BaseLokoGrammar, delegates-to: BaseLokoGrammar)"
+        );
+        assert_eq!(
+            direct_override.expression.to_string(),
+            "function-definition => host-grammar-rule(name: function-definition, extends: BaseLokoGrammar, delegates-to: BaseLokoGrammar)"
+        );
+        assert_eq!(
+            source_data::dump(&direct_override.expression.source_data()),
+            "transform(input: rule-ref(name: function-definition), output: host-grammar-rule(name: function-definition, extends: BaseLokoGrammar, delegates-to: BaseLokoGrammar))"
         );
 
         let effective_override = records
