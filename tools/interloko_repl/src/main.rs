@@ -983,36 +983,54 @@ impl Repl {
             EnvironmentAffordance::ShowGrammarStack => {
                 write!(stdout, "{}", artifacts.dump_grammar_stack())?
             }
-            EnvironmentAffordance::ShowGrammarRule => {
-                if let Some(explanation) = artifacts.explain_grammar_rule(object.id.as_str()) {
-                    write!(stdout, "{explanation}")?;
-                } else {
-                    writeln!(
-                        stderr,
-                        "error: affordance `{}` is not available for `{}`",
-                        affordance.as_str(),
-                        object.id.as_str()
-                    )?;
-                }
-            }
+            EnvironmentAffordance::ShowGrammars => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_grammar_environment(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
+            EnvironmentAffordance::ShowDirectRules => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_direct_grammar_rules(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
+            EnvironmentAffordance::ShowEffectiveRules => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_effective_grammar_rules(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
+            EnvironmentAffordance::ShowActivations => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_grammar_activations(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
+            EnvironmentAffordance::ShowGrammarRule => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_grammar_rule(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
             EnvironmentAffordance::ShowParseTrace => {
                 write!(stdout, "{}", artifacts.dump_parse_trace())?
             }
             EnvironmentAffordance::ShowGrammarRegistry => {
                 write!(stdout, "{}", artifacts.dump_grammar_registry())?
             }
-            EnvironmentAffordance::ShowGrammarExtension => {
-                if let Some(explanation) = artifacts.explain_grammar_extension(object.id.as_str()) {
-                    write!(stdout, "{explanation}")?;
-                } else {
-                    writeln!(
-                        stderr,
-                        "error: affordance `{}` is not available for `{}`",
-                        affordance.as_str(),
-                        object.id.as_str()
-                    )?;
-                }
-            }
+            EnvironmentAffordance::ShowGrammarExtension => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_grammar_extension(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
             EnvironmentAffordance::Run => {
                 self.run_environment_object(artifacts, object, stdout, stderr)?
             }
@@ -1594,6 +1612,30 @@ fn find_object(artifacts: &SessionArtifacts, id: &str) -> Option<EnvironmentObje
         .find(|object| object.id.as_str() == id)
 }
 
+fn write_optional_affordance<W, E>(
+    stdout: &mut W,
+    stderr: &mut E,
+    explanation: Option<String>,
+    affordance: EnvironmentAffordance,
+    object_id: &str,
+) -> Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    if let Some(explanation) = explanation {
+        write!(stdout, "{explanation}")?;
+    } else {
+        writeln!(
+            stderr,
+            "error: affordance `{}` is not available for `{}`",
+            affordance.as_str(),
+            object_id
+        )?;
+    }
+    Ok(())
+}
+
 enum ReplObjectReference {
     Form(AcceptedDefinition),
     Environment(Box<EnvironmentObject>),
@@ -1666,8 +1708,22 @@ fn object_lookup_names(object: &EnvironmentObject) -> Vec<String> {
             .title
             .rsplit_once('.')
             .map_or_else(Vec::new, |(_, slot)| vec![slot.to_string()]),
+        EnvironmentKind::LanguageEnvironment => {
+            object_id_tail(object.id.as_str(), "language-environment:")
+                .into_iter()
+                .collect()
+        }
+        EnvironmentKind::Grammar => object_id_tail(object.id.as_str(), "grammar:")
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
+}
+
+fn object_id_tail(id: &str, prefix: &str) -> Option<String> {
+    id.strip_prefix(prefix)
+        .filter(|tail| !tail.is_empty())
+        .map(ToString::to_string)
 }
 
 fn presentation_title_name(title: &str) -> Option<String> {

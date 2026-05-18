@@ -1,5 +1,82 @@
 # Plans
 
+## Make Grammar Environments the Visible Frontend Center
+
+### Goal
+
+Shift the staged frontend presentation from "session registry plus adapters" to
+the OMeta/OhmJS-shaped model we want: language environments scope grammars,
+grammars inherit and override rules, activations parse source regions, and
+trusted host adapters are only the implementation behind grammar objects.
+
+### Non-Goals
+
+- No source-authored grammar syntax.
+- No arbitrary host semantic actions.
+- No parser rewrite.
+- No object-stream grammars.
+- No left-recursion controls.
+- No grammar package persistence.
+- No new language semantics beyond existing structural staged forms.
+
+### Fence
+
+`interloko_compiler::grammar_frontend` owns language environments, grammar
+metaobjects, rule inheritance/effectivity, activation provenance, and trusted
+structural staged emissions; it explicitly does not own AST/semantic lowering,
+source-authored grammars, macro expansion, or host action execution.
+
+The session/workbench layers own presentation, inspection, affordances, and
+reports over those facts; they explicitly do not reinterpret grammar lookup or
+invent alternate parser semantics.
+
+### Invariants
+
+- The registry remains as host/catalog plumbing, but user-facing inspection
+  starts from language environments and grammars.
+- A language environment reports its available grammars, active stack, staged
+  extension policy, and activation/provenance namespace.
+- Staged grammars appear as grammar objects with rules and inheritance, not as
+  adapter-shaped primary objects.
+- Direct rules, inherited rules, overridden rules, and effective rules remain
+  distinguishable.
+- Activations say which environment and grammar parsed a region, which root
+  rule was used, and which structural forms/objects came from it.
+- Registry and adapter records remain inspectable for debugging, but visually
+  and textually secondary.
+
+### Commit Sequence
+
+1. Session projection/model:
+   - add environment-centered grammar summaries and object affordances;
+   - make grammar/staged grammar records describe parent chain, direct rules,
+     effective rules, activation policy, and extensions;
+   - update object-scoped MOP dumps.
+2. REPL surface:
+   - name-aware inspection for grammar/environment names;
+   - environment/grammar affordances for direct rules, effective rules,
+     activations, grammar stack, and parse trace.
+3. Report surface:
+   - navigation from environment -> grammars -> rules -> activations -> forms
+     -> semantic objects;
+   - staged regions link to active grammar and effective rules;
+   - registry panels remain secondary.
+4. Tests/docs:
+   - base and staged grammar/environment inspection;
+   - records/calculator grammar objects;
+   - direct/effective rule display;
+   - activation provenance to emitted objects;
+   - docs explaining the OMeta/OhmJS shape.
+
+### Risks
+
+- The visible model can overpromise source-authored grammars. Keep wording
+  honest: host-backed staged grammars are trusted structural adapters today.
+- The registry may leak back into views because it is the current implementation
+  spine. Keep registry commands available but secondary.
+- Rule-name heuristics can look like real parse traces. Where span-to-rule
+  provenance is not implemented, label it as projected or heuristic.
+
 ## Rewind The In-Memory Mutation Log
 
 ### Goal

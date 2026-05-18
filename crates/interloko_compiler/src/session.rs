@@ -530,6 +530,14 @@ pub enum EnvironmentAffordance {
     ShowSlots,
     /// Show the resolved grammar stack.
     ShowGrammarStack,
+    /// Show grammars owned by a language environment or related to a grammar.
+    ShowGrammars,
+    /// Show direct rules projected by a grammar.
+    ShowDirectRules,
+    /// Show effective rules resolved for a grammar.
+    ShowEffectiveRules,
+    /// Show grammar activations for an environment or grammar.
+    ShowActivations,
     /// Show a projected grammar rule.
     ShowGrammarRule,
     /// Show parse provenance and grammar activations.
@@ -567,6 +575,10 @@ impl EnvironmentAffordance {
             Self::DumpArtifacts,
             Self::ShowSlots,
             Self::ShowGrammarStack,
+            Self::ShowGrammars,
+            Self::ShowDirectRules,
+            Self::ShowEffectiveRules,
+            Self::ShowActivations,
             Self::ShowGrammarRule,
             Self::ShowParseTrace,
             Self::ShowGrammarRegistry,
@@ -609,6 +621,10 @@ impl EnvironmentAffordance {
             Self::DumpArtifacts => "dump-artifacts",
             Self::ShowSlots => "show-slots",
             Self::ShowGrammarStack => "show-grammar-stack",
+            Self::ShowGrammars => "show-grammars",
+            Self::ShowDirectRules => "show-direct-rules",
+            Self::ShowEffectiveRules => "show-effective-rules",
+            Self::ShowActivations => "show-activations",
             Self::ShowGrammarRule => "show-grammar-rule",
             Self::ShowParseTrace => "show-parse-trace",
             Self::ShowGrammarRegistry => "show-grammar-registry",
@@ -1234,6 +1250,30 @@ impl SessionArtifacts {
     #[must_use]
     pub fn explain_grammar_extension(&self, id: &str) -> Option<String> {
         explain_grammar_extension(self, id)
+    }
+
+    /// Explains the grammars owned by a language environment or one grammar.
+    #[must_use]
+    pub fn explain_grammar_environment(&self, id: &str) -> Option<String> {
+        explain_grammar_environment(self, id)
+    }
+
+    /// Explains direct rules projected by one grammar.
+    #[must_use]
+    pub fn explain_direct_grammar_rules(&self, id: &str) -> Option<String> {
+        explain_direct_grammar_rules(self, id)
+    }
+
+    /// Explains effective rules resolved for one grammar.
+    #[must_use]
+    pub fn explain_effective_grammar_rules(&self, id: &str) -> Option<String> {
+        explain_effective_grammar_rules(self, id)
+    }
+
+    /// Explains grammar activations for a language environment or grammar.
+    #[must_use]
+    pub fn explain_grammar_activations(&self, id: &str) -> Option<String> {
+        explain_grammar_activations(self, id)
     }
 
     /// Explains a grammar rule environment object id.
@@ -5415,6 +5455,243 @@ fn dump_grammar_registry(registry: GrammarFrontendRegistry) -> String {
     out
 }
 
+fn explain_grammar_environment(artifacts: &SessionArtifacts, object_id: &str) -> Option<String> {
+    if object_id == "grammar-registry:session" {
+        return Some(artifacts.dump_grammar_registry());
+    }
+    if object_id
+        .strip_prefix("registered-grammar-environment:")
+        .is_some()
+    {
+        return dump_registered_grammar_environment_object(artifacts, object_id);
+    }
+    if grammar_frontend::language_environment_object_id(&artifacts.grammar_parse.environment)
+        == object_id
+    {
+        return Some(render_environment_grammar_list(
+            &artifacts.grammar_parse.environment,
+            &artifacts.grammar_parse.grammars,
+        ));
+    }
+    let grammar = grammar_for_object(&artifacts.grammar_parse, object_id)?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "grammar {}",
+        grammar_frontend::grammar_object_id(grammar)
+    );
+    let _ = writeln!(out, "name {}", grammar.name);
+    let _ = writeln!(
+        out,
+        "extends {}",
+        render_grammar_extends(&artifacts.grammar_parse, grammar)
+    );
+    let _ = writeln!(out, "direct-rules {}", grammar.direct_rules.len());
+    let _ = writeln!(out, "effective-rules {}", grammar.effective_rules.len());
+    out.push_str(&render_grammar_activation_summary(
+        &artifacts.grammar_parse,
+        grammar,
+    ));
+    Some(out)
+}
+
+fn explain_direct_grammar_rules(artifacts: &SessionArtifacts, object_id: &str) -> Option<String> {
+    let grammar = grammar_for_object(&artifacts.grammar_parse, object_id)?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "direct grammar rules {}",
+        grammar_frontend::grammar_object_id(grammar)
+    );
+    for rule_id in &grammar.direct_rules {
+        let label = artifacts
+            .grammar_parse
+            .rules
+            .iter()
+            .find(|rule| rule.id == *rule_id)
+            .map_or_else(|| rule_id.to_string(), render_direct_grammar_rule_row);
+        let _ = writeln!(out, "  {label}");
+    }
+    Some(out)
+}
+
+fn explain_effective_grammar_rules(
+    artifacts: &SessionArtifacts,
+    object_id: &str,
+) -> Option<String> {
+    let grammar = grammar_for_object(&artifacts.grammar_parse, object_id)?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "effective grammar rules {}",
+        grammar_frontend::grammar_object_id(grammar)
+    );
+    for rule_id in &grammar.effective_rules {
+        let label = artifacts
+            .grammar_parse
+            .effective_rules
+            .iter()
+            .find(|rule| rule.id == *rule_id)
+            .map_or_else(|| rule_id.to_string(), render_effective_grammar_rule_row);
+        let _ = writeln!(out, "  {label}");
+    }
+    Some(out)
+}
+
+fn explain_grammar_activations(artifacts: &SessionArtifacts, object_id: &str) -> Option<String> {
+    let mut out = String::new();
+    if grammar_frontend::language_environment_object_id(&artifacts.grammar_parse.environment)
+        == object_id
+    {
+        let _ = writeln!(out, "grammar activations {object_id}");
+        for activation in &artifacts.grammar_parse.activations {
+            let _ = writeln!(out, "  {}", render_grammar_activation_row(activation));
+        }
+        return Some(out);
+    }
+
+    let grammar = grammar_for_object(&artifacts.grammar_parse, object_id)?;
+    let _ = writeln!(
+        out,
+        "grammar activations {}",
+        grammar_frontend::grammar_object_id(grammar)
+    );
+    for activation in artifacts
+        .grammar_parse
+        .activations
+        .iter()
+        .filter(|activation| activation.grammar == grammar.id)
+    {
+        let _ = writeln!(out, "  {}", render_grammar_activation_row(activation));
+    }
+    Some(out)
+}
+
+fn render_environment_grammar_list(
+    environment: &LanguageEnvironment,
+    grammars: &[grammar_frontend::Grammar],
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "language environment grammars {}",
+        grammar_frontend::language_environment_object_id(environment)
+    );
+    for (index, grammar_id) in environment.grammar_stack.iter().enumerate() {
+        if let Some(grammar) = grammars.iter().find(|grammar| grammar.id == *grammar_id) {
+            let active = if index + 1 == environment.grammar_stack.len() {
+                "active"
+            } else {
+                "base"
+            };
+            let _ = writeln!(
+                out,
+                "  {index}: {} {} role={active} extends={}",
+                grammar_frontend::grammar_object_id(grammar),
+                grammar.name,
+                render_grammar_extends_for_list(grammars, grammar)
+            );
+        } else {
+            let _ = writeln!(out, "  {index}: {grammar_id} <unknown>");
+        }
+    }
+    out
+}
+
+fn grammar_for_object<'a>(
+    report: &'a GrammarParseReport,
+    object_id: &str,
+) -> Option<&'a grammar_frontend::Grammar> {
+    report
+        .grammars
+        .iter()
+        .find(|grammar| grammar_frontend::grammar_object_id(grammar) == object_id)
+}
+
+fn render_grammar_extends(
+    report: &GrammarParseReport,
+    grammar: &grammar_frontend::Grammar,
+) -> String {
+    render_grammar_extends_for_list(&report.grammars, grammar)
+}
+
+fn render_grammar_extends_for_list(
+    grammars: &[grammar_frontend::Grammar],
+    grammar: &grammar_frontend::Grammar,
+) -> String {
+    if grammar.extends.is_empty() {
+        return "none".into();
+    }
+    grammar
+        .extends
+        .iter()
+        .map(|parent_id| {
+            grammars
+                .iter()
+                .find(|parent| parent.id == *parent_id)
+                .map_or_else(
+                    || parent_id.to_string(),
+                    |parent| format!("{}:{}", parent.id, parent.name),
+                )
+        })
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+fn render_direct_grammar_rule_row(rule: &GrammarRule) -> String {
+    format!(
+        "{} {} expression=\"{}\" origin={}",
+        grammar_frontend::grammar_rule_object_id(rule),
+        rule.name,
+        rule.expression,
+        rule.projection.origin
+    )
+}
+
+fn render_effective_grammar_rule_row(rule: &grammar_frontend::EffectiveGrammarRule) -> String {
+    format!(
+        "{} {} selected={} from={} resolution={}",
+        grammar_frontend::effective_grammar_rule_object_id(rule),
+        rule.name,
+        rule.selected_rule,
+        rule.selected_rule_grammar,
+        rule.resolution.as_str()
+    )
+}
+
+fn render_grammar_activation_summary(
+    report: &GrammarParseReport,
+    grammar: &grammar_frontend::Grammar,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "activations:");
+    let mut any = false;
+    for activation in report
+        .activations
+        .iter()
+        .filter(|activation| activation.grammar == grammar.id)
+    {
+        any = true;
+        let _ = writeln!(out, "  {}", render_grammar_activation_row(activation));
+    }
+    if !any {
+        let _ = writeln!(out, "  <none>");
+    }
+    out
+}
+
+fn render_grammar_activation_row(activation: &GrammarActivation) -> String {
+    format!(
+        "{} grammar={} span={}..{} root-rule={} reason=\"{}\"",
+        grammar_frontend::grammar_activation_object_id(activation),
+        activation.grammar_slug,
+        activation.span.start,
+        activation.span.end,
+        activation.root_rule,
+        activation.reason
+    )
+}
+
 fn frontend_emission_generated_label(
     artifacts: &SessionArtifacts,
     emission: &grammar_frontend::GrammarExtensionEmission,
@@ -6333,6 +6610,13 @@ fn dump_language_environment_object(
     let _ = writeln!(out, "language environment {object_id}");
     let _ = writeln!(out, "id {}", environment.id);
     let _ = writeln!(out, "name {}", environment.name);
+    let _ = writeln!(
+        out,
+        "discovers-staged-regions {}",
+        !artifacts.grammar_parse.staged_regions.is_empty()
+            || environment.slug == grammar_frontend::STAGED_LOKO_ENVIRONMENT_SLUG
+            || environment.slug == grammar_frontend::BASE_LOKO_ENVIRONMENT_SLUG
+    );
     let _ = writeln!(out, "grammar-stack:");
     for grammar_id in &environment.grammar_stack {
         let name = artifacts
@@ -6342,6 +6626,15 @@ fn dump_language_environment_object(
             .find(|grammar| grammar.id == *grammar_id)
             .map_or("<unknown>", |grammar| grammar.name.as_str());
         let _ = writeln!(out, "  {grammar_id} {name}");
+    }
+    let _ = writeln!(out, "available-grammars:");
+    out.push_str(&render_environment_grammar_list(
+        environment,
+        &artifacts.grammar_parse.grammars,
+    ));
+    let _ = writeln!(out, "activations:");
+    for activation in &artifacts.grammar_parse.activations {
+        let _ = writeln!(out, "  {}", render_grammar_activation_row(activation));
     }
     Some(out)
 }
@@ -6359,16 +6652,7 @@ fn dump_grammar_object(artifacts: &SessionArtifacts, object_id: &str) -> Option<
     let _ = writeln!(
         out,
         "extends {}",
-        if grammar.extends.is_empty() {
-            "none".to_string()
-        } else {
-            grammar
-                .extends
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        }
+        render_grammar_extends(&artifacts.grammar_parse, grammar)
     );
     let _ = writeln!(out, "direct-rules:");
     for rule in &grammar.direct_rules {
@@ -6396,6 +6680,10 @@ fn dump_grammar_object(artifacts: &SessionArtifacts, object_id: &str) -> Option<
             );
         let _ = writeln!(out, "  {label}");
     }
+    out.push_str(&render_grammar_activation_summary(
+        &artifacts.grammar_parse,
+        grammar,
+    ));
     Some(out)
 }
 
@@ -6416,6 +6704,23 @@ fn dump_grammar_activation_object(artifacts: &SessionArtifacts, object_id: &str)
         "grammar {} {}",
         activation.grammar, activation.grammar_slug
     );
+    if let Some(grammar) = artifacts
+        .grammar_parse
+        .grammars
+        .iter()
+        .find(|grammar| grammar.id == activation.grammar)
+    {
+        let _ = writeln!(
+            out,
+            "grammar-object {}",
+            grammar_frontend::grammar_object_id(grammar)
+        );
+        let _ = writeln!(
+            out,
+            "extends {}",
+            render_grammar_extends(&artifacts.grammar_parse, grammar)
+        );
+    }
     let _ = writeln!(
         out,
         "span {}..{}",
@@ -7034,7 +7339,7 @@ fn project_grammar_registry(artifacts: &SessionArtifacts, sink: &mut dyn Environ
         affordances: Vec::from([Aff::Inspect, Aff::DumpEop, Aff::ShowGrammarRegistry]),
         execution: None,
         inspection: format!(
-            "environments=[{}] staged-adapters=[{}]",
+            "role=host-catalog-plumbing environments=[{}] staged-adapters=[{}]",
             environments.join(","),
             adapters.join(",")
         ),
@@ -7074,10 +7379,16 @@ fn project_registered_grammar_environment(
         origin: registered_environment_origin(provider.environment_slug()),
         storage: EnvironmentStorage::FrontendRegistry,
         title: provider.environment_name().into(),
-        affordances: Vec::from([Aff::Inspect, Aff::DumpEop, Aff::ShowGrammarRegistry]),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpMop,
+            Aff::DumpEop,
+            Aff::ShowGrammarRegistry,
+            Aff::ShowGrammars,
+        ]),
         execution: None,
         inspection: format!(
-            "slug={} name={} discovers-staged-regions={} grammars=[{}]",
+            "role=registered-environment-template slug={} name={} discovers-staged-regions={} grammars=[{}]",
             provider.environment_slug(),
             provider.environment_name(),
             provider.discovers_staged_regions(),
@@ -7115,7 +7426,7 @@ fn project_staged_grammar_adapter(
         ]),
         execution: None,
         inspection: format!(
-            "name={} grammar={} root-rule={} capabilities=[{}] emits=[{}] provenance-rules=[{}]",
+            "role=host-adapter-implementation name={} grammar={} root-rule={} capabilities=[{}] emits=[{}] provenance-rules=[{}]",
             adapter.adapter_name(),
             adapter.grammar_slug(),
             adapter.root_rule(),
@@ -7147,7 +7458,7 @@ fn project_grammar_extension_descriptor(
         ]),
         execution: None,
         inspection: format!(
-            "adapter={} grammar={} activation={:?} region={:?} end={:?} accepts={:?} capabilities=[{}] emits=[{}] provenance-rules=[{}]",
+            "role=grammar-extension-descriptor adapter={} grammar={} activation={:?} region={:?} end={:?} accepts={:?} capabilities=[{}] emits=[{}] provenance-rules=[{}]",
             descriptor.adapter,
             descriptor.grammar_slug,
             descriptor.activation_directive,
@@ -7165,31 +7476,41 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
     use EnvironmentAffordance as Aff;
 
     let report = &artifacts.grammar_parse;
-    project_language_environment(sink, &report.environment);
+    project_language_environment(artifacts, sink, &report.environment);
     for grammar in &report.grammars {
         let id = grammar_frontend::grammar_object_id(grammar);
         sink.emit(environment_object(EnvironmentObjectParts {
             id,
             kind: EnvironmentKind::Grammar,
             meta_class: "<grammar>",
-            origin: EnvironmentOrigin::CompilerGenerated,
+            origin: grammar_origin(grammar),
             storage: EnvironmentStorage::CachedArtifact,
             title: grammar.name.clone(),
             affordances: Vec::from([
                 Aff::Inspect,
                 Aff::DumpMop,
                 Aff::DumpEop,
+                Aff::ShowGrammars,
+                Aff::ShowDirectRules,
+                Aff::ShowEffectiveRules,
+                Aff::ShowActivations,
                 Aff::ShowGrammarStack,
                 Aff::ShowParseTrace,
             ]),
             execution: None,
             inspection: format!(
-                "id={} name={} extends={} direct-rules={} effective-rules={}",
+                "id={} slug={} name={} extends=[{}] direct-rules={} effective-rules={} activations={}",
                 grammar.id,
+                grammar.slug,
                 grammar.name,
-                grammar.extends.len(),
+                render_grammar_extends(&artifacts.grammar_parse, grammar),
                 grammar.direct_rules.len(),
-                grammar.effective_rules.len()
+                grammar.effective_rules.len(),
+                report
+                    .activations
+                    .iter()
+                    .filter(|activation| activation.grammar == grammar.id)
+                    .count()
             ),
         }));
     }
@@ -7217,6 +7538,7 @@ fn project_environment_grammar(artifacts: &SessionArtifacts, sink: &mut dyn Envi
 }
 
 fn project_language_environment(
+    artifacts: &SessionArtifacts,
     sink: &mut dyn EnvironmentObjectSink,
     environment: &LanguageEnvironment,
 ) {
@@ -7233,17 +7555,40 @@ fn project_language_environment(
             Aff::Inspect,
             Aff::DumpMop,
             Aff::DumpEop,
+            Aff::ShowGrammars,
+            Aff::ShowActivations,
             Aff::ShowGrammarStack,
             Aff::ShowParseTrace,
         ]),
         execution: None,
         inspection: format!(
-            "id={} name={} grammar-stack={}",
+            "id={} slug={} name={} grammar-stack={} grammars=[{}] activations={}",
             environment.id,
+            environment.slug,
             environment.name,
-            environment.grammar_stack.len()
+            environment.grammar_stack.len(),
+            environment
+                .grammar_stack
+                .iter()
+                .filter_map(|grammar_id| artifacts
+                    .grammar_parse
+                    .grammars
+                    .iter()
+                    .find(|grammar| grammar.id == *grammar_id))
+                .map(|grammar| grammar.slug.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            artifacts.grammar_parse.activations.len()
         ),
     }));
+}
+
+fn grammar_origin(grammar: &grammar_frontend::Grammar) -> EnvironmentOrigin {
+    if grammar.slug == grammar_frontend::BASE_LOKO_ENVIRONMENT_SLUG {
+        EnvironmentOrigin::CompilerGenerated
+    } else {
+        EnvironmentOrigin::HostProvided
+    }
 }
 
 fn project_grammar_rule(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRule) {
@@ -7337,6 +7682,8 @@ fn project_grammar_activation(
             Aff::Inspect,
             Aff::DumpMop,
             Aff::DumpEop,
+            Aff::ShowGrammars,
+            Aff::ShowActivations,
             Aff::ShowGrammarStack,
             Aff::ShowParseTrace,
         ]),
@@ -9484,6 +9831,13 @@ mod tests {
                 EnvironmentAffordance::ShowGrammarStack,
                 "show-grammar-stack",
             ),
+            (EnvironmentAffordance::ShowGrammars, "show-grammars"),
+            (EnvironmentAffordance::ShowDirectRules, "show-direct-rules"),
+            (
+                EnvironmentAffordance::ShowEffectiveRules,
+                "show-effective-rules",
+            ),
+            (EnvironmentAffordance::ShowActivations, "show-activations"),
             (EnvironmentAffordance::ShowGrammarRule, "show-grammar-rule"),
             (EnvironmentAffordance::ShowParseTrace, "show-parse-trace"),
             (
@@ -9644,6 +9998,30 @@ mod tests {
             artifacts
                 .explain_grammar_rule("grammar-rule:base-loko/function-definition")
                 .is_some()
+        );
+        assert!(
+            artifacts
+                .explain_grammar_environment("language-environment:base-loko")
+                .expect("language environment grammar list")
+                .contains("grammar:base-loko")
+        );
+        assert!(
+            artifacts
+                .explain_direct_grammar_rules("grammar:base-loko")
+                .expect("direct rule list")
+                .contains("grammar-rule:base-loko/function-definition")
+        );
+        assert!(
+            artifacts
+                .explain_effective_grammar_rules("grammar:base-loko")
+                .expect("effective rule list")
+                .contains("effective-grammar-rule:base-loko/function-definition")
+        );
+        assert!(
+            artifacts
+                .explain_grammar_activations("grammar:base-loko")
+                .expect("activation list")
+                .contains("grammar-activation:base-loko/source-file")
         );
     }
 
@@ -10219,6 +10597,11 @@ mod tests {
                 .keys
                 .contains(&QueryArtifact::GrammarStack.key(artifacts.source.id))
         );
+        assert!(
+            registered_environment
+                .affordances
+                .contains(EnvironmentAffordance::ShowGrammars)
+        );
 
         let staged_adapter = eop_object(&objects, "staged-grammar-adapter:records");
         assert_eq!(staged_adapter.kind, EnvironmentKind::StagedGrammarAdapter);
@@ -10249,6 +10632,11 @@ mod tests {
                 .keys
                 .contains(&QueryArtifact::GrammarParse.key(artifacts.source.id))
         );
+        assert!(
+            language_environment
+                .affordances
+                .contains(EnvironmentAffordance::ShowGrammars)
+        );
 
         let grammar = eop_object(&objects, "grammar:base-loko");
         assert_eq!(grammar.kind, EnvironmentKind::Grammar);
@@ -10257,6 +10645,21 @@ mod tests {
                 .artifacts
                 .keys
                 .contains(&QueryArtifact::GrammarStack.key(artifacts.source.id))
+        );
+        assert!(
+            grammar
+                .affordances
+                .contains(EnvironmentAffordance::ShowGrammars)
+        );
+        assert!(
+            grammar
+                .affordances
+                .contains(EnvironmentAffordance::ShowDirectRules)
+        );
+        assert!(
+            grammar
+                .affordances
+                .contains(EnvironmentAffordance::ShowEffectiveRules)
         );
 
         let grammar_rule = eop_object(&objects, "grammar-rule:base-loko/function-definition");

@@ -665,6 +665,54 @@ fn invoke_affordance(
             print!("{}", workbench.artifacts.dump_grammar_stack());
             Ok(())
         }
+        EnvironmentAffordance::ShowGrammars => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_grammar_environment(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowDirectRules => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_direct_grammar_rules(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowEffectiveRules => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_effective_grammar_rules(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
+        EnvironmentAffordance::ShowActivations => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_grammar_activations(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
         EnvironmentAffordance::ShowGrammarRule => {
             print!(
                 "{}",

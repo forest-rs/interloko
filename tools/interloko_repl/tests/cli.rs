@@ -275,6 +275,50 @@ fn inspect_and_affordances_resolve_language_names() {
 }
 
 #[test]
+fn grammar_names_resolve_to_active_environment_objects() {
+    let path = temp_loko_path("staged_records_lookup.loko");
+    fs::write(
+        &path,
+        "// grammar-activate: records\n\
+         // staged-loko: records\n\
+         record circle\n\
+           radius: <integer>\n\
+         end\n\
+         // end-staged-loko\n\
+         define function main()\n\
+           10\n\
+         end;\n",
+    )
+    .expect("write staged fixture");
+
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {}\n\
+         :inspect records\n\
+         :invoke records show-direct-rules\n\
+         :invoke records show-effective-rules\n\
+         :invoke staged-loko show-grammars\n\
+         :quit\n",
+        path.display()
+    ));
+    let _ = fs::remove_file(path);
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("object grammar:records"), "{stdout}");
+    assert!(
+        stdout.contains("direct grammar rules grammar:records"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("effective grammar rules grammar:records"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("language environment grammars language-environment:staged-loko"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn unknown_source_form_ids_report_unknown_form() {
     let (stdout, stderr) = run_repl(
         "define function answer()\n  42\nend;\n\
