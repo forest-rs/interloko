@@ -170,8 +170,12 @@ embedded grammar source:
 ```text
 grammar records
 rule records-region = record-definition*
-rule record-definition = `record` name record-field* `end` => frontend-class
-rule record-field = name `:` type-name `;`? => frontend-slot
+rule record-definition = `record` record-name record-field* `end` => frontend-class
+rule record-name = type-name | identifier
+rule record-field = field-name `:` type-name `;`? => frontend-slot
+rule field-name = identifier
+rule type-name = `<` identifier `>`
+rule identifier = [A-Za-z_] [A-Za-z0-9_?-]*
 end
 ```
 
@@ -186,9 +190,11 @@ pipeline no longer reparses it as the source of truth. Rust still performs
 parse-tree to `FrontendForm::Class` conversion and records-specific validation,
 but it is no longer a duplicate records parser.
 
-`CalculatorRegionGrammar` remains Rust-hosted. Both grammars still live behind
-the same explicit registry protocol; there is no user package/loading story for
-external grammar files yet.
+`CalculatorRegionGrammar` follows the same source-authored/interpreted grammar
+path for recognition, while Rust still converts the interpreted expression tree
+into structural function forms. Both grammars still live behind the same
+explicit registry protocol; there is no user package/loading story for external
+grammar files yet.
 
 Each staged adapter also exposes a `GrammarExtensionDescriptor`. The descriptor
 is the readable protocol record for the extension:

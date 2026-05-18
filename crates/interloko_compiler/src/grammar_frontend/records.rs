@@ -14,15 +14,19 @@ use super::interpreter::{
 use super::{
     FrontendForm, FrontendSlot, GrammarId, GrammarProjection, GrammarRule, GrammarRuleId,
     ProjectionOrigin, RECORDS_GRAMMAR_NAME, StagedRegionEmission,
-    grammar_rule_expression_data_from_expr, normalize_record_class_name, source_span_data,
-    staged_expected_diagnostic, valid_record_field_name, valid_type_name,
+    grammar_rule_expression_data_from_expr, source_span_data, staged_expected_diagnostic,
+    valid_record_field_name, valid_record_type_fragment, valid_type_name,
 };
 
 const RECORDS_GRAMMAR_SOURCE: &str = "\
 grammar records\n\
 rule records-region = record-definition*\n\
-rule record-definition = `record` name record-field* `end` => frontend-class\n\
-rule record-field = name `:` type-name `;`? => frontend-slot\n\
+rule record-definition = `record` record-name record-field* `end` => frontend-class\n\
+rule record-name = type-name | identifier\n\
+rule record-field = field-name `:` type-name `;`? => frontend-slot\n\
+rule field-name = identifier\n\
+rule type-name = `<` identifier `>`\n\
+rule identifier = [A-Za-z_] [A-Za-z0-9_?-]*\n\
 end\n";
 
 pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmission {
@@ -91,8 +95,8 @@ fn frontend_record_from_interpreted_node(
     let name = record
         .children
         .iter()
-        .find(|node| node.rule_name == "name")?;
-    let Some(class_name) = normalize_record_class_name(name.text.trim()) else {
+        .find(|node| node.rule_name == "record-name")?;
+    let Some(class_name) = record_class_name(name) else {
         diagnostics.push(staged_expected_diagnostic(
             name.span,
             "records",
@@ -129,7 +133,11 @@ fn parse_interpreted_record_field(
     field_data: &mut Vec<SourceData>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let Some(name) = field.children.iter().find(|node| node.rule_name == "name") else {
+    let Some(name) = field
+        .children
+        .iter()
+        .find(|node| node.rule_name == "field-name")
+    else {
         diagnostics.push(staged_expected_diagnostic(
             field.span,
             "records",
@@ -137,6 +145,16 @@ fn parse_interpreted_record_field(
         ));
         return;
     };
+    parse_interpreted_record_field_parts(field, name, fields, field_data, diagnostics);
+}
+
+fn parse_interpreted_record_field_parts(
+    field: &InterpretedRuleNode,
+    name: &InterpretedRuleNode,
+    fields: &mut Vec<FrontendSlot>,
+    field_data: &mut Vec<SourceData>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let Some(type_name) = field
         .children
         .iter()
@@ -183,6 +201,15 @@ fn parse_interpreted_record_field(
             source_span_data(field.span),
         ],
     ));
+}
+
+fn record_class_name(name: &InterpretedRuleNode) -> Option<String> {
+    let text = name.text.trim();
+    if text.starts_with('<') {
+        valid_type_name(text).then(|| text.to_string())
+    } else {
+        valid_record_type_fragment(text).then(|| format!("<{text}>"))
+    }
 }
 
 fn records_parse_error_emission(

@@ -2375,16 +2375,6 @@ fn valid_calculator_function_name(name: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
 }
 
-fn normalize_record_class_name(name: &str) -> Option<String> {
-    if valid_type_name(name) {
-        return Some(name.to_string());
-    }
-    if valid_record_type_fragment(name) {
-        return Some(format!("<{name}>"));
-    }
-    None
-}
-
 fn valid_type_name(name: &str) -> bool {
     let Some(inner) = name
         .strip_prefix('<')
@@ -3482,7 +3472,7 @@ mod tests {
         assert!(record_definition.projection.source_span.is_some());
         assert_eq!(
             record_definition.expression.to_string(),
-            "`record` name record-field* `end` => frontend-class"
+            "`record` record-name record-field* `end` => frontend-class"
         );
     }
 
