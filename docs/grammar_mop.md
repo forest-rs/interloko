@@ -144,25 +144,34 @@ embedded grammar source:
 ```text
 grammar calculator
 rule calculator-region = calculator-function*
-rule calculator-function = name `=` expression => frontend-function
+rule calculator-function = name `=` expression
+  => emit-function(name: name, body: expression)
 rule expression = term additive-tail*
-rule additive-tail = add-op term
+  => fold-binary(lhs: term, tails: additive-tail*)
+rule additive-tail = add-op term => emit-binary-tail(op: add-op, rhs: term)
 rule add-op = `+` | `-`
 rule term = factor multiplicative-tail*
+  => fold-binary(lhs: factor, tails: multiplicative-tail*)
 rule multiplicative-tail = `*` factor
-rule factor = parenthesized | call | number | name
+  => emit-binary-tail(op: "*", rhs: factor)
+rule factor = parenthesized | call | number-literal | name-ref
 rule parenthesized = `(` expression `)`
-rule call = name `(` argument-list? `)`
+rule number-literal = number => emit-integer(value: number)
+rule name-ref = name => emit-name(name: name)
+rule call = name `(` argument-list? `)` => emit-call(callee: name, args: argument-list*)
 rule argument-list = expression argument-tail*
-rule argument-tail = `,` expression
+  => emit-argument-list(first: expression, rest: argument-tail*)
+rule argument-tail = `,` expression => emit-argument-tail(value: expression)
 end
 ```
 
 A frontend metadata directive selects it by name:
 `// grammar-activate: calculator`. Later comment-delimited regions are
 recognized by the interpreted grammar and converted into structural function
-forms. Rust still performs parse-tree to `FrontendExpression` conversion and
-calculator-specific validation, but it is no longer a duplicate recognizer.
+forms through the `emit-function`, expression, call, and left-fold binary
+actions. Rust still implements those safe action primitives and
+calculator-specific validation, but it is no longer a duplicate recognizer or a
+bespoke expression-tree walker.
 
 `RecordsRegionGrammar` is also grammar-driven. Its direct rules are parsed from
 embedded grammar source:

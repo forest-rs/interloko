@@ -7,10 +7,11 @@ use crate::source_data::{self, SourceData};
 use crate::syntax::Span;
 
 use super::{
-    FrontendForm, FrontendSlot, GrammarAction, GrammarActionTerm, RuleExpression, StagedRuleCount,
+    FrontendBinaryOp, FrontendExpression, FrontendForm, FrontendSlot, GrammarAction,
+    GrammarActionTerm, RuleExpression, StagedRuleCount, frontend_expression_source_data,
     frontend_form_source_data, frontend_slot_source_data, parse_grammar_action,
-    projected_rule_expression, source_span_data, valid_record_field_name,
-    valid_record_type_fragment, valid_type_name,
+    projected_rule_expression, source_span_data, valid_calculator_function_name,
+    valid_record_field_name, valid_record_type_fragment, valid_type_name,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,9 +43,19 @@ pub(super) struct InterpretedParseError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum GrammarActionValue {
-    Text { value: String, span: Span },
+    Text {
+        value: String,
+        span: Span,
+    },
     FrontendSlot(FrontendSlot),
     FrontendForm(FrontendForm),
+    FrontendExpression(FrontendExpression),
+    FrontendExpressionList(Vec<FrontendExpression>),
+    BinaryTail {
+        op: FrontendBinaryOp,
+        rhs: FrontendExpression,
+        span: Span,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,6 +152,40 @@ pub(super) fn evaluate_rule_action(
             GrammarActionValue::FrontendForm(evaluate_emit_class(rules, node, &action)?)
         }
         "emit-slot" => GrammarActionValue::FrontendSlot(evaluate_emit_slot(node, &action)?),
+        "emit-function" => {
+            GrammarActionValue::FrontendForm(evaluate_emit_function(rules, node, &action)?)
+        }
+        "emit-integer" => {
+            GrammarActionValue::FrontendExpression(evaluate_emit_integer(node, &action)?)
+        }
+        "emit-name" => GrammarActionValue::FrontendExpression(evaluate_emit_name(node, &action)?),
+        "emit-call" => {
+            GrammarActionValue::FrontendExpression(evaluate_emit_call(rules, node, &action)?)
+        }
+        "emit-argument-list" => GrammarActionValue::FrontendExpressionList(
+            evaluate_emit_argument_list(rules, node, &action)?,
+        ),
+        "emit-argument-tail" => {
+            GrammarActionValue::FrontendExpressionList(Vec::from([action_expression_arg(
+                rules, node, &action, "value",
+            )?]))
+        }
+        "emit-binary-tail" => {
+            let op = action_text_arg(node, &action, "op")?;
+            let rhs = action_expression_arg(rules, node, &action, "rhs")?;
+            GrammarActionValue::BinaryTail {
+                op: binary_op_from_text(&op.value).ok_or_else(|| GrammarActionError {
+                    span: op.span,
+                    expected: "binary operator".to_string(),
+                    field: None,
+                })?,
+                span: Span::new(op.span.start, expr_span(&rhs).end),
+                rhs,
+            }
+        }
+        "fold-binary" => {
+            GrammarActionValue::FrontendExpression(evaluate_fold_binary(rules, node, &action)?)
+        }
         _ => {
             return Err(GrammarActionError {
                 span: node.span,
@@ -227,6 +272,91 @@ fn evaluate_emit_slot(
     Ok(slot)
 }
 
+fn evaluate_emit_function(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<FrontendForm, GrammarActionError> {
+    let name = action_text_arg(node, action, "name")?;
+    if !valid_calculator_function_name(name.value.trim()) {
+        return Err(GrammarActionError {
+            span: name.span,
+            expected: "`name = expression`".to_string(),
+            field: None,
+        });
+    }
+    let body = action_expression_arg(rules, node, action, "body")?;
+    Ok(FrontendForm::function(name.value.trim(), body, node.span))
+}
+
+fn evaluate_emit_integer(
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<FrontendExpression, GrammarActionError> {
+    let value = action_text_arg(node, action, "value")?;
+    Ok(FrontendExpression::Integer {
+        value: value.value.parse().map_err(|_| GrammarActionError {
+            span: value.span,
+            expected: "integer literal".to_string(),
+            field: None,
+        })?,
+        source_span: node.span,
+    })
+}
+
+fn evaluate_emit_name(
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<FrontendExpression, GrammarActionError> {
+    let name = action_text_arg(node, action, "name")?;
+    Ok(FrontendExpression::Name {
+        name: name.value,
+        source_span: node.span,
+    })
+}
+
+fn evaluate_emit_call(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<FrontendExpression, GrammarActionError> {
+    let callee = action_text_arg(node, action, "callee")?;
+    let args = action_expression_list_arg(rules, node, action, "args").unwrap_or_default();
+    Ok(FrontendExpression::Call {
+        callee: callee.value,
+        args,
+        source_span: node.span,
+    })
+}
+
+fn evaluate_emit_argument_list(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<Vec<FrontendExpression>, GrammarActionError> {
+    let mut args = Vec::from([action_expression_arg(rules, node, action, "first")?]);
+    args.extend(action_expression_list_arg(rules, node, action, "rest").unwrap_or_default());
+    Ok(args)
+}
+
+fn evaluate_fold_binary(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+) -> Result<FrontendExpression, GrammarActionError> {
+    let mut lhs = action_expression_arg(rules, node, action, "lhs")?;
+    for tail in action_binary_tails_arg(rules, node, action, "tails")? {
+        let source_span = Span::new(expr_span(&lhs).start, expr_span(&tail.rhs).end);
+        lhs = FrontendExpression::Binary {
+            op: tail.op,
+            lhs: alloc::boxed::Box::new(lhs),
+            rhs: alloc::boxed::Box::new(tail.rhs),
+            source_span,
+        };
+    }
+    Ok(lhs)
+}
+
 fn action_text_arg(
     node: &InterpretedRuleNode,
     action: &GrammarAction,
@@ -263,6 +393,127 @@ fn action_text_arg(
             field: None,
         }),
     }
+}
+
+fn action_expression_arg(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+    name: &str,
+) -> Result<FrontendExpression, GrammarActionError> {
+    let value = action_capture_value(rules, node, action, name)?;
+    match value {
+        GrammarActionValue::FrontendExpression(expression) => Ok(expression),
+        _ => Err(GrammarActionError {
+            span: node.span,
+            expected: format!("expression argument `{name}`"),
+            field: None,
+        }),
+    }
+}
+
+fn action_expression_list_arg(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+    name: &str,
+) -> Result<Vec<FrontendExpression>, GrammarActionError> {
+    let values = action_list_arg(rules, node, action, name)?;
+    let mut expressions = Vec::new();
+    for value in values {
+        match value {
+            GrammarActionValue::FrontendExpression(expression) => expressions.push(expression),
+            GrammarActionValue::FrontendExpressionList(items) => expressions.extend(items),
+            _ => {
+                return Err(GrammarActionError {
+                    span: node.span,
+                    expected: format!("expression list argument `{name}`"),
+                    field: None,
+                });
+            }
+        }
+    }
+    Ok(expressions)
+}
+
+fn action_binary_tails_arg(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+    name: &str,
+) -> Result<Vec<BinaryTail>, GrammarActionError> {
+    action_list_arg(rules, node, action, name)?
+        .into_iter()
+        .map(|value| match value {
+            GrammarActionValue::BinaryTail { op, rhs, span } => Ok(BinaryTail { op, rhs, span }),
+            _ => Err(GrammarActionError {
+                span: node.span,
+                expected: format!("binary tail argument `{name}`"),
+                field: None,
+            }),
+        })
+        .collect()
+}
+
+fn action_capture_value(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+    action: &GrammarAction,
+    name: &str,
+) -> Result<GrammarActionValue, GrammarActionError> {
+    let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
+        return Err(GrammarActionError {
+            span: node.span,
+            expected: format!("grammar action argument `{name}`"),
+            field: None,
+        });
+    };
+    let GrammarActionTerm::Capture { rule } = &arg.value else {
+        return Err(GrammarActionError {
+            span: node.span,
+            expected: format!("capture argument `{name}`"),
+            field: None,
+        });
+    };
+    let child = node
+        .children
+        .iter()
+        .find(|child| child.rule_name == *rule)
+        .ok_or_else(|| GrammarActionError {
+            span: node.span,
+            expected: format!("capture `{rule}`"),
+            field: None,
+        })?;
+    evaluate_node_value(rules, child)
+}
+
+fn evaluate_node_value(
+    rules: &[SourceAuthoredRule],
+    node: &InterpretedRuleNode,
+) -> Result<GrammarActionValue, GrammarActionError> {
+    if let Some(output) = evaluate_rule_action(rules, node)? {
+        return Ok(output.value);
+    }
+    if let Some(value) =
+        node.children
+            .iter()
+            .find_map(|child| match evaluate_node_value(rules, child) {
+                Ok(GrammarActionValue::FrontendExpression(expression)) => {
+                    Some(Ok(GrammarActionValue::FrontendExpression(expression)))
+                }
+                Ok(GrammarActionValue::FrontendExpressionList(items)) => {
+                    Some(Ok(GrammarActionValue::FrontendExpressionList(items)))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+    {
+        return value;
+    }
+    Ok(GrammarActionValue::Text {
+        value: node.text.trim().to_string(),
+        span: node.span,
+    })
 }
 
 fn action_bool_arg(action: &GrammarAction, name: &str) -> Option<bool> {
@@ -314,9 +565,34 @@ fn action_list_arg(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct BinaryTail {
+    op: FrontendBinaryOp,
+    rhs: FrontendExpression,
+    span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TextValue {
     value: String,
     span: Span,
+}
+
+fn binary_op_from_text(text: &str) -> Option<FrontendBinaryOp> {
+    match text.trim() {
+        "+" => Some(FrontendBinaryOp::Add),
+        "-" => Some(FrontendBinaryOp::Sub),
+        "*" => Some(FrontendBinaryOp::Mul),
+        _ => None,
+    }
+}
+
+fn expr_span(expression: &FrontendExpression) -> Span {
+    match expression {
+        FrontendExpression::Integer { source_span, .. }
+        | FrontendExpression::Name { source_span, .. }
+        | FrontendExpression::Call { source_span, .. }
+        | FrontendExpression::Binary { source_span, .. } => *source_span,
+    }
 }
 
 fn class_name_from_action_text(text: &str) -> Option<String> {
@@ -352,6 +628,20 @@ fn grammar_action_value_source_data(value: &GrammarActionValue) -> SourceData {
         ),
         GrammarActionValue::FrontendSlot(slot) => frontend_slot_source_data(slot),
         GrammarActionValue::FrontendForm(form) => frontend_form_source_data(form),
+        GrammarActionValue::FrontendExpression(expression) => {
+            frontend_expression_source_data(expression)
+        }
+        GrammarActionValue::FrontendExpressionList(items) => {
+            SourceData::list(items.iter().map(frontend_expression_source_data).collect())
+        }
+        GrammarActionValue::BinaryTail { op, rhs, span } => SourceData::record(
+            "binary-tail",
+            vec![
+                source_data::field("op", SourceData::symbol(op.as_str())),
+                source_data::field("rhs", frontend_expression_source_data(rhs)),
+                source_span_data(*span),
+            ],
+        ),
     }
 }
 

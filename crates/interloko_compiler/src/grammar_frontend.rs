@@ -3651,7 +3651,7 @@ mod tests {
         assert!(calculator_function.projection.source_span.is_some());
         assert_eq!(
             calculator_function.expression.to_string(),
-            "name `=` expression => frontend-function"
+            "name `=` expression => grammar-action(name: emit-function, args: [grammar-action-arg(name: name, value: capture(rule: name)), grammar-action-arg(name: body, value: capture(rule: expression))])"
         );
 
         let records_grammar = registry.staged_records(&[RECORDS_GRAMMAR_SLUG]);
@@ -3932,8 +3932,11 @@ mod tests {
                 .contains("helper() + 2")
         );
         assert!(
+            source_data::dump(&report.staged_regions[1].data).contains("grammar-action-output")
+        );
+        assert!(
             source_data::dump(&report.staged_regions[1].data)
-                .contains("calculator-function(name: main")
+                .contains("frontend-function(name: main")
         );
     }
 

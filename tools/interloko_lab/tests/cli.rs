@@ -453,7 +453,8 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert!(trace.contains("extension emissions:"));
     assert!(trace.contains("extension provenance:"));
     assert!(trace.contains("forms=[frontend-function(name: main"));
-    assert!(trace.contains("calculator-function(name: main"));
+    assert!(trace.contains("grammar-action-output"));
+    assert!(trace.contains("frontend-function(name: main"));
     assert!(trace.contains("adapter=calculator"));
     assert!(trace.contains("directive="));
     assert!(trace.contains("define function main()"));
