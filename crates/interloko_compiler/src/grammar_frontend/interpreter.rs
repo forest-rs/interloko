@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -68,8 +69,42 @@ pub(super) struct GrammarActionOutput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct GrammarActionError {
     pub(super) span: Span,
-    pub(super) expected: String,
-    pub(super) field: Option<String>,
+    pub(super) expected: Box<str>,
+    pub(super) field: Option<Box<str>>,
+    pub(super) action: Option<Box<str>>,
+    pub(super) arg: Option<Box<str>>,
+    pub(super) rule: Option<Box<str>>,
+}
+
+impl GrammarActionError {
+    fn new(span: Span, expected: impl Into<String>) -> Self {
+        Self {
+            span,
+            expected: expected.into().into_boxed_str(),
+            field: None,
+            action: None,
+            arg: None,
+            rule: None,
+        }
+    }
+
+    fn with_field(mut self, field: impl Into<String>) -> Self {
+        self.field = Some(field.into().into_boxed_str());
+        self
+    }
+
+    fn with_arg(mut self, arg: impl Into<String>) -> Self {
+        self.arg = Some(arg.into().into_boxed_str());
+        self
+    }
+
+    fn with_action_context(mut self, action: &str, rule: &str) -> Self {
+        self.action
+            .get_or_insert_with(|| action.to_string().into_boxed_str());
+        self.rule
+            .get_or_insert_with(|| rule.to_string().into_boxed_str());
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,51 +184,45 @@ pub(super) fn evaluate_rule_action(
     };
     let value = match action.name.as_str() {
         "emit-class" => {
-            GrammarActionValue::FrontendForm(evaluate_emit_class(rules, node, &action)?)
+            evaluate_emit_class(rules, node, &action).map(GrammarActionValue::FrontendForm)
         }
-        "emit-slot" => GrammarActionValue::FrontendSlot(evaluate_emit_slot(node, &action)?),
+        "emit-slot" => evaluate_emit_slot(node, &action).map(GrammarActionValue::FrontendSlot),
         "emit-function" => {
-            GrammarActionValue::FrontendForm(evaluate_emit_function(rules, node, &action)?)
+            evaluate_emit_function(rules, node, &action).map(GrammarActionValue::FrontendForm)
         }
         "emit-integer" => {
-            GrammarActionValue::FrontendExpression(evaluate_emit_integer(node, &action)?)
+            evaluate_emit_integer(node, &action).map(GrammarActionValue::FrontendExpression)
         }
-        "emit-name" => GrammarActionValue::FrontendExpression(evaluate_emit_name(node, &action)?),
+        "emit-name" => {
+            evaluate_emit_name(node, &action).map(GrammarActionValue::FrontendExpression)
+        }
         "emit-call" => {
-            GrammarActionValue::FrontendExpression(evaluate_emit_call(rules, node, &action)?)
+            evaluate_emit_call(rules, node, &action).map(GrammarActionValue::FrontendExpression)
         }
-        "emit-argument-list" => GrammarActionValue::FrontendExpressionList(
-            evaluate_emit_argument_list(rules, node, &action)?,
-        ),
-        "emit-argument-tail" => {
-            GrammarActionValue::FrontendExpressionList(Vec::from([action_expression_arg(
-                rules, node, &action, "value",
-            )?]))
-        }
-        "emit-binary-tail" => {
+        "emit-argument-list" => evaluate_emit_argument_list(rules, node, &action)
+            .map(GrammarActionValue::FrontendExpressionList),
+        "emit-argument-tail" => action_expression_arg(rules, node, &action, "value")
+            .map(|value| GrammarActionValue::FrontendExpressionList(Vec::from([value]))),
+        "emit-binary-tail" => (|| {
             let op = action_text_arg(node, &action, "op")?;
             let rhs = action_expression_arg(rules, node, &action, "rhs")?;
-            GrammarActionValue::BinaryTail {
-                op: binary_op_from_text(&op.value).ok_or_else(|| GrammarActionError {
-                    span: op.span,
-                    expected: "binary operator".to_string(),
-                    field: None,
+            Ok(GrammarActionValue::BinaryTail {
+                op: binary_op_from_text(&op.value).ok_or_else(|| {
+                    GrammarActionError::new(op.span, "binary operator").with_arg("op")
                 })?,
                 span: Span::new(op.span.start, expr_span(&rhs).end),
                 rhs,
-            }
-        }
+            })
+        })(),
         "fold-binary" => {
-            GrammarActionValue::FrontendExpression(evaluate_fold_binary(rules, node, &action)?)
+            evaluate_fold_binary(rules, node, &action).map(GrammarActionValue::FrontendExpression)
         }
-        _ => {
-            return Err(GrammarActionError {
-                span: node.span,
-                expected: format!("known grammar action `{}`", action.name),
-                field: None,
-            });
-        }
-    };
+        _ => Err(GrammarActionError::new(
+            node.span,
+            format!("known grammar action `{}`", action.name),
+        )),
+    }
+    .map_err(|error| error.with_action_context(&action.name, &node.rule_name))?;
     Ok(Some(GrammarActionOutput {
         data: grammar_action_output_source_data(&action, &value),
         action,
@@ -207,12 +236,8 @@ fn evaluate_emit_class(
     action: &GrammarAction,
 ) -> Result<FrontendForm, GrammarActionError> {
     let name = action_text_arg(node, action, "name")?;
-    let class_name =
-        class_name_from_action_text(&name.value).ok_or_else(|| GrammarActionError {
-            span: name.span,
-            expected: "valid class name".to_string(),
-            field: None,
-        })?;
+    let class_name = class_name_from_action_text(&name.value)
+        .ok_or_else(|| GrammarActionError::new(name.span, "valid class name").with_arg("name"))?;
     let superclass = action_text_arg(node, action, "superclass")
         .map(|value| value.value)
         .unwrap_or_else(|_| "<object>".to_string());
@@ -220,20 +245,15 @@ fn evaluate_emit_class(
         .into_iter()
         .map(|value| match value {
             GrammarActionValue::FrontendSlot(slot) => Ok(slot),
-            _ => Err(GrammarActionError {
-                span: node.span,
-                expected: "slot action output".to_string(),
-                field: None,
-            }),
+            _ => Err(GrammarActionError::new(node.span, "slot action output")),
         })
         .collect::<Result<Vec<_>, _>>()?;
     for (index, slot) in slots.iter().enumerate() {
         if slots[..index].iter().any(|prior| prior.name == slot.name) {
-            return Err(GrammarActionError {
-                span: slot.source_span,
-                expected: "unique record field".to_string(),
-                field: Some(slot.name.clone()),
-            });
+            return Err(
+                GrammarActionError::new(slot.source_span, "unique record field")
+                    .with_field(slot.name.clone()),
+            );
         }
     }
     Ok(FrontendForm::class(
@@ -248,18 +268,14 @@ fn evaluate_emit_slot(
     let name = action_text_arg(node, action, "name")?;
     let type_name = action_text_arg(node, action, "type")?;
     if !valid_record_field_name(name.value.trim()) {
-        return Err(GrammarActionError {
-            span: name.span,
-            expected: "valid record field".to_string(),
-            field: Some(name.value.clone()),
-        });
+        return Err(GrammarActionError::new(name.span, "valid record field")
+            .with_arg("name")
+            .with_field(name.value.clone()));
     }
     if !valid_type_name(type_name.value.trim()) {
-        return Err(GrammarActionError {
-            span: type_name.span,
-            expected: "field type name".to_string(),
-            field: Some(name.value.clone()),
-        });
+        return Err(GrammarActionError::new(type_name.span, "field type name")
+            .with_arg("type")
+            .with_field(name.value.clone()));
     }
     let init_keyword = action_text_arg(node, action, "init-keyword")
         .map(|value| value.value)
@@ -279,11 +295,7 @@ fn evaluate_emit_function(
 ) -> Result<FrontendForm, GrammarActionError> {
     let name = action_text_arg(node, action, "name")?;
     if !valid_calculator_function_name(name.value.trim()) {
-        return Err(GrammarActionError {
-            span: name.span,
-            expected: "`name = expression`".to_string(),
-            field: None,
-        });
+        return Err(GrammarActionError::new(name.span, "`name = expression`").with_arg("name"));
     }
     let body = action_expression_arg(rules, node, action, "body")?;
     Ok(FrontendForm::function(name.value.trim(), body, node.span))
@@ -295,10 +307,8 @@ fn evaluate_emit_integer(
 ) -> Result<FrontendExpression, GrammarActionError> {
     let value = action_text_arg(node, action, "value")?;
     Ok(FrontendExpression::Integer {
-        value: value.value.parse().map_err(|_| GrammarActionError {
-            span: value.span,
-            expected: "integer literal".to_string(),
-            field: None,
+        value: value.value.parse().map_err(|_| {
+            GrammarActionError::new(value.span, "integer literal").with_arg("value")
         })?,
         source_span: node.span,
     })
@@ -363,11 +373,11 @@ fn action_text_arg(
     name: &str,
 ) -> Result<TextValue, GrammarActionError> {
     let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
-        return Err(GrammarActionError {
-            span: node.span,
-            expected: format!("grammar action argument `{name}`"),
-            field: None,
-        });
+        return Err(GrammarActionError::new(
+            node.span,
+            format!("grammar action argument `{name}`"),
+        )
+        .with_arg(name));
     };
     match &arg.value {
         GrammarActionTerm::Capture { rule } => node
@@ -378,20 +388,16 @@ fn action_text_arg(
                 value: child.text.trim().to_string(),
                 span: child.span,
             })
-            .ok_or_else(|| GrammarActionError {
-                span: node.span,
-                expected: format!("capture `{rule}`"),
-                field: None,
+            .ok_or_else(|| {
+                GrammarActionError::new(node.span, format!("capture `{rule}`")).with_arg(name)
             }),
         GrammarActionTerm::Literal(value) => Ok(TextValue {
             value: value.clone(),
             span: node.span,
         }),
-        _ => Err(GrammarActionError {
-            span: node.span,
-            expected: format!("text argument `{name}`"),
-            field: None,
-        }),
+        _ => Err(
+            GrammarActionError::new(node.span, format!("text argument `{name}`")).with_arg(name),
+        ),
     }
 }
 
@@ -404,11 +410,10 @@ fn action_expression_arg(
     let value = action_capture_value(rules, node, action, name)?;
     match value {
         GrammarActionValue::FrontendExpression(expression) => Ok(expression),
-        _ => Err(GrammarActionError {
-            span: node.span,
-            expected: format!("expression argument `{name}`"),
-            field: None,
-        }),
+        _ => Err(
+            GrammarActionError::new(node.span, format!("expression argument `{name}`"))
+                .with_arg(name),
+        ),
     }
 }
 
@@ -425,11 +430,11 @@ fn action_expression_list_arg(
             GrammarActionValue::FrontendExpression(expression) => expressions.push(expression),
             GrammarActionValue::FrontendExpressionList(items) => expressions.extend(items),
             _ => {
-                return Err(GrammarActionError {
-                    span: node.span,
-                    expected: format!("expression list argument `{name}`"),
-                    field: None,
-                });
+                return Err(GrammarActionError::new(
+                    node.span,
+                    format!("expression list argument `{name}`"),
+                )
+                .with_arg(name));
             }
         }
     }
@@ -446,11 +451,10 @@ fn action_binary_tails_arg(
         .into_iter()
         .map(|value| match value {
             GrammarActionValue::BinaryTail { op, rhs, span } => Ok(BinaryTail { op, rhs, span }),
-            _ => Err(GrammarActionError {
-                span: node.span,
-                expected: format!("binary tail argument `{name}`"),
-                field: None,
-            }),
+            _ => Err(
+                GrammarActionError::new(node.span, format!("binary tail argument `{name}`"))
+                    .with_arg(name),
+            ),
         })
         .collect()
 }
@@ -462,27 +466,23 @@ fn action_capture_value(
     name: &str,
 ) -> Result<GrammarActionValue, GrammarActionError> {
     let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
-        return Err(GrammarActionError {
-            span: node.span,
-            expected: format!("grammar action argument `{name}`"),
-            field: None,
-        });
+        return Err(GrammarActionError::new(
+            node.span,
+            format!("grammar action argument `{name}`"),
+        )
+        .with_arg(name));
     };
     let GrammarActionTerm::Capture { rule } = &arg.value else {
-        return Err(GrammarActionError {
-            span: node.span,
-            expected: format!("capture argument `{name}`"),
-            field: None,
-        });
+        return Err(
+            GrammarActionError::new(node.span, format!("capture argument `{name}`")).with_arg(name),
+        );
     };
     let child = node
         .children
         .iter()
         .find(|child| child.rule_name == *rule)
-        .ok_or_else(|| GrammarActionError {
-            span: node.span,
-            expected: format!("capture `{rule}`"),
-            field: None,
+        .ok_or_else(|| {
+            GrammarActionError::new(node.span, format!("capture `{rule}`")).with_arg(name)
         })?;
     evaluate_node_value(rules, child)
 }
@@ -534,18 +534,16 @@ fn action_list_arg(
     name: &str,
 ) -> Result<Vec<GrammarActionValue>, GrammarActionError> {
     let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
-        return Err(GrammarActionError {
-            span: node.span,
-            expected: format!("grammar action argument `{name}`"),
-            field: None,
-        });
+        return Err(GrammarActionError::new(
+            node.span,
+            format!("grammar action argument `{name}`"),
+        )
+        .with_arg(name));
     };
     let GrammarActionTerm::CaptureAll { rule } = &arg.value else {
-        return Err(GrammarActionError {
-            span: node.span,
-            expected: format!("list argument `{name}`"),
-            field: None,
-        });
+        return Err(
+            GrammarActionError::new(node.span, format!("list argument `{name}`")).with_arg(name),
+        );
     };
     node.children
         .iter()

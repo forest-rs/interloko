@@ -3,7 +3,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticArg};
 use crate::source_data::{self, SourceData};
 use crate::syntax::Span;
 
@@ -15,7 +15,7 @@ use super::interpreter::{
 use super::{
     CALCULATOR_GRAMMAR_NAME, GrammarId, GrammarProjection, GrammarRule, GrammarRuleId,
     ProjectionOrigin, StagedRegionEmission, grammar_rule_expression_data_from_expr,
-    source_span_data, staged_expected_diagnostic, valid_calculator_function_name,
+    source_span_data, staged_expected_diagnostic,
 };
 
 const CALCULATOR_GRAMMAR_RESOURCE: &str = "grammars/calculator.grammar";
@@ -68,11 +68,26 @@ fn emission_from_interpreted_parse(
                 "calculator",
                 "calculator action",
             )),
-            Err(error) => diagnostics.push(staged_expected_diagnostic(
-                error.span,
-                "calculator",
-                &error.expected,
-            )),
+            Err(error) => {
+                let mut diagnostic =
+                    staged_expected_diagnostic(error.span, "calculator", error.expected.as_ref());
+                if let Some(rule) = error.rule {
+                    diagnostic = diagnostic.with_arg(DiagnosticArg::text("rule", rule.to_string()));
+                }
+                if let Some(action) = error.action {
+                    diagnostic =
+                        diagnostic.with_arg(DiagnosticArg::text("action", action.to_string()));
+                }
+                if let Some(arg) = error.arg {
+                    diagnostic =
+                        diagnostic.with_arg(DiagnosticArg::text("argument", arg.to_string()));
+                }
+                if let Some(field) = error.field {
+                    diagnostic =
+                        diagnostic.with_arg(DiagnosticArg::text("field", field.to_string()));
+                }
+                diagnostics.push(diagnostic);
+            }
         }
     }
     if functions.is_empty() && diagnostics.is_empty() {
@@ -139,58 +154,16 @@ fn calculator_parse_error_emission(
 }
 
 fn calculator_parse_error_diagnostic(
-    body: &str,
-    source_offset: usize,
+    _body: &str,
+    _source_offset: usize,
     error: &InterpretedParseError,
 ) -> Diagnostic {
-    if let Some(diagnostic) = calculator_shape_diagnostic(body, source_offset) {
-        return diagnostic;
-    }
     let expected = if error.expected.is_empty() {
         "calculator grammar".to_string()
     } else {
         error.expected.join(" or ")
     };
     staged_expected_diagnostic(error.span, "calculator", &expected)
-}
-
-fn calculator_shape_diagnostic(body: &str, source_offset: usize) -> Option<Diagnostic> {
-    let mut offset = source_offset;
-    for line in body.split_inclusive('\n') {
-        let line_start = offset;
-        offset += line.len();
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            continue;
-        }
-        let leading = line.find(trimmed).unwrap_or(0);
-        let span = Span::new(line_start + leading, line_start + leading + trimmed.len());
-        let Some((name, expression)) = trimmed.split_once('=') else {
-            return Some(staged_expected_diagnostic(
-                span,
-                "calculator",
-                "`name = expression`",
-            ));
-        };
-        if name.trim().is_empty()
-            || expression.trim().is_empty()
-            || !valid_calculator_function_name(name.trim())
-        {
-            return Some(staged_expected_diagnostic(
-                span,
-                "calculator",
-                "`name = expression`",
-            ));
-        }
-        let expression_offset = trimmed.find(expression.trim()).unwrap_or(0);
-        let expression_start = span.start + expression_offset;
-        return Some(staged_expected_diagnostic(
-            Span::new(expression_start, expression_start + expression.trim().len()),
-            "calculator",
-            "calculator expression",
-        ));
-    }
-    None
 }
 
 pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {

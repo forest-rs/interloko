@@ -3677,7 +3677,7 @@ mod tests {
         );
         assert_eq!(
             record_definition.expression.to_string(),
-            "`record` record-name record-field* `end` => grammar-action(name: emit-class, args: [grammar-action-arg(name: name, value: capture(rule: record-name)), grammar-action-arg(name: superclass, value: literal(value: \"<object>\")), grammar-action-arg(name: slots, value: capture-all(rule: record-field))])"
+            "`record` record-name record-field+ `end` => grammar-action(name: emit-class, args: [grammar-action-arg(name: name, value: capture(rule: record-name)), grammar-action-arg(name: superclass, value: literal(value: \"<object>\")), grammar-action-arg(name: slots, value: capture-all(rule: record-field))])"
         );
     }
 
@@ -3992,7 +3992,7 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
-                    == Some("`name = expression`".to_string())
+                    == Some("`=`".to_string())
                     && diagnostic_arg(diagnostic, "adapter") == Some("calculator".to_string()))
         );
     }
@@ -4090,7 +4090,7 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
-                    == Some("`field: <type>`".to_string())
+                    == Some("`:`".to_string())
                     && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string()))
         );
     }
@@ -4112,6 +4112,9 @@ mod tests {
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
                     == Some("valid record field".to_string())
                     && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string())
+                    && diagnostic_arg(diagnostic, "rule") == Some("record-field".to_string())
+                    && diagnostic_arg(diagnostic, "action") == Some("emit-slot".to_string())
+                    && diagnostic_arg(diagnostic, "argument") == Some("name".to_string())
                     && diagnostic_arg(diagnostic, "field") == Some("123".to_string()))
         );
     }
@@ -4129,7 +4132,7 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic_arg(diagnostic, "expected")
-                    == Some("`record name`".to_string())
+                    == Some("`record`".to_string())
                     && diagnostic_arg(diagnostic, "adapter") == Some("records".to_string()))
         );
     }

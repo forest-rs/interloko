@@ -15,7 +15,7 @@ use super::interpreter::{
 use super::{
     GrammarId, GrammarProjection, GrammarRule, GrammarRuleId, ProjectionOrigin,
     RECORDS_GRAMMAR_NAME, StagedRegionEmission, grammar_rule_expression_data_from_expr,
-    source_span_data, staged_expected_diagnostic, valid_record_field_name,
+    source_span_data, staged_expected_diagnostic,
 };
 
 const RECORDS_GRAMMAR_RESOURCE: &str = "grammars/records.grammar";
@@ -70,9 +70,21 @@ fn emission_from_interpreted_parse(
             )),
             Err(error) => {
                 let mut diagnostic =
-                    staged_expected_diagnostic(error.span, "records", &error.expected);
+                    staged_expected_diagnostic(error.span, "records", error.expected.as_ref());
+                if let Some(rule) = error.rule {
+                    diagnostic = diagnostic.with_arg(DiagnosticArg::text("rule", rule.to_string()));
+                }
+                if let Some(action) = error.action {
+                    diagnostic =
+                        diagnostic.with_arg(DiagnosticArg::text("action", action.to_string()));
+                }
+                if let Some(arg) = error.arg {
+                    diagnostic =
+                        diagnostic.with_arg(DiagnosticArg::text("argument", arg.to_string()));
+                }
                 if let Some(field) = error.field {
-                    diagnostic = diagnostic.with_arg(DiagnosticArg::text("field", field));
+                    diagnostic =
+                        diagnostic.with_arg(DiagnosticArg::text("field", field.to_string()));
                 }
                 diagnostics.push(diagnostic);
             }
@@ -146,61 +158,12 @@ fn records_parse_error_diagnostic(
     source_offset: usize,
     error: &InterpretedParseError,
 ) -> Diagnostic {
-    if let Some(diagnostic) = record_shape_diagnostic(body, source_offset) {
-        return diagnostic;
-    }
     let expected = joined_expected(error);
     staged_expected_diagnostic(
         parse_error_span(body, source_offset, error.span),
         "records",
         &expected,
     )
-}
-
-fn record_shape_diagnostic(body: &str, source_offset: usize) -> Option<Diagnostic> {
-    let mut in_record = false;
-    let mut offset = source_offset;
-    for line in body.split_inclusive('\n') {
-        let line_start = offset;
-        offset += line.len();
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            continue;
-        }
-        let leading = line.find(trimmed).unwrap_or(0);
-        let span = Span::new(line_start + leading, line_start + leading + trimmed.len());
-        if !in_record {
-            if trimmed.starts_with("record ") {
-                in_record = true;
-                continue;
-            }
-            return Some(staged_expected_diagnostic(span, "records", "`record name`"));
-        }
-        if trimmed == "end" {
-            in_record = false;
-            continue;
-        }
-        let Some((name, _)) = trimmed.split_once(':') else {
-            return Some(staged_expected_diagnostic(
-                span,
-                "records",
-                "`field: <type>`",
-            ));
-        };
-        let name = name.trim();
-        if !valid_record_field_name(name) {
-            return Some(
-                staged_expected_diagnostic(span, "records", "valid record field")
-                    .with_arg(DiagnosticArg::text("field", name)),
-            );
-        }
-        return Some(staged_expected_diagnostic(
-            span,
-            "records",
-            "`field: <type>`",
-        ));
-    }
-    None
 }
 
 fn joined_expected(error: &InterpretedParseError) -> String {

@@ -1,5 +1,5 @@
 grammar calculator
-rule calculator-region = calculator-function*
+rule calculator-region = calculator-function+
 rule calculator-function = name `=` expression => emit-function(name: name, body: expression)
 rule expression = term additive-tail* => fold-binary(lhs: term, tails: additive-tail*)
 rule additive-tail = add-op term => emit-binary-tail(op: add-op, rhs: term)
