@@ -63,6 +63,8 @@ fn transcript_definitions_expressions_and_inspection_commands() {
     assert!(stdout.contains("eop "));
     assert!(stdout.contains("artifact graph"));
     assert!(stdout.contains("object function:f0"));
+    assert!(stdout.contains("bind, source="));
+    assert!(stdout.contains("runtime-result, source="));
     assert!(stdout.contains("affordances function:f0"));
     assert!(stdout.contains("cleared"));
     assert!(stdout.contains("(empty)"));

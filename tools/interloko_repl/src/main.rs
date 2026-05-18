@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
-use interloko_compiler::identity::SourceFileId;
+use interloko_compiler::identity::{ArtifactKey, SourceFileId};
 use interloko_compiler::sem;
 use interloko_compiler::session::{
     DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, FunctionRunResult,
@@ -1553,7 +1553,7 @@ fn format_environment_object(object: &EnvironmentObject) -> String {
         let _ = writeln!(out, "  <none>");
     } else {
         for key in &object.artifacts.keys {
-            let _ = writeln!(out, "  {key}");
+            let _ = writeln!(out, "  {}", format_artifact_key(key));
         }
     }
     let _ = writeln!(out, "affordances:");
@@ -1569,6 +1569,19 @@ fn format_environment_object(object: &EnvironmentObject) -> String {
     let _ = writeln!(out, "inspection:");
     let _ = writeln!(out, "  {}", object.inspection.detail);
     out
+}
+
+fn format_artifact_key(key: &ArtifactKey) -> String {
+    let definition = key
+        .definition
+        .map_or_else(|| "<none>".to_string(), |definition| definition.to_string());
+    format!(
+        "{} ({}, source={}, definition={})",
+        key,
+        key.kind.as_str(),
+        key.source_file,
+        definition
+    )
 }
 
 fn format_affordances(object: &EnvironmentObject) -> String {
