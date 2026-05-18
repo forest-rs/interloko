@@ -2190,26 +2190,51 @@ fn form_effective_grammar_rule(
     artifacts: &SessionArtifacts,
     activation: &grammar_frontend::GrammarActivation,
 ) -> Option<String> {
-    let rule_name = form_grammar_rule_name(entry.form.parsed_kind)?;
+    let application = form_rule_application(entry, artifacts, activation)?;
     artifacts
         .grammar_parse
         .effective_rules
         .iter()
-        .find(|rule| rule.grammar == activation.grammar && rule.name == rule_name)
+        .find(|rule| rule.grammar == activation.grammar && rule.id == application.rule)
         .map(grammar_frontend::effective_grammar_rule_object_id)
 }
 
-fn form_grammar_rule_name(kind: Option<TopLevelFormKind>) -> Option<&'static str> {
-    // Keep this paired with TopLevelFormKind and the base grammar's projected
-    // rule names. A fuller parse trace should eventually answer this from
-    // span-to-rule provenance instead of this top-level-form heuristic.
-    match kind {
-        Some(TopLevelFormKind::Class) => Some("class-definition"),
-        Some(TopLevelFormKind::Generic) => Some("generic-definition"),
-        Some(TopLevelFormKind::Method) => Some("method-definition"),
-        Some(TopLevelFormKind::Function) => Some("function-definition"),
-        _ => None,
-    }
+fn form_rule_application<'a>(
+    entry: &AcceptedDefinition,
+    artifacts: &'a SessionArtifacts,
+    activation: &grammar_frontend::GrammarActivation,
+) -> Option<&'a grammar_frontend::GrammarRuleApplication> {
+    artifacts
+        .grammar_parse
+        .provenance
+        .applications
+        .iter()
+        .filter(|application| application.activation == activation.id)
+        .find(|application| {
+            application.span == entry.form.span && application.rule_name != "source-file"
+        })
+        .or_else(|| {
+            artifacts
+                .grammar_parse
+                .provenance
+                .applications
+                .iter()
+                .filter(|application| application.activation == activation.id)
+                .find(|application| application.span == entry.form.span)
+        })
+        .or_else(|| {
+            artifacts
+                .grammar_parse
+                .provenance
+                .applications
+                .iter()
+                .filter(|application| application.activation == activation.id)
+                .filter(|application| application.rule_name != "source-file")
+                .filter(|application| span_contains(application.span, entry.form.span))
+                .min_by_key(|application| {
+                    application.span.end.saturating_sub(application.span.start)
+                })
+        })
 }
 
 fn span_contains(outer: syntax::Span, inner: syntax::Span) -> bool {

@@ -945,6 +945,21 @@ pub struct GrammarRuleProvenance {
     pub node_count: usize,
 }
 
+/// One grammar rule application recorded from parser output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrammarRuleApplication {
+    /// Parse activation that applied the rule.
+    pub activation: GrammarActivationId,
+    /// Grammar whose effective rule was applied.
+    pub grammar: GrammarId,
+    /// Effective rule applied by the parser.
+    pub rule: GrammarRuleId,
+    /// Stable rule name.
+    pub rule_name: String,
+    /// Source span covered by the parser node.
+    pub span: Span,
+}
+
 /// Grammar-specific view of one parser diagnostic.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarDiagnosticFact {
@@ -981,6 +996,8 @@ pub struct ParseProvenance {
     pub grammar_stack: GrammarStack,
     /// Activations that parsed the source.
     pub activations: Vec<GrammarActivationId>,
+    /// Individual parser rule applications.
+    pub applications: Vec<GrammarRuleApplication>,
     /// Rule provenance summaries.
     pub rules: Vec<GrammarRuleProvenance>,
     /// Grammar-specific diagnostic facts.
@@ -1339,7 +1356,8 @@ fn parse_file_with_records(
         .filter(|rule| rule.grammar == active_grammar)
         .cloned()
         .collect::<Vec<_>>();
-    let provenance_rules = rule_provenance(&active_effective_rules, &syntax.root);
+    let applications = rule_applications(&active_effective_rules, &activation, &syntax.root);
+    let provenance_rules = rule_provenance(&active_effective_rules, &applications);
     let grammar_diagnostics = grammar_diagnostic_facts(
         &syntax.diagnostics,
         &syntax.root,
@@ -1356,6 +1374,7 @@ fn parse_file_with_records(
         environment: records.environment.id,
         grammar_stack: grammar_stack.clone(),
         activations: vec![activation.id],
+        applications,
         rules: provenance_rules,
         diagnostics: grammar_diagnostics.clone(),
     };
@@ -1745,7 +1764,8 @@ fn parse_staged_file(
     syntax.diagnostics.extend(diagnostics);
 
     let active_effective_rules = records.effective_rules.to_vec();
-    let mut provenance_rules = rule_provenance(&active_effective_rules, &syntax.root);
+    let applications = rule_applications(&active_effective_rules, &activations[0], &syntax.root);
+    let mut provenance_rules = rule_provenance(&active_effective_rules, &applications);
     for (grammar, rule_names) in staged_rule_counts {
         for rule_name in rule_names {
             add_staged_rule_count(
@@ -1782,6 +1802,7 @@ fn parse_staged_file(
         environment: records.environment.id,
         grammar_stack: grammar_stack.clone(),
         activations: activations.iter().map(|activation| activation.id).collect(),
+        applications,
         rules: provenance_rules,
         diagnostics: grammar_diagnostics.clone(),
     };
@@ -3301,12 +3322,58 @@ fn effective_rule_id_by_name(
         .map(|rule| rule.id)
 }
 
-fn rule_provenance(rules: &[EffectiveGrammarRule], root: &CstNode) -> Vec<GrammarRuleProvenance> {
+fn rule_applications(
+    rules: &[EffectiveGrammarRule],
+    activation: &GrammarActivation,
+    root: &CstNode,
+) -> Vec<GrammarRuleApplication> {
+    let mut applications = Vec::new();
+    collect_rule_applications(rules, activation, root, &mut applications);
+    applications
+}
+
+fn collect_rule_applications(
+    rules: &[EffectiveGrammarRule],
+    activation: &GrammarActivation,
+    node: &CstNode,
+    applications: &mut Vec<GrammarRuleApplication>,
+) {
+    if let Some(name) = cst_rule_name(node.kind)
+        && let Some(rule) = rules
+            .iter()
+            .find(|rule| rule.grammar == activation.grammar && rule.name == name)
+    {
+        applications.push(GrammarRuleApplication {
+            activation: activation.id,
+            grammar: activation.grammar,
+            rule: rule.id,
+            rule_name: rule.name.clone(),
+            span: node.span,
+        });
+    }
+    for child in &node.children {
+        if let CstElement::Node(child) = child {
+            collect_rule_applications(rules, activation, child, applications);
+        }
+    }
+}
+
+fn rule_provenance(
+    rules: &[EffectiveGrammarRule],
+    applications: &[GrammarRuleApplication],
+) -> Vec<GrammarRuleProvenance> {
     let mut counts = rules
         .iter()
         .map(|rule| (rule.id, rule.name.clone(), 0_usize))
         .collect::<Vec<_>>();
-    count_node(root, &mut counts);
+    for application in applications {
+        if let Some((_, _, count)) = counts
+            .iter_mut()
+            .find(|(rule, _, _)| *rule == application.rule)
+        {
+            *count = count.saturating_add(1);
+        }
+    }
     counts
         .into_iter()
         .map(|(rule, rule_name, node_count)| GrammarRuleProvenance {
@@ -3389,21 +3456,6 @@ fn find_cst_rule_name_at_span(
 fn span_contains(outer: Span, inner: Span) -> bool {
     outer.start <= inner.start
         && (inner.end <= outer.end || inner.start == inner.end && inner.start <= outer.end)
-}
-
-fn count_node(node: &CstNode, counts: &mut [(GrammarRuleId, String, usize)]) {
-    if let Some(name) = cst_rule_name(node.kind)
-        && let Some((_, _, count)) = counts
-            .iter_mut()
-            .find(|(_, rule_name, _)| rule_name == name)
-    {
-        *count = count.saturating_add(1);
-    }
-    for child in &node.children {
-        if let CstElement::Node(child) = child {
-            count_node(child, counts);
-        }
-    }
 }
 
 fn cst_rule_name(kind: CstKind) -> Option<&'static str> {

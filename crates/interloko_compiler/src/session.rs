@@ -6144,6 +6144,19 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
             );
         }
     }
+    let _ = writeln!(out, "rule applications:");
+    for application in &report.provenance.applications {
+        let _ = writeln!(
+            out,
+            "  activation={} grammar={} rule={} rule-name={} span={}..{}",
+            application.activation,
+            application.grammar,
+            application.rule,
+            application.rule_name,
+            application.span.start,
+            application.span.end
+        );
+    }
     let _ = writeln!(out, "diagnostics:");
     for fact in &report.grammar_diagnostics {
         let _ = writeln!(
@@ -9914,6 +9927,17 @@ mod tests {
                 TopLevelFormKind::Function,
             ])
         );
+        for form in &forms {
+            assert!(
+                artifacts
+                    .grammar_parse
+                    .provenance
+                    .applications
+                    .iter()
+                    .any(|application| application.span == form.span),
+                "missing rule application for {form:?}"
+            );
+        }
         assert_eq!(
             &artifacts.syntax.source[forms[0].span.start..forms[0].span.end],
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;"
@@ -10028,7 +10052,10 @@ mod tests {
                 .contains("grammar-parse <- grammar-stack")
         );
         assert!(artifacts.dump_grammar_stack().contains("BaseLokoGrammar"));
-        assert!(artifacts.dump_parse_trace().contains("rule provenance:"));
+        let parse_trace = artifacts.dump_parse_trace();
+        assert!(parse_trace.contains("rule provenance:"));
+        assert!(parse_trace.contains("rule applications:"));
+        assert!(parse_trace.contains("rule-name=function-definition"));
         assert!(
             artifacts
                 .explain_grammar_rule("grammar-rule:base-loko/function-definition")
