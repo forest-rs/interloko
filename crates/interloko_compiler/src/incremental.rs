@@ -304,14 +304,14 @@ impl QueryInvalidation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast, identity::SourceFileId, sem, syntax};
+    use crate::{ast, grammar_frontend, identity::SourceFileId, sem};
 
     fn lower_source(source: &str) -> sem::Module {
         lower_file(SourceFileId::ANONYMOUS, source)
     }
 
     fn lower_file(source_file: SourceFileId, source: &str) -> sem::Module {
-        let tree = syntax::parse_file(source_file, source);
+        let tree = grammar_frontend::parse_file(source_file, source).syntax;
         let ast = ast::lower(&tree);
         sem::lower(&ast)
     }

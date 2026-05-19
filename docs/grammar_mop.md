@@ -1,11 +1,10 @@
 # Grammar MOP
 
-Interloko exposes the current hand-written Loko parser as read-only grammar
+Interloko exposes the source-authored base-Loko grammar as read-only grammar
 metaobjects inside a selected language environment. It also has staged grammar
 extensions that emit structural frontend forms lowered directly into AST
-definitions. The `records` and `calculator` staged grammars are now parsed by
-a tiny interpreted grammar path; base Loko is still parsed by the Rust parser.
-This is still not a full parser rewrite and not a macro system.
+definitions. The `records`, `calculator`, and base-Loko grammars are parsed by
+the interpreted grammar path. This is still not a macro system.
 
 ## Boundary
 
@@ -14,14 +13,14 @@ grammar metaobjects, grammar-stack resolution, parser invocation, parse
 activations, structural staged emissions, and parse provenance.
 
 It explicitly does not own AST lowering, semantic lowering, user grammar
-package loading, semantic actions, host code execution, OMeta/Ohm
-compatibility, or a replacement for the base Loko parser.
+package loading, semantic actions, host code execution, or OMeta/Ohm
+compatibility.
 
 ## What Is Real Now
 
 The implemented grammar slice has three load-bearing pieces:
 
-- a read-only grammar MOP projection for the base hand-written parser;
+- a read-only grammar MOP projection for the source-authored base-Loko grammar;
 - language environments that own resolved grammar stacks, activations, and
   provenance;
 - a session-owned host registry used as catalog plumbing for available
@@ -241,7 +240,7 @@ grammar packages, or a macro system exist yet.
 
 ## Parse Reports
 
-The grammar frontend wraps the existing `syntax::parse_file` path and returns a
+The grammar frontend runs the source-authored base-Loko grammar and returns a
 `GrammarParseReport`.
 
 That report contains:
@@ -260,7 +259,7 @@ That report contains:
 - grammar diagnostic facts that attach syntax diagnostics to the active
   grammar, activation, effective rule, source span, diagnostic code, and
   structured expected fragment when present;
-- syntax diagnostics from the existing parser.
+- syntax diagnostics from the grammar parser.
 
 The normal pipeline now has one explicit structured-input join point:
 
@@ -388,27 +387,24 @@ edits look like grammar edits.
 diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
 
-`show-parser-shadow` is the base-Loko self-hosting harness surface. Today it
-reports the source-authored base-Loko grammar parser as the primary parser and
-compares it with the Rust recursive-descent parser as oracle. The comparison is
-still normalized to the top-level class, generic, method, and function
-signature, but ordinary compilation now flows through grammar-primary parsing.
+`show-parser-shadow` is now a parser-summary surface kept for continuity with
+the self-hosting work. The Rust recursive-descent oracle has been removed, so it
+reports the source-authored base-Loko grammar parser product without an oracle
+comparison.
 
 Example output:
 
 ```text
-parser shadow status=equivalent
+parser shadow status=oracle-unavailable
 primary:
-  implementation source-authored-base-loko-grammar-primary
+  implementation source-authored-base-loko-grammar
   normalized-nodes 5
   top-level-nodes 4
   top-level-signature class-definition,generic-definition,method-definition,function-definition
-oracle:
-  implementation rust-recursive-descent-oracle
 ```
 
-If the source-authored shadow grammar disagrees with the Rust parser, the report
-switches to `diverged` and lists normalized-node, top-level-count,
+If another oracle is introduced later, the report can again switch to
+`equivalent` or `diverged` and list normalized-node, top-level-count,
 top-level-signature, diagnostic, or rule-application differences.
 
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
@@ -464,7 +460,8 @@ frontend-slot(name: radius, type: <integer>, ...)
 ```
 
 These records are the inspectable expander boundary. They are not executable
-semantic actions, and they do not bypass the existing parser.
+semantic actions, and they feed the normal grammar parser, AST, semantic IR, and
+lowering pipeline.
 
 ## Deferred Design
 

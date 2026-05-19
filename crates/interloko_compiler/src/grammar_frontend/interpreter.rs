@@ -171,6 +171,19 @@ pub(super) fn interpret_region_result(
     }
 }
 
+pub(super) fn interpret_rule_error(
+    rules: &[SourceAuthoredRule],
+    rule_name: &str,
+    source: &str,
+    position: usize,
+    source_offset: usize,
+) -> InterpretedParseError {
+    interpret_rule_result(rules, rule_name, source, position, source_offset)
+        .err()
+        .unwrap_or_else(|| ParseFailure::expected(position, rule_name))
+        .into_error(source_offset)
+}
+
 pub(super) fn evaluate_rule_action(
     rules: &[SourceAuthoredRule],
     node: &InterpretedRuleNode,
@@ -654,6 +667,9 @@ fn interpret_rule_result(
         let start = skip_interpreter_trivia(source, position);
         let matched = interpret_expression(rules, &rule.expression, source, start, source_offset)?;
         let end = matched.end;
+        if name == "name" && is_loko_reserved_word(&source[start..end]) {
+            return Err(ParseFailure::expected(start, "name"));
+        }
         return Ok(InterpretedRuleNode {
             rule_name: name.to_string(),
             span: Span::new(source_offset + start, source_offset + end),
@@ -665,6 +681,27 @@ fn interpret_rule_result(
         skip_interpreter_trivia(source, position),
         name,
     ))
+}
+
+fn is_loko_reserved_word(text: &str) -> bool {
+    matches!(
+        text,
+        "define"
+            | "function"
+            | "class"
+            | "slot"
+            | "constant"
+            | "generic"
+            | "method"
+            | "let"
+            | "if"
+            | "then"
+            | "else"
+            | "handle"
+            | "with"
+            | "restart"
+            | "end"
+    )
 }
 
 fn interpret_expression(
@@ -725,7 +762,7 @@ fn interpret_expression(
                     let end = start + index + value.len();
                     literal_boundary_ok(source, end, value).then_some(start + index)
                 })
-                .ok_or_else(|| ParseFailure::expected(source.len(), literal_expected(value)))?;
+                .unwrap_or(source.len());
             Ok(ExpressionMatch {
                 end: relative_end,
                 children: vec![InterpretedRuleNode {

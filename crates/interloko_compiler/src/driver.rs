@@ -11,8 +11,9 @@ use execution_tape::vm::{Limits, Vm};
 use interloko_runtime::InterlokoHost;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::identity::SourceFileId;
 use crate::sem::HostMetaRegistry;
-use crate::{ast, lower, sem, syntax, tape};
+use crate::{ast, grammar_frontend, lower, sem, syntax, tape};
 
 /// End-to-end compiler or runtime error.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -145,7 +146,7 @@ pub fn compile_with_host_registry(
     source: &str,
     registry: &HostMetaRegistry,
 ) -> Result<CompiledModule, CompileError> {
-    let syntax = syntax::parse(source);
+    let syntax = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
     let ast = ast::lower(&syntax);
     let sem = sem::lower_with_host_registry(&ast, registry);
     if !sem.diagnostics.is_empty() {

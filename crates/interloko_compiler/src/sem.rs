@@ -4397,16 +4397,16 @@ impl Lowering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast, syntax};
+    use crate::{ast, grammar_frontend};
 
     fn lower_source(source: &str) -> Module {
-        let tree = syntax::parse(source);
+        let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         lower(&ast)
     }
 
     fn lower_source_with_host_registry(source: &str, registry: &HostMetaRegistry) -> Module {
-        let tree = syntax::parse(source);
+        let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         lower_with_host_registry(&ast, registry)
     }

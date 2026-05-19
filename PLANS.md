@@ -1,5 +1,64 @@
 # Plans
 
+## Remove The Rust Recursive-Descent Loko Parser
+
+### Goal
+
+Finish the parser replacement. Base Loko source should parse through the
+source-authored grammar path only. The old Rust recursive-descent parser stops
+being an oracle, fallback, public mode, or test target, and `syntax` becomes the
+lexer/CST substrate that grammar parsing emits into.
+
+### Non-Goals
+
+- No new Loko language semantics.
+- No macro system or source-authored grammar package loader.
+- No staged grammar redesign.
+- No attempt to improve diagnostics beyond preserving existing corpus behavior.
+- No removal of lexer, tokens, CST node kinds, spans, or `SyntaxTree`.
+
+### Fence
+
+`syntax` owns lexing, tokens, CST node identity, spans, and `SyntaxTree`
+storage. It explicitly does not own parsing base Loko source.
+
+`grammar_frontend::base_loko_primary` owns base Loko parsing into the existing
+CST shape. It explicitly does not own AST, semantic IR, lowering, or execution.
+
+### Invariants
+
+- Normal compilation has one base-Loko parser path: the grammar parser.
+- No public `ParserMode`, `RustPrimary`, `parse_file_rust`, or Rust-oracle
+  fallback remains.
+- Invalid-source diagnostics still come from structured diagnostic facts and
+  corpus expectations continue to pass.
+- Staged records/calculator parsing keeps using the same grammar frontend
+  activation model.
+- The existing AST/sem/lower/tape pipeline still receives `SyntaxTree`.
+- Every commit is bisectable and the workspace stays green.
+
+### Sequence
+
+1. Replace parser-mode/oracle APIs with a single grammar parse path and update
+   parser-shadow reporting to describe the active grammar parser without a Rust
+   oracle.
+2. Move or rewrite the remaining parser tests so they exercise grammar parsing,
+   then delete the recursive-descent `Parser` implementation from `syntax.rs`.
+3. Tighten grammar-parser diagnostics only where removing fallback exposes a
+   corpus or fixture regression.
+4. Update docs/tests/report expectations that still talk about Rust-primary or
+   recursive-descent oracle mode.
+5. Run fmt, clippy, workspace tests, corpus, docs, then commit cleanly.
+
+### Risks
+
+- Invalid syntax behavior may have depended on fallback diagnostics. Fix only
+  observed regressions with structured diagnostics in the grammar parser.
+- Parser-shadow output becomes less dramatic without an oracle. Keep it useful
+  by reporting the parser product summary for the grammar parser.
+- Deleting the parser can accidentally delete CST helpers. Keep `CstNode`,
+  `CstElement`, `CstKind`, lexer tests, and token APIs intact.
+
 ## Flip Base Loko To Grammar-Primary Behind A Parser Mode
 
 ### Goal

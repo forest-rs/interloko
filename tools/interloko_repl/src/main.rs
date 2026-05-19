@@ -1528,7 +1528,14 @@ enum PendingDefinitionState {
 }
 
 fn pending_definition_state(source: &str) -> PendingDefinitionState {
-    let tree = syntax::parse_file(SourceFileId::ANONYMOUS, source);
+    if matches!(
+        pending_definition_boundary(source),
+        Some(PendingDefinitionState::Incomplete)
+    ) {
+        return PendingDefinitionState::Incomplete;
+    }
+
+    let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
     if tree.diagnostics.is_empty() {
         return PendingDefinitionState::Ready;
     }
@@ -1548,6 +1555,64 @@ fn pending_definition_state(source: &str) -> PendingDefinitionState {
     } else {
         PendingDefinitionState::Ready
     }
+}
+
+fn pending_definition_boundary(source: &str) -> Option<PendingDefinitionState> {
+    let tokens: Vec<_> = syntax::lex(source)
+        .into_iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::Comment))
+        .collect();
+    let [first, second, ..] = tokens.as_slice() else {
+        return Some(PendingDefinitionState::Incomplete);
+    };
+    if first.kind != TokenKind::Define {
+        return None;
+    }
+
+    match second.kind {
+        TokenKind::Generic => tokens
+            .last()
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            .then_some(PendingDefinitionState::Ready)
+            .or(Some(PendingDefinitionState::Incomplete)),
+        TokenKind::Class | TokenKind::Function | TokenKind::Method => {
+            block_definition_boundary(&tokens)
+        }
+        _ => None,
+    }
+}
+
+fn block_definition_boundary(tokens: &[syntax::Token]) -> Option<PendingDefinitionState> {
+    let mut depth = 0usize;
+    let mut previous = None;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::Class | TokenKind::Function | TokenKind::Method
+                if previous == Some(TokenKind::Define) =>
+            {
+                depth += 1;
+            }
+            TokenKind::If | TokenKind::Handle => {
+                depth += 1;
+            }
+            TokenKind::End if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return if tokens[index + 1..]
+                        .iter()
+                        .all(|token| token.kind == TokenKind::Semicolon)
+                    {
+                        Some(PendingDefinitionState::Ready)
+                    } else {
+                        None
+                    };
+                }
+            }
+            _ => {}
+        }
+        previous = Some(token.kind);
+    }
+    Some(PendingDefinitionState::Incomplete)
 }
 
 fn parse_optional_stage<E>(args: &[&str], stderr: &mut E) -> Result<Option<DumpStage>>

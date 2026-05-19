@@ -20,7 +20,7 @@ rule result-annotation = `=>` type-annotation-value
 rule type-annotation = `::` type-annotation-value
 rule type-annotation-value = class-object-type? type-name
 rule class-object-type = `class`
-rule body = let-statement* expression
+rule body = let-statement* expression?
 rule let-statement = `let` name `=` expression `;`
 rule expression = handle-expression | if-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
@@ -55,7 +55,7 @@ rule name-expression = name
 rule type-expression = type-name
 rule number-literal = number
 rule bool-literal = `#t` | `#f`
-rule string-literal = `"` until(`"`) `"`
+rule string-literal = `"` until(`"`) `"`?
 rule symbol-literal = `#` name
 rule keyword-symbol = `#:` name | name `:`
 rule name = [A-Za-z_] [A-Za-z0-9_?-]*

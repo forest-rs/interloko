@@ -624,16 +624,17 @@ fn load_records_semicolon_terminated_generic_forms() {
 }
 
 #[test]
-fn malformed_pending_definition_reports_immediately() {
+fn malformed_completed_definition_reports_and_repl_continues() {
     let (stdout, stderr) = run_repl(
         "define function broken()\n\
            let x = ;\n\
+         end;\n\
          1 + 2\n\
          :quit\n",
     );
 
     assert!(stderr.contains("diagnostics:"), "{stderr}");
-    assert!(stderr.contains("syntax.expected-expression"), "{stderr}");
+    assert!(stderr.contains("syntax.expected-token"), "{stderr}");
     assert!(stdout.lines().any(|line| line == "3"));
 }
 

@@ -1,13 +1,12 @@
-//! Read-only grammar frontend projection for the base Loko parser.
+//! Grammar frontend projection for the base Loko parser.
 //!
 //! This module owns language-environment identity, grammar metaobjects,
 //! grammar-stack resolution, staged parse activations, structural parse
-//! emissions, and parse provenance for the current hand-written parser. It
-//! intentionally does not own AST lowering, semantic lowering, source-authored
-//! grammars, macros, host semantic actions, or parser rewriting.
+//! emissions, and parse provenance for the source-authored grammar parser. It
+//! intentionally does not own AST lowering, semantic lowering, macros, or host
+//! semantic actions.
 
 mod base_loko_primary;
-mod base_loko_shadow;
 mod calculator;
 mod interpreter;
 mod records;
@@ -1253,10 +1252,8 @@ pub struct GrammarParseReport {
     pub grammar_diagnostics: Vec<GrammarDiagnosticFact>,
     /// Syntax diagnostics from the parser.
     pub diagnostics: Vec<Diagnostic>,
-    /// Syntax tree produced by the existing parser.
+    /// Syntax tree produced by the active grammar parser.
     pub syntax: SyntaxTree,
-    /// Parser implementation mode that produced [`Self::syntax`].
-    pub parser_mode: syntax::ParserMode,
 }
 
 /// Normalized parser product used by parser shadow comparison.
@@ -1379,9 +1376,8 @@ impl ParserShadowReport {
 
 /// Provider for a registered language environment.
 ///
-/// A provider contributes the grammar records for one environment token. The
-/// current built-ins still delegate CST construction to the hand-written parser,
-/// but this protocol keeps selection out of hardcoded caller matches.
+/// A provider contributes the grammar records for one environment token and
+/// keeps language-environment selection out of hardcoded caller matches.
 pub trait GrammarEnvironmentProvider: Sync {
     /// Stable registry token accepted by source headers and tools.
     fn environment_slug(&self) -> &'static str;
@@ -1603,57 +1599,28 @@ impl GrammarFrontendRegistry {
 /// Parses source through the base Loko grammar frontend.
 #[must_use]
 pub fn parse_file(source_file: SourceFileId, source: &str) -> GrammarParseReport {
-    parse_file_with_parser_mode(source_file, source, syntax::ParserMode::default())
-}
-
-/// Parses source through the base Loko grammar frontend with an explicit parser mode.
-#[must_use]
-pub fn parse_file_with_parser_mode(
-    source_file: SourceFileId,
-    source: &str,
-    parser_mode: syntax::ParserMode,
-) -> GrammarParseReport {
-    parse_file_with_environment_and_parser_mode(
+    parse_file_with_environment(
         source_file,
         source,
         GrammarEnvironmentSelection::base_loko(),
-        parser_mode,
     )
 }
 
 /// Parses source through the selected grammar frontend.
 ///
-/// All selections currently delegate tokenization and CST construction to the
-/// base hand-written parser. The selected environment controls the projected
-/// grammar stack, effective rule table, activations, and provenance records.
+/// The selected environment controls the projected grammar stack, effective
+/// rule table, activations, and provenance records.
 #[must_use]
 pub fn parse_file_with_environment(
     source_file: SourceFileId,
     source: &str,
     environment: GrammarEnvironmentSelection,
 ) -> GrammarParseReport {
-    parse_file_with_environment_and_parser_mode(
-        source_file,
-        source,
-        environment,
-        syntax::ParserMode::default(),
-    )
-}
-
-/// Parses source through the selected grammar frontend and parser mode.
-#[must_use]
-pub fn parse_file_with_environment_and_parser_mode(
-    source_file: SourceFileId,
-    source: &str,
-    environment: GrammarEnvironmentSelection,
-    parser_mode: syntax::ParserMode,
-) -> GrammarParseReport {
-    parse_file_with_registry_and_parser_mode(
+    parse_file_with_registry(
         source_file,
         source,
         environment,
         &GrammarFrontendRegistry::builtin(),
-        parser_mode,
     )
 }
 
@@ -1669,34 +1636,16 @@ pub fn parse_file_with_registry(
     environment: GrammarEnvironmentSelection,
     registry: &GrammarFrontendRegistry,
 ) -> GrammarParseReport {
-    parse_file_with_registry_and_parser_mode(
-        source_file,
-        source,
-        environment,
-        registry,
-        syntax::ParserMode::default(),
-    )
-}
-
-/// Parses source through an explicit grammar frontend registry and parser mode.
-#[must_use]
-pub fn parse_file_with_registry_and_parser_mode(
-    source_file: SourceFileId,
-    source: &str,
-    environment: GrammarEnvironmentSelection,
-    registry: &GrammarFrontendRegistry,
-    parser_mode: syntax::ParserMode,
-) -> GrammarParseReport {
     if let Some(provider) = registry.environment_provider(environment.as_str()) {
         if provider.discovers_staged_regions()
             && let Some(report) = parse_staged_file(source_file, source, registry)
         {
             return report;
         }
-        return parse_file_with_records(source_file, source, provider.records(), parser_mode);
+        return parse_file_with_records(source_file, source, provider.records());
     }
 
-    let mut report = parse_file_with_records(source_file, source, base_loko_records(), parser_mode);
+    let mut report = parse_file_with_records(source_file, source, base_loko_records());
     push_report_diagnostic(
         &mut report,
         unknown_environment_diagnostic(Span::new(0, 0), environment.as_str(), registry),
@@ -1706,25 +1655,15 @@ pub fn parse_file_with_registry_and_parser_mode(
 
 /// Builds the current parser shadow report for a grammar parse report.
 ///
-/// The Rust parser remains primary. The oracle is a source-authored
-/// `base-loko-shadow` grammar that recognizes the top-level definition subset
-/// and compares normalized parser products.
+/// The recursive-descent oracle has been removed. The report now summarizes the
+/// active source-authored grammar parser product.
 #[must_use]
 pub fn parser_shadow_report(report: &GrammarParseReport) -> ParserShadowReport {
-    match report.parser_mode {
-        syntax::ParserMode::GrammarPrimary => compare_parser_products(
-            top_level_shadow_summary(
-                "source-authored-base-loko-grammar-primary",
-                &report.syntax.root,
-                report.diagnostics.len(),
-            ),
-            rust_top_level_oracle_summary(report.source_file, &report.syntax.source),
-        ),
-        syntax::ParserMode::RustPrimary => compare_parser_products(
-            rust_top_level_shadow_summary(report),
-            base_loko_shadow::oracle_summary(&report.syntax.source),
-        ),
-    }
+    ParserShadowReport::oracle_unavailable(top_level_shadow_summary(
+        "source-authored-base-loko-grammar",
+        &report.syntax.root,
+        report.diagnostics.len(),
+    ))
 }
 
 /// Compares two normalized parser products.
@@ -1751,22 +1690,10 @@ fn parse_file_with_records(
     source_file: SourceFileId,
     source: &str,
     records: GrammarFrontendRecords,
-    parser_mode: syntax::ParserMode,
 ) -> GrammarParseReport {
-    let syntax = match parser_mode {
-        syntax::ParserMode::RustPrimary => syntax::parse_file_rust(source_file, source),
-        syntax::ParserMode::GrammarPrimary => {
-            match base_loko_primary::parse_file(source_file, source) {
-                Ok(tree) => tree,
-                Err(diagnostic) => {
-                    let mut tree = syntax::parse_file_rust(source_file, source);
-                    if tree.diagnostics.is_empty() {
-                        tree.diagnostics.push(diagnostic);
-                    }
-                    tree
-                }
-            }
-        }
+    let syntax = match base_loko_primary::parse_file(source_file, source) {
+        Ok(tree) => tree,
+        Err(diagnostic) => syntax_tree_with_diagnostic(source_file, source, diagnostic),
     };
     let active_grammar = records.active_grammar;
     let active_grammar_slug = records
@@ -1837,7 +1764,28 @@ fn parse_file_with_records(
         grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
-        parser_mode,
+    }
+}
+
+fn syntax_tree_with_diagnostic(
+    source_file: SourceFileId,
+    source: &str,
+    diagnostic: Diagnostic,
+) -> SyntaxTree {
+    let tokens = syntax::lex(source);
+    SyntaxTree {
+        source_file,
+        source: source.into(),
+        tokens,
+        root: CstNode::from_children(
+            source_file,
+            CstKind::Root,
+            Vec::new(),
+            &[],
+            source,
+            Span::new(0, source.len()),
+        ),
+        diagnostics: vec![diagnostic],
     }
 }
 
@@ -2085,12 +2033,7 @@ fn parse_staged_file(
     let discovery = discover_staged_regions(source, registry);
     if discovery.regions.is_empty() {
         if !discovery.diagnostics.is_empty() {
-            let mut report = parse_file_with_records(
-                source_file,
-                source,
-                base_loko_records(),
-                syntax::ParserMode::default(),
-            );
+            let mut report = parse_file_with_records(source_file, source, base_loko_records());
             report.diagnostics.extend(discovery.diagnostics);
             if let Some(activation) = report.activations.first() {
                 report.grammar_diagnostics = grammar_diagnostic_facts(
@@ -2215,7 +2158,10 @@ fn parse_staged_file(
     }
 
     let parser_source = source_with_staged_regions_blanked(source, &discovery.regions);
-    let mut syntax = syntax::parse_file(source_file, &parser_source);
+    let mut syntax = match base_loko_primary::parse_file(source_file, &parser_source) {
+        Ok(tree) => tree,
+        Err(diagnostic) => syntax_tree_with_diagnostic(source_file, &parser_source, diagnostic),
+    };
     syntax.diagnostics.extend(diagnostics);
 
     let active_effective_rules = records.effective_rules.to_vec();
@@ -2277,7 +2223,6 @@ fn parse_staged_file(
         grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
-        parser_mode: syntax::ParserMode::default(),
     })
 }
 
@@ -3475,23 +3420,6 @@ fn rule_applications(
     applications
 }
 
-fn rust_top_level_shadow_summary(report: &GrammarParseReport) -> ParserProductSummary {
-    top_level_shadow_summary(
-        "rust-recursive-descent-top-level",
-        &report.syntax.root,
-        report.diagnostics.len(),
-    )
-}
-
-fn rust_top_level_oracle_summary(source_file: SourceFileId, source: &str) -> ParserProductSummary {
-    let syntax = syntax::parse_file_rust(source_file, source);
-    top_level_shadow_summary(
-        "rust-recursive-descent-oracle",
-        &syntax.root,
-        syntax.diagnostics.len(),
-    )
-}
-
 fn top_level_shadow_summary(
     implementation: &'static str,
     root: &CstNode,
@@ -4195,7 +4123,7 @@ mod tests {
     fn grammar_diagnostics_record_active_rule_and_expected_fragment() {
         let report = parse_file_with_environment(
             SourceFileId::from_path("bad.loko"),
-            "define function main()\nend",
+            "define function main(",
             GrammarEnvironmentSelection::derived_host(),
         );
         let fact = report
@@ -4203,10 +4131,10 @@ mod tests {
             .first()
             .expect("syntax diagnostic fact");
 
-        assert_eq!(fact.code, DiagnosticCode::SyntaxExpectedExpression);
+        assert_eq!(fact.code, DiagnosticCode::SyntaxExpectedToken);
         assert_eq!(fact.grammar, GrammarId::new(DERIVED_HOST_GRAMMAR_NAME));
-        assert_eq!(fact.rule_name, "body");
-        assert_eq!(fact.expected_fragment, None);
+        assert_eq!(fact.rule_name, "source-file");
+        assert!(fact.expected_fragment.is_some());
         assert_eq!(report.provenance.diagnostics, report.grammar_diagnostics);
     }
 
@@ -4491,7 +4419,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_shadow_report_compares_base_loko_shadow_subset() {
+    fn parser_shadow_report_summarizes_base_loko_grammar_parser() {
         let source_file = SourceFileId::from_path("shadow.loko");
         let source = "define class <circle> (<object>)\n\
                         slot radius :: <integer>, required-init-keyword: radius:;\n\
@@ -4506,10 +4434,10 @@ mod tests {
         let report = parse_file(source_file, source);
 
         let shadow = parser_shadow_report(&report);
-        assert_eq!(shadow.status, ParserShadowStatus::Equivalent);
+        assert_eq!(shadow.status, ParserShadowStatus::OracleUnavailable);
         assert_eq!(
             shadow.primary.implementation,
-            "source-authored-base-loko-grammar-primary"
+            "source-authored-base-loko-grammar"
         );
         assert_eq!(shadow.primary.cst_node_count, 5);
         assert_eq!(shadow.primary.top_level_node_count, 4);
@@ -4519,13 +4447,7 @@ mod tests {
         );
         assert_eq!(shadow.primary.diagnostic_count, 0);
         assert_eq!(shadow.primary.rule_application_count, 5);
-        assert_eq!(
-            shadow
-                .oracle
-                .as_ref()
-                .map(|summary| summary.implementation.as_str()),
-            Some("rust-recursive-descent-oracle")
-        );
+        assert_eq!(shadow.oracle, None);
         assert_eq!(shadow.divergences, Vec::new());
     }
 
@@ -4542,8 +4464,7 @@ mod tests {
                       define function main()\n\
                         area(make(<circle>, radius: 10))\n\
                       end";
-        let report =
-            parse_file_with_parser_mode(source_file, source, syntax::ParserMode::GrammarPrimary);
+        let report = parse_file(source_file, source);
 
         assert_eq!(report.diagnostics, Vec::new());
         assert_eq!(report.syntax.root.child_nodes(CstKind::Class).count(), 1);
@@ -4581,8 +4502,7 @@ mod tests {
         let source = "define function main()\n\
                         fallback:\n\
                       end";
-        let report =
-            parse_file_with_parser_mode(source_file, source, syntax::ParserMode::GrammarPrimary);
+        let report = parse_file(source_file, source);
 
         assert_eq!(report.diagnostics, Vec::new());
         let module = crate::ast::lower(&report.syntax);

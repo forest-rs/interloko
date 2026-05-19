@@ -987,10 +987,10 @@ fn span_id(span: Span) -> Option<SpanId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast, sem, syntax};
+    use crate::{ast, grammar_frontend, identity::SourceFileId, sem};
 
     fn lower_source(source: &str) -> lower::Module {
-        let tree = syntax::parse(source);
+        let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         let sem = sem::lower(&ast);
         lower::lower(&sem).expect("lowering should succeed")

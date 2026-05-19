@@ -17,8 +17,8 @@ const DOMAIN_ARTIFACT: u64 = 0x05;
 
 /// Stable identifier for a source file.
 ///
-/// `SourceFileId` is derived from a logical path when the caller has one. The
-/// legacy [`crate::syntax::parse`] entry point uses [`SourceFileId::ANONYMOUS`].
+/// `SourceFileId` is derived from a logical path when the caller has one. Tests
+/// and scratch compilation use [`SourceFileId::ANONYMOUS`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct SourceFileId(
     /// Stable raw identifier.

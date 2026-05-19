@@ -2342,7 +2342,7 @@ impl CompilerSession {
 /// Incremental compiler session with an in-memory artifact cache.
 ///
 /// This session owns source edit state and cache reporting. It reuses the
-/// existing parser, AST lowering, semantic lowering, executable IR lowering,
+/// grammar frontend, AST lowering, semantic lowering, executable IR lowering,
 /// tape emission, and runtime execution stages.
 #[derive(Clone, Debug, Default)]
 pub struct IncrementalCompilerSession {
@@ -10500,9 +10500,8 @@ mod tests {
         assert!(parse_trace.contains("rule applications:"));
         assert!(parse_trace.contains("rule-name=function-definition"));
         let shadow = artifacts.dump_parser_shadow_report();
-        assert!(shadow.contains("parser shadow status=equivalent"));
-        assert!(shadow.contains("implementation source-authored-base-loko-grammar-primary"));
-        assert!(shadow.contains("implementation rust-recursive-descent-oracle"));
+        assert!(shadow.contains("parser shadow status=oracle-unavailable"));
+        assert!(shadow.contains("implementation source-authored-base-loko-grammar"));
         assert!(shadow.contains("top-level-signature class-definition,generic-definition,method-definition,function-definition"));
         assert!(
             artifacts

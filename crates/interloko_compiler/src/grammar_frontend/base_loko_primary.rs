@@ -7,7 +7,7 @@ use crate::identity::SourceFileId;
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree, Token, TokenKind};
 
 use super::interpreter::{
-    InterpretedParseError, InterpretedRuleNode, interpret_region_result,
+    InterpretedParseError, InterpretedRuleNode, interpret_region_result, interpret_rule_error,
     parse_source_authored_grammar,
 };
 
@@ -19,7 +19,7 @@ pub(super) fn parse_file(
 ) -> Result<SyntaxTree, Diagnostic> {
     let rules = parse_source_authored_grammar(BASE_LOKO_GRAMMAR_SOURCE);
     let parse = interpret_region_result(&rules, "source-file", source, 0)
-        .map_err(grammar_parse_diagnostic)?;
+        .map_err(|error| base_loko_parse_diagnostic(&rules, source, error))?;
     let tokens = syntax::lex(source);
     let builder = GrammarCstBuilder {
         source_file,
@@ -27,6 +27,62 @@ pub(super) fn parse_file(
         tokens,
     };
     Ok(builder.finish(&parse.root))
+}
+
+fn base_loko_parse_diagnostic(
+    rules: &[super::interpreter::SourceAuthoredRule],
+    source: &str,
+    error: InterpretedParseError,
+) -> Diagnostic {
+    if let Some(span) = malformed_string_span(source) {
+        return Diagnostic::error(span, DiagnosticCode::AstMalformedStringLiteral);
+    }
+    grammar_parse_diagnostic(base_loko_parse_error(rules, source, error))
+}
+
+fn base_loko_parse_error(
+    rules: &[super::interpreter::SourceAuthoredRule],
+    source: &str,
+    mut error: InterpretedParseError,
+) -> InterpretedParseError {
+    if error
+        .expected
+        .iter()
+        .any(|expected| expected == "end of region")
+    {
+        error = interpret_rule_error(rules, "definition", source, error.span.start, 0);
+    }
+    if let Some(let_start) =
+        nearby_token_start(source, error.span.start, TokenKind::Let).filter(|_| {
+            error
+                .expected
+                .iter()
+                .any(|expected| expected.contains("end"))
+        })
+    {
+        let let_error = interpret_rule_error(rules, "let-statement", source, let_start, 0);
+        if let_error.span.start > error.span.start {
+            return let_error;
+        }
+    }
+    error
+}
+
+fn nearby_token_start(source: &str, offset: usize, kind: TokenKind) -> Option<usize> {
+    syntax::lex(source)
+        .into_iter()
+        .rfind(|token| token.kind == kind && token.span.start.abs_diff(offset) <= 16)
+        .map(|token| token.span.start)
+}
+
+fn malformed_string_span(source: &str) -> Option<Span> {
+    syntax::lex(source)
+        .into_iter()
+        .find(|token| {
+            token.kind == TokenKind::String
+                && !source[token.span.start..token.span.end].ends_with('"')
+        })
+        .map(|token| token.span)
 }
 
 fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {
@@ -207,7 +263,10 @@ impl GrammarCstBuilder<'_> {
         let expr = node
             .children
             .iter()
-            .find(|child| child.rule_name == "expression")
+            .find(|child| {
+                child.rule_name == "expression"
+                    && (!child.span.is_empty() || !child.children.is_empty())
+            })
             .map(|expr| self.build_expr(expr));
         let mut children = lets.into_iter().map(CstElement::Node).collect::<Vec<_>>();
         if let Some(expr) = expr {

@@ -2373,11 +2373,11 @@ fn fmt_quoted(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast, syntax};
+    use crate::{ast, grammar_frontend, identity::SourceFileId};
     use interloko_runtime as runtime;
 
     fn lower_source(source: &str) -> Module {
-        let tree = syntax::parse(source);
+        let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         let sem = sem::lower(&ast);
         lower(&sem).expect("lowering should succeed")

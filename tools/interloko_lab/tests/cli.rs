@@ -612,16 +612,15 @@ fn report_handles_plain_loko_sources() {
 fn parse_trace_reports_grammar_diagnostic_facts() {
     let file = fixture("derived_grammar_syntax_error.loko");
     let path = file.to_str().expect("fixture path should be utf8");
-    let out = run_lab_success(&[
+    let (out, err) = run_lab_success(&[
         "invoke-affordance",
         path,
         "language-environment:derived-host",
         "show-parse-trace",
-    ])
-    .0;
+    ]);
 
     assert!(out.contains("diagnostics:"));
-    assert!(out.contains("code=syntax.expected-expression"));
+    assert!(err.contains("Error syntax.expected-expression"));
     assert!(out.contains("rule-name=body"));
     assert!(out.contains("grammar=grm"));
 }
@@ -928,9 +927,8 @@ fn invoke_affordance_runs_read_only_views() {
         "language-environment:base-loko",
         "show-parser-shadow",
     ]);
-    assert!(shadow.contains("parser shadow status=equivalent"));
-    assert!(shadow.contains("implementation source-authored-base-loko-grammar-primary"));
-    assert!(shadow.contains("implementation rust-recursive-descent-oracle"));
+    assert!(shadow.contains("parser shadow status=oracle-unavailable"));
+    assert!(shadow.contains("implementation source-authored-base-loko-grammar"));
 
     let registry = run_lab(&[
         "invoke-affordance",

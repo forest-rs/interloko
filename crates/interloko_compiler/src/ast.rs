@@ -1054,6 +1054,13 @@ impl<'tree> Lowering<'tree> {
             }
         }
 
+        if result.is_none() {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                DiagnosticCode::SyntaxExpectedExpression,
+            ));
+        }
+
         Block {
             id: self.ast_id(node),
             lets,
@@ -1283,8 +1290,12 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
-    fn lower_name(&self, node: &CstNode) -> Expr {
+    fn lower_name(&mut self, node: &CstNode) -> Expr {
         let Some((span, text)) = self.first_token_text(node, TokenKind::Ident) else {
+            self.diagnostics.push(Diagnostic::error(
+                node.span,
+                DiagnosticCode::SyntaxExpectedExpression,
+            ));
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -2085,9 +2096,17 @@ mod tests {
     use crate::identity::SourceFileId;
     use crate::syntax;
 
+    fn parse(source: &str) -> syntax::SyntaxTree {
+        grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax
+    }
+
+    fn parse_file(source_file: SourceFileId, source: &str) -> syntax::SyntaxTree {
+        grammar_frontend::parse_file(source_file, source).syntax
+    }
+
     #[test]
     fn lowers_function_params_lets_and_binary_result() {
-        let tree = syntax::parse("define function add-one(x)\n  let one = 1;\n  x + one\nend;");
+        let tree = parse("define function add-one(x)\n  let one = 1;\n  x + one\nend;");
         let module = lower(&tree);
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.functions.len(), 1);
@@ -2106,7 +2125,7 @@ mod tests {
 
     #[test]
     fn lowers_function_param_and_return_annotations() {
-        let tree = syntax::parse(
+        let tree = parse(
             "define function build(klass :: class <circle>, radius :: <integer>) => <circle>\n  make(klass, radius: radius)\nend;",
         );
         let module = lower(&tree);
@@ -2139,7 +2158,7 @@ mod tests {
 
     #[test]
     fn lowers_call_arguments() {
-        let tree = syntax::parse("define function main()\n  add(40, 2)\nend;");
+        let tree = parse("define function main()\n  add(40, 2)\nend;");
         let module = lower(&tree);
         let Expr::Call { callee, args, .. } = &module.functions[0].body.result else {
             panic!("expected call");
@@ -2186,7 +2205,7 @@ mod tests {
 
     #[test]
     fn lowers_instance_tests_and_casts() {
-        let tree = syntax::parse(
+        let tree = parse(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function main(x :: <object>) => <integer>\n  if instance?(x, <circle>) then as(<circle>, x).radius else 0 end\nend;",
         );
@@ -2213,7 +2232,7 @@ mod tests {
 
     #[test]
     fn lowers_classes_generics_methods_make_and_slot_reads() {
-        let tree = syntax::parse(
+        let tree = parse(
             "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: radius:;\n  slot valid? :: <boolean>, init-keyword: enabled?:;\n  constant slot cached :: <integer>, init-value: 5;\nend;\n\
              define generic area(x :: <object>) => <integer>;\n\
              define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
@@ -2302,8 +2321,7 @@ mod tests {
 
     #[test]
     fn lowers_booleans_comparisons_and_if() {
-        let tree =
-            syntax::parse("define function main(x)\n  if x < 0 then #f else x >= 10 end\nend;");
+        let tree = parse("define function main(x)\n  if x < 0 then #f else x >= 10 end\nend;");
         let module = lower(&tree);
 
         assert_eq!(module.diagnostics, Vec::new());
@@ -2338,7 +2356,7 @@ mod tests {
 
     #[test]
     fn lowers_signal_handle_and_restart() {
-        let tree = syntax::parse(
+        let tree = parse(
             "define function main()\n  handle signal(make(<bad>, fallback: 0)) with restart e :: <bad> e.fallback end\nend;",
         );
         let module = lower(&tree);
@@ -2374,8 +2392,8 @@ mod tests {
     #[test]
     fn syntax_and_ast_definition_ids_survive_whitespace_edits() {
         let source_file = SourceFileId::from_path("examples/main.loko");
-        let before_tree = syntax::parse_file(source_file, "define function main()\n  40 + 2\nend;");
-        let edited_tree = syntax::parse_file(
+        let before_tree = parse_file(source_file, "define function main()\n  40 + 2\nend;");
+        let edited_tree = parse_file(
             source_file,
             "\n// comment before the same definition\n\
              define   function   main(  )\n  40   +   2\nend;",
