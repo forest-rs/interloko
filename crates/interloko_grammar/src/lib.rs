@@ -582,6 +582,41 @@ pub struct Parse {
     pub root: RuleNode,
 }
 
+/// Partial parse report returned by [`inspect_region`].
+///
+/// This is for inspection and tooling. It is not recovery and it does not make
+/// an incomplete parse successful: [`ParseReport::error`] is populated whenever
+/// complete-region parsing failed. When the root rule matched before trailing
+/// input failed, [`ParseReport::root`] preserves that matched tree so callers
+/// can still inspect it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseReport {
+    /// Matched root node, if the root rule itself matched.
+    pub root: Option<RuleNode>,
+    /// Complete-region parse failure, if parsing did not consume the region.
+    pub error: Option<ParseError>,
+}
+
+impl ParseReport {
+    /// Returns true when the report represents a complete successful parse.
+    #[must_use]
+    pub const fn is_success(&self) -> bool {
+        self.root.is_some() && self.error.is_none()
+    }
+
+    /// Converts this report into the legacy success/failure result shape.
+    pub fn into_result(self) -> Result<Parse, ParseError> {
+        match (self.root, self.error) {
+            (Some(root), None) => Ok(Parse { root }),
+            (_, Some(error)) => Err(error),
+            (None, None) => Err(ParseError {
+                span: Span::default(),
+                expected: Vec::new(),
+            }),
+        }
+    }
+}
+
 /// Interpreted parse failure returned by [`interpret_region`] and
 /// [`interpret_rule_error`].
 ///
@@ -900,13 +935,44 @@ pub fn interpret_region(
     source: &str,
     source_offset: usize,
 ) -> Result<Parse, ParseError> {
-    let root = interpret_rule(rules, root_rule, source, 0, source_offset)
-        .map_err(|failure| failure.into_error(source_offset))?;
+    inspect_region(rules, root_rule, source, source_offset).into_result()
+}
+
+/// Interprets `root_rule` and returns the matched root plus any complete-region
+/// failure.
+///
+/// This is the inspection-oriented sibling of [`interpret_region`]. Use it when
+/// a caller wants to display a partial tree after the root rule matched but
+/// trailing input prevented a complete parse.
+#[must_use]
+pub fn inspect_region(
+    rules: &[SourceAuthoredRule],
+    root_rule: &str,
+    source: &str,
+    source_offset: usize,
+) -> ParseReport {
+    let root = match interpret_rule(rules, root_rule, source, 0, source_offset) {
+        Ok(root) => root,
+        Err(failure) => {
+            return ParseReport {
+                root: None,
+                error: Some(failure.into_error(source_offset)),
+            };
+        }
+    };
     let trailing = skip_trivia(source, root.span.end.saturating_sub(source_offset));
     if trailing == source.len() {
-        Ok(Parse { root })
+        ParseReport {
+            root: Some(root),
+            error: None,
+        }
     } else {
-        Err(ParseFailure::expected(trailing, "end of region").into_error(source_offset))
+        ParseReport {
+            root: Some(root),
+            error: Some(
+                ParseFailure::expected(trailing, "end of region").into_error(source_offset),
+            ),
+        }
     }
 }
 
@@ -1265,9 +1331,11 @@ mod tests {
         assert!(colon.is_anonymous());
 
         let class_nodes = parse.root.find_by_role(RuleNodeRole::CharacterClass);
-        assert!(class_nodes
-            .iter()
-            .any(|node| node.character_class() == Some("A-Za-z_")));
+        assert!(
+            class_nodes
+                .iter()
+                .any(|node| node.character_class() == Some("A-Za-z_"))
+        );
 
         let names = parse.root.find_rules("name");
         assert_eq!(names.len(), 2);
@@ -1329,6 +1397,37 @@ mod tests {
 
         assert_eq!(error.span, Span::new(8, 8));
         assert_eq!(error.expected, vec!["end of region"]);
+    }
+
+    #[test]
+    fn reports_partial_root_for_trailing_input() {
+        let grammar = "grammar one\nrule root = `ok`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let report = inspect_region(&rules, "root", "ok nope", 5);
+
+        assert!(!report.is_success());
+        assert_eq!(
+            report.root.as_ref().map(|node| node.text.as_str()),
+            Some("ok")
+        );
+        assert_eq!(
+            report.error.as_ref().map(|error| error.span),
+            Some(Span::new(8, 8))
+        );
+        assert_eq!(
+            report.error.as_ref().map(|error| error.expected.as_slice()),
+            Some(&["end of region".to_string()][..])
+        );
+
+        let root_failure = inspect_region(&rules, "root", "nope", 5);
+        assert!(root_failure.root.is_none());
+        assert_eq!(
+            root_failure
+                .error
+                .as_ref()
+                .map(|error| error.expected.as_slice()),
+            Some(&["`ok`".to_string()][..])
+        );
     }
 
     #[test]
