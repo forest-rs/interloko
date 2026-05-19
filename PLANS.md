@@ -1,5 +1,77 @@
 # Plans
 
+## Harden Interpreted Staged Grammars
+
+### Goal
+
+Make the current staged grammar path obviously load-bearing. Records and
+calculator should read as source-authored/interpreted grammars from grammar
+source through report output, with no hidden lexical builtins or implied legacy
+fallback. The remaining Rust should be narrow adapter machinery: safe action
+evaluation, semantic validation, frontend-form construction, and workbench
+presentation.
+
+### Non-Goals
+
+- No base-Loko parser flip.
+- No external/user grammar package loading.
+- No macro system.
+- No arbitrary host callbacks from grammar source.
+- No parser-theory expansion beyond the existing staged grammar surface.
+- No new records/calculator user syntax.
+
+### Fence
+
+`grammar_frontend::interpreter` owns interpreted staged grammar recognition,
+parse-tree construction, and safe structural action evaluation. It explicitly
+does not own base-Loko parsing, AST lowering, semantic lowering, or arbitrary
+host execution.
+
+`grammar_frontend::records` and `grammar_frontend::calculator` own their grammar
+resources and staged-language validation. They explicitly do not own duplicate
+recognizers or legacy fallback parsers.
+
+Workbench/report surfaces own explanation and linking. They explicitly do not
+infer compiler facts by parsing prose dumps.
+
+### Invariants
+
+- Valid records and calculator fixtures keep producing the same frontend forms
+  and runtime behavior.
+- Calculator token shapes are source-authored grammar rules, not interpreter
+  builtins.
+- The interpreter reports unknown rule references as grammar failures rather
+  than silently matching hidden Rust token parsers.
+- Staged regions expose parser driver/oracle facts so users can tell whether a
+  region was interpreted and whether a legacy fallback participated.
+- Reports and docs make the interpreted path visible without overclaiming a
+  base-Loko self-hosting flip.
+
+### Sequence
+
+1. Move calculator lexical rules (`name`, `number`) into
+   `calculator.grammar`, remove the remaining staged interpreter builtins, and
+   test unknown-rule behavior.
+2. Reduce staged adapter glue by parsing each grammar resource once per region
+   and sharing action diagnostic conversion between records and calculator.
+3. Add explicit staged parser metadata (`driver=interpreted-grammar`,
+   `oracle=none`) to `StagedRegionEmission`/`StagedParseRegion`, parse traces,
+   EOP records, and the HTML report.
+4. Update grammar docs and report tests to show the now-real path:
+   grammar resource -> direct rule -> action -> frontend form -> semantic
+   object -> artifacts.
+5. Run full workspace gates and commit each slice coherently.
+
+### Risks
+
+- Removing builtins may expose grammar-resource omissions. Keep tests around
+  calculator calls, arithmetic, records type names, and malformed staged input.
+- Parser metadata can overpromise. Use precise values: interpreted staged
+  grammars have no legacy oracle/fallback; base-Loko shadow remains separate
+  and unavailable for now.
+- Shared adapter helpers should not hide records/calculator validation. Keep
+  semantic checks local to the staged grammar module that owns them.
+
 ## Make Grammar Actions Inspectable And Presentable
 
 ### Goal
