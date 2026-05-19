@@ -2561,11 +2561,22 @@ fn form_defined_objects(
     entry: &AcceptedDefinition,
     artifacts: &SessionArtifacts,
 ) -> Vec<EnvironmentObject> {
-    let mut objects = artifacts
-        .environment_objects()
+    let produced = artifacts
+        .source_forms()
         .into_iter()
-        .filter(|object| form_defines_object(entry, object))
-        .collect::<Vec<_>>();
+        .find(|form| form.id == entry.form.id())
+        .map(|form| form.produced_object_ids)
+        .unwrap_or_default();
+    let mut objects = artifacts.environment_objects();
+    if produced.is_empty() {
+        objects.retain(|object| form_defines_object(entry, object));
+    } else {
+        objects.retain(|object| {
+            produced
+                .iter()
+                .any(|produced_id| produced_id == object.id.as_str())
+        });
+    }
     objects.sort_by(|left, right| {
         form_primary_object(entry, right)
             .cmp(&form_primary_object(entry, left))

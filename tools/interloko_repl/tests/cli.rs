@@ -216,7 +216,8 @@ fn source_forms_are_inspectable_and_invokable() {
 #[test]
 fn source_forms_report_defined_environment_objects() {
     let (stdout, stderr) = run_repl(
-        "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+        "define class <point> slot x; end;\n\
+         define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
          define generic area(shape :: <object>) => <integer>;\n\
          define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
          define function main()\n  area(make(<circle>, radius: 10))\nend;\n\
@@ -224,23 +225,29 @@ fn source_forms_report_defined_environment_objects() {
          :invoke form:f1 show-defined-objects\n\
          :invoke form:f2 show-defined-objects\n\
          :invoke form:f3 show-defined-objects\n\
+         :invoke form:f4 show-defined-objects\n\
          :invoke form:f0 show-grammar\n\
          :invoke form:f1 show-grammar\n\
          :invoke form:f2 show-grammar\n\
          :invoke form:f3 show-grammar\n\
+         :invoke form:f4 show-grammar\n\
          :quit\n",
     );
 
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("defined objects form:f0"));
-    assert!(stdout.contains("class:c1 <circle> primary"));
+    assert!(stdout.contains("class:c1 <point> primary"));
     assert!(stdout.contains("slot:c1.s0"));
     assert!(stdout.contains("accessor:c1.s0"));
     assert!(stdout.contains("defined objects form:f1"));
-    assert!(stdout.contains("generic:g0 area(shape:object-top) -> integer primary"));
+    assert!(stdout.contains("class:c2 <circle> primary"));
+    assert!(stdout.contains("slot:c2.s0"));
+    assert!(stdout.contains("accessor:c2.s0"));
     assert!(stdout.contains("defined objects form:f2"));
-    assert!(stdout.contains("method:m0 area(c1:<circle>) -> integer primary"));
+    assert!(stdout.contains("generic:g0 area(shape:object-top) -> integer primary"));
     assert!(stdout.contains("defined objects form:f3"));
+    assert!(stdout.contains("method:m0 area(c2:<circle>) -> integer primary"));
+    assert!(stdout.contains("defined objects form:f4"));
     assert!(stdout.contains("function:f0 main() -> integer primary"));
     assert!(stdout.contains("effective-rule: effective-grammar-rule:base-loko/class-definition"));
     assert!(stdout.contains("effective-rule: effective-grammar-rule:base-loko/generic-definition"));

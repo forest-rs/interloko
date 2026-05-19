@@ -4972,10 +4972,11 @@ fn produced_object_ids_for_span(objects: &[EnvironmentObject], span: Span) -> Ve
     let mut ids = objects
         .iter()
         .filter(|object| {
-            object
-                .source
-                .span
-                .is_some_and(|object_span| span_contains(span, object_span))
+            object.origin == EnvironmentOrigin::SourceAuthored
+                && object
+                    .source
+                    .span
+                    .is_some_and(|object_span| span_contains(span, object_span))
         })
         .map(|object| object.id.to_string())
         .collect::<Vec<_>>();
@@ -10906,6 +10907,12 @@ mod tests {
                 .produced_object_ids
                 .iter()
                 .any(|id| id.starts_with("class:c"))
+        );
+        assert!(
+            staged
+                .produced_object_ids
+                .iter()
+                .all(|id| id != "class:c0")
         );
     }
 
