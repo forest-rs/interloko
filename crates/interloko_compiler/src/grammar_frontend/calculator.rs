@@ -3,9 +3,8 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::diagnostic::{Diagnostic, DiagnosticArg};
+use crate::diagnostic::Diagnostic;
 use crate::source_data::{self, SourceData};
-use crate::syntax::Span;
 
 use super::interpreter::{
     GrammarActionValue, InterpretedParse, InterpretedParseError, evaluate_rule_action,
@@ -15,43 +14,42 @@ use super::interpreter::{
 use super::{
     CALCULATOR_GRAMMAR_NAME, GrammarId, GrammarProjection, GrammarRule, GrammarRuleId,
     ProjectionOrigin, StagedRegionEmission, grammar_rule_expression_data_from_expr,
-    source_span_data, staged_expected_diagnostic,
+    source_span_data, staged_action_error_diagnostic, staged_expected_diagnostic,
 };
 
 const CALCULATOR_GRAMMAR_RESOURCE: &str = "grammars/calculator.grammar";
 const CALCULATOR_GRAMMAR_SOURCE: &str = include_str!("../../grammars/calculator.grammar");
 
 pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmission {
-    match interpret_calculator_region(body, source_offset) {
-        Ok(parse) => emission_from_interpreted_parse(body, source_offset, &parse),
+    let grammar_rules = parse_source_authored_grammar(CALCULATOR_GRAMMAR_SOURCE);
+    match interpret_calculator_region(&grammar_rules, body, source_offset) {
+        Ok(parse) => emission_from_interpreted_parse(&grammar_rules, &parse),
         Err(error) => calculator_parse_error_emission(body, source_offset, error),
     }
 }
 
 fn interpret_calculator_region(
+    rules: &[super::interpreter::SourceAuthoredRule],
     body: &str,
     source_offset: usize,
 ) -> Result<InterpretedParse, InterpretedParseError> {
-    let rules = parse_source_authored_grammar(CALCULATOR_GRAMMAR_SOURCE);
-    interpret_region_result(&rules, "calculator-region", body, source_offset)
+    interpret_region_result(rules, "calculator-region", body, source_offset)
 }
 
 fn emission_from_interpreted_parse(
-    body: &str,
-    source_offset: usize,
+    grammar_rules: &[super::interpreter::SourceAuthoredRule],
     parse: &InterpretedParse,
 ) -> StagedRegionEmission {
     let mut forms = Vec::new();
     let mut diagnostics = Vec::new();
     let mut functions = Vec::new();
-    let grammar_rules = parse_source_authored_grammar(CALCULATOR_GRAMMAR_SOURCE);
     for function in parse
         .root
         .children
         .iter()
         .filter(|node| node.rule_name == "calculator-function")
     {
-        match evaluate_rule_action(&grammar_rules, function) {
+        match evaluate_rule_action(grammar_rules, function) {
             Ok(Some(output)) => match output.value {
                 GrammarActionValue::FrontendForm(form) => {
                     forms.push(form);
@@ -68,31 +66,12 @@ fn emission_from_interpreted_parse(
                 "calculator",
                 "calculator action",
             )),
-            Err(error) => {
-                let mut diagnostic =
-                    staged_expected_diagnostic(error.span, "calculator", error.expected.as_ref());
-                if let Some(rule) = error.rule {
-                    diagnostic = diagnostic.with_arg(DiagnosticArg::text("rule", rule.to_string()));
-                }
-                if let Some(action) = error.action {
-                    diagnostic =
-                        diagnostic.with_arg(DiagnosticArg::text("action", action.to_string()));
-                }
-                if let Some(arg) = error.arg {
-                    diagnostic =
-                        diagnostic.with_arg(DiagnosticArg::text("argument", arg.to_string()));
-                }
-                if let Some(field) = error.field {
-                    diagnostic =
-                        diagnostic.with_arg(DiagnosticArg::text("field", field.to_string()));
-                }
-                diagnostics.push(diagnostic);
-            }
+            Err(error) => diagnostics.push(staged_action_error_diagnostic(error, "calculator")),
         }
     }
     if functions.is_empty() && diagnostics.is_empty() {
         diagnostics.push(staged_expected_diagnostic(
-            Span::new(source_offset, source_offset + body.len()),
+            parse.root.span,
             "calculator",
             "`name = expression`",
         ));

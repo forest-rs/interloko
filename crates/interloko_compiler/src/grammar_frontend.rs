@@ -2479,6 +2479,26 @@ fn staged_expected_diagnostic(span: Span, adapter: &str, expected: &str) -> Diag
     expected_syntax_diagnostic(span, expected).with_arg(DiagnosticArg::text("adapter", adapter))
 }
 
+fn staged_action_error_diagnostic(
+    error: interpreter::GrammarActionError,
+    adapter: &str,
+) -> Diagnostic {
+    let mut diagnostic = staged_expected_diagnostic(error.span, adapter, error.expected.as_ref());
+    if let Some(rule) = error.rule {
+        diagnostic = diagnostic.with_arg(DiagnosticArg::text("rule", rule.to_string()));
+    }
+    if let Some(action) = error.action {
+        diagnostic = diagnostic.with_arg(DiagnosticArg::text("action", action.to_string()));
+    }
+    if let Some(arg) = error.arg {
+        diagnostic = diagnostic.with_arg(DiagnosticArg::text("argument", arg.to_string()));
+    }
+    if let Some(field) = error.field {
+        diagnostic = diagnostic.with_arg(DiagnosticArg::text("field", field.to_string()));
+    }
+    diagnostic
+}
+
 fn push_report_diagnostic(report: &mut GrammarParseReport, diagnostic: Diagnostic) {
     report.diagnostics.push(diagnostic);
     if let Some(activation) = report.activations.first() {
