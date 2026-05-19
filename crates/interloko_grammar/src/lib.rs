@@ -11,6 +11,11 @@ use alloc::vec::Vec;
 use core::fmt;
 
 /// A byte span in parsed source.
+///
+/// [`interpret_region`] uses spans to report where a [`Parse`] or
+/// [`ParseError`] lands in the caller's source. `source_offset` is folded into
+/// every produced span so embedded regions can preserve coordinates in a larger
+/// file.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Span {
     /// Inclusive start byte offset.
@@ -34,6 +39,10 @@ impl Span {
 }
 
 /// Stable source of a projected grammar fact.
+///
+/// This is metadata for callers that project grammar rules into a larger
+/// environment model. `interloko_compiler` uses it for grammar MOP/EOP records;
+/// the grammar kernel itself does not branch on it while matching input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectionOrigin {
     /// Projected from compiler-owned facts.
@@ -66,6 +75,10 @@ impl fmt::Display for ProjectionOrigin {
 }
 
 /// Structured grammar expression used by grammar rules.
+///
+/// [`parse_rule_expression`] and [`parse_grammar_source`] produce this type.
+/// [`interpret_region`] consumes it through [`SourceAuthoredRule`] values when
+/// matching source text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuleExpression {
     /// A named grammar rule reference.
@@ -87,6 +100,9 @@ pub enum RuleExpression {
     /// Zero or more repetitions.
     ZeroOrMore(Box<RuleExpression>),
     /// A structural input expression plus an inert output description.
+    ///
+    /// Matching uses only `input`; callers can inspect `output` after parsing a
+    /// grammar to decide how a matched rule should be interpreted.
     Transform {
         /// Matched input expression.
         input: Box<RuleExpression>,
@@ -96,6 +112,10 @@ pub enum RuleExpression {
 }
 
 /// Inert output attached to a transformed rule expression.
+///
+/// [`parse_rule_expression`] produces this for `=> ...` transforms. The
+/// grammar kernel stores and displays the value, but it never executes actions
+/// or assigns language-specific meaning to symbols.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransformOutput {
     /// Deterministic action descriptor.
@@ -107,6 +127,11 @@ pub enum TransformOutput {
 }
 
 /// A deterministic structural action attached to a grammar rule.
+///
+/// [`parse_grammar_action`] and [`parse_grammar_source`] produce this from
+/// transform output such as `=> emit-form(name: name)`. The value is inert:
+/// callers inspect it alongside a matched [`RuleNode`] and decide what it
+/// means.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarAction {
     /// Action name, such as `emit-class`.
@@ -116,6 +141,10 @@ pub struct GrammarAction {
 }
 
 /// One named grammar action argument.
+///
+/// [`GrammarAction::args`] stores these. Each argument names a capture,
+/// capture-all, literal, or boolean term that a caller-owned action evaluator
+/// can interpret against a [`RuleNode`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarActionArg {
     /// Argument name.
@@ -125,6 +154,10 @@ pub struct GrammarActionArg {
 }
 
 /// A small grammar action value expression.
+///
+/// [`parse_grammar_action`] produces these for action arguments. The grammar
+/// kernel does not resolve captures; it only records what a caller should look
+/// for in a matched [`RuleNode`] tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GrammarActionTerm {
     /// Capture the first child rule with this name.
@@ -322,13 +355,21 @@ impl fmt::Display for GroupedRuleExpression<'_> {
 }
 
 /// A rule parsed from grammar source.
+///
+/// [`parse_grammar_source`] returns a list of these. Pass that list to
+/// [`interpret_region`] or [`interpret_rule_error`] to match input. Callers may
+/// adjust policy fields, such as [`SourceAuthoredRule::excluded_text`], before
+/// interpreting.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceAuthoredRule {
     /// Rule name.
     pub name: String,
-    /// Rule expression.
+    /// Rule expression consumed by [`interpret_region`].
     pub expression: RuleExpression,
-    /// Optional deterministic action descriptor.
+    /// Optional deterministic action descriptor parsed from `=> ...`.
+    ///
+    /// This crate records the action so callers can interpret it later; the
+    /// matcher does not execute it.
     pub action: Option<GrammarAction>,
     /// Complete matched text values rejected after the expression matches.
     ///
@@ -350,6 +391,11 @@ impl SourceAuthoredRule {
 }
 
 /// Parse tree node produced by interpreted matching.
+///
+/// [`interpret_region`] returns a [`Parse`] whose [`Parse::root`] is a
+/// `RuleNode`. Callers usually inspect these nodes directly or combine them
+/// with [`GrammarAction`] descriptors from matching [`SourceAuthoredRule`]
+/// values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuleNode {
     /// Matched rule name.
@@ -358,23 +404,39 @@ pub struct RuleNode {
     pub span: Span,
     /// Matched source text.
     pub text: String,
-    /// Child rule/literal/class nodes.
+    /// Child rule/literal/class nodes produced while matching this rule.
     pub children: Vec<RuleNode>,
 }
 
-/// Interpreted parse result.
+/// Interpreted parse result returned by [`interpret_region`].
+///
+/// The root is the node for the requested root rule. If complete-region parsing
+/// fails, callers receive [`ParseError`] instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parse {
     /// Root parse node.
     pub root: RuleNode,
 }
 
-/// Interpreted parse failure.
+/// Interpreted parse failure returned by [`interpret_region`] and
+/// [`interpret_rule_error`].
+///
+/// The failure is structural: [`ParseError::span`] reports the failed byte
+/// position and [`ParseError::expected`] lists the fragments that could have
+/// matched there. Rendering, localization, labels, and recovery policy belong
+/// to the caller.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError {
-    /// Error span.
+    /// Error span in the caller's coordinate system.
+    ///
+    /// [`interpret_region`] and [`interpret_rule_error`] add their
+    /// `source_offset` argument to the internal failure position before
+    /// returning this span.
     pub span: Span,
     /// Expected fragments at the error span.
+    ///
+    /// These are parser fragments such as rule names, literal tokens, character
+    /// classes, or `end of region`; callers decide how to render them.
     pub expected: Vec<String>,
 }
 
@@ -391,6 +453,10 @@ struct ParseFailure {
 }
 
 /// Parses the small line-oriented grammar source format.
+///
+/// Returns one [`SourceAuthoredRule`] per `rule ... = ...` line. Pass the
+/// returned slice to [`interpret_region`] to match source text, or inspect the
+/// rules to build documentation, projections, or caller-owned action tables.
 #[must_use]
 pub fn parse_grammar_source(source: &str) -> Vec<SourceAuthoredRule> {
     let mut rules = Vec::new();
@@ -430,6 +496,10 @@ pub fn parse_grammar_source(source: &str) -> Vec<SourceAuthoredRule> {
 }
 
 /// Parses one grammar rule expression.
+///
+/// This is useful for tests, tools, or host-projected grammars that already
+/// have the rule name and only need the right-hand side. Use
+/// [`parse_grammar_source`] when parsing complete grammar files.
 #[must_use]
 pub fn parse_rule_expression(expression: &str) -> RuleExpression {
     let trimmed = expression.trim();
@@ -485,6 +555,9 @@ fn parse_transform_output(output: &str) -> TransformOutput {
 }
 
 /// Parses an action descriptor.
+///
+/// Returns `None` when the input is not shaped like `name(arg: value, ...)`.
+/// [`parse_grammar_source`] calls this for transform output after `=>`.
 #[must_use]
 pub fn parse_grammar_action(output: &str) -> Option<GrammarAction> {
     let trimmed = output.trim();
@@ -652,6 +725,11 @@ fn split_whitespace_top_level(input: &str) -> Vec<&str> {
 }
 
 /// Interprets `root_rule` over a complete source region.
+///
+/// `rules` normally comes from [`parse_grammar_source`]. On success, returns a
+/// [`Parse`] tree rooted at `root_rule`. On failure, returns a [`ParseError`].
+/// `source_offset` is added to every reported [`Span`], which lets callers
+/// parse an embedded region while preserving outer source coordinates.
 pub fn interpret_region(
     rules: &[SourceAuthoredRule],
     root_rule: &str,
@@ -669,6 +747,10 @@ pub fn interpret_region(
 }
 
 /// Interprets one rule and returns the failure that rule would produce.
+///
+/// This helper is for diagnostics and recovery. It does not require the full
+/// region to be consumed, and it returns the [`ParseError`] that matching
+/// `rule_name` at `position` would produce.
 #[must_use]
 pub fn interpret_rule_error(
     rules: &[SourceAuthoredRule],
@@ -936,6 +1018,11 @@ fn literal_boundary_ok(source: &str, end: usize, literal: &str) -> bool {
 }
 
 /// Counts parse tree nodes per rule name.
+///
+/// Pass a [`RuleNode`], usually [`Parse::root`], to summarize which grammar
+/// rules contributed to a parse. `interloko_compiler` uses these counts in
+/// staged-region reports; standalone callers can use them for tracing,
+/// coverage, or simple parser diagnostics.
 #[must_use]
 pub fn rule_counts(root: &RuleNode) -> Vec<RuleCount> {
     let mut counts = Vec::<RuleCount>::new();
@@ -943,7 +1030,10 @@ pub fn rule_counts(root: &RuleNode) -> Vec<RuleCount> {
     counts
 }
 
-/// Count for one parse-tree rule name.
+/// Count for one parse-tree rule name returned by [`rule_counts`].
+///
+/// This is a reporting/provenance record, not parser input. It lets callers
+/// show which rules were exercised without walking the parse tree themselves.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuleCount {
     /// Stable grammar rule name.

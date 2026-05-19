@@ -35,15 +35,16 @@ assert!(parse.root.children.iter().any(|node| node.rule_name == "name"));
 
 ## Concepts
 
-- **Grammar source**: a compact line-oriented format with `grammar`, `rule`, and
-  `end` lines.
-- **Rule expression**: structured grammar data such as rule references, literals,
-  character classes, choices, repetitions, and transforms.
-- **Parse tree**: a `RuleNode` tree produced by interpreted matching.
-- **Action descriptor**: inert data attached with `=> action(...)`; this crate
-  parses it but does not execute it.
+- **Grammar source**: a compact line-oriented format passed to
+  [`parse_grammar_source`] with `grammar`, `rule`, and `end` lines.
+- **Rule expression**: [`RuleExpression`] data such as rule references,
+  literals, character classes, choices, repetitions, and transforms.
+- **Parse tree**: a [`RuleNode`] tree returned by [`interpret_region`].
+- **Action descriptor**: inert [`GrammarAction`] data attached with
+  `=> action(...)`; this crate parses it but does not execute it.
 - **Caller policy**: language-specific behavior, such as reserved words, supplied
-  by the caller rather than built into this crate.
+  by the caller through [`SourceAuthoredRule::with_excluded_text`] rather than
+  built into this crate.
 
 ## Grammar Source
 
@@ -51,8 +52,9 @@ The source format is intentionally small:
 
 ```text
 grammar tiny
-rule item = (`a` | `b`) `!`?
-rule items = item+
+rule word = `a` | `b`
+rule maybe-word = word?
+rule words = word+
 end
 ```
 
@@ -63,14 +65,14 @@ Supported expression forms include:
 - character classes: `[A-Za-z_]`
 - sequence: `` name `:` type-name ``
 - choice: `` `a` | `b` ``
-- optional: `` `!`? ``
+- optional: `item?`
 - one-or-more: `item+`
 - zero-or-more: `item*`
 - opaque regions: `` until(`end`) ``
 - transforms: `item => emit-item(name: name)`
 
-Transforms produce `TransformOutput` and optional `GrammarAction` values. They
-are structural metadata only.
+Transforms produce [`TransformOutput`] and optional [`GrammarAction`] values.
+They are structural metadata only.
 
 ```rust
 use interloko_grammar::{
@@ -105,9 +107,10 @@ assert_eq!(
 
 ## Parse Errors
 
-Failures report a byte span and a list of expected fragments. The span uses the
-`source_offset` supplied to `interpret_region`, so callers can parse embedded
-regions while preserving coordinates in the larger source file.
+Failures return a [`ParseError`] with a [`Span`] and a list of expected
+fragments. The span uses the `source_offset` supplied to [`interpret_region`],
+so callers can parse embedded regions while preserving coordinates in the
+larger source file.
 
 ```rust
 use interloko_grammar::{Span, interpret_region, parse_grammar_source};
@@ -144,9 +147,12 @@ assert_eq!(error.expected, vec!["name"]);
 
 The intended extension model is:
 
-1. Use this crate to parse grammar source and match input.
-2. Inspect `RuleNode` trees and `GrammarAction` descriptors.
-3. Interpret actions in a caller-owned layer.
+1. Use [`parse_grammar_source`] to parse grammar source into
+   [`SourceAuthoredRule`] values.
+2. Use [`interpret_region`] to match input and return a [`Parse`] containing a
+   [`RuleNode`] tree.
+3. Inspect [`RuleNode`] trees and [`GrammarAction`] descriptors.
+4. Interpret actions in a caller-owned layer.
 
 For Interloko, that caller-owned layer lives in `interloko_compiler`: it turns
 grammar actions into frontend forms, CST data, diagnostics, and MOP/EOP
@@ -163,3 +169,15 @@ parse-tree and action-descriptor data.
 - Diagnostics are structural spans and expected fragments, not localized prose.
 - Performance is tuned for clarity and current compiler/workbench use, not for a
   high-throughput parser generator.
+
+[`GrammarAction`]: crate::GrammarAction
+[`Parse`]: crate::Parse
+[`ParseError`]: crate::ParseError
+[`RuleExpression`]: crate::RuleExpression
+[`RuleNode`]: crate::RuleNode
+[`SourceAuthoredRule`]: crate::SourceAuthoredRule
+[`SourceAuthoredRule::with_excluded_text`]: crate::SourceAuthoredRule::with_excluded_text
+[`Span`]: crate::Span
+[`TransformOutput`]: crate::TransformOutput
+[`interpret_region`]: crate::interpret_region
+[`parse_grammar_source`]: crate::parse_grammar_source
