@@ -999,6 +999,56 @@ pub struct ParseProvenance {
     pub diagnostics: Vec<GrammarDiagnosticFact>,
 }
 
+/// Source text variant consumed by the base grammar parser.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontendParseSource {
+    /// Parser consumed the original source file text.
+    OriginalSource,
+    /// Parser consumed a derived source where staged regions were blanked and
+    /// materialized frontend forms were inserted through the staged pipeline.
+    StagedRegionsBlanked,
+}
+
+impl FrontendParseSource {
+    /// Returns the stable source token used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OriginalSource => "original-source",
+            Self::StagedRegionsBlanked => "staged-regions-blanked",
+        }
+    }
+}
+
+/// Owned frontend parse artifact preserved after CST projection.
+///
+/// The borrowed `interloko_grammar` parse tree is converted into
+/// [`SourceData`] before it enters this report so sessions can keep parse
+/// provenance without carrying parser lifetimes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontendParseArtifact {
+    /// Source file parsed.
+    pub source_file: SourceFileId,
+    /// Language environment selected for the parse.
+    pub environment: LanguageEnvironmentId,
+    /// Grammar used by the base source parse.
+    pub grammar: GrammarId,
+    /// Activation used by the base source parse.
+    pub activation: GrammarActivationId,
+    /// Root rule used by the base source parse.
+    pub root_rule: GrammarRuleId,
+    /// Source variant consumed by the parser.
+    pub source: FrontendParseSource,
+    /// Span of the source parsed by this artifact.
+    pub source_span: Span,
+    /// Owned parse-tree projection when the grammar parse succeeded.
+    pub parse_tree: Option<SourceData>,
+    /// Number of CST nodes produced by projection.
+    pub cst_node_count: usize,
+    /// Number of parser diagnostics attached to the syntax tree.
+    pub diagnostic_count: usize,
+}
+
 /// Complete report for parsing one source through a grammar frontend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarParseReport {
@@ -1028,6 +1078,8 @@ pub struct GrammarParseReport {
     pub provenance: ParseProvenance,
     /// Grammar-specific diagnostic facts.
     pub grammar_diagnostics: Vec<GrammarDiagnosticFact>,
+    /// Frontend parse artifact before AST conversion.
+    pub frontend_parse: FrontendParseArtifact,
     /// Syntax diagnostics from the parser.
     pub diagnostics: Vec<Diagnostic>,
     /// Syntax tree produced by the active grammar parser.
@@ -1469,9 +1521,12 @@ fn parse_file_with_records(
     source: &str,
     records: GrammarFrontendRecords,
 ) -> GrammarParseReport {
-    let syntax = match base_loko_primary::parse_file(source_file, source) {
-        Ok(tree) => tree,
-        Err(diagnostic) => syntax_tree_with_diagnostic(source_file, source, diagnostic),
+    let (syntax, parse_tree) = match base_loko_primary::parse_file(source_file, source) {
+        Ok(success) => (success.syntax, Some(success.parse_tree)),
+        Err(diagnostic) => (
+            syntax_tree_with_diagnostic(source_file, source, diagnostic),
+            None,
+        ),
     };
     let active_grammar = records.active_grammar;
     let active_grammar_slug = records
@@ -1496,6 +1551,18 @@ fn parse_file_with_records(
             "{} source file parse delegated to base parser",
             records.environment.slug
         ),
+    };
+    let frontend_parse = FrontendParseArtifact {
+        source_file,
+        environment: records.environment.id,
+        grammar: active_grammar,
+        activation: activation.id,
+        root_rule,
+        source: FrontendParseSource::OriginalSource,
+        source_span: Span::new(0, source.len()),
+        parse_tree,
+        cst_node_count: cst_node_count(&syntax.root),
+        diagnostic_count: syntax.diagnostics.len(),
     };
     let active_effective_rules = records
         .effective_rules
@@ -1540,6 +1607,7 @@ fn parse_file_with_records(
         extension_provenance: Vec::new(),
         provenance,
         grammar_diagnostics,
+        frontend_parse,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
     }
@@ -1937,9 +2005,13 @@ fn parse_staged_file(
     }
 
     let parser_source = source_with_staged_regions_blanked(source, &discovery.regions);
-    let mut syntax = match base_loko_primary::parse_file(source_file, &parser_source) {
-        Ok(tree) => tree,
-        Err(diagnostic) => syntax_tree_with_diagnostic(source_file, &parser_source, diagnostic),
+    let (mut syntax, parse_tree) = match base_loko_primary::parse_file(source_file, &parser_source)
+    {
+        Ok(success) => (success.syntax, Some(success.parse_tree)),
+        Err(diagnostic) => (
+            syntax_tree_with_diagnostic(source_file, &parser_source, diagnostic),
+            None,
+        ),
     };
     syntax.diagnostics.extend(diagnostics);
 
@@ -1975,6 +2047,18 @@ fn parse_staged_file(
         diagnostic_activation,
         &active_effective_rules,
     );
+    let frontend_parse = FrontendParseArtifact {
+        source_file,
+        environment: records.environment.id,
+        grammar: base_grammar,
+        activation: activations[0].id,
+        root_rule: base_root_rule,
+        source: FrontendParseSource::StagedRegionsBlanked,
+        source_span: Span::new(0, source.len()),
+        parse_tree,
+        cst_node_count: cst_node_count(&syntax.root),
+        diagnostic_count: syntax.diagnostics.len(),
+    };
     let provenance = ParseProvenance {
         id: ParseProvenanceId::new(source_file, records.environment.id),
         source_file,
@@ -2000,6 +2084,7 @@ fn parse_staged_file(
         extension_provenance,
         provenance,
         grammar_diagnostics,
+        frontend_parse,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
     })
@@ -3003,6 +3088,17 @@ fn normalized_shadow_node_count(top_level_count: usize) -> usize {
     top_level_count.saturating_add(1)
 }
 
+fn cst_node_count(root: &CstNode) -> usize {
+    1 + root
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            CstElement::Node(child) => Some(cst_node_count(child)),
+            CstElement::Token(_) => None,
+        })
+        .sum::<usize>()
+}
+
 fn parser_product_divergences(
     primary: &ParserProductSummary,
     oracle: &ParserProductSummary,
@@ -3679,6 +3775,48 @@ mod tests {
     }
 
     #[test]
+    fn frontend_parse_artifact_preserves_parse_tree_and_cst_projection() {
+        let source_file = SourceFileId::from_path("parse-artifact.loko");
+        let source = "define function main()\n  42\nend";
+        let report = parse_file(source_file, source);
+
+        assert_eq!(report.frontend_parse.source_file, source_file);
+        assert_eq!(report.frontend_parse.environment, report.environment.id);
+        assert_eq!(report.frontend_parse.grammar, report.activations[0].grammar);
+        assert_eq!(report.frontend_parse.activation, report.activations[0].id);
+        assert_eq!(
+            report.frontend_parse.root_rule,
+            report.activations[0].root_rule
+        );
+        assert_eq!(
+            report.frontend_parse.source,
+            FrontendParseSource::OriginalSource
+        );
+        assert_eq!(
+            report.frontend_parse.source_span,
+            Span::new(0, source.len())
+        );
+        assert_eq!(
+            report.frontend_parse.diagnostic_count,
+            report.syntax.diagnostics.len()
+        );
+        assert_eq!(
+            report.frontend_parse.cst_node_count,
+            cst_node_count(&report.syntax.root)
+        );
+        assert_eq!(report.syntax.root.child_nodes(CstKind::Function).count(), 1);
+
+        let parse_tree = report
+            .frontend_parse
+            .parse_tree
+            .as_ref()
+            .expect("successful parse preserves an owned parse-tree artifact");
+        let dump = source_data::dump(parse_tree);
+        assert!(dump.contains("rule: source-file"));
+        assert!(dump.contains("rule: function-definition"));
+    }
+
+    #[test]
     fn grammar_diagnostics_record_active_rule_and_expected_fragment() {
         let report = parse_file_with_environment(
             SourceFileId::from_path("bad.loko"),
@@ -3709,6 +3847,11 @@ mod tests {
         let report = parse_file(SourceFileId::from_path("staged.loko"), source);
 
         assert_eq!(report.environment.name, STAGED_LOKO_ENVIRONMENT_NAME);
+        assert_eq!(
+            report.frontend_parse.source,
+            FrontendParseSource::StagedRegionsBlanked
+        );
+        assert!(report.frontend_parse.parse_tree.is_some());
         assert_eq!(report.activations.len(), 3);
         assert_eq!(report.staged_regions.len(), 2);
         assert!(

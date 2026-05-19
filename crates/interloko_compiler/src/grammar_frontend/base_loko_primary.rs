@@ -8,27 +8,37 @@ use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::SourceFileId;
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree, Token, TokenKind};
 
+use crate::source_data::SourceData;
+
 use super::interpreter::{
     InterpretedParseError, InterpretedRuleNode, interpret_region_result, interpret_rule_error,
-    parse_source_authored_grammar,
+    interpreted_rule_node_source_data, parse_source_authored_grammar,
 };
 
 const BASE_LOKO_GRAMMAR_SOURCE: &str = include_str!("../../grammars/base_loko.grammar");
 
+pub(super) struct BaseLokoParseSuccess {
+    pub(super) syntax: SyntaxTree,
+    pub(super) parse_tree: SourceData,
+}
+
 pub(super) fn parse_file(
     source_file: SourceFileId,
     source: &str,
-) -> Result<SyntaxTree, Diagnostic> {
+) -> Result<BaseLokoParseSuccess, Diagnostic> {
     let rules = parse_source_authored_grammar(BASE_LOKO_GRAMMAR_SOURCE);
     let parse = interpret_region_result(&rules, "source-file", source, 0)
         .map_err(|error| base_loko_parse_diagnostic(&rules, source, error))?;
     let tokens = syntax::lex(source);
-    let builder = GrammarCstBuilder {
+    let projector = BaseLokoCstProjector {
         source_file,
         source,
         tokens,
     };
-    Ok(builder.finish(&parse.root))
+    Ok(BaseLokoParseSuccess {
+        parse_tree: interpreted_rule_node_source_data(&parse.root),
+        syntax: projector.project(&parse.root),
+    })
 }
 
 fn base_loko_parse_diagnostic(
@@ -102,14 +112,14 @@ fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {
         .with_arg(DiagnosticArg::text("expected", expected))
 }
 
-struct GrammarCstBuilder<'source> {
+struct BaseLokoCstProjector<'source> {
     source_file: SourceFileId,
     source: &'source str,
     tokens: Vec<Token>,
 }
 
-impl GrammarCstBuilder<'_> {
-    fn finish(self, root: &InterpretedRuleNode<'_>) -> SyntaxTree {
+impl BaseLokoCstProjector<'_> {
+    fn project(self, root: &InterpretedRuleNode<'_>) -> SyntaxTree {
         let root = self.build_root(root);
         SyntaxTree {
             source_file: self.source_file,

@@ -1,5 +1,60 @@
 # Plans
 
+## Clarify The Frontend Parse Boundary
+
+### Goal
+
+Make the compiler frontend pipeline explicit: source text is parsed by a
+selected grammar environment, that parse produces an inspectable parse-tree
+artifact, and a CST projector turns the parse tree into the compiler
+`SyntaxTree` consumed by AST lowering.
+
+### Non-Goals
+
+- No LSP server.
+- No formatter.
+- No syntax-highlighting API yet.
+- No crate split.
+- No new grammar syntax.
+- No AST, semantic IR, lowering, runtime, or tape behavior changes.
+
+### Fence
+
+`interloko_grammar` owns the borrowed parser kernel. It explicitly does not own
+compiler CST projection or long-lived session artifacts.
+
+`interloko_compiler::grammar_frontend` owns grammar-environment selection,
+frontend parse reports, parse-tree-to-CST projection, grammar provenance, and
+compiler diagnostics. It explicitly does not own AST lowering, semantic IR, or
+runtime execution.
+
+### Invariants
+
+- The active parser path still produces the existing `SyntaxTree` shape.
+- The parse tree is not discarded during CST projection; an owned parse artifact
+  is preserved in `GrammarParseReport`.
+- Borrowed grammar-kernel parse nodes do not leak into long-lived compiler
+  reports.
+- Staged-region blanking remains explicit in the frontend artifact.
+- Existing session, lab, REPL, corpus, and examples keep their behavior.
+
+### Sequence
+
+1. Rename the base Loko CST builder role around projection rather than parsing.
+2. Return a base parse success containing both owned parse-tree source data and
+   the produced `SyntaxTree`.
+3. Add a `FrontendParseArtifact` to `GrammarParseReport`.
+4. Populate it for ordinary and staged parses.
+5. Add focused tests and run full validation.
+
+### Risks
+
+- Duplicating parse-tree source data in reports can add memory pressure. Keep it
+  as owned structural report data for now, not a second compiler tree API.
+- Staged parses use a blanked parser source; the artifact must name that fact so
+  future tooling does not confuse it with original source text.
+- This slice should expose the boundary, not start a formatter/LSP subsystem.
+
 ## Borrow Grammar Kernel Strings
 
 ### Goal
