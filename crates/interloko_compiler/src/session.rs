@@ -5349,13 +5349,15 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
     for fact in &artifacts.grammar_parse.grammar_diagnostics {
         let _ = writeln!(
             out,
-            "  d{} code={} grammar={} activation={} rule={} rule-name={} span={}..{} expected={}",
+            "  d{} code={} grammar={} activation={} rule={} rule-name={} context={} application-span={} span={}..{} expected={}",
             fact.diagnostic_index,
             fact.code.as_str(),
             fact.grammar,
             fact.activation,
             fact.rule,
             fact.rule_name,
+            fact.context.as_str(),
+            render_optional_span(fact.application_span),
             fact.span.start,
             fact.span.end,
             grammar_expected_label(fact.expected_fragment.as_deref())
@@ -6470,13 +6472,15 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
     for fact in &report.grammar_diagnostics {
         let _ = writeln!(
             out,
-            "  d{} code={} grammar={} activation={} rule={} rule-name={} span={}..{} expected={}",
+            "  d{} code={} grammar={} activation={} rule={} rule-name={} context={} application-span={} span={}..{} expected={}",
             fact.diagnostic_index,
             fact.code.as_str(),
             fact.grammar,
             fact.activation,
             fact.rule,
             fact.rule_name,
+            fact.context.as_str(),
+            render_optional_span(fact.application_span),
             fact.span.start,
             fact.span.end,
             grammar_expected_label(fact.expected_fragment.as_deref())
@@ -6538,6 +6542,13 @@ fn write_parser_product_summary(
 
 fn grammar_expected_label(expected: Option<&str>) -> String {
     expected.map_or_else(|| "none".into(), |value| format!("{value:?}"))
+}
+
+fn render_optional_span(span: Option<Span>) -> String {
+    span.map_or_else(
+        || "none".into(),
+        |span| format!("{}..{}", span.start, span.end),
+    )
 }
 
 fn explain_grammar_rule(rule: &GrammarRule) -> String {
@@ -10594,6 +10605,21 @@ mod tests {
                 .iter()
                 .any(|application| application.rule_name == "function-definition")
         );
+    }
+
+    #[test]
+    fn parse_trace_renders_grammar_diagnostic_context() {
+        let artifacts = CompilerSession::compile_source(
+            "bad-syntax.loko",
+            "define function main(",
+            RuntimeMode::CompileOnly,
+        );
+
+        let trace = artifacts.dump_parse_trace();
+        assert!(trace.contains("diagnostics:"));
+        assert!(trace.contains("context=containing-rule-application"));
+        assert!(trace.contains("application-span=0..21"));
+        assert!(trace.contains("expected="));
     }
 
     #[test]

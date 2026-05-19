@@ -94,6 +94,42 @@ form-kind heuristics.
 3. Expose span queries for CST nodes, tokens, and grammar-rule applications.
 4. Add tests using a function body span and cursor span.
 
+## Structure Grammar Diagnostic Context
+
+### Goal
+
+Make grammar diagnostics explain which recorded parser application supplied
+their context. Diagnostics should carry a stable context classification and
+the application span where available, so tools can link an error to parse
+provenance without slicing parse-trace text.
+
+### Non-Goals
+
+- No new diagnostic renderer.
+- No localization changes.
+- No recovery algorithm changes.
+- No attempt to improve wording in this slice.
+
+### Fence
+
+`grammar_frontend` owns the diagnostic facts because it owns parser
+applications and grammar provenance. `session` may render those facts, but it
+does not infer parser context from CST shape or diagnostic prose.
+
+### Invariants
+
+- Diagnostic facts are derived from recorded rule applications first.
+- Fallback to the root rule stays explicit when no application context exists.
+- Existing diagnostic codes and structured args remain unchanged.
+- Parse trace output includes the context without becoming the only API.
+
+### Sequence
+
+1. Add a grammar diagnostic context enum and application span field.
+2. Resolve diagnostic context from recorded rule applications.
+3. Render the new fields in parse-trace and semantic dumps.
+4. Add focused tests for context and trace output.
+
 ## Borrow Grammar Kernel Strings
 
 ### Goal

@@ -955,6 +955,29 @@ pub struct GrammarRuleApplication {
     pub span: Span,
 }
 
+/// How a grammar diagnostic was associated with parser provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrammarDiagnosticContext {
+    /// The diagnostic span exactly matched a recorded rule application.
+    ExactRuleApplication,
+    /// The diagnostic span was contained by a recorded rule application.
+    ContainingRuleApplication,
+    /// No recorded application matched, so the activation root rule was used.
+    RootRuleFallback,
+}
+
+impl GrammarDiagnosticContext {
+    /// Returns the stable label used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactRuleApplication => "exact-rule-application",
+            Self::ContainingRuleApplication => "containing-rule-application",
+            Self::RootRuleFallback => "root-rule-fallback",
+        }
+    }
+}
+
 /// Grammar-specific view of one parser diagnostic.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarDiagnosticFact {
@@ -974,6 +997,10 @@ pub struct GrammarDiagnosticFact {
     pub rule: GrammarRuleId,
     /// Effective rule name active at or nearest the diagnostic span.
     pub rule_name: String,
+    /// How the diagnostic was associated with parser provenance.
+    pub context: GrammarDiagnosticContext,
+    /// Span of the matched parser application, when one was available.
+    pub application_span: Option<Span>,
     /// Structured expected fragment, when the syntax diagnostic provides one.
     pub expected_fragment: Option<String>,
 }
@@ -1574,9 +1601,9 @@ fn parse_file_with_records(
     let provenance_rules = rule_provenance(&active_effective_rules, &applications);
     let grammar_diagnostics = grammar_diagnostic_facts(
         &syntax.diagnostics,
-        &syntax.root,
         &activation,
         &active_effective_rules,
+        &applications,
     );
     let grammar_stack = GrammarStack {
         environment: records.environment.id,
@@ -1885,9 +1912,9 @@ fn parse_staged_file(
             if let Some(activation) = report.activations.first() {
                 report.grammar_diagnostics = grammar_diagnostic_facts(
                     &report.diagnostics,
-                    &report.syntax.root,
                     activation,
                     &report.effective_rules,
+                    &report.provenance.applications,
                 );
                 report.provenance.diagnostics = report.grammar_diagnostics.clone();
             }
@@ -2043,9 +2070,9 @@ fn parse_staged_file(
         .expect("staged reports always include at least a base activation");
     let grammar_diagnostics = grammar_diagnostic_facts(
         &syntax.diagnostics,
-        &syntax.root,
         diagnostic_activation,
         &active_effective_rules,
+        &applications,
     );
     let frontend_parse = FrontendParseArtifact {
         source_file,
@@ -2472,9 +2499,9 @@ fn push_report_diagnostic(report: &mut GrammarParseReport, diagnostic: Diagnosti
     if let Some(activation) = report.activations.first() {
         report.grammar_diagnostics = grammar_diagnostic_facts(
             &report.diagnostics,
-            &report.syntax.root,
             activation,
             &report.effective_rules,
+            &report.provenance.applications,
         );
         report.provenance.diagnostics = report.grammar_diagnostics.clone();
     }
@@ -3207,18 +3234,18 @@ fn rule_provenance(
 
 fn grammar_diagnostic_facts(
     diagnostics: &[Diagnostic],
-    root: &CstNode,
     activation: &GrammarActivation,
     effective_rules: &[EffectiveGrammarRule],
+    applications: &[GrammarRuleApplication],
 ) -> Vec<GrammarDiagnosticFact> {
     diagnostics
         .iter()
         .enumerate()
         .map(|(diagnostic_index, diagnostic)| {
-            let rule_name = cst_rule_name_at_span(root, diagnostic.span).unwrap_or("source-file");
+            let context = diagnostic_rule_context(diagnostic.span, activation, applications);
             let rule = effective_rules
                 .iter()
-                .find(|rule| rule.name == rule_name)
+                .find(|rule| rule.id == context.rule)
                 .or_else(|| {
                     effective_rules
                         .iter()
@@ -3232,11 +3259,63 @@ fn grammar_diagnostic_facts(
                 grammar: activation.grammar,
                 activation: activation.id,
                 rule: rule.map_or(activation.root_rule, |rule| rule.id),
-                rule_name: rule_name.to_string(),
+                rule_name: context.rule_name,
+                context: context.context,
+                application_span: context.application_span,
                 expected_fragment: diagnostic_arg(diagnostic, "expected"),
             }
         })
         .collect()
+}
+
+struct DiagnosticRuleContext {
+    rule: GrammarRuleId,
+    rule_name: String,
+    context: GrammarDiagnosticContext,
+    application_span: Option<Span>,
+}
+
+fn diagnostic_rule_context(
+    span: Span,
+    activation: &GrammarActivation,
+    applications: &[GrammarRuleApplication],
+) -> DiagnosticRuleContext {
+    if let Some(application) = applications
+        .iter()
+        .find(|application| application.span == span)
+    {
+        return DiagnosticRuleContext {
+            rule: application.rule,
+            rule_name: application.rule_name.clone(),
+            context: GrammarDiagnosticContext::ExactRuleApplication,
+            application_span: Some(application.span),
+        };
+    }
+
+    let containing = applications
+        .iter()
+        .filter(|application| span_contains(application.span, span))
+        .min_by_key(|application| {
+            (
+                application.span.end.saturating_sub(application.span.start),
+                application.span.start,
+            )
+        });
+    if let Some(application) = containing {
+        return DiagnosticRuleContext {
+            rule: application.rule,
+            rule_name: application.rule_name.clone(),
+            context: GrammarDiagnosticContext::ContainingRuleApplication,
+            application_span: Some(application.span),
+        };
+    }
+
+    DiagnosticRuleContext {
+        rule: activation.root_rule,
+        rule_name: "source-file".to_string(),
+        context: GrammarDiagnosticContext::RootRuleFallback,
+        application_span: None,
+    }
 }
 
 fn diagnostic_arg(diagnostic: &Diagnostic, name: &str) -> Option<String> {
@@ -3245,33 +3324,6 @@ fn diagnostic_arg(diagnostic: &Diagnostic, name: &str) -> Option<String> {
         .iter()
         .find(|arg| arg.name == name)
         .map(|arg| arg.value.render())
-}
-
-fn cst_rule_name_at_span(root: &CstNode, span: Span) -> Option<&'static str> {
-    let mut best = None;
-    find_cst_rule_name_at_span(root, span, &mut best);
-    best.map(|(_, name)| name)
-}
-
-fn find_cst_rule_name_at_span(
-    node: &CstNode,
-    span: Span,
-    best: &mut Option<(usize, &'static str)>,
-) {
-    if !span_contains(node.span, span) {
-        return;
-    }
-    if let Some(name) = cst_rule_name(node.kind) {
-        let width = node.span.end.saturating_sub(node.span.start);
-        if best.is_none_or(|(best_width, _)| width <= best_width) {
-            *best = Some((width, name));
-        }
-    }
-    for child in &node.children {
-        if let CstElement::Node(child) = child {
-            find_cst_rule_name_at_span(child, span, best);
-        }
-    }
 }
 
 fn span_contains(outer: Span, inner: Span) -> bool {
@@ -3831,6 +3883,14 @@ mod tests {
         assert_eq!(fact.code, DiagnosticCode::SyntaxExpectedToken);
         assert_eq!(fact.grammar, GrammarId::new(DERIVED_HOST_GRAMMAR_NAME));
         assert_eq!(fact.rule_name, "source-file");
+        assert_eq!(
+            fact.context,
+            GrammarDiagnosticContext::ContainingRuleApplication
+        );
+        assert_eq!(
+            fact.application_span,
+            Some(Span::new(0, "define function main(".len()))
+        );
         assert!(fact.expected_fragment.is_some());
         assert_eq!(report.provenance.diagnostics, report.grammar_diagnostics);
     }
