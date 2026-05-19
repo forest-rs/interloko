@@ -389,12 +389,28 @@ diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
 
 `show-parser-shadow` is the base-Loko self-hosting harness surface. Today it
-reports the Rust recursive-descent parser as the primary parser and marks the
-source-authored grammar interpreter oracle as unavailable. That is intentional:
-the hand-written parser remains trusted while the grammar interpreter is
-brought up behind a stable report shape. Future source-authored grammar work
-plugs into this same report and compares normalized parser products before any
-primary-parser flip.
+reports the Rust recursive-descent parser as the primary parser and compares it
+with a source-authored `base-loko-shadow` grammar. The shadow grammar recognizes
+the top-level class, generic, method, and function subset and reports a
+normalized top-level signature. The hand-written parser remains trusted; the
+shadow grammar is an oracle for the subset it owns, not the primary parser.
+
+Example output:
+
+```text
+parser shadow status=equivalent
+primary:
+  implementation rust-recursive-descent-top-level
+  normalized-nodes 5
+  top-level-nodes 4
+  top-level-signature class-definition,generic-definition,method-definition,function-definition
+oracle:
+  implementation source-authored-base-loko-shadow
+```
+
+If the source-authored shadow grammar disagrees with the Rust parser, the report
+switches to `diverged` and lists normalized-node, top-level-count,
+top-level-signature, diagnostic, or rule-application differences.
 
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
 parser driver, oracle/fallback status, activation directive span, source span,
@@ -457,8 +473,7 @@ Later slices may add:
 
 - user-authored grammar declarations loaded from ordinary source files;
 - structural semantic actions that emit forms or grammar deltas;
-- base-Loko shadow-mode grammar products that can compare a source-authored
-  grammar against the Rust parser;
+- wider base-Loko shadow grammar coverage beyond the current top-level subset;
 - a complete structural frontend expression model for the full Loko expression
   language;
 - macro hygiene and name-introduction rules;

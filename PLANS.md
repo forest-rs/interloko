@@ -133,8 +133,8 @@ infer compiler facts by parsing prose dumps.
 - Removing builtins may expose grammar-resource omissions. Keep tests around
   calculator calls, arithmetic, records type names, and malformed staged input.
 - Parser metadata can overpromise. Use precise values: interpreted staged
-  grammars have no legacy oracle/fallback; base-Loko shadow remains separate
-  and unavailable for now.
+  grammars have no legacy oracle/fallback; base-Loko shadow is a separate
+  top-level oracle, not staged-region fallback metadata.
 - Shared adapter helpers should not hide records/calculator validation. Keep
   semantic checks local to the staged grammar module that owns them.
 
