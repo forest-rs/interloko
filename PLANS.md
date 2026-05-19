@@ -1,5 +1,67 @@
 # Plans
 
+## Make Grammar Parse Trees More Inspectable
+
+### Goal
+
+Bring the first Tree-sitter-like usability ideas into `interloko_grammar`
+without changing the parser strategy. Parse trees should clearly distinguish
+named grammar-rule nodes from anonymous literal/class/opaque nodes, expose
+small query helpers, and offer a partial parse report for tools that want to
+show the successfully matched tree plus the failure that stopped complete-region
+parsing.
+
+### Non-Goals
+
+- No new grammar syntax.
+- No LR/GLR parser generator work.
+- No source editing or incremental reparsing API.
+- No diagnostic rendering/localization.
+- No editor integration.
+- No Interloko language semantics changes.
+
+### Fence
+
+`interloko_grammar` owns neutral parse-tree roles, parse-tree traversal/query
+helpers, and structural partial parse reports. It explicitly does not own
+Interloko CST nodes, semantic actions, editor buffers, diagnostics catalogs,
+source-data rendering, or incremental scheduling.
+
+`interloko_compiler::grammar_frontend` owns mapping these neutral records into
+Interloko source-data reports, staged-region diagnostics, and MOP/EOP
+projections.
+
+### Invariants
+
+- Existing callers of `interpret_region` keep their current behavior.
+- New APIs are additive and keep `interloko_grammar` `no_std`.
+- `RuleNode` remains caller-inspectable without requiring consumers to parse
+  `rule_name` prefixes themselves.
+- Partial parse reports never pretend a failed complete parse succeeded.
+- Query helpers traverse existing parse trees and do not mutate parser state.
+- Full workspace validation stays green.
+
+### Sequence
+
+1. Add parse-tree node roles and methods on `RuleNode` for named/anonymous node
+   classification.
+2. Add simple query/traversal helpers for finding rule nodes, role-filtered
+   nodes, and span-covering nodes.
+3. Add a partial parse API that returns the matched root when available plus the
+   complete-region failure when trailing input or root matching fails.
+4. Update compiler source-data rendering to include node roles and use the new
+   count/query helpers where appropriate.
+5. Update README/rustdoc examples to show the new inspection surface.
+
+### Risks
+
+- Too much query API could turn the kernel into a general tree-processing
+  library. Keep helpers small and parse-specific.
+- Partial parse reports could be mistaken for recovery. Name and docs must be
+  explicit: they are reports, not successful parses.
+- Adding public fields to `RuleNode` would break struct-literal callers. Prefer
+  methods/enums for this slice.
+
 ## Extract The Grammar Kernel
 
 ### Goal
