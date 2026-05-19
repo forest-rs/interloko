@@ -17,13 +17,16 @@ use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::grammar_frontend::{
-    self, GrammarActivation, GrammarEnvironmentSelection, GrammarFrontendRegistry,
-    GrammarParseReport, GrammarRule, LanguageEnvironment,
+    self, FrontendParseArtifact, GrammarActivation, GrammarEnvironmentSelection,
+    GrammarFrontendRegistry, GrammarParseReport, GrammarRule, GrammarRuleApplication,
+    LanguageEnvironment,
 };
-use crate::identity::{ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder};
+use crate::identity::{
+    ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder, SyntaxNodeId,
+};
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
 use crate::runtime as runtime_bridge;
-use crate::syntax::{CstElement, CstNode, Span, SyntaxTree, TokenKind};
+use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, tape};
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
@@ -1142,6 +1145,38 @@ pub struct TopLevelFormSpan {
     pub span: Span,
 }
 
+/// Owned summary of one CST node that intersects a tooling query.
+///
+/// Returned by [`SessionArtifacts::syntax_nodes_containing_span`] so editor,
+/// report, and REPL callers can reason about CST shape without borrowing the
+/// full syntax tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyntaxNodeSummary {
+    /// Stable-ish CST node identity.
+    pub id: SyntaxNodeId,
+    /// CST node kind.
+    pub kind: CstKind,
+    /// Source span covered by this node.
+    pub span: Span,
+    /// Depth from the CST root, where the root is depth zero.
+    pub depth: usize,
+}
+
+/// Owned summary of one non-trivia token that intersects a tooling query.
+///
+/// Returned by [`SessionArtifacts::syntax_tokens_intersecting_span`]. The
+/// token text is copied out of the source so callers can display the summary
+/// without keeping a borrow into [`SessionArtifacts`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyntaxTokenSummary {
+    /// Token kind.
+    pub kind: TokenKind,
+    /// Source span covered by this token.
+    pub span: Span,
+    /// Token text copied from the source.
+    pub text: String,
+}
+
 impl SessionArtifacts {
     /// Returns stable artifact reports for this compilation.
     #[must_use]
@@ -1191,6 +1226,77 @@ impl SessionArtifacts {
     #[must_use]
     pub fn top_level_forms(&self) -> Vec<TopLevelFormSpan> {
         collect_top_level_forms(&self.syntax)
+    }
+
+    /// Returns the preserved frontend parse artifact.
+    ///
+    /// This is the stable bridge between grammar parsing and CST projection:
+    /// it records which grammar activation parsed the source, which source
+    /// variant was consumed, and the owned parse-tree projection when parsing
+    /// succeeded.
+    #[must_use]
+    pub const fn frontend_parse_artifact(&self) -> &FrontendParseArtifact {
+        &self.grammar_parse.frontend_parse
+    }
+
+    /// Returns CST nodes that contain `span`, ordered outermost to innermost.
+    ///
+    /// A zero-width `span` acts like a cursor position. Results are owned
+    /// summaries rather than borrowed [`CstNode`] values so tooling can keep
+    /// them after releasing the artifact borrow.
+    #[must_use]
+    pub fn syntax_nodes_containing_span(&self, span: Span) -> Vec<SyntaxNodeSummary> {
+        let mut nodes = Vec::new();
+        collect_syntax_nodes_containing_span(&self.syntax.root, span, 0, &mut nodes);
+        nodes
+    }
+
+    /// Returns non-trivia tokens that intersect `span`, in source order.
+    ///
+    /// A zero-width `span` acts like a cursor position and returns the token
+    /// under the cursor when one exists.
+    #[must_use]
+    pub fn syntax_tokens_intersecting_span(&self, span: Span) -> Vec<SyntaxTokenSummary> {
+        self.syntax
+            .tokens
+            .iter()
+            .copied()
+            .filter(|token| !token.kind.is_trivia())
+            .filter(|token| span_intersects_query(token.span, span))
+            .map(|token| SyntaxTokenSummary {
+                kind: token.kind,
+                span: token.span,
+                text: token.text(&self.syntax.source).to_string(),
+            })
+            .collect()
+    }
+
+    /// Returns recorded grammar-rule applications that contain `span`.
+    ///
+    /// This uses the parser provenance recorded in
+    /// [`GrammarParseReport::provenance`], not a form-kind heuristic. Results
+    /// are ordered from the smallest containing span to the largest so cursor
+    /// tooling sees the most specific rule first.
+    #[must_use]
+    pub fn grammar_rule_applications_containing_span(
+        &self,
+        span: Span,
+    ) -> Vec<GrammarRuleApplication> {
+        let mut applications = self
+            .grammar_parse
+            .provenance
+            .applications
+            .iter()
+            .filter(|application| span_contains(application.span, span))
+            .cloned()
+            .collect::<Vec<_>>();
+        applications.sort_by_key(|application| {
+            (
+                application.span.end.saturating_sub(application.span.start),
+                application.span.start,
+            )
+        });
+        applications
     }
 
     /// Returns the live EOP mutation log in application order.
@@ -4604,6 +4710,40 @@ fn top_level_form_kind(kind: crate::syntax::CstKind) -> Option<TopLevelFormKind>
         crate::syntax::CstKind::Method => Some(TopLevelFormKind::Method),
         crate::syntax::CstKind::Function => Some(TopLevelFormKind::Function),
         _ => None,
+    }
+}
+
+fn collect_syntax_nodes_containing_span(
+    node: &CstNode,
+    span: Span,
+    depth: usize,
+    out: &mut Vec<SyntaxNodeSummary>,
+) {
+    if !span_contains(node.span, span) {
+        return;
+    }
+    out.push(SyntaxNodeSummary {
+        id: node.id,
+        kind: node.kind,
+        span: node.span,
+        depth,
+    });
+    for child in &node.children {
+        if let CstElement::Node(child) = child {
+            collect_syntax_nodes_containing_span(child, span, depth + 1, out);
+        }
+    }
+}
+
+fn span_contains(outer: Span, inner: Span) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn span_intersects_query(item: Span, query: Span) -> bool {
+    if query.is_empty() {
+        item.start <= query.start && query.start < item.end
+    } else {
+        item.start < query.end && query.start < item.end
     }
 }
 
@@ -10400,6 +10540,59 @@ mod tests {
         assert_eq!(
             &artifacts.syntax.source[forms[3].span.start..forms[3].span.end],
             "define function main()\n  1\nend"
+        );
+    }
+
+    #[test]
+    fn session_answers_syntax_tooling_queries_by_span() {
+        let source = "define function main()\n  40 + 2\nend\n";
+        let artifacts =
+            CompilerSession::compile_source("tooling.loko", source, RuntimeMode::CompileOnly);
+        let expression_start = source.find("40 + 2").expect("expression text present");
+        let expression_span = Span::new(expression_start, expression_start + "40 + 2".len());
+
+        let parse_artifact = artifacts.frontend_parse_artifact();
+        assert_eq!(parse_artifact.source_file, artifacts.source.id);
+        assert!(parse_artifact.parse_tree.is_some());
+
+        let nodes = artifacts.syntax_nodes_containing_span(expression_span);
+        assert_eq!(nodes.first().map(|node| node.kind), Some(CstKind::Root));
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.kind == CstKind::Function && node.depth == 1)
+        );
+        assert!(nodes.iter().any(|node| node.kind == CstKind::BinaryExpr));
+
+        let tokens = artifacts.syntax_tokens_intersecting_span(expression_span);
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| (token.kind, token.text.as_str()))
+                .collect::<Vec<_>>(),
+            Vec::from([
+                (TokenKind::Number, "40"),
+                (TokenKind::Plus, "+"),
+                (TokenKind::Number, "2"),
+            ])
+        );
+
+        let cursor = Span::new(expression_start, expression_start);
+        let cursor_tokens = artifacts.syntax_tokens_intersecting_span(cursor);
+        assert_eq!(cursor_tokens.len(), 1);
+        assert_eq!(cursor_tokens[0].text, "40");
+
+        let applications = artifacts.grammar_rule_applications_containing_span(expression_span);
+        assert_eq!(
+            applications
+                .first()
+                .map(|application| application.rule_name.as_str()),
+            Some("body")
+        );
+        assert!(
+            applications
+                .iter()
+                .any(|application| application.rule_name == "function-definition")
         );
     }
 

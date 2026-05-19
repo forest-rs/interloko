@@ -55,6 +55,45 @@ runtime execution.
   future tooling does not confuse it with original source text.
 - This slice should expose the boundary, not start a formatter/LSP subsystem.
 
+## Add Syntax Tooling Queries
+
+### Goal
+
+Give future formatter, highlighter, and editor surfaces a calm compiler API for
+asking source-oriented syntax questions without reaching into parser internals.
+The API should expose parse artifact metadata, CST node summaries, token
+summaries, and grammar-rule applications for a byte span.
+
+### Non-Goals
+
+- No formatter implementation.
+- No highlighter implementation.
+- No LSP server.
+- No parser algorithm changes.
+- No new source map format.
+
+### Fence
+
+`SessionArtifacts` owns the stable query surface because it already holds the
+source, syntax tree, grammar parse report, and artifact provenance. The grammar
+kernel still owns parser execution, and syntax tooling queries do not bypass the
+ordinary source-to-grammar-to-CST pipeline.
+
+### Invariants
+
+- Query results are owned summaries, not borrowed CST nodes.
+- Query methods work for byte ranges and zero-width cursor spans.
+- Grammar-rule provenance comes from recorded parser applications, not from
+form-kind heuristics.
+- Existing dumps and EOP records remain unchanged.
+
+### Sequence
+
+1. Add owned syntax node/token summary types.
+2. Expose `SessionArtifacts::frontend_parse_artifact`.
+3. Expose span queries for CST nodes, tokens, and grammar-rule applications.
+4. Add tests using a function body span and cursor span.
+
 ## Borrow Grammar Kernel Strings
 
 ### Goal
