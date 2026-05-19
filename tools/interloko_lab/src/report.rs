@@ -16,7 +16,7 @@ use interloko_compiler::sem::{
 use interloko_compiler::session::{
     DumpStage, EnvironmentKind, EnvironmentObject, EnvironmentOrigin, EnvironmentStorage,
     ExecutionTraceEvent, ExecutionTraceOutcome, ExecutionTraceScope, RuntimeResult,
-    SessionArtifacts, TopLevelFormKind,
+    SessionArtifacts, SourceFormOrigin, SourceFormProvenance,
 };
 use interloko_compiler::syntax::Span;
 
@@ -378,13 +378,7 @@ fn render_source_lines(artifacts: &SessionArtifacts) -> String {
 }
 
 fn render_parse_provenance_section(artifacts: &SessionArtifacts) -> String {
-    let forms = artifacts.top_level_forms();
-    let staged_form_count = artifacts
-        .grammar_parse
-        .staged_regions
-        .iter()
-        .map(|region| region.forms.len())
-        .sum::<usize>();
+    let forms = artifacts.source_forms();
     let mut out = String::new();
     out.push_str("      <section class=\"section\" id=\"parse-provenance\">\n");
     out.push_str(&render_section_heading(
@@ -392,7 +386,7 @@ fn render_parse_provenance_section(artifacts: &SessionArtifacts) -> String {
         "Source To Parse Rules",
         "Each top-level form is shown as a source span, token stream, CST path, grammar rule stack, and local diagnostics. This is the workbench's static parse lens: a compact version of the grammar-editor view that explains how text became syntax.",
     ));
-    if forms.is_empty() && staged_form_count == 0 {
+    if forms.is_empty() {
         out.push_str(
             "        <div class=\"empty-state\">No top-level source forms were parsed.</div>\n",
         );
@@ -403,37 +397,32 @@ fn render_parse_provenance_section(artifacts: &SessionArtifacts) -> String {
     for form in forms {
         out.push_str(&render_parse_form_card(artifacts, &form));
     }
-    for region in &artifacts.grammar_parse.staged_regions {
-        for (index, form) in region.forms.iter().enumerate() {
-            out.push_str(&render_staged_parse_form_card(
-                artifacts, region, index, form,
-            ));
-        }
-    }
     out.push_str("        </div>\n");
     out.push_str("      </section>\n");
     out
 }
 
-fn render_parse_form_card(
-    artifacts: &SessionArtifacts,
-    form: &interloko_compiler::session::TopLevelFormSpan,
-) -> String {
-    let view = artifacts.parse_view_for_span(form.span);
+fn render_parse_form_card(artifacts: &SessionArtifacts, form: &SourceFormProvenance) -> String {
     let line = source_line_for_byte(&artifacts.source.source, form.span.start);
-    let form_anchor = parse_form_anchor(form.index);
+    let form_anchor = parse_form_anchor(&form.id);
+    let origin_class = if form.frontend_form.is_some() {
+        " parse-card--staged"
+    } else {
+        ""
+    };
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "          <article class=\"parse-card\" id=\"{}\" data-node=\"parse-form:{}\">",
+        "          <article class=\"parse-card{}\" id=\"{}\" data-node=\"{}\">",
+        origin_class,
         escape_attr(&form_anchor),
-        form.index
+        escape_attr(&form.id)
     );
     let _ = writeln!(
         out,
-        "            <header class=\"parse-card__header\"><div><span>form f{}</span><strong>{}</strong></div><a href=\"#source-line-{}\">line {}</a><code>{}..{}</code></header>",
-        form.index,
-        form_kind_label(form.kind),
+        "            <header class=\"parse-card__header\"><div><span>{}</span><strong>{}</strong></div><a href=\"#source-line-{}\">line {}</a><code>{}..{}</code></header>",
+        escape_html(&form.id),
+        escape_html(&form.title),
         line,
         line,
         form.span.start,
@@ -444,102 +433,48 @@ fn render_parse_form_card(
     out.push_str(&render_parse_source_excerpt(
         &artifacts.source.source,
         form.span,
-        &view.tokens,
-        &view.rule_applications,
+        &artifacts.parse_view_for_span(form.span).tokens,
+        &form.rule_applications,
     ));
     out.push_str("</code></pre>\n");
     out.push_str("              <div class=\"parse-lens\">\n");
+    if let Some(frontend_form) = &form.frontend_form {
+        out.push_str("                <div class=\"parse-lens__label\">staged grammar</div>\n");
+        out.push_str(&render_source_form_staged_meta(form));
+        out.push_str("                <div class=\"parse-lens__label\">frontend form</div>\n");
+        out.push_str(&render_staged_frontend_form_summary(frontend_form));
+        out.push_str("                <div class=\"parse-lens__label\">materialized Loko</div>\n");
+        let materialized =
+            grammar_frontend::materialize_frontend_forms(core::slice::from_ref(frontend_form));
+        let _ = writeln!(
+            out,
+            "                <pre class=\"parse-materialized\"><code>{}</code></pre>",
+            escape_html(&materialized)
+        );
+    }
     out.push_str("                <div class=\"parse-lens__label\">rule stack</div>\n");
     out.push_str(&render_rule_ladder(
         artifacts,
         form.span,
-        &view.rule_applications,
+        &form.rule_applications,
     ));
-    out.push_str("                <div class=\"parse-lens__label\">tokens</div>\n");
-    out.push_str(&render_token_strip(&view.tokens));
-    out.push_str("                <div class=\"parse-lens__label\">cst path</div>\n");
-    out.push_str("                <ol class=\"parse-cst-path\">\n");
-    for node in &view.nodes {
-        let _ = writeln!(
-            out,
-            "                  <li style=\"--depth:{}\"><span>{:?}</span><code>{}..{}</code></li>",
-            node.depth, node.kind, node.span.start, node.span.end
-        );
+    if form.frontend_form.is_none() {
+        let view = artifacts.parse_view_for_span(form.span);
+        out.push_str("                <div class=\"parse-lens__label\">tokens</div>\n");
+        out.push_str(&render_token_strip(&view.tokens));
+        out.push_str("                <div class=\"parse-lens__label\">cst path</div>\n");
+        out.push_str("                <ol class=\"parse-cst-path\">\n");
+        for node in &view.nodes {
+            let _ = writeln!(
+                out,
+                "                  <li style=\"--depth:{}\"><span>{:?}</span><code>{}..{}</code></li>",
+                node.depth, node.kind, node.span.start, node.span.end
+            );
+        }
+        out.push_str("                </ol>\n");
+        out.push_str("                <div class=\"parse-lens__label\">diagnostics</div>\n");
+        out.push_str(&render_parse_diagnostics(&view.diagnostics));
     }
-    out.push_str("                </ol>\n");
-    out.push_str("                <div class=\"parse-lens__label\">diagnostics</div>\n");
-    out.push_str(&render_parse_diagnostics(&view.diagnostics));
-    out.push_str("              </div>\n");
-    out.push_str("            </div>\n");
-    out.push_str("          </article>\n");
-    out
-}
-
-fn render_staged_parse_form_card(
-    artifacts: &SessionArtifacts,
-    region: &StagedParseRegion,
-    index: usize,
-    form: &FrontendForm,
-) -> String {
-    let line = source_line_for_byte(&artifacts.source.source, form.source_span.start);
-    let form_rel = relation_for_form(region, index);
-    let flow_rel = flow_relation_for_form(region, index);
-    let region_rel = relation_for_region(region);
-    let grammar_id = format!("grammar:{}", region.grammar_slug);
-    let materialized = grammar_frontend::materialize_frontend_forms(core::slice::from_ref(form));
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "          <article class=\"parse-card parse-card--staged\" id=\"{}\" data-node=\"{}\" data-rel=\"{} {} {}\">",
-        escape_attr(&parse_staged_form_anchor(region, index)),
-        escape_attr(&form_rel),
-        escape_attr(&form_rel),
-        escape_attr(&flow_rel),
-        escape_attr(&region_rel)
-    );
-    let _ = writeln!(
-        out,
-        "            <header class=\"parse-card__header\"><div><span>staged form {}/{}</span><strong>{}</strong></div><a href=\"#source-line-{}\">line {}</a><code>{}..{}</code></header>",
-        escape_html(&region.object_slug),
-        index,
-        escape_html(&frontend_form_title(form)),
-        line,
-        line,
-        form.source_span.start,
-        form.source_span.end
-    );
-    out.push_str("            <div class=\"parse-card__body\">\n");
-    out.push_str("              <pre class=\"parse-source\"><code>");
-    out.push_str(&escape_html(
-        artifacts
-            .source
-            .source
-            .get(form.source_span.start..form.source_span.end)
-            .unwrap_or(""),
-    ));
-    out.push_str("</code></pre>\n");
-    out.push_str("              <div class=\"parse-lens\">\n");
-    out.push_str("                <div class=\"parse-lens__label\">staged grammar</div>\n");
-    let _ = writeln!(
-        out,
-        "                <div class=\"parse-staged-meta\"><a href=\"#{}\">{}</a><code>{}</code><span>{}</span></div>",
-        escape_attr(&object_anchor(&grammar_id)),
-        escape_html(&grammar_id),
-        escape_html(region.driver.as_str()),
-        escape_html(region.oracle.as_str())
-    );
-    out.push_str("                <div class=\"parse-lens__label\">frontend form</div>\n");
-    out.push_str(&render_staged_frontend_form_summary(form));
-    out.push_str("                <div class=\"parse-lens__label\">materialized Loko</div>\n");
-    let _ = writeln!(
-        out,
-        "                <pre class=\"parse-materialized\"><code>{}</code></pre>",
-        escape_html(&materialized)
-    );
-    out.push_str(
-        "                <div class=\"parse-lens__label\">parser rule applications</div>\n",
-    );
-    out.push_str("                <div class=\"parse-empty\">This staged grammar currently exposes rule counts and grammar-extension provenance here; per-node staged rule applications are not yet threaded into the source parse-view query.</div>\n");
     out.push_str("              </div>\n");
     out.push_str("            </div>\n");
     out.push_str("          </article>\n");
@@ -579,6 +514,26 @@ fn render_staged_frontend_form_summary(form: &FrontendForm) -> String {
             out.push_str("                </div>\n");
         }
     }
+    out
+}
+
+fn render_source_form_staged_meta(form: &SourceFormProvenance) -> String {
+    let activation = form.activation.map_or_else(
+        || "activation:<unknown>".to_string(),
+        |activation| activation.to_string(),
+    );
+    let mut out = String::new();
+    let grammar_label = form.grammar.map_or_else(
+        || "grammar:<unknown>".to_string(),
+        |grammar| grammar.to_string(),
+    );
+    let _ = writeln!(
+        out,
+        "                <div class=\"parse-staged-meta\"><span>{}</span><code>{}</code><span>{}</span></div>",
+        escape_html(&grammar_label),
+        escape_html(&activation),
+        escape_html(&source_form_origin_label(&form.origin))
+    );
     out
 }
 
@@ -671,6 +626,23 @@ fn render_parse_source_excerpt(
     tokens: &[interloko_compiler::session::SyntaxTokenSummary],
     applications: &[interloko_compiler::grammar_frontend::GrammarRuleApplication],
 ) -> String {
+    if tokens.is_empty() {
+        let relation = applications
+            .iter()
+            .map(|application| parse_rule_relation_key(form_span, application))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return format!(
+            "<mark class=\"parse-source-token\" data-rel=\"{}\" title=\"{}\">{}</mark>",
+            escape_attr(&relation),
+            escape_attr(&format!(
+                "source span {}..{}",
+                form_span.start, form_span.end
+            )),
+            escape_html(source.get(form_span.start..form_span.end).unwrap_or(""))
+        );
+    }
+
     let mut out = String::new();
     let mut cursor = form_span.start;
     for token in tokens {
@@ -2217,7 +2189,7 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
     }
     out.push(']');
     out.push_str(",\"parseViews\":[");
-    for (index, form) in artifacts.top_level_forms().iter().enumerate() {
+    for (index, form) in artifacts.source_forms().iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -2332,20 +2304,17 @@ fn diagnostic_json(diagnostic: &Diagnostic) -> String {
     out
 }
 
-fn parse_view_json(
-    artifacts: &SessionArtifacts,
-    form: &interloko_compiler::session::TopLevelFormSpan,
-) -> String {
+fn parse_view_json(artifacts: &SessionArtifacts, form: &SourceFormProvenance) -> String {
     let view = artifacts.parse_view_for_span(form.span);
     let mut out = String::new();
     let _ = write!(
         out,
         "{{\"id\":{},\"kind\":{},\"span\":{},\"rules\":[",
-        json_string(&format!("form:f{}", form.index)),
-        json_string(form_kind_label(form.kind)),
+        json_string(&form.id),
+        json_string(form.kind.as_str()),
         span_json(form.span)
     );
-    for (index, application) in view.rule_applications.iter().enumerate() {
+    for (index, application) in form.rule_applications.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -2866,28 +2835,16 @@ fn source_line_for_byte(source: &str, byte: usize) -> usize {
         + 1
 }
 
-fn parse_form_anchor(index: usize) -> String {
-    format!("parse-form-{index}")
+fn parse_form_anchor(id: &str) -> String {
+    format!("parse-form-{}", anchor_slug(id))
 }
 
-fn parse_staged_form_anchor(region: &StagedParseRegion, index: usize) -> String {
-    format!("parse-staged-{}-f{index}", anchor_slug(&region.object_slug))
-}
-
-fn frontend_form_title(form: &FrontendForm) -> String {
-    match &form.kind {
-        FrontendFormKind::Function(function) => format!("frontend function {}", function.name),
-        FrontendFormKind::Class(class) => format!("frontend class {}", class.name),
-    }
-}
-
-fn form_kind_label(kind: TopLevelFormKind) -> &'static str {
-    match kind {
-        TopLevelFormKind::Class => "class definition",
-        TopLevelFormKind::Generic => "generic definition",
-        TopLevelFormKind::Method => "method definition",
-        TopLevelFormKind::Function => "function definition",
-        _ => "source form",
+fn source_form_origin_label(origin: &SourceFormOrigin) -> String {
+    match origin {
+        SourceFormOrigin::BaseCst => "base CST".to_string(),
+        SourceFormOrigin::StagedGrammar { region, form_index } => {
+            format!("staged {region}/f{form_index}")
+        }
     }
 }
 
