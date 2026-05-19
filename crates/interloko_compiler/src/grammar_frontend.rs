@@ -1001,6 +1001,9 @@ pub struct GrammarDiagnosticFact {
     pub context: GrammarDiagnosticContext,
     /// Span of the matched parser application, when one was available.
     pub application_span: Option<Span>,
+    /// Source fragment found at the diagnostic span, when the span is not
+    /// zero-width.
+    pub unexpected_fragment: Option<String>,
     /// Structured expected fragment, when the syntax diagnostic provides one.
     pub expected_fragment: Option<String>,
 }
@@ -1600,6 +1603,7 @@ fn parse_file_with_records(
     let applications = rule_applications(&active_effective_rules, &activation, &syntax.root);
     let provenance_rules = rule_provenance(&active_effective_rules, &applications);
     let grammar_diagnostics = grammar_diagnostic_facts(
+        source,
         &syntax.diagnostics,
         &activation,
         &active_effective_rules,
@@ -1911,6 +1915,7 @@ fn parse_staged_file(
             report.diagnostics.extend(discovery.diagnostics);
             if let Some(activation) = report.activations.first() {
                 report.grammar_diagnostics = grammar_diagnostic_facts(
+                    source,
                     &report.diagnostics,
                     activation,
                     &report.effective_rules,
@@ -2069,6 +2074,7 @@ fn parse_staged_file(
         .last()
         .expect("staged reports always include at least a base activation");
     let grammar_diagnostics = grammar_diagnostic_facts(
+        source,
         &syntax.diagnostics,
         diagnostic_activation,
         &active_effective_rules,
@@ -2498,6 +2504,7 @@ fn push_report_diagnostic(report: &mut GrammarParseReport, diagnostic: Diagnosti
     report.diagnostics.push(diagnostic);
     if let Some(activation) = report.activations.first() {
         report.grammar_diagnostics = grammar_diagnostic_facts(
+            &report.syntax.source,
             &report.diagnostics,
             activation,
             &report.effective_rules,
@@ -3233,6 +3240,7 @@ fn rule_provenance(
 }
 
 fn grammar_diagnostic_facts(
+    source: &str,
     diagnostics: &[Diagnostic],
     activation: &GrammarActivation,
     effective_rules: &[EffectiveGrammarRule],
@@ -3262,10 +3270,21 @@ fn grammar_diagnostic_facts(
                 rule_name: context.rule_name,
                 context: context.context,
                 application_span: context.application_span,
+                unexpected_fragment: unexpected_fragment(source, diagnostic.span),
                 expected_fragment: diagnostic_arg(diagnostic, "expected"),
             }
         })
         .collect()
+}
+
+fn unexpected_fragment(source: &str, span: Span) -> Option<String> {
+    if span.is_empty() {
+        return None;
+    }
+    source
+        .get(span.start..span.end)
+        .filter(|fragment| !fragment.is_empty())
+        .map(ToString::to_string)
 }
 
 struct DiagnosticRuleContext {
@@ -3891,6 +3910,7 @@ mod tests {
             fact.application_span,
             Some(Span::new(0, "define function main(".len()))
         );
+        assert_eq!(fact.unexpected_fragment, None);
         assert!(fact.expected_fragment.is_some());
         assert_eq!(report.provenance.diagnostics, report.grammar_diagnostics);
     }
@@ -3909,6 +3929,11 @@ mod tests {
             diagnostic_arg(diagnostic, "expected"),
             Some("`class` or `generic` or `method` or `function`".to_string())
         );
+        let fact = report
+            .grammar_diagnostics
+            .first()
+            .expect("grammar diagnostic fact");
+        assert_eq!(fact.unexpected_fragment.as_deref(), Some("classs"));
     }
 
     #[test]
@@ -3924,6 +3949,11 @@ mod tests {
             diagnostic.span,
             Span::new("define function main(".len(), "define function main(".len())
         );
+        let fact = report
+            .grammar_diagnostics
+            .first()
+            .expect("grammar diagnostic fact");
+        assert_eq!(fact.unexpected_fragment, None);
     }
 
     #[test]

@@ -5430,7 +5430,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
     for fact in &artifacts.grammar_parse.grammar_diagnostics {
         let _ = writeln!(
             out,
-            "  d{} code={} grammar={} activation={} rule={} rule-name={} context={} application-span={} span={}..{} expected={}",
+            "  d{} code={} grammar={} activation={} rule={} rule-name={} context={} application-span={} span={}..{} unexpected={} expected={}",
             fact.diagnostic_index,
             fact.code.as_str(),
             fact.grammar,
@@ -5441,6 +5441,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             render_optional_span(fact.application_span),
             fact.span.start,
             fact.span.end,
+            grammar_unexpected_label(fact.unexpected_fragment.as_deref()),
             grammar_expected_label(fact.expected_fragment.as_deref())
         );
     }
@@ -6553,7 +6554,7 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
     for fact in &report.grammar_diagnostics {
         let _ = writeln!(
             out,
-            "  d{} code={} grammar={} activation={} rule={} rule-name={} context={} application-span={} span={}..{} expected={}",
+            "  d{} code={} grammar={} activation={} rule={} rule-name={} context={} application-span={} span={}..{} unexpected={} expected={}",
             fact.diagnostic_index,
             fact.code.as_str(),
             fact.grammar,
@@ -6564,6 +6565,7 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
             render_optional_span(fact.application_span),
             fact.span.start,
             fact.span.end,
+            grammar_unexpected_label(fact.unexpected_fragment.as_deref()),
             grammar_expected_label(fact.expected_fragment.as_deref())
         );
     }
@@ -6623,6 +6625,10 @@ fn write_parser_product_summary(
 
 fn grammar_expected_label(expected: Option<&str>) -> String {
     expected.map_or_else(|| "none".into(), |value| format!("{value:?}"))
+}
+
+fn grammar_unexpected_label(unexpected: Option<&str>) -> String {
+    unexpected.map_or_else(|| "none".into(), |value| format!("{value:?}"))
 }
 
 fn render_optional_span(span: Option<Span>) -> String {

@@ -2318,15 +2318,20 @@ fn write_form_diagnostic_view(
             .expected_fragment
             .as_deref()
             .unwrap_or("<unknown>");
+        let unexpected = diagnostic
+            .unexpected_fragment
+            .as_deref()
+            .unwrap_or("<none>");
         let _ = writeln!(
             out,
-            "{indent}  d{} {} span={}..{} rule={} context={} expected={}",
+            "{indent}  d{} {} span={}..{} rule={} context={} unexpected={} expected={}",
             diagnostic.diagnostic_index,
             diagnostic.code,
             diagnostic.span.start,
             diagnostic.span.end,
             diagnostic.rule_name,
             diagnostic.context.as_str(),
+            unexpected,
             expected
         );
     }
