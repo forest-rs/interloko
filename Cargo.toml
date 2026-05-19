@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/interloko_compiler",
+    "crates/interloko_grammar",
     "crates/interloko_model",
     "crates/interloko_runtime",
     "examples/forty_two",

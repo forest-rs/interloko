@@ -91,7 +91,7 @@ fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {
     } else {
         error.expected.join(" or ")
     };
-    Diagnostic::error(error.span, DiagnosticCode::SyntaxExpectedToken)
+    Diagnostic::error(error.span.into(), DiagnosticCode::SyntaxExpectedToken)
         .with_arg(DiagnosticArg::text("expected", expected))
 }
 
@@ -639,22 +639,24 @@ impl GrammarCstBuilder<'_> {
         self.node(kind, self.direct_tokens(node.span, &[]), node.span)
     }
 
-    fn error_node(&self, span: Span) -> CstNode {
+    fn error_node(&self, span: impl Into<Span>) -> CstNode {
+        let span = span.into();
         self.node(CstKind::Error, self.direct_tokens(span, &[]), span)
     }
 
-    fn node(&self, kind: CstKind, children: Vec<CstElement>, fallback: Span) -> CstNode {
+    fn node(&self, kind: CstKind, children: Vec<CstElement>, fallback: impl Into<Span>) -> CstNode {
         CstNode::from_children(
             self.source_file,
             kind,
             children,
             &self.tokens,
             self.source,
-            fallback,
+            fallback.into(),
         )
     }
 
-    fn direct_tokens(&self, span: Span, excluded: &[Span]) -> Vec<CstElement> {
+    fn direct_tokens(&self, span: impl Into<Span>, excluded: &[Span]) -> Vec<CstElement> {
+        let span = span.into();
         self.tokens
             .iter()
             .enumerate()
@@ -669,7 +671,8 @@ impl GrammarCstBuilder<'_> {
             .collect()
     }
 
-    fn first_token_index(&self, span: Span, kind: TokenKind) -> usize {
+    fn first_token_index(&self, span: impl Into<Span>, kind: TokenKind) -> usize {
+        let span = span.into();
         self.tokens
             .iter()
             .enumerate()
@@ -678,7 +681,8 @@ impl GrammarCstBuilder<'_> {
             .unwrap_or(0)
     }
 
-    fn first_operator_token(&self, span: Span) -> usize {
+    fn first_operator_token(&self, span: impl Into<Span>) -> usize {
+        let span = span.into();
         self.tokens
             .iter()
             .enumerate()
@@ -739,7 +743,9 @@ impl GrammarCstBuilder<'_> {
     }
 }
 
-fn span_contains(outer: Span, inner: Span) -> bool {
+fn span_contains(outer: impl Into<Span>, inner: impl Into<Span>) -> bool {
+    let outer = outer.into();
+    let inner = inner.into();
     outer.start <= inner.start
         && (inner.end <= outer.end || inner.start == inner.end && inner.start <= outer.end)
 }

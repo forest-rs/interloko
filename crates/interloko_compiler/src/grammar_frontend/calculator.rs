@@ -57,13 +57,13 @@ fn emission_from_interpreted_parse(
                     functions.push(output.data);
                 }
                 _ => diagnostics.push(staged_expected_diagnostic(
-                    function.span,
+                    function.span.into(),
                     "calculator",
                     "frontend function action output",
                 )),
             },
             Ok(None) => diagnostics.push(staged_expected_diagnostic(
-                function.span,
+                function.span.into(),
                 "calculator",
                 "calculator action",
             )),
@@ -72,7 +72,7 @@ fn emission_from_interpreted_parse(
     }
     if functions.is_empty() && diagnostics.is_empty() {
         diagnostics.push(staged_expected_diagnostic(
-            parse.root.span,
+            parse.root.span.into(),
             "calculator",
             "`name = expression`",
         ));
@@ -161,7 +161,7 @@ fn calculator_parse_error_diagnostic(
     } else {
         error.expected.join(" or ")
     };
-    staged_expected_diagnostic(error.span, "calculator", &expected)
+    staged_expected_diagnostic(error.span.into(), "calculator", &expected)
 }
 
 pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
@@ -185,7 +185,7 @@ pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
                 projection: GrammarProjection {
                     origin: ProjectionOrigin::SourceAuthored,
                     location,
-                    source_span: Some(rule.source_span),
+                    source_span: Some(rule.source_span.into()),
                 },
             }
         })

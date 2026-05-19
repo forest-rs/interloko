@@ -11,17 +11,27 @@ mod calculator;
 mod interpreter;
 mod records;
 
-use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub use interloko_grammar::{
+    GrammarAction, GrammarActionArg, GrammarActionTerm, ProjectionOrigin, RuleExpression,
+    TransformOutput,
+};
+
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{SourceFileId, StableIdBuilder};
 use crate::source_data::{self, SourceData};
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree};
+
+impl From<interloko_grammar::Span> for Span {
+    fn from(span: interloko_grammar::Span) -> Self {
+        Self::new(span.start, span.end)
+    }
+}
 
 const DOMAIN_LANGUAGE_ENVIRONMENT: u64 = 0x4c4f_4b4f_5f45_4e56;
 const DOMAIN_GRAMMAR: u64 = 0x4c4f_4b4f_5f47_524d;
@@ -300,266 +310,9 @@ pub struct GrammarProjection {
     pub source_span: Option<Span>,
 }
 
-/// Stable source of a projected grammar fact.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProjectionOrigin {
-    /// Projected from the compiler's hand-written base parser.
-    CompilerProjected,
-    /// Projected from a compiler-shipped staged grammar prototype.
-    CompilerProjectedPrototype,
-    /// Projected from a trusted host fixture or adapter.
-    TrustedHostFixture,
-    /// Projected from source-authored grammar data.
-    SourceAuthored,
-}
-
-impl ProjectionOrigin {
-    /// Returns the stable origin token used in dumps.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CompilerProjected => "compiler-projected",
-            Self::CompilerProjectedPrototype => "compiler-projected-prototype",
-            Self::TrustedHostFixture => "trusted-host-fixture",
-            Self::SourceAuthored => "source-authored",
-        }
-    }
-}
-
-impl fmt::Display for ProjectionOrigin {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Structured grammar expression used by projected grammar rules.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RuleExpression {
-    /// A named grammar rule reference.
-    Rule(String),
-    /// A literal token or delimiter.
-    Literal(String),
-    /// A character class over a single character.
-    CharacterClass(String),
-    /// Consume source until the next literal delimiter, without consuming it.
-    UntilLiteral(String),
-    /// A sequence of expressions.
-    Sequence(Vec<RuleExpression>),
-    /// An ordered choice between alternatives.
-    Choice(Vec<RuleExpression>),
-    /// An optional expression.
-    Optional(Box<RuleExpression>),
-    /// One or more repetitions.
-    OneOrMore(Box<RuleExpression>),
-    /// Zero or more repetitions.
-    ZeroOrMore(Box<RuleExpression>),
-    /// A structural input expression plus an inert output description.
-    Transform {
-        /// Matched input expression.
-        input: Box<RuleExpression>,
-        /// Inert output description.
-        output: SourceData,
-    },
-}
-
-/// A deterministic structural action attached to a grammar rule.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GrammarAction {
-    /// Action name, such as `emit-class`.
-    pub name: String,
-    /// Named action arguments.
-    pub args: Vec<GrammarActionArg>,
-}
-
-/// One named grammar action argument.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GrammarActionArg {
-    /// Argument name.
-    pub name: String,
-    /// Argument value expression.
-    pub value: GrammarActionTerm,
-}
-
-/// A small grammar action value expression.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GrammarActionTerm {
-    /// Capture the first child rule with this name.
-    Capture {
-        /// Captured rule name.
-        rule: String,
-    },
-    /// Capture all child rules with this name.
-    CaptureAll {
-        /// Captured rule name.
-        rule: String,
-    },
-    /// Literal string/symbol data.
-    Literal(String),
-    /// Literal boolean data.
-    Bool(bool),
-}
-
-impl GrammarAction {
-    /// Creates a grammar action.
-    #[must_use]
-    pub fn new(name: impl Into<String>, args: Vec<GrammarActionArg>) -> Self {
-        Self {
-            name: name.into(),
-            args,
-        }
-    }
-
-    /// Returns inert source data for this action.
-    #[must_use]
-    pub fn source_data(&self) -> SourceData {
-        grammar_action_source_data(self)
-    }
-}
-
-impl GrammarActionArg {
-    /// Creates a named grammar action argument.
-    #[must_use]
-    pub fn new(name: impl Into<String>, value: GrammarActionTerm) -> Self {
-        Self {
-            name: name.into(),
-            value,
-        }
-    }
-}
-
-impl RuleExpression {
-    /// Creates a rule reference.
-    #[must_use]
-    pub fn rule(name: impl Into<String>) -> Self {
-        Self::Rule(name.into())
-    }
-
-    /// Creates a literal token/delimiter expression.
-    #[must_use]
-    pub fn literal(value: impl Into<String>) -> Self {
-        Self::Literal(value.into())
-    }
-
-    /// Creates a character class expression.
-    #[must_use]
-    pub fn character_class(value: impl Into<String>) -> Self {
-        Self::CharacterClass(value.into())
-    }
-
-    /// Creates an opaque-region expression that consumes until `value`.
-    #[must_use]
-    pub fn until_literal(value: impl Into<String>) -> Self {
-        Self::UntilLiteral(value.into())
-    }
-
-    /// Creates a sequence, collapsing a single item to that item.
-    #[must_use]
-    pub fn sequence(items: Vec<Self>) -> Self {
-        collapse_expression(Self::Sequence(items))
-    }
-
-    /// Creates an ordered choice, collapsing a single item to that item.
-    #[must_use]
-    pub fn choice(items: Vec<Self>) -> Self {
-        collapse_expression(Self::Choice(items))
-    }
-
-    /// Creates an optional expression.
-    #[must_use]
-    pub fn optional(item: Self) -> Self {
-        Self::Optional(Box::new(item))
-    }
-
-    /// Creates a one-or-more repetition expression.
-    #[must_use]
-    pub fn one_or_more(item: Self) -> Self {
-        Self::OneOrMore(Box::new(item))
-    }
-
-    /// Creates a zero-or-more repetition expression.
-    #[must_use]
-    pub fn zero_or_more(item: Self) -> Self {
-        Self::ZeroOrMore(Box::new(item))
-    }
-
-    /// Creates a transform expression with inert output data.
-    #[must_use]
-    pub fn transform(input: Self, output: SourceData) -> Self {
-        Self::Transform {
-            input: Box::new(input),
-            output,
-        }
-    }
-
-    /// Returns inert source data for this expression.
-    #[must_use]
-    pub fn source_data(&self) -> SourceData {
-        rule_expression_source_data(self)
-    }
-}
-
-impl fmt::Display for RuleExpression {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rule(name) => formatter.write_str(name),
-            Self::Literal(value) => write!(formatter, "`{value}`"),
-            Self::CharacterClass(value) => write!(formatter, "[{value}]"),
-            Self::UntilLiteral(value) => write!(formatter, "until(`{value}`)"),
-            Self::Sequence(items) => {
-                for (index, item) in items.iter().enumerate() {
-                    if index > 0 {
-                        formatter.write_str(" ")?;
-                    }
-                    write!(formatter, "{}", grouped_rule_expression(item))?;
-                }
-                Ok(())
-            }
-            Self::Choice(items) => {
-                for (index, item) in items.iter().enumerate() {
-                    if index > 0 {
-                        formatter.write_str(" | ")?;
-                    }
-                    write!(formatter, "{item}")?;
-                }
-                Ok(())
-            }
-            Self::Optional(item) => write!(formatter, "{}?", grouped_rule_expression(item)),
-            Self::OneOrMore(item) => write!(formatter, "{}+", grouped_rule_expression(item)),
-            Self::ZeroOrMore(item) => write!(formatter, "{}*", grouped_rule_expression(item)),
-            Self::Transform { input, output } => write!(formatter, "{input} => {output}"),
-        }
-    }
-}
-
-fn collapse_expression(expression: RuleExpression) -> RuleExpression {
-    match expression {
-        RuleExpression::Sequence(mut items) | RuleExpression::Choice(mut items)
-            if items.len() == 1 =>
-        {
-            items.remove(0)
-        }
-        expression => expression,
-    }
-}
-
-fn grouped_rule_expression(expression: &RuleExpression) -> RuleExpressionDisplay<'_> {
-    RuleExpressionDisplay(expression)
-}
-
-struct RuleExpressionDisplay<'a>(&'a RuleExpression);
-
-impl fmt::Display for RuleExpressionDisplay<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            RuleExpression::Choice(_) | RuleExpression::Transform { .. } => {
-                write!(formatter, "({})", self.0)
-            }
-            expression => write!(formatter, "{expression}"),
-        }
-    }
-}
-
-fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
+/// Returns inert source data for a grammar rule expression.
+#[must_use]
+pub fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
     match expression {
         RuleExpression::Rule(name) => SourceData::record(
             "rule-ref",
@@ -628,13 +381,23 @@ fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
             "transform",
             vec![
                 source_data::field("input", rule_expression_source_data(input)),
-                source_data::field("output", output.clone()),
+                source_data::field("output", transform_output_source_data(output)),
             ],
         ),
     }
 }
 
-fn grammar_action_source_data(action: &GrammarAction) -> SourceData {
+fn transform_output_source_data(output: &TransformOutput) -> SourceData {
+    match output {
+        TransformOutput::Action(action) => grammar_action_source_data(action),
+        TransformOutput::Literal(value) => SourceData::string(value.as_str()),
+        TransformOutput::Symbol(value) => SourceData::symbol(value.as_str()),
+    }
+}
+
+/// Returns inert source data for a grammar action descriptor.
+#[must_use]
+pub fn grammar_action_source_data(action: &GrammarAction) -> SourceData {
     SourceData::record(
         "grammar-action",
         vec![
@@ -2009,7 +1772,8 @@ pub(super) fn frontend_slot_source_data(slot: &FrontendSlot) -> SourceData {
     )
 }
 
-fn source_span_data(span: Span) -> source_data::SourceDataField {
+fn source_span_data(span: impl Into<Span>) -> source_data::SourceDataField {
+    let span = span.into();
     source_data::field(
         "source-span",
         SourceData::record(
@@ -2755,14 +2519,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
         name: "function-definition".to_string(),
         expression: RuleExpression::transform(
             RuleExpression::rule("function-definition"),
-            SourceData::record(
-                "host-grammar-rule",
-                vec![
-                    source_data::field("name", SourceData::symbol("function-definition")),
-                    source_data::field("extends", SourceData::symbol("BaseLokoGrammar")),
-                    source_data::field("delegates-to", SourceData::symbol("BaseLokoGrammar")),
-                ],
-            ),
+            TransformOutput::Symbol("delegates-to-base-loko".to_string()),
         ),
         expression_data: SourceData::record(
             "host-grammar-rule",
@@ -3055,7 +2812,7 @@ fn grammar_rule_expression_data_from_expr(
 ) -> SourceData {
     let mut fields = vec![
         source_data::field("name", SourceData::symbol(name)),
-        source_data::field("expression", expression.source_data()),
+        source_data::field("expression", rule_expression_source_data(expression)),
     ];
     if let Some(text) = text {
         fields.push(source_data::field("text", SourceData::string(text)));
@@ -3065,232 +2822,11 @@ fn grammar_rule_expression_data_from_expr(
 }
 
 fn projected_rule_expression(expression: &str) -> RuleExpression {
-    let trimmed = expression.trim();
-    // This parser handles the small presentational grammar strings projected by
-    // the compiler and the embedded staged grammar sources. It is not a public
-    // grammar-file parser; malformed controlled strings may degrade to odd rule
-    // trees rather than user-facing diagnostics.
-    if let Some((input, output)) = split_transform_top_level(trimmed) {
-        return RuleExpression::transform(
-            projected_rule_expression(input),
-            transform_output_source_data(output.trim()),
-        );
-    }
-    let choices = split_top_level(trimmed, '|');
-    if choices.len() > 1 {
-        return RuleExpression::choice(
-            choices
-                .into_iter()
-                .map(projected_rule_expression)
-                .collect::<Vec<_>>(),
-        );
-    }
-    let terms = split_whitespace_top_level(trimmed);
-    RuleExpression::sequence(
-        terms
-            .into_iter()
-            .map(projected_rule_term)
-            .collect::<Vec<_>>(),
-    )
-}
-
-fn split_transform_top_level(input: &str) -> Option<(&str, &str)> {
-    let mut depth = 0_i32;
-    let mut in_literal = false;
-    let mut chars = input.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        match ch {
-            '`' => in_literal = !in_literal,
-            '(' if !in_literal => depth += 1,
-            ')' if !in_literal => depth -= 1,
-            '=' if !in_literal && depth == 0 && matches!(chars.peek(), Some((_, '>'))) => {
-                let output_start = index + "=>".len();
-                return Some((input[..index].trim(), input[output_start..].trim()));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn transform_output_source_data(output: &str) -> SourceData {
-    if let Some(action) = parse_grammar_action(output) {
-        return action.source_data();
-    }
-    output
-        .strip_prefix('`')
-        .and_then(|inner| inner.strip_suffix('`'))
-        .map_or_else(|| SourceData::symbol(output), SourceData::string)
+    interloko_grammar::parse_rule_expression(expression)
 }
 
 fn parse_grammar_action(output: &str) -> Option<GrammarAction> {
-    let trimmed = output.trim();
-    let (name, args) = trimmed.split_once('(')?;
-    let args = args.strip_suffix(')')?;
-    Some(GrammarAction::new(
-        name.trim(),
-        split_action_args(args)
-            .into_iter()
-            .filter_map(parse_grammar_action_arg)
-            .collect(),
-    ))
-}
-
-fn parse_grammar_action_arg(arg: &str) -> Option<GrammarActionArg> {
-    let (name, value) = arg.split_once(':')?;
-    Some(GrammarActionArg::new(
-        name.trim(),
-        parse_grammar_action_term(value.trim()),
-    ))
-}
-
-fn parse_grammar_action_term(value: &str) -> GrammarActionTerm {
-    let trimmed = value.trim();
-    if trimmed == "true" {
-        return GrammarActionTerm::Bool(true);
-    }
-    if trimmed == "false" {
-        return GrammarActionTerm::Bool(false);
-    }
-    if let Some(inner) = trimmed
-        .strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-        .or_else(|| {
-            trimmed
-                .strip_prefix('`')
-                .and_then(|inner| inner.strip_suffix('`'))
-        })
-    {
-        return GrammarActionTerm::Literal(inner.to_string());
-    }
-    if let Some(rule) = trimmed.strip_suffix('*') {
-        return GrammarActionTerm::CaptureAll {
-            rule: rule.trim().to_string(),
-        };
-    }
-    GrammarActionTerm::Capture {
-        rule: trimmed.to_string(),
-    }
-}
-
-fn split_action_args(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut in_string = false;
-    let mut in_literal = false;
-    for (index, ch) in input.char_indices() {
-        match ch {
-            '"' if !in_literal => in_string = !in_string,
-            '`' if !in_string => in_literal = !in_literal,
-            ',' if !in_string && !in_literal => {
-                parts.push(input[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(input[start..].trim());
-    parts.into_iter().filter(|part| !part.is_empty()).collect()
-}
-
-fn projected_rule_term(term: &str) -> RuleExpression {
-    let trimmed = term.trim();
-    if let Some(inner) = trimmed.strip_suffix('*') {
-        return RuleExpression::zero_or_more(projected_rule_expression(inner));
-    }
-    if let Some(inner) = trimmed.strip_suffix('+') {
-        return RuleExpression::one_or_more(projected_rule_expression(inner));
-    }
-    if let Some(inner) = trimmed.strip_suffix('?') {
-        return RuleExpression::optional(projected_rule_expression(inner));
-    }
-    if let Some(inner) = trimmed
-        .strip_prefix('(')
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        return projected_rule_expression(inner);
-    }
-    if let Some(inner) = trimmed
-        .strip_prefix("until(")
-        .and_then(|inner| inner.strip_suffix(')'))
-        .and_then(|inner| {
-            inner
-                .trim()
-                .strip_prefix('`')
-                .and_then(|inner| inner.strip_suffix('`'))
-        })
-    {
-        return RuleExpression::until_literal(inner);
-    }
-    if let Some(inner) = trimmed
-        .strip_prefix('`')
-        .and_then(|inner| inner.strip_suffix('`'))
-    {
-        return RuleExpression::literal(inner);
-    }
-    if let Some(inner) = trimmed
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-    {
-        return RuleExpression::character_class(inner);
-    }
-    RuleExpression::rule(trimmed)
-}
-
-fn split_top_level(input: &str, delimiter: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut depth = 0_i32;
-    let mut in_literal = false;
-    for (index, ch) in input.char_indices() {
-        match ch {
-            '`' => in_literal = !in_literal,
-            '(' if !in_literal => depth += 1,
-            ')' if !in_literal => depth -= 1,
-            _ if ch == delimiter && !in_literal && depth == 0 => {
-                parts.push(input[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(input[start..].trim());
-    parts.into_iter().filter(|part| !part.is_empty()).collect()
-}
-
-fn split_whitespace_top_level(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = None;
-    let mut depth = 0_i32;
-    let mut in_literal = false;
-    for (index, ch) in input.char_indices() {
-        match ch {
-            '`' => {
-                if start.is_none() {
-                    start = Some(index);
-                }
-                in_literal = !in_literal;
-            }
-            '(' if !in_literal => {
-                if start.is_none() {
-                    start = Some(index);
-                }
-                depth += 1;
-            }
-            ')' if !in_literal => depth -= 1,
-            _ if ch.is_whitespace() && !in_literal && depth == 0 => {
-                if let Some(term_start) = start.take() {
-                    parts.push(input[term_start..index].trim());
-                }
-            }
-            _ if start.is_none() => start = Some(index),
-            _ => {}
-        }
-    }
-    if let Some(term_start) = start {
-        parts.push(input[term_start..].trim());
-    }
-    parts.into_iter().filter(|part| !part.is_empty()).collect()
+    interloko_grammar::parse_grammar_action(output)
 }
 
 fn staged_effective_rules(
@@ -3778,6 +3314,7 @@ fn stable_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use interloko_grammar::Span as GrammarSpan;
 
     #[test]
     fn builtin_registry_resolves_environment_and_staged_tokens() {
@@ -3850,7 +3387,7 @@ mod tests {
         );
         assert_eq!(
             calculator_function.expression.to_string(),
-            "name `=` expression => grammar-action(name: emit-function, args: [grammar-action-arg(name: name, value: capture(rule: name)), grammar-action-arg(name: body, value: capture(rule: expression))])"
+            "name `=` expression => emit-function(name: name, body: expression)"
         );
 
         let records_grammar = registry.staged_records(&[RECORDS_GRAMMAR_SLUG]);
@@ -3872,7 +3409,7 @@ mod tests {
         );
         assert_eq!(
             record_definition.expression.to_string(),
-            "`record` record-name record-field+ `end` => grammar-action(name: emit-class, args: [grammar-action-arg(name: name, value: capture(rule: record-name)), grammar-action-arg(name: superclass, value: literal(value: \"<object>\")), grammar-action-arg(name: slots, value: capture-all(rule: record-field))])"
+            "`record` record-name record-field+ `end` => emit-class(name: record-name, superclass: \"<object>\", slots: record-field*)"
         );
     }
 
@@ -3889,7 +3426,7 @@ mod tests {
         let node = parse.root;
 
         assert_eq!(node.rule_name, "pair");
-        assert_eq!(node.span, Span::new(100, 117));
+        assert_eq!(node.span, GrammarSpan::new(100, 117));
         assert_eq!(
             node.children
                 .iter()
@@ -3911,7 +3448,7 @@ mod tests {
         let identifier = interpreter::interpret_region_result(&rules, "identifier", "area?", 10)
             .expect("identifier parses")
             .root;
-        assert_eq!(identifier.span, Span::new(10, 15));
+        assert_eq!(identifier.span, GrammarSpan::new(10, 15));
         assert_eq!(identifier.text, "area?");
         assert_eq!(
             identifier
@@ -3926,12 +3463,12 @@ mod tests {
         let digits = interpreter::interpret_region_result(&rules, "digits", "123", 20)
             .expect("digits parse")
             .root;
-        assert_eq!(digits.span, Span::new(20, 23));
+        assert_eq!(digits.span, GrammarSpan::new(20, 23));
         assert_eq!(digits.text, "123");
 
         let error = interpreter::interpret_region_result(&rules, "digits", "", 30)
             .expect_err("one-or-more requires one match");
-        assert_eq!(error.span, Span::new(30, 30));
+        assert_eq!(error.span, GrammarSpan::new(30, 30));
         assert_eq!(error.expected, Vec::from(["[0-9]".to_string()]));
     }
 
@@ -3946,7 +3483,7 @@ mod tests {
             .root;
 
         assert_eq!(node.rule_name, "block");
-        assert_eq!(node.span, Span::new(40, 55));
+        assert_eq!(node.span, GrammarSpan::new(40, 55));
         assert_eq!(
             node.children
                 .iter()
@@ -4003,7 +3540,7 @@ mod tests {
         let error = interpreter::interpret_region_result(&rules, "root", "anything", 40)
             .expect_err("unknown rule cannot be interpreted by hidden builtins");
 
-        assert_eq!(error.span, Span::new(40, 40));
+        assert_eq!(error.span, GrammarSpan::new(40, 40));
         assert_eq!(error.expected, Vec::from(["missing-rule".to_string()]));
     }
 
@@ -4065,11 +3602,11 @@ mod tests {
         );
         assert_eq!(
             direct_override.expression.to_string(),
-            "function-definition => host-grammar-rule(name: function-definition, extends: BaseLokoGrammar, delegates-to: BaseLokoGrammar)"
+            "function-definition => delegates-to-base-loko"
         );
         assert_eq!(
-            source_data::dump(&direct_override.expression.source_data()),
-            "transform(input: rule-ref(name: function-definition), output: host-grammar-rule(name: function-definition, extends: BaseLokoGrammar, delegates-to: BaseLokoGrammar))"
+            source_data::dump(&rule_expression_source_data(&direct_override.expression)),
+            "transform(input: rule-ref(name: function-definition), output: delegates-to-base-loko)"
         );
 
         let effective_override = records

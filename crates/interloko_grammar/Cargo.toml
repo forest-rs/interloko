@@ -1,0 +1,11 @@
+[package]
+name = "interloko_grammar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interloko grammar expression and interpreted parsing kernel."
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -4,43 +4,27 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use interloko_grammar::{self, GrammarAction, GrammarActionTerm};
+
+pub(super) use interloko_grammar::{
+    Parse as InterpretedParse, ParseError as InterpretedParseError,
+    RuleNode as InterpretedRuleNode, SourceAuthoredRule,
+};
+
 use crate::source_data::{self, SourceData};
 use crate::syntax::Span;
 
 use super::{
-    FrontendBinaryOp, FrontendExpression, FrontendForm, FrontendSlot, GrammarAction,
-    GrammarActionTerm, RuleExpression, StagedRuleCount, frontend_expression_source_data,
-    frontend_form_source_data, frontend_slot_source_data, parse_grammar_action,
-    projected_rule_expression, source_span_data, valid_calculator_function_name,
+    FrontendBinaryOp, FrontendExpression, FrontendForm, FrontendSlot, StagedRuleCount,
+    frontend_expression_source_data, frontend_form_source_data, frontend_slot_source_data,
+    grammar_action_source_data, source_span_data, valid_calculator_function_name,
     valid_record_field_name, valid_record_type_fragment, valid_type_name,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct SourceAuthoredRule {
-    pub(super) name: String,
-    pub(super) expression: RuleExpression,
-    pub(super) action: Option<GrammarAction>,
-    pub(super) source_span: Span,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct InterpretedRuleNode {
-    pub(super) rule_name: String,
-    pub(super) span: Span,
-    pub(super) text: String,
-    pub(super) children: Vec<InterpretedRuleNode>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct InterpretedParse {
-    pub(super) root: InterpretedRuleNode,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct InterpretedParseError {
-    pub(super) span: Span,
-    pub(super) expected: Vec<String>,
-}
+const LOKO_RESERVED_WORDS: &[&str] = &[
+    "define", "function", "class", "slot", "constant", "generic", "method", "let", "if", "then",
+    "else", "handle", "with", "restart", "end",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum GrammarActionValue {
@@ -77,9 +61,9 @@ pub(super) struct GrammarActionError {
 }
 
 impl GrammarActionError {
-    fn new(span: Span, expected: impl Into<String>) -> Self {
+    fn new(span: impl Into<Span>, expected: impl Into<String>) -> Self {
         Self {
-            span,
+            span: span.into(),
             expected: expected.into().into_boxed_str(),
             field: None,
             action: None,
@@ -107,52 +91,22 @@ impl GrammarActionError {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ExpressionMatch {
-    end: usize,
-    children: Vec<InterpretedRuleNode>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ParseFailure {
-    position: usize,
-    expected: Vec<String>,
-}
-
 pub(super) fn parse_source_authored_grammar(source: &str) -> Vec<SourceAuthoredRule> {
-    let mut rules = Vec::new();
-    let mut offset = 0_usize;
-    for line in source.split_inclusive('\n') {
-        let line_start = offset;
-        let line_end = offset + line.len();
-        offset = line_end;
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("//")
-            || trimmed.starts_with("grammar ")
-            || trimmed == "end"
-        {
-            continue;
-        }
-        let Some(rest) = trimmed.strip_prefix("rule ") else {
-            continue;
-        };
-        let Some((name, expression)) = rest.split_once('=') else {
-            continue;
-        };
-        let action = expression
-            .split_once("=>")
-            .and_then(|(_, output)| parse_grammar_action(output.trim()));
-        let leading = line.find(trimmed).unwrap_or(0);
-        let trimmed_start = line_start + leading;
-        rules.push(SourceAuthoredRule {
-            name: name.trim().to_string(),
-            expression: projected_rule_expression(expression),
-            action,
-            source_span: Span::new(trimmed_start, line_end.saturating_sub(1)),
-        });
-    }
-    rules
+    interloko_grammar::parse_grammar_source(source)
+        .into_iter()
+        .map(|rule| {
+            if rule.name == "name" {
+                rule.with_excluded_text(
+                    LOKO_RESERVED_WORDS
+                        .iter()
+                        .map(|word| (*word).to_string())
+                        .collect(),
+                )
+            } else {
+                rule
+            }
+        })
+        .collect()
 }
 
 pub(super) fn interpret_region_result(
@@ -161,14 +115,7 @@ pub(super) fn interpret_region_result(
     source: &str,
     source_offset: usize,
 ) -> Result<InterpretedParse, InterpretedParseError> {
-    let root = interpret_rule_result(rules, root_rule, source, 0, source_offset)
-        .map_err(|failure| failure.into_error(source_offset))?;
-    let trailing = skip_interpreter_trivia(source, root.span.end.saturating_sub(source_offset));
-    if trailing == source.len() {
-        Ok(InterpretedParse { root })
-    } else {
-        Err(ParseFailure::expected(trailing, "end of region").into_error(source_offset))
-    }
+    interloko_grammar::interpret_region(rules, root_rule, source, source_offset)
 }
 
 pub(super) fn interpret_rule_error(
@@ -178,10 +125,7 @@ pub(super) fn interpret_rule_error(
     position: usize,
     source_offset: usize,
 ) -> InterpretedParseError {
-    interpret_rule_result(rules, rule_name, source, position, source_offset)
-        .err()
-        .unwrap_or_else(|| ParseFailure::expected(position, rule_name))
-        .into_error(source_offset)
+    interloko_grammar::interpret_rule_error(rules, rule_name, source, position, source_offset)
 }
 
 pub(super) fn evaluate_rule_action(
@@ -270,7 +214,10 @@ fn evaluate_emit_class(
         }
     }
     Ok(FrontendForm::class(
-        class_name, superclass, slots, node.span,
+        class_name,
+        superclass,
+        slots,
+        node.span.into(),
     ))
 }
 
@@ -294,7 +241,7 @@ fn evaluate_emit_slot(
         .map(|value| value.value)
         .ok();
     let required = action_bool_arg(action, "required-init-keyword").unwrap_or(false);
-    let mut slot = FrontendSlot::new(name.value.trim(), type_name.value.trim(), node.span);
+    let mut slot = FrontendSlot::new(name.value.trim(), type_name.value.trim(), node.span.into());
     if let Some(init_keyword) = init_keyword {
         slot = slot.with_init_keyword(init_keyword.trim(), required);
     }
@@ -311,7 +258,11 @@ fn evaluate_emit_function(
         return Err(GrammarActionError::new(name.span, "`name = expression`").with_arg("name"));
     }
     let body = action_expression_arg(rules, node, action, "body")?;
-    Ok(FrontendForm::function(name.value.trim(), body, node.span))
+    Ok(FrontendForm::function(
+        name.value.trim(),
+        body,
+        node.span.into(),
+    ))
 }
 
 fn evaluate_emit_integer(
@@ -323,7 +274,7 @@ fn evaluate_emit_integer(
         value: value.value.parse().map_err(|_| {
             GrammarActionError::new(value.span, "integer literal").with_arg("value")
         })?,
-        source_span: node.span,
+        source_span: node.span.into(),
     })
 }
 
@@ -334,7 +285,7 @@ fn evaluate_emit_name(
     let name = action_text_arg(node, action, "name")?;
     Ok(FrontendExpression::Name {
         name: name.value,
-        source_span: node.span,
+        source_span: node.span.into(),
     })
 }
 
@@ -348,7 +299,7 @@ fn evaluate_emit_call(
     Ok(FrontendExpression::Call {
         callee: callee.value,
         args,
-        source_span: node.span,
+        source_span: node.span.into(),
     })
 }
 
@@ -399,14 +350,14 @@ fn action_text_arg(
             .find(|child| child.rule_name == *rule)
             .map(|child| TextValue {
                 value: child.text.trim().to_string(),
-                span: child.span,
+                span: child.span.into(),
             })
             .ok_or_else(|| {
                 GrammarActionError::new(node.span, format!("capture `{rule}`")).with_arg(name)
             }),
         GrammarActionTerm::Literal(value) => Ok(TextValue {
             value: value.clone(),
-            span: node.span,
+            span: node.span.into(),
         }),
         _ => Err(
             GrammarActionError::new(node.span, format!("text argument `{name}`")).with_arg(name),
@@ -525,7 +476,7 @@ fn evaluate_node_value(
     }
     Ok(GrammarActionValue::Text {
         value: node.text.trim().to_string(),
-        span: node.span,
+        span: node.span.into(),
     })
 }
 
@@ -566,7 +517,7 @@ fn action_list_arg(
                 || {
                     Ok(GrammarActionValue::Text {
                         value: child.text.trim().to_string(),
-                        span: child.span,
+                        span: child.span.into(),
                     })
                 },
                 |output| Ok(output.value),
@@ -622,7 +573,7 @@ fn grammar_action_output_source_data(
     SourceData::record(
         "grammar-action-output",
         vec![
-            source_data::field("action", action.source_data()),
+            source_data::field("action", grammar_action_source_data(action)),
             source_data::field("value", grammar_action_value_source_data(value)),
         ],
     )
@@ -654,278 +605,6 @@ fn grammar_action_value_source_data(value: &GrammarActionValue) -> SourceData {
             ],
         ),
     }
-}
-
-fn interpret_rule_result(
-    rules: &[SourceAuthoredRule],
-    name: &str,
-    source: &str,
-    position: usize,
-    source_offset: usize,
-) -> Result<InterpretedRuleNode, ParseFailure> {
-    if let Some(rule) = rules.iter().find(|rule| rule.name == name) {
-        let start = skip_interpreter_trivia(source, position);
-        let matched = interpret_expression(rules, &rule.expression, source, start, source_offset)?;
-        let end = matched.end;
-        if name == "name" && is_loko_reserved_word(&source[start..end]) {
-            return Err(ParseFailure::expected(start, "name"));
-        }
-        return Ok(InterpretedRuleNode {
-            rule_name: name.to_string(),
-            span: Span::new(source_offset + start, source_offset + end),
-            text: source[start..end].to_string(),
-            children: matched.children,
-        });
-    }
-    Err(ParseFailure::expected(
-        skip_interpreter_trivia(source, position),
-        name,
-    ))
-}
-
-fn is_loko_reserved_word(text: &str) -> bool {
-    matches!(
-        text,
-        "define"
-            | "function"
-            | "class"
-            | "slot"
-            | "constant"
-            | "generic"
-            | "method"
-            | "let"
-            | "if"
-            | "then"
-            | "else"
-            | "handle"
-            | "with"
-            | "restart"
-            | "end"
-    )
-}
-
-fn interpret_expression(
-    rules: &[SourceAuthoredRule],
-    expression: &RuleExpression,
-    source: &str,
-    position: usize,
-    source_offset: usize,
-) -> Result<ExpressionMatch, ParseFailure> {
-    match expression {
-        RuleExpression::Rule(name) => {
-            let node = interpret_rule_result(rules, name, source, position, source_offset)?;
-            Ok(ExpressionMatch {
-                end: node.span.end.saturating_sub(source_offset),
-                children: vec![node],
-            })
-        }
-        RuleExpression::Literal(value) => {
-            let start = skip_interpreter_trivia(source, position);
-            let end = source[start..]
-                .starts_with(value)
-                .then_some(start + value.len())
-                .filter(|end| literal_boundary_ok(source, *end, value))
-                .ok_or_else(|| ParseFailure::expected(start, literal_expected(value)))?;
-            Ok(ExpressionMatch {
-                end,
-                children: vec![InterpretedRuleNode {
-                    rule_name: format!("literal:{value}"),
-                    span: Span::new(source_offset + start, source_offset + end),
-                    text: source[start..end].to_string(),
-                    children: Vec::new(),
-                }],
-            })
-        }
-        RuleExpression::CharacterClass(value) => {
-            let start = position;
-            let ch = source[start..]
-                .chars()
-                .next()
-                .filter(|ch| character_class_contains(value, *ch))
-                .ok_or_else(|| ParseFailure::expected(start, character_class_expected(value)))?;
-            let end = start + ch.len_utf8();
-            Ok(ExpressionMatch {
-                end,
-                children: vec![InterpretedRuleNode {
-                    rule_name: format!("class:{value}"),
-                    span: Span::new(source_offset + start, source_offset + end),
-                    text: source[start..end].to_string(),
-                    children: Vec::new(),
-                }],
-            })
-        }
-        RuleExpression::UntilLiteral(value) => {
-            let start = position;
-            let relative_end = source[start..]
-                .match_indices(value)
-                .find_map(|(index, _)| {
-                    let end = start + index + value.len();
-                    literal_boundary_ok(source, end, value).then_some(start + index)
-                })
-                .unwrap_or(source.len());
-            Ok(ExpressionMatch {
-                end: relative_end,
-                children: vec![InterpretedRuleNode {
-                    rule_name: format!("until:{value}"),
-                    span: Span::new(source_offset + start, source_offset + relative_end),
-                    text: source[start..relative_end].to_string(),
-                    children: Vec::new(),
-                }],
-            })
-        }
-        RuleExpression::Sequence(items) => {
-            let mut end = position;
-            let mut children = Vec::new();
-            for item in items {
-                let matched = interpret_expression(rules, item, source, end, source_offset)?;
-                end = matched.end;
-                children.extend(matched.children);
-            }
-            Ok(ExpressionMatch { end, children })
-        }
-        RuleExpression::Choice(items) => {
-            let mut failure = None;
-            for item in items {
-                match interpret_expression(rules, item, source, position, source_offset) {
-                    Ok(matched) => return Ok(matched),
-                    Err(error) => merge_failure(&mut failure, error),
-                }
-            }
-            Err(failure.unwrap_or_else(|| ParseFailure::expected(position, "choice")))
-        }
-        RuleExpression::Optional(item) => {
-            Ok(
-                interpret_expression(rules, item, source, position, source_offset).unwrap_or_else(
-                    |_| ExpressionMatch {
-                        end: position,
-                        children: Vec::new(),
-                    },
-                ),
-            )
-        }
-        RuleExpression::OneOrMore(item) => {
-            let first = interpret_expression(rules, item, source, position, source_offset)?;
-            let mut end = first.end;
-            let mut children = first.children;
-            while let Ok(matched) = interpret_expression(rules, item, source, end, source_offset) {
-                if matched.end == end {
-                    break;
-                }
-                end = matched.end;
-                children.extend(matched.children);
-            }
-            Ok(ExpressionMatch { end, children })
-        }
-        RuleExpression::ZeroOrMore(item) => {
-            let mut end = position;
-            let mut children = Vec::new();
-            while let Ok(matched) = interpret_expression(rules, item, source, end, source_offset) {
-                if matched.end == end {
-                    break;
-                }
-                end = matched.end;
-                children.extend(matched.children);
-            }
-            Ok(ExpressionMatch { end, children })
-        }
-        RuleExpression::Transform { input, .. } => {
-            interpret_expression(rules, input, source, position, source_offset)
-        }
-    }
-}
-
-impl ParseFailure {
-    fn expected(position: usize, expected: impl Into<String>) -> Self {
-        Self {
-            position,
-            expected: vec![expected.into()],
-        }
-    }
-
-    fn into_error(self, source_offset: usize) -> InterpretedParseError {
-        InterpretedParseError {
-            span: Span::new(source_offset + self.position, source_offset + self.position),
-            expected: self.expected,
-        }
-    }
-}
-
-fn merge_failure(failure: &mut Option<ParseFailure>, next: ParseFailure) {
-    match failure {
-        Some(current) if current.position > next.position => {}
-        Some(current) if current.position == next.position => {
-            for expected in next.expected {
-                if !current.expected.contains(&expected) {
-                    current.expected.push(expected);
-                }
-            }
-        }
-        _ => *failure = Some(next),
-    }
-}
-
-fn literal_expected(value: &str) -> String {
-    format!("`{value}`")
-}
-
-fn character_class_expected(value: &str) -> String {
-    format!("[{value}]")
-}
-
-fn character_class_contains(class: &str, ch: char) -> bool {
-    let mut chars = class.chars().peekable();
-    let mut previous = None;
-    while let Some(current) = chars.next() {
-        if current == '-'
-            && let (Some(start), Some(&end)) = (previous, chars.peek())
-        {
-            let _ = chars.next();
-            if start <= ch && ch <= end {
-                return true;
-            }
-            previous = Some(end);
-            continue;
-        }
-        if current == ch {
-            return true;
-        }
-        previous = Some(current);
-    }
-    false
-}
-
-fn skip_interpreter_trivia(source: &str, mut position: usize) -> usize {
-    loop {
-        let rest = &source[position..];
-        let skipped = rest
-            .char_indices()
-            .take_while(|(_, ch)| ch.is_whitespace())
-            .last()
-            .map_or(0, |(index, ch)| index + ch.len_utf8());
-        position += skipped;
-        if source[position..].starts_with("//") {
-            if let Some(newline) = source[position..].find('\n') {
-                position += newline + 1;
-                continue;
-            }
-            return source.len();
-        }
-        return position;
-    }
-}
-
-fn literal_boundary_ok(source: &str, end: usize, literal: &str) -> bool {
-    if !literal
-        .bytes()
-        .last()
-        .is_some_and(|byte| byte.is_ascii_alphabetic())
-    {
-        return true;
-    }
-    source
-        .as_bytes()
-        .get(end)
-        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'?'))
 }
 
 pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode) -> SourceData {

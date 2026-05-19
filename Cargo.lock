@@ -420,6 +420,7 @@ name = "interloko_compiler"
 version = "0.1.0"
 dependencies = [
  "execution_tape",
+ "interloko_grammar",
  "interloko_model",
  "interloko_runtime",
  "invalidation",
@@ -458,6 +459,10 @@ version = "0.1.0"
 dependencies = [
  "interloko_compiler",
 ]
+
+[[package]]
+name = "interloko_grammar"
+version = "0.1.0"
 
 [[package]]
 name = "interloko_host_backed_area_example"

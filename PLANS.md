@@ -1,5 +1,69 @@
 # Plans
 
+## Extract The Grammar Kernel
+
+### Goal
+
+Make the grammar system honest as a reusable kernel. Add an `interloko_grammar`
+crate that owns grammar rule expressions, grammar action descriptors, grammar
+source parsing, interpreted rule matching, parse trees, spans, and parse
+failures. Keep Interloko-specific CST building, staged-region policy, MOP/EOP
+projection, source-data rendering, and `FrontendForm` emission in
+`interloko_compiler`.
+
+### Non-Goals
+
+- No public grammar package loader.
+- No new grammar syntax.
+- No macro system.
+- No new Loko semantics.
+- No attempt to publish or stabilize the crate yet.
+- No extraction of compiler-specific semantic actions into the grammar crate.
+
+### Fence
+
+`interloko_grammar` owns grammar syntax, neutral rule/action descriptors,
+interpreted matching, parse trees, spans, and parse failures. It explicitly does
+not own Interloko CST nodes, AST lowering, diagnostics catalogs, staged-region
+selection, MOP/EOP projection, or runtime semantics.
+
+`interloko_compiler::grammar_frontend` owns Interloko grammar environments,
+base-Loko CST projection, staged-region activation, source-data projection, and
+mapping grammar matches to `FrontendForm` values.
+
+### Invariants
+
+- Base Loko, records, and calculator still parse through the same interpreted
+  grammar behavior after the split.
+- `interloko_grammar` has no dependency on `interloko_compiler`.
+- Grammar actions in the new crate are inert data, not host callbacks.
+- Source-data rendering remains compiler-owned.
+- Workspace tests, corpus, clippy, fmt, and docs stay green.
+
+### Sequence
+
+1. Add `crates/interloko_grammar` and move neutral `Span`, `ProjectionOrigin`,
+   `RuleExpression`, `GrammarAction`, grammar-source parsing, and interpreter
+   parse tree/failure types into it.
+2. Re-export the moved public grammar types from `grammar_frontend` so existing
+   compiler/session call sites keep their current path.
+3. Leave compiler-owned action evaluation and source-data rendering in
+   `grammar_frontend::interpreter`, but make it consume `interloko_grammar`
+   parse trees/rules.
+4. Move or duplicate the grammar-kernel unit tests into the new crate; keep
+   compiler tests focused on Interloko integration.
+5. Update docs to describe the crate boundary and run full validation.
+
+### Risks
+
+- Span type duplication can create noisy conversions. Keep conversions explicit
+  at the compiler boundary.
+- Leaving semantic action evaluation in the compiler may make the first split
+  feel partial. That is intentional: action descriptors are reusable data; action
+  meanings are compiler-specific.
+- Re-exporting types can hide the new crate boundary. Use it only as a migration
+  affordance for existing call sites.
+
 ## Remove The Rust Recursive-Descent Loko Parser
 
 ### Goal

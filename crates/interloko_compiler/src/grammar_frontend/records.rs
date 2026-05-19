@@ -58,13 +58,13 @@ fn emission_from_interpreted_parse(
                     records.push(output.data);
                 }
                 _ => diagnostics.push(staged_expected_diagnostic(
-                    record.span,
+                    record.span.into(),
                     "records",
                     "frontend class action output",
                 )),
             },
             Ok(None) => diagnostics.push(staged_expected_diagnostic(
-                record.span,
+                record.span.into(),
                 "records",
                 "record action",
             )),
@@ -73,7 +73,7 @@ fn emission_from_interpreted_parse(
     }
     if records.is_empty() && diagnostics.is_empty() {
         diagnostics.push(staged_expected_diagnostic(
-            parse.root.span,
+            parse.root.span.into(),
             "records",
             "`record name`",
         ));
@@ -173,11 +173,11 @@ fn joined_expected(error: &InterpretedParseError) -> String {
     }
 }
 
-fn parse_error_span(body: &str, source_offset: usize, span: Span) -> Span {
+fn parse_error_span(body: &str, source_offset: usize, span: interloko_grammar::Span) -> Span {
     if span.start == span.end && span.start == source_offset {
         Span::new(source_offset, source_offset + body.len())
     } else {
-        span
+        span.into()
     }
 }
 
@@ -202,7 +202,7 @@ pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
                 projection: GrammarProjection {
                     origin: ProjectionOrigin::SourceAuthored,
                     location,
-                    source_span: Some(rule.source_span),
+                    source_span: Some(rule.source_span.into()),
                 },
             }
         })

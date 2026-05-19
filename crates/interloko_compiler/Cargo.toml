@@ -12,6 +12,7 @@ std = ["dep:serde", "dep:toml"]
 [dependencies]
 execution_tape = { path = "../../../execution/execution_tape" }
 invalidation = { version = "0.2", path = "../../../invalidation/crates/invalidation" }
+interloko_grammar = { path = "../interloko_grammar" }
 interloko_model = { path = "../interloko_model" }
 interloko_runtime = { path = "../interloko_runtime" }
 serde = { version = "1", features = ["derive"], optional = true }

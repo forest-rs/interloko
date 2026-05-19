@@ -5735,7 +5735,11 @@ fn explain_grammar_expression(artifacts: &SessionArtifacts, id: &str) -> Option<
             );
             let _ = writeln!(out, "rule {}", rule.name);
             let _ = writeln!(out, "text {}", rule.expression);
-            let _ = writeln!(out, "data {}", rule.expression.source_data());
+            let _ = writeln!(
+                out,
+                "data {}",
+                grammar_frontend::rule_expression_source_data(&rule.expression)
+            );
             out
         })
 }
@@ -5765,7 +5769,11 @@ fn explain_grammar_action(artifacts: &SessionArtifacts, id: &str) -> Option<Stri
             grammar_action_term_label(&arg.value)
         );
     }
-    let _ = writeln!(out, "data {}", action.source_data());
+    let _ = writeln!(
+        out,
+        "data {}",
+        grammar_frontend::grammar_action_source_data(action)
+    );
     out.push_str(&explain_grammar_action_output(artifacts, id).unwrap_or_default());
     Some(out)
 }
@@ -8056,7 +8064,7 @@ fn project_grammar_action(sink: &mut dyn EnvironmentObjectSink, rule: &GrammarRu
             grammar_frontend::grammar_rule_object_id(rule),
             action.name,
             action.args.len(),
-            action.source_data()
+            grammar_frontend::grammar_action_source_data(action)
         ),
     }));
 }
