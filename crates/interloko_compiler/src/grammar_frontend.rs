@@ -6,6 +6,7 @@
 //! intentionally does not own AST lowering, semantic lowering, source-authored
 //! grammars, macros, host semantic actions, or parser rewriting.
 
+mod base_loko_primary;
 mod base_loko_shadow;
 mod calculator;
 mod interpreter;
@@ -1600,10 +1601,21 @@ impl GrammarFrontendRegistry {
 /// Parses source through the base Loko grammar frontend.
 #[must_use]
 pub fn parse_file(source_file: SourceFileId, source: &str) -> GrammarParseReport {
-    parse_file_with_environment(
+    parse_file_with_parser_mode(source_file, source, syntax::ParserMode::default())
+}
+
+/// Parses source through the base Loko grammar frontend with an explicit parser mode.
+#[must_use]
+pub fn parse_file_with_parser_mode(
+    source_file: SourceFileId,
+    source: &str,
+    parser_mode: syntax::ParserMode,
+) -> GrammarParseReport {
+    parse_file_with_environment_and_parser_mode(
         source_file,
         source,
         GrammarEnvironmentSelection::base_loko(),
+        parser_mode,
     )
 }
 
@@ -1618,11 +1630,28 @@ pub fn parse_file_with_environment(
     source: &str,
     environment: GrammarEnvironmentSelection,
 ) -> GrammarParseReport {
-    parse_file_with_registry(
+    parse_file_with_environment_and_parser_mode(
+        source_file,
+        source,
+        environment,
+        syntax::ParserMode::default(),
+    )
+}
+
+/// Parses source through the selected grammar frontend and parser mode.
+#[must_use]
+pub fn parse_file_with_environment_and_parser_mode(
+    source_file: SourceFileId,
+    source: &str,
+    environment: GrammarEnvironmentSelection,
+    parser_mode: syntax::ParserMode,
+) -> GrammarParseReport {
+    parse_file_with_registry_and_parser_mode(
         source_file,
         source,
         environment,
         &GrammarFrontendRegistry::builtin(),
+        parser_mode,
     )
 }
 
@@ -1638,16 +1667,34 @@ pub fn parse_file_with_registry(
     environment: GrammarEnvironmentSelection,
     registry: &GrammarFrontendRegistry,
 ) -> GrammarParseReport {
+    parse_file_with_registry_and_parser_mode(
+        source_file,
+        source,
+        environment,
+        registry,
+        syntax::ParserMode::default(),
+    )
+}
+
+/// Parses source through an explicit grammar frontend registry and parser mode.
+#[must_use]
+pub fn parse_file_with_registry_and_parser_mode(
+    source_file: SourceFileId,
+    source: &str,
+    environment: GrammarEnvironmentSelection,
+    registry: &GrammarFrontendRegistry,
+    parser_mode: syntax::ParserMode,
+) -> GrammarParseReport {
     if let Some(provider) = registry.environment_provider(environment.as_str()) {
         if provider.discovers_staged_regions()
             && let Some(report) = parse_staged_file(source_file, source, registry)
         {
             return report;
         }
-        return parse_file_with_records(source_file, source, provider.records());
+        return parse_file_with_records(source_file, source, provider.records(), parser_mode);
     }
 
-    let mut report = parse_file_with_records(source_file, source, base_loko_records());
+    let mut report = parse_file_with_records(source_file, source, base_loko_records(), parser_mode);
     push_report_diagnostic(
         &mut report,
         unknown_environment_diagnostic(Span::new(0, 0), environment.as_str(), registry),
@@ -1692,8 +1739,21 @@ fn parse_file_with_records(
     source_file: SourceFileId,
     source: &str,
     records: GrammarFrontendRecords,
+    parser_mode: syntax::ParserMode,
 ) -> GrammarParseReport {
-    let syntax = syntax::parse_file(source_file, source);
+    let syntax = match parser_mode {
+        syntax::ParserMode::RustPrimary => syntax::parse_file_rust(source_file, source),
+        syntax::ParserMode::GrammarPrimary => {
+            match base_loko_primary::parse_file(source_file, source) {
+                Ok(tree) => tree,
+                Err(diagnostic) => {
+                    let mut tree = syntax::parse_file_rust(source_file, source);
+                    tree.diagnostics.push(diagnostic);
+                    tree
+                }
+            }
+        }
+    };
     let active_grammar = records.active_grammar;
     let active_grammar_slug = records
         .grammars
@@ -2010,7 +2070,12 @@ fn parse_staged_file(
     let discovery = discover_staged_regions(source, registry);
     if discovery.regions.is_empty() {
         if !discovery.diagnostics.is_empty() {
-            let mut report = parse_file_with_records(source_file, source, base_loko_records());
+            let mut report = parse_file_with_records(
+                source_file,
+                source,
+                base_loko_records(),
+                syntax::ParserMode::default(),
+            );
             report.diagnostics.extend(discovery.diagnostics);
             if let Some(activation) = report.activations.first() {
                 report.grammar_diagnostics = grammar_diagnostic_facts(
@@ -3044,7 +3109,7 @@ fn projected_rule_expression(expression: &str) -> RuleExpression {
     // the compiler and the embedded staged grammar sources. It is not a public
     // grammar-file parser; malformed controlled strings may degrade to odd rule
     // trees rather than user-facing diagnostics.
-    if let Some((input, output)) = trimmed.split_once("=>") {
+    if let Some((input, output)) = split_transform_top_level(trimmed) {
         return RuleExpression::transform(
             projected_rule_expression(input),
             transform_output_source_data(output.trim()),
@@ -3066,6 +3131,25 @@ fn projected_rule_expression(expression: &str) -> RuleExpression {
             .map(projected_rule_term)
             .collect::<Vec<_>>(),
     )
+}
+
+fn split_transform_top_level(input: &str) -> Option<(&str, &str)> {
+    let mut depth = 0_i32;
+    let mut in_literal = false;
+    let mut chars = input.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '`' => in_literal = !in_literal,
+            '(' if !in_literal => depth += 1,
+            ')' if !in_literal => depth -= 1,
+            '=' if !in_literal && depth == 0 && matches!(chars.peek(), Some((_, '>'))) => {
+                let output_start = index + "=>".len();
+                return Some((input[..index].trim(), input[output_start..].trim()));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn transform_output_source_data(output: &str) -> SourceData {
@@ -3912,6 +3996,40 @@ mod tests {
     }
 
     #[test]
+    fn source_authored_rule_interpreter_matches_hyphenated_names() {
+        let grammar = "grammar tiny\n\
+                       rule name = [A-Za-z_] [A-Za-z0-9_?-]*\n\
+                       end\n";
+        let rules = interpreter::parse_source_authored_grammar(grammar);
+        let node = interpreter::interpret_region_result(&rules, "name", "required-init-keyword", 0)
+            .expect("name parses")
+            .root;
+        assert_eq!(node.text, "required-init-keyword");
+    }
+
+    #[test]
+    fn source_authored_rule_interpreter_matches_slot_with_required_keyword() {
+        let grammar = include_str!("../grammars/base_loko.grammar");
+        let rules = interpreter::parse_source_authored_grammar(grammar);
+        let source = "slot radius :: <integer>, required-init-keyword: radius:;";
+        let node = interpreter::interpret_region_result(&rules, "slot-declaration", source, 0)
+            .expect("slot parses")
+            .root;
+        assert_eq!(node.text, source);
+    }
+
+    #[test]
+    fn source_authored_rule_interpreter_matches_class_with_required_keyword_slot() {
+        let grammar = include_str!("../grammars/base_loko.grammar");
+        let rules = interpreter::parse_source_authored_grammar(grammar);
+        let source = "define class <circle> (<object>)\n                        slot radius :: <integer>, required-init-keyword: radius:;\n                      end";
+        let node = interpreter::interpret_region_result(&rules, "class-definition", source, 0)
+            .expect("class parses")
+            .root;
+        assert_eq!(node.text, source);
+    }
+
+    #[test]
     fn source_authored_rule_interpreter_reports_unknown_rule_refs() {
         let grammar = "grammar tiny\n\
                        rule root = missing-rule\n\
@@ -4372,6 +4490,52 @@ mod tests {
             Some("source-authored-base-loko-shadow")
         );
         assert_eq!(shadow.divergences, Vec::new());
+    }
+
+    #[test]
+    fn grammar_primary_base_loko_builds_cst_for_current_surface() {
+        let source_file = SourceFileId::from_path("grammar-primary.loko");
+        let source = "define class <circle> (<object>)\n\
+                        slot radius :: <integer>, required-init-keyword: radius:;\n\
+                      end\n\
+                      define generic area(shape :: <object>) => <integer>;\n\
+                      define method area(c :: <circle>) => <integer>\n\
+                        c.radius * c.radius\n\
+                      end\n\
+                      define function main()\n\
+                        area(make(<circle>, radius: 10))\n\
+                      end";
+        let report =
+            parse_file_with_parser_mode(source_file, source, syntax::ParserMode::GrammarPrimary);
+
+        assert_eq!(report.diagnostics, Vec::new());
+        assert_eq!(report.syntax.root.child_nodes(CstKind::Class).count(), 1);
+        assert_eq!(report.syntax.root.child_nodes(CstKind::Generic).count(), 1);
+        assert_eq!(report.syntax.root.child_nodes(CstKind::Method).count(), 1);
+        assert_eq!(report.syntax.root.child_nodes(CstKind::Function).count(), 1);
+        assert!(
+            report
+                .syntax
+                .root
+                .child_nodes(CstKind::Class)
+                .next()
+                .expect("class")
+                .child_nodes(CstKind::SlotDecl)
+                .next()
+                .expect("slot")
+                .child_nodes(CstKind::SlotOption)
+                .count()
+                == 1
+        );
+
+        let module = crate::ast::lower(&report.syntax);
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.classes.len(), 1);
+        assert_eq!(module.generics.len(), 1);
+        assert_eq!(module.methods.len(), 1);
+        assert_eq!(module.functions.len(), 1);
+        assert_eq!(module.classes[0].slots[0].name, "radius");
+        assert_eq!(module.functions[0].name, "main");
     }
 
     #[test]

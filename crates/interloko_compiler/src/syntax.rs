@@ -135,7 +135,7 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
-    fn is_trivia(self) -> bool {
+    pub(crate) fn is_trivia(self) -> bool {
         matches!(self, Self::Whitespace | Self::Comment)
     }
 }
@@ -252,6 +252,22 @@ pub struct CstNode {
 }
 
 impl CstNode {
+    /// Creates a CST node from explicit children.
+    ///
+    /// This is used by parser frontends that construct the same CST contract
+    /// as the built-in Rust parser from another recognition strategy.
+    #[must_use]
+    pub(crate) fn from_children(
+        source_file: SourceFileId,
+        kind: CstKind,
+        children: Vec<CstElement>,
+        tokens: &[Token],
+        source: &str,
+        fallback: Span,
+    ) -> Self {
+        Self::new(source_file, kind, children, tokens, source, fallback)
+    }
+
     fn new(
         source_file: SourceFileId,
         kind: CstKind,
@@ -505,6 +521,16 @@ pub struct SyntaxTree {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Parser implementation mode for base Loko source.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum ParserMode {
+    /// Use the original Rust recursive-descent parser as primary.
+    #[default]
+    RustPrimary,
+    /// Use the source-authored grammar parser as primary, with Rust kept as an oracle.
+    GrammarPrimary,
+}
+
 /// Lexes `source` into a token stream that includes trivia.
 #[must_use]
 pub fn lex(source: &str) -> Vec<Token> {
@@ -743,6 +769,26 @@ pub fn parse(source: &str) -> SyntaxTree {
 /// Parses source from `source_file` into a [`SyntaxTree`].
 #[must_use]
 pub fn parse_file(source_file: SourceFileId, source: &str) -> SyntaxTree {
+    parse_file_with_mode(source_file, source, ParserMode::default())
+}
+
+/// Parses source from `source_file` into a [`SyntaxTree`] with an explicit parser mode.
+#[must_use]
+pub fn parse_file_with_mode(
+    source_file: SourceFileId,
+    source: &str,
+    mode: ParserMode,
+) -> SyntaxTree {
+    match mode {
+        ParserMode::RustPrimary | ParserMode::GrammarPrimary => {
+            parse_file_rust(source_file, source)
+        }
+    }
+}
+
+/// Parses source from `source_file` using the Rust recursive-descent parser.
+#[must_use]
+pub fn parse_file_rust(source_file: SourceFileId, source: &str) -> SyntaxTree {
     let tokens = lex(source);
     Parser::new(source_file, source, tokens).parse()
 }
