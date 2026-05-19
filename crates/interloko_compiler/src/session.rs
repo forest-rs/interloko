@@ -17,9 +17,9 @@ use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::grammar_frontend::{
-    self, FrontendParseArtifact, GrammarActivation, GrammarEnvironmentSelection,
-    GrammarFrontendRegistry, GrammarParseReport, GrammarRule, GrammarRuleApplication,
-    LanguageEnvironment,
+    self, FrontendParseArtifact, GrammarActivation, GrammarDiagnosticFact,
+    GrammarEnvironmentSelection, GrammarFrontendRegistry, GrammarParseReport, GrammarRule,
+    GrammarRuleApplication, LanguageEnvironment,
 };
 use crate::identity::{
     ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder, SyntaxNodeId,
@@ -1177,6 +1177,26 @@ pub struct SyntaxTokenSummary {
     pub text: String,
 }
 
+/// Owned parse/provenance view for one source span.
+///
+/// Returned by [`SessionArtifacts::parse_view_for_span`] so editor, REPL, and
+/// report callers can show the CST path, tokens, grammar applications, and
+/// parser diagnostics for the same source selection without duplicating
+/// traversal logic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceParseView {
+    /// Queried source span.
+    pub span: Span,
+    /// CST nodes containing the queried span, outermost to innermost.
+    pub nodes: Vec<SyntaxNodeSummary>,
+    /// Non-trivia tokens intersecting the queried span.
+    pub tokens: Vec<SyntaxTokenSummary>,
+    /// Grammar rule applications that touch the queried span, smallest first.
+    pub rule_applications: Vec<GrammarRuleApplication>,
+    /// Grammar diagnostic facts that touch the queried span.
+    pub diagnostics: Vec<GrammarDiagnosticFact>,
+}
+
 impl SessionArtifacts {
     /// Returns stable artifact reports for this compilation.
     #[must_use]
@@ -1271,6 +1291,20 @@ impl SessionArtifacts {
             .collect()
     }
 
+    /// Returns grammar diagnostic facts that touch `span`.
+    ///
+    /// This is a tooling query: non-empty spans overlap normally, while
+    /// zero-width spans are treated as cursor positions.
+    #[must_use]
+    pub fn grammar_diagnostics_intersecting_span(&self, span: Span) -> Vec<GrammarDiagnosticFact> {
+        self.grammar_parse
+            .grammar_diagnostics
+            .iter()
+            .filter(|fact| span_touches_query(fact.span, span))
+            .cloned()
+            .collect()
+    }
+
     /// Returns recorded grammar-rule applications that contain `span`.
     ///
     /// This uses the parser provenance recorded in
@@ -1297,6 +1331,23 @@ impl SessionArtifacts {
             )
         });
         applications
+    }
+
+    /// Returns the parse/provenance view for one source span.
+    ///
+    /// This is the preferred tooling entry point for source selections. It
+    /// joins CST containment, token intersection, parser rule applications, and
+    /// parser diagnostics into one owned value that downstream tools can render
+    /// without keeping internal tree borrows alive.
+    #[must_use]
+    pub fn parse_view_for_span(&self, span: Span) -> SourceParseView {
+        SourceParseView {
+            span,
+            nodes: self.syntax_nodes_containing_span(span),
+            tokens: self.syntax_tokens_intersecting_span(span),
+            rule_applications: grammar_rule_applications_touching_span(&self.grammar_parse, span),
+            diagnostics: self.grammar_diagnostics_intersecting_span(span),
+        }
     }
 
     /// Returns the live EOP mutation log in application order.
@@ -4745,6 +4796,36 @@ fn span_intersects_query(item: Span, query: Span) -> bool {
     } else {
         item.start < query.end && query.start < item.end
     }
+}
+
+fn span_touches_query(item: Span, query: Span) -> bool {
+    if query.is_empty() {
+        item.start <= query.start && query.start <= item.end
+    } else if item.is_empty() {
+        query.start <= item.start && item.start <= query.end
+    } else {
+        item.start < query.end && query.start < item.end
+    }
+}
+
+fn grammar_rule_applications_touching_span(
+    report: &GrammarParseReport,
+    span: Span,
+) -> Vec<GrammarRuleApplication> {
+    let mut applications = report
+        .provenance
+        .applications
+        .iter()
+        .filter(|application| span_touches_query(application.span, span))
+        .cloned()
+        .collect::<Vec<_>>();
+    applications.sort_by_key(|application| {
+        (
+            application.span.end.saturating_sub(application.span.start),
+            application.span.start,
+        )
+    });
+    applications
 }
 
 fn dump_cst_node(out: &mut String, tree: &SyntaxTree, node: &CstNode, indent: usize) {
@@ -10605,6 +10686,39 @@ mod tests {
                 .iter()
                 .any(|application| application.rule_name == "function-definition")
         );
+
+        let view = artifacts.parse_view_for_span(expression_span);
+        assert_eq!(view.span, expression_span);
+        assert_eq!(view.nodes, nodes);
+        assert_eq!(view.tokens, tokens);
+        assert!(
+            view.rule_applications
+                .iter()
+                .any(|application| application.rule_name == "body")
+        );
+        assert!(
+            view.rule_applications
+                .iter()
+                .any(|application| application.rule_name == "function-definition")
+        );
+        assert!(view.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_view_reports_grammar_diagnostics_for_source_span() {
+        let source = "define classs foo (<object>) end;";
+        let artifacts =
+            CompilerSession::compile_source("bad-keyword.loko", source, RuntimeMode::CompileOnly);
+        let unexpected_span = Span::new(7, 13);
+
+        let view = artifacts.parse_view_for_span(unexpected_span);
+        assert_eq!(view.span, unexpected_span);
+        assert_eq!(view.diagnostics.len(), 1);
+        assert_eq!(
+            view.diagnostics[0].code,
+            DiagnosticCode::SyntaxExpectedToken
+        );
+        assert_eq!(view.diagnostics[0].span, unexpected_span);
     }
 
     #[test]
