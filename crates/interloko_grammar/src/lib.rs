@@ -1250,13 +1250,26 @@ fn literal_boundary_ok(source: &str, end: usize, literal: &str) -> bool {
 /// Counts parse tree nodes per rule name.
 ///
 /// Pass a [`RuleNode`], usually [`Parse::root`], to summarize which grammar
-/// rules contributed to a parse. `interloko_compiler` uses these counts in
-/// staged-region reports; standalone callers can use them for tracing,
-/// coverage, or simple parser diagnostics.
+/// nodes contributed to a parse. This includes anonymous literal, character
+/// class, and opaque-region nodes. Use [`named_rule_counts`] when the caller
+/// wants counts for grammar rules only.
 #[must_use]
 pub fn rule_counts(root: &RuleNode) -> Vec<RuleCount> {
     let mut counts = Vec::<RuleCount>::new();
-    count_rule(root, &mut counts);
+    count_rule(root, &mut counts, true);
+    counts
+}
+
+/// Counts named grammar-rule nodes per rule name.
+///
+/// Pass a [`RuleNode`], usually [`Parse::root`], to summarize which named
+/// grammar rules contributed to a parse. `interloko_compiler` uses this for
+/// staged-region rule provenance so literal/class helper nodes do not appear as
+/// grammar rules.
+#[must_use]
+pub fn named_rule_counts(root: &RuleNode) -> Vec<RuleCount> {
+    let mut counts = Vec::<RuleCount>::new();
+    count_rule(root, &mut counts, false);
     counts
 }
 
@@ -1272,20 +1285,22 @@ pub struct RuleCount {
     pub node_count: usize,
 }
 
-fn count_rule(node: &RuleNode, counts: &mut Vec<RuleCount>) {
-    if let Some(count) = counts
-        .iter_mut()
-        .find(|count| count.rule_name == node.rule_name)
-    {
-        count.node_count = count.node_count.saturating_add(1);
-    } else {
-        counts.push(RuleCount {
-            rule_name: node.rule_name.clone(),
-            node_count: 1,
-        });
+fn count_rule(node: &RuleNode, counts: &mut Vec<RuleCount>, include_anonymous: bool) {
+    if include_anonymous || node.is_named() {
+        if let Some(count) = counts
+            .iter_mut()
+            .find(|count| count.rule_name == node.rule_name)
+        {
+            count.node_count = count.node_count.saturating_add(1);
+        } else {
+            counts.push(RuleCount {
+                rule_name: node.rule_name.clone(),
+                node_count: 1,
+            });
+        }
     }
     for child in &node.children {
-        count_rule(child, counts);
+        count_rule(child, counts, include_anonymous);
     }
 }
 
@@ -1356,6 +1371,20 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(walked[0], "pair");
         assert!(walked.contains(&"type-name"));
+
+        let all_counts = rule_counts(&parse.root);
+        assert!(
+            all_counts
+                .iter()
+                .any(|count| count.rule_name == "literal::")
+        );
+        let named_counts = named_rule_counts(&parse.root);
+        assert!(
+            named_counts
+                .iter()
+                .all(|count| !count.rule_name.starts_with("literal:"))
+        );
+        assert!(named_counts.iter().any(|count| count.rule_name == "pair"));
     }
 
     #[test]

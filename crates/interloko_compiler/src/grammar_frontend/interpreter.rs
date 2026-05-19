@@ -58,7 +58,9 @@ pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode) -> S
         "rule-node",
         vec![
             source_data::field("rule", SourceData::symbol(node.rule_name.as_str())),
+            source_data::field("role", SourceData::symbol(node.role().as_str())),
             source_span_data(node.span),
+            source_data::field("text", SourceData::string(node.text.as_str())),
             source_data::field(
                 "children",
                 SourceData::list(
@@ -73,7 +75,7 @@ pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode) -> S
 }
 
 pub(super) fn interpreted_rule_counts(root: &InterpretedRuleNode) -> Vec<StagedRuleCount> {
-    interloko_grammar::rule_counts(root)
+    interloko_grammar::named_rule_counts(root)
         .into_iter()
         .map(|count| StagedRuleCount {
             rule_name: count.rule_name,
