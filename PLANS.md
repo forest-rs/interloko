@@ -1,5 +1,64 @@
 # Plans
 
+## Add Binding Type Annotations
+
+### Goal
+
+Extend Loko's existing annotation syntax so immutable top-level constants and
+local `let` bindings can declare value types:
+
+```loko
+define constant $answer :: <integer> = 42;
+define function main()
+  let radius :: <integer> = 10;
+  radius
+end;
+```
+
+Parameters, method specializers, slot types, and result annotations already use
+the same `::` vocabulary. This slice makes value bindings follow that pattern
+instead of treating constants and locals as inferred-only special cases.
+
+### Non-Goals
+
+- No mutable top-level variables.
+- No general type aliases, unions, parametric types, or refinements.
+- No new runtime representation for constants or locals.
+- No constant folding, inference scheduler, or flow-sensitive local annotation
+  refinement.
+- No annotations on arbitrary assignment targets.
+
+### Fence
+
+`grammar_frontend` owns recognizing optional binding annotations and projecting
+them into CST. It explicitly does not decide whether the annotation is valid.
+
+`ast` owns preserving the optional `TypeAnnotation` on constants and lets. It
+explicitly does not resolve classes or compare value kinds.
+
+`sem` owns resolving annotations and checking initializer/value compatibility.
+It explicitly does not introduce new storage or runtime evaluation machinery.
+
+`lower` owns respecting the semantic local kind when emitting a local binding.
+It explicitly does not reinterpret annotations or issue diagnostics.
+
+### Invariants
+
+- Existing unannotated constants and lets keep their current behavior.
+- Annotated constants and lets use the same type-resolution rules as function
+  annotations.
+- Mismatches are structured diagnostics with stable codes and MessageFormat
+  catalog entries.
+- Lowering continues through ordinary expression/local machinery.
+
+### Sequence
+
+1. Extend base-loko grammar/CST projection and AST records.
+2. Add semantic annotation checks for constants and lets.
+3. Make lowered locals coerce to the semantic local kind.
+4. Add unit, driver, corpus, and docs/progress coverage.
+5. Run fmt, clippy, workspace tests, docs, then commit cleanly.
+
 ## Add Top-Level Constants
 
 ### Goal

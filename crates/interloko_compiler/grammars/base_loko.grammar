@@ -13,7 +13,7 @@ rule keyword-slot-option = name `:` name `:`
 rule generic-definition = `define` `generic` name `(` parameter-list? `)` result-annotation? `;`
 rule method-definition = `define` `method` name `(` parameter-list? `)` result-annotation? body `end` `;`?
 rule function-definition = `define` `function` name `(` parameter-list? `)` result-annotation? body `end` `;`?
-rule constant-definition = `define` `constant` name `=` expression `;`
+rule constant-definition = `define` `constant` name type-annotation? `=` expression `;`
 rule parameter-list = parameter parameter-tail*
 rule parameter-tail = `,` parameter
 rule parameter = name type-annotation?
@@ -22,7 +22,7 @@ rule type-annotation = `::` type-annotation-value
 rule type-annotation-value = class-object-type? type-name
 rule class-object-type = `class`
 rule body = let-statement* expression?
-rule let-statement = `let` name `=` expression `;`
+rule let-statement = `let` name type-annotation? `=` expression `;`
 rule expression = handle-expression | if-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
 rule restart-clause = `restart` restart-binding? type-name expression

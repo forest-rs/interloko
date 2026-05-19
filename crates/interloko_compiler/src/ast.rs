@@ -59,6 +59,8 @@ pub struct Constant {
     pub definition: DefinitionId,
     /// Constant name, conventionally including a leading `$`.
     pub name: String,
+    /// Optional value type annotation.
+    pub type_annotation: Option<TypeAnnotation>,
     /// Initializer expression.
     pub value: Expr,
     /// Source span.
@@ -252,6 +254,8 @@ pub struct Let {
     pub definition: DefinitionId,
     /// Local name.
     pub name: String,
+    /// Optional value type annotation.
+    pub type_annotation: Option<TypeAnnotation>,
     /// Bound value expression.
     pub value: Expr,
     /// Source span.
@@ -954,6 +958,12 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_constant(&mut self, node: &CstNode) -> Constant {
         let name = self.definition_name_after(node, TokenKind::Constant);
+        let type_annotation = node.children.iter().find_map(|child| match child {
+            CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::DoubleColon => {
+                self.type_annotation_after(node, *index)
+            }
+            _ => None,
+        });
         let value = node
             .children
             .iter()
@@ -969,6 +979,7 @@ impl<'tree> Lowering<'tree> {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Constant, &name, ""),
             name,
+            type_annotation,
             value,
             span: node.span,
         }
@@ -1120,6 +1131,7 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_let(&mut self, node: &CstNode) -> Let {
         let mut name = String::new();
+        let mut type_annotation = None;
         let mut value = None;
 
         for child in &node.children {
@@ -1128,6 +1140,11 @@ impl<'tree> Lowering<'tree> {
                     if self.tree.tokens[*index].kind == TokenKind::Ident && name.is_empty() =>
                 {
                     name = self.tree.tokens[*index].text(&self.tree.source).to_string();
+                }
+                CstElement::Token(index)
+                    if self.tree.tokens[*index].kind == TokenKind::DoubleColon =>
+                {
+                    type_annotation = self.type_annotation_after(node, *index);
                 }
                 CstElement::Node(child_node) => value = Some(self.lower_expr(child_node)),
                 _ => {}
@@ -1138,6 +1155,7 @@ impl<'tree> Lowering<'tree> {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Local, &name, ""),
             name,
+            type_annotation,
             value: value.unwrap_or(Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -2152,7 +2170,8 @@ mod tests {
 
     #[test]
     fn lowers_function_params_lets_and_binary_result() {
-        let tree = parse("define function add-one(x)\n  let one = 1;\n  x + one\nend;");
+        let tree =
+            parse("define function add-one(x)\n  let one :: <integer> = 1;\n  x + one\nend;");
         let module = lower(&tree);
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.functions.len(), 1);
@@ -2160,6 +2179,13 @@ mod tests {
         assert_eq!(module.functions[0].params[0].name, "x");
         assert_eq!(module.functions[0].params[0].type_annotation, None);
         assert_eq!(module.functions[0].body.lets[0].name, "one");
+        assert_eq!(
+            module.functions[0].body.lets[0]
+                .type_annotation
+                .as_ref()
+                .map(|annotation| annotation.name.as_str()),
+            Some("<integer>")
+        );
         assert!(matches!(
             module.functions[0].body.result,
             Expr::Binary {
@@ -2199,6 +2225,21 @@ mod tests {
                 .as_ref()
                 .map(|annotation| (annotation.class_object, annotation.name.as_str())),
             Some((false, "<circle>"))
+        );
+    }
+
+    #[test]
+    fn lowers_constant_annotations() {
+        let tree = parse("define constant $answer :: <integer> = 42;");
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.constants[0].name, "$answer");
+        assert_eq!(
+            module.constants[0]
+                .type_annotation
+                .as_ref()
+                .map(|annotation| annotation.name.as_str()),
+            Some("<integer>")
         );
     }
 

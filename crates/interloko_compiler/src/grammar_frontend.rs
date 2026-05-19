@@ -2867,7 +2867,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "constant-definition",
-            "`define constant` name `=` expression `;`",
+            "`define constant` name type-annotation? `=` expression `;`",
             "base_loko_primary::BaseLokoCstBuilder::build_constant",
         ),
         (
@@ -2878,7 +2878,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ("body", "let* expression", "syntax.rs:Parser::parse_body"),
         (
             "let-statement",
-            "`let` name `=` expression `;`",
+            "`let` name type-annotation? `=` expression `;`",
             "syntax.rs:Parser::parse_let",
         ),
         (
