@@ -17,9 +17,9 @@ use execution_tape::vm::{Limits, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::grammar_frontend::{
-    self, FrontendParseArtifact, GrammarActivation, GrammarDiagnosticFact,
-    GrammarEnvironmentSelection, GrammarFrontendRegistry, GrammarParseReport, GrammarRule,
-    GrammarRuleApplication, LanguageEnvironment,
+    self, FrontendForm, FrontendFormKind, FrontendParseArtifact, GrammarActivation,
+    GrammarDiagnosticFact, GrammarEnvironmentSelection, GrammarFrontendRegistry,
+    GrammarParseReport, GrammarRule, GrammarRuleApplication, LanguageEnvironment,
 };
 use crate::identity::{
     ArtifactKey, DefinitionId, DefinitionKind, SourceFileId, StableIdBuilder, SyntaxNodeId,
@@ -1145,6 +1145,82 @@ pub struct TopLevelFormSpan {
     pub span: Span,
 }
 
+/// Origin of a compiler-recognized source form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceFormOrigin {
+    /// Form came from the base Loko CST.
+    BaseCst,
+    /// Form was emitted by a staged grammar region.
+    StagedGrammar {
+        /// Staged region slug.
+        region: String,
+        /// Zero-based form index inside the staged region.
+        form_index: usize,
+    },
+}
+
+/// Kind of compiler-recognized source form.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SourceFormKind {
+    /// Base `define class`.
+    Class,
+    /// Base `define generic`.
+    Generic,
+    /// Base `define method`.
+    Method,
+    /// Base `define function`.
+    Function,
+    /// Staged frontend class form.
+    FrontendClass,
+    /// Staged frontend function form.
+    FrontendFunction,
+}
+
+impl SourceFormKind {
+    /// Returns a stable display label for this form kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Class => "class definition",
+            Self::Generic => "generic definition",
+            Self::Method => "method definition",
+            Self::Function => "function definition",
+            Self::FrontendClass => "frontend class",
+            Self::FrontendFunction => "frontend function",
+        }
+    }
+}
+
+/// Unified provenance record for one source-level form.
+///
+/// Base Loko definitions and staged grammar emissions both appear here so
+/// tools can ask "what source forms did this compile see?" without knowing
+/// which frontend path produced each form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFormProvenance {
+    /// Stable display id within this compile.
+    pub id: String,
+    /// Form kind.
+    pub kind: SourceFormKind,
+    /// Human-readable title.
+    pub title: String,
+    /// Original source span.
+    pub span: Span,
+    /// Origin path that produced the form.
+    pub origin: SourceFormOrigin,
+    /// Grammar activation that parsed or emitted the form.
+    pub activation: Option<grammar_frontend::GrammarActivationId>,
+    /// Grammar that parsed or emitted the form.
+    pub grammar: Option<grammar_frontend::GrammarId>,
+    /// Environment-object ids produced from this form when known.
+    pub produced_object_ids: Vec<String>,
+    /// Grammar rule applications associated with this form.
+    pub rule_applications: Vec<GrammarRuleApplication>,
+    /// Staged frontend form payload, when this came from a staged grammar.
+    pub frontend_form: Option<FrontendForm>,
+}
+
 /// Owned summary of one CST node that intersects a tooling query.
 ///
 /// Returned by [`SessionArtifacts::syntax_nodes_containing_span`] so editor,
@@ -1246,6 +1322,17 @@ impl SessionArtifacts {
     #[must_use]
     pub fn top_level_forms(&self) -> Vec<TopLevelFormSpan> {
         collect_top_level_forms(&self.syntax)
+    }
+
+    /// Returns all source forms recognized by this compile.
+    ///
+    /// Unlike [`SessionArtifacts::top_level_forms`], this includes both base
+    /// Loko CST definitions and structural frontend forms emitted by staged
+    /// grammars. This is the preferred API for reports, workbenches, and source
+    /// inspectors that need to explain the user-facing units of source.
+    #[must_use]
+    pub fn source_forms(&self) -> Vec<SourceFormProvenance> {
+        collect_source_forms(self)
     }
 
     /// Returns the preserved frontend parse artifact.
@@ -4764,6 +4851,138 @@ fn top_level_form_kind(kind: crate::syntax::CstKind) -> Option<TopLevelFormKind>
     }
 }
 
+fn collect_source_forms(artifacts: &SessionArtifacts) -> Vec<SourceFormProvenance> {
+    let objects = artifacts.environment_objects();
+    let mut forms = collect_base_source_forms(artifacts, &objects);
+    forms.extend(collect_staged_source_forms(artifacts, &objects));
+    forms.sort_by_key(|form| {
+        (
+            form.span.start,
+            form.span.end,
+            source_form_origin_order(&form.origin),
+            form.id.clone(),
+        )
+    });
+    forms
+}
+
+fn collect_base_source_forms(
+    artifacts: &SessionArtifacts,
+    objects: &[EnvironmentObject],
+) -> Vec<SourceFormProvenance> {
+    artifacts
+        .top_level_forms()
+        .into_iter()
+        .map(|form| SourceFormProvenance {
+            id: format!("form:f{}", form.index),
+            kind: source_form_kind_from_top_level(form.kind),
+            title: source_form_kind_from_top_level(form.kind)
+                .as_str()
+                .to_string(),
+            span: form.span,
+            origin: SourceFormOrigin::BaseCst,
+            activation: activation_for_span(&artifacts.grammar_parse, form.span)
+                .map(|activation| activation.id),
+            grammar: activation_for_span(&artifacts.grammar_parse, form.span)
+                .map(|activation| activation.grammar),
+            produced_object_ids: produced_object_ids_for_span(objects, form.span),
+            rule_applications: grammar_rule_applications_touching_span(
+                &artifacts.grammar_parse,
+                form.span,
+            ),
+            frontend_form: None,
+        })
+        .collect()
+}
+
+fn collect_staged_source_forms(
+    artifacts: &SessionArtifacts,
+    objects: &[EnvironmentObject],
+) -> Vec<SourceFormProvenance> {
+    let mut forms = Vec::new();
+    for region in &artifacts.grammar_parse.staged_regions {
+        for (index, form) in region.forms.iter().enumerate() {
+            forms.push(SourceFormProvenance {
+                id: format!("staged-form:{}/f{}", region.object_slug, index),
+                kind: source_form_kind_from_frontend(form),
+                title: source_form_title_from_frontend(form),
+                span: form.source_span,
+                origin: SourceFormOrigin::StagedGrammar {
+                    region: region.object_slug.clone(),
+                    form_index: index,
+                },
+                activation: Some(region.activation),
+                grammar: Some(region.grammar),
+                produced_object_ids: produced_object_ids_for_span(objects, form.source_span),
+                rule_applications: grammar_rule_applications_touching_list(
+                    &region.rule_applications,
+                    form.source_span,
+                ),
+                frontend_form: Some(form.clone()),
+            });
+        }
+    }
+    forms
+}
+
+fn source_form_kind_from_top_level(kind: TopLevelFormKind) -> SourceFormKind {
+    match kind {
+        TopLevelFormKind::Class => SourceFormKind::Class,
+        TopLevelFormKind::Generic => SourceFormKind::Generic,
+        TopLevelFormKind::Method => SourceFormKind::Method,
+        TopLevelFormKind::Function => SourceFormKind::Function,
+    }
+}
+
+fn source_form_kind_from_frontend(form: &FrontendForm) -> SourceFormKind {
+    match form.kind {
+        FrontendFormKind::Class(_) => SourceFormKind::FrontendClass,
+        FrontendFormKind::Function(_) => SourceFormKind::FrontendFunction,
+    }
+}
+
+fn source_form_title_from_frontend(form: &FrontendForm) -> String {
+    match &form.kind {
+        FrontendFormKind::Class(class) => format!("frontend class {}", class.name),
+        FrontendFormKind::Function(function) => format!("frontend function {}", function.name),
+    }
+}
+
+fn source_form_origin_order(origin: &SourceFormOrigin) -> usize {
+    match origin {
+        SourceFormOrigin::BaseCst => 0,
+        SourceFormOrigin::StagedGrammar { .. } => 1,
+    }
+}
+
+fn activation_for_span(report: &GrammarParseReport, span: Span) -> Option<&GrammarActivation> {
+    report
+        .activations
+        .iter()
+        .filter(|activation| span_contains(activation.span, span))
+        .min_by_key(|activation| {
+            (
+                activation.span.end.saturating_sub(activation.span.start),
+                activation.span.start,
+            )
+        })
+}
+
+fn produced_object_ids_for_span(objects: &[EnvironmentObject], span: Span) -> Vec<String> {
+    let mut ids = objects
+        .iter()
+        .filter(|object| {
+            object
+                .source
+                .span
+                .is_some_and(|object_span| span_contains(span, object_span))
+        })
+        .map(|object| object.id.to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
 fn collect_syntax_nodes_containing_span(
     node: &CstNode,
     span: Span,
@@ -4812,9 +5031,14 @@ fn grammar_rule_applications_touching_span(
     report: &GrammarParseReport,
     span: Span,
 ) -> Vec<GrammarRuleApplication> {
-    let mut applications = report
-        .provenance
-        .applications
+    grammar_rule_applications_touching_list(&report.provenance.applications, span)
+}
+
+fn grammar_rule_applications_touching_list(
+    source: &[GrammarRuleApplication],
+    span: Span,
+) -> Vec<GrammarRuleApplication> {
+    let mut applications = source
         .iter()
         .filter(|application| span_touches_query(application.span, span))
         .cloned()
@@ -10638,6 +10862,50 @@ mod tests {
         assert_eq!(
             &artifacts.syntax.source[forms[3].span.start..forms[3].span.end],
             "define function main()\n  1\nend"
+        );
+    }
+
+    #[test]
+    fn session_reports_unified_source_forms_for_base_and_staged_inputs() {
+        let source = "// grammar-activate: records\n\
+                      // staged-loko: records\n\
+                      record circle\n\
+                        radius: <integer>\n\
+                      end\n\
+                      // end-staged-loko\n\
+                      define function main()\n\
+                        1\n\
+                      end\n";
+        let artifacts =
+            CompilerSession::compile_source("source-forms.loko", source, RuntimeMode::CompileOnly);
+        let forms = artifacts.source_forms();
+
+        assert!(forms.iter().any(|form| form.id == "form:f0"
+            && form.kind == SourceFormKind::Function
+            && form.origin == SourceFormOrigin::BaseCst));
+        let staged = forms
+            .iter()
+            .find(|form| form.id == "staged-form:r0/f0")
+            .expect("staged records form");
+        assert_eq!(staged.kind, SourceFormKind::FrontendClass);
+        assert_eq!(
+            staged.origin,
+            SourceFormOrigin::StagedGrammar {
+                region: "r0".to_string(),
+                form_index: 0,
+            }
+        );
+        assert!(
+            staged
+                .rule_applications
+                .iter()
+                .any(|application| application.rule_name == "record-definition")
+        );
+        assert!(
+            staged
+                .produced_object_ids
+                .iter()
+                .any(|id| id.starts_with("class:c"))
         );
     }
 
