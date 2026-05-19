@@ -661,8 +661,10 @@ fn interpret_rule_result(
             children: matched.children,
         });
     }
-    interpret_builtin_rule(name, source, position, source_offset)
-        .ok_or_else(|| ParseFailure::expected(skip_interpreter_trivia(source, position), name))
+    Err(ParseFailure::expected(
+        skip_interpreter_trivia(source, position),
+        name,
+    ))
 }
 
 fn interpret_expression(
@@ -836,32 +838,6 @@ fn character_class_contains(class: &str, ch: char) -> bool {
     false
 }
 
-fn interpret_builtin_rule(
-    name: &str,
-    source: &str,
-    position: usize,
-    source_offset: usize,
-) -> Option<InterpretedRuleNode> {
-    let start = skip_interpreter_trivia(source, position);
-    // Keep these builtins intentionally tiny. Calculator still uses them while
-    // staged grammars gain enough lexical PEG surface to define tokens directly.
-    let end = match name {
-        "name" => match source.as_bytes().get(start).copied() {
-            Some(b'<') => parse_angle_name(source, start)?,
-            _ => parse_identifier_like(source, start)?,
-        },
-        "type-name" => parse_angle_name(source, start)?,
-        "number" => parse_number(source, start)?,
-        _ => return None,
-    };
-    Some(InterpretedRuleNode {
-        rule_name: name.to_string(),
-        span: Span::new(source_offset + start, source_offset + end),
-        text: source[start..end].to_string(),
-        children: Vec::new(),
-    })
-}
-
 fn skip_interpreter_trivia(source: &str, mut position: usize) -> usize {
     loop {
         let rest = &source[position..];
@@ -894,42 +870,6 @@ fn literal_boundary_ok(source: &str, end: usize, literal: &str) -> bool {
         .as_bytes()
         .get(end)
         .is_none_or(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'?'))
-}
-
-fn parse_identifier_like(source: &str, start: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let first = *bytes.get(start)?;
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return None;
-    }
-    let mut end = start + 1;
-    while bytes
-        .get(end)
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
-    {
-        end += 1;
-    }
-    Some(end)
-}
-
-fn parse_angle_name(source: &str, start: usize) -> Option<usize> {
-    let rest = source.get(start..)?;
-    if !rest.starts_with('<') {
-        return None;
-    }
-    rest.find('>').map(|index| start + index + 1)
-}
-
-fn parse_number(source: &str, start: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    if !bytes.get(start).is_some_and(u8::is_ascii_digit) {
-        return None;
-    }
-    let mut end = start + 1;
-    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-        end += 1;
-    }
-    Some(end)
 }
 
 pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode) -> SourceData {

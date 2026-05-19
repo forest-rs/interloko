@@ -3701,6 +3701,8 @@ mod tests {
     fn source_authored_rule_interpreter_matches_tiny_grammar() {
         let grammar = "grammar tiny\n\
                        rule pair = name `:` type-name => pair-form\n\
+                       rule name = [A-Za-z_] [A-Za-z0-9_?-]*\n\
+                       rule type-name = `<` name `>`\n\
                        end\n";
         let rules = interpreter::parse_source_authored_grammar(grammar);
         let parse = interpreter::interpret_region_result(&rules, "pair", "radius: <integer>", 100)
@@ -3752,6 +3754,19 @@ mod tests {
             .expect_err("one-or-more requires one match");
         assert_eq!(error.span, Span::new(30, 30));
         assert_eq!(error.expected, Vec::from(["[0-9]".to_string()]));
+    }
+
+    #[test]
+    fn source_authored_rule_interpreter_reports_unknown_rule_refs() {
+        let grammar = "grammar tiny\n\
+                       rule root = missing-rule\n\
+                       end\n";
+        let rules = interpreter::parse_source_authored_grammar(grammar);
+        let error = interpreter::interpret_region_result(&rules, "root", "anything", 40)
+            .expect_err("unknown rule cannot be interpreted by hidden builtins");
+
+        assert_eq!(error.span, Span::new(40, 40));
+        assert_eq!(error.expected, Vec::from(["missing-rule".to_string()]));
     }
 
     #[test]
