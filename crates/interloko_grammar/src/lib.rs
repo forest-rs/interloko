@@ -36,6 +36,25 @@ impl Span {
     pub const fn is_empty(self) -> bool {
         self.start == self.end
     }
+
+    /// Returns true when `offset` is inside this span.
+    ///
+    /// Empty spans contain only their exact start position. Non-empty spans use
+    /// the usual half-open byte range: `start <= offset < end`.
+    #[must_use]
+    pub const fn contains_offset(self, offset: usize) -> bool {
+        if self.is_empty() {
+            self.start == offset
+        } else {
+            self.start <= offset && offset < self.end
+        }
+    }
+
+    /// Returns true when `span` is fully contained by this span.
+    #[must_use]
+    pub const fn contains_span(self, span: Span) -> bool {
+        self.start <= span.start && span.end <= self.end
+    }
 }
 
 /// Stable source of a projected grammar fact.
@@ -390,6 +409,43 @@ impl SourceAuthoredRule {
     }
 }
 
+/// Structural role of a [`RuleNode`].
+///
+/// [`RuleNode::role`] returns this value so callers can distinguish named
+/// grammar-rule nodes from anonymous syntax leaves without parsing
+/// [`RuleNode::rule_name`] prefixes themselves. This is presentation and query
+/// metadata; it does not affect matching.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleNodeRole {
+    /// A node produced by a named grammar rule.
+    NamedRule,
+    /// A node produced by a literal token expression.
+    Literal,
+    /// A node produced by a character-class expression.
+    CharacterClass,
+    /// A node produced by an opaque `until(...)` expression.
+    OpaqueRegion,
+}
+
+impl RuleNodeRole {
+    /// Returns the stable role token used in dumps and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NamedRule => "named-rule",
+            Self::Literal => "literal",
+            Self::CharacterClass => "character-class",
+            Self::OpaqueRegion => "opaque-region",
+        }
+    }
+}
+
+impl fmt::Display for RuleNodeRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Parse tree node produced by interpreted matching.
 ///
 /// [`interpret_region`] returns a [`Parse`] whose [`Parse::root`] is a
@@ -406,6 +462,114 @@ pub struct RuleNode {
     pub text: String,
     /// Child rule/literal/class nodes produced while matching this rule.
     pub children: Vec<RuleNode>,
+}
+
+impl RuleNode {
+    /// Returns the structural role of this parse-tree node.
+    #[must_use]
+    pub fn role(&self) -> RuleNodeRole {
+        if self.rule_name.starts_with("literal:") {
+            RuleNodeRole::Literal
+        } else if self.rule_name.starts_with("class:") {
+            RuleNodeRole::CharacterClass
+        } else if self.rule_name.starts_with("until:") {
+            RuleNodeRole::OpaqueRegion
+        } else {
+            RuleNodeRole::NamedRule
+        }
+    }
+
+    /// Returns true when this node came from a named grammar rule.
+    #[must_use]
+    pub fn is_named(&self) -> bool {
+        self.role() == RuleNodeRole::NamedRule
+    }
+
+    /// Returns true when this node came from a literal, class, or opaque syntax
+    /// expression rather than a named grammar rule.
+    #[must_use]
+    pub fn is_anonymous(&self) -> bool {
+        !self.is_named()
+    }
+
+    /// Returns the literal token text for literal nodes.
+    #[must_use]
+    pub fn literal(&self) -> Option<&str> {
+        self.rule_name.strip_prefix("literal:")
+    }
+
+    /// Returns the character-class expression for character-class nodes.
+    #[must_use]
+    pub fn character_class(&self) -> Option<&str> {
+        self.rule_name.strip_prefix("class:")
+    }
+
+    /// Returns the delimiter for opaque-region nodes.
+    #[must_use]
+    pub fn opaque_delimiter(&self) -> Option<&str> {
+        self.rule_name.strip_prefix("until:")
+    }
+
+    /// Returns a preorder iterator over this node and all descendants.
+    #[must_use]
+    pub fn walk(&self) -> RuleNodeWalk<'_> {
+        RuleNodeWalk { stack: vec![self] }
+    }
+
+    /// Returns the first named grammar-rule node with `rule_name`.
+    #[must_use]
+    pub fn find_rule(&self, rule_name: &str) -> Option<&RuleNode> {
+        self.walk()
+            .find(|node| node.is_named() && node.rule_name == rule_name)
+    }
+
+    /// Returns all named grammar-rule nodes with `rule_name`.
+    #[must_use]
+    pub fn find_rules(&self, rule_name: &str) -> Vec<&RuleNode> {
+        self.walk()
+            .filter(|node| node.is_named() && node.rule_name == rule_name)
+            .collect()
+    }
+
+    /// Returns all nodes with the requested structural role.
+    #[must_use]
+    pub fn find_by_role(&self, role: RuleNodeRole) -> Vec<&RuleNode> {
+        self.walk().filter(|node| node.role() == role).collect()
+    }
+
+    /// Returns the smallest node that fully contains `span`.
+    ///
+    /// This is useful when a caller has a source byte range and wants the most
+    /// specific parse-tree node that explains it.
+    #[must_use]
+    pub fn smallest_covering_span(&self, span: Span) -> Option<&RuleNode> {
+        if !self.span.contains_span(span) {
+            return None;
+        }
+        self.children
+            .iter()
+            .filter_map(|child| child.smallest_covering_span(span))
+            .min_by_key(|node| node.span.end.saturating_sub(node.span.start))
+            .or(Some(self))
+    }
+}
+
+/// Preorder iterator returned by [`RuleNode::walk`].
+///
+/// The iterator yields the root node first, then each child subtree in source
+/// order.
+pub struct RuleNodeWalk<'a> {
+    stack: Vec<&'a RuleNode>,
+}
+
+impl<'a> Iterator for RuleNodeWalk<'a> {
+    type Item = &'a RuleNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.stack.pop()?;
+        self.stack.extend(node.children.iter().rev());
+        Some(node)
+    }
 }
 
 /// Interpreted parse result returned by [`interpret_region`].
@@ -1079,6 +1243,51 @@ mod tests {
                 .iter()
                 .any(|child| child.rule_name == "name")
         );
+    }
+
+    #[test]
+    fn exposes_node_roles_and_queries() {
+        let grammar = "grammar tiny\nrule pair = name `:` type-name\nrule name = [A-Za-z_]+ \nrule type-name = `<` name `>`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse =
+            interpret_region(&rules, "pair", "radius: <integer>", 100).expect("pair should parse");
+
+        assert_eq!(parse.root.role(), RuleNodeRole::NamedRule);
+        assert!(parse.root.is_named());
+
+        let colon = parse
+            .root
+            .find_by_role(RuleNodeRole::Literal)
+            .into_iter()
+            .find(|node| node.literal() == Some(":"))
+            .expect("literal colon node");
+        assert_eq!(colon.text, ":");
+        assert!(colon.is_anonymous());
+
+        let class_nodes = parse.root.find_by_role(RuleNodeRole::CharacterClass);
+        assert!(class_nodes
+            .iter()
+            .any(|node| node.character_class() == Some("A-Za-z_")));
+
+        let names = parse.root.find_rules("name");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].text, "radius");
+        assert_eq!(names[1].text, "integer");
+
+        let covering = parse
+            .root
+            .smallest_covering_span(Span::new(109, 116))
+            .expect("covering type name");
+        assert_eq!(covering.rule_name, "name");
+        assert_eq!(covering.text, "integer");
+
+        let walked = parse
+            .root
+            .walk()
+            .map(|node| node.rule_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(walked[0], "pair");
+        assert!(walked.contains(&"type-name"));
     }
 
     #[test]
