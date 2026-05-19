@@ -40,6 +40,8 @@ assert!(parse.root.children.iter().any(|node| node.rule_name == "name"));
 - **Rule expression**: [`RuleExpression`] data such as rule references,
   literals, character classes, choices, repetitions, and transforms.
 - **Parse tree**: a [`RuleNode`] tree returned by [`interpret_region`].
+- **Node role**: [`RuleNodeRole`] classification that separates named grammar
+  rules from anonymous literal, character-class, and opaque-region nodes.
 - **Action descriptor**: inert [`GrammarAction`] data attached with
   `=> action(...)`; this crate parses it but does not execute it.
 - **Caller policy**: language-specific behavior, such as reserved words, supplied
@@ -105,6 +107,44 @@ assert_eq!(
 );
 ```
 
+## Parse Tree Inspection
+
+[`RuleNode`] has small traversal and query helpers so callers can inspect parse
+trees without parsing generated names such as `literal::` or `class:A-Z`.
+
+```rust
+use interloko_grammar::{
+    RuleNodeRole, Span, interpret_region, parse_grammar_source,
+};
+
+let rules = parse_grammar_source("\
+grammar fields
+rule field = name `:` type-name
+rule name = [A-Za-z_]+
+rule type-name = `<` name `>`
+end
+");
+
+let parse = interpret_region(&rules, "field", "radius: <integer>", 100)
+    .expect("field should parse");
+
+assert_eq!(parse.root.role(), RuleNodeRole::NamedRule);
+assert_eq!(parse.root.find_rules("name").len(), 2);
+
+let colon = parse.root
+    .find_by_role(RuleNodeRole::Literal)
+    .into_iter()
+    .find(|node| node.literal() == Some(":"))
+    .expect("literal colon");
+assert_eq!(colon.text, ":");
+
+let integer = parse.root
+    .smallest_covering_span(Span::new(109, 116))
+    .expect("node covering integer");
+assert_eq!(integer.rule_name, "name");
+assert_eq!(integer.text, "integer");
+```
+
 ## Parse Errors
 
 Failures return a [`ParseError`] with a [`Span`] and a list of expected
@@ -121,6 +161,20 @@ let error = interpret_region(&rules, "digits", "", 30)
 
 assert_eq!(error.span, Span::new(30, 30));
 assert_eq!(error.expected, vec!["[0-9]"]);
+```
+
+For tooling, [`inspect_region`] preserves a partial root when the root rule
+matched but complete-region parsing failed on trailing input:
+
+```rust
+use interloko_grammar::{Span, inspect_region, parse_grammar_source};
+
+let rules = parse_grammar_source("grammar one\nrule root = `ok`\nend\n");
+let report = inspect_region(&rules, "root", "ok nope", 5);
+
+assert!(!report.is_success());
+assert_eq!(report.root.as_ref().map(|root| root.text.as_str()), Some("ok"));
+assert_eq!(report.error.as_ref().map(|error| error.span), Some(Span::new(8, 8)));
 ```
 
 ## Caller-Owned Policy
@@ -151,8 +205,10 @@ The intended extension model is:
    [`SourceAuthoredRule`] values.
 2. Use [`interpret_region`] to match input and return a [`Parse`] containing a
    [`RuleNode`] tree.
-3. Inspect [`RuleNode`] trees and [`GrammarAction`] descriptors.
-4. Interpret actions in a caller-owned layer.
+3. Use [`RuleNode::walk`], [`RuleNode::find_rules`], or
+   [`RuleNode::find_by_role`] to inspect the matched tree.
+4. Inspect [`RuleNode`] trees and [`GrammarAction`] descriptors.
+5. Interpret actions in a caller-owned layer.
 
 For Interloko, that caller-owned layer lives in `interloko_compiler`: it turns
 grammar actions into frontend forms, CST data, diagnostics, and MOP/EOP
@@ -166,6 +222,7 @@ parse-tree and action-descriptor data.
 - Semantic actions are not executed here.
 - There is no package loader or import system.
 - There is no left-recursion support.
+- Partial parse reports are inspection reports, not parser recovery.
 - Diagnostics are structural spans and expected fragments, not localized prose.
 - Performance is tuned for clarity and current compiler/workbench use, not for a
   high-throughput parser generator.
@@ -175,9 +232,14 @@ parse-tree and action-descriptor data.
 [`ParseError`]: crate::ParseError
 [`RuleExpression`]: crate::RuleExpression
 [`RuleNode`]: crate::RuleNode
+[`RuleNode::find_by_role`]: crate::RuleNode::find_by_role
+[`RuleNode::find_rules`]: crate::RuleNode::find_rules
+[`RuleNode::walk`]: crate::RuleNode::walk
+[`RuleNodeRole`]: crate::RuleNodeRole
 [`SourceAuthoredRule`]: crate::SourceAuthoredRule
 [`SourceAuthoredRule::with_excluded_text`]: crate::SourceAuthoredRule::with_excluded_text
 [`Span`]: crate::Span
 [`TransformOutput`]: crate::TransformOutput
+[`inspect_region`]: crate::inspect_region
 [`interpret_region`]: crate::interpret_region
 [`parse_grammar_source`]: crate::parse_grammar_source
