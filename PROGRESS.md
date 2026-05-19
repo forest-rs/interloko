@@ -1,5 +1,38 @@
 # Interloko Progress
 
+## Implemented: Top-Level Constants
+
+- Loko now accepts immutable top-level constants using the Dylan naming
+  convention: `define constant $name = expression;`.
+- Constants are parsed as top-level source forms, receive stable
+  `DefinitionKind::Constant` identities, and lower through CST, AST, semantic
+  IR, lowered IR, and tape emission like other expression-bearing definitions.
+- Semantic binding records constants as immutable named values. Functions,
+  methods, and later expressions can reference constants with the ordinary name
+  lookup path. Duplicate names and unresolved references remain structured
+  diagnostics.
+- Constant initializers must produce runtime values. Function/generic/accessor
+  names are rejected as initializer values with
+  `sem.constant-initializer-type-mismatch` rather than becoming hidden callable
+  globals.
+- Lowering inlines the initializer expression through the existing expression
+  pipeline. No new global-storage opcode, module-initialization tape, mutable
+  global state, or constant-folding pass is introduced in this slice.
+- Constants are projected as EOP/MOP objects such as `constant:k0`, carry
+  source and artifact facets, appear in source-form `defines` output, and are
+  addressable by REPL/lab lookup surfaces.
+- Corpus and driver coverage includes integer, boolean, string, class-object,
+  and native object constants, plus duplicate, unresolved, and invalid
+  initializer diagnostics.
+
+Deferred:
+
+- Mutable top-level variables.
+- Module/import/export scoping.
+- A dependency scheduler for forward or cyclic constant initializers.
+- Persistent image semantics for object constants.
+- Optimizer-level constant folding or sealed static propagation.
+
 ## Implemented: Save And Open Session Transcripts
 
 - A new `interloko_compiler::transcript` module (gated behind the

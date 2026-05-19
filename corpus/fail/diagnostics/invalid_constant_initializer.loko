@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.constant-initializer-type-mismatch
+// expect: diagnostic contains constant `$helper` initializer must produce a runtime value
+
+define function helper()
+  1
+end;
+
+define constant $helper = helper;

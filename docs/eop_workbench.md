@@ -30,6 +30,7 @@ Typical IDs include:
 - `generic:g0`
 - `method:m0`
 - `function:f0`
+- `constant:k0`
 - `dispatch:d0`
 - `runtime-class:c0` for the root runtime layout row
 - `runtime-class:c1`

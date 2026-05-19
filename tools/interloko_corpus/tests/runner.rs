@@ -53,6 +53,10 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/diagnostics/mop_legacy_alias.loko"));
     assert!(out.contains("pass/mop/staged_records.loko"));
     assert!(out.contains("fail/diagnostics/unresolved_local.loko"));
+    assert!(out.contains("pass/values/top_level_constants.loko"));
+    assert!(out.contains("fail/diagnostics/duplicate_constant.loko"));
+    assert!(out.contains("fail/diagnostics/invalid_constant_initializer.loko"));
+    assert!(out.contains("fail/diagnostics/unresolved_constant.loko"));
     assert!(out.contains("fail/restarts/signal_without_restart.loko"));
     assert!(out.contains("pass/objects/init_keywords.loko"));
     assert!(out.contains("pass/objects/accessor_call.loko"));
@@ -106,7 +110,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/typed_slots_and_dispatch.loko"));
     assert!(out.contains("fail/values/malformed_string.loko"));
     assert!(out.contains("fail/syntax/expected_expression.loko"));
-    assert!(out.contains("corpus: 132 passed, 0 failed, 132 total"));
+    assert!(out.contains("corpus: 136 passed, 0 failed, 136 total"));
 }
 
 #[test]

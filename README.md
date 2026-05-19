@@ -95,6 +95,8 @@ than special generic-dispatch bytecode.
 The current slices include:
 
 - function definitions, locals, arithmetic, booleans, conditionals, and calls;
+- immutable top-level constants named in the Dylan style, such as
+  `define constant $answer = 42;`;
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;

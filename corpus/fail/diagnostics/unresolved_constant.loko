@@ -1,0 +1,6 @@
+// expect: diagnostic code sem.unresolved-local
+// expect: diagnostic contains unresolved local `$missing`
+
+define function main()
+  $missing
+end;

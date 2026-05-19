@@ -1,0 +1,9 @@
+// expect: diagnostic code sem.duplicate-definition
+// expect: diagnostic contains constant `$answer` is already defined
+
+define constant $answer = 1;
+define constant $answer = 2;
+
+define function main()
+  $answer
+end;

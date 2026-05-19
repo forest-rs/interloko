@@ -1,0 +1,28 @@
+// expect: run 46
+// expect: diagnostics 0
+// expect: dump sem contains constant k0
+// expect: dump sem contains constant-ref k3
+// expect: dump eop contains constant:k0
+// expect: dump lowered contains make <circle>
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define constant $answer = 40 + 2;
+define constant $truth = #t;
+define constant $label = "circle";
+define constant $circle-class = <circle>;
+define constant $unit = make($circle-class, radius: 4);
+
+define function main()
+  if $truth then
+    if $label = "circle" then
+      $answer + $unit.radius
+    else
+      0
+    end
+  else
+    0
+  end
+end;
