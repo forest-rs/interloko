@@ -161,6 +161,11 @@ fn source_forms_are_inspectable_and_invokable() {
          :invoke form:f0 inspect\n\
          :invoke form:f0 show-defined-objects\n\
          :invoke form:f0 show-grammar\n\
+         :invoke form:f0 show-parse\n\
+         :invoke form:f0 show-cst\n\
+         :invoke form:f0 show-tokens\n\
+         :invoke form:f0 show-rule-applications\n\
+         :invoke form:f0 show-diagnostics\n\
          :invoke form:f0 show-source\n\
          :show-form f0\n\
          :quit\n",
@@ -188,8 +193,22 @@ fn source_forms_are_inspectable_and_invokable() {
     assert!(stdout.contains("show-source"));
     assert!(stdout.contains("show-defined-objects"));
     assert!(stdout.contains("show-grammar"));
+    assert!(stdout.contains("show-parse"));
+    assert!(stdout.contains("show-cst"));
+    assert!(stdout.contains("show-tokens"));
+    assert!(stdout.contains("show-rule-applications"));
+    assert!(stdout.contains("show-diagnostics"));
     assert!(stdout.contains("defined objects form:f0"));
     assert!(stdout.contains("grammar form:f0"));
+    assert!(stdout.contains("parse form:f0"));
+    assert!(stdout.contains("cst:"));
+    assert!(stdout.contains("tokens:"));
+    assert!(stdout.contains("rule-applications:"));
+    assert!(stdout.contains("diagnostics:"));
+    assert!(stdout.contains("Function"));
+    assert!(stdout.contains("Define"));
+    assert!(stdout.contains("function-definition"));
+    assert!(stdout.contains("<none>"));
     assert!(stdout.contains("source form:f0 function answer"));
     assert!(stdout.contains("   1 | define function answer()"));
 }

@@ -835,6 +835,25 @@ impl Repl {
                 "show-grammar" => {
                     write!(stdout, "{}", format_form_grammar(&entry, &artifacts))?;
                 }
+                "show-parse" => {
+                    write!(stdout, "{}", format_form_parse(&entry, &artifacts))?;
+                }
+                "show-cst" => {
+                    write!(stdout, "{}", format_form_cst(&entry, &artifacts))?;
+                }
+                "show-tokens" => {
+                    write!(stdout, "{}", format_form_tokens(&entry, &artifacts))?;
+                }
+                "show-rule-applications" => {
+                    write!(
+                        stdout,
+                        "{}",
+                        format_form_rule_applications(&entry, &artifacts)
+                    )?;
+                }
+                "show-diagnostics" => {
+                    write!(stdout, "{}", format_form_diagnostics(&entry, &artifacts))?;
+                }
                 "show-source" => write_form_source(&entry, stdout)?,
                 "drop" => self.drop_form_by_id(&id, stdout, stderr)?,
                 _ => writeln!(
@@ -2080,6 +2099,7 @@ fn format_form_object(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) 
     let form = &entry.form;
     let defined = form_defined_objects(entry, artifacts);
     let grammar = form_grammar_context(entry, artifacts);
+    let parse_view = artifacts.parse_view_for_span(form.span);
     let mut out = String::new();
     let _ = writeln!(out, "object {}", form.id());
     let _ = writeln!(out, "kind: repl-source-form");
@@ -2110,6 +2130,14 @@ fn format_form_object(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) 
     }
     let _ = writeln!(out, "grammar:");
     write_form_grammar_context(&mut out, &grammar, "  ");
+    let _ = writeln!(
+        out,
+        "parse: {} nodes, {} tokens, {} rule applications, {} diagnostics",
+        parse_view.nodes.len(),
+        parse_view.tokens.len(),
+        parse_view.rule_applications.len(),
+        parse_view.diagnostics.len()
+    );
     let _ = writeln!(out, "affordances:");
     for affordance in FORM_AFFORDANCES {
         let _ = writeln!(out, "  {affordance}");
@@ -2155,6 +2183,153 @@ fn format_form_grammar(entry: &AcceptedDefinition, artifacts: &SessionArtifacts)
     let _ = writeln!(out, "grammar {}", entry.form.id());
     write_form_grammar_context(&mut out, &form_grammar_context(entry, artifacts), "");
     out
+}
+
+fn format_form_parse(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let view = artifacts.parse_view_for_span(entry.form.span);
+    let mut out = String::new();
+    let _ = writeln!(out, "parse {}", entry.form.id());
+    let _ = writeln!(out, "span: {}..{}", view.span.start, view.span.end);
+    write_form_cst_view(&mut out, entry, artifacts, "cst:", "  ");
+    write_form_token_view(&mut out, entry, artifacts, "tokens:", "  ");
+    write_form_rule_application_view(&mut out, entry, artifacts, "rule-applications:", "  ");
+    write_form_diagnostic_view(&mut out, entry, artifacts, "diagnostics:", "  ");
+    out
+}
+
+fn format_form_cst(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "cst {}", entry.form.id());
+    write_form_cst_view(&mut out, entry, artifacts, "nodes:", "");
+    out
+}
+
+fn format_form_tokens(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "tokens {}", entry.form.id());
+    write_form_token_view(&mut out, entry, artifacts, "tokens:", "");
+    out
+}
+
+fn format_form_rule_applications(
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "rule-applications {}", entry.form.id());
+    write_form_rule_application_view(&mut out, entry, artifacts, "rules:", "");
+    out
+}
+
+fn format_form_diagnostics(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "diagnostics {}", entry.form.id());
+    write_form_diagnostic_view(&mut out, entry, artifacts, "diagnostics:", "");
+    out
+}
+
+fn write_form_cst_view(
+    out: &mut String,
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+    header: &str,
+    indent: &str,
+) {
+    let nodes = artifacts.parse_view_for_span(entry.form.span).nodes;
+    let _ = writeln!(out, "{indent}{header}");
+    if nodes.is_empty() {
+        let _ = writeln!(out, "{indent}  <none>");
+        return;
+    }
+    for node in nodes {
+        let _ = writeln!(
+            out,
+            "{indent}  depth={} {:?} {} span={}..{}",
+            node.depth, node.kind, node.id, node.span.start, node.span.end
+        );
+    }
+}
+
+fn write_form_token_view(
+    out: &mut String,
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+    header: &str,
+    indent: &str,
+) {
+    let tokens = artifacts.parse_view_for_span(entry.form.span).tokens;
+    let _ = writeln!(out, "{indent}{header}");
+    if tokens.is_empty() {
+        let _ = writeln!(out, "{indent}  <none>");
+        return;
+    }
+    for token in tokens {
+        let _ = writeln!(
+            out,
+            "{indent}  {:?} {}..{} `{}`",
+            token.kind, token.span.start, token.span.end, token.text
+        );
+    }
+}
+
+fn write_form_rule_application_view(
+    out: &mut String,
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+    header: &str,
+    indent: &str,
+) {
+    let applications = artifacts
+        .parse_view_for_span(entry.form.span)
+        .rule_applications;
+    let _ = writeln!(out, "{indent}{header}");
+    if applications.is_empty() {
+        let _ = writeln!(out, "{indent}  <none>");
+        return;
+    }
+    for application in applications {
+        let _ = writeln!(
+            out,
+            "{indent}  {} rule={} activation={} span={}..{}",
+            application.rule_name,
+            application.rule,
+            application.activation,
+            application.span.start,
+            application.span.end
+        );
+    }
+}
+
+fn write_form_diagnostic_view(
+    out: &mut String,
+    entry: &AcceptedDefinition,
+    artifacts: &SessionArtifacts,
+    header: &str,
+    indent: &str,
+) {
+    let diagnostics = artifacts.parse_view_for_span(entry.form.span).diagnostics;
+    let _ = writeln!(out, "{indent}{header}");
+    if diagnostics.is_empty() {
+        let _ = writeln!(out, "{indent}  <none>");
+        return;
+    }
+    for diagnostic in diagnostics {
+        let expected = diagnostic
+            .expected_fragment
+            .as_deref()
+            .unwrap_or("<unknown>");
+        let _ = writeln!(
+            out,
+            "{indent}  d{} {} span={}..{} rule={} context={} expected={}",
+            diagnostic.diagnostic_index,
+            diagnostic.code,
+            diagnostic.span.start,
+            diagnostic.span.end,
+            diagnostic.rule_name,
+            diagnostic.context.as_str(),
+            expected
+        );
+    }
 }
 
 fn write_form_grammar_context(out: &mut String, context: &[FormGrammarContext], indent: &str) {
@@ -2370,6 +2545,11 @@ const FORM_AFFORDANCES: &[&str] = &[
     "show-source",
     "show-defined-objects",
     "show-grammar",
+    "show-parse",
+    "show-cst",
+    "show-tokens",
+    "show-rule-applications",
+    "show-diagnostics",
     "drop",
 ];
 
