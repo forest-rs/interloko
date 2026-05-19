@@ -28,7 +28,9 @@ The implemented grammar slice has three load-bearing pieces:
   environments and staged extensions;
 - trusted staged grammar extensions that emit structural frontend forms;
 - source-authored staged grammars, `records` and `calculator`, whose grammar
-  source is parsed into `RuleExpression` and interpreted over staged regions.
+  source is parsed into `RuleExpression` and interpreted over staged regions,
+  with explicit staged-region metadata recording the parser driver and oracle
+  status.
 
 Those frontend forms are compiler data, not source text. `ast.rs` consumes
 staged function and class forms directly when building AST definitions, and the
@@ -162,6 +164,8 @@ rule call = name `(` argument-list? `)` => emit-call(callee: name, args: argumen
 rule argument-list = expression argument-tail*
   => emit-argument-list(first: expression, rest: argument-tail*)
 rule argument-tail = `,` expression => emit-argument-tail(value: expression)
+rule name = [A-Za-z_] [A-Za-z0-9_?-]*
+rule number = [0-9]+
 end
 ```
 
@@ -170,8 +174,8 @@ A frontend metadata directive selects it by name:
 recognized by the interpreted grammar and converted into structural function
 forms through the `emit-function`, expression, call, and left-fold binary
 actions. Rust still implements those safe action primitives and
-calculator-specific validation, but it is no longer a duplicate recognizer or a
-bespoke expression-tree walker.
+calculator-specific validation, but it is no longer a duplicate recognizer, a
+hidden token parser, or a bespoke expression-tree walker.
 
 `RecordsRegionGrammar` is also grammar-driven. Its direct rules are loaded from
 `crates/interloko_compiler/grammars/records.grammar`:
@@ -393,11 +397,19 @@ plugs into this same report and compares normalized parser products before any
 primary-parser flip.
 
 For staged regions, `show-parse-trace` and EOP records show the adapter name,
-activation directive span, source span, frontend forms, debug materialized
-source, and inert source-data result. For interpreted staged grammars, the
-inert result includes `driver: interpreted-grammar` and a `rule-node` parse
-tree. The directive and `// staged-loko:` markers are frontend/workbench
-metadata; they are not part of the Loko language semantics.
+parser driver, oracle/fallback status, activation directive span, source span,
+frontend forms, debug materialized source, and inert source-data result. For
+records and calculator, the metadata is explicit:
+
+```text
+driver=interpreted-grammar
+oracle=none
+```
+
+The inert result repeats those facts as `driver: interpreted-grammar` and
+`oracle: none`, then includes the `rule-node` parse tree. The directive and
+`// staged-loko:` markers are frontend/workbench metadata; they are not part of
+the Loko language semantics.
 
 ## Source Data
 
@@ -445,6 +457,8 @@ Later slices may add:
 
 - user-authored grammar declarations loaded from ordinary source files;
 - structural semantic actions that emit forms or grammar deltas;
+- base-Loko shadow-mode grammar products that can compare a source-authored
+  grammar against the Rust parser;
 - a complete structural frontend expression model for the full Loko expression
   language;
 - macro hygiene and name-introduction rules;
