@@ -9,7 +9,7 @@ pub(super) type SourceAuthoredRule = interloko_grammar::SourceAuthoredRule<'stat
 
 use crate::source_data::{self, SourceData};
 
-use super::{StagedRuleCount, source_span_data};
+use super::{StagedRuleApplication, StagedRuleCount, source_span_data};
 
 const LOKO_RESERVED_WORDS: &[&str] = &[
     "define", "function", "class", "slot", "constant", "generic", "method", "let", "if", "then",
@@ -91,6 +91,19 @@ pub(super) fn interpreted_rule_counts(root: &InterpretedRuleNode<'_>) -> Vec<Sta
             Some(StagedRuleCount {
                 rule_name: count.rule_name()?.to_string(),
                 node_count: count.node_count,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn interpreted_rule_applications(
+    root: &InterpretedRuleNode<'_>,
+) -> Vec<StagedRuleApplication> {
+    root.walk()
+        .filter_map(|node| {
+            Some(StagedRuleApplication {
+                rule_name: node.name()?.to_string(),
+                span: node.span.into(),
             })
         })
         .collect()

@@ -9,8 +9,9 @@ use crate::syntax::Span;
 
 use super::actions::{GrammarActionValue, evaluate_rule_action};
 use super::interpreter::{
-    InterpretedParse, InterpretedParseError, interpret_region_result, interpreted_rule_counts,
-    interpreted_rule_node_source_data, parse_source_authored_grammar,
+    InterpretedParse, InterpretedParseError, interpret_region_result,
+    interpreted_rule_applications, interpreted_rule_counts, interpreted_rule_node_source_data,
+    parse_source_authored_grammar,
 };
 use super::{
     GrammarId, GrammarProjection, GrammarRule, GrammarRuleId, ProjectionOrigin,
@@ -99,6 +100,7 @@ fn emission_from_interpreted_parse(
             ],
         ),
         rule_counts: interpreted_rule_counts(&parse.root),
+        rule_applications: interpreted_rule_applications(&parse.root),
         diagnostics,
     }
 }
@@ -148,6 +150,7 @@ fn records_parse_error_emission(
             ],
         ),
         rule_counts: Vec::new(),
+        rule_applications: Vec::new(),
         diagnostics: Vec::from([diagnostic]),
     }
 }

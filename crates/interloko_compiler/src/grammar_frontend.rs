@@ -801,6 +801,8 @@ pub struct StagedParseRegion {
     pub materialized_source: String,
     /// Inert structural parse result.
     pub data: SourceData,
+    /// Rule applications recorded by the staged grammar parser.
+    pub rule_applications: Vec<GrammarRuleApplication>,
 }
 
 /// Parser driver used for one staged source region.
@@ -1991,6 +1993,12 @@ fn parse_staged_file(
                 .iter()
                 .map(|count| (grammar, count.rule_name.clone(), count.node_count)),
         );
+        let staged_rule_applications = staged_rule_applications(
+            grammar,
+            &records.effective_rules,
+            &activation,
+            &emission.rule_applications,
+        );
         let forms_data = frontend_forms_source_data(&emission.forms);
 
         extension_activations.push(GrammarExtensionActivation {
@@ -2033,6 +2041,7 @@ fn parse_staged_file(
             forms_data,
             materialized_source: region_materialized_source,
             data: emission.data,
+            rule_applications: staged_rule_applications,
         });
     }
 
@@ -2189,8 +2198,19 @@ pub struct StagedRegionEmission {
     pub data: SourceData,
     /// Rule counts charged by the staged grammar parser.
     pub rule_counts: Vec<StagedRuleCount>,
+    /// Rule applications recorded by the staged grammar parser.
+    pub rule_applications: Vec<StagedRuleApplication>,
     /// Diagnostics emitted while parsing the staged region.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// One staged grammar rule application emitted before grammar ids are resolved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedRuleApplication {
+    /// Stable grammar rule name.
+    pub rule_name: String,
+    /// Source span covered by this rule application.
+    pub span: Span,
 }
 
 /// Number of parser nodes charged to one staged grammar rule.
@@ -2562,6 +2582,27 @@ fn add_staged_rule_count(
     if let Some(provenance) = rules.iter_mut().find(|item| item.rule == rule.id) {
         provenance.node_count = provenance.node_count.saturating_add(count);
     }
+}
+
+fn staged_rule_applications(
+    grammar: GrammarId,
+    effective_rules: &[EffectiveGrammarRule],
+    activation: &GrammarActivation,
+    applications: &[StagedRuleApplication],
+) -> Vec<GrammarRuleApplication> {
+    applications
+        .iter()
+        .map(|application| GrammarRuleApplication {
+            activation: activation.id,
+            grammar,
+            rule: effective_rule_id_by_name(effective_rules, grammar, &application.rule_name)
+                .unwrap_or_else(|| {
+                    GrammarRuleId::new(grammar, &format!("effective:{}", application.rule_name))
+                }),
+            rule_name: application.rule_name.clone(),
+            span: application.span,
+        })
+        .collect()
 }
 
 fn extension_provenance_records(
@@ -3985,6 +4026,12 @@ mod tests {
         assert!(!report.syntax.source.contains("define function main()"));
         assert_eq!(report.staged_regions[0].adapter, "calculator");
         assert_eq!(report.staged_regions[0].object_slug, "r0");
+        assert!(
+            report.staged_regions[0]
+                .rule_applications
+                .iter()
+                .any(|application| application.rule_name == "calculator-function")
+        );
         assert_eq!(
             report.staged_regions[0].driver,
             StagedParseDriver::InterpretedGrammar
@@ -4117,6 +4164,18 @@ mod tests {
         );
         assert_eq!(report.staged_regions.len(), 1);
         assert_eq!(report.staged_regions[0].adapter, "records");
+        assert!(
+            report.staged_regions[0]
+                .rule_applications
+                .iter()
+                .any(|application| application.rule_name == "record-definition")
+        );
+        assert!(
+            report.staged_regions[0]
+                .rule_applications
+                .iter()
+                .any(|application| application.rule_name == "record-field")
+        );
         assert_eq!(
             report.staged_regions[0].driver,
             StagedParseDriver::InterpretedGrammar
