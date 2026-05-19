@@ -389,23 +389,22 @@ diagnostic prose. Presentation tools remain responsible for turning diagnostic
 codes and structured args into user-facing text.
 
 `show-parser-shadow` is the base-Loko self-hosting harness surface. Today it
-reports the Rust recursive-descent parser as the primary parser and compares it
-with a source-authored `base-loko-shadow` grammar. The shadow grammar recognizes
-the top-level class, generic, method, and function subset and reports a
-normalized top-level signature. The hand-written parser remains trusted; the
-shadow grammar is an oracle for the subset it owns, not the primary parser.
+reports the source-authored base-Loko grammar parser as the primary parser and
+compares it with the Rust recursive-descent parser as oracle. The comparison is
+still normalized to the top-level class, generic, method, and function
+signature, but ordinary compilation now flows through grammar-primary parsing.
 
 Example output:
 
 ```text
 parser shadow status=equivalent
 primary:
-  implementation rust-recursive-descent-top-level
+  implementation source-authored-base-loko-grammar-primary
   normalized-nodes 5
   top-level-nodes 4
   top-level-signature class-definition,generic-definition,method-definition,function-definition
 oracle:
-  implementation source-authored-base-loko-shadow
+  implementation rust-recursive-descent-oracle
 ```
 
 If the source-authored shadow grammar disagrees with the Rust parser, the report

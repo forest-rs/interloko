@@ -1255,6 +1255,8 @@ pub struct GrammarParseReport {
     pub diagnostics: Vec<Diagnostic>,
     /// Syntax tree produced by the existing parser.
     pub syntax: SyntaxTree,
+    /// Parser implementation mode that produced [`Self::syntax`].
+    pub parser_mode: syntax::ParserMode,
 }
 
 /// Normalized parser product used by parser shadow comparison.
@@ -1709,10 +1711,20 @@ pub fn parse_file_with_registry_and_parser_mode(
 /// and compares normalized parser products.
 #[must_use]
 pub fn parser_shadow_report(report: &GrammarParseReport) -> ParserShadowReport {
-    compare_parser_products(
-        rust_top_level_shadow_summary(report),
-        base_loko_shadow::oracle_summary(&report.syntax.source),
-    )
+    match report.parser_mode {
+        syntax::ParserMode::GrammarPrimary => compare_parser_products(
+            top_level_shadow_summary(
+                "source-authored-base-loko-grammar-primary",
+                &report.syntax.root,
+                report.diagnostics.len(),
+            ),
+            rust_top_level_oracle_summary(report.source_file, &report.syntax.source),
+        ),
+        syntax::ParserMode::RustPrimary => compare_parser_products(
+            rust_top_level_shadow_summary(report),
+            base_loko_shadow::oracle_summary(&report.syntax.source),
+        ),
+    }
 }
 
 /// Compares two normalized parser products.
@@ -1748,7 +1760,9 @@ fn parse_file_with_records(
                 Ok(tree) => tree,
                 Err(diagnostic) => {
                     let mut tree = syntax::parse_file_rust(source_file, source);
-                    tree.diagnostics.push(diagnostic);
+                    if tree.diagnostics.is_empty() {
+                        tree.diagnostics.push(diagnostic);
+                    }
                     tree
                 }
             }
@@ -1823,6 +1837,7 @@ fn parse_file_with_records(
         grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
+        parser_mode,
     }
 }
 
@@ -2262,6 +2277,7 @@ fn parse_staged_file(
         grammar_diagnostics,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
+        parser_mode: syntax::ParserMode::default(),
     })
 }
 
@@ -3460,14 +3476,35 @@ fn rule_applications(
 }
 
 fn rust_top_level_shadow_summary(report: &GrammarParseReport) -> ParserProductSummary {
-    let signature = top_level_rule_signature(&report.syntax.root);
+    top_level_shadow_summary(
+        "rust-recursive-descent-top-level",
+        &report.syntax.root,
+        report.diagnostics.len(),
+    )
+}
+
+fn rust_top_level_oracle_summary(source_file: SourceFileId, source: &str) -> ParserProductSummary {
+    let syntax = syntax::parse_file_rust(source_file, source);
+    top_level_shadow_summary(
+        "rust-recursive-descent-oracle",
+        &syntax.root,
+        syntax.diagnostics.len(),
+    )
+}
+
+fn top_level_shadow_summary(
+    implementation: &'static str,
+    root: &CstNode,
+    diagnostic_count: usize,
+) -> ParserProductSummary {
+    let signature = top_level_rule_signature(root);
     let top_level_count = signature.len();
     ParserProductSummary::with_top_level_signature(
-        "rust-recursive-descent-top-level",
+        implementation,
         normalized_shadow_node_count(top_level_count),
         top_level_count,
         signature.join(","),
-        report.diagnostics.len(),
+        diagnostic_count,
         normalized_shadow_node_count(top_level_count),
     )
 }
@@ -4472,7 +4509,7 @@ mod tests {
         assert_eq!(shadow.status, ParserShadowStatus::Equivalent);
         assert_eq!(
             shadow.primary.implementation,
-            "rust-recursive-descent-top-level"
+            "source-authored-base-loko-grammar-primary"
         );
         assert_eq!(shadow.primary.cst_node_count, 5);
         assert_eq!(shadow.primary.top_level_node_count, 4);
@@ -4487,7 +4524,7 @@ mod tests {
                 .oracle
                 .as_ref()
                 .map(|summary| summary.implementation.as_str()),
-            Some("source-authored-base-loko-shadow")
+            Some("rust-recursive-descent-oracle")
         );
         assert_eq!(shadow.divergences, Vec::new());
     }
@@ -4536,6 +4573,25 @@ mod tests {
         assert_eq!(module.functions.len(), 1);
         assert_eq!(module.classes[0].slots[0].name, "radius");
         assert_eq!(module.functions[0].name, "main");
+    }
+
+    #[test]
+    fn grammar_primary_base_loko_lowers_dylan_style_keyword_symbols() {
+        let source_file = SourceFileId::from_path("grammar-primary-keywords.loko");
+        let source = "define function main()\n\
+                        fallback:\n\
+                      end";
+        let report =
+            parse_file_with_parser_mode(source_file, source, syntax::ParserMode::GrammarPrimary);
+
+        assert_eq!(report.diagnostics, Vec::new());
+        let module = crate::ast::lower(&report.syntax);
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.functions.len(), 1);
+        assert!(matches!(
+            &module.functions[0].body.result,
+            crate::ast::Expr::Symbol { name, .. } if name == "fallback"
+        ));
     }
 
     #[test]

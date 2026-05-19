@@ -10501,8 +10501,8 @@ mod tests {
         assert!(parse_trace.contains("rule-name=function-definition"));
         let shadow = artifacts.dump_parser_shadow_report();
         assert!(shadow.contains("parser shadow status=equivalent"));
-        assert!(shadow.contains("implementation rust-recursive-descent-top-level"));
-        assert!(shadow.contains("implementation source-authored-base-loko-shadow"));
+        assert!(shadow.contains("implementation source-authored-base-loko-grammar-primary"));
+        assert!(shadow.contains("implementation rust-recursive-descent-oracle"));
         assert!(shadow.contains("top-level-signature class-definition,generic-definition,method-definition,function-definition"));
         assert!(
             artifacts

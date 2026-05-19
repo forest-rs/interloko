@@ -259,7 +259,7 @@ impl GrammarCstBuilder<'_> {
             "bool-literal" => self.leaf(CstKind::BoolExpr, node),
             "string-literal" => self.leaf(CstKind::StringExpr, node),
             "symbol-literal" => self.leaf(CstKind::SymbolExpr, node),
-            "keyword-symbol" => self.leaf(CstKind::KeywordExpr, node),
+            "keyword-symbol" => self.build_keyword_symbol(node),
             _ => self.unwrap_first_expr(node),
         }
     }
@@ -272,6 +272,18 @@ impl GrammarCstBuilder<'_> {
                 || self.error_node(node.span),
                 |child| self.build_expr(child),
             )
+    }
+
+    fn build_keyword_symbol(&self, node: &InterpretedRuleNode) -> CstNode {
+        let kind =
+            if self.tokens.iter().any(|token| {
+                token.kind == TokenKind::Keyword && span_contains(node.span, token.span)
+            }) {
+                CstKind::KeywordExpr
+            } else {
+                CstKind::SymbolExpr
+            };
+        self.leaf(kind, node)
     }
 
     fn build_handle(&self, node: &InterpretedRuleNode) -> CstNode {
@@ -471,12 +483,20 @@ impl GrammarCstBuilder<'_> {
             .iter()
             .find(|child| child.rule_name == "vector-items")
             .map(|items| {
-                items
-                    .children
-                    .iter()
-                    .filter(|child| child.rule_name == "expression")
-                    .map(|expr| self.build_expr(expr))
-                    .collect::<Vec<_>>()
+                let mut expressions = Vec::new();
+                for child in &items.children {
+                    if child.rule_name == "expression" {
+                        expressions.push(self.build_expr(child));
+                    } else if child.rule_name == "vector-tail"
+                        && let Some(expr) = child
+                            .children
+                            .iter()
+                            .find(|child| child.rule_name == "expression")
+                    {
+                        expressions.push(self.build_expr(expr));
+                    }
+                }
+                expressions
             })
             .unwrap_or_default();
         self.node_with_nested(CstKind::VectorExpr, node, nested)
@@ -499,12 +519,21 @@ impl GrammarCstBuilder<'_> {
     }
 
     fn build_argument_list(&self, node: &InterpretedRuleNode) -> CstNode {
-        let nested = node
-            .children
-            .iter()
-            .filter(|child| child.rule_name == "argument")
-            .filter_map(|arg| {
-                arg.children
+        let mut nested = Vec::new();
+        for child in &node.children {
+            let arg = if child.rule_name == "argument" {
+                Some(child)
+            } else if child.rule_name == "argument-tail" {
+                child
+                    .children
+                    .iter()
+                    .find(|child| child.rule_name == "argument")
+            } else {
+                None
+            };
+            if let Some(arg) = arg
+                && let Some(node) = arg
+                    .children
                     .iter()
                     .find(|child| child.rule_name == "keyword-argument")
                     .map(|keyword| self.build_keyword_arg(keyword))
@@ -514,8 +543,10 @@ impl GrammarCstBuilder<'_> {
                             .find(|child| child.rule_name == "expression")
                             .map(|expr| self.build_expr(expr))
                     })
-            })
-            .collect::<Vec<_>>();
+            {
+                nested.push(node);
+            }
+        }
         self.node_with_nested(CstKind::ArgList, node, nested)
     }
 

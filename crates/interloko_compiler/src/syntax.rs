@@ -525,9 +525,9 @@ pub struct SyntaxTree {
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ParserMode {
     /// Use the original Rust recursive-descent parser as primary.
-    #[default]
     RustPrimary,
     /// Use the source-authored grammar parser as primary, with Rust kept as an oracle.
+    #[default]
     GrammarPrimary,
 }
 
