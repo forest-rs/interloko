@@ -1,5 +1,71 @@
 # Plans
 
+## Build A Real Base-Loko Shadow Grammar Subset
+
+### Goal
+
+Make parser shadow mode useful for base Loko. The Rust recursive-descent parser
+stays primary, but a source-authored `base-loko-shadow` grammar should
+independently recognize the current top-level definition surface and compare
+its normalized parser product against the Rust parser.
+
+This is not the parser flip. It is the first load-bearing base-Loko oracle:
+class, generic, method, and function forms are recognized from grammar source,
+reported through `show-parser-shadow`, and exercised by tests.
+
+### Non-Goals
+
+- No replacement of `interloko_compiler::syntax`.
+- No full expression/body grammar.
+- No source-authored semantic actions for base Loko.
+- No macro system or new language surface.
+- No diagnostic parity claim beyond the normalized shadow subset.
+- No performance work.
+
+### Fence
+
+`grammar_frontend::interpreter` owns the small PEG-style matching primitives
+needed by source-authored grammars. It explicitly does not own AST, semantic IR,
+or executable behavior.
+
+`grammar_frontend` owns the base-Loko shadow grammar resource, normalized parser
+product comparison, and parser-shadow reporting. It explicitly does not route
+normal compilation through the shadow parser.
+
+### Invariants
+
+- Rust parsing remains primary and trusted.
+- The shadow grammar is source-authored grammar text, not projected Rust labels.
+- Shadow comparison is normalized to the top-level subset the shadow grammar
+  actually recognizes.
+- Divergence reports are explicit and diffable.
+- Opaque method/function/class bodies are recognized by an explicit grammar
+  primitive, not by hidden Rust fallback.
+- Existing staged records/calculator grammar paths keep working.
+- Every commit is bisectable.
+
+### Sequence
+
+1. Add this plan and keep the boundary explicit.
+2. Add a small `until(literal)` rule-expression primitive for opaque delimited
+   regions, with structural display/source-data/interpreter support and tests.
+3. Add `grammars/base_loko_shadow.grammar` for top-level class, generic,
+   method, and function forms.
+4. Run the shadow grammar from `parser_shadow_report`, compare normalized
+   products against Rust top-level parser facts, and report equivalence or
+   divergence.
+5. Update REPL/lab/session tests and grammar docs to show the real oracle path.
+6. Run fmt, clippy, tests, docs, then commit clean slices.
+
+### Risks
+
+- The normalized summary could hide real parse-tree differences. Name it as a
+  top-level shadow subset and keep the full Rust parser as primary.
+- `until(literal)` can become a crutch. It is acceptable here only to skip
+  bodies while the base expression grammar remains Rust-owned.
+- Divergence output can become too coarse. If the subset starts failing in
+  confusing ways, add span/rule-level diffs before expanding coverage.
+
 ## Harden Interpreted Staged Grammars
 
 ### Goal
