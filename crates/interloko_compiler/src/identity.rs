@@ -146,6 +146,8 @@ pub enum DefinitionKind {
     Method,
     /// Direct function definition.
     Function,
+    /// Immutable top-level constant definition.
+    Constant,
     /// Local binding.
     Local,
 }
@@ -163,6 +165,7 @@ impl DefinitionKind {
             Self::Grammar => 8,
             Self::GrammarRule => 9,
             Self::SemanticAction => 10,
+            Self::Constant => 11,
         }
     }
 }

@@ -163,6 +163,8 @@ pub enum CstKind {
     Root,
     /// Function definition.
     Function,
+    /// Constant definition.
+    Constant,
     /// Class definition.
     Class,
     /// Slot declaration.
@@ -314,6 +316,9 @@ fn syntax_node_id(
         CstKind::Function => {
             mix_definition_name(&mut builder, children, tokens, source, TokenKind::Function);
         }
+        CstKind::Constant => {
+            mix_definition_name(&mut builder, children, tokens, source, TokenKind::Constant);
+        }
         CstKind::Generic => {
             mix_definition_name(&mut builder, children, tokens, source, TokenKind::Generic);
         }
@@ -436,6 +441,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::CallExpr => 11,
         CstKind::SlotExpr => 12,
         CstKind::SlotAssignExpr => 29,
+        CstKind::Constant => 30,
         CstKind::ArgList => 13,
         CstKind::KeywordArg => 14,
         CstKind::NameExpr => 15,
@@ -719,7 +725,7 @@ pub fn lex(source: &str) -> Vec<Token> {
 }
 
 fn is_ident_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'_'
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$'
 }
 
 fn lex_type_name_end(bytes: &[u8], start: usize) -> Option<usize> {

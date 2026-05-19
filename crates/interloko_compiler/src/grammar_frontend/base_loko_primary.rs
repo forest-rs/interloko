@@ -149,8 +149,25 @@ impl BaseLokoCstProjector<'_> {
                 "generic-definition" => Some(self.build_generic(child)),
                 "method-definition" => Some(self.build_callable(child, CstKind::Method)),
                 "function-definition" => Some(self.build_callable(child, CstKind::Function)),
+                "constant-definition" => Some(self.build_constant(child)),
                 _ => None,
             })
+    }
+
+    fn build_constant(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let value = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("expression"))
+            .map(|expr| self.build_expr(expr));
+        let excluded = value
+            .as_ref()
+            .map_or_else(Vec::new, |value| vec![value.span]);
+        let mut children = self.direct_tokens(node.span, &excluded);
+        if let Some(value) = value {
+            children.push(CstElement::Node(value));
+        }
+        self.node(CstKind::Constant, self.sorted(children), node.span)
     }
 
     fn build_class(&self, node: &InterpretedRuleNode<'_>) -> CstNode {

@@ -2832,7 +2832,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ("source-file", "definition*", "syntax.rs:Parser::parse"),
         (
             "definition",
-            "class-definition | function-definition | generic-definition | method-definition",
+            "class-definition | function-definition | generic-definition | method-definition | constant-definition",
             "syntax.rs:Parser::parse",
         ),
         (
@@ -2864,6 +2864,11 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "function-definition",
             "`define function` name parameter-list result-annotation? body `end`",
             "syntax.rs:Parser::parse_function",
+        ),
+        (
+            "constant-definition",
+            "`define constant` name `=` expression `;`",
+            "base_loko_primary::BaseLokoCstBuilder::build_constant",
         ),
         (
             "parameter-list",
@@ -3395,6 +3400,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
     match kind {
         CstKind::Root => Some("source-file"),
         CstKind::Function => Some("function-definition"),
+        CstKind::Constant => Some("constant-definition"),
         CstKind::Class => Some("class-definition"),
         CstKind::SlotDecl => Some("slot-declaration"),
         CstKind::SlotOption => Some("slot-option"),
@@ -3430,6 +3436,7 @@ fn cst_top_level_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::Generic => Some("generic-definition"),
         CstKind::Method => Some("method-definition"),
         CstKind::Function => Some("function-definition"),
+        CstKind::Constant => Some("constant-definition"),
         _ => None,
     }
 }
@@ -3815,7 +3822,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert_eq!(grammar.direct_rules.len(), 1);
-        assert_eq!(grammar.effective_rules.len(), 25);
+        assert_eq!(grammar.effective_rules.len(), 26);
 
         let direct_override = records
             .rules
@@ -3968,7 +3975,7 @@ mod tests {
         assert_eq!(diagnostic.span, Span::new(7, 13));
         assert_eq!(
             diagnostic_arg(diagnostic, "expected"),
-            Some("`class` or `generic` or `method` or `function`".to_string())
+            Some("`class` or `generic` or `method` or `function` or `constant`".to_string())
         );
         let fact = report
             .grammar_diagnostics

@@ -1,5 +1,74 @@
 # Plans
 
+## Add Top-Level Constants
+
+### Goal
+
+Add immutable top-level `define constant $name = expression;` definitions to
+Loko. Constants should be ordinary named values available from functions,
+methods, and other expressions, while remaining inspectable through the same
+source-form, EOP/MOP, REPL, lab, and corpus surfaces as classes/generics/
+methods/functions.
+
+### Non-Goals
+
+- No mutable top-level variables.
+- No modules, imports, exports, or package scope rules.
+- No macro system.
+- No optimizer or constant-folding pass.
+- No compile-time evaluation beyond binding the initializer expression into
+  executable code.
+- No REPL redefinition protocol beyond rebuilding the accepted source buffer.
+- No persistence/image semantics.
+
+### Fence
+
+`syntax` and `grammar_frontend` own recognizing constant definitions and
+projecting them into CST. They explicitly do not own semantic binding or
+runtime execution.
+
+`ast` owns the constant definition AST node. It explicitly does not resolve or
+evaluate constants.
+
+`sem`, `lower`, and `tape` own binding constants and making their values usable
+through the existing expression pipeline. They explicitly do not introduce
+mutable global state.
+
+`session`, `interloko_repl`, and `interloko_lab` own projection and inspection
+of constant objects. They explicitly do not infer constants by parsing dump
+text.
+
+### Invariants
+
+- `define constant` creates a stable `DefinitionKind::Constant` id.
+- Constants are source-authored immutable definitions with EOP/MOP source and
+  artifact facets.
+- Constant references use the same expression semantics as other names.
+- Constant initializers lower through the ordinary expression/lowered/tape path,
+  not through an ad hoc evaluator.
+- Duplicate names and unresolved references stay structured diagnostics.
+- Existing source and staged grammar behavior keeps working.
+
+### Sequence
+
+1. Add grammar/CST/AST support for `define constant $name = expression;`.
+2. Add semantic constant symbols, duplicate checks, and reference resolution.
+3. Lower constants through module initialization/existing expression machinery
+   enough for functions and methods to read them.
+4. Project constants through session/EOP/MOP/source-form tooling and update REPL
+   and lab lookups.
+5. Add corpus, unit, REPL/lab, and docs/progress coverage.
+6. Run fmt, clippy, workspace tests, docs, and commit in coherent slices.
+
+### Risks
+
+- A top-level value can accidentally become hidden global mutable state. Keep
+  constants immutable and value-producing only.
+- Constant initializers may want dependency ordering. Start with source-order
+  constants and report unresolved references rather than adding a scheduler.
+- Object constants can pressure runtime ownership if interpreted as persistent
+  heap state. Treat them as ordinary executable values in this slice.
+
 ## Clarify The Frontend Parse Boundary
 
 ### Goal

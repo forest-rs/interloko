@@ -25,6 +25,8 @@ pub struct Module {
     pub methods: Vec<Method>,
     /// Function definitions in source order.
     pub functions: Vec<Function>,
+    /// Immutable top-level constant definitions in source order.
+    pub constants: Vec<Constant>,
     /// AST lowering diagnostics.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -44,6 +46,21 @@ pub struct Function {
     pub return_type: Option<TypeAnnotation>,
     /// Function body.
     pub body: Block,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Immutable top-level constant definition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Constant {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
+    /// Constant name, conventionally including a leading `$`.
+    pub name: String,
+    /// Initializer expression.
+    pub value: Expr,
     /// Source span.
     pub span: Span,
 }
@@ -634,12 +651,19 @@ impl<'tree> Lowering<'tree> {
             .child_nodes(CstKind::Function)
             .map(|node| self.lower_function(node))
             .collect();
+        let constants = self
+            .tree
+            .root
+            .child_nodes(CstKind::Constant)
+            .map(|node| self.lower_constant(node))
+            .collect();
         Module {
             source_file: self.tree.source_file,
             classes,
             generics,
             methods,
             functions,
+            constants,
             diagnostics: self.diagnostics.clone(),
         }
     }
@@ -924,6 +948,28 @@ impl<'tree> Lowering<'tree> {
             params,
             return_type,
             body,
+            span: node.span,
+        }
+    }
+
+    fn lower_constant(&mut self, node: &CstNode) -> Constant {
+        let name = self.definition_name_after(node, TokenKind::Constant);
+        let value = node
+            .children
+            .iter()
+            .find_map(|child| match child {
+                CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                CstElement::Token(_) => None,
+            })
+            .unwrap_or_else(|| Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            });
+        Constant {
+            id: self.ast_id(node),
+            definition: self.definition(DefinitionKind::Constant, &name, ""),
+            name,
+            value,
             span: node.span,
         }
     }
