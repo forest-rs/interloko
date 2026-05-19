@@ -7,10 +7,10 @@ use crate::diagnostic::Diagnostic;
 use crate::source_data::{self, SourceData};
 use crate::syntax::Span;
 
+use super::actions::{GrammarActionValue, evaluate_rule_action};
 use super::interpreter::{
-    GrammarActionValue, InterpretedParse, InterpretedParseError, evaluate_rule_action,
-    interpret_region_result, interpreted_rule_counts, interpreted_rule_node_source_data,
-    parse_source_authored_grammar,
+    InterpretedParse, InterpretedParseError, interpret_region_result, interpreted_rule_counts,
+    interpreted_rule_node_source_data, parse_source_authored_grammar,
 };
 use super::{
     GrammarId, GrammarProjection, GrammarRule, GrammarRuleId, ProjectionOrigin,

@@ -1000,4 +1000,81 @@ mod tests {
         assert_eq!(error.span, Span::new(30, 30));
         assert_eq!(error.expected, vec!["[0-9]"]);
     }
+
+    #[test]
+    fn interprets_choice_optional_and_repetition() {
+        let grammar = "grammar words\n\
+                       rule item = (`a` | `b`) `!`?\n\
+                       rule items = item+\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "items", "a! b", 10).expect("items parse");
+
+        assert_eq!(parse.root.span, Span::new(10, 14));
+        assert_eq!(
+            parse
+                .root
+                .children
+                .iter()
+                .map(|child| (child.rule_name.as_str(), child.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("item", "a!"), ("item", "b")]
+        );
+    }
+
+    #[test]
+    fn reports_trailing_input_as_region_error() {
+        let grammar = "grammar one\nrule root = `ok`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let error = interpret_region(&rules, "root", "ok nope", 5).expect_err("trailing input");
+
+        assert_eq!(error.span, Span::new(8, 8));
+        assert_eq!(error.expected, vec!["end of region"]);
+    }
+
+    #[test]
+    fn parses_action_descriptors_as_inert_data() {
+        let grammar = "grammar forms\n\
+                       rule form = name => emit-form(name: name, items: item*, required: true, kind: \"thing\")\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let action = rules[0].action.as_ref().expect("action parsed");
+
+        assert_eq!(action.name, "emit-form");
+        assert_eq!(
+            action.args,
+            vec![
+                GrammarActionArg::new(
+                    "name",
+                    GrammarActionTerm::Capture {
+                        rule: "name".to_string()
+                    }
+                ),
+                GrammarActionArg::new(
+                    "items",
+                    GrammarActionTerm::CaptureAll {
+                        rule: "item".to_string()
+                    }
+                ),
+                GrammarActionArg::new("required", GrammarActionTerm::Bool(true)),
+                GrammarActionArg::new("kind", GrammarActionTerm::Literal("thing".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn caller_owned_excluded_text_rejects_matched_rules() {
+        let grammar = "grammar names\nrule name = [A-Za-z]+\nend\n";
+        let rules = parse_grammar_source(grammar)
+            .into_iter()
+            .map(|rule| rule.with_excluded_text(vec!["define".to_string()]))
+            .collect::<Vec<_>>();
+
+        let error = interpret_region(&rules, "name", "define", 20).expect_err("excluded word");
+        assert_eq!(error.span, Span::new(20, 20));
+        assert_eq!(error.expected, vec!["name"]);
+
+        let parse = interpret_region(&rules, "name", "circle", 30).expect("non-excluded name");
+        assert_eq!(parse.root.text, "circle");
+    }
 }

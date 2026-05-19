@@ -6,6 +6,7 @@
 //! intentionally does not own AST lowering, semantic lowering, macros, or host
 //! semantic actions.
 
+mod actions;
 mod base_loko_primary;
 mod calculator;
 mod interpreter;
@@ -2350,10 +2351,7 @@ fn staged_expected_diagnostic(span: Span, adapter: &str, expected: &str) -> Diag
     expected_syntax_diagnostic(span, expected).with_arg(DiagnosticArg::text("adapter", adapter))
 }
 
-fn staged_action_error_diagnostic(
-    error: interpreter::GrammarActionError,
-    adapter: &str,
-) -> Diagnostic {
+fn staged_action_error_diagnostic(error: actions::GrammarActionError, adapter: &str) -> Diagnostic {
     let mut diagnostic = staged_expected_diagnostic(error.span, adapter, error.expected.as_ref());
     if let Some(rule) = error.rule {
         diagnostic = diagnostic.with_arg(DiagnosticArg::text("rule", rule.to_string()));
