@@ -16,7 +16,7 @@ use interloko_compiler::sem::{
 use interloko_compiler::session::{
     DumpStage, EnvironmentKind, EnvironmentObject, EnvironmentOrigin, EnvironmentStorage,
     ExecutionTraceEvent, ExecutionTraceOutcome, ExecutionTraceScope, RuntimeResult,
-    SessionArtifacts,
+    SessionArtifacts, TopLevelFormKind,
 };
 use interloko_compiler::syntax::Span;
 
@@ -48,6 +48,7 @@ fn render_report(workbench: &CompiledWorkbench) -> String {
     out.push_str(&render_hero(artifacts));
     out.push_str("    <main class=\"report-main\">\n");
     out.push_str(&render_source_section(artifacts));
+    out.push_str(&render_parse_provenance_section(artifacts));
     out.push_str(&render_grammar_environment_section(artifacts, &objects));
     out.push_str(&render_staged_section(artifacts, &objects));
     out.push_str(&render_model_section(artifacts, &objects, &related_objects));
@@ -373,6 +374,365 @@ fn render_source_lines(artifacts: &SessionArtifacts) -> String {
         line_start += line_with_break.len();
     }
     out.push_str("          </code></pre>\n");
+    out
+}
+
+fn render_parse_provenance_section(artifacts: &SessionArtifacts) -> String {
+    let forms = artifacts.top_level_forms();
+    let staged_form_count = artifacts
+        .grammar_parse
+        .staged_regions
+        .iter()
+        .map(|region| region.forms.len())
+        .sum::<usize>();
+    let mut out = String::new();
+    out.push_str("      <section class=\"section\" id=\"parse-provenance\">\n");
+    out.push_str(&render_section_heading(
+        "Parse provenance",
+        "Source To Parse Rules",
+        "Each top-level form is shown as a source span, token stream, CST path, grammar rule stack, and local diagnostics. This is the workbench's static parse lens: a compact version of the grammar-editor view that explains how text became syntax.",
+    ));
+    if forms.is_empty() && staged_form_count == 0 {
+        out.push_str(
+            "        <div class=\"empty-state\">No top-level source forms were parsed.</div>\n",
+        );
+        out.push_str("      </section>\n");
+        return out;
+    }
+    out.push_str("        <div class=\"parse-grid\">\n");
+    for form in forms {
+        out.push_str(&render_parse_form_card(artifacts, &form));
+    }
+    for region in &artifacts.grammar_parse.staged_regions {
+        for (index, form) in region.forms.iter().enumerate() {
+            out.push_str(&render_staged_parse_form_card(
+                artifacts, region, index, form,
+            ));
+        }
+    }
+    out.push_str("        </div>\n");
+    out.push_str("      </section>\n");
+    out
+}
+
+fn render_parse_form_card(
+    artifacts: &SessionArtifacts,
+    form: &interloko_compiler::session::TopLevelFormSpan,
+) -> String {
+    let view = artifacts.parse_view_for_span(form.span);
+    let line = source_line_for_byte(&artifacts.source.source, form.span.start);
+    let form_anchor = parse_form_anchor(form.index);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "          <article class=\"parse-card\" id=\"{}\" data-node=\"parse-form:{}\">",
+        escape_attr(&form_anchor),
+        form.index
+    );
+    let _ = writeln!(
+        out,
+        "            <header class=\"parse-card__header\"><div><span>form f{}</span><strong>{}</strong></div><a href=\"#source-line-{}\">line {}</a><code>{}..{}</code></header>",
+        form.index,
+        form_kind_label(form.kind),
+        line,
+        line,
+        form.span.start,
+        form.span.end
+    );
+    out.push_str("            <div class=\"parse-card__body\">\n");
+    out.push_str("              <pre class=\"parse-source\"><code>");
+    out.push_str(&render_parse_source_excerpt(
+        &artifacts.source.source,
+        form.span,
+        &view.tokens,
+        &view.rule_applications,
+    ));
+    out.push_str("</code></pre>\n");
+    out.push_str("              <div class=\"parse-lens\">\n");
+    out.push_str("                <div class=\"parse-lens__label\">rule stack</div>\n");
+    out.push_str(&render_rule_ladder(
+        artifacts,
+        form.span,
+        &view.rule_applications,
+    ));
+    out.push_str("                <div class=\"parse-lens__label\">tokens</div>\n");
+    out.push_str(&render_token_strip(&view.tokens));
+    out.push_str("                <div class=\"parse-lens__label\">cst path</div>\n");
+    out.push_str("                <ol class=\"parse-cst-path\">\n");
+    for node in &view.nodes {
+        let _ = writeln!(
+            out,
+            "                  <li style=\"--depth:{}\"><span>{:?}</span><code>{}..{}</code></li>",
+            node.depth, node.kind, node.span.start, node.span.end
+        );
+    }
+    out.push_str("                </ol>\n");
+    out.push_str("                <div class=\"parse-lens__label\">diagnostics</div>\n");
+    out.push_str(&render_parse_diagnostics(&view.diagnostics));
+    out.push_str("              </div>\n");
+    out.push_str("            </div>\n");
+    out.push_str("          </article>\n");
+    out
+}
+
+fn render_staged_parse_form_card(
+    artifacts: &SessionArtifacts,
+    region: &StagedParseRegion,
+    index: usize,
+    form: &FrontendForm,
+) -> String {
+    let line = source_line_for_byte(&artifacts.source.source, form.source_span.start);
+    let form_rel = relation_for_form(region, index);
+    let flow_rel = flow_relation_for_form(region, index);
+    let region_rel = relation_for_region(region);
+    let grammar_id = format!("grammar:{}", region.grammar_slug);
+    let materialized = grammar_frontend::materialize_frontend_forms(core::slice::from_ref(form));
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "          <article class=\"parse-card parse-card--staged\" id=\"{}\" data-node=\"{}\" data-rel=\"{} {} {}\">",
+        escape_attr(&parse_staged_form_anchor(region, index)),
+        escape_attr(&form_rel),
+        escape_attr(&form_rel),
+        escape_attr(&flow_rel),
+        escape_attr(&region_rel)
+    );
+    let _ = writeln!(
+        out,
+        "            <header class=\"parse-card__header\"><div><span>staged form {}/{}</span><strong>{}</strong></div><a href=\"#source-line-{}\">line {}</a><code>{}..{}</code></header>",
+        escape_html(&region.object_slug),
+        index,
+        escape_html(&frontend_form_title(form)),
+        line,
+        line,
+        form.source_span.start,
+        form.source_span.end
+    );
+    out.push_str("            <div class=\"parse-card__body\">\n");
+    out.push_str("              <pre class=\"parse-source\"><code>");
+    out.push_str(&escape_html(
+        artifacts
+            .source
+            .source
+            .get(form.source_span.start..form.source_span.end)
+            .unwrap_or(""),
+    ));
+    out.push_str("</code></pre>\n");
+    out.push_str("              <div class=\"parse-lens\">\n");
+    out.push_str("                <div class=\"parse-lens__label\">staged grammar</div>\n");
+    let _ = writeln!(
+        out,
+        "                <div class=\"parse-staged-meta\"><a href=\"#{}\">{}</a><code>{}</code><span>{}</span></div>",
+        escape_attr(&object_anchor(&grammar_id)),
+        escape_html(&grammar_id),
+        escape_html(region.driver.as_str()),
+        escape_html(region.oracle.as_str())
+    );
+    out.push_str("                <div class=\"parse-lens__label\">frontend form</div>\n");
+    out.push_str(&render_staged_frontend_form_summary(form));
+    out.push_str("                <div class=\"parse-lens__label\">materialized Loko</div>\n");
+    let _ = writeln!(
+        out,
+        "                <pre class=\"parse-materialized\"><code>{}</code></pre>",
+        escape_html(&materialized)
+    );
+    out.push_str(
+        "                <div class=\"parse-lens__label\">parser rule applications</div>\n",
+    );
+    out.push_str("                <div class=\"parse-empty\">This staged grammar currently exposes rule counts and grammar-extension provenance here; per-node staged rule applications are not yet threaded into the source parse-view query.</div>\n");
+    out.push_str("              </div>\n");
+    out.push_str("            </div>\n");
+    out.push_str("          </article>\n");
+    out
+}
+
+fn render_staged_frontend_form_summary(form: &FrontendForm) -> String {
+    let mut out = String::new();
+    match &form.kind {
+        FrontendFormKind::Function(function) => {
+            let _ = writeln!(
+                out,
+                "                <div class=\"parse-frontend-form\"><strong>frontend-function</strong><code>{}</code><small>body {}</small></div>",
+                escape_html(&function.name),
+                escape_html(&frontend_expression_label(&function.body))
+            );
+        }
+        FrontendFormKind::Class(class) => {
+            let _ = writeln!(
+                out,
+                "                <div class=\"parse-frontend-form\"><strong>frontend-class</strong><code>{} extends {}</code>",
+                escape_html(&class.name),
+                escape_html(&class.superclass)
+            );
+            out.push_str("                  <ul class=\"slot-list\">\n");
+            for slot in &class.slots {
+                let _ = writeln!(
+                    out,
+                    "                    <li><code>{}</code><span>type {}</span><span>span {}..{}</span></li>",
+                    escape_html(&slot.name),
+                    escape_html(&slot.type_name),
+                    slot.source_span.start,
+                    slot.source_span.end
+                );
+            }
+            out.push_str("                  </ul>\n");
+            out.push_str("                </div>\n");
+        }
+    }
+    out
+}
+
+fn render_rule_ladder(
+    artifacts: &SessionArtifacts,
+    form_span: Span,
+    applications: &[interloko_compiler::grammar_frontend::GrammarRuleApplication],
+) -> String {
+    let mut out = String::new();
+    out.push_str("                <div class=\"parse-rule-ladder\">\n");
+    if applications.is_empty() {
+        out.push_str(
+            "                  <div class=\"parse-empty\">No rule applications recorded.</div>\n",
+        );
+    } else {
+        let mut rules = applications.to_vec();
+        rules.sort_by_key(|application| {
+            (
+                application.span.start,
+                core::cmp::Reverse(application.span.end.saturating_sub(application.span.start)),
+                application.rule_name.clone(),
+            )
+        });
+        for application in &rules {
+            let object_id = effective_rule_object_id_for_application(artifacts, application);
+            let href = object_id.as_deref().map(object_anchor);
+            let depth = parse_rule_depth(&rules, application.span);
+            let relation = parse_rule_relation_key(form_span, application);
+            let _ = write!(
+                out,
+                "                  <div class=\"parse-rule-row\" data-rel=\"{}\" style=\"--rule-depth:{depth}; {}\">",
+                escape_attr(&relation),
+                parse_rule_bar_style(form_span, application.span)
+            );
+            if let Some(href) = href {
+                let _ = write!(
+                    out,
+                    "<a href=\"#{}\"><strong>{}</strong><small>{}</small></a>",
+                    escape_attr(&href),
+                    escape_html(&application.rule_name),
+                    escape_html(object_id.as_deref().unwrap_or(""))
+                );
+            } else {
+                let _ = write!(
+                    out,
+                    "<span><strong>{}</strong></span>",
+                    escape_html(&application.rule_name)
+                );
+            }
+            let _ = writeln!(
+                out,
+                "<code>{}..{}</code></div>",
+                application.span.start, application.span.end
+            );
+        }
+    }
+    out.push_str("                </div>\n");
+    out
+}
+
+fn render_token_strip(tokens: &[interloko_compiler::session::SyntaxTokenSummary]) -> String {
+    let mut out = String::new();
+    out.push_str("                <div class=\"parse-token-strip\">\n");
+    if tokens.is_empty() {
+        out.push_str("                  <span class=\"parse-empty\">No tokens.</span>\n");
+    } else {
+        for token in tokens.iter().take(48) {
+            let _ = writeln!(
+                out,
+                "                  <span class=\"parse-token\"><strong>{}</strong><code>{:?}</code></span>",
+                escape_html(&token.text),
+                token.kind
+            );
+        }
+        if tokens.len() > 48 {
+            let _ = writeln!(
+                out,
+                "                  <span class=\"parse-token parse-token--more\">{} more</span>",
+                tokens.len() - 48
+            );
+        }
+    }
+    out.push_str("                </div>\n");
+    out
+}
+
+fn render_parse_source_excerpt(
+    source: &str,
+    form_span: Span,
+    tokens: &[interloko_compiler::session::SyntaxTokenSummary],
+    applications: &[interloko_compiler::grammar_frontend::GrammarRuleApplication],
+) -> String {
+    let mut out = String::new();
+    let mut cursor = form_span.start;
+    for token in tokens {
+        if token.span.end <= form_span.start || form_span.end <= token.span.start {
+            continue;
+        }
+        let start = token.span.start.max(form_span.start);
+        let end = token.span.end.min(form_span.end);
+        if start > cursor {
+            out.push_str(&escape_html(source.get(cursor..start).unwrap_or("")));
+        }
+        let relations = applications
+            .iter()
+            .filter(|application| {
+                application.span.start <= token.span.start && token.span.end <= application.span.end
+            })
+            .map(|application| parse_rule_relation_key(form_span, application))
+            .collect::<Vec<_>>();
+        let relation = relations.join(" ");
+        let _ = write!(
+            out,
+            "<mark class=\"parse-source-token\" data-rel=\"{}\" title=\"{}\">{}</mark>",
+            escape_attr(&relation),
+            escape_attr(&format!(
+                "{:?} {}..{}",
+                token.kind, token.span.start, token.span.end
+            )),
+            escape_html(source.get(start..end).unwrap_or(""))
+        );
+        cursor = end;
+    }
+    if cursor < form_span.end {
+        out.push_str(&escape_html(
+            source.get(cursor..form_span.end).unwrap_or(""),
+        ));
+    }
+    out
+}
+
+fn render_parse_diagnostics(
+    diagnostics: &[interloko_compiler::grammar_frontend::GrammarDiagnosticFact],
+) -> String {
+    let mut out = String::new();
+    out.push_str("                <div class=\"parse-diagnostics\">\n");
+    if diagnostics.is_empty() {
+        out.push_str("                  <span class=\"parse-empty\">No parser diagnostics touched this form.</span>\n");
+    } else {
+        for diagnostic in diagnostics {
+            let unexpected = diagnostic.unexpected_fragment.as_deref().unwrap_or("none");
+            let expected = diagnostic.expected_fragment.as_deref().unwrap_or("unknown");
+            let _ = writeln!(
+                out,
+                "                  <div class=\"parse-diagnostic\"><strong>{}</strong><span>{}..{}</span><small>unexpected {} · expected {}</small></div>",
+                diagnostic.code,
+                diagnostic.span.start,
+                diagnostic.span.end,
+                escape_html(unexpected),
+                escape_html(expected)
+            );
+        }
+    }
+    out.push_str("                </div>\n");
     out
 }
 
@@ -1856,6 +2216,14 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
         out.push_str(&region_json(region));
     }
     out.push(']');
+    out.push_str(",\"parseViews\":[");
+    for (index, form) in artifacts.top_level_forms().iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&parse_view_json(artifacts, form));
+    }
+    out.push(']');
     out.push_str(",\"objects\":[");
     for (index, object) in objects.iter().enumerate() {
         if index > 0 {
@@ -1958,6 +2326,69 @@ fn diagnostic_json(diagnostic: &Diagnostic) -> String {
             }),
             span_json(label.span),
             json_string(label.message.as_deref().unwrap_or(""))
+        );
+    }
+    out.push_str("]}");
+    out
+}
+
+fn parse_view_json(
+    artifacts: &SessionArtifacts,
+    form: &interloko_compiler::session::TopLevelFormSpan,
+) -> String {
+    let view = artifacts.parse_view_for_span(form.span);
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "{{\"id\":{},\"kind\":{},\"span\":{},\"rules\":[",
+        json_string(&format!("form:f{}", form.index)),
+        json_string(form_kind_label(form.kind)),
+        span_json(form.span)
+    );
+    for (index, application) in view.rule_applications.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let object_id = effective_rule_object_id_for_application(artifacts, application);
+        let _ = write!(
+            out,
+            "{{\"name\":{},\"span\":{},\"object\":{}}}",
+            json_string(&application.rule_name),
+            span_json(application.span),
+            object_id.map_or_else(|| "null".to_string(), |id| json_string(&id))
+        );
+    }
+    out.push_str("],\"tokens\":[");
+    for (index, token) in view.tokens.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"kind\":{},\"text\":{},\"span\":{}}}",
+            json_string(&format!("{:?}", token.kind)),
+            json_string(&token.text),
+            span_json(token.span)
+        );
+    }
+    out.push_str("],\"diagnostics\":[");
+    for (index, diagnostic) in view.diagnostics.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"code\":{},\"span\":{},\"unexpected\":{},\"expected\":{}}}",
+            json_string(&diagnostic.code.to_string()),
+            span_json(diagnostic.span),
+            diagnostic
+                .unexpected_fragment
+                .as_ref()
+                .map_or_else(|| "null".to_string(), |value| json_string(value)),
+            diagnostic
+                .expected_fragment
+                .as_ref()
+                .map_or_else(|| "null".to_string(), |value| json_string(value))
         );
     }
     out.push_str("]}");
@@ -2433,6 +2864,85 @@ fn source_line_for_byte(source: &str, byte: usize) -> usize {
         .filter(|(_, ch)| *ch == '\n')
         .count()
         + 1
+}
+
+fn parse_form_anchor(index: usize) -> String {
+    format!("parse-form-{index}")
+}
+
+fn parse_staged_form_anchor(region: &StagedParseRegion, index: usize) -> String {
+    format!("parse-staged-{}-f{index}", anchor_slug(&region.object_slug))
+}
+
+fn frontend_form_title(form: &FrontendForm) -> String {
+    match &form.kind {
+        FrontendFormKind::Function(function) => format!("frontend function {}", function.name),
+        FrontendFormKind::Class(class) => format!("frontend class {}", class.name),
+    }
+}
+
+fn form_kind_label(kind: TopLevelFormKind) -> &'static str {
+    match kind {
+        TopLevelFormKind::Class => "class definition",
+        TopLevelFormKind::Generic => "generic definition",
+        TopLevelFormKind::Method => "method definition",
+        TopLevelFormKind::Function => "function definition",
+        _ => "source form",
+    }
+}
+
+fn effective_rule_object_id_for_application(
+    artifacts: &SessionArtifacts,
+    application: &interloko_compiler::grammar_frontend::GrammarRuleApplication,
+) -> Option<String> {
+    artifacts
+        .grammar_parse
+        .effective_rules
+        .iter()
+        .find(|rule| rule.id == application.rule)
+        .map(grammar_frontend::effective_grammar_rule_object_id)
+}
+
+fn parse_rule_relation_key(
+    form_span: Span,
+    application: &interloko_compiler::grammar_frontend::GrammarRuleApplication,
+) -> String {
+    format!(
+        "parse-rule:{}-{}:{}:{}",
+        form_span.start,
+        form_span.end,
+        anchor_slug(&application.rule_name),
+        application.span.start
+    )
+}
+
+fn parse_rule_depth(
+    applications: &[interloko_compiler::grammar_frontend::GrammarRuleApplication],
+    span: Span,
+) -> usize {
+    applications
+        .iter()
+        .filter(|candidate| candidate.span != span)
+        .filter(|candidate| {
+            candidate.span.start <= span.start
+                && span.end <= candidate.span.end
+                && candidate.span.end.saturating_sub(candidate.span.start)
+                    > span.end.saturating_sub(span.start)
+        })
+        .count()
+        .min(8)
+}
+
+fn parse_rule_bar_style(form_span: Span, rule_span: Span) -> String {
+    let form_width = form_span.end.saturating_sub(form_span.start).max(1) as f64;
+    let start = rule_span.start.max(form_span.start);
+    let end = rule_span.end.min(form_span.end).max(start);
+    let left = ((start.saturating_sub(form_span.start)) as f64 / form_width) * 100.0;
+    let width = ((end.saturating_sub(start)) as f64 / form_width) * 100.0;
+    format!(
+        "--rule-left:{left:.2}%; --rule-width:{:.2}%;",
+        width.max(3.0)
+    )
 }
 
 #[derive(Clone)]
@@ -2942,6 +3452,267 @@ a {
 .source-mark--diagnostic {
   background: rgba(227, 122, 122, 0.62);
   box-shadow: inset 0 -2px #e37a7a;
+}
+
+.parse-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.parse-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.parse-card--staged {
+  border-color: rgba(155, 77, 45, 0.34);
+}
+
+.parse-card__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-strong);
+}
+
+.parse-card__header div {
+  min-width: 0;
+}
+
+.parse-card__header span,
+.parse-lens__label {
+  display: block;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.parse-card__header strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.parse-card__header code {
+  color: var(--muted);
+}
+
+.parse-card__body {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.86fr) minmax(0, 1.14fr);
+  gap: 0;
+}
+
+.parse-source {
+  margin: 0;
+  padding: 16px;
+  max-height: 360px;
+  overflow: auto;
+  background: #101614;
+  color: #edf4f1;
+  font-size: 0.82rem;
+  line-height: 1.22;
+  white-space: pre;
+}
+
+.parse-source-token {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+}
+
+.parse-source-token.is-related,
+.parse-source-token.is-focus {
+  background: rgba(142, 208, 197, 0.32);
+  box-shadow: inset 0 -2px #8ed0c5;
+}
+
+.parse-materialized {
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  background: #101614;
+  color: #edf4f1;
+  font-size: 0.78rem;
+  line-height: 1.24;
+}
+
+.parse-staged-meta,
+.parse-frontend-form {
+  padding: 9px 10px;
+  border: 1px solid rgba(155, 77, 45, 0.24);
+  background: rgba(155, 77, 45, 0.08);
+}
+
+.parse-staged-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.parse-staged-meta a {
+  font-weight: 800;
+}
+
+.parse-staged-meta code,
+.parse-staged-meta span,
+.parse-frontend-form small {
+  color: var(--muted);
+}
+
+.parse-frontend-form strong,
+.parse-frontend-form code,
+.parse-frontend-form small {
+  display: block;
+}
+
+.parse-frontend-form code {
+  margin-top: 3px;
+}
+
+.parse-lens {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-left: 1px solid var(--line);
+}
+
+.parse-rule-ladder {
+  display: grid;
+  gap: 6px;
+}
+
+.parse-rule-row {
+  position: relative;
+  min-height: 42px;
+  margin-left: calc(var(--rule-depth) * 18px);
+  padding: 7px 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid rgba(18, 109, 101, 0.28);
+  background: rgba(18, 109, 101, 0.09);
+  overflow: hidden;
+}
+
+.parse-rule-row.is-focus,
+.parse-rule-row.is-related {
+  border-color: rgba(18, 109, 101, 0.62);
+  background: rgba(18, 109, 101, 0.16);
+}
+
+.parse-rule-row::before {
+  content: "";
+  position: absolute;
+  left: var(--rule-left);
+  right: calc(100% - var(--rule-left) - var(--rule-width));
+  bottom: 0;
+  height: 3px;
+  background: rgba(18, 109, 101, 0.45);
+}
+
+.parse-rule-row a,
+.parse-rule-row span {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 750;
+}
+
+.parse-rule-row strong,
+.parse-rule-row small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parse-rule-row strong {
+  font-size: 0.92rem;
+}
+
+.parse-rule-row small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.parse-rule-row code {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.parse-token-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.parse-token {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 7px;
+  border: 1px solid rgba(155, 77, 45, 0.24);
+  background: rgba(155, 77, 45, 0.08);
+  font-size: 0.82rem;
+}
+
+.parse-token code {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.parse-cst-path {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  list-style: none;
+}
+
+.parse-cst-path li {
+  margin-left: calc(var(--depth) * 14px);
+  padding: 4px 7px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border-left: 3px solid rgba(93, 84, 136, 0.35);
+  background: rgba(93, 84, 136, 0.07);
+}
+
+.parse-diagnostics {
+  display: grid;
+  gap: 6px;
+}
+
+.parse-diagnostic {
+  padding: 8px 10px;
+  border: 1px solid rgba(169, 60, 60, 0.32);
+  background: rgba(169, 60, 60, 0.08);
+}
+
+.parse-diagnostic strong,
+.parse-diagnostic span,
+.parse-diagnostic small {
+  display: block;
+}
+
+.parse-diagnostic small,
+.parse-empty {
+  color: var(--muted);
 }
 
 .region-grid {

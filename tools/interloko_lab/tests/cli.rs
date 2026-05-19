@@ -540,6 +540,17 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("id=\"artifact-art"));
     assert!(html.contains("href=\"#artifact-art"));
     assert!(html.contains("id=\"interloko-report-data\""));
+    assert!(html.contains("id=\"parse-provenance\""));
+    assert!(html.contains("Source To Parse Rules"));
+    assert!(html.contains("parse-card"));
+    assert!(html.contains("parse-rule-ladder"));
+    assert!(html.contains("parse-token-strip"));
+    assert!(html.contains("function-definition"));
+    assert!(html.contains("parse-card--staged"));
+    assert!(html.contains("staged form r0/0"));
+    assert!(html.contains("frontend class &lt;circle&gt;"));
+    assert!(html.contains("parse-materialized"));
+    assert!(html.contains("\"parseViews\""));
     assert!(html.contains("\"stagedRegions\""));
     assert!(html.contains("\"driver\":\"interpreted-grammar\""));
     assert!(html.contains("\"oracle\":\"none\""));
@@ -606,6 +617,9 @@ fn report_handles_plain_loko_sources() {
     assert!(html.contains("&lt;object&gt;"));
     assert!(html.contains("class:c1"));
     assert!(html.contains("generic:g0"));
+    assert!(html.contains("id=\"parse-form-0\""));
+    assert!(html.contains("rule stack"));
+    assert!(html.contains("tokens"));
 }
 
 #[test]
