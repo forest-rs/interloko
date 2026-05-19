@@ -5188,11 +5188,13 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
     for region in &artifacts.grammar_parse.staged_regions {
         let _ = writeln!(
             out,
-            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} forms={} materialized={:?} data={}",
+            "  {} adapter={} activation={} grammar={} driver={} oracle={} directive={}..{} span={}..{} forms={} materialized={:?} data={}",
             grammar_frontend::staged_parse_region_object_id(region),
             region.adapter,
             region.activation,
             region.grammar,
+            region.driver.as_str(),
+            region.oracle.as_str(),
             region.activation_directive.start,
             region.activation_directive.end,
             region.source_span.start,
@@ -6242,11 +6244,13 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
     for region in &report.staged_regions {
         let _ = writeln!(
             out,
-            "  {} adapter={} activation={} grammar={} directive={}..{} span={}..{} forms={}",
+            "  {} adapter={} activation={} grammar={} driver={} oracle={} directive={}..{} span={}..{} forms={}",
             grammar_frontend::staged_parse_region_object_id(region),
             region.adapter,
             region.activation,
             region.grammar,
+            region.driver.as_str(),
+            region.oracle.as_str(),
             region.activation_directive.start,
             region.activation_directive.end,
             region.source_span.start,
@@ -7048,6 +7052,8 @@ fn dump_staged_region_object(artifacts: &SessionArtifacts, object_id: &str) -> O
     let _ = writeln!(out, "adapter {}", region.adapter);
     let _ = writeln!(out, "activation {}", region.activation);
     let _ = writeln!(out, "grammar {} {}", region.grammar, region.grammar_slug);
+    let _ = writeln!(out, "driver {}", region.driver.as_str());
+    let _ = writeln!(out, "oracle {}", region.oracle.as_str());
     let _ = writeln!(
         out,
         "activation-directive {}..{}",
@@ -8186,10 +8192,12 @@ fn project_staged_parse_region(
         ]),
         execution: None,
         inspection: format!(
-            "adapter={} activation={} grammar={} directive={}..{} span={}..{} forms={} materialized={:?} data={}",
+            "adapter={} activation={} grammar={} driver={} oracle={} directive={}..{} span={}..{} forms={} materialized={:?} data={}",
             region.adapter,
             region.activation,
             region.grammar,
+            region.driver.as_str(),
+            region.oracle.as_str(),
             region.activation_directive.start,
             region.activation_directive.end,
             region.source_span.start,

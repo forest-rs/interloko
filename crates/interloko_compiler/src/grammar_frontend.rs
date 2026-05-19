@@ -990,6 +990,10 @@ pub struct StagedParseRegion {
     pub grammar: GrammarId,
     /// Grammar slug used in dumps.
     pub grammar_slug: String,
+    /// Parser driver used for this staged region.
+    pub driver: StagedParseDriver,
+    /// Optional parser oracle/fallback status for this staged region.
+    pub oracle: StagedParseOracle,
     /// Comment directive that activated the staged grammar adapter.
     pub activation_directive: Span,
     /// Original source region parsed by the staged grammar.
@@ -1002,6 +1006,40 @@ pub struct StagedParseRegion {
     pub materialized_source: String,
     /// Inert structural parse result.
     pub data: SourceData,
+}
+
+/// Parser driver used for one staged source region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StagedParseDriver {
+    /// Source-authored grammar interpreted by `grammar_frontend::interpreter`.
+    InterpretedGrammar,
+}
+
+impl StagedParseDriver {
+    /// Returns the stable label used in dumps, source data, and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InterpretedGrammar => "interpreted-grammar",
+        }
+    }
+}
+
+/// Parser oracle/fallback status for one staged source region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StagedParseOracle {
+    /// No legacy oracle or fallback participated in this staged-region parse.
+    None,
+}
+
+impl StagedParseOracle {
+    /// Returns the stable label used in dumps, source data, and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+        }
+    }
 }
 
 /// Registered staged grammar extension descriptor.
@@ -2048,6 +2086,8 @@ fn parse_staged_file(
             activation: activation.id,
             grammar,
             grammar_slug: region.adapter.grammar_slug().to_string(),
+            driver: emission.driver,
+            oracle: emission.oracle,
             activation_directive: region.activation_directive,
             source_span: region.body_span,
             forms: emission.forms,
@@ -2181,6 +2221,10 @@ struct SourceLine<'source> {
 pub struct StagedRegionEmission {
     /// Frontend forms emitted by the adapter.
     pub forms: Vec<FrontendForm>,
+    /// Parser driver used to produce this emission.
+    pub driver: StagedParseDriver,
+    /// Parser oracle/fallback status for this emission.
+    pub oracle: StagedParseOracle,
     /// Inert structured protocol data describing the adapter parse.
     pub data: SourceData,
     /// Rule counts charged by the staged grammar parser.
@@ -3944,10 +3988,16 @@ mod tests {
         assert!(!report.syntax.source.contains("define function main()"));
         assert_eq!(report.staged_regions[0].adapter, "calculator");
         assert_eq!(report.staged_regions[0].object_slug, "r0");
+        assert_eq!(
+            report.staged_regions[0].driver,
+            StagedParseDriver::InterpretedGrammar
+        );
+        assert_eq!(report.staged_regions[0].oracle, StagedParseOracle::None);
         assert!(
             source_data::dump(&report.staged_regions[0].data)
                 .contains("driver: interpreted-grammar")
         );
+        assert!(source_data::dump(&report.staged_regions[0].data).contains("oracle: none"));
         assert!(
             source_data::dump(&report.staged_regions[1].data)
                 .contains("rule-node(rule: calculator-region")
@@ -4071,10 +4121,16 @@ mod tests {
         );
         assert_eq!(report.staged_regions.len(), 1);
         assert_eq!(report.staged_regions[0].adapter, "records");
+        assert_eq!(
+            report.staged_regions[0].driver,
+            StagedParseDriver::InterpretedGrammar
+        );
+        assert_eq!(report.staged_regions[0].oracle, StagedParseOracle::None);
         assert!(
             source_data::dump(&report.staged_regions[0].data)
                 .contains("driver: interpreted-grammar")
         );
+        assert!(source_data::dump(&report.staged_regions[0].data).contains("oracle: none"));
         assert!(
             source_data::dump(&report.staged_regions[0].data)
                 .contains("rule-node(rule: records-region")

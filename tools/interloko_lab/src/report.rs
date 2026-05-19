@@ -462,7 +462,9 @@ fn render_staged_region(
     );
     let _ = writeln!(
         out,
-        "              <p>directive {}..{} · region {}..{} · activation {}</p>",
+        "              <p>driver {} · oracle {} · directive {}..{} · region {}..{} · activation {}</p>",
+        escape_html(region.driver.as_str()),
+        escape_html(region.oracle.as_str()),
         region.activation_directive.start,
         region.activation_directive.end,
         region.source_span.start,
@@ -1966,10 +1968,12 @@ fn region_json(region: &StagedParseRegion) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        "{{\"id\":{},\"adapter\":{},\"grammar\":{},\"activation\":{},\"directive\":{},\"span\":{},\"forms\":[",
+        "{{\"id\":{},\"adapter\":{},\"grammar\":{},\"driver\":{},\"oracle\":{},\"activation\":{},\"directive\":{},\"span\":{},\"forms\":[",
         json_string(&grammar_frontend::staged_parse_region_object_id(region).to_string()),
         json_string(&region.adapter),
         json_string(&region.grammar.to_string()),
+        json_string(region.driver.as_str()),
+        json_string(region.oracle.as_str()),
         json_string(&region.activation.to_string()),
         span_json(region.activation_directive),
         span_json(region.source_span)

@@ -14,8 +14,9 @@ use super::interpreter::{
 };
 use super::{
     GrammarId, GrammarProjection, GrammarRule, GrammarRuleId, ProjectionOrigin,
-    RECORDS_GRAMMAR_NAME, StagedRegionEmission, grammar_rule_expression_data_from_expr,
-    source_span_data, staged_action_error_diagnostic, staged_expected_diagnostic,
+    RECORDS_GRAMMAR_NAME, StagedParseDriver, StagedParseOracle, StagedRegionEmission,
+    grammar_rule_expression_data_from_expr, source_span_data, staged_action_error_diagnostic,
+    staged_expected_diagnostic,
 };
 
 const RECORDS_GRAMMAR_RESOURCE: &str = "grammars/records.grammar";
@@ -79,11 +80,20 @@ fn emission_from_interpreted_parse(
     }
     StagedRegionEmission {
         forms,
+        driver: StagedParseDriver::InterpretedGrammar,
+        oracle: StagedParseOracle::None,
         data: SourceData::record(
             "records-region",
             vec![
                 source_data::field("grammar", SourceData::symbol(RECORDS_GRAMMAR_NAME)),
-                source_data::field("driver", SourceData::symbol("interpreted-grammar")),
+                source_data::field(
+                    "driver",
+                    SourceData::symbol(StagedParseDriver::InterpretedGrammar.as_str()),
+                ),
+                source_data::field(
+                    "oracle",
+                    SourceData::symbol(StagedParseOracle::None.as_str()),
+                ),
                 source_data::field("parse-tree", interpreted_rule_node_source_data(&parse.root)),
                 source_data::field("records", SourceData::list(records)),
             ],
@@ -101,11 +111,20 @@ fn records_parse_error_emission(
     let diagnostic = records_parse_error_diagnostic(body, source_offset, &error);
     StagedRegionEmission {
         forms: Vec::new(),
+        driver: StagedParseDriver::InterpretedGrammar,
+        oracle: StagedParseOracle::None,
         data: SourceData::record(
             "records-region",
             vec![
                 source_data::field("grammar", SourceData::symbol(RECORDS_GRAMMAR_NAME)),
-                source_data::field("driver", SourceData::symbol("interpreted-grammar")),
+                source_data::field(
+                    "driver",
+                    SourceData::symbol(StagedParseDriver::InterpretedGrammar.as_str()),
+                ),
+                source_data::field(
+                    "oracle",
+                    SourceData::symbol(StagedParseOracle::None.as_str()),
+                ),
                 source_data::field(
                     "parse-error",
                     SourceData::record(

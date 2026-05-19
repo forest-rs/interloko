@@ -439,6 +439,8 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert!(eop.contains("object grammar-extension-emission:calculator/r1/f0"));
     assert!(eop.contains("object grammar-extension-provenance:calculator/r1/calculator-function"));
     assert!(eop.contains("adapter=calculator"));
+    assert!(eop.contains("driver=interpreted-grammar"));
+    assert!(eop.contains("oracle=none"));
     assert!(eop.contains("directive="));
 
     let trace = run_lab(&[
@@ -456,6 +458,8 @@ fn staged_calculator_region_runs_and_traces_activation_boundary() {
     assert!(trace.contains("grammar-action-output"));
     assert!(trace.contains("frontend-function(name: main"));
     assert!(trace.contains("adapter=calculator"));
+    assert!(trace.contains("driver=interpreted-grammar"));
+    assert!(trace.contains("oracle=none"));
     assert!(trace.contains("directive="));
     assert!(trace.contains("define function main()"));
     assert!(
@@ -493,6 +497,8 @@ fn staged_records_region_runs_and_projects_classes() {
     assert!(trace.contains("RecordsRegionGrammar"));
     assert!(trace.contains("extension emissions:"));
     assert!(trace.contains("forms=[frontend-class(name: <circle>"));
+    assert!(trace.contains("driver=interpreted-grammar"));
+    assert!(trace.contains("oracle=none"));
     assert!(trace.contains("materialized=\"define class <circle>"));
     assert!(trace.contains("records-region(grammar: RecordsRegionGrammar"));
 }
@@ -535,11 +541,14 @@ fn report_generates_staged_records_html() {
     assert!(html.contains("href=\"#artifact-art"));
     assert!(html.contains("id=\"interloko-report-data\""));
     assert!(html.contains("\"stagedRegions\""));
+    assert!(html.contains("\"driver\":\"interpreted-grammar\""));
+    assert!(html.contains("\"oracle\":\"none\""));
     assert!(html.contains("\"sourceSpan\""));
     assert!(html.contains("\"artifactKeys\""));
     assert!(html.contains("\"elapsedNanos\""));
     assert!(html.contains("\"executionTrace\""));
     assert!(html.contains("Expansion Chain"));
+    assert!(html.contains("driver interpreted-grammar · oracle none"));
     assert!(html.contains("RecordsRegionGrammar"));
     assert!(html.contains("Grammar package, rules, and actions"));
     assert!(html.contains("grammar-package:records"));

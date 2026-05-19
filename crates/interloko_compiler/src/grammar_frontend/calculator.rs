@@ -13,8 +13,9 @@ use super::interpreter::{
 };
 use super::{
     CALCULATOR_GRAMMAR_NAME, GrammarId, GrammarProjection, GrammarRule, GrammarRuleId,
-    ProjectionOrigin, StagedRegionEmission, grammar_rule_expression_data_from_expr,
-    source_span_data, staged_action_error_diagnostic, staged_expected_diagnostic,
+    ProjectionOrigin, StagedParseDriver, StagedParseOracle, StagedRegionEmission,
+    grammar_rule_expression_data_from_expr, source_span_data, staged_action_error_diagnostic,
+    staged_expected_diagnostic,
 };
 
 const CALCULATOR_GRAMMAR_RESOURCE: &str = "grammars/calculator.grammar";
@@ -78,11 +79,20 @@ fn emission_from_interpreted_parse(
     }
     StagedRegionEmission {
         forms,
+        driver: StagedParseDriver::InterpretedGrammar,
+        oracle: StagedParseOracle::None,
         data: SourceData::record(
             "calculator-region",
             vec![
                 source_data::field("grammar", SourceData::symbol(CALCULATOR_GRAMMAR_NAME)),
-                source_data::field("driver", SourceData::symbol("interpreted-grammar")),
+                source_data::field(
+                    "driver",
+                    SourceData::symbol(StagedParseDriver::InterpretedGrammar.as_str()),
+                ),
+                source_data::field(
+                    "oracle",
+                    SourceData::symbol(StagedParseOracle::None.as_str()),
+                ),
                 source_data::field("parse-tree", interpreted_rule_node_source_data(&parse.root)),
                 source_data::field("functions", SourceData::list(functions)),
             ],
@@ -100,11 +110,20 @@ fn calculator_parse_error_emission(
     let diagnostic = calculator_parse_error_diagnostic(body, source_offset, &error);
     StagedRegionEmission {
         forms: Vec::new(),
+        driver: StagedParseDriver::InterpretedGrammar,
+        oracle: StagedParseOracle::None,
         data: SourceData::record(
             "calculator-region",
             vec![
                 source_data::field("grammar", SourceData::symbol(CALCULATOR_GRAMMAR_NAME)),
-                source_data::field("driver", SourceData::symbol("interpreted-grammar")),
+                source_data::field(
+                    "driver",
+                    SourceData::symbol(StagedParseDriver::InterpretedGrammar.as_str()),
+                ),
+                source_data::field(
+                    "oracle",
+                    SourceData::symbol(StagedParseOracle::None.as_str()),
+                ),
                 source_data::field(
                     "parse-error",
                     SourceData::record(
