@@ -717,6 +717,25 @@ fn interpret_expression(
                 }],
             })
         }
+        RuleExpression::UntilLiteral(value) => {
+            let start = position;
+            let relative_end = source[start..]
+                .match_indices(value)
+                .find_map(|(index, _)| {
+                    let end = start + index + value.len();
+                    literal_boundary_ok(source, end, value).then_some(start + index)
+                })
+                .ok_or_else(|| ParseFailure::expected(source.len(), literal_expected(value)))?;
+            Ok(ExpressionMatch {
+                end: relative_end,
+                children: vec![InterpretedRuleNode {
+                    rule_name: format!("until:{value}"),
+                    span: Span::new(source_offset + start, source_offset + relative_end),
+                    text: source[start..relative_end].to_string(),
+                    children: Vec::new(),
+                }],
+            })
+        }
         RuleExpression::Sequence(items) => {
             let mut end = position;
             let mut children = Vec::new();

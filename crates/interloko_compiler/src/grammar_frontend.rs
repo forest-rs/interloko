@@ -340,6 +340,8 @@ pub enum RuleExpression {
     Literal(String),
     /// A character class over a single character.
     CharacterClass(String),
+    /// Consume source until the next literal delimiter, without consuming it.
+    UntilLiteral(String),
     /// A sequence of expressions.
     Sequence(Vec<RuleExpression>),
     /// An ordered choice between alternatives.
@@ -443,6 +445,12 @@ impl RuleExpression {
         Self::CharacterClass(value.into())
     }
 
+    /// Creates an opaque-region expression that consumes until `value`.
+    #[must_use]
+    pub fn until_literal(value: impl Into<String>) -> Self {
+        Self::UntilLiteral(value.into())
+    }
+
     /// Creates a sequence, collapsing a single item to that item.
     #[must_use]
     pub fn sequence(items: Vec<Self>) -> Self {
@@ -495,6 +503,7 @@ impl fmt::Display for RuleExpression {
             Self::Rule(name) => formatter.write_str(name),
             Self::Literal(value) => write!(formatter, "`{value}`"),
             Self::CharacterClass(value) => write!(formatter, "[{value}]"),
+            Self::UntilLiteral(value) => write!(formatter, "until(`{value}`)"),
             Self::Sequence(items) => {
                 for (index, item) in items.iter().enumerate() {
                     if index > 0 {
@@ -567,6 +576,13 @@ fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
         ),
         RuleExpression::CharacterClass(value) => SourceData::record(
             "character-class",
+            vec![source_data::field(
+                "value",
+                SourceData::string(value.as_str()),
+            )],
+        ),
+        RuleExpression::UntilLiteral(value) => SourceData::record(
+            "until-literal",
             vec![source_data::field(
                 "value",
                 SourceData::string(value.as_str()),
@@ -3129,6 +3145,18 @@ fn projected_rule_term(term: &str) -> RuleExpression {
         return projected_rule_expression(inner);
     }
     if let Some(inner) = trimmed
+        .strip_prefix("until(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .and_then(|inner| {
+            inner
+                .trim()
+                .strip_prefix('`')
+                .and_then(|inner| inner.strip_suffix('`'))
+        })
+    {
+        return RuleExpression::until_literal(inner);
+    }
+    if let Some(inner) = trimmed
         .strip_prefix('`')
         .and_then(|inner| inner.strip_suffix('`'))
     {
@@ -3818,6 +3846,31 @@ mod tests {
             .expect_err("one-or-more requires one match");
         assert_eq!(error.span, Span::new(30, 30));
         assert_eq!(error.expected, Vec::from(["[0-9]".to_string()]));
+    }
+
+    #[test]
+    fn source_authored_rule_interpreter_matches_until_literal_regions() {
+        let grammar = "grammar tiny\n\
+                       rule block = `begin` until(`end`) `end`\n\
+                       end\n";
+        let rules = interpreter::parse_source_authored_grammar(grammar);
+        let node = interpreter::interpret_region_result(&rules, "block", "begin 1 + 2\nend", 40)
+            .expect("block parses")
+            .root;
+
+        assert_eq!(node.rule_name, "block");
+        assert_eq!(node.span, Span::new(40, 55));
+        assert_eq!(
+            node.children
+                .iter()
+                .find(|child| child.rule_name == "until:end")
+                .map(|child| child.text.as_str()),
+            Some(" 1 + 2\n")
+        );
+        assert_eq!(
+            rules[0].expression.to_string(),
+            "`begin` until(`end`) `end`"
+        );
     }
 
     #[test]
