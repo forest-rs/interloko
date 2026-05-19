@@ -19,8 +19,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub use interloko_grammar::{
-    GrammarAction, GrammarActionArg, GrammarActionTerm, ProjectionOrigin, RuleExpression,
-    TransformOutput,
+    GrammarAction, GrammarActionArg, GrammarActionTerm, RuleExpression, TransformOutput,
 };
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
@@ -31,6 +30,42 @@ use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree};
 impl From<interloko_grammar::Span> for Span {
     fn from(span: interloko_grammar::Span) -> Self {
         Self::new(span.start, span.end)
+    }
+}
+
+/// Stable source of a projected grammar environment fact.
+///
+/// This is compiler/frontend metadata used for grammar MOP/EOP projection. It
+/// is intentionally not part of `interloko_grammar`, whose parser kernel does
+/// not branch on projection provenance while matching input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionOrigin {
+    /// Projected from compiler-owned facts.
+    CompilerProjected,
+    /// Projected from a compiler-shipped prototype.
+    CompilerProjectedPrototype,
+    /// Projected from a trusted host fixture or adapter.
+    TrustedHostFixture,
+    /// Projected from source-authored grammar data.
+    SourceAuthored,
+}
+
+impl ProjectionOrigin {
+    /// Returns the stable origin token used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CompilerProjected => "compiler-projected",
+            Self::CompilerProjectedPrototype => "compiler-projected-prototype",
+            Self::TrustedHostFixture => "trusted-host-fixture",
+            Self::SourceAuthored => "source-authored",
+        }
+    }
+}
+
+impl fmt::Display for ProjectionOrigin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 

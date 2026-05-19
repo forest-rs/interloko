@@ -57,42 +57,6 @@ impl Span {
     }
 }
 
-/// Stable source of a projected grammar fact.
-///
-/// This is metadata for callers that project grammar rules into a larger
-/// environment model. `interloko_compiler` uses it for grammar MOP/EOP records;
-/// the grammar kernel itself does not branch on it while matching input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProjectionOrigin {
-    /// Projected from compiler-owned facts.
-    CompilerProjected,
-    /// Projected from a compiler-shipped prototype.
-    CompilerProjectedPrototype,
-    /// Projected from a trusted host fixture or adapter.
-    TrustedHostFixture,
-    /// Projected from source-authored grammar data.
-    SourceAuthored,
-}
-
-impl ProjectionOrigin {
-    /// Returns the stable origin token used in dumps.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CompilerProjected => "compiler-projected",
-            Self::CompilerProjectedPrototype => "compiler-projected-prototype",
-            Self::TrustedHostFixture => "trusted-host-fixture",
-            Self::SourceAuthored => "source-authored",
-        }
-    }
-}
-
-impl fmt::Display for ProjectionOrigin {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 /// Structured grammar expression used by grammar rules.
 ///
 /// [`parse_rule_expression`] and [`parse_grammar_source`] produce this type.

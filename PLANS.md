@@ -104,7 +104,7 @@ mapping grammar matches to `FrontendForm` values.
 
 ### Sequence
 
-1. Add `crates/interloko_grammar` and move neutral `Span`, `ProjectionOrigin`,
+1. Add `crates/interloko_grammar` and move neutral `Span`,
    `RuleExpression`, `GrammarAction`, grammar-source parsing, and interpreter
    parse tree/failure types into it.
 2. Re-export the moved public grammar types from `grammar_frontend` so existing
