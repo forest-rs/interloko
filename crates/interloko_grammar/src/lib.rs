@@ -1,5 +1,5 @@
 #![no_std]
-#![doc = "Neutral grammar expressions, grammar-source parsing, and interpreted matching."]
+#![doc = include_str!("../README.md")]
 
 extern crate alloc;
 
