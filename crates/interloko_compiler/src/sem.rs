@@ -22,6 +22,13 @@ pub struct FunctionId(
     pub u32,
 );
 
+/// Durable top-level constant identifier within a semantic module.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ConstantId(
+    /// Zero-based constant index.
+    pub u32,
+);
+
 /// Durable local identifier within a semantic function or method.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct LocalId(
@@ -408,6 +415,8 @@ pub struct Module {
     pub methods: Vec<Method>,
     /// Direct function definitions.
     pub functions: Vec<Function>,
+    /// Immutable top-level constants.
+    pub constants: Vec<Constant>,
     /// Semantic diagnostics.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -886,6 +895,23 @@ pub struct Function {
     pub span: Span,
 }
 
+/// Immutable top-level constant value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Constant {
+    /// Constant identifier.
+    pub id: ConstantId,
+    /// Stable definition identity.
+    pub definition: DefinitionId,
+    /// Constant name.
+    pub name: String,
+    /// Lowered initializer expression.
+    pub value: Expr,
+    /// Result value category.
+    pub result_kind: ValueKind,
+    /// Source span.
+    pub span: Span,
+}
+
 /// Semantic local binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Local {
@@ -1107,6 +1133,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Immutable top-level constant reference.
+    ConstantRef {
+        /// Referenced constant.
+        constant: ConstantId,
+        /// Constant value category.
+        result_kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Resolved class object value.
     ClassObject {
         /// Nominal class represented by this value.
@@ -1313,6 +1348,7 @@ impl Expr {
             | Self::SymbolLiteral { span, .. }
             | Self::VectorLiteral { span, .. }
             | Self::Local { span, .. }
+            | Self::ConstantRef { span, .. }
             | Self::ClassObject { span, .. }
             | Self::KnownCallable { span, .. }
             | Self::GenericFunctionObject { span, .. }
@@ -1378,6 +1414,14 @@ impl FunctionSymbol {
     fn arity(&self) -> usize {
         self.param_kinds.len()
     }
+}
+
+#[derive(Clone, Debug)]
+struct ConstantSymbol {
+    name: String,
+    id: ConstantId,
+    kind: ValueKind,
+    span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -1506,6 +1550,8 @@ struct Lowering {
     generics: Vec<GenericFunction>,
     methods: Vec<Method>,
     functions: Vec<FunctionSymbol>,
+    constants: Vec<Constant>,
+    constant_symbols: Vec<ConstantSymbol>,
     generic_symbols: Vec<GenericSymbol>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -1519,15 +1565,19 @@ impl Lowering {
             generics: Vec::new(),
             methods: Vec::new(),
             functions: Vec::new(),
+            constants: Vec::new(),
+            constant_symbols: Vec::new(),
             generic_symbols: Vec::new(),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
         lowering.collect_generics(module);
         lowering.collect_functions(module);
+        lowering.collect_constant_symbols(module);
         lowering.collect_slot_init_values(module);
         lowering.finalize_classes();
         lowering.collect_slot_setter_generics();
+        lowering.lower_constants(module);
         lowering
     }
 
@@ -2430,6 +2480,95 @@ impl Lowering {
         }
     }
 
+    fn collect_constant_symbols(&mut self, module: &ast::Module) {
+        for (index, constant) in module.constants.iter().enumerate() {
+            if let Some(previous) = self.resolve_constant(&constant.name) {
+                self.diagnostics.push(
+                    Diagnostic::error(constant.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "constant"))
+                        .with_arg(DiagnosticArg::text("name", constant.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
+            }
+            if let Some(previous) = self.resolve_function(&constant.name) {
+                self.diagnostics.push(
+                    Diagnostic::error(constant.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "constant"))
+                        .with_arg(DiagnosticArg::text("name", constant.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
+            }
+            if let Some(previous) = self.resolve_generic(&constant.name) {
+                self.diagnostics.push(
+                    Diagnostic::error(constant.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "constant"))
+                        .with_arg(DiagnosticArg::text("name", constant.name.clone()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
+            }
+            let id = ConstantId(u32::try_from(index).unwrap_or(u32::MAX));
+            self.constant_symbols.push(ConstantSymbol {
+                name: constant.name.clone(),
+                id,
+                kind: ValueKind::Error,
+                span: constant.span,
+            });
+        }
+    }
+
+    fn lower_constants(&mut self, module: &ast::Module) {
+        self.constants.clear();
+        for (index, constant) in module.constants.iter().enumerate() {
+            let id = ConstantId(u32::try_from(index).unwrap_or(u32::MAX));
+            let mut ctx = FunctionContext::new();
+            let value = self.lower_expr(&mut ctx, &constant.value);
+            self.diagnostics.extend(ctx.diagnostics);
+            let result_kind = self.expr_kind(&value);
+            if matches!(result_kind, ValueKind::KnownCallable(_) | ValueKind::Error) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        constant.value.span(),
+                        DiagnosticCode::ConstantInitializerTypeMismatch,
+                    )
+                    .with_arg(DiagnosticArg::text("constant", constant.name.clone()))
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(result_kind))),
+                );
+            }
+            if let Some(symbol) = self.constant_symbols.get_mut(index) {
+                symbol.kind = result_kind;
+            }
+            self.constants.push(Constant {
+                id,
+                definition: constant.definition,
+                name: constant.name.clone(),
+                value,
+                result_kind,
+                span: constant.span,
+            });
+        }
+    }
+
     fn lower_module(&mut self, module: &ast::Module) -> Module {
         self.methods.clear();
         for method in &module.methods {
@@ -2458,6 +2597,7 @@ impl Lowering {
             generics: self.generics.clone(),
             methods: self.methods.clone(),
             functions,
+            constants: self.constants.clone(),
             diagnostics: self.diagnostics.clone(),
         }
     }
@@ -3016,6 +3156,13 @@ impl Lowering {
     }
 
     fn lower_known_name(&self, ctx: &mut FunctionContext, name: &str, span: Span) -> Expr {
+        if let Some(symbol) = self.resolve_constant(name) {
+            return Expr::ConstantRef {
+                constant: symbol.id,
+                result_kind: symbol.kind,
+                span,
+            };
+        }
         if let Some(symbol) = self.resolve_function(name) {
             return Expr::KnownCallable {
                 callable: KnownCallable::DirectFunction(symbol.id),
@@ -3977,6 +4124,7 @@ impl Lowering {
             | Expr::ValueEqual { .. }
             | Expr::InstanceOf { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,
+            Expr::ConstantRef { result_kind, .. } => *result_kind,
             Expr::Cast { class, .. } => self
                 .kind_for_builtin_class(*class)
                 .unwrap_or(ValueKind::Object(*class)),
@@ -4369,6 +4517,12 @@ impl Lowering {
         self.functions.iter().find(|symbol| symbol.name == name)
     }
 
+    fn resolve_constant(&self, name: &str) -> Option<&ConstantSymbol> {
+        self.constant_symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+    }
+
     fn resolve_generic(&self, name: &str) -> Option<&GenericSymbol> {
         self.generic_symbols
             .iter()
@@ -4476,6 +4630,56 @@ mod tests {
         };
         assert_eq!(*function, FunctionId(0));
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn resolves_top_level_constants_and_reports_bad_initializers() {
+        let module = lower_source(
+            "define constant $answer = 40 + 2;\n\
+             define constant $alias = $answer;\n\
+             define function main()\n  $alias\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.constants.len(), 2);
+        assert_eq!(module.constants[0].name, "$answer");
+        assert_eq!(module.constants[0].result_kind, ValueKind::I64);
+        assert!(matches!(
+            module.functions[0].body.result,
+            Expr::ConstantRef {
+                constant: ConstantId(1),
+                result_kind: ValueKind::I64,
+                ..
+            }
+        ));
+
+        let duplicate = lower_source(
+            "define constant $answer = 1;\n\
+             define constant $answer = 2;\n\
+             define function main()\n  $answer\nend;",
+        );
+        assert!(has_diagnostic(
+            &duplicate,
+            DiagnosticCode::DuplicateDefinition,
+            &[("kind", "constant"), ("name", "$answer")]
+        ));
+
+        let unresolved = lower_source("define function main()\n  $missing\nend;");
+        assert!(has_diagnostic(
+            &unresolved,
+            DiagnosticCode::UnresolvedLocal,
+            &[("local", "$missing")]
+        ));
+
+        let invalid = lower_source(
+            "define function helper()\n  1\nend;\n\
+             define constant $helper = helper;\n\
+             define function main()\n  0\nend;",
+        );
+        assert!(has_diagnostic(
+            &invalid,
+            DiagnosticCode::ConstantInitializerTypeMismatch,
+            &[("constant", "$helper")]
+        ));
     }
 
     #[test]

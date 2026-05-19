@@ -1169,6 +1169,7 @@ fn render_model_section(
         (EnvironmentKind::Generic, "Generics"),
         (EnvironmentKind::Method, "Methods"),
         (EnvironmentKind::Function, "Functions"),
+        (EnvironmentKind::Constant, "Constants"),
         (EnvironmentKind::GrammarRegistry, "Grammar Registry"),
         (
             EnvironmentKind::RegisteredGrammarEnvironment,
@@ -1360,6 +1361,7 @@ fn object_facts(artifacts: &SessionArtifacts, object: &EnvironmentObject) -> Vec
         EnvironmentKind::Generic => generic_object_facts(artifacts, object.id.as_str()),
         EnvironmentKind::Method => method_object_facts(artifacts, object.id.as_str()),
         EnvironmentKind::Function => function_object_facts(artifacts, object.id.as_str()),
+        EnvironmentKind::Constant => constant_object_facts(artifacts, object.id.as_str()),
         _ => Vec::new(),
     }
 }
@@ -1591,6 +1593,27 @@ fn function_object_facts(artifacts: &SessionArtifacts, object_id: &str) -> Vec<O
     ])
 }
 
+fn constant_object_facts(artifacts: &SessionArtifacts, object_id: &str) -> Vec<ObjectFact> {
+    let Some(index) = parse_prefixed_index(object_id, "constant:k") else {
+        return Vec::new();
+    };
+    let Some(constant) = artifacts.sem.constants.get(index) else {
+        return Vec::new();
+    };
+    Vec::from([
+        ObjectFact::new(
+            "binding",
+            "immutable",
+            "Top-level constants are immutable source bindings.",
+        ),
+        ObjectFact::new(
+            "result",
+            value_kind_label(&artifacts.sem, constant.result_kind),
+            "Resolved constant value category.",
+        ),
+    ])
+}
+
 fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
     match kind {
         EnvironmentKind::SourceFile => "Named source file known to this session.",
@@ -1642,6 +1665,7 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
         EnvironmentKind::Generic => "Generic function participating in method dispatch.",
         EnvironmentKind::Method => "Method implementation attached to a generic function.",
         EnvironmentKind::Function => "Direct function definition.",
+        EnvironmentKind::Constant => "Immutable top-level constant definition.",
         EnvironmentKind::DispatchSite => "Resolved generic dispatch site.",
         EnvironmentKind::Diagnostic => "Structured compiler diagnostic.",
         EnvironmentKind::RuntimeLayoutRow => "Runtime storage layout fact.",

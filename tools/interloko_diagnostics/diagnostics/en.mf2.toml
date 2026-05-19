@@ -31,6 +31,7 @@
 "sem.function-arity-mismatch" = "function `{ $callee }` expects { $expected_count } arguments but got { $actual_count }"
 "sem.function-argument-type-mismatch" = "function `{ $function }` argument { $argument_index } expects { $expected } but got { $actual }"
 "sem.function-return-type-mismatch" = "function `{ $function }` returns { $expected } but body has { $actual }"
+"sem.constant-initializer-type-mismatch" = "constant `{ $constant }` initializer must produce a runtime value; got { $actual }"
 "sem.generic-method-specializer-type-mismatch" = "method `{ $method }` argument { $argument_index } specializer { $actual } does not satisfy generic contract { $expected }"
 "sem.generic-method-arity-mismatch" = "method `{ $method }` has { $actual_count } parameters but generic expects { $expected_count }"
 "sem.ambiguous-generic-method-dispatch" = "generic `{ $generic }` has ambiguous methods for { $actuals }: { $candidates }"

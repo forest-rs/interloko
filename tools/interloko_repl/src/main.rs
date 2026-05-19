@@ -1853,6 +1853,7 @@ fn object_lookup_names(object: &EnvironmentObject) -> Vec<String> {
         EnvironmentKind::Generic
         | EnvironmentKind::Method
         | EnvironmentKind::Function
+        | EnvironmentKind::Constant
         | EnvironmentKind::Accessor => presentation_title_name(&object.presentation.title)
             .into_iter()
             .collect(),
@@ -2718,6 +2719,7 @@ fn form_primary_kind_matches(kind: Option<TopLevelFormKind>, object: Environment
             | (Some(TopLevelFormKind::Generic), EnvironmentKind::Generic)
             | (Some(TopLevelFormKind::Method), EnvironmentKind::Method)
             | (Some(TopLevelFormKind::Function), EnvironmentKind::Function)
+            | (Some(TopLevelFormKind::Constant), EnvironmentKind::Constant)
     )
 }
 

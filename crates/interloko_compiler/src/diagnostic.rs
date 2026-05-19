@@ -82,6 +82,8 @@ pub enum DiagnosticCode {
     FunctionArgumentTypeMismatch,
     /// A direct function body does not satisfy its result annotation.
     FunctionReturnTypeMismatch,
+    /// A top-level constant initializer does not produce a runtime value.
+    ConstantInitializerTypeMismatch,
     /// A generic method specializer does not satisfy the generic contract.
     GenericMethodSpecializerTypeMismatch,
     /// A method definition does not match the generic arity.
@@ -213,6 +215,7 @@ impl DiagnosticCode {
         Self::FunctionArityMismatch,
         Self::FunctionArgumentTypeMismatch,
         Self::FunctionReturnTypeMismatch,
+        Self::ConstantInitializerTypeMismatch,
         Self::GenericMethodSpecializerTypeMismatch,
         Self::GenericMethodArityMismatch,
         Self::AmbiguousGenericMethodDispatch,
@@ -298,6 +301,7 @@ impl DiagnosticCode {
             Self::FunctionArityMismatch => "sem.function-arity-mismatch",
             Self::FunctionArgumentTypeMismatch => "sem.function-argument-type-mismatch",
             Self::FunctionReturnTypeMismatch => "sem.function-return-type-mismatch",
+            Self::ConstantInitializerTypeMismatch => "sem.constant-initializer-type-mismatch",
             Self::GenericMethodSpecializerTypeMismatch => {
                 "sem.generic-method-specializer-type-mismatch"
             }
@@ -386,6 +390,7 @@ impl DiagnosticCode {
             "sem.function-arity-mismatch" => Self::FunctionArityMismatch,
             "sem.function-argument-type-mismatch" => Self::FunctionArgumentTypeMismatch,
             "sem.function-return-type-mismatch" => Self::FunctionReturnTypeMismatch,
+            "sem.constant-initializer-type-mismatch" => Self::ConstantInitializerTypeMismatch,
             "sem.generic-method-specializer-type-mismatch" => {
                 Self::GenericMethodSpecializerTypeMismatch
             }

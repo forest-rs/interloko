@@ -689,6 +689,7 @@ struct BodyLowering<'module> {
     instructions: Vec<Instr>,
     local_regs: Vec<Option<Value>>,
     active_restarts: Vec<ActiveRestart>,
+    active_constants: Vec<sem::ConstantId>,
     next_reg: u32,
     next_label: u32,
 }
@@ -747,6 +748,7 @@ impl<'module> BodyLowering<'module> {
             instructions: Vec::new(),
             local_regs: Vec::new(),
             active_restarts: Vec::new(),
+            active_constants: Vec::new(),
             next_reg: next_after_inputs(generic.arity),
             next_label: 0,
         }
@@ -766,6 +768,7 @@ impl<'module> BodyLowering<'module> {
             instructions: Vec::new(),
             local_regs: vec![None; source_locals.len()],
             active_restarts: Vec::new(),
+            active_constants: Vec::new(),
             next_reg: 1,
             next_label: 0,
         }
@@ -1080,6 +1083,26 @@ impl<'module> BodyLowering<'module> {
                     .and_then(|value| *value)
                     .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
                 self.coerce_value(value, value_kind(*result_kind)?, *span)
+            }
+            sem::Expr::ConstantRef { constant, span, .. } => {
+                if self
+                    .active_constants
+                    .iter()
+                    .any(|active| active == constant)
+                {
+                    return Err(invalid_semantic("constant initializer cycle"));
+                }
+                let constant_info = self
+                    .module
+                    .constants
+                    .get(constant.0 as usize)
+                    .ok_or_else(|| invalid_semantic("constant id is out of range"))?;
+                let expected = value_kind(constant_info.result_kind)?;
+                let value = constant_info.value.clone();
+                self.active_constants.push(*constant);
+                let lowered = self.lower_expr(&value);
+                self.active_constants.pop();
+                self.coerce_value(lowered?, expected, *span)
             }
             sem::Expr::ClassObject { class, span } => self.lower_class_meta_object(*class, *span),
             sem::Expr::GenericFunctionObject { generic, span } => {

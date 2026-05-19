@@ -378,6 +378,8 @@ pub enum EnvironmentKind {
     Method,
     /// A direct function definition.
     Function,
+    /// An immutable top-level constant definition.
+    Constant,
     /// A semantic generic dispatch-site object.
     DispatchSite,
     /// A compiler diagnostic.
@@ -420,6 +422,7 @@ impl EnvironmentKind {
             Self::Generic => "generic",
             Self::Method => "method",
             Self::Function => "function",
+            Self::Constant => "constant",
             Self::DispatchSite => "dispatch-site",
             Self::Diagnostic => "diagnostic",
             Self::RuntimeLayoutRow => "runtime-layout-row",
@@ -1132,6 +1135,8 @@ pub enum TopLevelFormKind {
     Method,
     /// `define function`.
     Function,
+    /// `define constant`.
+    Constant,
 }
 
 /// Source span for one parser-recognized top-level form.
@@ -1171,6 +1176,8 @@ pub enum SourceFormKind {
     Method,
     /// Base `define function`.
     Function,
+    /// Base `define constant`.
+    Constant,
     /// Staged frontend class form.
     FrontendClass,
     /// Staged frontend function form.
@@ -1186,6 +1193,7 @@ impl SourceFormKind {
             Self::Generic => "generic definition",
             Self::Method => "method definition",
             Self::Function => "function definition",
+            Self::Constant => "constant definition",
             Self::FrontendClass => "frontend class",
             Self::FrontendFunction => "frontend function",
         }
@@ -3671,6 +3679,17 @@ fn collect_dispatch_sites_in_expr(
                 );
             }
         }
+        sem::Expr::ConstantRef { constant, .. } => {
+            if let Some(constant) = artifacts.sem.constants.get(constant.0 as usize) {
+                collect_dispatch_sites_in_expr(
+                    artifacts,
+                    owner,
+                    &constant.value,
+                    owner_index,
+                    sites,
+                );
+            }
+        }
         sem::Expr::IntrinsicCall { args, .. } => {
             for arg in args {
                 collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
@@ -4241,6 +4260,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
         sem::Expr::SymbolLiteral { class, .. } => sem::ValueKind::Symbol(*class),
         sem::Expr::VectorLiteral { class, .. } => sem::ValueKind::Vector(*class),
         sem::Expr::Local { result_kind, .. } => *result_kind,
+        sem::Expr::ConstantRef { result_kind, .. } => *result_kind,
         sem::Expr::ClassObject { class, .. } | sem::Expr::ClassOf { class, .. } => {
             sem::ValueKind::ClassObject(*class)
         }
@@ -4290,6 +4310,10 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
         sem::Expr::StringLiteral { class, .. }
         | sem::Expr::SymbolLiteral { class, .. }
         | sem::Expr::VectorLiteral { class, .. } => Some(*class),
+        sem::Expr::ConstantRef { constant, .. } => module
+            .constants
+            .get(constant.0 as usize)
+            .and_then(|constant| exact_static_class(module, &constant.value)),
         sem::Expr::Cast { value, .. } => exact_static_class(module, value),
         sem::Expr::If {
             then_branch,
@@ -4847,6 +4871,7 @@ fn top_level_form_kind(kind: crate::syntax::CstKind) -> Option<TopLevelFormKind>
         crate::syntax::CstKind::Generic => Some(TopLevelFormKind::Generic),
         crate::syntax::CstKind::Method => Some(TopLevelFormKind::Method),
         crate::syntax::CstKind::Function => Some(TopLevelFormKind::Function),
+        crate::syntax::CstKind::Constant => Some(TopLevelFormKind::Constant),
         _ => None,
     }
 }
@@ -4931,6 +4956,7 @@ fn source_form_kind_from_top_level(kind: TopLevelFormKind) -> SourceFormKind {
         TopLevelFormKind::Generic => SourceFormKind::Generic,
         TopLevelFormKind::Method => SourceFormKind::Method,
         TopLevelFormKind::Function => SourceFormKind::Function,
+        TopLevelFormKind::Constant => SourceFormKind::Constant,
     }
 }
 
@@ -5510,6 +5536,17 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         dump_sem_locals(module, &mut out, &method.locals, 2);
         dump_sem_block(&mut out, &method.body, 2);
+    }
+    for constant in &module.constants {
+        let _ = writeln!(
+            out,
+            "constant k{} {} {} result={}",
+            constant.id.0,
+            constant.definition,
+            constant.name,
+            sem_kind_label(module, constant.result_kind)
+        );
+        dump_sem_expr(&mut out, &constant.value, 2);
     }
     for function in &module.functions {
         let params = function
@@ -7071,6 +7108,24 @@ fn dump_sem_environment_object(artifacts: &SessionArtifacts, object: &Environmen
                 dump_environment_object_summary(object, &mut out);
             }
         }
+        EnvironmentKind::Constant => {
+            if let Some(constant) = object_index(object.id.as_str(), "constant:k")
+                .and_then(|index| artifacts.sem.constants.get(index))
+            {
+                let _ = writeln!(out, "kind: constant");
+                let _ = writeln!(out, "name: {}", constant.name);
+                let _ = writeln!(out, "definition: {}", constant.definition);
+                let _ = writeln!(
+                    out,
+                    "result: {}",
+                    sem_kind_label(&artifacts.sem, constant.result_kind)
+                );
+                let _ = writeln!(out, "value:");
+                dump_sem_expr(&mut out, &constant.value, 2);
+            } else {
+                dump_environment_object_summary(object, &mut out);
+            }
+        }
         EnvironmentKind::Method => {
             if let Some(method) = object_index(object.id.as_str(), "method:m")
                 .and_then(|index| artifacts.sem.methods.get(index))
@@ -7759,6 +7814,9 @@ fn project_session_environment(
     for function in &module.functions {
         project_environment_function(module, sink, function);
     }
+    for constant in &module.constants {
+        project_environment_constant(module, sink, constant);
+    }
     for site in artifacts.dispatch_sites() {
         project_environment_dispatch_site(module, sink, &site);
     }
@@ -7916,6 +7974,25 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
                         QueryArtifact::LoweredModule,
                         QueryArtifact::TapeProgram,
                         QueryArtifact::RuntimeResult,
+                    ],
+                );
+            }
+        }
+        EnvironmentKind::Constant => {
+            if let Some(constant) = object_index(object.id.as_str(), "constant:k")
+                .and_then(|index| artifacts.sem.constants.get(index))
+            {
+                object.source = SourceFacet::new(
+                    Some(source_file),
+                    Some(constant.definition),
+                    Some(constant.span),
+                );
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[
+                        QueryArtifact::Bind,
+                        QueryArtifact::LoweredModule,
+                        QueryArtifact::TapeProgram,
                     ],
                 );
             }
@@ -9101,6 +9178,40 @@ fn project_environment_function(
     }));
 }
 
+fn project_environment_constant(
+    module: &sem::Module,
+    sink: &mut dyn EnvironmentObjectSink,
+    constant: &sem::Constant,
+) {
+    use EnvironmentAffordance as Aff;
+
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: format!("constant:k{}", constant.id.0),
+        kind: EnvironmentKind::Constant,
+        meta_class: "<constant>",
+        origin: EnvironmentOrigin::SourceAuthored,
+        storage: EnvironmentStorage::SourceDefined,
+        title: format!(
+            "{} = {}",
+            constant.name,
+            sem_kind_label(module, constant.result_kind)
+        ),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpSem,
+            Aff::DumpLowered,
+            Aff::DumpTape,
+            Aff::DumpEop,
+            Aff::ShowDependencies,
+        ]),
+        execution: Some("binding=immutable top-level".to_string()),
+        inspection: format!(
+            "definition={} constant-id=k{}",
+            constant.definition, constant.id.0
+        ),
+    }));
+}
+
 fn project_environment_dispatch_site(
     module: &sem::Module,
     sink: &mut dyn EnvironmentObjectSink,
@@ -9638,6 +9749,18 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 out,
                 "local l{} as {}",
                 local.0,
+                sem_kind_label_for_expr(*result_kind)
+            );
+        }
+        sem::Expr::ConstantRef {
+            constant,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "constant-ref k{} as {}",
+                constant.0,
                 sem_kind_label_for_expr(*result_kind)
             );
         }
@@ -10432,6 +10555,18 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             let result = sem_kind_fingerprint(module, *result_kind);
             let _ = write!(out, "local({}:{result})", local.0);
         }
+        sem::Expr::ConstantRef {
+            constant,
+            result_kind,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let definition = module
+                .constants
+                .get(constant.0 as usize)
+                .map_or(0, |constant| constant.definition.raw());
+            let _ = write!(out, "constant({definition}:{result})");
+        }
         sem::Expr::ClassObject { class, .. } => {
             let definition = module
                 .classes
@@ -10908,11 +11043,48 @@ mod tests {
                 .iter()
                 .any(|id| id.starts_with("class:c"))
         );
+        assert!(staged.produced_object_ids.iter().all(|id| id != "class:c0"));
+    }
+
+    #[test]
+    fn session_projects_constant_source_forms_and_environment_objects() {
+        let source = "define constant $answer = 42;\n\
+                      define function main()\n  $answer\nend\n";
+        let artifacts =
+            CompilerSession::compile_source("constant.loko", source, RuntimeMode::RunMain);
+
+        assert_eq!(
+            artifacts.runtime_result,
+            Some(RuntimeResult::ReturnedI64(42))
+        );
+        let forms = artifacts.source_forms();
+        let constant_form = forms
+            .iter()
+            .find(|form| form.kind == SourceFormKind::Constant)
+            .expect("constant source form");
         assert!(
-            staged
+            constant_form
                 .produced_object_ids
                 .iter()
-                .all(|id| id != "class:c0")
+                .any(|id| id == "constant:k0")
+        );
+
+        let constant = artifacts
+            .environment_objects()
+            .into_iter()
+            .find(|object| object.id.as_str() == "constant:k0")
+            .expect("constant object");
+        assert_eq!(constant.kind, EnvironmentKind::Constant);
+        assert_eq!(
+            constant.source.definition,
+            Some(artifacts.sem.constants[0].definition)
+        );
+        assert!(
+            constant
+                .artifacts
+                .keys
+                .iter()
+                .any(|key| key.kind == crate::identity::ArtifactKind::Bind)
         );
     }
 
