@@ -50,6 +50,7 @@ const COMMANDS: &[&str] = &[
     ":eop",
     ":artifacts",
     ":dispatch",
+    ":explain",
     ":inspect",
     ":affordances",
     ":show-form",
@@ -328,6 +329,7 @@ impl Repl {
                 write!(stdout, "{}", artifacts.dump_artifact_graph())?;
             }
             ":dispatch" => self.print_dispatch(&args, stdout, stderr)?,
+            ":explain" => self.print_explanation(&args, stdout, stderr)?,
             ":inspect" => self.print_object(&args, stdout, stderr)?,
             ":affordances" => self.print_affordances(&args, stdout, stderr)?,
             ":show-form" => self.show_form(&args, stdout, stderr)?,
@@ -746,6 +748,42 @@ impl Repl {
             }
             ReplObjectReference::Environment(object) => {
                 write!(stdout, "{}", format_environment_object(&object))?;
+            }
+            ReplObjectReference::AmbiguousEnvironment(objects) => {
+                write_ambiguous_object_reference(stderr, &id, &objects)?;
+            }
+            ReplObjectReference::UnknownEnvironment => {
+                writeln!(stderr, "error: unknown object `{id}`")?;
+            }
+            ReplObjectReference::UnknownForm => writeln!(stderr, "error: unknown form `{id}`")?,
+        }
+        Ok(())
+    }
+
+    fn print_explanation<W, E>(
+        &mut self,
+        args: &[&str],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(id) = single_object_id(args, ":explain <object-id|name>", stderr)? else {
+            return Ok(());
+        };
+        let artifacts = self.ensure_artifacts(stderr)?;
+        match self.resolve_repl_object_reference(&artifacts, &id) {
+            ReplObjectReference::Form(entry) => {
+                write!(stdout, "{}", format_form_explanation(&entry, &artifacts))?;
+            }
+            ReplObjectReference::Environment(object) => {
+                write!(
+                    stdout,
+                    "{}",
+                    format_environment_explanation(&object, &artifacts)
+                )?;
             }
             ReplObjectReference::AmbiguousEnvironment(objects) => {
                 write_ambiguous_object_reference(stderr, &id, &objects)?;
@@ -1950,6 +1988,133 @@ fn format_affordances(object: &EnvironmentObject) -> String {
     out
 }
 
+fn format_form_explanation(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let form = &entry.form;
+    let defined = form_defined_objects(entry, artifacts);
+    let grammar = form_grammar_context(entry, artifacts);
+    let parse_view = artifacts.parse_view_for_span(form.span);
+    let mut out = String::new();
+    let _ = writeln!(out, "explain {}", form.id());
+    let _ = writeln!(
+        out,
+        "summary: {} {} `{}` lines {}..{} span {}..{}",
+        entry.origin.as_str(),
+        form.kind,
+        form.name,
+        form.line_start,
+        form.line_end,
+        form.span.start,
+        form.span.end
+    );
+    let _ = writeln!(out, "defined objects:");
+    if defined.is_empty() {
+        let _ = writeln!(out, "  <none>");
+    } else {
+        for object in &defined {
+            let primary = if form_primary_object(entry, object) {
+                " primary"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "  {} {}{}",
+                object.id.as_str(),
+                object.presentation.title,
+                primary
+            );
+        }
+    }
+    let _ = writeln!(out, "grammar:");
+    write_form_grammar_context(&mut out, &grammar, "  ");
+    let _ = writeln!(
+        out,
+        "parse: {} nodes, {} tokens, {} rule applications, {} diagnostics",
+        parse_view.nodes.len(),
+        parse_view.tokens.len(),
+        parse_view.rule_applications.len(),
+        parse_view.diagnostics.len()
+    );
+    let _ = writeln!(out, "try:");
+    let _ = writeln!(out, "  :inspect {}", form.id());
+    let _ = writeln!(out, "  :invoke {} show-source", form.id());
+    let _ = writeln!(out, "  :invoke {} show-defined-objects", form.id());
+    let _ = writeln!(out, "  :invoke {} show-grammar", form.id());
+    let _ = writeln!(out, "  :invoke {} show-parse", form.id());
+    out
+}
+
+fn format_environment_explanation(
+    object: &EnvironmentObject,
+    artifacts: &SessionArtifacts,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "explain {}", object.id);
+    let _ = writeln!(out, "summary: {}", object.presentation.title);
+    let _ = writeln!(
+        out,
+        "kind: {} · origin: {} · storage: {}",
+        object.kind.as_str(),
+        object.origin.as_str(),
+        object.storage.as_str()
+    );
+    let _ = writeln!(out, "source:");
+    if let Some(span) = object.source.span {
+        let line = line_number_for_offset(&artifacts.source.source, span.start);
+        let _ = writeln!(out, "  line {line}, span {}..{}", span.start, span.end);
+    } else {
+        let _ = writeln!(out, "  <none>");
+    }
+    let _ = writeln!(out, "defined by:");
+    let defining_forms = source_forms_defining_object(artifacts, object.id.as_str());
+    if defining_forms.is_empty() {
+        let _ = writeln!(out, "  <none>");
+    } else {
+        for form in defining_forms {
+            let _ = writeln!(
+                out,
+                "  {} {} span {}..{}",
+                form.id,
+                form.kind.as_str(),
+                form.span.start,
+                form.span.end
+            );
+        }
+    }
+    let _ = writeln!(out, "affordances:");
+    for affordance in &object.affordances.names {
+        let _ = writeln!(out, "  {}", affordance.as_str());
+    }
+    let _ = writeln!(out, "try:");
+    let _ = writeln!(out, "  :inspect {}", object.id);
+    let _ = writeln!(out, "  :affordances {}", object.id);
+    for affordance in object
+        .affordances
+        .names
+        .iter()
+        .filter(|affordance| affordance.as_str() != "inspect")
+        .take(4)
+    {
+        let _ = writeln!(out, "  :invoke {} {}", object.id, affordance.as_str());
+    }
+    out
+}
+
+fn source_forms_defining_object(
+    artifacts: &SessionArtifacts,
+    object_id: &str,
+) -> Vec<interloko_compiler::session::SourceFormProvenance> {
+    artifacts
+        .source_forms()
+        .into_iter()
+        .filter(|form| {
+            form.produced_object_ids
+                .iter()
+                .any(|produced| produced == object_id)
+        })
+        .collect()
+}
+
 fn all_invokable_affordance_names() -> Vec<String> {
     let mut names: Vec<String> = FORM_AFFORDANCES
         .iter()
@@ -2616,6 +2781,7 @@ inspection:
   :eop
   :artifacts
   :dispatch [dispatch-site-id]
+  :explain <object-id|name>
   :inspect <object-id|name>
   :affordances <object-id|name>
   :show-form <form-id>
@@ -2936,7 +3102,7 @@ impl Completer for InterlokoCompleter {
                     .lock()
                     .map(|state| state.dispatch_ids.clone())
                     .unwrap_or_default(),
-                ":inspect" | ":affordances" => self
+                ":explain" | ":inspect" | ":affordances" => self
                     .state
                     .lock()
                     .map(|state| state.object_ids.clone())
@@ -3209,6 +3375,10 @@ mod tests {
         let mut completer = InterlokoCompleter::new(state);
         assert!(
             completion_values(&mut completer, ":inspect function:")
+                .contains(&"function:f0".to_string())
+        );
+        assert!(
+            completion_values(&mut completer, ":explain function:")
                 .contains(&"function:f0".to_string())
         );
         assert!(

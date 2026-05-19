@@ -257,6 +257,8 @@ fn inspect_and_affordances_resolve_language_names() {
          define generic area(shape :: <object>) => <integer>;\n\
          define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
          define function main()\n  area(make(<circle>, radius: 10))\nend;\n\
+         :explain <circle>\n\
+         :explain form:f0\n\
          :inspect <circle>\n\
          :affordances <circle>\n\
          :invoke <circle> show-slots\n\
@@ -269,6 +271,14 @@ fn inspect_and_affordances_resolve_language_names() {
     );
 
     assert!(stdout.contains("object class:c1"));
+    assert!(stdout.contains("explain class:c1"));
+    assert!(stdout.contains("defined by:"));
+    assert!(stdout.contains("form:f0 class definition"));
+    assert!(stdout.contains(":invoke class:c1 show-slots"));
+    assert!(stdout.contains("explain form:f0"));
+    assert!(stdout.contains("summary: typed class `<circle>`"));
+    assert!(stdout.contains("defined objects:"));
+    assert!(stdout.contains(":invoke form:f0 show-grammar"));
     assert!(stdout.contains("title: <circle>"));
     assert!(stdout.contains("affordances class:c1"));
     assert!(stdout.contains("show-slots"));

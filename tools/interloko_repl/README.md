@@ -67,8 +67,9 @@ Commands:
 :eop
 :artifacts
 :dispatch [dispatch-site-id]
-:inspect <object-id>
-:affordances <object-id>
+:explain <object-id|name>
+:inspect <object-id|name>
+:affordances <object-id|name>
 :show-form <form-id>
 :drop-form <form-id>
 :invoke <object-id> <affordance>
@@ -83,6 +84,12 @@ the direct spelling for `:invoke form:f0 show-source`. `:drop-form form:f0` is
 the direct spelling for `:invoke form:f0 drop`; it compiles the candidate source
 first, so diagnostics leave the previous buffer unchanged. Dropping a form
 renumbers later forms; `:forms` always shows the current IDs.
+
+`:explain <object-id|name>` is the shortest discovery path for a demo or a
+fresh session. It resolves the same object names as `:inspect`, then prints a
+compact summary, source span, defining source form when available, exposed
+affordances, and useful next commands. Use it when you know the thing you care
+about but do not yet know which object id or affordance to pull on next.
 
 `:invoke <object-id> <affordance>` also runs supported compiler/session
 environment-object affordances, including `inspect`, stage dumps, linked
