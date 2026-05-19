@@ -1,0 +1,10 @@
+grammar base-loko-shadow
+rule source-file = top-level-definition*
+rule top-level-definition = class-definition | generic-definition | method-definition | function-definition
+rule class-definition = `define` `class` type-name until(`end`) `end` `;`?
+rule generic-definition = `define` `generic` name until(`;`) `;`
+rule method-definition = `define` `method` name until(`end`) `end` `;`?
+rule function-definition = `define` `function` name until(`end`) `end` `;`?
+rule name = [A-Za-z_] [A-Za-z0-9_?-]*
+rule type-name = `<` name `>`
+end

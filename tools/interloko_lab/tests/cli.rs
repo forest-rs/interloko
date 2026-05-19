@@ -928,8 +928,9 @@ fn invoke_affordance_runs_read_only_views() {
         "language-environment:base-loko",
         "show-parser-shadow",
     ]);
-    assert!(shadow.contains("parser shadow status=oracle-unavailable"));
-    assert!(shadow.contains("implementation rust-recursive-descent"));
+    assert!(shadow.contains("parser shadow status=equivalent"));
+    assert!(shadow.contains("implementation rust-recursive-descent-top-level"));
+    assert!(shadow.contains("implementation source-authored-base-loko-shadow"));
 
     let registry = run_lab(&[
         "invoke-affordance",

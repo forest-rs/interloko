@@ -6373,8 +6373,17 @@ fn write_parser_product_summary(
     summary: &grammar_frontend::ParserProductSummary,
 ) {
     let _ = writeln!(out, "  implementation {}", summary.implementation);
-    let _ = writeln!(out, "  cst-nodes {}", summary.cst_node_count);
+    let _ = writeln!(out, "  normalized-nodes {}", summary.cst_node_count);
     let _ = writeln!(out, "  top-level-nodes {}", summary.top_level_node_count);
+    let _ = writeln!(
+        out,
+        "  top-level-signature {}",
+        if summary.top_level_signature.is_empty() {
+            "<empty>"
+        } else {
+            summary.top_level_signature.as_str()
+        }
+    );
     let _ = writeln!(out, "  diagnostics {}", summary.diagnostic_count);
     let _ = writeln!(
         out,
@@ -10491,9 +10500,10 @@ mod tests {
         assert!(parse_trace.contains("rule applications:"));
         assert!(parse_trace.contains("rule-name=function-definition"));
         let shadow = artifacts.dump_parser_shadow_report();
-        assert!(shadow.contains("parser shadow status=oracle-unavailable"));
-        assert!(shadow.contains("implementation rust-recursive-descent"));
-        assert!(shadow.contains("oracle:\n  <unavailable>"));
+        assert!(shadow.contains("parser shadow status=equivalent"));
+        assert!(shadow.contains("implementation rust-recursive-descent-top-level"));
+        assert!(shadow.contains("implementation source-authored-base-loko-shadow"));
+        assert!(shadow.contains("top-level-signature class-definition,generic-definition,method-definition,function-definition"));
         assert!(
             artifacts
                 .explain_grammar_rule("grammar-rule:base-loko/function-definition")

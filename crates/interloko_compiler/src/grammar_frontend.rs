@@ -6,6 +6,7 @@
 //! intentionally does not own AST lowering, semantic lowering, source-authored
 //! grammars, macros, host semantic actions, or parser rewriting.
 
+mod base_loko_shadow;
 mod calculator;
 mod interpreter;
 mod records;
@@ -1260,10 +1261,12 @@ pub struct GrammarParseReport {
 pub struct ParserProductSummary {
     /// Stable parser implementation label.
     pub implementation: String,
-    /// Number of CST nodes in the parsed tree.
+    /// Number of normalized parser nodes in the compared subset.
     pub cst_node_count: usize,
     /// Number of top-level CST definition nodes.
     pub top_level_node_count: usize,
+    /// Ordered top-level rule signature in the compared subset.
+    pub top_level_signature: String,
     /// Number of diagnostics produced by the parser.
     pub diagnostic_count: usize,
     /// Number of recorded grammar rule applications.
@@ -1284,6 +1287,27 @@ impl ParserProductSummary {
             implementation: implementation.into(),
             cst_node_count,
             top_level_node_count,
+            top_level_signature: String::new(),
+            diagnostic_count,
+            rule_application_count,
+        }
+    }
+
+    /// Creates a normalized parser product summary with a top-level signature.
+    #[must_use]
+    pub fn with_top_level_signature(
+        implementation: impl Into<String>,
+        cst_node_count: usize,
+        top_level_node_count: usize,
+        top_level_signature: impl Into<String>,
+        diagnostic_count: usize,
+        rule_application_count: usize,
+    ) -> Self {
+        Self {
+            implementation: implementation.into(),
+            cst_node_count,
+            top_level_node_count,
+            top_level_signature: top_level_signature.into(),
             diagnostic_count,
             rule_application_count,
         }
@@ -1633,18 +1657,15 @@ pub fn parse_file_with_registry(
 
 /// Builds the current parser shadow report for a grammar parse report.
 ///
-/// This is intentionally conservative: the Rust parser is still the primary
-/// parser and no source-authored grammar interpreter is available yet. The
-/// report gives future interpreter work a stable comparison surface.
+/// The Rust parser remains primary. The oracle is a source-authored
+/// `base-loko-shadow` grammar that recognizes the top-level definition subset
+/// and compares normalized parser products.
 #[must_use]
 pub fn parser_shadow_report(report: &GrammarParseReport) -> ParserShadowReport {
-    ParserShadowReport::oracle_unavailable(ParserProductSummary::new(
-        "rust-recursive-descent",
-        cst_node_count(&report.syntax.root),
-        top_level_node_count(&report.syntax.root),
-        report.diagnostics.len(),
-        report.provenance.applications.len(),
-    ))
+    compare_parser_products(
+        rust_top_level_shadow_summary(report),
+        base_loko_shadow::oracle_summary(&report.syntax.source),
+    )
 }
 
 /// Compares two normalized parser products.
@@ -3354,31 +3375,31 @@ fn rule_applications(
     applications
 }
 
-fn cst_node_count(node: &CstNode) -> usize {
-    1 + node
-        .children
-        .iter()
-        .filter_map(|child| match child {
-            CstElement::Node(child) => Some(cst_node_count(child)),
-            CstElement::Token(_) => None,
-        })
-        .sum::<usize>()
+fn rust_top_level_shadow_summary(report: &GrammarParseReport) -> ParserProductSummary {
+    let signature = top_level_rule_signature(&report.syntax.root);
+    let top_level_count = signature.len();
+    ParserProductSummary::with_top_level_signature(
+        "rust-recursive-descent-top-level",
+        normalized_shadow_node_count(top_level_count),
+        top_level_count,
+        signature.join(","),
+        report.diagnostics.len(),
+        normalized_shadow_node_count(top_level_count),
+    )
 }
 
-fn top_level_node_count(root: &CstNode) -> usize {
+fn top_level_rule_signature(root: &CstNode) -> Vec<&'static str> {
     root.children
         .iter()
         .filter_map(|child| match child {
-            CstElement::Node(child) => Some(child.kind),
+            CstElement::Node(child) => cst_top_level_rule_name(child.kind),
             CstElement::Token(_) => None,
         })
-        .filter(|kind| {
-            matches!(
-                kind,
-                CstKind::Class | CstKind::Generic | CstKind::Method | CstKind::Function
-            )
-        })
-        .count()
+        .collect()
+}
+
+fn normalized_shadow_node_count(top_level_count: usize) -> usize {
+    top_level_count.saturating_add(1)
 }
 
 fn parser_product_divergences(
@@ -3388,7 +3409,7 @@ fn parser_product_divergences(
     let mut divergences = Vec::new();
     push_parser_product_divergence(
         &mut divergences,
-        "cst-node-count",
+        "normalized-node-count",
         primary.cst_node_count,
         oracle.cst_node_count,
     );
@@ -3398,6 +3419,13 @@ fn parser_product_divergences(
         primary.top_level_node_count,
         oracle.top_level_node_count,
     );
+    if primary.top_level_signature != oracle.top_level_signature {
+        divergences.push(ParserShadowDivergence {
+            field: "top-level-signature".to_string(),
+            primary: primary.top_level_signature.clone(),
+            oracle: oracle.top_level_signature.clone(),
+        });
+    }
     push_parser_product_divergence(
         &mut divergences,
         "diagnostic-count",
@@ -3584,6 +3612,16 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
         CstKind::Error => None,
+    }
+}
+
+fn cst_top_level_rule_name(kind: CstKind) -> Option<&'static str> {
+    match kind {
+        CstKind::Class => Some("class-definition"),
+        CstKind::Generic => Some("generic-definition"),
+        CstKind::Method => Some("method-definition"),
+        CstKind::Function => Some("function-definition"),
+        _ => None,
     }
 }
 
@@ -4298,19 +4336,41 @@ mod tests {
     }
 
     #[test]
-    fn parser_shadow_report_summarizes_primary_parser_until_oracle_exists() {
+    fn parser_shadow_report_compares_base_loko_shadow_subset() {
         let source_file = SourceFileId::from_path("shadow.loko");
-        let source = "define function main()\n  1\nend";
+        let source = "define class <circle> (<object>)\n\
+                        slot radius :: <integer>, required-init-keyword: radius:;\n\
+                      end\n\
+                      define generic area(shape :: <object>) => <integer>;\n\
+                      define method area(c :: <circle>) => <integer>\n\
+                        c.radius * c.radius\n\
+                      end\n\
+                      define function main()\n\
+                        area(make(<circle>, radius: 10))\n\
+                      end";
         let report = parse_file(source_file, source);
 
         let shadow = parser_shadow_report(&report);
-        assert_eq!(shadow.status, ParserShadowStatus::OracleUnavailable);
-        assert_eq!(shadow.primary.implementation, "rust-recursive-descent");
-        assert!(shadow.primary.cst_node_count > 0);
-        assert_eq!(shadow.primary.top_level_node_count, 1);
+        assert_eq!(shadow.status, ParserShadowStatus::Equivalent);
+        assert_eq!(
+            shadow.primary.implementation,
+            "rust-recursive-descent-top-level"
+        );
+        assert_eq!(shadow.primary.cst_node_count, 5);
+        assert_eq!(shadow.primary.top_level_node_count, 4);
+        assert_eq!(
+            shadow.primary.top_level_signature,
+            "class-definition,generic-definition,method-definition,function-definition"
+        );
         assert_eq!(shadow.primary.diagnostic_count, 0);
-        assert!(shadow.primary.rule_application_count > 0);
-        assert_eq!(shadow.oracle, None);
+        assert_eq!(shadow.primary.rule_application_count, 5);
+        assert_eq!(
+            shadow
+                .oracle
+                .as_ref()
+                .map(|summary| summary.implementation.as_str()),
+            Some("source-authored-base-loko-shadow")
+        );
         assert_eq!(shadow.divergences, Vec::new());
     }
 
@@ -4333,7 +4393,7 @@ mod tests {
                 .iter()
                 .map(|divergence| divergence.field.as_str())
                 .collect::<Vec<_>>(),
-            Vec::from(["cst-node-count", "diagnostic-count"])
+            Vec::from(["normalized-node-count", "diagnostic-count"])
         );
     }
 }
