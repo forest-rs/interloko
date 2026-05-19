@@ -817,6 +817,7 @@ impl<'module> BodyLowering<'module> {
                 continue;
             }
             let value = self.lower_expr(&let_binding.value)?;
+            let value = self.coerce_value(value, value_kind(local_kind)?, let_binding.span)?;
             self.set_local(let_binding.local, value)?;
             self.locals.push(Local {
                 source: let_binding.local,

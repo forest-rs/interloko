@@ -1421,6 +1421,7 @@ struct ConstantSymbol {
     name: String,
     id: ConstantId,
     kind: ValueKind,
+    annotation: Option<ValueKind>,
     span: Span,
 }
 
@@ -2528,10 +2529,15 @@ impl Lowering {
                 );
             }
             let id = ConstantId(u32::try_from(index).unwrap_or(u32::MAX));
+            let annotation = constant
+                .type_annotation
+                .as_ref()
+                .map(|annotation| self.resolve_type_annotation(annotation));
             self.constant_symbols.push(ConstantSymbol {
                 name: constant.name.clone(),
                 id,
-                kind: ValueKind::Error,
+                kind: annotation.unwrap_or(ValueKind::Error),
+                annotation,
                 span: constant.span,
             });
         }
@@ -2544,17 +2550,32 @@ impl Lowering {
             let mut ctx = FunctionContext::new();
             let value = self.lower_expr(&mut ctx, &constant.value);
             self.diagnostics.extend(ctx.diagnostics);
-            let result_kind = self.expr_kind(&value);
-            if matches!(result_kind, ValueKind::KnownCallable(_) | ValueKind::Error) {
+            let actual_kind = self.expr_kind(&value);
+            if matches!(actual_kind, ValueKind::KnownCallable(_) | ValueKind::Error) {
                 self.diagnostics.push(
                     Diagnostic::error(
                         constant.value.span(),
                         DiagnosticCode::ConstantInitializerTypeMismatch,
                     )
                     .with_arg(DiagnosticArg::text("constant", constant.name.clone()))
-                    .with_arg(DiagnosticArg::text("actual", self.kind_name(result_kind))),
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
                 );
             }
+            let expected_kind = self
+                .constant_symbols
+                .get(index)
+                .and_then(|symbol| symbol.annotation);
+            if let Some(expected) = expected_kind
+                && !self.kinds_match(expected, actual_kind)
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(constant.value.span(), DiagnosticCode::ConstantTypeMismatch)
+                        .with_arg(DiagnosticArg::text("constant", constant.name.clone()))
+                        .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
+                );
+            }
+            let result_kind = expected_kind.unwrap_or(actual_kind);
             if let Some(symbol) = self.constant_symbols.get_mut(index) {
                 symbol.kind = result_kind;
             }
@@ -2801,6 +2822,22 @@ impl Lowering {
         let mut lets = Vec::new();
         for local in &block.lets {
             let value = self.lower_expr(ctx, &local.value);
+            let actual_kind = self.expr_kind(&value);
+            let expected_kind = local
+                .type_annotation
+                .as_ref()
+                .map(|annotation| self.resolve_type_annotation_in_context(ctx, annotation));
+            if let Some(expected) = expected_kind
+                && !self.kinds_match(expected, actual_kind)
+            {
+                ctx.diagnostics.push(
+                    Diagnostic::error(local.value.span(), DiagnosticCode::LocalTypeMismatch)
+                        .with_arg(DiagnosticArg::text("local", local.name.clone()))
+                        .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
+                );
+            }
+            let local_kind = expected_kind.unwrap_or(actual_kind);
             if ctx.find_local(&local.name).is_some() {
                 ctx.diagnostics.push(
                     Diagnostic::error(local.span, DiagnosticCode::DuplicateLocal)
@@ -2810,7 +2847,7 @@ impl Lowering {
             let id = ctx.add_local(
                 self.local_definition(local.definition, &local.name),
                 local.name.clone(),
-                self.expr_kind(&value),
+                local_kind,
                 local.span,
             );
             lets.push(Let {
@@ -4285,6 +4322,19 @@ impl Lowering {
         self.resolve_type_name(&annotation.name, annotation.class_object, annotation.span)
     }
 
+    fn resolve_type_annotation_in_context(
+        &self,
+        ctx: &mut FunctionContext,
+        annotation: &ast::TypeAnnotation,
+    ) -> ValueKind {
+        self.resolve_type_name_with_sink(
+            &annotation.name,
+            annotation.class_object,
+            annotation.span,
+            &mut ctx.diagnostics,
+        )
+    }
+
     fn resolve_method_specializer(
         &mut self,
         param: &ast::MethodParam,
@@ -4306,12 +4356,26 @@ impl Lowering {
     }
 
     fn resolve_type_name(&mut self, type_name: &str, class_object: bool, span: Span) -> ValueKind {
+        let mut diagnostics = Vec::new();
+        let kind =
+            self.resolve_type_name_with_sink(type_name, class_object, span, &mut diagnostics);
+        self.diagnostics.extend(diagnostics);
+        kind
+    }
+
+    fn resolve_type_name_with_sink(
+        &self,
+        type_name: &str,
+        class_object: bool,
+        span: Span,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> ValueKind {
         if class_object {
             return self
                 .resolve_class(type_name)
                 .map(|class| ValueKind::ClassObject(class.id))
                 .unwrap_or_else(|| {
-                    self.diagnostics.push(
+                    diagnostics.push(
                         Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
                             .with_arg(DiagnosticArg::text("class", type_name)),
                     );
@@ -4347,7 +4411,7 @@ impl Lowering {
                 .resolve_class(name)
                 .map(|class| ValueKind::Object(class.id))
                 .unwrap_or_else(|| {
-                    self.diagnostics.push(
+                    diagnostics.push(
                         Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
                             .with_arg(DiagnosticArg::text("class", name)),
                     );
@@ -4635,8 +4699,8 @@ mod tests {
     #[test]
     fn resolves_top_level_constants_and_reports_bad_initializers() {
         let module = lower_source(
-            "define constant $answer = 40 + 2;\n\
-             define constant $alias = $answer;\n\
+            "define constant $answer :: <integer> = 40 + 2;\n\
+             define constant $alias :: <integer> = $answer;\n\
              define function main()\n  $alias\nend;",
         );
         assert_eq!(module.diagnostics, Vec::new());
@@ -4679,6 +4743,40 @@ mod tests {
             &invalid,
             DiagnosticCode::ConstantInitializerTypeMismatch,
             &[("constant", "$helper")]
+        ));
+
+        let mismatch = lower_source(
+            "define constant $answer :: <boolean> = 42;\n\
+             define function main()\n  0\nend;",
+        );
+        assert!(has_diagnostic(
+            &mismatch,
+            DiagnosticCode::ConstantTypeMismatch,
+            &[
+                ("constant", "$answer"),
+                ("expected", "<boolean>"),
+                ("actual", "<integer>")
+            ]
+        ));
+    }
+
+    #[test]
+    fn checks_local_type_annotations() {
+        let module =
+            lower_source("define function main()\n  let answer :: <integer> = 42;\n  answer\nend;");
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.functions[0].locals[0].kind, ValueKind::I64);
+
+        let mismatch =
+            lower_source("define function main()\n  let answer :: <boolean> = 42;\n  answer\nend;");
+        assert!(has_diagnostic(
+            &mismatch,
+            DiagnosticCode::LocalTypeMismatch,
+            &[
+                ("local", "answer"),
+                ("expected", "<boolean>"),
+                ("actual", "<integer>")
+            ]
         ));
     }
 

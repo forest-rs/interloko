@@ -32,6 +32,8 @@
 "sem.function-argument-type-mismatch" = "[ps] { $function } arg { $argument_index }: got { $actual }, need { $expected }"
 "sem.function-return-type-mismatch" = "[ps] { $function } body is { $actual }, return requires { $expected }"
 "sem.constant-initializer-type-mismatch" = "[ps] constant { $constant } initializer got { $actual }, need runtime value"
+"sem.constant-type-mismatch" = "[ps] constant { $constant } expects { $expected }, initializer { $actual }"
+"sem.local-type-mismatch" = "[ps] local { $local } expects { $expected }, initializer { $actual }"
 "sem.generic-method-specializer-type-mismatch" = "[ps] method { $method } arg { $argument_index } specializer { $actual } violates { $expected }"
 "sem.generic-method-arity-mismatch" = "[ps] method { $method } arity { $actual_count } expected { $expected_count }"
 "sem.ambiguous-generic-method-dispatch" = "[ps] ambiguous generic { $generic } for { $actuals }: { $candidates }"

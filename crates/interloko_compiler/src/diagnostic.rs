@@ -84,6 +84,10 @@ pub enum DiagnosticCode {
     FunctionReturnTypeMismatch,
     /// A top-level constant initializer does not produce a runtime value.
     ConstantInitializerTypeMismatch,
+    /// A top-level constant initializer does not satisfy its type annotation.
+    ConstantTypeMismatch,
+    /// A local `let` initializer does not satisfy its type annotation.
+    LocalTypeMismatch,
     /// A generic method specializer does not satisfy the generic contract.
     GenericMethodSpecializerTypeMismatch,
     /// A method definition does not match the generic arity.
@@ -216,6 +220,8 @@ impl DiagnosticCode {
         Self::FunctionArgumentTypeMismatch,
         Self::FunctionReturnTypeMismatch,
         Self::ConstantInitializerTypeMismatch,
+        Self::ConstantTypeMismatch,
+        Self::LocalTypeMismatch,
         Self::GenericMethodSpecializerTypeMismatch,
         Self::GenericMethodArityMismatch,
         Self::AmbiguousGenericMethodDispatch,
@@ -302,6 +308,8 @@ impl DiagnosticCode {
             Self::FunctionArgumentTypeMismatch => "sem.function-argument-type-mismatch",
             Self::FunctionReturnTypeMismatch => "sem.function-return-type-mismatch",
             Self::ConstantInitializerTypeMismatch => "sem.constant-initializer-type-mismatch",
+            Self::ConstantTypeMismatch => "sem.constant-type-mismatch",
+            Self::LocalTypeMismatch => "sem.local-type-mismatch",
             Self::GenericMethodSpecializerTypeMismatch => {
                 "sem.generic-method-specializer-type-mismatch"
             }
@@ -391,6 +399,8 @@ impl DiagnosticCode {
             "sem.function-argument-type-mismatch" => Self::FunctionArgumentTypeMismatch,
             "sem.function-return-type-mismatch" => Self::FunctionReturnTypeMismatch,
             "sem.constant-initializer-type-mismatch" => Self::ConstantInitializerTypeMismatch,
+            "sem.constant-type-mismatch" => Self::ConstantTypeMismatch,
+            "sem.local-type-mismatch" => Self::LocalTypeMismatch,
             "sem.generic-method-specializer-type-mismatch" => {
                 Self::GenericMethodSpecializerTypeMismatch
             }

@@ -3,7 +3,7 @@
 ## Implemented: Top-Level Constants
 
 - Loko now accepts immutable top-level constants using the Dylan naming
-  convention: `define constant $name = expression;`.
+  convention: `define constant $name :: <type> = expression;`.
 - Constants are parsed as top-level source forms, receive stable
   `DefinitionKind::Constant` identities, and lower through CST, AST, semantic
   IR, lowered IR, and tape emission like other expression-bearing definitions.
@@ -32,6 +32,29 @@ Deferred:
 - A dependency scheduler for forward or cyclic constant initializers.
 - Persistent image semantics for object constants.
 - Optimizer-level constant folding or sealed static propagation.
+
+## Implemented: Binding Type Annotations
+
+- Constants and local `let` bindings now use the same `::` type annotation
+  notation as parameters, results, and slots:
+  `define constant $answer :: <integer> = 42;` and
+  `let radius :: <integer> = 10;`.
+- AST preserves optional `TypeAnnotation` records for constants and local
+  bindings. Semantic lowering resolves those annotations through the same class
+  and built-in value type rules used by function signatures.
+- Annotated constants and locals are checked against their initializer
+  expression. Mismatches report structured diagnostics:
+  `sem.constant-type-mismatch` and `sem.local-type-mismatch`.
+- Lowering respects the semantic local kind, so annotated locals use the same
+  coercion path as function results and other checked expression boundaries.
+
+Deferred:
+
+- Mutable top-level variables.
+- Type aliases, union types, parametric types, and refinements.
+- Flow-sensitive reinterpretation of local annotations after assignment-like
+  forms.
+- A dependency scheduler for forward annotated constants.
 
 ## Implemented: Save And Open Session Transcripts
 

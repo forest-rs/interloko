@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn compiles_and_runs_top_level_integer_constant() {
         let value = compile_and_run_main(
-            "define constant $answer = 40 + 2;\n\
+            "define constant $answer :: <integer> = 40 + 2;\n\
              define function main()\n  $answer\nend;",
         )
         .expect("constant program should compile and run");
@@ -279,7 +279,7 @@ mod tests {
     fn compiles_and_runs_top_level_object_constant() {
         let value = compile_and_run_main(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define constant $circle = make(<circle>, radius: 7);\n\
+             define constant $circle :: <circle> = make(<circle>, radius: 7);\n\
              define function main()\n  $circle.radius\nend;",
         )
         .expect("object constant program should compile and run");
@@ -290,12 +290,13 @@ mod tests {
     fn compiles_and_runs_boolean_string_and_class_constants() {
         let value = compile_and_run_main(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define constant $enabled? = #t;\n\
-             define constant $label = \"ok\";\n\
-             define constant $circle-class = <circle>;\n\
+             define constant $enabled? :: <boolean> = #t;\n\
+             define constant $label :: <string> = \"ok\";\n\
+             define constant $circle-class :: class <circle> = <circle>;\n\
              define function main()\n\
+               let radius :: <integer> = make($circle-class, radius: 9).radius;\n\
                if $enabled? then\n\
-                 if $label = \"ok\" then make($circle-class, radius: 9).radius else 0 end\n\
+                 if $label = \"ok\" then radius else 0 end\n\
                else\n\
                  0\n\
                end\n\

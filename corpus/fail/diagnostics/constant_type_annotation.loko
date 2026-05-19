@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.constant-type-mismatch
+// expect: diagnostic contains constant `$answer` expects <boolean> but initializer has <integer>
+
+define constant $answer :: <boolean> = 42;
+
+define function main()
+  0
+end;

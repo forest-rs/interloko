@@ -9,16 +9,17 @@ define class <circle> (<object>)
   slot radius :: <integer>;
 end;
 
-define constant $answer = 40 + 2;
-define constant $truth = #t;
-define constant $label = "circle";
-define constant $circle-class = <circle>;
-define constant $unit = make($circle-class, radius: 4);
+define constant $answer :: <integer> = 40 + 2;
+define constant $truth :: <boolean> = #t;
+define constant $label :: <string> = "circle";
+define constant $circle-class :: class <circle> = <circle>;
+define constant $unit :: <circle> = make($circle-class, radius: 4);
 
 define function main()
+  let bonus :: <integer> = $unit.radius;
   if $truth then
     if $label = "circle" then
-      $answer + $unit.radius
+      $answer + bonus
     else
       0
     end

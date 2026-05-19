@@ -1,0 +1,7 @@
+// expect: diagnostic code sem.local-type-mismatch
+// expect: diagnostic contains local `answer` expects <boolean> but initializer has <integer>
+
+define function main()
+  let answer :: <boolean> = 42;
+  answer
+end;

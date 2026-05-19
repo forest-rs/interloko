@@ -45,6 +45,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/control_flow/invalid_if_condition.loko"));
     assert!(out.contains("fail/diagnostics/slot_initializer_type.loko"));
     assert!(out.contains("fail/diagnostics/constant_slot_assignment.loko"));
+    assert!(out.contains("fail/diagnostics/constant_type_annotation.loko"));
     assert!(out.contains("fail/diagnostics/unknown_slot_assignment.loko"));
     assert!(out.contains("fail/diagnostics/slot_assignment_type.loko"));
     assert!(out.contains("fail/diagnostics/host_backed_slot_assignment.loko"));
@@ -56,6 +57,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/top_level_constants.loko"));
     assert!(out.contains("fail/diagnostics/duplicate_constant.loko"));
     assert!(out.contains("fail/diagnostics/invalid_constant_initializer.loko"));
+    assert!(out.contains("fail/diagnostics/local_type_annotation.loko"));
     assert!(out.contains("fail/diagnostics/unresolved_constant.loko"));
     assert!(out.contains("fail/restarts/signal_without_restart.loko"));
     assert!(out.contains("pass/objects/init_keywords.loko"));
@@ -110,7 +112,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/typed_slots_and_dispatch.loko"));
     assert!(out.contains("fail/values/malformed_string.loko"));
     assert!(out.contains("fail/syntax/expected_expression.loko"));
-    assert!(out.contains("corpus: 136 passed, 0 failed, 136 total"));
+    assert!(out.contains("corpus: 138 passed, 0 failed, 138 total"));
 }
 
 #[test]
