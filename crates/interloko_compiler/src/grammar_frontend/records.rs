@@ -30,17 +30,17 @@ pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmis
     }
 }
 
-fn interpret_records_region(
+fn interpret_records_region<'s>(
     rules: &[super::interpreter::SourceAuthoredRule],
-    body: &str,
+    body: &'s str,
     source_offset: usize,
-) -> Result<InterpretedParse, InterpretedParseError> {
+) -> Result<InterpretedParse<'s>, InterpretedParseError> {
     interpret_region_result(rules, "records-region", body, source_offset)
 }
 
 fn emission_from_interpreted_parse(
     grammar_rules: &[super::interpreter::SourceAuthoredRule],
-    parse: &InterpretedParse,
+    parse: &InterpretedParse<'_>,
 ) -> StagedRegionEmission {
     let mut forms = Vec::new();
     let mut diagnostics = Vec::new();
@@ -49,7 +49,7 @@ fn emission_from_interpreted_parse(
         .root
         .children
         .iter()
-        .filter(|node| node.rule_name == "record-definition")
+        .filter(|node| node.is_rule("record-definition"))
     {
         match evaluate_rule_action(grammar_rules, record) {
             Ok(Some(output)) => match output.value {
@@ -137,7 +137,7 @@ fn records_parse_error_emission(
                                     error
                                         .expected
                                         .iter()
-                                        .map(|item| SourceData::string(item.as_str()))
+                                        .map(|item| SourceData::string(format!("{item}")))
                                         .collect(),
                                 ),
                             ),
@@ -169,7 +169,12 @@ fn joined_expected(error: &InterpretedParseError) -> String {
     if error.expected.is_empty() {
         "records grammar".to_string()
     } else {
-        error.expected.join(" or ")
+        error
+            .expected
+            .iter()
+            .map(|expected| format!("{expected}"))
+            .collect::<Vec<_>>()
+            .join(" or ")
     }
 }
 
@@ -187,12 +192,12 @@ pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
         .map(|rule| {
             let location = format!("resource:{RECORDS_GRAMMAR_RESOURCE}/{}", rule.name);
             GrammarRule {
-                id: GrammarRuleId::new(grammar, &rule.name),
+                id: GrammarRuleId::new(grammar, rule.name),
                 grammar,
                 grammar_slug: grammar_slug.to_string(),
-                name: rule.name.clone(),
+                name: rule.name.to_string(),
                 expression_data: grammar_rule_expression_data_from_expr(
-                    &rule.name,
+                    rule.name,
                     &rule.expression,
                     None,
                     &location,

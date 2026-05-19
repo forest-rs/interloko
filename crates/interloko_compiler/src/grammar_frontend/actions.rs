@@ -37,7 +37,7 @@ pub(super) enum GrammarActionValue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct GrammarActionOutput {
-    pub(super) action: GrammarAction,
+    pub(super) action: GrammarAction<'static>,
     pub(super) value: GrammarActionValue,
     pub(super) data: SourceData,
 }
@@ -85,16 +85,16 @@ impl GrammarActionError {
 
 pub(super) fn evaluate_rule_action(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
+    node: &InterpretedRuleNode<'_>,
 ) -> Result<Option<GrammarActionOutput>, GrammarActionError> {
     let Some(action) = rules
         .iter()
-        .find(|rule| rule.name == node.rule_name)
+        .find(|rule| node.is_rule(rule.name))
         .and_then(|rule| rule.action.clone())
     else {
         return Ok(None);
     };
-    let value = match action.name.as_str() {
+    let value = match action.name {
         "emit-class" => {
             evaluate_emit_class(rules, node, &action).map(GrammarActionValue::FrontendForm)
         }
@@ -134,7 +134,9 @@ pub(super) fn evaluate_rule_action(
             format!("known grammar action `{}`", action.name),
         )),
     }
-    .map_err(|error| error.with_action_context(&action.name, &node.rule_name))?;
+    .map_err(|error| {
+        error.with_action_context(action.name, node.name().unwrap_or("<anonymous>"))
+    })?;
     Ok(Some(GrammarActionOutput {
         data: grammar_action_output_source_data(&action, &value),
         action,
@@ -144,8 +146,8 @@ pub(super) fn evaluate_rule_action(
 
 fn evaluate_emit_class(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<FrontendForm, GrammarActionError> {
     let name = action_text_arg(node, action, "name")?;
     let class_name = class_name_from_action_text(&name.value)
@@ -177,8 +179,8 @@ fn evaluate_emit_class(
 }
 
 fn evaluate_emit_slot(
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<FrontendSlot, GrammarActionError> {
     let name = action_text_arg(node, action, "name")?;
     let type_name = action_text_arg(node, action, "type")?;
@@ -205,8 +207,8 @@ fn evaluate_emit_slot(
 
 fn evaluate_emit_function(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<FrontendForm, GrammarActionError> {
     let name = action_text_arg(node, action, "name")?;
     if !valid_calculator_function_name(name.value.trim()) {
@@ -221,8 +223,8 @@ fn evaluate_emit_function(
 }
 
 fn evaluate_emit_integer(
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<FrontendExpression, GrammarActionError> {
     let value = action_text_arg(node, action, "value")?;
     Ok(FrontendExpression::Integer {
@@ -234,8 +236,8 @@ fn evaluate_emit_integer(
 }
 
 fn evaluate_emit_name(
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<FrontendExpression, GrammarActionError> {
     let name = action_text_arg(node, action, "name")?;
     Ok(FrontendExpression::Name {
@@ -246,8 +248,8 @@ fn evaluate_emit_name(
 
 fn evaluate_emit_call(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<FrontendExpression, GrammarActionError> {
     let callee = action_text_arg(node, action, "callee")?;
     let args = action_expression_list_arg(rules, node, action, "args").unwrap_or_default();
@@ -260,8 +262,8 @@ fn evaluate_emit_call(
 
 fn evaluate_emit_argument_list(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<Vec<FrontendExpression>, GrammarActionError> {
     let mut args = Vec::from([action_expression_arg(rules, node, action, "first")?]);
     args.extend(action_expression_list_arg(rules, node, action, "rest").unwrap_or_default());
@@ -270,8 +272,8 @@ fn evaluate_emit_argument_list(
 
 fn evaluate_fold_binary(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
 ) -> Result<FrontendExpression, GrammarActionError> {
     let mut lhs = action_expression_arg(rules, node, action, "lhs")?;
     for tail in action_binary_tails_arg(rules, node, action, "tails")? {
@@ -287,8 +289,8 @@ fn evaluate_fold_binary(
 }
 
 fn action_text_arg(
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
     name: &str,
 ) -> Result<TextValue, GrammarActionError> {
     let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
@@ -302,7 +304,7 @@ fn action_text_arg(
         GrammarActionTerm::Capture { rule } => node
             .children
             .iter()
-            .find(|child| child.rule_name == *rule)
+            .find(|child| child.is_rule(rule))
             .map(|child| TextValue {
                 value: child.text.trim().to_string(),
                 span: child.span.into(),
@@ -311,7 +313,7 @@ fn action_text_arg(
                 GrammarActionError::new(node.span, format!("capture `{rule}`")).with_arg(name)
             }),
         GrammarActionTerm::Literal(value) => Ok(TextValue {
-            value: value.clone(),
+            value: (*value).to_string(),
             span: node.span.into(),
         }),
         _ => Err(
@@ -322,8 +324,8 @@ fn action_text_arg(
 
 fn action_expression_arg(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
     name: &str,
 ) -> Result<FrontendExpression, GrammarActionError> {
     let value = action_capture_value(rules, node, action, name)?;
@@ -338,8 +340,8 @@ fn action_expression_arg(
 
 fn action_expression_list_arg(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
     name: &str,
 ) -> Result<Vec<FrontendExpression>, GrammarActionError> {
     let values = action_list_arg(rules, node, action, name)?;
@@ -362,8 +364,8 @@ fn action_expression_list_arg(
 
 fn action_binary_tails_arg(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
     name: &str,
 ) -> Result<Vec<BinaryTail>, GrammarActionError> {
     action_list_arg(rules, node, action, name)?
@@ -380,8 +382,8 @@ fn action_binary_tails_arg(
 
 fn action_capture_value(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
     name: &str,
 ) -> Result<GrammarActionValue, GrammarActionError> {
     let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
@@ -399,7 +401,7 @@ fn action_capture_value(
     let child = node
         .children
         .iter()
-        .find(|child| child.rule_name == *rule)
+        .find(|child| child.is_rule(rule))
         .ok_or_else(|| {
             GrammarActionError::new(node.span, format!("capture `{rule}`")).with_arg(name)
         })?;
@@ -408,7 +410,7 @@ fn action_capture_value(
 
 fn evaluate_node_value(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
+    node: &InterpretedRuleNode<'_>,
 ) -> Result<GrammarActionValue, GrammarActionError> {
     if let Some(output) = evaluate_rule_action(rules, node)? {
         return Ok(output.value);
@@ -435,7 +437,7 @@ fn evaluate_node_value(
     })
 }
 
-fn action_bool_arg(action: &GrammarAction, name: &str) -> Option<bool> {
+fn action_bool_arg(action: &GrammarAction<'_>, name: &str) -> Option<bool> {
     action
         .args
         .iter()
@@ -448,8 +450,8 @@ fn action_bool_arg(action: &GrammarAction, name: &str) -> Option<bool> {
 
 fn action_list_arg(
     rules: &[SourceAuthoredRule],
-    node: &InterpretedRuleNode,
-    action: &GrammarAction,
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
     name: &str,
 ) -> Result<Vec<GrammarActionValue>, GrammarActionError> {
     let Some(arg) = action.args.iter().find(|arg| arg.name == name) else {
@@ -466,7 +468,7 @@ fn action_list_arg(
     };
     node.children
         .iter()
-        .filter(|child| child.rule_name == *rule)
+        .filter(|child| child.is_rule(rule))
         .map(|child| {
             evaluate_rule_action(rules, child)?.map_or_else(
                 || {
@@ -522,7 +524,7 @@ fn class_name_from_action_text(text: &str) -> Option<String> {
 }
 
 fn grammar_action_output_source_data(
-    action: &GrammarAction,
+    action: &GrammarAction<'_>,
     value: &GrammarActionValue,
 ) -> SourceData {
     SourceData::record(

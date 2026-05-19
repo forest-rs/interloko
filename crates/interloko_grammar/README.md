@@ -27,10 +27,10 @@ let rules = parse_grammar_source(grammar);
 let parse = interpret_region(&rules, "field", "radius: <integer>", 100)
     .expect("field should parse");
 
-assert_eq!(parse.root.rule_name, "field");
+assert_eq!(parse.root.name(), Some("field"));
 assert_eq!(parse.root.span, Span::new(100, 117));
 assert_eq!(parse.root.text, "radius: <integer>");
-assert!(parse.root.children.iter().any(|node| node.rule_name == "name"));
+assert!(parse.root.children.iter().any(|node| node.is_rule("name")));
 ```
 
 ## Concepts
@@ -96,11 +96,11 @@ assert_eq!(
     vec![
         GrammarActionArg::new(
             "name",
-            GrammarActionTerm::Capture { rule: "name".to_string() },
+            GrammarActionTerm::Capture { rule: "name" },
         ),
         GrammarActionArg::new(
             "fields",
-            GrammarActionTerm::CaptureAll { rule: "field".to_string() },
+            GrammarActionTerm::CaptureAll { rule: "field" },
         ),
         GrammarActionArg::new("required", GrammarActionTerm::Bool(true)),
     ],
@@ -110,7 +110,7 @@ assert_eq!(
 ## Parse Tree Inspection
 
 [`RuleNode`] has small traversal and query helpers so callers can inspect parse
-trees without parsing generated names such as `literal::` or `class:A-Z`.
+trees without parsing presentation labels such as `literal::` or `class:A-Z`.
 
 ```rust
 use interloko_grammar::{
@@ -141,7 +141,7 @@ assert_eq!(colon.text, ":");
 let integer = parse.root
     .smallest_covering_span(Span::new(109, 116))
     .expect("node covering integer");
-assert_eq!(integer.rule_name, "name");
+assert_eq!(integer.name(), Some("name"));
 assert_eq!(integer.text, "integer");
 ```
 
@@ -153,14 +153,16 @@ so callers can parse embedded regions while preserving coordinates in the
 larger source file.
 
 ```rust
-use interloko_grammar::{Span, interpret_region, parse_grammar_source};
+use interloko_grammar::{
+    ExpectedFragment, Span, interpret_region, parse_grammar_source,
+};
 
 let rules = parse_grammar_source("grammar digits\nrule digits = [0-9]+\nend\n");
 let error = interpret_region(&rules, "digits", "", 30)
     .expect_err("empty source is not digits");
 
 assert_eq!(error.span, Span::new(30, 30));
-assert_eq!(error.expected, vec!["[0-9]"]);
+assert_eq!(error.expected, vec![ExpectedFragment::CharacterClass("0-9")]);
 ```
 
 For tooling, [`inspect_region`] preserves a partial root when the root rule
@@ -173,7 +175,7 @@ let rules = parse_grammar_source("grammar one\nrule root = `ok`\nend\n");
 let report = inspect_region(&rules, "root", "ok nope", 5);
 
 assert!(!report.is_success());
-assert_eq!(report.root.as_ref().map(|root| root.text.as_str()), Some("ok"));
+assert_eq!(report.root.as_ref().map(|root| root.text), Some("ok"));
 assert_eq!(report.error.as_ref().map(|error| error.span), Some(Span::new(8, 8)));
 ```
 
@@ -183,18 +185,20 @@ The kernel does not know about Interloko or any other language's keywords.
 Identifier-like rules can reject complete matched text supplied by the caller:
 
 ```rust
-use interloko_grammar::{Span, interpret_region, parse_grammar_source};
+use interloko_grammar::{
+    ExpectedFragment, Span, interpret_region, parse_grammar_source,
+};
 
 let rules = parse_grammar_source("grammar names\nrule name = [A-Za-z]+\nend\n")
     .into_iter()
-    .map(|rule| rule.with_excluded_text(vec!["define".to_string()]))
+    .map(|rule| rule.with_excluded_text(vec!["define"]))
     .collect::<Vec<_>>();
 
 let error = interpret_region(&rules, "name", "define", 10)
     .expect_err("caller excluded this word");
 
 assert_eq!(error.span, Span::new(10, 10));
-assert_eq!(error.expected, vec!["name"]);
+assert_eq!(error.expected, vec![ExpectedFragment::Rule("name")]);
 ```
 
 ## Extension Points

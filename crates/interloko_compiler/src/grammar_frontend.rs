@@ -348,35 +348,23 @@ pub struct GrammarProjection {
 
 /// Returns inert source data for a grammar rule expression.
 #[must_use]
-pub fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
+pub fn rule_expression_source_data(expression: &RuleExpression<'_>) -> SourceData {
     match expression {
         RuleExpression::Rule(name) => SourceData::record(
             "rule-ref",
-            vec![source_data::field(
-                "name",
-                SourceData::symbol(name.as_str()),
-            )],
+            vec![source_data::field("name", SourceData::symbol(*name))],
         ),
         RuleExpression::Literal(value) => SourceData::record(
             "literal",
-            vec![source_data::field(
-                "value",
-                SourceData::string(value.as_str()),
-            )],
+            vec![source_data::field("value", SourceData::string(*value))],
         ),
         RuleExpression::CharacterClass(value) => SourceData::record(
             "character-class",
-            vec![source_data::field(
-                "value",
-                SourceData::string(value.as_str()),
-            )],
+            vec![source_data::field("value", SourceData::string(*value))],
         ),
         RuleExpression::UntilLiteral(value) => SourceData::record(
             "until-literal",
-            vec![source_data::field(
-                "value",
-                SourceData::string(value.as_str()),
-            )],
+            vec![source_data::field("value", SourceData::string(*value))],
         ),
         RuleExpression::Sequence(items) => SourceData::record(
             "sequence",
@@ -423,21 +411,21 @@ pub fn rule_expression_source_data(expression: &RuleExpression) -> SourceData {
     }
 }
 
-fn transform_output_source_data(output: &TransformOutput) -> SourceData {
+fn transform_output_source_data(output: &TransformOutput<'_>) -> SourceData {
     match output {
         TransformOutput::Action(action) => grammar_action_source_data(action),
-        TransformOutput::Literal(value) => SourceData::string(value.as_str()),
-        TransformOutput::Symbol(value) => SourceData::symbol(value.as_str()),
+        TransformOutput::Literal(value) => SourceData::string(*value),
+        TransformOutput::Symbol(value) => SourceData::symbol(*value),
     }
 }
 
 /// Returns inert source data for a grammar action descriptor.
 #[must_use]
-pub fn grammar_action_source_data(action: &GrammarAction) -> SourceData {
+pub fn grammar_action_source_data(action: &GrammarAction<'_>) -> SourceData {
     SourceData::record(
         "grammar-action",
         vec![
-            source_data::field("name", SourceData::symbol(action.name.as_str())),
+            source_data::field("name", SourceData::symbol(action.name)),
             source_data::field(
                 "args",
                 SourceData::list(
@@ -452,38 +440,29 @@ pub fn grammar_action_source_data(action: &GrammarAction) -> SourceData {
     )
 }
 
-fn grammar_action_arg_source_data(arg: &GrammarActionArg) -> SourceData {
+fn grammar_action_arg_source_data(arg: &GrammarActionArg<'_>) -> SourceData {
     SourceData::record(
         "grammar-action-arg",
         vec![
-            source_data::field("name", SourceData::symbol(arg.name.as_str())),
+            source_data::field("name", SourceData::symbol(arg.name)),
             source_data::field("value", grammar_action_term_source_data(&arg.value)),
         ],
     )
 }
 
-fn grammar_action_term_source_data(term: &GrammarActionTerm) -> SourceData {
+fn grammar_action_term_source_data(term: &GrammarActionTerm<'_>) -> SourceData {
     match term {
         GrammarActionTerm::Capture { rule } => SourceData::record(
             "capture",
-            vec![source_data::field(
-                "rule",
-                SourceData::symbol(rule.as_str()),
-            )],
+            vec![source_data::field("rule", SourceData::symbol(*rule))],
         ),
         GrammarActionTerm::CaptureAll { rule } => SourceData::record(
             "capture-all",
-            vec![source_data::field(
-                "rule",
-                SourceData::symbol(rule.as_str()),
-            )],
+            vec![source_data::field("rule", SourceData::symbol(*rule))],
         ),
         GrammarActionTerm::Literal(value) => SourceData::record(
             "literal",
-            vec![source_data::field(
-                "value",
-                SourceData::string(value.as_str()),
-            )],
+            vec![source_data::field("value", SourceData::string(*value))],
         ),
         GrammarActionTerm::Bool(value) => SourceData::record(
             "bool",
@@ -534,9 +513,9 @@ pub struct GrammarRule {
     /// Rule name.
     pub name: String,
     /// Structured projected expression.
-    pub expression: RuleExpression,
+    pub expression: RuleExpression<'static>,
     /// Deterministic structural action attached to this rule, when any.
-    pub action: Option<GrammarAction>,
+    pub action: Option<GrammarAction<'static>>,
     /// Inert structural expression data.
     pub expression_data: SourceData,
     /// Projection/source location information.
@@ -2552,7 +2531,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
         name: "function-definition".to_string(),
         expression: RuleExpression::transform(
             RuleExpression::rule("function-definition"),
-            TransformOutput::Symbol("delegates-to-base-loko".to_string()),
+            TransformOutput::Symbol("delegates-to-base-loko"),
         ),
         expression_data: SourceData::record(
             "host-grammar-rule",
@@ -2832,14 +2811,18 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         .collect()
 }
 
-fn grammar_rule_expression_data(name: &str, expression: &str, location: &str) -> SourceData {
+fn grammar_rule_expression_data(
+    name: &str,
+    expression: &'static str,
+    location: &str,
+) -> SourceData {
     let structured = projected_rule_expression(expression);
     grammar_rule_expression_data_from_expr(name, &structured, Some(expression), location)
 }
 
 fn grammar_rule_expression_data_from_expr(
     name: &str,
-    expression: &RuleExpression,
+    expression: &RuleExpression<'_>,
     text: Option<&str>,
     location: &str,
 ) -> SourceData {
@@ -2854,11 +2837,11 @@ fn grammar_rule_expression_data_from_expr(
     SourceData::record("grammar-rule", fields)
 }
 
-fn projected_rule_expression(expression: &str) -> RuleExpression {
+fn projected_rule_expression(expression: &'static str) -> RuleExpression<'static> {
     interloko_grammar::parse_rule_expression(expression)
 }
 
-fn parse_grammar_action(output: &str) -> Option<GrammarAction> {
+fn parse_grammar_action(output: &'static str) -> Option<GrammarAction<'static>> {
     interloko_grammar::parse_grammar_action(output)
 }
 
@@ -3458,13 +3441,13 @@ mod tests {
             .expect("pair parses");
         let node = parse.root;
 
-        assert_eq!(node.rule_name, "pair");
+        assert_eq!(node.name(), Some("pair"));
         assert_eq!(node.span, GrammarSpan::new(100, 117));
         assert_eq!(
             node.children
                 .iter()
-                .filter(|child| !child.rule_name.starts_with("literal:"))
-                .map(|child| (child.rule_name.as_str(), child.text.as_str()))
+                .filter(|child| child.is_named())
+                .map(|child| (child.name().unwrap_or(""), child.text))
                 .collect::<Vec<_>>(),
             Vec::from([("name", "radius"), ("type-name", "<integer>")])
         );
@@ -3487,8 +3470,8 @@ mod tests {
             identifier
                 .children
                 .iter()
-                .filter(|child| child.rule_name.starts_with("class:"))
-                .map(|child| child.text.as_str())
+                .filter(|child| child.character_class().is_some())
+                .map(|child| child.text)
                 .collect::<Vec<_>>(),
             Vec::from(["a", "r", "e", "a", "?"])
         );
@@ -3502,7 +3485,10 @@ mod tests {
         let error = interpreter::interpret_region_result(&rules, "digits", "", 30)
             .expect_err("one-or-more requires one match");
         assert_eq!(error.span, GrammarSpan::new(30, 30));
-        assert_eq!(error.expected, Vec::from(["[0-9]".to_string()]));
+        assert_eq!(
+            error.expected,
+            Vec::from([interloko_grammar::ExpectedFragment::CharacterClass("0-9")])
+        );
     }
 
     #[test]
@@ -3515,13 +3501,13 @@ mod tests {
             .expect("block parses")
             .root;
 
-        assert_eq!(node.rule_name, "block");
+        assert_eq!(node.name(), Some("block"));
         assert_eq!(node.span, GrammarSpan::new(40, 55));
         assert_eq!(
             node.children
                 .iter()
-                .find(|child| child.rule_name == "until:end")
-                .map(|child| child.text.as_str()),
+                .find(|child| child.opaque_delimiter() == Some("end"))
+                .map(|child| child.text),
             Some(" 1 + 2\n")
         );
         assert_eq!(
@@ -3574,7 +3560,10 @@ mod tests {
             .expect_err("unknown rule cannot be interpreted by hidden builtins");
 
         assert_eq!(error.span, GrammarSpan::new(40, 40));
-        assert_eq!(error.expected, Vec::from(["missing-rule".to_string()]));
+        assert_eq!(
+            error.expected,
+            Vec::from([interloko_grammar::ExpectedFragment::Rule("missing-rule")])
+        );
     }
 
     #[test]
@@ -3743,8 +3732,7 @@ mod tests {
         );
         assert!(source_data::dump(&report.staged_regions[0].data).contains("oracle: none"));
         assert!(
-            source_data::dump(&report.staged_regions[1].data)
-                .contains("rule-node(rule: calculator-region")
+            source_data::dump(&report.staged_regions[1].data).contains("rule: calculator-region")
         );
         assert_eq!(report.extension_activations.len(), 2);
         assert_eq!(report.extension_activations[0].adapter, "calculator");
@@ -3875,10 +3863,7 @@ mod tests {
                 .contains("driver: interpreted-grammar")
         );
         assert!(source_data::dump(&report.staged_regions[0].data).contains("oracle: none"));
-        assert!(
-            source_data::dump(&report.staged_regions[0].data)
-                .contains("rule-node(rule: records-region")
-        );
+        assert!(source_data::dump(&report.staged_regions[0].data).contains("rule: records-region"));
         assert!(
             report
                 .extension_provenance

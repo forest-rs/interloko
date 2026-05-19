@@ -5820,11 +5820,7 @@ fn explain_grammar_action_output(artifacts: &SessionArtifacts, id: &str) -> Opti
             .unwrap_or_else(|| grammar_frontend::grammar_rule_object_id(rule))
     );
     let _ = writeln!(out, "action {}", action.name);
-    let _ = writeln!(
-        out,
-        "produces {}",
-        grammar_action_output_label(&action.name)
-    );
+    let _ = writeln!(out, "produces {}", grammar_action_output_label(action.name));
     let _ = writeln!(out, "rule-expression {}", rule.expression);
     Some(out)
 }

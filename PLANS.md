@@ -1,5 +1,67 @@
 # Plans
 
+## Borrow Grammar Kernel Strings
+
+### Goal
+
+Make `interloko_grammar` stop allocating strings for grammar-source and
+input-source data that can be borrowed. Grammar expressions, actions, parsed
+rules, parse trees, parse errors, and rule-count reports should carry lifetimes
+that make their relationship to grammar source and parsed source explicit.
+
+### Non-Goals
+
+- No new grammar syntax.
+- No parser algorithm changes.
+- No package loader or persistent grammar registry.
+- No attempt to remove all allocations; recursive expressions and child lists
+  still use `Box`/`Vec`.
+- No Interloko semantic changes.
+
+### Fence
+
+`interloko_grammar` owns borrowed parser-kernel data tied to grammar source and
+parsed input source. It explicitly does not own compiler projection
+provenance, semantic action evaluation, source-data rendering, or MOP/EOP
+objects.
+
+`interloko_compiler::grammar_frontend` owns any conversion from borrowed grammar
+records into compiler-owned projection records that must outlive a local parse.
+
+### Invariants
+
+- Grammar source parsing returns `SourceAuthoredRule<'g>` values borrowing from
+  the supplied grammar source.
+- Interpreted parse trees return `RuleNode<'g, 's>` values: node kind/rule names
+  borrow from grammar source, matched text borrows from parsed source.
+- `ParseError` and `RuleCount` stop owning expected/rule-name strings when they
+  can borrow grammar fragments.
+- Compiler-owned `GrammarRule` records remain owned where session/report data
+  needs stable storage beyond the local parse.
+- `interloko_grammar` remains `no_std`.
+- Workspace tests, clippy, docs, and doctests stay green.
+
+### Sequence
+
+1. Add lifetime parameters to grammar expression/action/rule types and parser
+   helpers.
+2. Replace parse-tree synthetic `rule_name: String` with a borrowed
+   `RuleNodeKind<'g>` plus text slices borrowed from the parsed source.
+3. Update parse failures, parse errors, and rule-count reports to borrow
+   expected fragments and rule names.
+4. Update compiler adapters to convert borrowed grammar records into owned
+   compiler records at the projection boundary.
+5. Update README/rustdoc examples and run full validation.
+
+### Risks
+
+- Lifetimes can spread into compiler-owned long-lived records. Keep conversion
+  to owned data at the compiler boundary.
+- Anonymous node labels used to be synthetic strings. Preserve stable display
+  labels through methods rather than storing generated strings.
+- Public API breakage is intentional here, but docs should make the new
+  borrowed ownership model obvious.
+
 ## Make Grammar Parse Trees More Inspectable
 
 ### Goal

@@ -2,6 +2,8 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use interloko_grammar::ExpectedFragment;
+
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::SourceFileId;
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree, Token, TokenKind};
@@ -48,7 +50,7 @@ fn base_loko_parse_error(
     if error
         .expected
         .iter()
-        .any(|expected| expected == "end of region")
+        .any(|expected| matches!(expected, ExpectedFragment::EndOfRegion))
     {
         error = interpret_rule_error(rules, "definition", source, error.span.start, 0);
     }
@@ -57,7 +59,7 @@ fn base_loko_parse_error(
             error
                 .expected
                 .iter()
-                .any(|expected| expected.contains("end"))
+                .any(|expected| matches!(expected, ExpectedFragment::EndOfRegion))
         })
     {
         let let_error = interpret_rule_error(rules, "let-statement", source, let_start, 0);
@@ -89,7 +91,12 @@ fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {
     let expected = if error.expected.is_empty() {
         "base Loko grammar".to_string()
     } else {
-        error.expected.join(" or ")
+        error
+            .expected
+            .iter()
+            .map(|expected| alloc::format!("{expected}"))
+            .collect::<Vec<_>>()
+            .join(" or ")
     };
     Diagnostic::error(error.span.into(), DiagnosticCode::SyntaxExpectedToken)
         .with_arg(DiagnosticArg::text("expected", expected))
@@ -102,7 +109,7 @@ struct GrammarCstBuilder<'source> {
 }
 
 impl GrammarCstBuilder<'_> {
-    fn finish(self, root: &InterpretedRuleNode) -> SyntaxTree {
+    fn finish(self, root: &InterpretedRuleNode<'_>) -> SyntaxTree {
         let root = self.build_root(root);
         SyntaxTree {
             source_file: self.source_file,
@@ -113,21 +120,21 @@ impl GrammarCstBuilder<'_> {
         }
     }
 
-    fn build_root(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_root(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let children = node
             .children
             .iter()
-            .filter(|child| child.rule_name == "definition")
+            .filter(|child| child.is_rule("definition"))
             .filter_map(|definition| self.build_definition(definition))
             .map(CstElement::Node)
             .collect();
         self.node(CstKind::Root, children, node.span)
     }
 
-    fn build_definition(&self, node: &InterpretedRuleNode) -> Option<CstNode> {
+    fn build_definition(&self, node: &InterpretedRuleNode<'_>) -> Option<CstNode> {
         node.children
             .iter()
-            .find_map(|child| match child.rule_name.as_str() {
+            .find_map(|child| match child.name().unwrap_or("") {
                 "class-definition" => Some(self.build_class(child)),
                 "generic-definition" => Some(self.build_generic(child)),
                 "method-definition" => Some(self.build_callable(child, CstKind::Method)),
@@ -136,11 +143,11 @@ impl GrammarCstBuilder<'_> {
             })
     }
 
-    fn build_class(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_class(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let slots = node
             .children
             .iter()
-            .filter(|child| child.rule_name == "slot-declaration")
+            .filter(|child| child.is_rule("slot-declaration"))
             .map(|slot| self.build_slot(slot))
             .collect::<Vec<_>>();
         let excluded = slots.iter().map(|slot| slot.span).collect::<Vec<_>>();
@@ -149,13 +156,13 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::Class, self.sorted(children), node.span)
     }
 
-    fn build_slot(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_slot(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let inner = node
             .children
             .iter()
             .find(|child| {
                 matches!(
-                    child.rule_name.as_str(),
+                    child.name().unwrap_or(""),
                     "constant-slot-declaration" | "mutable-slot-declaration"
                 )
             })
@@ -163,11 +170,11 @@ impl GrammarCstBuilder<'_> {
         let options = inner
             .children
             .iter()
-            .filter(|child| child.rule_name == "slot-option-tail")
+            .filter(|child| child.is_rule("slot-option-tail"))
             .filter_map(|tail| {
                 tail.children
                     .iter()
-                    .find(|child| child.rule_name == "slot-option")
+                    .find(|child| child.is_rule("slot-option"))
             })
             .map(|option| self.build_slot_option(option))
             .collect::<Vec<_>>();
@@ -177,13 +184,13 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::SlotDecl, self.sorted(children), inner.span)
     }
 
-    fn build_slot_option(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_slot_option(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let inner = node
             .children
             .iter()
             .find(|child| {
                 matches!(
-                    child.rule_name.as_str(),
+                    child.name().unwrap_or(""),
                     "init-value-option" | "keyword-slot-option"
                 )
             })
@@ -191,7 +198,7 @@ impl GrammarCstBuilder<'_> {
         let expr = inner
             .children
             .iter()
-            .find(|child| child.rule_name == "expression")
+            .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
         let excluded = expr.as_ref().map_or_else(Vec::new, |expr| vec![expr.span]);
         let mut children = self.direct_tokens(inner.span, &excluded);
@@ -201,11 +208,11 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::SlotOption, self.sorted(children), inner.span)
     }
 
-    fn build_generic(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_generic(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let params = node
             .children
             .iter()
-            .find(|child| child.rule_name == "parameter-list")
+            .find(|child| child.is_rule("parameter-list"))
             .map(|params| self.build_parameter_list(params));
         let excluded = params
             .as_ref()
@@ -217,16 +224,16 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::Generic, self.sorted(children), node.span)
     }
 
-    fn build_callable(&self, node: &InterpretedRuleNode, kind: CstKind) -> CstNode {
+    fn build_callable(&self, node: &InterpretedRuleNode<'_>, kind: CstKind) -> CstNode {
         let params = node
             .children
             .iter()
-            .find(|child| child.rule_name == "parameter-list")
+            .find(|child| child.is_rule("parameter-list"))
             .map(|params| self.build_parameter_list(params));
         let body = node
             .children
             .iter()
-            .find(|child| child.rule_name == "body")
+            .find(|child| child.is_rule("body"))
             .map(|body| self.build_body(body));
         let mut excluded = Vec::new();
         if let Some(params) = &params {
@@ -245,7 +252,7 @@ impl GrammarCstBuilder<'_> {
         self.node(kind, self.sorted(children), node.span)
     }
 
-    fn build_parameter_list(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_parameter_list(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         self.node(
             CstKind::ParameterList,
             self.direct_tokens(node.span, &[]),
@@ -253,18 +260,18 @@ impl GrammarCstBuilder<'_> {
         )
     }
 
-    fn build_body(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_body(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let lets = node
             .children
             .iter()
-            .filter(|child| child.rule_name == "let-statement")
+            .filter(|child| child.is_rule("let-statement"))
             .map(|let_stmt| self.build_let(let_stmt))
             .collect::<Vec<_>>();
         let expr = node
             .children
             .iter()
             .find(|child| {
-                child.rule_name == "expression"
+                child.is_rule("expression")
                     && (!child.span.is_empty() || !child.children.is_empty())
             })
             .map(|expr| self.build_expr(expr));
@@ -275,11 +282,11 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::Body, self.sorted(children), node.span)
     }
 
-    fn build_let(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_let(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let expr = node
             .children
             .iter()
-            .find(|child| child.rule_name == "expression")
+            .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
         let excluded = expr.as_ref().map_or_else(Vec::new, |expr| vec![expr.span]);
         let mut children = self.direct_tokens(node.span, &excluded);
@@ -289,8 +296,8 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::LetStmt, self.sorted(children), node.span)
     }
 
-    fn build_expr(&self, node: &InterpretedRuleNode) -> CstNode {
-        match node.rule_name.as_str() {
+    fn build_expr(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        match node.name().unwrap_or("") {
             "expression" => self.unwrap_first_expr(node),
             "handle-expression" => self.build_handle(node),
             "restart-clause" => self.build_restart(node),
@@ -306,7 +313,7 @@ impl GrammarCstBuilder<'_> {
             "parenthesized-expression" => node
                 .children
                 .iter()
-                .find(|child| child.rule_name == "expression")
+                .find(|child| child.is_rule("expression"))
                 .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr)),
             "vector-expression" => self.build_vector(node),
             "call-expression" => self.build_call(node),
@@ -323,17 +330,17 @@ impl GrammarCstBuilder<'_> {
         }
     }
 
-    fn unwrap_first_expr(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn unwrap_first_expr(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         node.children
             .iter()
-            .find(|child| self.is_expr_rule(&child.rule_name))
+            .find(|child| child.name().is_some_and(|name| self.is_expr_rule(name)))
             .map_or_else(
                 || self.error_node(node.span),
                 |child| self.build_expr(child),
             )
     }
 
-    fn build_keyword_symbol(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_keyword_symbol(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let kind =
             if self.tokens.iter().any(|token| {
                 token.kind == TokenKind::Keyword && span_contains(node.span, token.span)
@@ -345,53 +352,53 @@ impl GrammarCstBuilder<'_> {
         self.leaf(kind, node)
     }
 
-    fn build_handle(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_handle(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let nested = node
             .children
             .iter()
-            .filter(|child| child.rule_name == "expression" || child.rule_name == "restart-clause")
+            .filter(|child| child.is_rule("expression") || child.is_rule("restart-clause"))
             .map(|child| self.build_expr(child))
             .collect::<Vec<_>>();
         self.node_with_nested(CstKind::HandleExpr, node, nested)
     }
 
-    fn build_restart(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_restart(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let nested = node
             .children
             .iter()
-            .find(|child| child.rule_name == "expression")
+            .find(|child| child.is_rule("expression"))
             .map(|expr| vec![self.build_expr(expr)])
             .unwrap_or_default();
         self.node_with_nested(CstKind::RestartClause, node, nested)
     }
 
-    fn build_if(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_if(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let nested = node
             .children
             .iter()
-            .filter(|child| child.rule_name == "expression")
+            .filter(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr))
             .collect::<Vec<_>>();
         self.node_with_nested(CstKind::IfExpr, node, nested)
     }
 
-    fn build_assignment(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_assignment(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let target = node
             .children
             .iter()
-            .find(|child| child.rule_name == "comparison-expression")
+            .find(|child| child.is_rule("comparison-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
         let Some(tail) = node
             .children
             .iter()
-            .find(|child| child.rule_name == "assignment-tail")
+            .find(|child| child.is_rule("assignment-tail"))
         else {
             return target;
         };
         let value = tail
             .children
             .iter()
-            .find(|child| child.rule_name == "expression")
+            .find(|child| child.is_rule("expression"))
             .map_or_else(|| self.error_node(tail.span), |expr| self.build_expr(expr));
         let children = vec![
             CstElement::Node(target),
@@ -401,23 +408,23 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::SlotAssignExpr, children, node.span)
     }
 
-    fn build_comparison(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_comparison(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let lhs = node
             .children
             .iter()
-            .find(|child| child.rule_name == "additive-expression")
+            .find(|child| child.is_rule("additive-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
         let Some(tail) = node
             .children
             .iter()
-            .find(|child| child.rule_name == "comparison-tail")
+            .find(|child| child.is_rule("comparison-tail"))
         else {
             return lhs;
         };
         let rhs = tail
             .children
             .iter()
-            .find(|child| child.rule_name == "additive-expression")
+            .find(|child| child.is_rule("additive-expression"))
             .map_or_else(|| self.error_node(tail.span), |expr| self.build_expr(expr));
         let op = self.first_operator_token(tail.span);
         self.node(
@@ -431,21 +438,21 @@ impl GrammarCstBuilder<'_> {
         )
     }
 
-    fn build_additive(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_additive(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut expr = node
             .children
             .iter()
-            .find(|child| child.rule_name == "multiplicative-expression")
+            .find(|child| child.is_rule("multiplicative-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
         for tail in node
             .children
             .iter()
-            .filter(|child| child.rule_name == "additive-tail")
+            .filter(|child| child.is_rule("additive-tail"))
         {
             let rhs = tail
                 .children
                 .iter()
-                .find(|child| child.rule_name == "multiplicative-expression")
+                .find(|child| child.is_rule("multiplicative-expression"))
                 .map_or_else(|| self.error_node(tail.span), |expr| self.build_expr(expr));
             let op = self.first_operator_token(tail.span);
             let span = expr.span.cover(rhs.span);
@@ -462,21 +469,21 @@ impl GrammarCstBuilder<'_> {
         expr
     }
 
-    fn build_multiplicative(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_multiplicative(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut expr = node
             .children
             .iter()
-            .find(|child| child.rule_name == "unary-expression")
+            .find(|child| child.is_rule("unary-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
         for tail in node
             .children
             .iter()
-            .filter(|child| child.rule_name == "multiplicative-tail")
+            .filter(|child| child.is_rule("multiplicative-tail"))
         {
             let rhs = tail
                 .children
                 .iter()
-                .find(|child| child.rule_name == "unary-expression")
+                .find(|child| child.is_rule("unary-expression"))
                 .map_or_else(|| self.error_node(tail.span), |expr| self.build_expr(expr));
             let op = self.first_token_index(tail.span, TokenKind::Star);
             let span = expr.span.cover(rhs.span);
@@ -493,11 +500,11 @@ impl GrammarCstBuilder<'_> {
         expr
     }
 
-    fn build_unary(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_unary(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let expr = node
             .children
             .iter()
-            .find(|child| child.rule_name == "unary-expression")
+            .find(|child| child.is_rule("unary-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
         self.node(
             CstKind::UnaryExpr,
@@ -509,16 +516,16 @@ impl GrammarCstBuilder<'_> {
         )
     }
 
-    fn build_postfix(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_postfix(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut expr = node
             .children
             .iter()
-            .find(|child| child.rule_name == "primary-expression")
+            .find(|child| child.is_rule("primary-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
         for tail in node
             .children
             .iter()
-            .filter(|child| child.rule_name == "slot-tail")
+            .filter(|child| child.is_rule("slot-tail"))
         {
             let dot = self.first_token_index(tail.span, TokenKind::Dot);
             let name = self.first_token_index(tail.span, TokenKind::Ident);
@@ -536,21 +543,21 @@ impl GrammarCstBuilder<'_> {
         expr
     }
 
-    fn build_vector(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_vector(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let nested = node
             .children
             .iter()
-            .find(|child| child.rule_name == "vector-items")
+            .find(|child| child.is_rule("vector-items"))
             .map(|items| {
                 let mut expressions = Vec::new();
                 for child in &items.children {
-                    if child.rule_name == "expression" {
+                    if child.is_rule("expression") {
                         expressions.push(self.build_expr(child));
-                    } else if child.rule_name == "vector-tail"
+                    } else if child.is_rule("vector-tail")
                         && let Some(expr) = child
                             .children
                             .iter()
-                            .find(|child| child.rule_name == "expression")
+                            .find(|child| child.is_rule("expression"))
                     {
                         expressions.push(self.build_expr(expr));
                     }
@@ -561,11 +568,11 @@ impl GrammarCstBuilder<'_> {
         self.node_with_nested(CstKind::VectorExpr, node, nested)
     }
 
-    fn build_call(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_call(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let arg_list = node
             .children
             .iter()
-            .find(|child| child.rule_name == "argument-list")
+            .find(|child| child.is_rule("argument-list"))
             .map(|args| self.build_argument_list(args));
         let excluded = arg_list
             .as_ref()
@@ -577,16 +584,16 @@ impl GrammarCstBuilder<'_> {
         self.node(CstKind::CallExpr, self.sorted(children), node.span)
     }
 
-    fn build_argument_list(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_argument_list(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut nested = Vec::new();
         for child in &node.children {
-            let arg = if child.rule_name == "argument" {
+            let arg = if child.is_rule("argument") {
                 Some(child)
-            } else if child.rule_name == "argument-tail" {
+            } else if child.is_rule("argument-tail") {
                 child
                     .children
                     .iter()
-                    .find(|child| child.rule_name == "argument")
+                    .find(|child| child.is_rule("argument"))
             } else {
                 None
             };
@@ -594,12 +601,12 @@ impl GrammarCstBuilder<'_> {
                 && let Some(node) = arg
                     .children
                     .iter()
-                    .find(|child| child.rule_name == "keyword-argument")
+                    .find(|child| child.is_rule("keyword-argument"))
                     .map(|keyword| self.build_keyword_arg(keyword))
                     .or_else(|| {
                         arg.children
                             .iter()
-                            .find(|child| child.rule_name == "expression")
+                            .find(|child| child.is_rule("expression"))
                             .map(|expr| self.build_expr(expr))
                     })
             {
@@ -609,11 +616,11 @@ impl GrammarCstBuilder<'_> {
         self.node_with_nested(CstKind::ArgList, node, nested)
     }
 
-    fn build_keyword_arg(&self, node: &InterpretedRuleNode) -> CstNode {
+    fn build_keyword_arg(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let expr = node
             .children
             .iter()
-            .find(|child| child.rule_name == "expression")
+            .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
         let excluded = expr.as_ref().map_or_else(Vec::new, |expr| vec![expr.span]);
         let mut children = self.direct_tokens(node.span, &excluded);
@@ -626,7 +633,7 @@ impl GrammarCstBuilder<'_> {
     fn node_with_nested(
         &self,
         kind: CstKind,
-        source: &InterpretedRuleNode,
+        source: &InterpretedRuleNode<'_>,
         nested: Vec<CstNode>,
     ) -> CstNode {
         let excluded = nested.iter().map(|node| node.span).collect::<Vec<_>>();
@@ -635,7 +642,7 @@ impl GrammarCstBuilder<'_> {
         self.node(kind, self.sorted(children), source.span)
     }
 
-    fn leaf(&self, kind: CstKind, node: &InterpretedRuleNode) -> CstNode {
+    fn leaf(&self, kind: CstKind, node: &InterpretedRuleNode<'_>) -> CstNode {
         self.node(kind, self.direct_tokens(node.span, &[]), node.span)
     }
 
