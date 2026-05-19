@@ -3707,7 +3707,7 @@ mod tests {
         let error = interpreter::interpret_region_result(&rules, "root", "anything", 40)
             .expect_err("unknown rule cannot be interpreted by hidden builtins");
 
-        assert_eq!(error.span, GrammarSpan::new(40, 40));
+        assert_eq!(error.span, GrammarSpan::new(40, 48));
         assert_eq!(
             error.expected,
             Vec::from([interloko_grammar::ExpectedFragment::Rule("missing-rule")])
@@ -3893,6 +3893,37 @@ mod tests {
         );
         assert!(fact.expected_fragment.is_some());
         assert_eq!(report.provenance.diagnostics, report.grammar_diagnostics);
+    }
+
+    #[test]
+    fn base_loko_expected_token_diagnostic_points_at_unexpected_token() {
+        let report = parse_file(
+            SourceFileId::from_path("bad-keyword.loko"),
+            "define classs foo (<object>) end;",
+        );
+        let diagnostic = report.diagnostics.first().expect("syntax diagnostic");
+
+        assert_eq!(diagnostic.code, DiagnosticCode::SyntaxExpectedToken);
+        assert_eq!(diagnostic.span, Span::new(7, 13));
+        assert_eq!(
+            diagnostic_arg(diagnostic, "expected"),
+            Some("`class` or `generic` or `method` or `function`".to_string())
+        );
+    }
+
+    #[test]
+    fn base_loko_expected_token_diagnostic_keeps_eof_span() {
+        let report = parse_file(
+            SourceFileId::from_path("bad-eof.loko"),
+            "define function main(",
+        );
+        let diagnostic = report.diagnostics.first().expect("syntax diagnostic");
+
+        assert_eq!(diagnostic.code, DiagnosticCode::SyntaxExpectedToken);
+        assert_eq!(
+            diagnostic.span,
+            Span::new("define function main(".len(), "define function main(".len())
+        );
     }
 
     #[test]

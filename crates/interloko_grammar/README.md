@@ -148,9 +148,10 @@ assert_eq!(integer.text, "integer");
 ## Parse Errors
 
 Failures return a [`ParseError`] with a [`Span`] and a list of expected
-fragments. The span uses the `source_offset` supplied to [`interpret_region`],
-so callers can parse embedded regions while preserving coordinates in the
-larger source file.
+fragments. The span points at the unexpected source fragment when one exists,
+or at a zero-width expectation point at EOF. It uses the `source_offset`
+supplied to [`interpret_region`], so callers can parse embedded regions while
+preserving coordinates in the larger source file.
 
 ```rust
 use interloko_grammar::{
@@ -176,7 +177,7 @@ let report = inspect_region(&rules, "root", "ok nope", 5);
 
 assert!(!report.is_success());
 assert_eq!(report.root.as_ref().map(|root| root.text), Some("ok"));
-assert_eq!(report.error.as_ref().map(|error| error.span), Some(Span::new(8, 8)));
+assert_eq!(report.error.as_ref().map(|error| error.span), Some(Span::new(8, 12)));
 ```
 
 ## Caller-Owned Policy
@@ -197,7 +198,7 @@ let rules = parse_grammar_source("grammar names\nrule name = [A-Za-z]+\nend\n")
 let error = interpret_region(&rules, "name", "define", 10)
     .expect_err("caller excluded this word");
 
-assert_eq!(error.span, Span::new(10, 10));
+assert_eq!(error.span, Span::new(10, 16));
 assert_eq!(error.expected, vec![ExpectedFragment::Rule("name")]);
 ```
 

@@ -706,17 +706,18 @@ impl fmt::Display for ExpectedFragment<'_> {
 /// Interpreted parse failure returned by [`interpret_region`] and
 /// [`interpret_rule_error`].
 ///
-/// The failure is structural: [`ParseError::span`] reports the failed byte
-/// position and [`ParseError::expected`] lists the fragments that could have
-/// matched there. Rendering, localization, labels, and recovery policy belong
-/// to the caller.
+/// The failure is structural: [`ParseError::span`] reports the unexpected
+/// source fragment when one exists, or a zero-width expectation point at EOF
+/// or between fragments. [`ParseError::expected`] lists the fragments that
+/// could have matched there. Rendering, localization, labels, and recovery
+/// policy belong to the caller.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError<'g> {
     /// Error span in the caller's coordinate system.
     ///
     /// [`interpret_region`] and [`interpret_rule_error`] add their
-    /// `source_offset` argument to the internal failure position before
-    /// returning this span.
+    /// `source_offset` argument to the internal failure span before returning
+    /// this span.
     pub span: Span,
     /// Expected fragments at the error span.
     ///
@@ -733,7 +734,7 @@ struct ExpressionMatch<'g, 's> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ParseFailure<'g> {
-    position: usize,
+    span: Span,
     expected: Vec<ExpectedFragment<'g>>,
 }
 
@@ -1049,7 +1050,7 @@ pub fn inspect_region<'g, 's>(
         ParseReport {
             root: Some(root),
             error: Some(
-                ParseFailure::expected(trailing, ExpectedFragment::EndOfRegion)
+                ParseFailure::expected_at_source(source, trailing, ExpectedFragment::EndOfRegion)
                     .into_error(source_offset),
             ),
         }
@@ -1071,7 +1072,9 @@ pub fn interpret_rule_error<'g>(
 ) -> ParseError<'g> {
     interpret_rule(rules, rule_name, source, position, source_offset)
         .err()
-        .unwrap_or_else(|| ParseFailure::expected(position, ExpectedFragment::Rule(rule_name)))
+        .unwrap_or_else(|| {
+            ParseFailure::expected_at_source(source, position, ExpectedFragment::Rule(rule_name))
+        })
         .into_error(source_offset)
 }
 
@@ -1091,7 +1094,11 @@ fn interpret_rule<'g, 's>(
             .iter()
             .any(|excluded| *excluded == &source[start..end])
         {
-            return Err(ParseFailure::expected(start, ExpectedFragment::Rule(name)));
+            return Err(ParseFailure::expected_at_source(
+                source,
+                start,
+                ExpectedFragment::Rule(name),
+            ));
         }
         return Ok(RuleNode {
             kind: RuleNodeKind::Rule { name },
@@ -1100,7 +1107,8 @@ fn interpret_rule<'g, 's>(
             children: matched.children,
         });
     }
-    Err(ParseFailure::expected(
+    Err(ParseFailure::expected_at_source(
+        source,
         skip_trivia(source, position),
         ExpectedFragment::Rule(name),
     ))
@@ -1127,7 +1135,13 @@ fn interpret_expression<'g, 's>(
                 .starts_with(value)
                 .then_some(start + value.len())
                 .filter(|end| literal_boundary_ok(source, *end, value))
-                .ok_or_else(|| ParseFailure::expected(start, ExpectedFragment::Literal(value)))?;
+                .ok_or_else(|| {
+                    ParseFailure::expected_at_source(
+                        source,
+                        start,
+                        ExpectedFragment::Literal(value),
+                    )
+                })?;
             Ok(ExpressionMatch {
                 end,
                 children: vec![RuleNode {
@@ -1145,7 +1159,11 @@ fn interpret_expression<'g, 's>(
                 .next()
                 .filter(|ch| character_class_contains(value, *ch))
                 .ok_or_else(|| {
-                    ParseFailure::expected(start, ExpectedFragment::CharacterClass(value))
+                    ParseFailure::expected_at_source(
+                        source,
+                        start,
+                        ExpectedFragment::CharacterClass(value),
+                    )
                 })?;
             let end = start + ch.len_utf8();
             Ok(ExpressionMatch {
@@ -1195,8 +1213,9 @@ fn interpret_expression<'g, 's>(
                     Err(error) => merge_failure(&mut failure, error),
                 }
             }
-            Err(failure
-                .unwrap_or_else(|| ParseFailure::expected(position, ExpectedFragment::Choice)))
+            Err(failure.unwrap_or_else(|| {
+                ParseFailure::expected_at_source(source, position, ExpectedFragment::Choice)
+            }))
         }
         RuleExpression::Optional(item) => {
             Ok(
@@ -1240,16 +1259,23 @@ fn interpret_expression<'g, 's>(
 }
 
 impl<'g> ParseFailure<'g> {
-    fn expected(position: usize, expected: ExpectedFragment<'g>) -> Self {
+    fn expected_at_source(source: &str, position: usize, expected: ExpectedFragment<'g>) -> Self {
         Self {
-            position,
+            span: unexpected_fragment_span(source, position),
             expected: vec![expected],
         }
     }
 
+    const fn position(&self) -> usize {
+        self.span.start
+    }
+
     fn into_error(self, source_offset: usize) -> ParseError<'g> {
         ParseError {
-            span: Span::new(source_offset + self.position, source_offset + self.position),
+            span: Span::new(
+                source_offset + self.span.start,
+                source_offset + self.span.end,
+            ),
             expected: self.expected,
         }
     }
@@ -1257,8 +1283,11 @@ impl<'g> ParseFailure<'g> {
 
 fn merge_failure<'g>(failure: &mut Option<ParseFailure<'g>>, next: ParseFailure<'g>) {
     match failure {
-        Some(current) if current.position > next.position => {}
-        Some(current) if current.position == next.position => {
+        Some(current) if current.position() > next.position() => {}
+        Some(current) if current.position() == next.position() => {
+            if next.span.end > current.span.end {
+                current.span.end = next.span.end;
+            }
             for expected in next.expected {
                 if !current.expected.contains(&expected) {
                     current.expected.push(expected);
@@ -1267,6 +1296,31 @@ fn merge_failure<'g>(failure: &mut Option<ParseFailure<'g>>, next: ParseFailure<
         }
         _ => *failure = Some(next),
     }
+}
+
+fn unexpected_fragment_span(source: &str, position: usize) -> Span {
+    let start = skip_trivia(source, position);
+    let Some(first) = source[start..].chars().next() else {
+        return Span::new(start, start);
+    };
+    if is_delimiter_like(first) {
+        return Span::new(start, start + first.len_utf8());
+    }
+    let end = source[start..]
+        .char_indices()
+        .skip(1)
+        .find_map(|(index, ch)| {
+            (ch.is_whitespace() || is_delimiter_like(ch)).then_some(start + index)
+        })
+        .unwrap_or(source.len());
+    Span::new(start, end)
+}
+
+fn is_delimiter_like(ch: char) -> bool {
+    matches!(
+        ch,
+        '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':' | '.' | '"' | '\'' | '`'
+    )
 }
 
 fn character_class_contains(class: &str, ch: char) -> bool {
@@ -1494,6 +1548,25 @@ mod tests {
     }
 
     #[test]
+    fn reports_unexpected_fragments_for_literal_failures() {
+        let grammar = "grammar declarations\n\
+                       rule declaration = `define` (`class` | `generic`)\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let error =
+            interpret_region(&rules, "declaration", "define classs", 50).expect_err("bad keyword");
+
+        assert_eq!(error.span, Span::new(57, 63));
+        assert_eq!(
+            error.expected,
+            vec![
+                ExpectedFragment::Literal("class"),
+                ExpectedFragment::Literal("generic")
+            ]
+        );
+    }
+
+    #[test]
     fn interprets_choice_optional_and_repetition() {
         let grammar = "grammar words\n\
                        rule item = (`a` | `b`) `!`?\n\
@@ -1520,7 +1593,7 @@ mod tests {
         let rules = parse_grammar_source(grammar);
         let error = interpret_region(&rules, "root", "ok nope", 5).expect_err("trailing input");
 
-        assert_eq!(error.span, Span::new(8, 8));
+        assert_eq!(error.span, Span::new(8, 12));
         assert_eq!(error.expected, vec![ExpectedFragment::EndOfRegion]);
     }
 
@@ -1534,7 +1607,7 @@ mod tests {
         assert_eq!(report.root.as_ref().map(|node| node.text), Some("ok"));
         assert_eq!(
             report.error.as_ref().map(|error| error.span),
-            Some(Span::new(8, 8))
+            Some(Span::new(8, 12))
         );
         assert_eq!(
             report.error.as_ref().map(|error| error.expected.as_slice()),
@@ -1581,7 +1654,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let error = interpret_region(&rules, "name", "define", 20).expect_err("excluded word");
-        assert_eq!(error.span, Span::new(20, 20));
+        assert_eq!(error.span, Span::new(20, 26));
         assert_eq!(error.expected, vec![ExpectedFragment::Rule("name")]);
 
         let parse = interpret_region(&rules, "name", "circle", 30).expect("non-excluded name");
