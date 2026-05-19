@@ -1,5 +1,88 @@
 # Plans
 
+## Flip Base Loko To Grammar-Primary Behind A Parser Mode
+
+### Goal
+
+Stop inching toward a parser replacement and make the source-authored base-Loko
+grammar the primary parser path behind an explicit parser mode. The grammar
+path must produce the existing `SyntaxTree`/`CstNode` shape that AST lowering
+already consumes. The Rust recursive-descent parser remains in tree as an
+oracle and emergency fallback while equivalence is proven across the corpus.
+
+This goal is complete when normal session parsing can select
+`GrammarPrimary`, valid corpus/examples compile through that mode, parser
+shadow compares grammar-primary output against Rust-oracle output, and the
+default mode can be flipped without changing downstream AST/semantic/lowering
+code.
+
+### Non-Goals
+
+- No removal of the Rust parser in this goal.
+- No new language semantics.
+- No macro system.
+- No new grammar package loading format beyond repo resources.
+- No attempt to outperform the hand-written parser.
+- No diagnostic-system rewrite beyond preserving existing structured
+  diagnostic codes where practical.
+
+### Fence
+
+`syntax` owns lexer tokens, CST node construction, parser modes, and
+Rust-oracle fallback. It explicitly does not own grammar MOP projection or
+semantic lowering.
+
+`grammar_frontend` owns grammar resources, parser-shadow reporting, and
+language-environment selection. It explicitly does not synthesize AST facts by
+bypassing `SyntaxTree`.
+
+The base-Loko grammar resource owns the grammar spelling for the current
+language surface. It explicitly does not own runtime semantics.
+
+### Invariants
+
+- `SyntaxTree` is still the handoff to AST lowering.
+- Grammar-primary parsing constructs CST nodes from grammar-recognized spans
+  and token indices, not by returning the Rust parser tree.
+- Rust parser remains callable and is used as oracle comparison.
+- If grammar-primary cannot build a valid tree, the failure is visible in
+  parser-shadow output and tests; fallback is explicit, not silent.
+- Parser mode selection is explicit in tests and session plumbing before any
+  default flip.
+- Existing source files keep compiling with no downstream AST/sem/lower/tape
+  changes.
+- Every commit is bisectable.
+
+### Sequence
+
+1. Add `ParserMode` and thread it through `syntax` and `grammar_frontend` while
+   keeping the default Rust-primary behavior unchanged.
+2. Author a full `base_loko.grammar` resource for the current supported syntax:
+   definitions, class slots/options, parameter lists, bodies, lets, handlers,
+   ifs, assignment, comparisons, arithmetic, calls, slot access, vectors, and
+   literals.
+3. Build a grammar-primary CST constructor that walks interpreted rule nodes,
+   maps spans back to lexer token indices, and emits the existing `CstKind`
+   shape.
+4. Add equivalence tests comparing grammar-primary and Rust parser products on
+   syntax fixtures, corpus programs, staged programs, and representative error
+   cases.
+5. Route session/lab/repl parsing through parser mode configuration and make
+   parser-shadow compare active primary against the oracle.
+6. Flip the default parser mode to grammar-primary only after corpus, examples,
+   clippy, tests, and docs pass.
+
+### Risks
+
+- The grammar interpreter may need more structure than staged grammars needed.
+  Add only primitives required by current Loko syntax.
+- Diagnostics are the largest replacement risk. Prefer preserving current
+  structured diagnostic codes over inventing new prose.
+- CST construction can accidentally depend on presentation strings. Build from
+  rule names, spans, and lexer tokens.
+- Parenthesized expressions currently disappear as CST nodes. Preserve that
+  downstream shape unless AST lowering changes deliberately.
+
 ## Build A Real Base-Loko Shadow Grammar Subset
 
 ### Goal
