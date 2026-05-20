@@ -138,6 +138,17 @@ pub enum RuleExpression<'g> {
         /// Inert output description.
         output: TransformOutput<'g>,
     },
+    /// Positive lookahead: match without consuming any input.
+    ///
+    /// Succeeds when the inner expression matches at the current position but
+    /// leaves the matcher position unchanged.
+    And(Box<RuleExpression<'g>>),
+    /// Negative lookahead: fail when the inner expression would match.
+    ///
+    /// Succeeds without consuming when the inner expression fails to match at
+    /// the current position. Reports
+    /// [`ExpectedFragment::NegativeLookahead`] on failure.
+    Not(Box<RuleExpression<'g>>),
 }
 
 /// Inert output attached to a transformed rule expression.
@@ -292,6 +303,20 @@ impl<'g> RuleExpression<'g> {
             output,
         }
     }
+
+    /// Creates a positive lookahead expression.
+    #[must_use]
+    #[allow(clippy::should_implement_trait, reason = "constructor mirrors variant name")]
+    pub fn and(item: Self) -> Self {
+        Self::And(Box::new(item))
+    }
+
+    /// Creates a negative lookahead expression.
+    #[must_use]
+    #[allow(clippy::should_implement_trait, reason = "constructor mirrors variant name")]
+    pub fn not(item: Self) -> Self {
+        Self::Not(Box::new(item))
+    }
 }
 
 impl fmt::Display for RuleExpression<'_> {
@@ -323,6 +348,8 @@ impl fmt::Display for RuleExpression<'_> {
             Self::OneOrMore(item) => write!(formatter, "{}+", GroupedRuleExpression(item)),
             Self::ZeroOrMore(item) => write!(formatter, "{}*", GroupedRuleExpression(item)),
             Self::Transform { input, output } => write!(formatter, "{input} => {output}"),
+            Self::And(item) => write!(formatter, "&{}", GroupedRuleExpression(item)),
+            Self::Not(item) => write!(formatter, "!{}", GroupedRuleExpression(item)),
         }
     }
 }
@@ -891,6 +918,9 @@ pub enum ExpectedFragment<'g> {
     EndOfRegion,
     /// An ordered-choice expression.
     Choice,
+    /// A negative-lookahead expression matched, which means the expression
+    /// could not consume here.
+    NegativeLookahead,
 }
 
 impl fmt::Display for ExpectedFragment<'_> {
@@ -901,6 +931,7 @@ impl fmt::Display for ExpectedFragment<'_> {
             Self::CharacterClass(value) => write!(formatter, "[{value}]"),
             Self::EndOfRegion => formatter.write_str("end of region"),
             Self::Choice => formatter.write_str("choice"),
+            Self::NegativeLookahead => formatter.write_str("not <expression>"),
         }
     }
 }
@@ -1271,6 +1302,12 @@ fn split_action_args(input: &str) -> Vec<&str> {
 
 fn parse_rule_term(term: &str) -> RuleExpression<'_> {
     let trimmed = term.trim();
+    if let Some(inner) = trimmed.strip_prefix('&') {
+        return RuleExpression::and(parse_rule_term(inner));
+    }
+    if let Some(inner) = trimmed.strip_prefix('!') {
+        return RuleExpression::not(parse_rule_term(inner));
+    }
     if let Some(inner) = trimmed.strip_suffix('*') {
         return RuleExpression::zero_or_more(parse_rule_expression(inner));
     }
@@ -1686,6 +1723,26 @@ fn interpret_expression<'g, 's>(
         }
         RuleExpression::Transform { input, .. } => {
             interpret_expression(lookup, input, source, position, source_offset)
+        }
+        RuleExpression::And(inner) => {
+            interpret_expression(lookup, inner, source, position, source_offset)?;
+            Ok(ExpressionMatch {
+                end: position,
+                children: Vec::new(),
+            })
+        }
+        RuleExpression::Not(inner) => {
+            match interpret_expression(lookup, inner, source, position, source_offset) {
+                Ok(_) => Err(ParseFailure::expected_at_source(
+                    source,
+                    position,
+                    ExpectedFragment::NegativeLookahead,
+                )),
+                Err(_) => Ok(ExpressionMatch {
+                    end: position,
+                    children: Vec::new(),
+                }),
+            }
         }
     }
 }
@@ -2279,6 +2336,71 @@ mod tests {
                 GrammarActionTerm::Capture { rule: "name" }
             )]
         );
+    }
+
+    #[test]
+    fn positive_lookahead_accepts_without_consuming() {
+        let grammar = "grammar tiny\n\
+                       rule pair = &name name\n\
+                       rule name = [A-Za-z]+\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "pair", "hello", 0).expect("name lookahead");
+        assert_eq!(parse.root.text, "hello");
+        // The positive lookahead leaves no children of its own; only the
+        // captured `name` should remain.
+        assert_eq!(
+            parse
+                .root
+                .children
+                .iter()
+                .filter(|child| child.is_rule("name"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn negative_lookahead_rejects_match_and_reports_fragment() {
+        let grammar = "grammar tiny\n\
+                       rule item = !`end` name\n\
+                       rule name = [A-Za-z]+\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        interpret_region(&rules, "item", "begin", 0).expect("non-end name");
+        let error = interpret_region(&rules, "item", "end", 0).expect_err("end rejected");
+        assert!(
+            error
+                .expected
+                .iter()
+                .any(|fragment| matches!(fragment, ExpectedFragment::NegativeLookahead)),
+            "got {:?}",
+            error.expected
+        );
+    }
+
+    #[test]
+    fn negative_lookahead_does_not_consume() {
+        let grammar = "grammar tiny\n\
+                       rule both = !`x` name `!`?\n\
+                       rule name = [A-Za-z]+\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "both", "foo!", 0).expect("foo with bang");
+        assert_eq!(parse.root.text, "foo!");
+    }
+
+    #[test]
+    fn lookahead_round_trips_in_display() {
+        let expr = RuleExpression::and(RuleExpression::rule("name"));
+        assert_eq!(alloc::format!("{expr}"), "&name");
+        let expr = RuleExpression::not(RuleExpression::literal("end"));
+        assert_eq!(alloc::format!("{expr}"), "!`end`");
+        let expr = RuleExpression::not(RuleExpression::choice(vec![
+            RuleExpression::literal("a"),
+            RuleExpression::literal("b"),
+        ]));
+        assert_eq!(alloc::format!("{expr}"), "!(`a` | `b`)");
     }
 
     #[test]

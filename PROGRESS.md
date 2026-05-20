@@ -1,5 +1,28 @@
 # Interloko Progress
 
+## Implemented: Positive and negative lookahead
+
+- New `RuleExpression::And` and `RuleExpression::Not` variants for positive
+  and negative lookahead. Grammar surface: prefix `&item` and `!item`.
+  Prefix binds looser than the trailing `*`/`+`/`?` operators so `&item*`
+  is `&(item*)`. Whitespace between prefix and operand is not allowed.
+- New `ExpectedFragment::NegativeLookahead` is reported when a negative
+  lookahead match prevents the rule from consuming.
+- Lookahead leaves no children on the parse tree; the matcher position is
+  unchanged on success.
+- Negative lookahead deliberately discards the inner expected-fragments —
+  they would mislead the user.
+- `parse_rule_term` parses the prefix before the suffix operators.
+- `interloko_compiler::grammar_frontend::rule_expression_source_data` gets
+  `positive-lookahead` / `negative-lookahead` projection arms.
+- Tests cover positive lookahead non-consumption, negative lookahead
+  rejection with the new fragment, non-consumption combined with following
+  expressions, and Display round-trip including parenthesization.
+
+Deferred:
+
+- Lookahead-aware error-recovery synchronization — Phase 3.
+
 ## Implemented: Richer character classes
 
 - `character_class_contains` is now a zero-allocation state machine that

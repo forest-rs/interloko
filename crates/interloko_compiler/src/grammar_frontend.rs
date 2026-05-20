@@ -408,6 +408,20 @@ pub fn rule_expression_source_data(expression: &RuleExpression<'_>) -> SourceDat
                 source_data::field("output", transform_output_source_data(output)),
             ],
         ),
+        RuleExpression::And(item) => SourceData::record(
+            "positive-lookahead",
+            vec![source_data::field(
+                "item",
+                rule_expression_source_data(item),
+            )],
+        ),
+        RuleExpression::Not(item) => SourceData::record(
+            "negative-lookahead",
+            vec![source_data::field(
+                "item",
+                rule_expression_source_data(item),
+            )],
+        ),
         _ => SourceData::record("unknown-rule-expression", Vec::new()),
     }
 }

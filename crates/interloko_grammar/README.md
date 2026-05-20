@@ -72,8 +72,14 @@ Supported expression forms include:
 - optional: `item?`
 - one-or-more: `item+`
 - zero-or-more: `item*`
+- positive lookahead: `&item` (match without consuming)
+- negative lookahead: `!item` (fail when `item` would match)
 - opaque regions: `` until(`end`) ``
 - transforms: `item => emit-item(name: name)`
+
+The lookahead prefixes bind looser than the trailing repetition operators,
+so `&item*` means `&(item*)`, not `(&item)*`. Whitespace between the prefix
+and operand is not allowed; write `&item`, not `& item`.
 
 Transforms produce [`TransformOutput`] and optional [`GrammarAction`] values.
 They are structural metadata only.
