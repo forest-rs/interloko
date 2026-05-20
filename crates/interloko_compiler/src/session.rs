@@ -6287,6 +6287,10 @@ fn explain_grammar_action_captures(artifacts: &SessionArtifacts, id: &str) -> Op
             }
             grammar_frontend::GrammarActionTerm::Literal(_)
             | grammar_frontend::GrammarActionTerm::Bool(_) => {}
+            _ => {
+                any = true;
+                let _ = writeln!(out, "  {} unknown-action-term", arg.name);
+            }
         }
     }
     if !any {
@@ -6327,6 +6331,7 @@ fn grammar_action_term_label(term: &grammar_frontend::GrammarActionTerm) -> Stri
         }
         grammar_frontend::GrammarActionTerm::Literal(value) => format!("literal({value:?})"),
         grammar_frontend::GrammarActionTerm::Bool(value) => value.to_string(),
+        _ => "unknown-action-term".to_string(),
     }
 }
 

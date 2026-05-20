@@ -1,5 +1,23 @@
 # Interloko Progress
 
+## Implemented: Mark kernel enums and SourceAuthoredRule non-exhaustive
+
+- `RuleExpression`, `TransformOutput`, `ExpectedFragment`, `RuleNodeKind`,
+  `RuleNodeRole`, `GrammarActionTerm`, `GrammarSourceDiagnosticCode`, and the
+  struct `SourceAuthoredRule` are now `#[non_exhaustive]`. Future kernel
+  commits can add variants (lookahead, cut) or per-rule policy fields (trivia
+  mode) without forcing breaking changes on downstream pattern matches.
+- Downstream catch-alls added at the five exhaustive match sites in
+  `interloko_compiler` (`grammar_frontend.rs` rule-expression / transform /
+  action-term projections; `session.rs` explain/label helpers). Each falls
+  through to `unreachable!()` so a future variant addition produces a clear
+  panic if a projection arm is forgotten.
+
+Deferred:
+
+- Marking less load-bearing types like `RuleCount`, `Parse`, `ParseError`,
+  `RuleNode` non-exhaustive — Phase 1 keeps the change targeted.
+
 ## Implemented: Grammar-source diagnostics
 
 - `interloko_grammar` now reports structural problems in grammar source instead

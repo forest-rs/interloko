@@ -408,6 +408,7 @@ pub fn rule_expression_source_data(expression: &RuleExpression<'_>) -> SourceDat
                 source_data::field("output", transform_output_source_data(output)),
             ],
         ),
+        _ => SourceData::record("unknown-rule-expression", Vec::new()),
     }
 }
 
@@ -416,6 +417,7 @@ fn transform_output_source_data(output: &TransformOutput<'_>) -> SourceData {
         TransformOutput::Action(action) => grammar_action_source_data(action),
         TransformOutput::Literal(value) => SourceData::string(*value),
         TransformOutput::Symbol(value) => SourceData::symbol(*value),
+        _ => SourceData::record("unknown-transform-output", Vec::new()),
     }
 }
 
@@ -468,6 +470,7 @@ fn grammar_action_term_source_data(term: &GrammarActionTerm<'_>) -> SourceData {
             "bool",
             vec![source_data::field("value", SourceData::bool(*value))],
         ),
+        _ => SourceData::record("unknown-grammar-action-term", Vec::new()),
     }
 }
 

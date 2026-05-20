@@ -60,7 +60,11 @@ impl Span {
 /// [`parse_rule_expression`] and [`parse_grammar_source`] produce this type.
 /// [`interpret_region`] consumes it through [`SourceAuthoredRule`] values when
 /// matching source text.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add variants
+/// (lookahead, cut, and similar) without forcing a breaking change.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RuleExpression<'g> {
     /// A named grammar rule reference.
     Rule(&'g str),
@@ -97,7 +101,11 @@ pub enum RuleExpression<'g> {
 /// [`parse_rule_expression`] produces this for `=> ...` transforms. The
 /// grammar kernel stores and displays the value, but it never executes actions
 /// or assigns language-specific meaning to symbols.
+///
+/// Marked `#[non_exhaustive]` so future transform output forms can be added
+/// without forcing a breaking change.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum TransformOutput<'g> {
     /// Deterministic action descriptor.
     Action(GrammarAction<'g>),
@@ -139,7 +147,11 @@ pub struct GrammarActionArg<'g> {
 /// [`parse_grammar_action`] produces these for action arguments. The grammar
 /// kernel does not resolve captures; it only records what a caller should look
 /// for in a matched [`RuleNode`] tree.
+///
+/// Marked `#[non_exhaustive]` so future action term forms can be added
+/// without forcing a breaking change.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum GrammarActionTerm<'g> {
     /// Capture the first child rule with this name.
     Capture {
@@ -335,7 +347,13 @@ impl fmt::Display for GroupedRuleExpression<'_, '_> {
 /// [`interpret_region`] or [`interpret_rule_error`] to match input. Callers may
 /// adjust policy fields, such as [`SourceAuthoredRule::excluded_text`], before
 /// interpreting.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add per-rule
+/// policy fields (such as trivia mode) without forcing a breaking change.
+/// Construct values via [`parse_grammar_source`] and tweak through provided
+/// builder methods.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct SourceAuthoredRule<'g> {
     /// Rule name.
     pub name: &'g str,
@@ -371,7 +389,11 @@ impl<'g> SourceAuthoredRule<'g> {
 /// grammar-rule nodes from anonymous syntax leaves without parsing
 /// [`RuleNodeKind`] labels themselves. This is presentation and query metadata;
 /// it does not affect matching.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add roles without
+/// forcing a breaking change on downstream pattern matches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RuleNodeRole {
     /// A node produced by a named grammar rule.
     NamedRule,
@@ -388,7 +410,11 @@ pub enum RuleNodeRole {
 /// The kind borrows names, literal tokens, and delimiter text from the grammar
 /// rule that produced the node. [`RuleNode::text`] separately borrows the
 /// matched bytes from the parsed source.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add node kinds
+/// without forcing a breaking change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RuleNodeKind<'g> {
     /// A node produced by a named grammar rule.
     Rule {
@@ -677,7 +703,11 @@ impl<'g, 's> ParseReport<'g, 's> {
 /// [`ParseError::expected`] stores these. The fragments borrow rule names and
 /// literal tokens from the grammar; callers can render them with
 /// [`fmt::Display`] when building diagnostics or reports.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add fragments
+/// (for example, negative lookahead) without forcing a breaking change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ExpectedFragment<'g> {
     /// A named grammar rule.
     Rule(&'g str),
@@ -743,7 +773,11 @@ struct ParseFailure<'g> {
 /// Callers can pattern-match on the code to localize messages, classify
 /// failures, or filter expected diagnostics in tests. The associated
 /// [`GrammarSourceDiagnosticCode::message`] returns a static default rendering.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add codes without
+/// forcing a breaking change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum GrammarSourceDiagnosticCode {
     /// A non-empty line did not begin with `rule `, `grammar`, `end`, or `//`.
     MissingRuleKeyword,
