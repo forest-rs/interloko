@@ -46,9 +46,6 @@ fn base_loko_parse_diagnostic(
     source: &str,
     error: InterpretedParseError,
 ) -> Diagnostic {
-    if let Some(span) = malformed_string_span(source) {
-        return Diagnostic::error(span, DiagnosticCode::AstMalformedStringLiteral);
-    }
     grammar_parse_diagnostic(base_loko_parse_error(rules, source, error))
 }
 
@@ -64,37 +61,7 @@ fn base_loko_parse_error(
     {
         error = interpret_rule_error(rules, "definition", source, error.span.start, 0);
     }
-    if let Some(let_start) =
-        nearby_token_start(source, error.span.start, TokenKind::Let).filter(|_| {
-            error
-                .expected
-                .iter()
-                .any(|expected| matches!(expected, ExpectedFragment::EndOfRegion))
-        })
-    {
-        let let_error = interpret_rule_error(rules, "let-statement", source, let_start, 0);
-        if let_error.span.start > error.span.start {
-            return let_error;
-        }
-    }
     error
-}
-
-fn nearby_token_start(source: &str, offset: usize, kind: TokenKind) -> Option<usize> {
-    syntax::lex(source)
-        .into_iter()
-        .rfind(|token| token.kind == kind && token.span.start.abs_diff(offset) <= 16)
-        .map(|token| token.span.start)
-}
-
-fn malformed_string_span(source: &str) -> Option<Span> {
-    syntax::lex(source)
-        .into_iter()
-        .find(|token| {
-            token.kind == TokenKind::String
-                && !source[token.span.start..token.span.end].ends_with('"')
-        })
-        .map(|token| token.span)
 }
 
 fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {

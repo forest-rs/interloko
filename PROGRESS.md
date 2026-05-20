@@ -1,5 +1,33 @@
 # Interloko Progress
 
+## Implemented: Tighten string-literal terminator and drop compensating workarounds
+
+- `base_loko.grammar` `string-literal` now requires the closing `"` instead
+  of leaving it optional. Unterminated strings fail in the kernel directly
+  with `expected `"``-shape parse error.
+- `grammar_frontend/base_loko_primary.rs` loses `malformed_string_span` (the
+  re-lex workaround that produced `ast.malformed-string-literal`) and the
+  `let-statement` retry branch in `base_loko_parse_error` (along with the
+  `nearby_token_start` helper). Unterminated strings now surface as the
+  natural `syntax.expected-token` failure with `expected = ``end```; the
+  parser backtracks past the failed string-literal and reports the next
+  required literal of the enclosing rule.
+- Corpus expectation in `corpus/fail/values/malformed_string.loko` updated
+  from `ast.malformed-string-literal` to `syntax.expected-token`. The
+  `reports_malformed_strings_and_unsupported_vector_equality` driver test
+  follows the same change.
+- `DiagnosticCode::AstMalformedStringLiteral` is retained because
+  `ast.rs::lower_string` still emits it when `decode_string_literal` rejects
+  a well-formed-but-undecodable string body.
+
+Deferred:
+
+- The kernel's error span for this case lands on the byte after `()` (where
+  the next literal would start), not on the unterminated `"`. A more
+  user-friendly diagnostic would require either reviving an unterminated-
+  string heuristic or improving the kernel's failure-reporting strategy to
+  surface deeper Choice-merged failures past Optional boundaries.
+
 ## Implemented: Per-rule trivia mode (`raw`)
 
 - New public `TriviaMode` enum (`Default` / `Raw`, `#[non_exhaustive]`)

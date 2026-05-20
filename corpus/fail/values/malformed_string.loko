@@ -1,4 +1,4 @@
-// expect: diagnostic code ast.malformed-string-literal
+// expect: diagnostic code syntax.expected-token
 define function main()
   "unterminated
 end;

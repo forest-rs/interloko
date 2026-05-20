@@ -209,6 +209,7 @@ fn run_tape_function_i64(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostic::DiagnosticArgValue;
     use crate::sem::{HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind};
     use interloko_runtime::{HostObjectAdapter, RuntimeError, ValueKind as RuntimeValueKind};
 
@@ -610,15 +611,31 @@ mod tests {
 
     #[test]
     fn reports_malformed_strings_and_unsupported_vector_equality() {
+        // Source: `define function main()\n  "unterminated\nend;`
+        //          0........1.........2.........3.........4
+        // The opening `"` is at byte 25. After removing the closing `"`?
+        // from the grammar, the kernel backtracks past the failed
+        // string-literal and reports the next required literal of the
+        // enclosing function-definition (`end`) at that position. Pinning
+        // the span and expected fragment guards against silent regressions
+        // in the kernel's failure-reporting strategy.
         let malformed = compile("define function main()\n  \"unterminated\nend;")
             .expect_err("malformed string should fail");
-        assert!(matches!(
-            malformed,
-            CompileError::Diagnostics { diagnostics }
-                if diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.code == DiagnosticCode::AstMalformedStringLiteral)
-        ));
+        let CompileError::Diagnostics { diagnostics } = &malformed else {
+            panic!("expected diagnostics, got {malformed:?}");
+        };
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::SyntaxExpectedToken)
+            .expect("malformed string should produce SyntaxExpectedToken");
+        assert_eq!(diagnostic.span.start, 25);
+        assert_eq!(diagnostic.span.end, 26);
+        assert!(
+            diagnostic.args.iter().any(|arg| arg.name == "expected"
+                && matches!(&arg.value, DiagnosticArgValue::Text(text) if text == "`end`")),
+            "expected `end` literal in args, got {:?}",
+            diagnostic.args,
+        );
 
         let vector_eq = compile("define function main()\n  #[1, 2] = #[1, 2]\nend;")
             .expect_err("vector equality should be rejected");
@@ -629,6 +646,37 @@ mod tests {
                     diagnostic.code == DiagnosticCode::ComparisonOperandTypeMismatch
                 })
         ));
+    }
+
+    #[test]
+    fn reports_malformed_let_statement_without_retry() {
+        // Removing the let-statement retry from base_loko_parse_error means
+        // a malformed let no longer dives into the let-statement rule to
+        // surface the deeper failure. Instead the parser backtracks past
+        // the failing body and reports the function-definition's required
+        // `end` literal at the let keyword. This test pins that shape so a
+        // future kernel change can't silently degrade it further.
+        //
+        // Source: `define function main()\n  let x = ;\nend;`
+        //          0........1.........2.........3.........4
+        // The `let` keyword is at byte 25.
+        let result = compile("define function main()\n  let x = ;\nend;")
+            .expect_err("malformed let should fail");
+        let CompileError::Diagnostics { diagnostics } = &result else {
+            panic!("expected diagnostics, got {result:?}");
+        };
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::SyntaxExpectedToken)
+            .expect("malformed let should produce SyntaxExpectedToken");
+        assert_eq!(diagnostic.span.start, 25);
+        assert_eq!(diagnostic.span.end, 28);
+        assert!(
+            diagnostic.args.iter().any(|arg| arg.name == "expected"
+                && matches!(&arg.value, DiagnosticArgValue::Text(text) if text == "`end`")),
+            "expected `end` literal in args, got {:?}",
+            diagnostic.args,
+        );
     }
 
     #[test]
