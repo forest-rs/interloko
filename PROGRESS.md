@@ -1,5 +1,40 @@
 # Interloko Progress
 
+## Implemented: Grammar inheritance (`extends`)
+
+- `parse_grammar_source` now captures the `grammar X` header line and a
+  trailing `extends Y` clause. New public surface:
+  `GrammarSourceHeader { name, extends }` and `ParsedGrammarSource`
+  bundle plus `parse_grammar_source_full` entry point. The existing
+  `parse_grammar_source_with_diagnostics` keeps its return shape via
+  a small `parse_grammar_source_inner` helper that everyone delegates
+  to. The first header wins; further `grammar` lines are ignored.
+- `CompiledGrammar::compile_with_parent(rules, parent)` builds an
+  inheritance-aware grammar: child rules take precedence over
+  parent rules with the same name; un-overridden parent rules are
+  flattened into the child for lookup. The existing
+  `CompiledGrammar::compile` is unchanged.
+- Tests cover header parsing (with and without `extends`), override
+  precedence in `compile_with_parent`, and child rule bodies that
+  reference parent-only rules through the chain.
+
+Deferred:
+
+- Lifting `DerivedHostEnvironmentProvider` in
+  `interloko_compiler/src/grammar_frontend.rs` to read from an actual
+  `derived_host.grammar` file. The existing fixture's override rule
+  for `function-definition` references itself as `Rule("function-definition")`,
+  which under real inheritance semantics would left-recurse. The
+  fixture is currently MOP-only metadata; migrating it requires
+  rewriting the override to a non-self-referential body. Tracked as
+  the next thing to do once the trusted fixture's semantics are
+  worked out.
+- A `provenance: GrammarId` field on `StagedRuleApplication` /
+  `StagedRuleCount` so logged rule applications can distinguish a
+  child override from an inherited parent rule. For now the staged
+  records carry effective rule names (child wins) and that's the
+  documented behavior.
+
 ## Implemented: Parametric rules (`list-of<elem, sep>`)
 
 - `RuleExpression` gains an `Apply { rule, args }` variant. Grammar

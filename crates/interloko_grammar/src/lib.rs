@@ -653,6 +653,78 @@ impl<'g> CompiledGrammar<'g> {
         }
     }
 
+    /// Builds a compiled grammar that inherits from `parent`.
+    ///
+    /// Child rules take precedence over parent rules with the same name
+    /// (override). Parent rules that aren't overridden are included so
+    /// that references from child bodies resolve through the chain.
+    /// The parent itself is cloned in flattened form; further-up
+    /// ancestors are already merged into `parent` if it was itself built
+    /// via `compile_with_parent`.
+    ///
+    /// This entry point is infallible: it does not check whether the
+    /// merged grammar is structurally valid (for example whether every
+    /// [`RuleExpression::Apply`] supplies the right number of
+    /// arguments). The recommended workflow is:
+    ///
+    /// 1. Parse source with [`parse_grammar_source_full`] or
+    ///    [`parse_grammar_source_with_diagnostics`]; source-time
+    ///    diagnostics already catch arity mismatches for parametric
+    ///    rules defined in the same source.
+    /// 2. Build the compiled form with this method, or with
+    ///    [`try_compile_with_parent`] if the caller wants inherited
+    ///    arity mismatches to surface as errors at compile time.
+    /// 3. Optionally run [`validate_parametric_arity`] against the
+    ///    compiled grammar before interpreting, to catch cross-grammar
+    ///    issues this method skipped.
+    ///
+    /// [`try_compile_with_parent`]: CompiledGrammar::try_compile_with_parent
+    /// [`validate_parametric_arity`]: CompiledGrammar::validate_parametric_arity
+    #[must_use]
+    pub fn compile_with_parent(
+        rules: Vec<SourceAuthoredRule<'g>>,
+        parent: &CompiledGrammar<'g>,
+    ) -> Self {
+        let mut merged = rules;
+        for parent_rule in parent.rules() {
+            if !merged.iter().any(|rule| rule.name == parent_rule.name) {
+                merged.push(parent_rule.clone());
+            }
+        }
+        Self::compile(merged)
+    }
+
+    /// Strict variant of [`compile_with_parent`] that runs
+    /// [`validate_parametric_arity`] on the merged grammar and returns
+    /// the diagnostics as an `Err` instead of producing a possibly
+    /// inconsistent grammar.
+    ///
+    /// Returns `Ok(compiled)` when the merged grammar passes all
+    /// post-compile validations the kernel currently runs (today: only
+    /// parametric arity). Returns `Err(diagnostics)` when at least one
+    /// validation failed; callers can render the diagnostics and refuse
+    /// to interpret.
+    ///
+    /// Use this when the caller cannot tolerate silently degraded
+    /// interpretation of an inherited grammar. Prefer the infallible
+    /// [`compile_with_parent`] when the caller wants to inspect a
+    /// grammar that may be in-progress.
+    ///
+    /// [`compile_with_parent`]: CompiledGrammar::compile_with_parent
+    /// [`validate_parametric_arity`]: CompiledGrammar::validate_parametric_arity
+    pub fn try_compile_with_parent(
+        rules: Vec<SourceAuthoredRule<'g>>,
+        parent: &CompiledGrammar<'g>,
+    ) -> Result<Self, Vec<GrammarSourceDiagnostic>> {
+        let compiled = Self::compile_with_parent(rules, parent);
+        let diagnostics = compiled.validate_parametric_arity();
+        if diagnostics.is_empty() {
+            Ok(compiled)
+        } else {
+            Err(diagnostics)
+        }
+    }
+
     /// Returns the underlying rule list in its original declaration order.
     #[must_use]
     pub fn rules(&self) -> &[SourceAuthoredRule<'g>] {
@@ -669,6 +741,43 @@ impl<'g> CompiledGrammar<'g> {
             .get(position)
             .map(|&idx| &rules[idx])
             .filter(|rule| rule.name == name)
+    }
+
+    /// Returns arity-mismatch diagnostics for every parametric Apply
+    /// invocation in the grammar whose target is part of this compiled
+    /// rule set.
+    ///
+    /// Source-time validation (`parse_grammar_source_with_diagnostics`)
+    /// already catches arity mismatches whose target is declared in the
+    /// same source. Run this after [`compile_with_parent`] to surface
+    /// cross-grammar arity mismatches that the source-time pass had to
+    /// skip because the target rule lived in the parent. Invocations
+    /// whose target is not present in the merged rule set are still
+    /// skipped here — the reference is unresolved and will surface as
+    /// a normal parse-time rule-lookup failure.
+    ///
+    /// Use [`try_compile_with_parent`] when the caller wants this check
+    /// to run automatically and fail closed instead of returning a
+    /// possibly inconsistent grammar.
+    ///
+    /// [`compile_with_parent`]: CompiledGrammar::compile_with_parent
+    /// [`try_compile_with_parent`]: CompiledGrammar::try_compile_with_parent
+    #[must_use]
+    pub fn validate_parametric_arity(&self) -> Vec<GrammarSourceDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for rule in &self.rules {
+            walk_apply_nodes(&rule.expression, &mut |target, args| {
+                if let Some(declared) = self.rule(target)
+                    && declared.params.len() != args.len()
+                {
+                    diagnostics.push(GrammarSourceDiagnostic::new(
+                        rule.source_span,
+                        GrammarSourceDiagnosticCode::ParametricRuleArityMismatch,
+                    ));
+                }
+            });
+        }
+        diagnostics
     }
 
     fn lookup(&self) -> RuleLookup<'_, 'g> {
@@ -1296,10 +1405,52 @@ impl fmt::Display for GrammarSourceDiagnostic {
 ///
 /// This entry point silently discards malformed lines. Use
 /// [`parse_grammar_source_with_diagnostics`] when grammar-source diagnostics
-/// are needed.
+/// are needed; [`parse_grammar_source_full`] also surfaces the
+/// `grammar X extends Y` header for inheritance-aware callers.
 #[must_use]
 pub fn parse_grammar_source(source: &str) -> Vec<SourceAuthoredRule<'_>> {
     parse_grammar_source_with_diagnostics(source).0
+}
+
+/// Header information captured from the leading `grammar ...` line.
+///
+/// Empty when the source does not declare a `grammar` header. The
+/// `extends` field is populated when the header carries the
+/// `extends OTHER-NAME` clause: `grammar X extends Y`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GrammarSourceHeader<'g> {
+    /// Declared grammar name (the `X` in `grammar X`). `None` when the
+    /// source has no `grammar` header.
+    pub name: Option<&'g str>,
+    /// Optional parent grammar name (the `Y` in `grammar X extends Y`).
+    pub extends: Option<&'g str>,
+}
+
+/// Bundle returned by [`parse_grammar_source_full`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsedGrammarSource<'g> {
+    /// Captured `grammar` header.
+    pub header: GrammarSourceHeader<'g>,
+    /// Rules parsed from `rule ... = ...` lines.
+    pub rules: Vec<SourceAuthoredRule<'g>>,
+    /// Structural diagnostics from grammar-source parsing.
+    pub diagnostics: Vec<GrammarSourceDiagnostic>,
+}
+
+/// Parses grammar source and returns rules, diagnostics, and the
+/// optional `grammar X extends Y` header.
+///
+/// Equivalent to [`parse_grammar_source_with_diagnostics`] but also
+/// surfaces the header so inheritance-aware callers can resolve
+/// parent grammars.
+#[must_use]
+pub fn parse_grammar_source_full(source: &str) -> ParsedGrammarSource<'_> {
+    let (rules, diagnostics, header) = parse_grammar_source_inner(source);
+    ParsedGrammarSource {
+        header,
+        rules,
+        diagnostics,
+    }
 }
 
 /// Parses grammar source and returns rules alongside structural diagnostics.
@@ -1314,19 +1465,49 @@ pub fn parse_grammar_source(source: &str) -> Vec<SourceAuthoredRule<'_>> {
 pub fn parse_grammar_source_with_diagnostics(
     source: &str,
 ) -> (Vec<SourceAuthoredRule<'_>>, Vec<GrammarSourceDiagnostic>) {
+    let (rules, diagnostics, _header) = parse_grammar_source_inner(source);
+    (rules, diagnostics)
+}
+
+fn parse_grammar_source_inner(
+    source: &str,
+) -> (
+    Vec<SourceAuthoredRule<'_>>,
+    Vec<GrammarSourceDiagnostic>,
+    GrammarSourceHeader<'_>,
+) {
     let mut rules = Vec::<SourceAuthoredRule<'_>>::new();
     let mut diagnostics = Vec::new();
+    let mut header = GrammarSourceHeader::default();
     let mut offset = 0_usize;
     for line in source.split_inclusive('\n') {
         let line_start = offset;
         let line_end = offset + line.len();
         offset = line_end;
         let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("//")
-            || trimmed.starts_with("grammar ")
-            || trimmed == "end"
-        {
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed == "end" {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("grammar ") {
+            // Header lines: `grammar X` or `grammar X extends Y`.
+            // First header wins; subsequent ones are ignored silently
+            // (consistent with how malformed lines beyond the first are
+            // currently handled).
+            if header.name.is_none() {
+                let (name, extends) = if let Some((name, parent)) = rest.split_once(" extends ") {
+                    (name.trim(), Some(parent.trim()))
+                } else {
+                    (rest.trim(), None)
+                };
+                if !name.is_empty() {
+                    header.name = Some(name);
+                }
+                if let Some(parent) = extends
+                    && !parent.is_empty()
+                {
+                    header.extends = Some(parent);
+                }
+            }
             continue;
         }
         let leading = line.find(trimmed).unwrap_or(0);
@@ -1406,7 +1587,7 @@ pub fn parse_grammar_source_with_diagnostics(
         });
     }
     validate_parametric_arity(&rules, &mut diagnostics);
-    (rules, diagnostics)
+    (rules, diagnostics, header)
 }
 
 /// Walks each rule's body for [`RuleExpression::Apply`] invocations and
@@ -2975,6 +3156,125 @@ mod tests {
                 GrammarActionArg::new("kind", GrammarActionTerm::Literal("thing")),
             ]
         );
+    }
+
+    #[test]
+    fn grammar_source_header_captures_name_and_parent() {
+        let parsed =
+            parse_grammar_source_full("grammar derived extends base-loko\nrule x = `a`\nend\n");
+        assert_eq!(parsed.header.name, Some("derived"));
+        assert_eq!(parsed.header.extends, Some("base-loko"));
+        assert_eq!(parsed.rules.len(), 1);
+        assert!(parsed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn grammar_source_header_without_extends() {
+        let parsed = parse_grammar_source_full("grammar tiny\nrule x = `a`\nend\n");
+        assert_eq!(parsed.header.name, Some("tiny"));
+        assert_eq!(parsed.header.extends, None);
+    }
+
+    #[test]
+    fn compiled_grammar_with_parent_inherits_lookups() {
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule digit = [0-9]\nrule shared = `parent`\nend\n",
+        ));
+        let child_rules = parse_grammar_source("grammar child\nrule shared = `child`\nend\n");
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        // Child override wins for `shared`.
+        let shared = child.rule("shared").expect("shared in child");
+        let parse = interpret_region_compiled(&child, "shared", "child", 0).expect("child");
+        assert_eq!(parse.root.text, "child");
+        assert_eq!(shared.name, "shared");
+
+        // Inherited rule resolves through the chain.
+        let digit = child.rule("digit").expect("digit inherited");
+        assert_eq!(digit.name, "digit");
+        let parse = interpret_region_compiled(&child, "digit", "5", 0).expect("digit");
+        assert_eq!(parse.root.text, "5");
+    }
+
+    #[test]
+    fn compiled_grammar_with_parent_chains_through_ancestor_references() {
+        // Parent defines `name`, child defines a rule that references `name`.
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule name = [A-Za-z]+\nend\n",
+        ));
+        let child_rules = parse_grammar_source("grammar child\nrule greeting = `hi` name\nend\n");
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        let parse =
+            interpret_region_compiled(&child, "greeting", "hi Bob", 0).expect("greeting parse");
+        assert_eq!(parse.root.text, "hi Bob");
+    }
+
+    #[test]
+    fn compiled_grammar_validate_parametric_arity_catches_inherited_mismatch() {
+        // Parent declares the parametric rule; child mis-invokes it.
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule list-of<elem, sep> = elem (sep elem)*\nend\n",
+        ));
+        let child_rules = parse_grammar_source(
+            "grammar child\nrule digits = list-of<digit>\nrule digit = [0-9]\nend\n",
+        );
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        // Source-time validation didn't see list-of (it was inherited);
+        // the compile-time pass picks up the mismatch.
+        let diagnostics = child.validate_parametric_arity();
+        let mismatch = diagnostics
+            .iter()
+            .find(|d| d.code() == GrammarSourceDiagnosticCode::ParametricRuleArityMismatch)
+            .expect("inherited arity diagnostic");
+        // Span points at the offending rule in the child.
+        let digits = child.rule("digits").expect("digits rule");
+        assert_eq!(mismatch.span(), digits.source_span);
+    }
+
+    #[test]
+    fn compiled_grammar_validate_parametric_arity_is_quiet_when_well_formed() {
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule list-of<elem, sep> = elem (sep elem)*\nend\n",
+        ));
+        let child_rules = parse_grammar_source(
+            "grammar child\nrule digits = list-of<digit, `,`>\nrule digit = [0-9]\nend\n",
+        );
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+        assert!(child.validate_parametric_arity().is_empty());
+    }
+
+    #[test]
+    fn try_compile_with_parent_returns_err_on_inherited_arity_mismatch() {
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule list-of<elem, sep> = elem (sep elem)*\nend\n",
+        ));
+        let child_rules = parse_grammar_source(
+            "grammar child\nrule digits = list-of<digit>\nrule digit = [0-9]\nend\n",
+        );
+        let error = CompiledGrammar::try_compile_with_parent(child_rules, &parent)
+            .expect_err("strict compile should reject mismatched arity");
+        assert!(
+            error
+                .iter()
+                .any(|d| d.code() == GrammarSourceDiagnosticCode::ParametricRuleArityMismatch)
+        );
+    }
+
+    #[test]
+    fn try_compile_with_parent_returns_ok_when_well_formed() {
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule list-of<elem, sep> = elem (sep elem)*\nend\n",
+        ));
+        let child_rules = parse_grammar_source(
+            "grammar child\nrule digits = list-of<digit, `,`>\nrule digit = [0-9]\nend\n",
+        );
+        let compiled = CompiledGrammar::try_compile_with_parent(child_rules, &parent)
+            .expect("well-formed grammar compiles");
+        let parse =
+            interpret_region_compiled(&compiled, "digits", "1,2,3", 0).expect("digits parse");
+        assert_eq!(parse.root.text, "1,2,3");
     }
 
     #[test]
