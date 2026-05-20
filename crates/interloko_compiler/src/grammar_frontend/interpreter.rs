@@ -17,7 +17,12 @@ const LOKO_RESERVED_WORDS: &[&str] = &[
 ];
 
 pub(super) fn parse_source_authored_grammar(source: &'static str) -> Vec<SourceAuthoredRule> {
-    interloko_grammar::parse_grammar_source(source)
+    let (rules, diagnostics) = interloko_grammar::parse_grammar_source_with_diagnostics(source);
+    assert!(
+        diagnostics.is_empty(),
+        "compiler-owned grammar produced source diagnostics: {diagnostics:?}",
+    );
+    rules
         .into_iter()
         .map(|rule| {
             if rule.name == "name" {

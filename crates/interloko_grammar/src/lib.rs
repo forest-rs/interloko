@@ -738,14 +738,133 @@ struct ParseFailure<'g> {
     expected: Vec<ExpectedFragment<'g>>,
 }
 
+/// Stable code for a [`GrammarSourceDiagnostic`].
+///
+/// Callers can pattern-match on the code to localize messages, classify
+/// failures, or filter expected diagnostics in tests. The associated
+/// [`GrammarSourceDiagnosticCode::message`] returns a static default rendering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrammarSourceDiagnosticCode {
+    /// A non-empty line did not begin with `rule `, `grammar`, `end`, or `//`.
+    MissingRuleKeyword,
+    /// A `rule` line had no `=` separating the name from the body.
+    MissingEquals,
+    /// A `rule` line had an empty name (for example `rule  = body`).
+    EmptyName,
+    /// A `rule` line had an empty body (for example `rule name =`).
+    EmptyBody,
+    /// A rule name appeared more than once in the same grammar source.
+    DuplicateName,
+}
+
+impl GrammarSourceDiagnosticCode {
+    /// Returns the stable identifier used in dumps and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingRuleKeyword => "missing-rule-keyword",
+            Self::MissingEquals => "missing-equals",
+            Self::EmptyName => "empty-name",
+            Self::EmptyBody => "empty-body",
+            Self::DuplicateName => "duplicate-name",
+        }
+    }
+
+    /// Returns a static human-readable description for this code.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::MissingRuleKeyword => "line must begin with `rule`, `grammar`, `end`, or `//`",
+            Self::MissingEquals => "rule is missing `=` between name and body",
+            Self::EmptyName => "rule name must not be empty",
+            Self::EmptyBody => "rule body must not be empty",
+            Self::DuplicateName => "rule name was already declared in this grammar",
+        }
+    }
+}
+
+impl fmt::Display for GrammarSourceDiagnosticCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Structural diagnostic produced by [`parse_grammar_source_with_diagnostics`].
+///
+/// Each diagnostic carries the span of the offending grammar-source line and a
+/// stable [`GrammarSourceDiagnosticCode`]. Use the accessors rather than the
+/// fields so the in-memory layout can evolve later.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GrammarSourceDiagnostic {
+    span: Span,
+    code: GrammarSourceDiagnosticCode,
+}
+
+impl GrammarSourceDiagnostic {
+    const fn new(span: Span, code: GrammarSourceDiagnosticCode) -> Self {
+        Self { span, code }
+    }
+
+    /// Returns the grammar-source span this diagnostic refers to.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    /// Returns the stable diagnostic code.
+    #[must_use]
+    pub const fn code(&self) -> GrammarSourceDiagnosticCode {
+        self.code
+    }
+
+    /// Returns a static human-readable description.
+    #[must_use]
+    pub const fn message(&self) -> &'static str {
+        self.code.message()
+    }
+}
+
+impl fmt::Display for GrammarSourceDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} at {}..{}: {}",
+            self.code.as_str(),
+            self.span.start,
+            self.span.end,
+            self.code.message(),
+        )
+    }
+}
+
 /// Parses the small line-oriented grammar source format.
 ///
 /// Returns one [`SourceAuthoredRule`] per `rule ... = ...` line. Pass the
 /// returned slice to [`interpret_region`] to match source text, or inspect the
 /// rules to build documentation, projections, or caller-owned action tables.
+///
+/// This entry point silently discards malformed lines. Use
+/// [`parse_grammar_source_with_diagnostics`] when grammar-source diagnostics
+/// are needed.
 #[must_use]
 pub fn parse_grammar_source(source: &str) -> Vec<SourceAuthoredRule<'_>> {
-    let mut rules = Vec::new();
+    parse_grammar_source_with_diagnostics(source).0
+}
+
+/// Parses grammar source and returns rules alongside structural diagnostics.
+///
+/// Diagnostics are stable, code-tagged structural reports for malformed lines:
+/// missing `rule` keyword, missing `=`, empty name, empty body, or duplicate
+/// rule names. The first occurrence of a duplicate name wins (matching the
+/// existing first-wins lookup semantics); subsequent duplicates are reported
+/// and skipped. Empty lines, comments, the `grammar` header, and the trailing
+/// `end` are not reported.
+#[must_use]
+pub fn parse_grammar_source_with_diagnostics(
+    source: &str,
+) -> (Vec<SourceAuthoredRule<'_>>, Vec<GrammarSourceDiagnostic>) {
+    let mut rules = Vec::<SourceAuthoredRule<'_>>::new();
+    let mut diagnostics = Vec::new();
     let mut offset = 0_usize;
     for line in source.split_inclusive('\n') {
         let line_start = offset;
@@ -759,26 +878,62 @@ pub fn parse_grammar_source(source: &str) -> Vec<SourceAuthoredRule<'_>> {
         {
             continue;
         }
+        let leading = line.find(trimmed).unwrap_or(0);
+        let trimmed_start = line_start + leading;
+        let trimmed_span = Span::new(trimmed_start, trimmed_start + trimmed.len());
         let Some(rest) = trimmed.strip_prefix("rule ") else {
+            diagnostics.push(GrammarSourceDiagnostic::new(
+                trimmed_span,
+                GrammarSourceDiagnosticCode::MissingRuleKeyword,
+            ));
             continue;
         };
         let Some((name, expression)) = rest.split_once('=') else {
+            diagnostics.push(GrammarSourceDiagnostic::new(
+                trimmed_span,
+                GrammarSourceDiagnosticCode::MissingEquals,
+            ));
             continue;
         };
-        let action = expression
-            .split_once("=>")
-            .and_then(|(_, output)| parse_grammar_action(output.trim()));
-        let leading = line.find(trimmed).unwrap_or(0);
-        let trimmed_start = line_start + leading;
+        let name = name.trim();
+        if name.is_empty() {
+            diagnostics.push(GrammarSourceDiagnostic::new(
+                trimmed_span,
+                GrammarSourceDiagnosticCode::EmptyName,
+            ));
+            continue;
+        }
+        if expression.trim().is_empty() {
+            diagnostics.push(GrammarSourceDiagnostic::new(
+                trimmed_span,
+                GrammarSourceDiagnosticCode::EmptyBody,
+            ));
+            continue;
+        }
+        if rules.iter().any(|rule| rule.name == name) {
+            diagnostics.push(GrammarSourceDiagnostic::new(
+                trimmed_span,
+                GrammarSourceDiagnosticCode::DuplicateName,
+            ));
+            continue;
+        }
+        let parsed = parse_rule_expression(expression);
+        let action = match &parsed {
+            RuleExpression::Transform {
+                output: TransformOutput::Action(action),
+                ..
+            } => Some(action.clone()),
+            _ => None,
+        };
         rules.push(SourceAuthoredRule {
-            name: name.trim(),
-            expression: parse_rule_expression(expression),
+            name,
+            expression: parsed,
             action,
             excluded_text: Vec::new(),
-            source_span: Span::new(trimmed_start, line_end.saturating_sub(1)),
+            source_span: trimmed_span,
         });
     }
-    rules
+    (rules, diagnostics)
 }
 
 /// Parses one grammar rule expression.
@@ -1659,5 +1814,141 @@ mod tests {
 
         let parse = interpret_region(&rules, "name", "circle", 30).expect("non-excluded name");
         assert_eq!(parse.root.text, "circle");
+    }
+
+    #[test]
+    fn parse_grammar_source_with_diagnostics_is_empty_on_clean_grammar() {
+        let grammar = "grammar tiny\nrule pair = name `:` name\nrule name = [A-Za-z]+\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert_eq!(rules.len(), 2);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_grammar_source_reports_missing_equals() {
+        let grammar = "grammar broken\nrule bad-rule no equals here\nrule good = `ok`\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "good");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            GrammarSourceDiagnosticCode::MissingEquals
+        );
+    }
+
+    #[test]
+    fn parse_grammar_source_reports_missing_rule_keyword() {
+        let grammar = "grammar broken\nnot-a-rule = `a`\nrule good = `ok`\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "good");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            GrammarSourceDiagnosticCode::MissingRuleKeyword
+        );
+    }
+
+    #[test]
+    fn parse_grammar_source_reports_empty_name_and_body() {
+        let grammar = "grammar oops\nrule  = `a`\nrule x =\nend\n";
+        let (_rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        let codes = diagnostics
+            .iter()
+            .map(GrammarSourceDiagnostic::code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec![
+                GrammarSourceDiagnosticCode::EmptyName,
+                GrammarSourceDiagnosticCode::EmptyBody,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_grammar_source_reports_duplicate_rule_names() {
+        let grammar = "grammar dup\nrule x = `a`\nrule x = `b`\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert_eq!(rules.len(), 1);
+        let parse = interpret_region(&rules, "x", "a", 0).expect("first rule wins");
+        assert_eq!(parse.root.text, "a");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            GrammarSourceDiagnosticCode::DuplicateName
+        );
+    }
+
+    #[test]
+    fn parse_grammar_source_legacy_shim_discards_diagnostics() {
+        let grammar = "grammar broken\nrule x = `a`\nrule x = `b`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "x");
+    }
+
+    #[test]
+    fn parse_grammar_source_accepts_equals_in_literal_body() {
+        let grammar = "grammar ops\nrule equals = `=`\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert!(diagnostics.is_empty());
+        let parse = interpret_region(&rules, "equals", "=", 0).expect("equals literal");
+        assert_eq!(parse.root.text, "=");
+    }
+
+    #[test]
+    fn parse_grammar_source_preserves_full_span_without_trailing_newline() {
+        let grammar = "rule bad with no equals";
+        let (_rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            GrammarSourceDiagnosticCode::MissingEquals
+        );
+        // The span must cover the full trimmed line, not drop the last byte.
+        assert_eq!(diagnostics[0].span(), Span::new(0, grammar.len()));
+    }
+
+    #[test]
+    fn parse_grammar_source_action_survives_literal_arrow_in_body() {
+        // The rule body contains a literal `=>` token *before* the real
+        // transform separator. A naive split on the first `=>` would split
+        // inside the literal; we must derive the action from the parsed
+        // Transform expression instead.
+        let grammar = "grammar tiny\n\
+                       rule arrow = `=>` => emit-arrow(value: name)\n\
+                       rule name = [A-Za-z]+\n\
+                       end\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert!(diagnostics.is_empty());
+        let arrow_rule = rules
+            .iter()
+            .find(|rule| rule.name == "arrow")
+            .expect("arrow rule");
+        let action = arrow_rule.action.as_ref().expect("emit-arrow action");
+        assert_eq!(action.name, "emit-arrow");
+        assert_eq!(
+            action.args,
+            vec![GrammarActionArg::new(
+                "value",
+                GrammarActionTerm::Capture { rule: "name" }
+            )]
+        );
+    }
+
+    #[test]
+    fn grammar_source_diagnostic_code_round_trips_as_str() {
+        for code in [
+            GrammarSourceDiagnosticCode::MissingRuleKeyword,
+            GrammarSourceDiagnosticCode::MissingEquals,
+            GrammarSourceDiagnosticCode::EmptyName,
+            GrammarSourceDiagnosticCode::EmptyBody,
+            GrammarSourceDiagnosticCode::DuplicateName,
+        ] {
+            assert!(!code.as_str().is_empty());
+            assert!(!code.message().is_empty());
+        }
     }
 }

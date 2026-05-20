@@ -1,5 +1,28 @@
 # Interloko Progress
 
+## Implemented: Grammar-source diagnostics
+
+- `interloko_grammar` now reports structural problems in grammar source instead
+  of silently dropping lines. `parse_grammar_source_with_diagnostics` returns
+  rules alongside a list of `GrammarSourceDiagnostic` values; the existing
+  `parse_grammar_source` stays as a shim that discards diagnostics.
+- New public surface: `GrammarSourceDiagnostic`, `GrammarSourceDiagnosticCode`
+  with stable codes `missing-rule-keyword`, `missing-equals`, `empty-name`,
+  `empty-body`, `duplicate-name`. Each code has a static `as_str()` and
+  `message()`.
+- Duplicate rule names preserve "first wins" lookup semantics, matching the
+  existing `rules.iter().find` behavior; subsequent declarations are reported
+  and skipped.
+- Tests cover each diagnostic code, the legacy shim, and a regression for
+  rule bodies that contain a literal `=` (e.g. `rule equals = `=``).
+
+Deferred:
+
+- Surfacing grammar-source diagnostics through `interloko_compiler` — Phase 1
+  keeps the kernel boundary clean.
+- Diagnostics for unknown rule modifiers — added in the per-rule trivia
+  commit.
+
 ## Implemented: Top-Level Constants
 
 - Loko now accepts immutable top-level constants using the Dylan naming
