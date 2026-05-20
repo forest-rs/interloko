@@ -1,5 +1,38 @@
 # Interloko Progress
 
+## Implemented: Direct left recursion (seed-then-grow)
+
+- `interpret_rule` now detects direct left recursion in a rule body
+  (`R = R alt | ... | base`) and uses the classical PEG seed-then-grow
+  technique to match it: seed with the non-LR alternatives, then
+  iteratively wrap the current match with each LR alternative's tail
+  while a tail extends. The construction is left-associative.
+- Detection is syntactic: `direct_lr_partitions` examines a rule's
+  top-level `RuleExpression::Choice` and partitions alternatives into
+  LR (start with `Rule(self)`) and non-LR. Rules without that shape
+  use the existing recursive descent path with no overhead.
+- No memo table is added. Indirect left recursion (a chain through
+  multiple rules) is not handled here; rules that need it should be
+  refactored into a single direct-LR form, or the grammar can keep
+  using the existing tail-rule ladder.
+- The `excluded_text` check applies to the final grown span, matching
+  the non-LR rule contract.
+- Tests cover: left-associative `1+2+3`, fall-through when the seed
+  fails, and stop-on-tail-failure when growth can't extend.
+
+Deferred:
+
+- Rewriting `base_loko.grammar`'s `additive-expression`,
+  `multiplicative-expression`, and `postfix-expression` to direct-LR
+  form (collapsing the `*-tail` rules) requires updating the CST
+  builders `build_additive`, `build_multiplicative`, `build_postfix`
+  and removing `evaluate_fold_binary` in
+  `interloko_compiler/src/grammar_frontend/actions.rs`. The kernel
+  feature is in place; the migration is a focused follow-up.
+- Indirect left recursion (cross-rule chains) needs a memoization
+  table à la Warth; the seed-then-grow technique here is the
+  syntactic-direct-LR subset.
+
 ## Implemented: Grammar inheritance (`extends`)
 
 - `parse_grammar_source` now captures the `grammar X` header line and a

@@ -2315,6 +2315,25 @@ fn interpret_rule<'g, 's>(
         } else {
             skip_trivia(source, position)
         };
+        // Direct left recursion: when the rule's body is a Choice with at
+        // least one alternative starting with a self-reference, seed from
+        // the non-LR alternatives and iteratively grow with the LR tails.
+        // This is the classical PEG-style left-recursion technique
+        // (Sergio Medeiros' bounded recursion / Warth's grow-the-seed
+        // without packrat memoization).
+        if let Some((non_lr_alts, lr_tails)) = direct_lr_partitions(&rule.expression, name) {
+            return interpret_left_recursive_rule(
+                lookup,
+                rule,
+                name,
+                source,
+                start,
+                source_offset,
+                raw,
+                &non_lr_alts,
+                &lr_tails,
+            );
+        }
         let matched =
             interpret_expression(lookup, &rule.expression, source, start, source_offset, raw)?;
         let end = matched.end;
@@ -2346,6 +2365,186 @@ fn interpret_rule<'g, 's>(
         ExpectedFragment::Rule(name),
         false,
     ))
+}
+
+/// Detects direct left recursion in a rule body.
+///
+/// Returns `Some((non_lr_alts, lr_tails))` when `expression` is a
+/// [`RuleExpression::Choice`] with at least one alternative whose
+/// leading element is `Rule(rule_name)`. `non_lr_alts` is the list of
+/// alternatives that do not self-reference; `lr_tails` is the list of
+/// per-LR-alternative tails (everything after the leading self
+/// reference). Returns `None` for rules that aren't directly left
+/// recursive — the caller uses the ordinary recursive descent path.
+type LrTail<'r, 'g> = (Option<&'g str>, Vec<&'r RuleExpression<'g>>);
+
+fn direct_lr_partitions<'r, 'g>(
+    expression: &'r RuleExpression<'g>,
+    rule_name: &str,
+) -> Option<(Vec<&'r RuleExpression<'g>>, Vec<LrTail<'r, 'g>>)> {
+    let RuleExpression::Choice(alts) = expression else {
+        return None;
+    };
+    let mut non_lr = Vec::new();
+    let mut lr_tails = Vec::new();
+    for alt in alts {
+        if let Some(entry) = lr_alternative_tail(alt, rule_name) {
+            lr_tails.push(entry);
+        } else {
+            non_lr.push(alt);
+        }
+    }
+    if lr_tails.is_empty() {
+        None
+    } else {
+        Some((non_lr, lr_tails))
+    }
+}
+
+/// Detects whether `alt` is a left-recursive alternative for
+/// `rule_name`. Returns `(binding, tail)` where `binding` carries the
+/// `name:expr` label applied to the leading self-reference (if any) and
+/// `tail` is the rest of the sequence after that self-reference.
+///
+/// Shapes recognized as LR:
+/// - bare `Rule(self)` → `(None, [])`
+/// - `Named { name, inner: Rule(self) }` → `(Some(name), [])`
+/// - `Sequence([Rule(self), tail...])` → `(None, [tail...])`
+/// - `Sequence([Named { name, inner: Rule(self) }, tail...])`
+///   → `(Some(name), [tail...])`
+///
+/// Other shapes — including a `Named` wrapper around an entire
+/// sequence whose first item is the self-reference — fall through so
+/// the caller treats them as non-LR. Those forms are rare and the
+/// binding semantics are ambiguous; users who hit them should rewrite
+/// to one of the supported shapes.
+fn lr_alternative_tail<'r, 'g>(
+    alt: &'r RuleExpression<'g>,
+    rule_name: &str,
+) -> Option<LrTail<'r, 'g>> {
+    if let Some(binding) = peel_self_reference(alt, rule_name) {
+        return Some((binding, Vec::new()));
+    }
+    let items = match alt {
+        RuleExpression::Sequence(items) => items.as_slice(),
+        _ => return None,
+    };
+    let first = items.first()?;
+    let binding = peel_self_reference(first, rule_name)?;
+    Some((binding, items[1..].iter().collect()))
+}
+
+/// Returns `Some(binding_name)` when `expr` is `Rule(rule_name)` or a
+/// `Named { inner: Rule(rule_name) }` wrapper around it. `binding_name`
+/// is `None` for the bare reference and `Some(name)` for the
+/// `name:expr` wrapper.
+fn peel_self_reference<'g>(expr: &RuleExpression<'g>, rule_name: &str) -> Option<Option<&'g str>> {
+    match expr {
+        RuleExpression::Rule(name) if *name == rule_name => Some(None),
+        RuleExpression::Named { name, inner } => match inner.as_ref() {
+            RuleExpression::Rule(inner_name) if *inner_name == rule_name => Some(Some(*name)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn interpret_left_recursive_rule<'g, 's>(
+    lookup: RuleLookup<'_, 'g>,
+    rule: &SourceAuthoredRule<'g>,
+    name: &'g str,
+    source: &'s str,
+    start: usize,
+    source_offset: usize,
+    raw: bool,
+    non_lr_alts: &[&RuleExpression<'g>],
+    lr_tails: &[LrTail<'_, 'g>],
+) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
+    // Seed: match the first successful non-LR alternative.
+    let mut accumulated: Option<ParseFailure<'g>> = None;
+    let mut seed: Option<ExpressionMatch<'g, 's>> = None;
+    for alt in non_lr_alts {
+        match interpret_expression(lookup, alt, source, start, source_offset, raw) {
+            Ok(matched) => {
+                seed = Some(matched);
+                break;
+            }
+            Err(failure) => merge_failure(&mut accumulated, failure),
+        }
+    }
+    let seed = seed.ok_or_else(|| {
+        accumulated.unwrap_or_else(|| {
+            ParseFailure::expected_at_source(source, start, ExpectedFragment::Rule(name), raw)
+        })
+    })?;
+    let mut current_end = seed.end;
+    let mut current_node = RuleNode {
+        kind: RuleNodeKind::Rule { name },
+        span: Span::new(source_offset + start, source_offset + current_end),
+        text: &source[start..current_end],
+        children: seed.children,
+        binding_name: None,
+    };
+    // Grow: at each iteration try each LR tail at the current end and
+    // wrap the previous match into a new rule node when an LR tail
+    // extends. The tail's `binding` (from `name:expr` on the leading
+    // self-reference, if any) is applied to the previous match when it
+    // becomes a child of the new outer node.
+    loop {
+        let mut grew = false;
+        for (binding, tail) in lr_tails {
+            let mut tail_end = current_end;
+            let mut tail_children = Vec::new();
+            let mut tail_ok = true;
+            for item in tail {
+                match interpret_expression(lookup, item, source, tail_end, source_offset, raw) {
+                    Ok(matched) => {
+                        tail_end = matched.end;
+                        tail_children.extend(matched.children);
+                    }
+                    Err(_) => {
+                        tail_ok = false;
+                        break;
+                    }
+                }
+            }
+            if tail_ok && tail_end > current_end {
+                let mut prior = current_node.clone();
+                prior.binding_name = *binding;
+                let mut combined = Vec::with_capacity(tail_children.len() + 1);
+                combined.push(prior);
+                combined.extend(tail_children);
+                current_end = tail_end;
+                current_node = RuleNode {
+                    kind: RuleNodeKind::Rule { name },
+                    span: Span::new(source_offset + start, source_offset + current_end),
+                    text: &source[start..current_end],
+                    children: combined,
+                    binding_name: None,
+                };
+                grew = true;
+                break;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // Excluded-text check applies to the final matched span.
+    if rule
+        .excluded_text
+        .iter()
+        .any(|excluded| *excluded == &source[start..current_end])
+    {
+        return Err(ParseFailure::expected_at_source(
+            source,
+            start,
+            ExpectedFragment::Rule(name),
+            raw,
+        ));
+    }
+    Ok(current_node)
 }
 
 fn interpret_expression<'g, 's>(
@@ -3155,6 +3354,111 @@ mod tests {
                 GrammarActionArg::new("required", GrammarActionTerm::Bool(true)),
                 GrammarActionArg::new("kind", GrammarActionTerm::Literal("thing")),
             ]
+        );
+    }
+
+    #[test]
+    fn left_recursive_rule_matches_left_associatively() {
+        // Classic left-recursive expression grammar.
+        let grammar = "grammar tiny\n\
+                       rule expr = expr `+` term | term\n\
+                       rule term = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "expr", "1+2+3", 0).expect("expr parse");
+        // The root represents the outermost `expr`. Left-associative: the
+        // first child is itself an expr that matched `1+2`; the last two
+        // tokens are the `+` literal and the `3` term.
+        assert_eq!(parse.root.text, "1+2+3");
+        let inner_expr = parse
+            .root
+            .children
+            .iter()
+            .find(|child| child.is_rule("expr"))
+            .expect("nested expr");
+        assert_eq!(inner_expr.text, "1+2");
+    }
+
+    #[test]
+    fn left_recursive_rule_falls_through_when_seed_fails() {
+        let grammar = "grammar tiny\n\
+                       rule expr = expr `+` term | term\n\
+                       rule term = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        // No digit at all → seed (term) fails; expr fails.
+        let error = interpret_region(&rules, "expr", "+5", 0).expect_err("no seed");
+        assert!(
+            error
+                .expected
+                .iter()
+                .any(|fragment| matches!(fragment, ExpectedFragment::CharacterClass(_)))
+        );
+    }
+
+    #[test]
+    fn left_recursive_rule_stops_growing_on_tail_failure() {
+        let grammar = "grammar tiny\n\
+                       rule expr = expr `+` term | term\n\
+                       rule term = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        // Seed matches `1`, tail starts `+2` which extends, then `;3`
+        // doesn't match `+`, so growth stops at `1+2`.
+        let parse = interpret_region(&rules, "expr", "1+2", 0).expect("partial parse");
+        assert_eq!(parse.root.text, "1+2");
+    }
+
+    #[test]
+    fn left_recursive_rule_with_bare_self_alternative_does_not_loop() {
+        // `expr = expr | base` is a degenerate direct-LR shape: the LR
+        // alternative is a bare self-reference (no Sequence wrapper).
+        // The seed-and-grow path must treat it as a no-tail LR
+        // alternative so the matcher exits with the base seed rather
+        // than recursing into itself forever.
+        let grammar = "grammar tiny\nrule expr = expr | `a`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "expr", "a", 0).expect("base seed");
+        assert_eq!(parse.root.text, "a");
+    }
+
+    #[test]
+    fn left_recursive_rule_with_named_self_reference_matches_and_binds() {
+        // The leading self-reference carries a `lhs:` binding. The LR
+        // detector must peel the Named wrapper, treat the alternative
+        // as LR, and tag the previous match with `lhs` when growing.
+        let grammar = "grammar tiny\n\
+                       rule expr = lhs:expr `+` term | term\n\
+                       rule term = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "expr", "1+2+3", 0).expect("expr parse");
+        assert_eq!(parse.root.text, "1+2+3");
+        let lhs = parse
+            .root
+            .find_by_binding("lhs")
+            .expect("lhs binding on inner expr");
+        // The bound child is itself an `expr` rule that matched `1+2`.
+        assert_eq!(lhs.name(), Some("expr"));
+        assert_eq!(lhs.text, "1+2");
+    }
+
+    #[test]
+    fn left_recursive_rule_with_named_self_reference_does_not_loop_on_seed_failure() {
+        // Even when the seed (term) can't match, the matcher must fail
+        // cleanly instead of recursing into the Named-wrapped self
+        // reference indefinitely.
+        let grammar = "grammar tiny\n\
+                       rule expr = lhs:expr `+` term | term\n\
+                       rule term = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let error = interpret_region(&rules, "expr", "+5", 0).expect_err("no seed");
+        assert!(
+            error
+                .expected
+                .iter()
+                .any(|fragment| matches!(fragment, ExpectedFragment::CharacterClass(_)))
         );
     }
 
