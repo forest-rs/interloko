@@ -53,6 +53,50 @@ impl Span {
     pub const fn contains_span(self, span: Span) -> bool {
         self.start <= span.start && span.end <= self.end
     }
+
+    /// Returns the smallest span that contains both `self` and `other`.
+    ///
+    /// The result starts at the minimum of the two starts and ends at the
+    /// maximum of the two ends. Useful when assembling a span over a sequence
+    /// of child nodes.
+    #[must_use]
+    pub const fn cover(self, other: Span) -> Span {
+        let start = if self.start < other.start {
+            self.start
+        } else {
+            other.start
+        };
+        let end = if self.end > other.end {
+            self.end
+        } else {
+            other.end
+        };
+        Span::new(start, end)
+    }
+
+    /// Returns the overlapping portion of `self` and `other`, or `None` when
+    /// the spans do not overlap.
+    ///
+    /// Half-open semantics match [`Span::contains_offset`]: touching endpoints
+    /// alone do not overlap and yield `None`.
+    #[must_use]
+    pub const fn intersect(self, other: Span) -> Option<Span> {
+        let start = if self.start > other.start {
+            self.start
+        } else {
+            other.start
+        };
+        let end = if self.end < other.end {
+            self.end
+        } else {
+            other.end
+        };
+        if start < end {
+            Some(Span::new(start, end))
+        } else {
+            None
+        }
+    }
 }
 
 /// Structured grammar expression used by grammar rules.
@@ -632,6 +676,46 @@ impl<'g, 's> RuleNode<'g, 's> {
             .filter_map(|child| child.smallest_covering_span(span))
             .min_by_key(|node| node.span.end.saturating_sub(node.span.start))
             .or(Some(self))
+    }
+
+    /// Returns every node in this subtree whose span is fully contained in
+    /// `span`, in preorder, including this node when it qualifies.
+    ///
+    /// Useful when a caller has an edit region or selection range and wants
+    /// every parse-tree node that is contained in it.
+    #[must_use]
+    pub fn descendants_in_span(&self, span: Span) -> Vec<&RuleNode<'g, 's>> {
+        self.walk()
+            .filter(|node| span.contains_span(node.span))
+            .collect()
+    }
+
+    /// Returns the path of nodes covering `offset`, root first.
+    ///
+    /// The returned vector starts at this node and walks down through the
+    /// children that contain `offset`, ending at the smallest covering node.
+    /// Returns an empty vector when this node does not contain `offset`.
+    #[must_use]
+    pub fn path_to_offset(&self, offset: usize) -> Vec<&RuleNode<'g, 's>> {
+        let mut path = Vec::new();
+        if !self.span.contains_offset(offset) {
+            return path;
+        }
+        let mut current = self;
+        path.push(current);
+        loop {
+            let next = current
+                .children
+                .iter()
+                .find(|child| child.span.contains_offset(offset));
+            match next {
+                Some(child) => {
+                    path.push(child);
+                    current = child;
+                }
+                None => return path,
+            }
+        }
     }
 }
 
@@ -1568,6 +1652,28 @@ fn literal_boundary_ok(source: &str, end: usize, literal: &str) -> bool {
         .is_none_or(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'?'))
 }
 
+/// Returns the 1-based line and byte column of `offset` inside `source`.
+///
+/// Lines are split by `'\n'` (CRLF is treated as a trailing carriage return
+/// on the previous line). Columns count bytes from the start of the line; for
+/// ASCII grammars this matches character columns. When `offset` is past the
+/// end of `source`, the location is clamped to one past the final byte of the
+/// last line so callers can render end-of-file diagnostics.
+#[must_use]
+pub fn line_column_at_byte_offset(source: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(source.len());
+    let mut line = 1_usize;
+    let mut line_start = 0_usize;
+    for (index, byte) in source.as_bytes().iter().enumerate().take(clamped) {
+        if *byte == b'\n' {
+            line += 1;
+            line_start = index + 1;
+        }
+    }
+    let column = clamped - line_start + 1;
+    (line, column)
+}
+
 /// Counts parse tree nodes per rule name.
 ///
 /// Pass a [`RuleNode`], usually [`Parse::root`], to summarize which grammar
@@ -1970,6 +2076,80 @@ mod tests {
                 GrammarActionTerm::Capture { rule: "name" }
             )]
         );
+    }
+
+    #[test]
+    fn span_cover_and_intersect() {
+        let lhs = Span::new(5, 10);
+        let rhs = Span::new(8, 14);
+
+        assert_eq!(lhs.cover(rhs), Span::new(5, 14));
+        assert_eq!(rhs.cover(lhs), Span::new(5, 14));
+        assert_eq!(lhs.intersect(rhs), Some(Span::new(8, 10)));
+        assert_eq!(rhs.intersect(lhs), Some(Span::new(8, 10)));
+
+        let disjoint = Span::new(10, 12);
+        assert_eq!(lhs.intersect(disjoint), None, "touching half-open spans");
+        assert_eq!(disjoint.intersect(lhs), None);
+
+        let nested = Span::new(6, 9);
+        assert_eq!(lhs.intersect(nested), Some(nested));
+    }
+
+    #[test]
+    fn descendants_in_span_returns_contained_nodes() {
+        let grammar = "grammar tiny\nrule pair = name `:` name\nrule name = [A-Za-z]+\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "pair", "alpha: beta", 0).expect("pair parse");
+
+        let outer = parse.root.descendants_in_span(parse.root.span);
+        assert!(
+            outer.len() >= 3,
+            "outer span should contain at least the two names and root, got {}",
+            outer.len()
+        );
+        assert!(outer.iter().any(|node| node.is_rule("pair")));
+
+        let alpha_only = parse.root.descendants_in_span(Span::new(0, 5));
+        let names: Vec<_> = alpha_only
+            .iter()
+            .filter(|node| node.is_rule("name"))
+            .map(|node| node.text)
+            .collect();
+        assert_eq!(names, vec!["alpha"]);
+    }
+
+    #[test]
+    fn path_to_offset_walks_to_smallest_covering_node() {
+        let grammar = "grammar tiny\nrule pair = name `:` name\nrule name = [A-Za-z]+\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "pair", "alpha: beta", 0).expect("pair parse");
+
+        let path = parse.root.path_to_offset(8);
+        assert!(!path.is_empty(), "8 should be inside the second name");
+        assert_eq!(path[0].name(), Some("pair"));
+        let last = path.last().expect("non-empty path");
+        assert!(
+            last.is_rule("name") || last.role() == RuleNodeRole::CharacterClass,
+            "deepest node should be inside the name token, got {:?}",
+            last.kind
+        );
+        assert!(last.text.contains('e') || last.text.contains('b'));
+
+        let outside = parse.root.path_to_offset(parse.root.span.end + 1);
+        assert!(outside.is_empty());
+    }
+
+    #[test]
+    fn line_column_at_byte_offset_reports_1_based_positions() {
+        let source = "abc\ndef\nghi";
+        assert_eq!(line_column_at_byte_offset(source, 0), (1, 1));
+        assert_eq!(line_column_at_byte_offset(source, 2), (1, 3));
+        assert_eq!(line_column_at_byte_offset(source, 3), (1, 4)); // the newline itself
+        assert_eq!(line_column_at_byte_offset(source, 4), (2, 1));
+        assert_eq!(line_column_at_byte_offset(source, 9), (3, 2));
+        // Clamped past the end.
+        assert_eq!(line_column_at_byte_offset(source, source.len() + 5), (3, 4));
     }
 
     #[test]

@@ -1,5 +1,24 @@
 # Interloko Progress
 
+## Implemented: Tree geometry and span helpers
+
+- `Span` gains `cover` and `intersect`, returning the smallest span covering
+  two spans and the half-open overlap respectively. Both are `const fn`.
+- `RuleNode` gains `descendants_in_span(span)` (preorder list of contained
+  nodes, including self when applicable) and `path_to_offset(offset)`
+  (root-first path of nodes covering an offset, deepest last).
+- New free function `line_column_at_byte_offset(source, offset)` returns
+  1-based line and byte-column coordinates. Columns count bytes, matching
+  characters for ASCII grammars; offsets past the end clamp to the last
+  line's end.
+- Tests cover the cover/intersect edge cases (touching half-open spans do
+  not overlap), descendants restricted to a sub-span, the path walk down
+  through a `name` rule, and line/column edge cases including clamping.
+
+Deferred:
+
+- Unicode-aware column counting and lossless CST shapes — Phase 3 territory.
+
 ## Implemented: Mark kernel enums and SourceAuthoredRule non-exhaustive
 
 - `RuleExpression`, `TransformOutput`, `ExpectedFragment`, `RuleNodeKind`,
