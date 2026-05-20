@@ -1,5 +1,36 @@
 # Interloko Progress
 
+## Implemented: `list-of` / `trailing-list-of` and base-loko migration
+
+- `base_loko.grammar` defines two parametric list helpers using the
+  Phase-2 angle-bracket syntax: `list-of<elem, sep>` for strict
+  separator semantics and `trailing-list-of<elem, sep> = list-of<elem,
+  sep> sep?`. `trailing-list-of` is composed on top of `list-of`, so
+  the strict form is load-bearing rather than dead code.
+- `parameter-list`, `argument-list`, and `vector-items` are now
+  one-liner invocations of `trailing-list-of<..., `,`>`. The
+  `parameter-tail`, `argument-tail`, and `vector-tail` shim rules are
+  gone.
+- Loko now accepts trailing commas in parameter lists, argument
+  lists, and vector literals. New corpus cases lock the laxness in:
+  `pass/functions/trailing_comma_lists.loko` and
+  `pass/values/trailing_comma_vector.loko`. Doubled commas remain a
+  parse error, pinned by `fail/syntax/double_comma_argument_list.loko`
+  and `fail/syntax/double_comma_vector.loko`.
+- The CST builders `build_argument_list` and `build_vector` in
+  `base_loko_primary.rs` collapsed to a single `filter` pass over
+  the direct rule-child shape that the parametric form produces (no
+  more `argument-tail` / `vector-tail` unwrap branches). A short
+  comment in each builder names the kernel behavior that justifies
+  the flat children: `Apply` substitutes the parametric body inline.
+
+Deferred:
+
+- The additive/multiplicative/postfix expression ladder still uses
+  the `*-tail` shape. Moving it to direct LR is the natural pairing
+  with the kernel's seed-then-grow support and removes
+  `evaluate_fold_binary` plus the matching CST helpers.
+
 ## Implemented: Direct left recursion (seed-then-grow)
 
 - `interpret_rule` now detects direct left recursion in a rule body

@@ -538,25 +538,20 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_vector(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        // `vector-items` invokes `trailing-list-of<expression, `,`>`; the
+        // kernel substitutes the parametric body inline, so children are
+        // flat `expression` nodes with no `list-of` wrapper to descend.
         let nested = node
             .children
             .iter()
             .find(|child| child.is_rule("vector-items"))
             .map(|items| {
-                let mut expressions = Vec::new();
-                for child in &items.children {
-                    if child.is_rule("expression") {
-                        expressions.push(self.build_expr(child));
-                    } else if child.is_rule("vector-tail")
-                        && let Some(expr) = child
-                            .children
-                            .iter()
-                            .find(|child| child.is_rule("expression"))
-                    {
-                        expressions.push(self.build_expr(expr));
-                    }
-                }
-                expressions
+                items
+                    .children
+                    .iter()
+                    .filter(|child| child.is_rule("expression"))
+                    .map(|expr| self.build_expr(expr))
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         self.node_with_nested(CstKind::VectorExpr, node, nested)
@@ -579,32 +574,28 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_argument_list(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        // `argument-list` invokes `trailing-list-of<argument, `,`>`; the
+        // kernel substitutes the parametric body inline, so children are
+        // flat `argument` nodes with no `list-of` wrapper to descend.
         let mut nested = Vec::new();
-        for child in &node.children {
-            let arg = if child.is_rule("argument") {
-                Some(child)
-            } else if child.is_rule("argument-tail") {
-                child
-                    .children
-                    .iter()
-                    .find(|child| child.is_rule("argument"))
-            } else {
-                None
-            };
-            if let Some(arg) = arg
-                && let Some(node) = arg
-                    .children
-                    .iter()
-                    .find(|child| child.is_rule("keyword-argument"))
-                    .map(|keyword| self.build_keyword_arg(keyword))
-                    .or_else(|| {
-                        arg.children
-                            .iter()
-                            .find(|child| child.is_rule("expression"))
-                            .map(|expr| self.build_expr(expr))
-                    })
+        for arg in node
+            .children
+            .iter()
+            .filter(|child| child.is_rule("argument"))
+        {
+            if let Some(child) = arg
+                .children
+                .iter()
+                .find(|child| child.is_rule("keyword-argument"))
+                .map(|keyword| self.build_keyword_arg(keyword))
+                .or_else(|| {
+                    arg.children
+                        .iter()
+                        .find(|child| child.is_rule("expression"))
+                        .map(|expr| self.build_expr(expr))
+                })
             {
-                nested.push(node);
+                nested.push(child);
             }
         }
         self.node_with_nested(CstKind::ArgList, node, nested)

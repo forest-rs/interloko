@@ -1,0 +1,5 @@
+// expect: diagnostics 1
+// expect: diagnostic code syntax.expected-token
+define function main()
+  #[1,,]
+end;

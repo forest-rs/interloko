@@ -14,8 +14,7 @@ rule generic-definition = `define` `generic` name `(` parameter-list? `)` result
 rule method-definition = `define` `method` name `(` parameter-list? `)` result-annotation? body `end` `;`?
 rule function-definition = `define` `function` name `(` parameter-list? `)` result-annotation? body `end` `;`?
 rule constant-definition = `define` `constant` name type-annotation? `=` expression `;`
-rule parameter-list = parameter parameter-tail*
-rule parameter-tail = `,` parameter
+rule parameter-list = trailing-list-of<parameter, `,`>
 rule parameter = name type-annotation?
 rule result-annotation = `=>` type-annotation-value
 rule type-annotation = `::` type-annotation-value
@@ -45,11 +44,9 @@ rule slot-tail = `.` name
 rule primary-expression = vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | symbol-literal | number-literal | type-expression | name-expression
 rule parenthesized-expression = `(` expression `)`
 rule vector-expression = `#[` vector-items? `]`
-rule vector-items = expression vector-tail*
-rule vector-tail = `,` expression
+rule vector-items = trailing-list-of<expression, `,`>
 rule call-expression = name `(` argument-list? `)`
-rule argument-list = argument argument-tail*
-rule argument-tail = `,` argument
+rule argument-list = trailing-list-of<argument, `,`>
 rule argument = keyword-argument | expression
 rule keyword-argument = name `:` expression
 rule name-expression = name
@@ -62,4 +59,6 @@ rule keyword-symbol = `#:` name | name `:`
 rule name = [$A-Za-z_] [A-Za-z0-9_?-]*
 rule number = [0-9]+
 rule type-name = `<` name `>`
+rule list-of<elem, sep> = elem (sep elem)*
+rule trailing-list-of<elem, sep> = list-of<elem, sep> sep?
 end
