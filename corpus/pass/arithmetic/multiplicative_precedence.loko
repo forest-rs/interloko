@@ -1,0 +1,6 @@
+// expect: run 26
+// expect: diagnostics 0
+
+define function main()
+  2 + 3 * 4 * 2
+end;

@@ -1,5 +1,31 @@
 # Interloko Progress
 
+## Implemented: base-loko expression ladder uses direct LR
+
+- `additive-expression`, `multiplicative-expression`, and
+  `postfix-expression` in `base_loko.grammar` are now defined in
+  direct left-recursive form, e.g.
+  `additive-expression = additive-expression add-op multiplicative-expression
+                       | multiplicative-expression`.
+  The shim rules `additive-tail`, `multiplicative-tail`, and
+  `slot-tail` are gone.
+- `build_additive`, `build_multiplicative`, and `build_postfix` in
+  `base_loko_primary.rs` walk the LR-shaped node directly: when the
+  first child is the rule itself, build a `BinaryExpr` / `SlotExpr`
+  from `(lhs_built_recursively, op_token, rhs)`; otherwise descend
+  into the base alternative. The kernel produces the
+  left-associative tree, so the builders no longer fold a tail list.
+- A new corpus case `pass/arithmetic/left_associative_subtraction.loko`
+  pins left-associativity for non-associative ops: `10 - 3 - 2`
+  evaluates to `5`, not `9`.
+
+Deferred:
+
+- `evaluate_fold_binary` in `actions.rs` is wired to the calculator
+  fixture grammar (`calculator.grammar`'s `fold-binary` action), not
+  to base-loko. Migrating that grammar to direct LR would let the
+  helper plus `emit-binary-tail` come out.
+
 ## Implemented: `list-of` / `trailing-list-of` and base-loko migration
 
 - `base_loko.grammar` defines two parametric list helpers using the

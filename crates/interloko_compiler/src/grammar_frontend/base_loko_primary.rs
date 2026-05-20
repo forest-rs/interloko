@@ -433,65 +433,74 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_additive(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        let mut expr = node
+        // `additive-expression` is direct-LR:
+        //   additive-expression = additive-expression add-op multiplicative-expression
+        //                       | multiplicative-expression
+        // The kernel produces a left-associative tree directly; the LR
+        // shape has three children (lhs additive-expression, add-op,
+        // rhs multiplicative-expression), and the base case has the
+        // single multiplicative-expression child.
+        let Some(first) = node.children.first() else {
+            return self.error_node(node.span);
+        };
+        if !first.is_rule("additive-expression") {
+            return self.build_expr(first);
+        }
+        let lhs = self.build_expr(first);
+        let rhs = node
             .children
             .iter()
             .find(|child| child.is_rule("multiplicative-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
-        for tail in node
+        let op_span = node
             .children
             .iter()
-            .filter(|child| child.is_rule("additive-tail"))
-        {
-            let rhs = tail
-                .children
-                .iter()
-                .find(|child| child.is_rule("multiplicative-expression"))
-                .map_or_else(|| self.error_node(tail.span), |expr| self.build_expr(expr));
-            let op = self.first_operator_token(tail.span);
-            let span = expr.span.cover(rhs.span);
-            expr = self.node(
-                CstKind::BinaryExpr,
-                vec![
-                    CstElement::Node(expr),
-                    CstElement::Token(op),
-                    CstElement::Node(rhs),
-                ],
-                span,
+            .find(|child| child.is_rule("add-op"))
+            .map_or_else(
+                || Span::new(lhs.span.end, rhs.span.start),
+                |op| Span::from(op.span),
             );
-        }
-        expr
+        let op = self.first_operator_token(op_span);
+        let span = lhs.span.cover(rhs.span);
+        self.node(
+            CstKind::BinaryExpr,
+            vec![
+                CstElement::Node(lhs),
+                CstElement::Token(op),
+                CstElement::Node(rhs),
+            ],
+            span,
+        )
     }
 
     fn build_multiplicative(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        let mut expr = node
+        // `multiplicative-expression` is direct-LR:
+        //   multiplicative-expression = multiplicative-expression `*` unary-expression
+        //                             | unary-expression
+        let Some(first) = node.children.first() else {
+            return self.error_node(node.span);
+        };
+        if !first.is_rule("multiplicative-expression") {
+            return self.build_expr(first);
+        }
+        let lhs = self.build_expr(first);
+        let rhs = node
             .children
             .iter()
+            .rev()
             .find(|child| child.is_rule("unary-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
-        for tail in node
-            .children
-            .iter()
-            .filter(|child| child.is_rule("multiplicative-tail"))
-        {
-            let rhs = tail
-                .children
-                .iter()
-                .find(|child| child.is_rule("unary-expression"))
-                .map_or_else(|| self.error_node(tail.span), |expr| self.build_expr(expr));
-            let op = self.first_token_index(tail.span, TokenKind::Star);
-            let span = expr.span.cover(rhs.span);
-            expr = self.node(
-                CstKind::BinaryExpr,
-                vec![
-                    CstElement::Node(expr),
-                    CstElement::Token(op),
-                    CstElement::Node(rhs),
-                ],
-                span,
-            );
-        }
-        expr
+        let op = self.first_token_index(Span::new(lhs.span.end, rhs.span.start), TokenKind::Star);
+        let span = lhs.span.cover(rhs.span);
+        self.node(
+            CstKind::BinaryExpr,
+            vec![
+                CstElement::Node(lhs),
+                CstElement::Token(op),
+                CstElement::Node(rhs),
+            ],
+            span,
+        )
     }
 
     fn build_unary(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -511,30 +520,42 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_postfix(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        let mut expr = node
-            .children
-            .iter()
-            .find(|child| child.is_rule("primary-expression"))
-            .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
-        for tail in node
-            .children
-            .iter()
-            .filter(|child| child.is_rule("slot-tail"))
-        {
-            let dot = self.first_token_index(tail.span, TokenKind::Dot);
-            let name = self.first_token_index(tail.span, TokenKind::Ident);
-            let span = expr.span.cover(self.tokens[name].span);
-            expr = self.node(
-                CstKind::SlotExpr,
-                vec![
-                    CstElement::Node(expr),
-                    CstElement::Token(dot),
-                    CstElement::Token(name),
-                ],
-                span,
-            );
+        // `postfix-expression` is direct-LR:
+        //   postfix-expression = postfix-expression `.` name | primary-expression
+        let Some(first) = node.children.first() else {
+            return self.error_node(node.span);
+        };
+        if !first.is_rule("postfix-expression") {
+            return self.build_expr(first);
         }
-        expr
+        let lhs = self.build_expr(first);
+        let name_node = node
+            .children
+            .iter()
+            .rev()
+            .find(|child| child.is_rule("name"));
+        let between = name_node.map_or_else(
+            || Span::new(lhs.span.end, node.span.end),
+            |n| Span::new(lhs.span.end, n.span.start),
+        );
+        let dot = self.first_token_index(between, TokenKind::Dot);
+        let name = self.first_token_index(
+            name_node.map_or_else(
+                || Span::new(lhs.span.end, node.span.end),
+                |n| Span::from(n.span),
+            ),
+            TokenKind::Ident,
+        );
+        let span = lhs.span.cover(self.tokens[name].span);
+        self.node(
+            CstKind::SlotExpr,
+            vec![
+                CstElement::Node(lhs),
+                CstElement::Token(dot),
+                CstElement::Token(name),
+            ],
+            span,
+        )
     }
 
     fn build_vector(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
