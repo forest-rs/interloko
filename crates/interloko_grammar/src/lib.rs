@@ -231,6 +231,26 @@ pub enum GrammarActionTerm<'g> {
     Literal(&'g str),
     /// Literal boolean data.
     Bool(bool),
+    /// Literal integer data.
+    Integer(i64),
+    /// Ordered list of action terms.
+    ///
+    /// Surface syntax: `[term, term, term]`. Used for projections that
+    /// assemble a sequence the evaluator can hand straight to a
+    /// downstream consumer.
+    List(Vec<GrammarActionTerm<'g>>),
+    /// Named record of action terms.
+    ///
+    /// Surface syntax: `{ key: term, key: term }`. Used for grouped
+    /// structural projections that aren't full action calls.
+    Record(Vec<GrammarActionArg<'g>>),
+    /// Nested action invocation.
+    ///
+    /// Surface syntax: `name(arg: term, ...)`. The kernel stores the
+    /// call as inert data; nested calls let the descriptor capture a
+    /// tree of structural projections without exiting the term
+    /// vocabulary.
+    Call(Box<GrammarAction<'g>>),
 }
 
 impl<'g> GrammarAction<'g> {
@@ -406,6 +426,28 @@ impl fmt::Display for GrammarActionTerm<'_> {
             Self::CaptureAll { rule } => write!(formatter, "{rule}*"),
             Self::Literal(value) => write!(formatter, "{value:?}"),
             Self::Bool(value) => write!(formatter, "{value}"),
+            Self::Integer(value) => write!(formatter, "{value}"),
+            Self::List(items) => {
+                formatter.write_str("[")?;
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{item}")?;
+                }
+                formatter.write_str("]")
+            }
+            Self::Record(args) => {
+                formatter.write_str("{")?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{}: {}", arg.name, arg.value)?;
+                }
+                formatter.write_str("}")
+            }
+            Self::Call(action) => write!(formatter, "{action}"),
         }
     }
 }
@@ -1348,6 +1390,37 @@ fn parse_grammar_action_term(value: &str) -> GrammarActionTerm<'_> {
     {
         return GrammarActionTerm::Literal(inner);
     }
+    if let Ok(integer) = trimmed.parse::<i64>() {
+        return GrammarActionTerm::Integer(integer);
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+    {
+        return GrammarActionTerm::List(
+            split_action_args(inner)
+                .into_iter()
+                .map(parse_grammar_action_term)
+                .collect(),
+        );
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+    {
+        return GrammarActionTerm::Record(
+            split_action_args(inner)
+                .into_iter()
+                .filter_map(parse_grammar_action_arg)
+                .collect(),
+        );
+    }
+    if trimmed.ends_with(')')
+        && trimmed.contains('(')
+        && let Some(action) = parse_grammar_action(trimmed)
+    {
+        return GrammarActionTerm::Call(Box::new(action));
+    }
     if let Some(rule) = trimmed.strip_suffix('*') {
         return GrammarActionTerm::CaptureAll { rule: rule.trim() };
     }
@@ -1359,11 +1432,25 @@ fn split_action_args(input: &str) -> Vec<&str> {
     let mut start = 0;
     let mut in_string = false;
     let mut in_literal = false;
+    let mut paren_depth = 0_i32;
+    let mut bracket_depth = 0_i32;
+    let mut brace_depth = 0_i32;
     for (index, ch) in input.char_indices() {
         match ch {
             '"' if !in_literal => in_string = !in_string,
             '`' if !in_string => in_literal = !in_literal,
-            ',' if !in_string && !in_literal => {
+            '(' if !in_string && !in_literal => paren_depth += 1,
+            ')' if !in_string && !in_literal => paren_depth -= 1,
+            '[' if !in_string && !in_literal => bracket_depth += 1,
+            ']' if !in_string && !in_literal => bracket_depth -= 1,
+            '{' if !in_string && !in_literal => brace_depth += 1,
+            '}' if !in_string && !in_literal => brace_depth -= 1,
+            ',' if !in_string
+                && !in_literal
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
                 parts.push(input[start..index].trim());
                 start = index + ch.len_utf8();
             }
@@ -2407,6 +2494,104 @@ mod tests {
                 GrammarActionArg::new("kind", GrammarActionTerm::Literal("thing")),
             ]
         );
+    }
+
+    #[test]
+    fn parses_integer_action_terms() {
+        let action = parse_grammar_action("emit-x(count: 42, offset: -1)")
+            .expect("action with integer terms");
+        assert_eq!(
+            action.args,
+            vec![
+                GrammarActionArg::new("count", GrammarActionTerm::Integer(42)),
+                GrammarActionArg::new("offset", GrammarActionTerm::Integer(-1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_list_action_terms() {
+        let action =
+            parse_grammar_action("emit-x(items: [name, item*, 7])").expect("action with list term");
+        assert_eq!(
+            action.args,
+            vec![GrammarActionArg::new(
+                "items",
+                GrammarActionTerm::List(vec![
+                    GrammarActionTerm::Capture { rule: "name" },
+                    GrammarActionTerm::CaptureAll { rule: "item" },
+                    GrammarActionTerm::Integer(7),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn parses_record_action_terms() {
+        let action = parse_grammar_action("emit-x(meta: { kind: \"slot\", count: 3 })")
+            .expect("action with record term");
+        let expected = GrammarActionTerm::Record(vec![
+            GrammarActionArg::new("kind", GrammarActionTerm::Literal("slot")),
+            GrammarActionArg::new("count", GrammarActionTerm::Integer(3)),
+        ]);
+        assert_eq!(action.args, vec![GrammarActionArg::new("meta", expected)]);
+    }
+
+    #[test]
+    fn parses_nested_action_call_terms() {
+        let action = parse_grammar_action("emit-x(body: emit-y(value: name))")
+            .expect("action with nested call");
+        let nested = GrammarAction::new(
+            "emit-y",
+            vec![GrammarActionArg::new(
+                "value",
+                GrammarActionTerm::Capture { rule: "name" },
+            )],
+        );
+        assert_eq!(
+            action.args,
+            vec![GrammarActionArg::new(
+                "body",
+                GrammarActionTerm::Call(Box::new(nested))
+            )]
+        );
+    }
+
+    #[test]
+    fn action_terms_round_trip_through_display() {
+        let action = GrammarAction::new(
+            "emit-form",
+            vec![
+                GrammarActionArg::new("count", GrammarActionTerm::Integer(42)),
+                GrammarActionArg::new(
+                    "items",
+                    GrammarActionTerm::List(vec![
+                        GrammarActionTerm::Capture { rule: "name" },
+                        GrammarActionTerm::Integer(7),
+                    ]),
+                ),
+                GrammarActionArg::new(
+                    "meta",
+                    GrammarActionTerm::Record(vec![GrammarActionArg::new(
+                        "kind",
+                        GrammarActionTerm::Literal("slot"),
+                    )]),
+                ),
+                GrammarActionArg::new(
+                    "body",
+                    GrammarActionTerm::Call(Box::new(GrammarAction::new(
+                        "emit-y",
+                        vec![GrammarActionArg::new(
+                            "value",
+                            GrammarActionTerm::Capture { rule: "name" },
+                        )],
+                    ))),
+                ),
+            ],
+        );
+        let rendered = alloc::format!("{action}");
+        let reparsed = parse_grammar_action(&rendered).expect("reparses");
+        assert_eq!(action, reparsed);
     }
 
     #[test]

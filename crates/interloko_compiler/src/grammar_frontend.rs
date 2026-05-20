@@ -491,6 +491,31 @@ fn grammar_action_term_source_data(term: &GrammarActionTerm<'_>) -> SourceData {
             "bool",
             vec![source_data::field("value", SourceData::bool(*value))],
         ),
+        GrammarActionTerm::Integer(value) => SourceData::record(
+            "integer",
+            vec![source_data::field("value", SourceData::integer(*value))],
+        ),
+        GrammarActionTerm::List(items) => SourceData::record(
+            "list",
+            vec![source_data::field(
+                "items",
+                SourceData::list(items.iter().map(grammar_action_term_source_data).collect()),
+            )],
+        ),
+        GrammarActionTerm::Record(fields) => SourceData::record(
+            "record",
+            vec![source_data::field(
+                "fields",
+                SourceData::list(fields.iter().map(grammar_action_arg_source_data).collect()),
+            )],
+        ),
+        GrammarActionTerm::Call(action) => SourceData::record(
+            "call",
+            vec![source_data::field(
+                "action",
+                grammar_action_source_data(action),
+            )],
+        ),
         _ => SourceData::record("unknown-grammar-action-term", Vec::new()),
     }
 }

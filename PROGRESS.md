@@ -1,5 +1,34 @@
 # Interloko Progress
 
+## Implemented: Richer action terms (Integer, List, Record, Call)
+
+- `GrammarActionTerm` gains `Integer(i64)`, `List(Vec<...>)`,
+  `Record(Vec<GrammarActionArg<'g>>)`, and `Call(Box<GrammarAction<'g>>)`.
+  The kernel still treats action descriptors as inert data; the new
+  variants let grammar authors capture structured projections in the
+  descriptor instead of pushing all the shape into the evaluator.
+- Surface syntax: bare integers (`42`, `-1`), `[term, term]` lists,
+  `{ key: term, key: term }` records, and nested `name(arg: term)`
+  calls. `parse_grammar_action_term` recognizes each form and
+  `split_action_args` now tracks `()`, `[]`, `{}` depth in addition
+  to the existing `"`/`` ` `` string/literal tracking, so commas
+  inside nested terms don't split.
+- Display round-trips each new variant. Downstream
+  `grammar_action_term_source_data` in
+  `interloko_compiler::grammar_frontend` gains explicit `integer`,
+  `list`, `record`, and `call` projection arms; the `_ =>
+  unknown-grammar-action-term` catch-all stays as forward-looking
+  insurance.
+- Tests cover integer (positive and negative), list, record, nested
+  call, and a full Display → parse round trip.
+
+Deferred:
+
+- The action evaluator (`grammar_frontend/actions.rs`) doesn't yet
+  consume the new variants — that's part of Phase 3 projection
+  work. Current evaluator paths still operate on Capture / CaptureAll
+  / Literal / Bool only.
+
 ## Implemented: Compiler grammar_frontend uses CompiledGrammar
 
 - `interloko_compiler::grammar_frontend::interpreter::parse_source_authored_grammar`
