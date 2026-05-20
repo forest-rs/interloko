@@ -1,5 +1,29 @@
 # Interloko Progress
 
+## Implemented: Committed-choice cut (`^expr`)
+
+- New `RuleExpression::Cut` variant. Grammar surface: prefix `^item`,
+  parsed in the same band as `&` / `!`. Once the inner expression of a
+  cut matches inside an alternative of an enclosing `|` choice, sibling
+  alternatives are no longer tried; a subsequent failure in the same
+  alternative becomes the choice's failure verbatim.
+- Internal `ExpressionMatch` and `ParseFailure` carry a private
+  `committed` flag. `Cut` raises it on success; `Sequence`, `Optional`,
+  `OneOrMore`, `ZeroOrMore` propagate it; `Choice` clears it on success
+  and on the committed-failure abort path (so an outer choice can still
+  try its alternatives). Rule references drop the flag at the rule
+  boundary, so cut never bubbles across rules.
+- Downstream `grammar_frontend.rs::rule_expression_source_data` gains a
+  `cut` projection arm.
+- Tests cover: cut prevents fallthrough after match (and absent cut
+  still falls through), cut inside Optional does not bubble, and Display
+  round-trip for the new prefix.
+
+Deferred:
+
+- Surfacing committed-failure spans through `interpret_rule_error`
+  callers as recovery anchors — Phase 3 territory.
+
 ## Implemented: Positive and negative lookahead
 
 - New `RuleExpression::And` and `RuleExpression::Not` variants for positive

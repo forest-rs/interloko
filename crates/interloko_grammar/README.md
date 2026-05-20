@@ -74,12 +74,16 @@ Supported expression forms include:
 - zero-or-more: `item*`
 - positive lookahead: `&item` (match without consuming)
 - negative lookahead: `!item` (fail when `item` would match)
+- committed-choice cut: `^item` (once `item` matches inside a `|` choice
+  alternative, sibling alternatives are no longer tried)
 - opaque regions: `` until(`end`) ``
 - transforms: `item => emit-item(name: name)`
 
-The lookahead prefixes bind looser than the trailing repetition operators,
-so `&item*` means `&(item*)`, not `(&item)*`. Whitespace between the prefix
-and operand is not allowed; write `&item`, not `& item`.
+The lookahead and cut prefixes bind looser than the trailing repetition
+operators, so `&item*` means `&(item*)`, not `(&item)*`. Whitespace between
+the prefix and operand is not allowed; write `&item`, not `& item`. Cut's
+commit is bounded by the innermost enclosing `|` choice: it does not bubble
+past an optional, a repetition, an outer choice, or a rule boundary.
 
 Transforms produce [`TransformOutput`] and optional [`GrammarAction`] values.
 They are structural metadata only.

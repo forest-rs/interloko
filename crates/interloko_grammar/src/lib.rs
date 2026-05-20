@@ -149,6 +149,15 @@ pub enum RuleExpression<'g> {
     /// the current position. Reports
     /// [`ExpectedFragment::NegativeLookahead`] on failure.
     Not(Box<RuleExpression<'g>>),
+    /// Committed-choice cut: once the inner expression matches inside an
+    /// alternative of an enclosing [`RuleExpression::Choice`], the choice no
+    /// longer falls through to sibling alternatives. A subsequent failure in
+    /// the same alternative becomes the choice's failure verbatim.
+    ///
+    /// The commit is bounded by the innermost enclosing [`RuleExpression::Choice`].
+    /// It does not bubble past an [`RuleExpression::Optional`], a repetition,
+    /// or an outer choice; nor does it cross rule boundaries.
+    Cut(Box<RuleExpression<'g>>),
 }
 
 /// Inert output attached to a transformed rule expression.
@@ -306,16 +315,28 @@ impl<'g> RuleExpression<'g> {
 
     /// Creates a positive lookahead expression.
     #[must_use]
-    #[allow(clippy::should_implement_trait, reason = "constructor mirrors variant name")]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "constructor mirrors variant name"
+    )]
     pub fn and(item: Self) -> Self {
         Self::And(Box::new(item))
     }
 
     /// Creates a negative lookahead expression.
     #[must_use]
-    #[allow(clippy::should_implement_trait, reason = "constructor mirrors variant name")]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "constructor mirrors variant name"
+    )]
     pub fn not(item: Self) -> Self {
         Self::Not(Box::new(item))
+    }
+
+    /// Creates a committed-choice cut expression.
+    #[must_use]
+    pub fn cut(item: Self) -> Self {
+        Self::Cut(Box::new(item))
     }
 }
 
@@ -350,6 +371,7 @@ impl fmt::Display for RuleExpression<'_> {
             Self::Transform { input, output } => write!(formatter, "{input} => {output}"),
             Self::And(item) => write!(formatter, "&{}", GroupedRuleExpression(item)),
             Self::Not(item) => write!(formatter, "!{}", GroupedRuleExpression(item)),
+            Self::Cut(item) => write!(formatter, "^{}", GroupedRuleExpression(item)),
         }
     }
 }
@@ -963,12 +985,21 @@ pub struct ParseError<'g> {
 struct ExpressionMatch<'g, 's> {
     end: usize,
     children: Vec<RuleNode<'g, 's>>,
+    /// Set when a [`RuleExpression::Cut`] inside this match has committed.
+    /// Propagates up through Sequence / Optional / repetition; cleared by
+    /// [`RuleExpression::Choice`] on success.
+    committed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ParseFailure<'g> {
     span: Span,
     expected: Vec<ExpectedFragment<'g>>,
+    /// Set when a [`RuleExpression::Cut`] earlier in the failing sequence has
+    /// committed. [`RuleExpression::Choice`] returns the failure as the
+    /// choice's failure (no fallthrough) and clears the flag so an outer
+    /// choice can still try its alternatives.
+    committed: bool,
 }
 
 /// Stable code for a [`GrammarSourceDiagnostic`].
@@ -1308,6 +1339,9 @@ fn parse_rule_term(term: &str) -> RuleExpression<'_> {
     if let Some(inner) = trimmed.strip_prefix('!') {
         return RuleExpression::not(parse_rule_term(inner));
     }
+    if let Some(inner) = trimmed.strip_prefix('^') {
+        return RuleExpression::cut(parse_rule_term(inner));
+    }
     if let Some(inner) = trimmed.strip_suffix('*') {
         return RuleExpression::zero_or_more(parse_rule_expression(inner));
     }
@@ -1592,10 +1626,19 @@ fn interpret_expression<'g, 's>(
 ) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
     match expression {
         RuleExpression::Rule(name) => {
-            let node = interpret_rule(lookup, name, source, position, source_offset)?;
+            // Cut commits never cross rule boundaries; the rule's own choice
+            // already cleared the flag on success, and we deliberately drop
+            // it on failure too.
+            let node = interpret_rule(lookup, name, source, position, source_offset).map_err(
+                |mut failure| {
+                    failure.committed = false;
+                    failure
+                },
+            )?;
             Ok(ExpressionMatch {
                 end: node.span.end.saturating_sub(source_offset),
                 children: vec![node],
+                committed: false,
             })
         }
         RuleExpression::Literal(value) => {
@@ -1619,6 +1662,7 @@ fn interpret_expression<'g, 's>(
                     text: &source[start..end],
                     children: Vec::new(),
                 }],
+                committed: false,
             })
         }
         RuleExpression::CharacterClass(value) => {
@@ -1643,6 +1687,7 @@ fn interpret_expression<'g, 's>(
                     text: &source[start..end],
                     children: Vec::new(),
                 }],
+                committed: false,
             })
         }
         RuleExpression::UntilLiteral(value) => {
@@ -1662,24 +1707,52 @@ fn interpret_expression<'g, 's>(
                     text: &source[start..relative_end],
                     children: Vec::new(),
                 }],
+                committed: false,
             })
         }
         RuleExpression::Sequence(items) => {
             let mut end = position;
             let mut children = Vec::new();
+            let mut committed = false;
             for item in items {
-                let matched = interpret_expression(lookup, item, source, end, source_offset)?;
-                end = matched.end;
-                children.extend(matched.children);
+                match interpret_expression(lookup, item, source, end, source_offset) {
+                    Ok(matched) => {
+                        committed |= matched.committed;
+                        end = matched.end;
+                        children.extend(matched.children);
+                    }
+                    Err(mut failure) => {
+                        failure.committed |= committed;
+                        return Err(failure);
+                    }
+                }
             }
-            Ok(ExpressionMatch { end, children })
+            Ok(ExpressionMatch {
+                end,
+                children,
+                committed,
+            })
         }
         RuleExpression::Choice(items) => {
             let mut failure = None;
             for item in items {
                 match interpret_expression(lookup, item, source, position, source_offset) {
-                    Ok(matched) => return Ok(matched),
-                    Err(error) => merge_failure(&mut failure, error),
+                    Ok(matched) => {
+                        return Ok(ExpressionMatch {
+                            end: matched.end,
+                            children: matched.children,
+                            committed: false,
+                        });
+                    }
+                    Err(error) => {
+                        if error.committed {
+                            return Err(ParseFailure {
+                                committed: false,
+                                ..error
+                            });
+                        }
+                        merge_failure(&mut failure, error);
+                    }
                 }
             }
             Err(failure.unwrap_or_else(|| {
@@ -1687,17 +1760,29 @@ fn interpret_expression<'g, 's>(
             }))
         }
         RuleExpression::Optional(item) => {
-            Ok(
-                interpret_expression(lookup, item, source, position, source_offset).unwrap_or_else(
-                    |_| ExpressionMatch {
-                        end: position,
-                        children: Vec::new(),
-                    },
-                ),
-            )
+            // Cut commits bounded by the innermost choice; an Optional
+            // contains the commit, on both the matched and skipped paths.
+            match interpret_expression(lookup, item, source, position, source_offset) {
+                Ok(mut matched) => {
+                    matched.committed = false;
+                    Ok(matched)
+                }
+                Err(_) => Ok(ExpressionMatch {
+                    end: position,
+                    children: Vec::new(),
+                    committed: false,
+                }),
+            }
         }
         RuleExpression::OneOrMore(item) => {
-            let first = interpret_expression(lookup, item, source, position, source_offset)?;
+            // A repetition boundary contains any inner cut commit. Both the
+            // required first match and later successful iterations have
+            // their committed flag cleared before propagating outward.
+            let first = interpret_expression(lookup, item, source, position, source_offset)
+                .map_err(|mut failure| {
+                    failure.committed = false;
+                    failure
+                })?;
             let mut end = first.end;
             let mut children = first.children;
             while let Ok(matched) = interpret_expression(lookup, item, source, end, source_offset) {
@@ -1707,9 +1792,16 @@ fn interpret_expression<'g, 's>(
                 end = matched.end;
                 children.extend(matched.children);
             }
-            Ok(ExpressionMatch { end, children })
+            Ok(ExpressionMatch {
+                end,
+                children,
+                committed: false,
+            })
         }
         RuleExpression::ZeroOrMore(item) => {
+            // Repetition boundary contains the cut commit; iteration
+            // failures are silently swallowed by the loop, so only success
+            // propagation needs the explicit clear.
             let mut end = position;
             let mut children = Vec::new();
             while let Ok(matched) = interpret_expression(lookup, item, source, end, source_offset) {
@@ -1719,16 +1811,28 @@ fn interpret_expression<'g, 's>(
                 end = matched.end;
                 children.extend(matched.children);
             }
-            Ok(ExpressionMatch { end, children })
+            Ok(ExpressionMatch {
+                end,
+                children,
+                committed: false,
+            })
         }
         RuleExpression::Transform { input, .. } => {
             interpret_expression(lookup, input, source, position, source_offset)
         }
         RuleExpression::And(inner) => {
-            interpret_expression(lookup, inner, source, position, source_offset)?;
+            // Lookahead is non-consuming inspection; an inner cut commit
+            // must not extend out to the enclosing choice scope.
+            interpret_expression(lookup, inner, source, position, source_offset).map_err(
+                |mut failure| {
+                    failure.committed = false;
+                    failure
+                },
+            )?;
             Ok(ExpressionMatch {
                 end: position,
                 children: Vec::new(),
+                committed: false,
             })
         }
         RuleExpression::Not(inner) => {
@@ -1741,8 +1845,14 @@ fn interpret_expression<'g, 's>(
                 Err(_) => Ok(ExpressionMatch {
                     end: position,
                     children: Vec::new(),
+                    committed: false,
                 }),
             }
+        }
+        RuleExpression::Cut(inner) => {
+            let mut matched = interpret_expression(lookup, inner, source, position, source_offset)?;
+            matched.committed = true;
+            Ok(matched)
         }
     }
 }
@@ -1752,6 +1862,7 @@ impl<'g> ParseFailure<'g> {
         Self {
             span: unexpected_fragment_span(source, position),
             expected: vec![expected],
+            committed: false,
         }
     }
 
@@ -2336,6 +2447,75 @@ mod tests {
                 GrammarActionTerm::Capture { rule: "name" }
             )]
         );
+    }
+
+    #[test]
+    fn cut_prevents_fallthrough_after_match() {
+        let grammar = "grammar tiny\nrule x = ^`a` `b` | `c`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        // No cut hit: the c alternative is still reachable.
+        let parse = interpret_region(&rules, "x", "c", 0).expect("c branch");
+        assert_eq!(parse.root.text, "c");
+
+        // Cut fires after matching `a`; `b` then fails and the choice does
+        // not fall through to `c`. The expected fragment should be `b`, not `c`.
+        let error = interpret_region(&rules, "x", "a", 0).expect_err("a without b");
+        assert!(
+            error
+                .expected
+                .iter()
+                .any(|fragment| matches!(fragment, ExpectedFragment::Literal("b"))),
+            "expected `b` in {:?}",
+            error.expected,
+        );
+        assert!(
+            !error
+                .expected
+                .iter()
+                .any(|fragment| matches!(fragment, ExpectedFragment::Literal("c"))),
+            "should not fall through to `c` in {:?}",
+            error.expected,
+        );
+    }
+
+    #[test]
+    fn cut_inside_optional_does_not_bubble() {
+        let grammar = "grammar tiny\nrule x = (^`a` `b`)? `c`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        // `a` matches, cut fires, then `b` fails. The Optional swallows the
+        // committed failure, so `c` still matches.
+        let parse = interpret_region(&rules, "x", "c", 0).expect("optional skipped");
+        assert_eq!(parse.root.text, "c");
+    }
+
+    #[test]
+    fn cut_inside_one_or_more_does_not_bubble() {
+        // A committed failure inside the required first match of a
+        // repetition must not abort the enclosing choice. After matching
+        // `a` and failing `b`, the outer choice should still fall through
+        // to the `a` alternative.
+        let grammar = "grammar tiny\nrule x = (^`a` `b`)+ | `a`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "x", "a", 0).expect("falls through to `a`");
+        assert_eq!(parse.root.text, "a");
+    }
+
+    #[test]
+    fn cut_inside_lookahead_does_not_bubble() {
+        // Positive lookahead is non-consuming; a committed failure inside
+        // the predicate must not commit the enclosing choice.
+        let grammar = "grammar tiny\nrule x = &(^`a` `b`) `c` | `a`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        // After cut matches `a` and `b` fails inside the lookahead, the
+        // committed flag is cleared and the choice falls through to `a`.
+        let parse = interpret_region(&rules, "x", "a", 0).expect("falls through to `a`");
+        assert_eq!(parse.root.text, "a");
+    }
+
+    #[test]
+    fn cut_round_trips_in_display() {
+        let expr = RuleExpression::cut(RuleExpression::literal("a"));
+        assert_eq!(alloc::format!("{expr}"), "^`a`");
     }
 
     #[test]

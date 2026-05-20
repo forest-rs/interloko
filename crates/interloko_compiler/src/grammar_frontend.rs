@@ -422,6 +422,13 @@ pub fn rule_expression_source_data(expression: &RuleExpression<'_>) -> SourceDat
                 rule_expression_source_data(item),
             )],
         ),
+        RuleExpression::Cut(item) => SourceData::record(
+            "cut",
+            vec![source_data::field(
+                "item",
+                rule_expression_source_data(item),
+            )],
+        ),
         _ => SourceData::record("unknown-rule-expression", Vec::new()),
     }
 }
