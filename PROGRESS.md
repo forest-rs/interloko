@@ -1,5 +1,29 @@
 # Interloko Progress
 
+## Implemented: CompiledGrammar with binary-search rule lookup
+
+- New `CompiledGrammar<'g>` owns a rule list and a sorted-by-name index.
+  `compile`, `rules`, and `rule(name)` are public; the `*_compiled` matching
+  entry points (`interpret_region_compiled`, `inspect_region_compiled`,
+  `interpret_rule_error_compiled`) accept it and do binary-search rule
+  lookups during matching.
+- Existing slice-taking `interpret_region` / `inspect_region` /
+  `interpret_rule_error` keep behavior and now share a private `RuleLookup`
+  helper with the compiled paths. Slice users keep the linear scan they
+  always had; callers wanting O(log n) lookup migrate to a pre-built
+  `CompiledGrammar`.
+- Lookup preserves first-wins behavior on ties (when a caller manually
+  constructs duplicate rule names) so the slice and compiled paths report
+  identical results.
+- Tests verify parity across success, failure, trailing-input inspection,
+  and `interpret_rule_error` between the slice and compiled paths.
+
+Deferred:
+
+- Switching `interloko_compiler::grammar_frontend` to `CompiledGrammar` —
+  the kernel exposes the path; compiler adoption can land separately.
+- Caching compiled grammars across compiler sessions.
+
 ## Implemented: Tree geometry and span helpers
 
 - `Span` gains `cover` and `intersect`, returning the smallest span covering

@@ -427,6 +427,94 @@ impl<'g> SourceAuthoredRule<'g> {
     }
 }
 
+/// A grammar with a precomputed name index for fast rule lookup.
+///
+/// [`CompiledGrammar::compile`] takes a list of rules (typically from
+/// [`parse_grammar_source`]) and builds a sorted index alongside them. The
+/// `*_compiled` matching entry points ([`interpret_region_compiled`],
+/// [`inspect_region_compiled`], [`interpret_rule_error_compiled`]) use that
+/// index for O(log n) rule lookups instead of the linear scan used by the
+/// slice-taking entry points.
+///
+/// Build once per grammar and reuse across many parses. The compiled form
+/// borrows nothing extra from the parsed grammar source; it owns the rule
+/// list and the sorted index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledGrammar<'g> {
+    rules: Vec<SourceAuthoredRule<'g>>,
+    /// Indices into `rules`, sorted by `rules[i].name`. Ties (which only
+    /// occur if a caller manually constructs duplicates outside the
+    /// diagnostic-filtered [`parse_grammar_source_with_diagnostics`] path) are
+    /// broken by original position so [`CompiledGrammar::rule`] still returns
+    /// the first declaration to match the slice-based lookup behavior.
+    sorted_indices: Vec<usize>,
+}
+
+impl<'g> CompiledGrammar<'g> {
+    /// Builds a compiled grammar from a rule list.
+    #[must_use]
+    pub fn compile(rules: Vec<SourceAuthoredRule<'g>>) -> Self {
+        let mut sorted_indices: Vec<usize> = (0..rules.len()).collect();
+        sorted_indices.sort_by(|&a, &b| rules[a].name.cmp(rules[b].name).then(a.cmp(&b)));
+        Self {
+            rules,
+            sorted_indices,
+        }
+    }
+
+    /// Returns the underlying rule list in its original declaration order.
+    #[must_use]
+    pub fn rules(&self) -> &[SourceAuthoredRule<'g>] {
+        &self.rules
+    }
+
+    /// Looks up the first rule with `name`, returning `None` when not found.
+    #[must_use]
+    pub fn rule(&self, name: &str) -> Option<&SourceAuthoredRule<'g>> {
+        let rules = self.rules.as_slice();
+        let indices = self.sorted_indices.as_slice();
+        let position = indices.partition_point(|&idx| rules[idx].name < name);
+        indices
+            .get(position)
+            .map(|&idx| &rules[idx])
+            .filter(|rule| rule.name == name)
+    }
+
+    fn lookup(&self) -> RuleLookup<'_, 'g> {
+        RuleLookup {
+            rules: &self.rules,
+            sorted_indices: Some(&self.sorted_indices),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RuleLookup<'a, 'g> {
+    rules: &'a [SourceAuthoredRule<'g>],
+    sorted_indices: Option<&'a [usize]>,
+}
+
+impl<'a, 'g> RuleLookup<'a, 'g> {
+    fn from_slice(rules: &'a [SourceAuthoredRule<'g>]) -> Self {
+        Self {
+            rules,
+            sorted_indices: None,
+        }
+    }
+
+    fn rule(self, name: &str) -> Option<&'a SourceAuthoredRule<'g>> {
+        if let Some(indices) = self.sorted_indices {
+            let position = indices.partition_point(|&idx| self.rules[idx].name < name);
+            indices
+                .get(position)
+                .map(|&idx| &self.rules[idx])
+                .filter(|rule| rule.name == name)
+        } else {
+            self.rules.iter().find(|rule| rule.name == name)
+        }
+    }
+}
+
 /// Structural role of a [`RuleNode`].
 ///
 /// [`RuleNode::role`] returns this value so callers can distinguish named
@@ -1282,6 +1370,10 @@ fn split_whitespace_top_level(input: &str) -> Vec<&str> {
 /// [`Parse`] tree rooted at `root_rule`. On failure, returns a [`ParseError`].
 /// `source_offset` is added to every reported [`Span`], which lets callers
 /// parse an embedded region while preserving outer source coordinates.
+///
+/// Use [`interpret_region_compiled`] with a pre-built [`CompiledGrammar`] for
+/// repeated calls against the same rules; this slice-taking entry point falls
+/// back to a linear name lookup.
 pub fn interpret_region<'g, 's>(
     rules: &[SourceAuthoredRule<'g>],
     root_rule: &'g str,
@@ -1289,6 +1381,20 @@ pub fn interpret_region<'g, 's>(
     source_offset: usize,
 ) -> Result<Parse<'g, 's>, ParseError<'g>> {
     inspect_region(rules, root_rule, source, source_offset).into_result()
+}
+
+/// Same as [`interpret_region`] but accepts a pre-built [`CompiledGrammar`].
+///
+/// Lookups use the compiled name index (binary search) instead of the linear
+/// scan used by the slice-taking entry point. Behavior is otherwise
+/// identical.
+pub fn interpret_region_compiled<'g, 's>(
+    grammar: &CompiledGrammar<'g>,
+    root_rule: &'g str,
+    source: &'s str,
+    source_offset: usize,
+) -> Result<Parse<'g, 's>, ParseError<'g>> {
+    inspect_region_compiled(grammar, root_rule, source, source_offset).into_result()
 }
 
 /// Interprets `root_rule` and returns the matched root plus any complete-region
@@ -1304,7 +1410,32 @@ pub fn inspect_region<'g, 's>(
     source: &'s str,
     source_offset: usize,
 ) -> ParseReport<'g, 's> {
-    let root = match interpret_rule(rules, root_rule, source, 0, source_offset) {
+    inspect_region_with(
+        RuleLookup::from_slice(rules),
+        root_rule,
+        source,
+        source_offset,
+    )
+}
+
+/// Same as [`inspect_region`] but accepts a pre-built [`CompiledGrammar`].
+#[must_use]
+pub fn inspect_region_compiled<'g, 's>(
+    grammar: &CompiledGrammar<'g>,
+    root_rule: &'g str,
+    source: &'s str,
+    source_offset: usize,
+) -> ParseReport<'g, 's> {
+    inspect_region_with(grammar.lookup(), root_rule, source, source_offset)
+}
+
+fn inspect_region_with<'g, 's>(
+    lookup: RuleLookup<'_, 'g>,
+    root_rule: &'g str,
+    source: &'s str,
+    source_offset: usize,
+) -> ParseReport<'g, 's> {
+    let root = match interpret_rule(lookup, root_rule, source, 0, source_offset) {
         Ok(root) => root,
         Err(failure) => {
             return ParseReport {
@@ -1343,7 +1474,35 @@ pub fn interpret_rule_error<'g>(
     position: usize,
     source_offset: usize,
 ) -> ParseError<'g> {
-    interpret_rule(rules, rule_name, source, position, source_offset)
+    interpret_rule_error_with(
+        RuleLookup::from_slice(rules),
+        rule_name,
+        source,
+        position,
+        source_offset,
+    )
+}
+
+/// Same as [`interpret_rule_error`] but accepts a pre-built [`CompiledGrammar`].
+#[must_use]
+pub fn interpret_rule_error_compiled<'g>(
+    grammar: &CompiledGrammar<'g>,
+    rule_name: &'g str,
+    source: &str,
+    position: usize,
+    source_offset: usize,
+) -> ParseError<'g> {
+    interpret_rule_error_with(grammar.lookup(), rule_name, source, position, source_offset)
+}
+
+fn interpret_rule_error_with<'g>(
+    lookup: RuleLookup<'_, 'g>,
+    rule_name: &'g str,
+    source: &str,
+    position: usize,
+    source_offset: usize,
+) -> ParseError<'g> {
+    interpret_rule(lookup, rule_name, source, position, source_offset)
         .err()
         .unwrap_or_else(|| {
             ParseFailure::expected_at_source(source, position, ExpectedFragment::Rule(rule_name))
@@ -1352,15 +1511,15 @@ pub fn interpret_rule_error<'g>(
 }
 
 fn interpret_rule<'g, 's>(
-    rules: &[SourceAuthoredRule<'g>],
+    lookup: RuleLookup<'_, 'g>,
     name: &'g str,
     source: &'s str,
     position: usize,
     source_offset: usize,
 ) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
-    if let Some(rule) = rules.iter().find(|rule| rule.name == name) {
+    if let Some(rule) = lookup.rule(name) {
         let start = skip_trivia(source, position);
-        let matched = interpret_expression(rules, &rule.expression, source, start, source_offset)?;
+        let matched = interpret_expression(lookup, &rule.expression, source, start, source_offset)?;
         let end = matched.end;
         if rule
             .excluded_text
@@ -1388,7 +1547,7 @@ fn interpret_rule<'g, 's>(
 }
 
 fn interpret_expression<'g, 's>(
-    rules: &[SourceAuthoredRule<'g>],
+    lookup: RuleLookup<'_, 'g>,
     expression: &RuleExpression<'g>,
     source: &'s str,
     position: usize,
@@ -1396,7 +1555,7 @@ fn interpret_expression<'g, 's>(
 ) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
     match expression {
         RuleExpression::Rule(name) => {
-            let node = interpret_rule(rules, name, source, position, source_offset)?;
+            let node = interpret_rule(lookup, name, source, position, source_offset)?;
             Ok(ExpressionMatch {
                 end: node.span.end.saturating_sub(source_offset),
                 children: vec![node],
@@ -1472,7 +1631,7 @@ fn interpret_expression<'g, 's>(
             let mut end = position;
             let mut children = Vec::new();
             for item in items {
-                let matched = interpret_expression(rules, item, source, end, source_offset)?;
+                let matched = interpret_expression(lookup, item, source, end, source_offset)?;
                 end = matched.end;
                 children.extend(matched.children);
             }
@@ -1481,7 +1640,7 @@ fn interpret_expression<'g, 's>(
         RuleExpression::Choice(items) => {
             let mut failure = None;
             for item in items {
-                match interpret_expression(rules, item, source, position, source_offset) {
+                match interpret_expression(lookup, item, source, position, source_offset) {
                     Ok(matched) => return Ok(matched),
                     Err(error) => merge_failure(&mut failure, error),
                 }
@@ -1492,7 +1651,7 @@ fn interpret_expression<'g, 's>(
         }
         RuleExpression::Optional(item) => {
             Ok(
-                interpret_expression(rules, item, source, position, source_offset).unwrap_or_else(
+                interpret_expression(lookup, item, source, position, source_offset).unwrap_or_else(
                     |_| ExpressionMatch {
                         end: position,
                         children: Vec::new(),
@@ -1501,10 +1660,10 @@ fn interpret_expression<'g, 's>(
             )
         }
         RuleExpression::OneOrMore(item) => {
-            let first = interpret_expression(rules, item, source, position, source_offset)?;
+            let first = interpret_expression(lookup, item, source, position, source_offset)?;
             let mut end = first.end;
             let mut children = first.children;
-            while let Ok(matched) = interpret_expression(rules, item, source, end, source_offset) {
+            while let Ok(matched) = interpret_expression(lookup, item, source, end, source_offset) {
                 if matched.end == end {
                     break;
                 }
@@ -1516,7 +1675,7 @@ fn interpret_expression<'g, 's>(
         RuleExpression::ZeroOrMore(item) => {
             let mut end = position;
             let mut children = Vec::new();
-            while let Ok(matched) = interpret_expression(rules, item, source, end, source_offset) {
+            while let Ok(matched) = interpret_expression(lookup, item, source, end, source_offset) {
                 if matched.end == end {
                     break;
                 }
@@ -1526,7 +1685,7 @@ fn interpret_expression<'g, 's>(
             Ok(ExpressionMatch { end, children })
         }
         RuleExpression::Transform { input, .. } => {
-            interpret_expression(rules, input, source, position, source_offset)
+            interpret_expression(lookup, input, source, position, source_offset)
         }
     }
 }
@@ -2076,6 +2235,47 @@ mod tests {
                 GrammarActionTerm::Capture { rule: "name" }
             )]
         );
+    }
+
+    #[test]
+    fn compiled_grammar_matches_slice_behavior() {
+        let grammar = "grammar tiny\n\
+                       rule pair = name `:` type-name\n\
+                       rule name = [A-Za-z_]+\n\
+                       rule type-name = `<` name `>`\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let compiled = CompiledGrammar::compile(rules.clone());
+
+        // Lookup parity.
+        for rule in compiled.rules() {
+            assert!(compiled.rule(rule.name).is_some(), "rule {}", rule.name);
+        }
+        assert!(compiled.rule("missing").is_none());
+
+        // Parse parity for success.
+        let from_slice =
+            interpret_region(&rules, "pair", "radius: <integer>", 100).expect("slice parse");
+        let from_compiled = interpret_region_compiled(&compiled, "pair", "radius: <integer>", 100)
+            .expect("compiled parse");
+        assert_eq!(from_slice, from_compiled);
+
+        // Parse parity for failure.
+        let slice_err = interpret_region(&rules, "pair", "", 0).expect_err("slice err");
+        let compiled_err =
+            interpret_region_compiled(&compiled, "pair", "", 0).expect_err("compiled err");
+        assert_eq!(slice_err, compiled_err);
+
+        // Inspect parity for trailing input.
+        let slice_report = inspect_region(&rules, "pair", "radius: <integer> trail", 0);
+        let compiled_report =
+            inspect_region_compiled(&compiled, "pair", "radius: <integer> trail", 0);
+        assert_eq!(slice_report, compiled_report);
+
+        // interpret_rule_error parity.
+        let slice_rule_err = interpret_rule_error(&rules, "name", "123", 0, 0);
+        let compiled_rule_err = interpret_rule_error_compiled(&compiled, "name", "123", 0, 0);
+        assert_eq!(slice_rule_err, compiled_rule_err);
     }
 
     #[test]
