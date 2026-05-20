@@ -434,6 +434,28 @@ impl fmt::Display for GroupedRuleExpression<'_, '_> {
     }
 }
 
+/// Whether a rule participates in default trivia skipping.
+///
+/// [`SourceAuthoredRule::trivia`] selects between leaving whitespace and
+/// `//` comments to the kernel ([`TriviaMode::Default`]) and treating them
+/// as part of the matched source ([`TriviaMode::Raw`]). Raw rules are
+/// useful for tokens with exact internal structure, such as string literals.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add modes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TriviaMode {
+    /// Whitespace and `//` comments are skipped before every literal and at
+    /// the rule boundary.
+    #[default]
+    Default,
+    /// Whitespace and `//` comments are not skipped at the rule boundary or
+    /// before literals inside this rule's body. Rule references inside a raw
+    /// rule are still evaluated according to the called rule's own trivia
+    /// mode.
+    Raw,
+}
+
 /// A rule parsed from grammar source.
 ///
 /// [`parse_grammar_source`] returns a list of these. Pass that list to
@@ -465,6 +487,8 @@ pub struct SourceAuthoredRule<'g> {
     pub excluded_text: Vec<&'g str>,
     /// Source span in the grammar source.
     pub source_span: Span,
+    /// Per-rule trivia policy. See [`TriviaMode`].
+    pub trivia: TriviaMode,
 }
 
 impl<'g> SourceAuthoredRule<'g> {
@@ -1023,6 +1047,9 @@ pub enum GrammarSourceDiagnosticCode {
     EmptyBody,
     /// A rule name appeared more than once in the same grammar source.
     DuplicateName,
+    /// A `rule` line carried an unrecognized modifier token between the
+    /// name and the `=` (only `raw` is currently recognized).
+    UnknownRuleModifier,
 }
 
 impl GrammarSourceDiagnosticCode {
@@ -1035,6 +1062,7 @@ impl GrammarSourceDiagnosticCode {
             Self::EmptyName => "empty-name",
             Self::EmptyBody => "empty-body",
             Self::DuplicateName => "duplicate-name",
+            Self::UnknownRuleModifier => "unknown-rule-modifier",
         }
     }
 
@@ -1047,6 +1075,7 @@ impl GrammarSourceDiagnosticCode {
             Self::EmptyName => "rule name must not be empty",
             Self::EmptyBody => "rule body must not be empty",
             Self::DuplicateName => "rule name was already declared in this grammar",
+            Self::UnknownRuleModifier => "unrecognized rule modifier; expected `raw` or nothing",
         }
     }
 }
@@ -1171,6 +1200,19 @@ pub fn parse_grammar_source_with_diagnostics(
             ));
             continue;
         }
+        // Detect an optional rule modifier appearing between the name and
+        // the `=`. Currently only `raw` is recognized.
+        let (name, trivia) = match name.rsplit_once(char::is_whitespace) {
+            Some((prefix, "raw")) => (prefix.trim(), TriviaMode::Raw),
+            Some((_, modifier)) if !modifier.is_empty() => {
+                diagnostics.push(GrammarSourceDiagnostic::new(
+                    trimmed_span,
+                    GrammarSourceDiagnosticCode::UnknownRuleModifier,
+                ));
+                continue;
+            }
+            _ => (name, TriviaMode::Default),
+        };
         if expression.trim().is_empty() {
             diagnostics.push(GrammarSourceDiagnostic::new(
                 trimmed_span,
@@ -1199,6 +1241,7 @@ pub fn parse_grammar_source_with_diagnostics(
             action,
             excluded_text: Vec::new(),
             source_span: trimmed_span,
+            trivia,
         });
     }
     (rules, diagnostics)
@@ -1506,6 +1549,9 @@ fn inspect_region_with<'g, 's>(
     source: &'s str,
     source_offset: usize,
 ) -> ParseReport<'g, 's> {
+    let root_raw = lookup
+        .rule(root_rule)
+        .is_some_and(|rule| matches!(rule.trivia, TriviaMode::Raw));
     let root = match interpret_rule(lookup, root_rule, source, 0, source_offset) {
         Ok(root) => root,
         Err(failure) => {
@@ -1515,7 +1561,14 @@ fn inspect_region_with<'g, 's>(
             };
         }
     };
-    let trailing = skip_trivia(source, root.span.end.saturating_sub(source_offset));
+    let region_end = root.span.end.saturating_sub(source_offset);
+    // Raw root rules keep trailing trivia as unconsumed input; default
+    // rules let trailing whitespace and `//` comments slide.
+    let trailing = if root_raw {
+        region_end
+    } else {
+        skip_trivia(source, region_end)
+    };
     if trailing == source.len() {
         ParseReport {
             root: Some(root),
@@ -1525,8 +1578,13 @@ fn inspect_region_with<'g, 's>(
         ParseReport {
             root: Some(root),
             error: Some(
-                ParseFailure::expected_at_source(source, trailing, ExpectedFragment::EndOfRegion)
-                    .into_error(source_offset),
+                ParseFailure::expected_at_source(
+                    source,
+                    trailing,
+                    ExpectedFragment::EndOfRegion,
+                    root_raw,
+                )
+                .into_error(source_offset),
             ),
         }
     }
@@ -1573,10 +1631,18 @@ fn interpret_rule_error_with<'g>(
     position: usize,
     source_offset: usize,
 ) -> ParseError<'g> {
+    let raw = lookup
+        .rule(rule_name)
+        .is_some_and(|rule| matches!(rule.trivia, TriviaMode::Raw));
     interpret_rule(lookup, rule_name, source, position, source_offset)
         .err()
         .unwrap_or_else(|| {
-            ParseFailure::expected_at_source(source, position, ExpectedFragment::Rule(rule_name))
+            ParseFailure::expected_at_source(
+                source,
+                position,
+                ExpectedFragment::Rule(rule_name),
+                raw,
+            )
         })
         .into_error(source_offset)
 }
@@ -1589,8 +1655,14 @@ fn interpret_rule<'g, 's>(
     source_offset: usize,
 ) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
     if let Some(rule) = lookup.rule(name) {
-        let start = skip_trivia(source, position);
-        let matched = interpret_expression(lookup, &rule.expression, source, start, source_offset)?;
+        let raw = matches!(rule.trivia, TriviaMode::Raw);
+        let start = if raw {
+            position
+        } else {
+            skip_trivia(source, position)
+        };
+        let matched =
+            interpret_expression(lookup, &rule.expression, source, start, source_offset, raw)?;
         let end = matched.end;
         if rule
             .excluded_text
@@ -1601,6 +1673,7 @@ fn interpret_rule<'g, 's>(
                 source,
                 start,
                 ExpectedFragment::Rule(name),
+                raw,
             ));
         }
         return Ok(RuleNode {
@@ -1610,10 +1683,13 @@ fn interpret_rule<'g, 's>(
             children: matched.children,
         });
     }
+    // Rule not found: we have no per-rule trivia context, so report the
+    // unexpected fragment using the default (trivia-skipping) heuristic.
     Err(ParseFailure::expected_at_source(
         source,
-        skip_trivia(source, position),
+        position,
         ExpectedFragment::Rule(name),
+        false,
     ))
 }
 
@@ -1623,6 +1699,7 @@ fn interpret_expression<'g, 's>(
     source: &'s str,
     position: usize,
     source_offset: usize,
+    raw: bool,
 ) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
     match expression {
         RuleExpression::Rule(name) => {
@@ -1642,7 +1719,11 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Literal(value) => {
-            let start = skip_trivia(source, position);
+            let start = if raw {
+                position
+            } else {
+                skip_trivia(source, position)
+            };
             let end = source[start..]
                 .starts_with(value)
                 .then_some(start + value.len())
@@ -1652,6 +1733,7 @@ fn interpret_expression<'g, 's>(
                         source,
                         start,
                         ExpectedFragment::Literal(value),
+                        raw,
                     )
                 })?;
             Ok(ExpressionMatch {
@@ -1676,6 +1758,7 @@ fn interpret_expression<'g, 's>(
                         source,
                         start,
                         ExpectedFragment::CharacterClass(value),
+                        raw,
                     )
                 })?;
             let end = start + ch.len_utf8();
@@ -1715,7 +1798,7 @@ fn interpret_expression<'g, 's>(
             let mut children = Vec::new();
             let mut committed = false;
             for item in items {
-                match interpret_expression(lookup, item, source, end, source_offset) {
+                match interpret_expression(lookup, item, source, end, source_offset, raw) {
                     Ok(matched) => {
                         committed |= matched.committed;
                         end = matched.end;
@@ -1736,7 +1819,7 @@ fn interpret_expression<'g, 's>(
         RuleExpression::Choice(items) => {
             let mut failure = None;
             for item in items {
-                match interpret_expression(lookup, item, source, position, source_offset) {
+                match interpret_expression(lookup, item, source, position, source_offset, raw) {
                     Ok(matched) => {
                         return Ok(ExpressionMatch {
                             end: matched.end,
@@ -1756,13 +1839,13 @@ fn interpret_expression<'g, 's>(
                 }
             }
             Err(failure.unwrap_or_else(|| {
-                ParseFailure::expected_at_source(source, position, ExpectedFragment::Choice)
+                ParseFailure::expected_at_source(source, position, ExpectedFragment::Choice, raw)
             }))
         }
         RuleExpression::Optional(item) => {
             // Cut commits bounded by the innermost choice; an Optional
             // contains the commit, on both the matched and skipped paths.
-            match interpret_expression(lookup, item, source, position, source_offset) {
+            match interpret_expression(lookup, item, source, position, source_offset, raw) {
                 Ok(mut matched) => {
                     matched.committed = false;
                     Ok(matched)
@@ -1778,14 +1861,16 @@ fn interpret_expression<'g, 's>(
             // A repetition boundary contains any inner cut commit. Both the
             // required first match and later successful iterations have
             // their committed flag cleared before propagating outward.
-            let first = interpret_expression(lookup, item, source, position, source_offset)
+            let first = interpret_expression(lookup, item, source, position, source_offset, raw)
                 .map_err(|mut failure| {
                     failure.committed = false;
                     failure
                 })?;
             let mut end = first.end;
             let mut children = first.children;
-            while let Ok(matched) = interpret_expression(lookup, item, source, end, source_offset) {
+            while let Ok(matched) =
+                interpret_expression(lookup, item, source, end, source_offset, raw)
+            {
                 if matched.end == end {
                     break;
                 }
@@ -1804,7 +1889,9 @@ fn interpret_expression<'g, 's>(
             // propagation needs the explicit clear.
             let mut end = position;
             let mut children = Vec::new();
-            while let Ok(matched) = interpret_expression(lookup, item, source, end, source_offset) {
+            while let Ok(matched) =
+                interpret_expression(lookup, item, source, end, source_offset, raw)
+            {
                 if matched.end == end {
                     break;
                 }
@@ -1818,12 +1905,12 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Transform { input, .. } => {
-            interpret_expression(lookup, input, source, position, source_offset)
+            interpret_expression(lookup, input, source, position, source_offset, raw)
         }
         RuleExpression::And(inner) => {
             // Lookahead is non-consuming inspection; an inner cut commit
             // must not extend out to the enclosing choice scope.
-            interpret_expression(lookup, inner, source, position, source_offset).map_err(
+            interpret_expression(lookup, inner, source, position, source_offset, raw).map_err(
                 |mut failure| {
                     failure.committed = false;
                     failure
@@ -1836,11 +1923,12 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Not(inner) => {
-            match interpret_expression(lookup, inner, source, position, source_offset) {
+            match interpret_expression(lookup, inner, source, position, source_offset, raw) {
                 Ok(_) => Err(ParseFailure::expected_at_source(
                     source,
                     position,
                     ExpectedFragment::NegativeLookahead,
+                    raw,
                 )),
                 Err(_) => Ok(ExpressionMatch {
                     end: position,
@@ -1850,7 +1938,8 @@ fn interpret_expression<'g, 's>(
             }
         }
         RuleExpression::Cut(inner) => {
-            let mut matched = interpret_expression(lookup, inner, source, position, source_offset)?;
+            let mut matched =
+                interpret_expression(lookup, inner, source, position, source_offset, raw)?;
             matched.committed = true;
             Ok(matched)
         }
@@ -1858,9 +1947,14 @@ fn interpret_expression<'g, 's>(
 }
 
 impl<'g> ParseFailure<'g> {
-    fn expected_at_source(source: &str, position: usize, expected: ExpectedFragment<'g>) -> Self {
+    fn expected_at_source(
+        source: &str,
+        position: usize,
+        expected: ExpectedFragment<'g>,
+        raw: bool,
+    ) -> Self {
         Self {
-            span: unexpected_fragment_span(source, position),
+            span: unexpected_fragment_span(source, position, raw),
             expected: vec![expected],
             committed: false,
         }
@@ -1898,8 +1992,12 @@ fn merge_failure<'g>(failure: &mut Option<ParseFailure<'g>>, next: ParseFailure<
     }
 }
 
-fn unexpected_fragment_span(source: &str, position: usize) -> Span {
-    let start = skip_trivia(source, position);
+fn unexpected_fragment_span(source: &str, position: usize, raw: bool) -> Span {
+    let start = if raw {
+        position
+    } else {
+        skip_trivia(source, position)
+    };
     let Some(first) = source[start..].chars().next() else {
         return Span::new(start, start);
     };
@@ -2447,6 +2545,98 @@ mod tests {
                 GrammarActionTerm::Capture { rule: "name" }
             )]
         );
+    }
+
+    #[test]
+    fn raw_rule_does_not_skip_internal_whitespace() {
+        let grammar = "grammar tiny\nrule pair raw = `(` `)`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        assert!(matches!(rules[0].trivia, TriviaMode::Raw));
+        // No whitespace between `(` and `)`: matches.
+        let parse = interpret_region(&rules, "pair", "()", 0).expect("()");
+        assert_eq!(parse.root.text, "()");
+        // Whitespace between: raw rule's Literal does not skip trivia, so the
+        // inner `)` literal fails.
+        interpret_region(&rules, "pair", "( )", 0).expect_err("space rejected");
+    }
+
+    #[test]
+    fn non_raw_rule_skips_internal_whitespace() {
+        let grammar = "grammar tiny\nrule pair = `(` `)`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        assert!(matches!(rules[0].trivia, TriviaMode::Default));
+        // Default trivia mode skips whitespace before each literal.
+        let parse = interpret_region(&rules, "pair", "( )", 0).expect("space accepted");
+        assert_eq!(parse.root.text, "( )");
+    }
+
+    #[test]
+    fn raw_rule_matches_strings_with_until_delimiter() {
+        let grammar = "grammar tiny\n\
+                       rule string-literal raw = `\"` until(`\"`) `\"`\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "string-literal", "\"hello world\"", 0)
+            .expect("string literal");
+        assert_eq!(parse.root.text, "\"hello world\"");
+    }
+
+    #[test]
+    fn raw_rule_modifier_unknown_modifier_diagnostic() {
+        let grammar = "grammar oops\nrule foo bogus = `a`\nrule good = `b`\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        // Rules with an unknown modifier are skipped entirely so that no
+        // garbage rule named "foo bogus" leaks into lookup.
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "good");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            GrammarSourceDiagnosticCode::UnknownRuleModifier
+        );
+    }
+
+    #[test]
+    fn raw_root_rejects_trailing_region_whitespace() {
+        let grammar = "grammar tiny\nrule pair raw = `(` `)`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        // Raw root rules do not let trailing whitespace slide; the trailing
+        // spaces are unconsumed input and must produce an EndOfRegion error.
+        let error = interpret_region(&rules, "pair", "()   ", 0).expect_err("trailing whitespace");
+        assert_eq!(
+            error.expected,
+            vec![ExpectedFragment::EndOfRegion],
+            "expected EndOfRegion, got {:?}",
+            error.expected
+        );
+        assert_eq!(error.span.start, 2, "should point at the trailing space");
+    }
+
+    #[test]
+    fn raw_rule_failure_span_points_at_internal_whitespace() {
+        let grammar = "grammar tiny\nrule pair raw = `(` `)`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        // Inside a raw rule, the missing-literal failure should land on the
+        // unexpected whitespace itself, not on a non-whitespace character past
+        // any trivia skip.
+        let error = interpret_region(&rules, "pair", "( )", 0).expect_err("interior space");
+        assert_eq!(error.span.start, 1, "should point at the space");
+        assert_eq!(error.span.end, 2);
+    }
+
+    #[test]
+    fn inspect_region_raw_root_reports_trailing_trivia() {
+        // The raw root contract also applies to the report-oriented API:
+        // inspect_region returns the matched root *and* a complete-region
+        // failure pointing at the unconsumed trailing whitespace.
+        let grammar = "grammar tiny\nrule pair raw = `(` `)`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let report = inspect_region(&rules, "pair", "()   ", 0);
+        let root = report.root.as_ref().expect("root matched");
+        assert_eq!(root.text, "()");
+        let error = report.error.as_ref().expect("trailing trivia rejected");
+        assert_eq!(error.expected, vec![ExpectedFragment::EndOfRegion]);
+        assert_eq!(error.span.start, 2);
     }
 
     #[test]

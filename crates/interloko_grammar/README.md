@@ -60,6 +60,17 @@ rule words = word+
 end
 ```
 
+A rule may declare a trivia mode between the name and `=`. Today only
+`raw` is recognized; raw rules do not skip whitespace or `//` comments at
+the rule boundary or before literals inside the rule body. Rule references
+inside a raw rule still follow the called rule's own trivia mode.
+
+```text
+grammar strings
+rule string-literal raw = `"` until(`"`) `"`
+end
+```
+
 Supported expression forms include:
 
 - rule references: `item`

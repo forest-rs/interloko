@@ -1,5 +1,37 @@
 # Interloko Progress
 
+## Implemented: Per-rule trivia mode (`raw`)
+
+- New public `TriviaMode` enum (`Default` / `Raw`, `#[non_exhaustive]`)
+  plus a `trivia` field on `SourceAuthoredRule`. Grammar surface: an
+  optional `raw` keyword between the rule name and `=`, e.g.
+  `rule string-literal raw = `"` until(`"`) `"`?`. The previous rule
+  shape continues to parse as `TriviaMode::Default`.
+- Raw rules skip neither leading nor inter-literal trivia. Rule references
+  inside a raw rule still follow the called rule's own mode, so a raw
+  rule embedding a `Default` rule still gets the called rule's trivia.
+- Unknown modifiers between the name and `=` produce a new
+  `GrammarSourceDiagnosticCode::UnknownRuleModifier` and the rule parses
+  with `TriviaMode::Default`.
+- `interpret_rule` and `interpret_expression` now thread a `raw: bool`;
+  `RuleExpression::Literal` consults it before deciding whether to skip
+  trivia.
+- `interloko_compiler/grammars/base_loko.grammar` opts `string-literal`
+  into raw mode. Full corpus (138 cases) still passes.
+- Tests cover raw-rule whitespace rejection, default-mode trivia skip
+  for comparison, the string-literal example, and the unknown-modifier
+  diagnostic.
+
+Deferred:
+
+- Dropping the optional `?` on the closing `"` in `string-literal` so
+  unterminated strings become real parse errors. Once that's in, the
+  `malformed_string_span` workaround in
+  `interloko_compiler::grammar_frontend::base_loko_primary` can go.
+- Revisiting the `interpret_rule_error` retry chain in
+  `base_loko_parse_error` now that lookahead, cut, and raw mode are
+  available.
+
 ## Implemented: Committed-choice cut (`^expr`)
 
 - New `RuleExpression::Cut` variant. Grammar surface: prefix `^item`,
