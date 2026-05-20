@@ -158,6 +158,20 @@ pub enum RuleExpression<'g> {
     /// It does not bubble past an [`RuleExpression::Optional`], a repetition,
     /// or an outer choice; nor does it cross rule boundaries.
     Cut(Box<RuleExpression<'g>>),
+    /// Named subexpression binding.
+    ///
+    /// Surface syntax: `name:expr` inside a rule body (glued colon,
+    /// outside backticks). The matcher tags children produced by
+    /// `inner` with the binding `name` so an action can resolve a
+    /// specific child by binding rather than by rule name. Useful when
+    /// a rule has multiple children of the same rule type and the
+    /// action wants to refer to a specific one.
+    Named {
+        /// Binding name attached to the matched children.
+        name: &'g str,
+        /// Inner expression whose match contributes the bound children.
+        inner: Box<RuleExpression<'g>>,
+    },
 }
 
 /// Inert output attached to a transformed rule expression.
@@ -226,6 +240,16 @@ pub enum GrammarActionTerm<'g> {
     CaptureAll {
         /// Captured rule name.
         rule: &'g str,
+    },
+    /// Capture the first child whose `binding_name` matches.
+    ///
+    /// Surface syntax: a bare identifier in an action argument value
+    /// resolves to this term when the enclosing rule defines a
+    /// matching `name:expr` binding. Bindings are scoped to the rule
+    /// they appear in; cross-rule binding lookups are not supported.
+    CaptureByName {
+        /// Captured binding name.
+        name: &'g str,
     },
     /// Literal string/symbol data.
     Literal(&'g str),
@@ -358,6 +382,15 @@ impl<'g> RuleExpression<'g> {
     pub fn cut(item: Self) -> Self {
         Self::Cut(Box::new(item))
     }
+
+    /// Creates a named subexpression binding.
+    #[must_use]
+    pub fn named(name: &'g str, item: Self) -> Self {
+        Self::Named {
+            name,
+            inner: Box::new(item),
+        }
+    }
 }
 
 impl fmt::Display for RuleExpression<'_> {
@@ -392,6 +425,9 @@ impl fmt::Display for RuleExpression<'_> {
             Self::And(item) => write!(formatter, "&{}", GroupedRuleExpression(item)),
             Self::Not(item) => write!(formatter, "!{}", GroupedRuleExpression(item)),
             Self::Cut(item) => write!(formatter, "^{}", GroupedRuleExpression(item)),
+            Self::Named { name, inner } => {
+                write!(formatter, "{name}:{}", GroupedRuleExpression(inner))
+            }
         }
     }
 }
@@ -424,6 +460,7 @@ impl fmt::Display for GrammarActionTerm<'_> {
         match self {
             Self::Capture { rule } => formatter.write_str(rule),
             Self::CaptureAll { rule } => write!(formatter, "{rule}*"),
+            Self::CaptureByName { name } => formatter.write_str(name),
             Self::Literal(value) => write!(formatter, "{value:?}"),
             Self::Bool(value) => write!(formatter, "{value}"),
             Self::Integer(value) => write!(formatter, "{value}"),
@@ -779,7 +816,11 @@ impl fmt::Display for RuleNodeRole {
 /// `RuleNode`. Callers usually inspect these nodes directly or combine them
 /// with [`GrammarAction`] descriptors from matching [`SourceAuthoredRule`]
 /// values.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add per-node
+/// metadata without forcing a breaking change.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct RuleNode<'g, 's> {
     /// Grammar node kind.
     pub kind: RuleNodeKind<'g>,
@@ -789,6 +830,13 @@ pub struct RuleNode<'g, 's> {
     pub text: &'s str,
     /// Child rule/literal/class nodes produced while matching this rule.
     pub children: Vec<RuleNode<'g, 's>>,
+    /// Optional binding name attached by a parent `name:expr` wrapper.
+    ///
+    /// When a [`RuleExpression::Named`] participates in the match, the
+    /// matcher tags each child this expression produced with the binding
+    /// `name`. Actions can resolve such children by name via
+    /// [`RuleNode::find_by_binding`].
+    pub binding_name: Option<&'g str>,
 }
 
 impl<'g, 's> RuleNode<'g, 's> {
@@ -863,6 +911,19 @@ impl<'g, 's> RuleNode<'g, 's> {
     #[must_use]
     pub fn find_by_role(&self, role: RuleNodeRole) -> Vec<&RuleNode<'g, 's>> {
         self.walk().filter(|node| node.role() == role).collect()
+    }
+
+    /// Returns the first direct child whose binding name matches.
+    ///
+    /// Bindings are attached by a parent `name:expr` wrapper; see
+    /// [`RuleExpression::Named`]. This helper searches only the direct
+    /// children of this node — the typical case where an action wants
+    /// the child a binding refers to.
+    #[must_use]
+    pub fn find_by_binding(&self, name: &str) -> Option<&RuleNode<'g, 's>> {
+        self.children
+            .iter()
+            .find(|child| child.binding_name == Some(name))
     }
 
     /// Returns the smallest node that fully contains `span`.
@@ -1298,9 +1359,15 @@ pub fn parse_grammar_source_with_diagnostics(
 pub fn parse_rule_expression(expression: &str) -> RuleExpression<'_> {
     let trimmed = expression.trim();
     if let Some((input, output)) = split_transform_top_level(trimmed) {
+        let parsed_input = parse_rule_expression(input);
+        // Collect `name:expr` binding names from the matched portion so the
+        // action parser can resolve bare identifiers to CaptureByName when a
+        // binding exists.
+        let mut bindings = Vec::new();
+        collect_binding_names(&parsed_input, &mut bindings);
         return RuleExpression::transform(
-            parse_rule_expression(input),
-            parse_transform_output(output.trim()),
+            parsed_input,
+            parse_transform_output(output.trim(), &bindings),
         );
     }
     let choices = split_top_level(trimmed, '|');
@@ -1335,8 +1402,8 @@ fn split_transform_top_level(input: &str) -> Option<(&str, &str)> {
     None
 }
 
-fn parse_transform_output(output: &str) -> TransformOutput<'_> {
-    if let Some(action) = parse_grammar_action(output) {
+fn parse_transform_output<'g>(output: &'g str, bindings: &[&'g str]) -> TransformOutput<'g> {
+    if let Some(action) = parse_grammar_action_with_bindings(output, bindings) {
         return TransformOutput::Action(action);
     }
     output
@@ -1351,6 +1418,18 @@ fn parse_transform_output(output: &str) -> TransformOutput<'_> {
 /// [`parse_grammar_source`] calls this for transform output after `=>`.
 #[must_use]
 pub fn parse_grammar_action(output: &str) -> Option<GrammarAction<'_>> {
+    parse_grammar_action_with_bindings(output, &[])
+}
+
+/// Same as [`parse_grammar_action`] but resolves bare identifiers to
+/// [`GrammarActionTerm::CaptureByName`] when they match one of the
+/// provided binding names (typically the binding set of the rule the
+/// action is attached to).
+#[must_use]
+pub fn parse_grammar_action_with_bindings<'g>(
+    output: &'g str,
+    bindings: &[&'g str],
+) -> Option<GrammarAction<'g>> {
     let trimmed = output.trim();
     let (name, args) = trimmed.split_once('(')?;
     let args = args.strip_suffix(')')?;
@@ -1358,20 +1437,23 @@ pub fn parse_grammar_action(output: &str) -> Option<GrammarAction<'_>> {
         name.trim(),
         split_action_args(args)
             .into_iter()
-            .filter_map(parse_grammar_action_arg)
+            .filter_map(|arg| parse_grammar_action_arg(arg, bindings))
             .collect(),
     ))
 }
 
-fn parse_grammar_action_arg(arg: &str) -> Option<GrammarActionArg<'_>> {
+fn parse_grammar_action_arg<'g>(
+    arg: &'g str,
+    bindings: &[&'g str],
+) -> Option<GrammarActionArg<'g>> {
     let (name, value) = arg.split_once(':')?;
     Some(GrammarActionArg::new(
         name.trim(),
-        parse_grammar_action_term(value.trim()),
+        parse_grammar_action_term(value.trim(), bindings),
     ))
 }
 
-fn parse_grammar_action_term(value: &str) -> GrammarActionTerm<'_> {
+fn parse_grammar_action_term<'g>(value: &'g str, bindings: &[&'g str]) -> GrammarActionTerm<'g> {
     let trimmed = value.trim();
     if trimmed == "true" {
         return GrammarActionTerm::Bool(true);
@@ -1400,7 +1482,7 @@ fn parse_grammar_action_term(value: &str) -> GrammarActionTerm<'_> {
         return GrammarActionTerm::List(
             split_action_args(inner)
                 .into_iter()
-                .map(parse_grammar_action_term)
+                .map(|item| parse_grammar_action_term(item, bindings))
                 .collect(),
         );
     }
@@ -1411,18 +1493,21 @@ fn parse_grammar_action_term(value: &str) -> GrammarActionTerm<'_> {
         return GrammarActionTerm::Record(
             split_action_args(inner)
                 .into_iter()
-                .filter_map(parse_grammar_action_arg)
+                .filter_map(|arg| parse_grammar_action_arg(arg, bindings))
                 .collect(),
         );
     }
     if trimmed.ends_with(')')
         && trimmed.contains('(')
-        && let Some(action) = parse_grammar_action(trimmed)
+        && let Some(action) = parse_grammar_action_with_bindings(trimmed, bindings)
     {
         return GrammarActionTerm::Call(Box::new(action));
     }
     if let Some(rule) = trimmed.strip_suffix('*') {
         return GrammarActionTerm::CaptureAll { rule: rule.trim() };
+    }
+    if bindings.contains(&trimmed) {
+        return GrammarActionTerm::CaptureByName { name: trimmed };
     }
     GrammarActionTerm::Capture { rule: trimmed }
 }
@@ -1461,6 +1546,77 @@ fn split_action_args(input: &str) -> Vec<&str> {
     parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
+/// Recognizes a `name:rest` binding prefix on a rule term.
+///
+/// Returns `Some((name, rest))` when `input` begins with an identifier
+/// shaped like a rule name immediately followed by a colon that is
+/// neither doubled (`::` is a literal token elsewhere) nor inside a
+/// backtick literal. The function tolerates trailing characters in
+/// `rest` and lets the caller decide how to parse them.
+fn parse_named_prefix(input: &str) -> Option<(&str, &str)> {
+    let mut chars = input.char_indices();
+    let mut name_end = None;
+    for (index, ch) in chars.by_ref() {
+        if is_named_binding_char(ch) {
+            name_end = Some(index + ch.len_utf8());
+            continue;
+        }
+        if ch == ':' {
+            let name_end = name_end?;
+            // Reject `::` — that's a literal token (e.g. base_loko's `::`).
+            let after_colon = index + ch.len_utf8();
+            if input[after_colon..].starts_with(':') {
+                return None;
+            }
+            let name = &input[..name_end];
+            let rest = input[after_colon..].trim_start();
+            if rest.is_empty() {
+                return None;
+            }
+            return Some((name, rest));
+        }
+        return None;
+    }
+    None
+}
+
+fn is_named_binding_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '?' | '$')
+}
+
+/// Collects every `name:expr` binding name in this rule expression.
+///
+/// Used by the action parser so that bare identifiers in action
+/// arguments resolve to [`GrammarActionTerm::CaptureByName`] when a
+/// binding of that name exists on the matched rule, falling back to
+/// [`GrammarActionTerm::Capture`] when no binding is in scope.
+fn collect_binding_names<'g>(expression: &RuleExpression<'g>, out: &mut Vec<&'g str>) {
+    match expression {
+        RuleExpression::Named { name, inner } => {
+            if !out.contains(name) {
+                out.push(name);
+            }
+            collect_binding_names(inner, out);
+        }
+        RuleExpression::Sequence(items) | RuleExpression::Choice(items) => {
+            for item in items {
+                collect_binding_names(item, out);
+            }
+        }
+        RuleExpression::Optional(item)
+        | RuleExpression::OneOrMore(item)
+        | RuleExpression::ZeroOrMore(item)
+        | RuleExpression::And(item)
+        | RuleExpression::Not(item)
+        | RuleExpression::Cut(item) => collect_binding_names(item, out),
+        RuleExpression::Transform { input, .. } => collect_binding_names(input, out),
+        RuleExpression::Rule(_)
+        | RuleExpression::Literal(_)
+        | RuleExpression::CharacterClass(_)
+        | RuleExpression::UntilLiteral(_) => {}
+    }
+}
+
 fn parse_rule_term(term: &str) -> RuleExpression<'_> {
     let trimmed = term.trim();
     if let Some(inner) = trimmed.strip_prefix('&') {
@@ -1471,6 +1627,9 @@ fn parse_rule_term(term: &str) -> RuleExpression<'_> {
     }
     if let Some(inner) = trimmed.strip_prefix('^') {
         return RuleExpression::cut(parse_rule_term(inner));
+    }
+    if let Some((name, rest)) = parse_named_prefix(trimmed) {
+        return RuleExpression::named(name, parse_rule_term(rest));
     }
     if let Some(inner) = trimmed.strip_suffix('*') {
         return RuleExpression::zero_or_more(parse_rule_expression(inner));
@@ -1768,6 +1927,7 @@ fn interpret_rule<'g, 's>(
             span: Span::new(source_offset + start, source_offset + end),
             text: &source[start..end],
             children: matched.children,
+            binding_name: None,
         });
     }
     // Rule not found: we have no per-rule trivia context, so report the
@@ -1830,6 +1990,7 @@ fn interpret_expression<'g, 's>(
                     span: Span::new(source_offset + start, source_offset + end),
                     text: &source[start..end],
                     children: Vec::new(),
+                    binding_name: None,
                 }],
                 committed: false,
             })
@@ -1856,6 +2017,7 @@ fn interpret_expression<'g, 's>(
                     span: Span::new(source_offset + start, source_offset + end),
                     text: &source[start..end],
                     children: Vec::new(),
+                    binding_name: None,
                 }],
                 committed: false,
             })
@@ -1876,6 +2038,7 @@ fn interpret_expression<'g, 's>(
                     span: Span::new(source_offset + start, source_offset + relative_end),
                     text: &source[start..relative_end],
                     children: Vec::new(),
+                    binding_name: None,
                 }],
                 committed: false,
             })
@@ -2029,6 +2192,23 @@ fn interpret_expression<'g, 's>(
                 interpret_expression(lookup, inner, source, position, source_offset, raw)?;
             matched.committed = true;
             Ok(matched)
+        }
+        RuleExpression::Named { name, inner } => {
+            let matched =
+                interpret_expression(lookup, inner, source, position, source_offset, raw)?;
+            let children = matched
+                .children
+                .into_iter()
+                .map(|mut child| {
+                    child.binding_name = Some(name);
+                    child
+                })
+                .collect();
+            Ok(ExpressionMatch {
+                end: matched.end,
+                children,
+                committed: matched.committed,
+            })
         }
     }
 }
@@ -2494,6 +2674,63 @@ mod tests {
                 GrammarActionArg::new("kind", GrammarActionTerm::Literal("thing")),
             ]
         );
+    }
+
+    #[test]
+    fn parses_named_subexpression_binds_children() {
+        // Two `name` children share a rule; the binding picks the second.
+        let grammar = "grammar tiny\n\
+                       rule pair = name `::` rhs:name\n\
+                       rule name = [A-Za-z]+\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "pair", "first::second", 0).expect("pair parse");
+        let root = parse.root;
+
+        let rhs = root.find_by_binding("rhs").expect("rhs binding present");
+        assert_eq!(rhs.text, "second");
+
+        let names = root.find_rules("name");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].text, "first");
+        assert_eq!(names[1].text, "second");
+        // Only the second name carries the binding.
+        assert_eq!(names[0].binding_name, None);
+        assert_eq!(names[1].binding_name, Some("rhs"));
+    }
+
+    #[test]
+    fn action_capture_resolves_named_binding_when_in_scope() {
+        let grammar = "grammar tiny\n\
+                       rule binding = lhs:name `::` rhs:name => emit-binding(lhs: lhs, rhs: rhs, fallback: name)\n\
+                       rule name = [A-Za-z]+\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let action = rules
+            .iter()
+            .find(|rule| rule.name == "binding")
+            .and_then(|rule| rule.action.as_ref())
+            .expect("binding action");
+        // `lhs` and `rhs` are in scope → CaptureByName.
+        // `name` is the rule (not a binding) → falls back to Capture.
+        assert_eq!(
+            action.args,
+            vec![
+                GrammarActionArg::new("lhs", GrammarActionTerm::CaptureByName { name: "lhs" }),
+                GrammarActionArg::new("rhs", GrammarActionTerm::CaptureByName { name: "rhs" }),
+                GrammarActionArg::new("fallback", GrammarActionTerm::Capture { rule: "name" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn named_subexpression_display_round_trips() {
+        let expr = RuleExpression::sequence(vec![
+            RuleExpression::named("lhs", RuleExpression::rule("name")),
+            RuleExpression::literal("::"),
+            RuleExpression::named("rhs", RuleExpression::rule("name")),
+        ]);
+        assert_eq!(alloc::format!("{expr}"), "lhs:name `::` rhs:name");
     }
 
     #[test]

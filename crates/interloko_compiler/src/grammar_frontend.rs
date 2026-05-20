@@ -429,6 +429,13 @@ pub fn rule_expression_source_data(expression: &RuleExpression<'_>) -> SourceDat
                 rule_expression_source_data(item),
             )],
         ),
+        RuleExpression::Named { name, inner } => SourceData::record(
+            "named-subexpression",
+            vec![
+                source_data::field("name", SourceData::symbol(*name)),
+                source_data::field("inner", rule_expression_source_data(inner)),
+            ],
+        ),
         _ => SourceData::record("unknown-rule-expression", Vec::new()),
     }
 }
@@ -482,6 +489,10 @@ fn grammar_action_term_source_data(term: &GrammarActionTerm<'_>) -> SourceData {
         GrammarActionTerm::CaptureAll { rule } => SourceData::record(
             "capture-all",
             vec![source_data::field("rule", SourceData::symbol(*rule))],
+        ),
+        GrammarActionTerm::CaptureByName { name } => SourceData::record(
+            "capture-by-name",
+            vec![source_data::field("name", SourceData::symbol(*name))],
         ),
         GrammarActionTerm::Literal(value) => SourceData::record(
             "literal",

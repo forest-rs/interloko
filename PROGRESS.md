@@ -1,5 +1,42 @@
 # Interloko Progress
 
+## Implemented: Named subexpressions (`name:expr`)
+
+- `RuleExpression` gains a `Named { name, inner }` variant.
+  Grammar surface: `name:expr` (glued colon, outside backticks). The
+  matcher tags every child produced by the inner expression with the
+  binding `name` so actions can resolve a specific child by binding
+  rather than by rule type.
+- `RuleNode` is now `#[non_exhaustive]` with a new
+  `binding_name: Option<&'g str>` field. New helper
+  `RuleNode::find_by_binding(name)` returns the first direct child
+  whose binding matches.
+- `GrammarActionTerm` gains `CaptureByName { name }`. Bare identifiers
+  in action arguments now resolve to `CaptureByName` when the
+  enclosing rule defines a matching binding; otherwise they remain
+  `Capture { rule }`. The binding set is collected from the rule's
+  expression and threaded into action parsing via the new
+  `parse_grammar_action_with_bindings`.
+- `parse_rule_term` recognizes the named prefix before the suffix
+  operators, so `lhs:name?` parses as `lhs:(name?)` (a bound optional)
+  and `lhs:`x`` produces a bound literal.
+- Display round-trips `name:expr` and treats `CaptureByName` as a
+  bare identifier (which becomes ambiguous with `Capture` only when
+  re-parsed without binding context — documented).
+- Downstream `rule_expression_source_data` gains a
+  `named-subexpression` arm; `grammar_action_term_source_data` gains
+  `capture-by-name`.
+- Tests cover: two same-named children disambiguated by binding,
+  action terms resolving to `CaptureByName` vs falling back to
+  `Capture`, and Display round-trip.
+
+Deferred:
+
+- A binding on a sequence inner (`lhs:(a b)`) tags every child of the
+  sequence — actions that expect a single node should use a
+  rule-reference inner. Document the multi-child case in evaluator
+  contracts when a real consumer arrives.
+
 ## Implemented: Richer action terms (Integer, List, Record, Call)
 
 - `GrammarActionTerm` gains `Integer(i64)`, `List(Vec<...>)`,
