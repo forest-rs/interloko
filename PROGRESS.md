@@ -1,5 +1,40 @@
 # Interloko Progress
 
+## Implemented: Parametric rules (`list-of<elem, sep>`)
+
+- `RuleExpression` gains an `Apply { rule, args }` variant. Grammar
+  surface: `rule-name<arg, arg, ...>` with the angle bracket glued to
+  the rule name. `SourceAuthoredRule` gains a `params: Vec<&'g str>`
+  field — populated when a rule header declares formal parameters
+  (`rule list-of<elem, sep> = ...`).
+- The matcher's `Apply` arm looks up the target rule, substitutes
+  each parameter reference in the body with the corresponding
+  argument expression, and interprets the substituted form.
+  Substitution is match-time and walks the expression tree once per
+  invocation; nested parametric calls and self-referential parametric
+  definitions work without a separate compile pass.
+- Parsing changes: `extract_rule_name_header` strips `<...>` formal
+  params from the rule name; `parse_apply_term` recognizes invocation
+  shape after the other term-prefix/suffix checks; `split_top_level`,
+  `split_whitespace_top_level`, and `split_transform_top_level` now
+  track angle-bracket depth so commas, whitespace, and `=>` inside
+  `<...>` don't split.
+- Display round-trips `list-of<digit, `,`>` shape.
+- Downstream `rule_expression_source_data` gets an `apply` arm with
+  rule name and arg list.
+- Tests cover parametric definition recording params, invocation
+  matching with substitution, Display round-trip, and composition
+  with named subexpressions.
+
+Deferred:
+
+- Rewriting `base_loko.grammar`'s `parameter-list`, `argument-list`,
+  and `vector-items` in terms of `list-of` requires updating the CST
+  builders in `interloko_compiler/src/grammar_frontend/base_loko_primary.rs`
+  (build_parameter_list, build_argument_list, build_vector) to handle
+  the flattened child shape (no more `*-tail` wrapping nodes). That
+  CST migration is a follow-up — the kernel feature is in place.
+
 ## Implemented: Named subexpressions (`name:expr`)
 
 - `RuleExpression` gains a `Named { name, inner }` variant.

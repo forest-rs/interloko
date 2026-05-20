@@ -436,6 +436,16 @@ pub fn rule_expression_source_data(expression: &RuleExpression<'_>) -> SourceDat
                 source_data::field("inner", rule_expression_source_data(inner)),
             ],
         ),
+        RuleExpression::Apply { rule, args } => SourceData::record(
+            "apply",
+            vec![
+                source_data::field("rule", SourceData::symbol(*rule)),
+                source_data::field(
+                    "args",
+                    SourceData::list(args.iter().map(rule_expression_source_data).collect()),
+                ),
+            ],
+        ),
         _ => SourceData::record("unknown-rule-expression", Vec::new()),
     }
 }

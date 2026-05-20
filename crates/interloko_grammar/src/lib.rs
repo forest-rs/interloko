@@ -172,6 +172,20 @@ pub enum RuleExpression<'g> {
         /// Inner expression whose match contributes the bound children.
         inner: Box<RuleExpression<'g>>,
     },
+    /// Parametric rule invocation.
+    ///
+    /// Surface syntax: `rule-name<arg, arg, ...>` with the angle bracket
+    /// glued to the rule name (no intervening whitespace). At match
+    /// time the kernel looks up `rule` (which must have declared the
+    /// matching number of [`SourceAuthoredRule::params`]) and
+    /// substitutes each parameter reference in the body with the
+    /// corresponding argument expression.
+    Apply {
+        /// Name of the parametric rule to invoke.
+        rule: &'g str,
+        /// Arguments substituted into the rule's formal parameters.
+        args: Vec<RuleExpression<'g>>,
+    },
 }
 
 /// Inert output attached to a transformed rule expression.
@@ -391,6 +405,12 @@ impl<'g> RuleExpression<'g> {
             inner: Box::new(item),
         }
     }
+
+    /// Creates a parametric rule invocation.
+    #[must_use]
+    pub fn apply(rule: &'g str, args: Vec<Self>) -> Self {
+        Self::Apply { rule, args }
+    }
 }
 
 impl fmt::Display for RuleExpression<'_> {
@@ -427,6 +447,17 @@ impl fmt::Display for RuleExpression<'_> {
             Self::Cut(item) => write!(formatter, "^{}", GroupedRuleExpression(item)),
             Self::Named { name, inner } => {
                 write!(formatter, "{name}:{}", GroupedRuleExpression(inner))
+            }
+            Self::Apply { rule, args } => {
+                formatter.write_str(rule)?;
+                formatter.write_str("<")?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{arg}")?;
+                }
+                formatter.write_str(">")
             }
         }
     }
@@ -568,6 +599,14 @@ pub struct SourceAuthoredRule<'g> {
     pub source_span: Span,
     /// Per-rule trivia policy. See [`TriviaMode`].
     pub trivia: TriviaMode,
+    /// Formal parameter names for a parametric rule definition.
+    ///
+    /// Surface syntax: `rule list-of<elem, sep> = ...`. Each parameter
+    /// is a name that, when referenced as a [`RuleExpression::Rule`]
+    /// inside the body, is substituted with the argument supplied by
+    /// the invoking [`RuleExpression::Apply`]. Empty for non-parametric
+    /// rules.
+    pub params: Vec<&'g str>,
 }
 
 impl<'g> SourceAuthoredRule<'g> {
@@ -1153,6 +1192,14 @@ pub enum GrammarSourceDiagnosticCode {
     /// A `rule` line carried an unrecognized modifier token between the
     /// name and the `=` (only `raw` is currently recognized).
     UnknownRuleModifier,
+    /// A parametric rule invocation (`rule-name<arg, ...>`) supplies a
+    /// different number of arguments than the target rule's declared
+    /// formal parameters.
+    ///
+    /// Only fires when the target rule is defined in the same grammar
+    /// source; references to externally-supplied (e.g. parent-grammar)
+    /// rules are not validated here.
+    ParametricRuleArityMismatch,
 }
 
 impl GrammarSourceDiagnosticCode {
@@ -1166,6 +1213,7 @@ impl GrammarSourceDiagnosticCode {
             Self::EmptyBody => "empty-body",
             Self::DuplicateName => "duplicate-name",
             Self::UnknownRuleModifier => "unknown-rule-modifier",
+            Self::ParametricRuleArityMismatch => "parametric-rule-arity-mismatch",
         }
     }
 
@@ -1179,6 +1227,9 @@ impl GrammarSourceDiagnosticCode {
             Self::EmptyBody => "rule body must not be empty",
             Self::DuplicateName => "rule name was already declared in this grammar",
             Self::UnknownRuleModifier => "unrecognized rule modifier; expected `raw` or nothing",
+            Self::ParametricRuleArityMismatch => {
+                "parametric rule invocation has wrong number of arguments"
+            }
         }
     }
 }
@@ -1303,19 +1354,25 @@ pub fn parse_grammar_source_with_diagnostics(
             ));
             continue;
         }
-        // Detect an optional rule modifier appearing between the name and
-        // the `=`. Currently only `raw` is recognized.
-        let (name, trivia) = match name.rsplit_once(char::is_whitespace) {
-            Some((prefix, "raw")) => (prefix.trim(), TriviaMode::Raw),
-            Some((_, modifier)) if !modifier.is_empty() => {
+        let Some((base_name, params, modifier_remainder)) = extract_rule_name_header(name) else {
+            diagnostics.push(GrammarSourceDiagnostic::new(
+                trimmed_span,
+                GrammarSourceDiagnosticCode::EmptyName,
+            ));
+            continue;
+        };
+        let trivia = match modifier_remainder {
+            "" => TriviaMode::Default,
+            "raw" => TriviaMode::Raw,
+            _ => {
                 diagnostics.push(GrammarSourceDiagnostic::new(
                     trimmed_span,
                     GrammarSourceDiagnosticCode::UnknownRuleModifier,
                 ));
                 continue;
             }
-            _ => (name, TriviaMode::Default),
         };
+        let name = base_name;
         if expression.trim().is_empty() {
             diagnostics.push(GrammarSourceDiagnostic::new(
                 trimmed_span,
@@ -1345,9 +1402,66 @@ pub fn parse_grammar_source_with_diagnostics(
             excluded_text: Vec::new(),
             source_span: trimmed_span,
             trivia,
+            params,
         });
     }
+    validate_parametric_arity(&rules, &mut diagnostics);
     (rules, diagnostics)
+}
+
+/// Walks each rule's body for [`RuleExpression::Apply`] invocations and
+/// reports arity mismatches against locally-declared parametric rules.
+///
+/// Apply nodes that reference a rule not present in `rules` are skipped
+/// — they may be supplied by a parent grammar via inheritance, and
+/// cross-grammar arity checks need access to the merged rule set.
+fn validate_parametric_arity<'g>(
+    rules: &[SourceAuthoredRule<'g>],
+    diagnostics: &mut Vec<GrammarSourceDiagnostic>,
+) {
+    for rule in rules {
+        walk_apply_nodes(&rule.expression, &mut |target, args| {
+            if let Some(declared) = rules.iter().find(|candidate| candidate.name == target)
+                && declared.params.len() != args.len()
+            {
+                diagnostics.push(GrammarSourceDiagnostic::new(
+                    rule.source_span,
+                    GrammarSourceDiagnosticCode::ParametricRuleArityMismatch,
+                ));
+            }
+        });
+    }
+}
+
+fn walk_apply_nodes<'g, F>(expression: &RuleExpression<'g>, visit: &mut F)
+where
+    F: FnMut(&'g str, &[RuleExpression<'g>]),
+{
+    match expression {
+        RuleExpression::Apply { rule, args } => {
+            visit(rule, args);
+            for arg in args {
+                walk_apply_nodes(arg, visit);
+            }
+        }
+        RuleExpression::Sequence(items) | RuleExpression::Choice(items) => {
+            for item in items {
+                walk_apply_nodes(item, visit);
+            }
+        }
+        RuleExpression::Optional(item)
+        | RuleExpression::OneOrMore(item)
+        | RuleExpression::ZeroOrMore(item)
+        | RuleExpression::And(item)
+        | RuleExpression::Not(item)
+        | RuleExpression::Cut(item) => walk_apply_nodes(item, visit),
+        RuleExpression::Transform { input, .. } => walk_apply_nodes(input, visit),
+        RuleExpression::Named { inner, .. } => walk_apply_nodes(inner, visit),
+        RuleExpression::Rule(_)
+        | RuleExpression::Literal(_)
+        | RuleExpression::CharacterClass(_)
+        | RuleExpression::UntilLiteral(_) => {}
+    }
 }
 
 /// Parses one grammar rule expression.
@@ -1385,6 +1499,7 @@ pub fn parse_rule_expression(expression: &str) -> RuleExpression<'_> {
 
 fn split_transform_top_level(input: &str) -> Option<(&str, &str)> {
     let mut depth = 0_i32;
+    let mut angle_depth = 0_i32;
     let mut in_literal = false;
     let mut chars = input.char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
@@ -1392,7 +1507,13 @@ fn split_transform_top_level(input: &str) -> Option<(&str, &str)> {
             '`' => in_literal = !in_literal,
             '(' if !in_literal => depth += 1,
             ')' if !in_literal => depth -= 1,
-            '=' if !in_literal && depth == 0 && matches!(chars.peek(), Some((_, '>'))) => {
+            '<' if !in_literal => angle_depth += 1,
+            '>' if !in_literal && angle_depth > 0 => angle_depth -= 1,
+            '=' if !in_literal
+                && depth == 0
+                && angle_depth == 0
+                && matches!(chars.peek(), Some((_, '>'))) =>
+            {
                 let output_start = index + "=>".len();
                 return Some((input[..index].trim(), input[output_start..].trim()));
             }
@@ -1610,6 +1731,11 @@ fn collect_binding_names<'g>(expression: &RuleExpression<'g>, out: &mut Vec<&'g 
         | RuleExpression::Not(item)
         | RuleExpression::Cut(item) => collect_binding_names(item, out),
         RuleExpression::Transform { input, .. } => collect_binding_names(input, out),
+        RuleExpression::Apply { args, .. } => {
+            for arg in args {
+                collect_binding_names(arg, out);
+            }
+        }
         RuleExpression::Rule(_)
         | RuleExpression::Literal(_)
         | RuleExpression::CharacterClass(_)
@@ -1670,20 +1796,111 @@ fn parse_rule_term(term: &str) -> RuleExpression<'_> {
     {
         return RuleExpression::character_class(inner);
     }
+    if let Some((rule, args)) = parse_apply_term(trimmed) {
+        return RuleExpression::apply(rule, args);
+    }
     RuleExpression::rule(trimmed)
+}
+
+/// Extracts the base name, any parametric definition parameters, and the
+/// trailing modifier token from a rule-definition header.
+///
+/// Returns `(base, params, remainder)` where `remainder` is the trimmed
+/// text after `base<params>`. For non-parametric rules `params` is empty.
+fn extract_rule_name_header(name: &str) -> Option<(&str, Vec<&str>, &str)> {
+    let trimmed = name.trim();
+    let mut base_end = trimmed.len();
+    for (idx, ch) in trimmed.char_indices() {
+        if !is_named_binding_char(ch) {
+            base_end = idx;
+            break;
+        }
+    }
+    let base = &trimmed[..base_end];
+    if base.is_empty() {
+        return None;
+    }
+    let rest = trimmed[base_end..].trim_start();
+    if let Some(inside) = rest.strip_prefix('<') {
+        // Find the matching `>` at angle-depth zero (outside backticks).
+        let mut depth = 1_i32;
+        let mut in_literal = false;
+        let mut end_index = None;
+        for (idx, ch) in inside.char_indices() {
+            match ch {
+                '`' => in_literal = !in_literal,
+                '<' if !in_literal => depth += 1,
+                '>' if !in_literal => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_index = Some(idx);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end_index = end_index?;
+        let params_body = &inside[..end_index];
+        let after = inside[end_index + 1..].trim_start();
+        let params: Vec<&str> = params_body
+            .split(',')
+            .map(str::trim)
+            .filter(|param| !param.is_empty())
+            .collect();
+        Some((base, params, after))
+    } else {
+        Some((base, Vec::new(), rest))
+    }
+}
+
+/// Recognizes a parametric rule invocation of the shape
+/// `rule-name<arg, arg, ...>`.
+///
+/// The angle bracket must be glued to the rule name (no whitespace) and
+/// the closing `>` must be the final byte of the trimmed term. Returns
+/// `None` when the shape doesn't match so the caller can fall back to a
+/// plain rule reference.
+fn parse_apply_term(input: &str) -> Option<(&str, Vec<RuleExpression<'_>>)> {
+    let trimmed = input.trim();
+    if !trimmed.ends_with('>') {
+        return None;
+    }
+    let mut name_end = None;
+    for (idx, ch) in trimmed.char_indices() {
+        if is_named_binding_char(ch) {
+            continue;
+        }
+        if ch == '<' && idx > 0 {
+            name_end = Some(idx);
+        }
+        break;
+    }
+    let name_end = name_end?;
+    let name = &trimmed[..name_end];
+    // Strip the closing `>` (the final byte) and the opening `<`.
+    let body = &trimmed[name_end + 1..trimmed.len() - 1];
+    let args = split_top_level(body, ',')
+        .into_iter()
+        .map(parse_rule_expression)
+        .collect();
+    Some((name, args))
 }
 
 fn split_top_level(input: &str, delimiter: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut depth = 0_i32;
+    let mut angle_depth = 0_i32;
     let mut in_literal = false;
     for (index, ch) in input.char_indices() {
         match ch {
             '`' => in_literal = !in_literal,
             '(' if !in_literal => depth += 1,
             ')' if !in_literal => depth -= 1,
-            _ if ch == delimiter && !in_literal && depth == 0 => {
+            '<' if !in_literal => angle_depth += 1,
+            '>' if !in_literal && angle_depth > 0 => angle_depth -= 1,
+            _ if ch == delimiter && !in_literal && depth == 0 && angle_depth == 0 => {
                 parts.push(input[start..index].trim());
                 start = index + ch.len_utf8();
             }
@@ -1698,10 +1915,13 @@ fn split_whitespace_top_level(input: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = None;
     let mut depth = 0_i32;
+    let mut angle_depth = 0_i32;
     let mut in_literal = false;
     let mut in_class = false;
     for (index, ch) in input.char_indices() {
-        if start.is_none() && (!ch.is_whitespace() || in_literal || in_class || depth > 0) {
+        if start.is_none()
+            && (!ch.is_whitespace() || in_literal || in_class || depth > 0 || angle_depth > 0)
+        {
             start = Some(index);
         }
         match ch {
@@ -1710,7 +1930,14 @@ fn split_whitespace_top_level(input: &str) -> Vec<&str> {
             ']' if !in_literal => in_class = false,
             '(' if !in_literal && !in_class => depth += 1,
             ')' if !in_literal && !in_class => depth -= 1,
-            _ if ch.is_whitespace() && !in_literal && !in_class && depth == 0 => {
+            '<' if !in_literal && !in_class => angle_depth += 1,
+            '>' if !in_literal && !in_class && angle_depth > 0 => angle_depth -= 1,
+            _ if ch.is_whitespace()
+                && !in_literal
+                && !in_class
+                && depth == 0
+                && angle_depth == 0 =>
+            {
                 if let Some(start_index) = start.take() {
                     parts.push(input[start_index..index].trim());
                 }
@@ -2210,6 +2437,80 @@ fn interpret_expression<'g, 's>(
                 committed: matched.committed,
             })
         }
+        RuleExpression::Apply { rule, args } => {
+            let target = lookup.rule(rule).ok_or_else(|| {
+                ParseFailure::expected_at_source(
+                    source,
+                    position,
+                    ExpectedFragment::Rule(rule),
+                    raw,
+                )
+            })?;
+            // Substitute parameter references in the body with the
+            // invocation arguments and interpret the substituted form.
+            let substituted = substitute_params(&target.expression, &target.params, args);
+            interpret_expression(lookup, &substituted, source, position, source_offset, raw)
+        }
+    }
+}
+
+fn substitute_params<'g>(
+    expression: &RuleExpression<'g>,
+    params: &[&'g str],
+    args: &[RuleExpression<'g>],
+) -> RuleExpression<'g> {
+    match expression {
+        RuleExpression::Rule(name) => {
+            if let Some(index) = params.iter().position(|param| param == name)
+                && let Some(arg) = args.get(index)
+            {
+                return arg.clone();
+            }
+            RuleExpression::Rule(name)
+        }
+        RuleExpression::Literal(value) => RuleExpression::Literal(value),
+        RuleExpression::CharacterClass(value) => RuleExpression::CharacterClass(value),
+        RuleExpression::UntilLiteral(value) => RuleExpression::UntilLiteral(value),
+        RuleExpression::Sequence(items) => RuleExpression::sequence(
+            items
+                .iter()
+                .map(|item| substitute_params(item, params, args))
+                .collect(),
+        ),
+        RuleExpression::Choice(items) => RuleExpression::choice(
+            items
+                .iter()
+                .map(|item| substitute_params(item, params, args))
+                .collect(),
+        ),
+        RuleExpression::Optional(item) => {
+            RuleExpression::optional(substitute_params(item, params, args))
+        }
+        RuleExpression::OneOrMore(item) => {
+            RuleExpression::one_or_more(substitute_params(item, params, args))
+        }
+        RuleExpression::ZeroOrMore(item) => {
+            RuleExpression::zero_or_more(substitute_params(item, params, args))
+        }
+        RuleExpression::And(item) => RuleExpression::and(substitute_params(item, params, args)),
+        RuleExpression::Not(item) => RuleExpression::not(substitute_params(item, params, args)),
+        RuleExpression::Cut(item) => RuleExpression::cut(substitute_params(item, params, args)),
+        RuleExpression::Named { name, inner } => {
+            RuleExpression::named(name, substitute_params(inner, params, args))
+        }
+        RuleExpression::Apply {
+            rule,
+            args: inner_args,
+        } => RuleExpression::apply(
+            rule,
+            inner_args
+                .iter()
+                .map(|arg| substitute_params(arg, params, args))
+                .collect(),
+        ),
+        RuleExpression::Transform { input, output } => {
+            RuleExpression::transform(substitute_params(input, params, args), output.clone())
+        }
     }
 }
 
@@ -2673,6 +2974,112 @@ mod tests {
                 GrammarActionArg::new("required", GrammarActionTerm::Bool(true)),
                 GrammarActionArg::new("kind", GrammarActionTerm::Literal("thing")),
             ]
+        );
+    }
+
+    #[test]
+    fn parametric_rule_definition_records_params() {
+        let grammar = "grammar tiny\n\
+                       rule list-of<elem, sep> = elem (sep elem)*\n\
+                       rule digit = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let list_of = rules
+            .iter()
+            .find(|rule| rule.name == "list-of")
+            .expect("list-of declared");
+        assert_eq!(list_of.params, vec!["elem", "sep"]);
+    }
+
+    #[test]
+    fn parametric_rule_invocation_substitutes_args() {
+        let grammar = "grammar tiny\n\
+                       rule list-of<elem, sep> = elem (sep elem)*\n\
+                       rule digits = list-of<digit, `,`>\n\
+                       rule digit = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "digits", "1,2,3", 0).expect("digits parse");
+        assert_eq!(parse.root.text, "1,2,3");
+        let digits = parse.root.find_rules("digit");
+        assert_eq!(digits.len(), 3);
+        assert_eq!(digits[0].text, "1");
+        assert_eq!(digits[1].text, "2");
+        assert_eq!(digits[2].text, "3");
+    }
+
+    #[test]
+    fn parametric_rule_arity_mismatch_reports_diagnostic() {
+        // `list-of` expects two params; invocation supplies one.
+        let grammar = "grammar tiny\n\
+                       rule list-of<elem, sep> = elem (sep elem)*\n\
+                       rule digits = list-of<digit>\n\
+                       rule digit = [0-9]\n\
+                       end\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        // The rule still parses — diagnostics surface the arity error
+        // alongside the rule list so callers can decide whether to fail.
+        assert_eq!(rules.len(), 3);
+        let arity_diag = diagnostics
+            .iter()
+            .find(|d| d.code() == GrammarSourceDiagnosticCode::ParametricRuleArityMismatch)
+            .expect("arity-mismatch diagnostic");
+        // The diagnostic points at the offending rule's source span.
+        let digits = rules
+            .iter()
+            .find(|rule| rule.name == "digits")
+            .expect("digits rule");
+        assert_eq!(arity_diag.span(), digits.source_span);
+    }
+
+    #[test]
+    fn parametric_rule_arity_skips_unknown_targets() {
+        // Apply to a rule not defined locally — could be inherited from a
+        // parent grammar; do not flag here.
+        let grammar = "grammar tiny\n\
+                       rule digits = list-of<digit, `,`>\n\
+                       rule digit = [0-9]\n\
+                       end\n";
+        let (_rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.code() == GrammarSourceDiagnosticCode::ParametricRuleArityMismatch),
+            "should not flag unknown parametric targets (may be inherited): {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn parametric_rule_display_round_trips() {
+        let expr = RuleExpression::apply(
+            "list-of",
+            vec![RuleExpression::rule("digit"), RuleExpression::literal(",")],
+        );
+        assert_eq!(alloc::format!("{expr}"), "list-of<digit, `,`>");
+    }
+
+    #[test]
+    fn parametric_rules_compose_with_named_subexpressions() {
+        let grammar = "grammar tiny\n\
+                       rule list-of<elem, sep> = elem (sep elem)*\n\
+                       rule pair = lhs:digit `:` rhs:list-of<digit, `,`>\n\
+                       rule digit = [0-9]\n\
+                       end\n";
+        let rules = parse_grammar_source(grammar);
+        let parse = interpret_region(&rules, "pair", "1:2,3,4", 0).expect("pair parse");
+        // The lhs binding tags the first digit; the rhs binding tags
+        // each digit that comes from inside list-of.
+        let lhs = parse.root.find_by_binding("lhs").expect("lhs digit");
+        assert_eq!(lhs.text, "1");
+        let rhs_count = parse
+            .root
+            .children
+            .iter()
+            .filter(|child| child.binding_name == Some("rhs"))
+            .count();
+        assert!(
+            rhs_count >= 1,
+            "rhs binding should tag at least one child, got {rhs_count}"
         );
     }
 
