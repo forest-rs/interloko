@@ -6,6 +6,7 @@ pub(super) type InterpretedParse<'s> = interloko_grammar::Parse<'static, 's>;
 pub(super) type InterpretedParseError = interloko_grammar::ParseError<'static>;
 pub(super) type InterpretedRuleNode<'s> = interloko_grammar::RuleNode<'static, 's>;
 pub(super) type SourceAuthoredRule = interloko_grammar::SourceAuthoredRule<'static>;
+pub(super) type CompiledGrammar = interloko_grammar::CompiledGrammar<'static>;
 
 use crate::source_data::{self, SourceData};
 
@@ -16,13 +17,13 @@ const LOKO_RESERVED_WORDS: &[&str] = &[
     "else", "handle", "with", "restart", "end",
 ];
 
-pub(super) fn parse_source_authored_grammar(source: &'static str) -> Vec<SourceAuthoredRule> {
+pub(super) fn parse_source_authored_grammar(source: &'static str) -> CompiledGrammar {
     let (rules, diagnostics) = interloko_grammar::parse_grammar_source_with_diagnostics(source);
     assert!(
         diagnostics.is_empty(),
         "compiler-owned grammar produced source diagnostics: {diagnostics:?}",
     );
-    rules
+    let rules = rules
         .into_iter()
         .map(|rule| {
             if rule.name == "name" {
@@ -31,26 +32,33 @@ pub(super) fn parse_source_authored_grammar(source: &'static str) -> Vec<SourceA
                 rule
             }
         })
-        .collect()
+        .collect();
+    CompiledGrammar::compile(rules)
 }
 
 pub(super) fn interpret_region_result<'s>(
-    rules: &[SourceAuthoredRule],
+    grammar: &CompiledGrammar,
     root_rule: &'static str,
     source: &'s str,
     source_offset: usize,
 ) -> Result<InterpretedParse<'s>, InterpretedParseError> {
-    interloko_grammar::interpret_region(rules, root_rule, source, source_offset)
+    interloko_grammar::interpret_region_compiled(grammar, root_rule, source, source_offset)
 }
 
 pub(super) fn interpret_rule_error(
-    rules: &[SourceAuthoredRule],
+    grammar: &CompiledGrammar,
     rule_name: &'static str,
     source: &str,
     position: usize,
     source_offset: usize,
 ) -> InterpretedParseError {
-    interloko_grammar::interpret_rule_error(rules, rule_name, source, position, source_offset)
+    interloko_grammar::interpret_rule_error_compiled(
+        grammar,
+        rule_name,
+        source,
+        position,
+        source_offset,
+    )
 }
 
 pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode<'_>) -> SourceData {

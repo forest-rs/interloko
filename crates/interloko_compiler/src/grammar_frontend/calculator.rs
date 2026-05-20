@@ -23,19 +23,19 @@ const CALCULATOR_GRAMMAR_RESOURCE: &str = "grammars/calculator.grammar";
 const CALCULATOR_GRAMMAR_SOURCE: &str = include_str!("../../grammars/calculator.grammar");
 
 pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmission {
-    let grammar_rules = parse_source_authored_grammar(CALCULATOR_GRAMMAR_SOURCE);
-    match interpret_calculator_region(&grammar_rules, body, source_offset) {
-        Ok(parse) => emission_from_interpreted_parse(&grammar_rules, &parse),
+    let grammar = parse_source_authored_grammar(CALCULATOR_GRAMMAR_SOURCE);
+    match interpret_calculator_region(&grammar, body, source_offset) {
+        Ok(parse) => emission_from_interpreted_parse(grammar.rules(), &parse),
         Err(error) => calculator_parse_error_emission(body, source_offset, error),
     }
 }
 
 fn interpret_calculator_region<'s>(
-    rules: &[super::interpreter::SourceAuthoredRule],
+    grammar: &super::interpreter::CompiledGrammar,
     body: &'s str,
     source_offset: usize,
 ) -> Result<InterpretedParse<'s>, InterpretedParseError> {
-    interpret_region_result(rules, "calculator-region", body, source_offset)
+    interpret_region_result(grammar, "calculator-region", body, source_offset)
 }
 
 fn emission_from_interpreted_parse(
@@ -174,7 +174,9 @@ fn calculator_parse_error_diagnostic(
 
 pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
     parse_source_authored_grammar(CALCULATOR_GRAMMAR_SOURCE)
-        .into_iter()
+        .rules()
+        .iter()
+        .cloned()
         .map(|rule| {
             let location = format!("resource:{CALCULATOR_GRAMMAR_RESOURCE}/{}", rule.name);
             GrammarRule {

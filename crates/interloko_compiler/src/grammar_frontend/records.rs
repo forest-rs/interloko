@@ -24,19 +24,19 @@ const RECORDS_GRAMMAR_RESOURCE: &str = "grammars/records.grammar";
 const RECORDS_GRAMMAR_SOURCE: &str = include_str!("../../grammars/records.grammar");
 
 pub(super) fn parse_region(body: &str, source_offset: usize) -> StagedRegionEmission {
-    let grammar_rules = parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE);
-    match interpret_records_region(&grammar_rules, body, source_offset) {
-        Ok(parse) => emission_from_interpreted_parse(&grammar_rules, &parse),
+    let grammar = parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE);
+    match interpret_records_region(&grammar, body, source_offset) {
+        Ok(parse) => emission_from_interpreted_parse(grammar.rules(), &parse),
         Err(error) => records_parse_error_emission(body, source_offset, error),
     }
 }
 
 fn interpret_records_region<'s>(
-    rules: &[super::interpreter::SourceAuthoredRule],
+    grammar: &super::interpreter::CompiledGrammar,
     body: &'s str,
     source_offset: usize,
 ) -> Result<InterpretedParse<'s>, InterpretedParseError> {
-    interpret_region_result(rules, "records-region", body, source_offset)
+    interpret_region_result(grammar, "records-region", body, source_offset)
 }
 
 fn emission_from_interpreted_parse(
@@ -191,7 +191,9 @@ fn parse_error_span(body: &str, source_offset: usize, span: interloko_grammar::S
 
 pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
     parse_source_authored_grammar(RECORDS_GRAMMAR_SOURCE)
-        .into_iter()
+        .rules()
+        .iter()
+        .cloned()
         .map(|rule| {
             let location = format!("resource:{RECORDS_GRAMMAR_RESOURCE}/{}", rule.name);
             GrammarRule {

@@ -1,5 +1,32 @@
 # Interloko Progress
 
+## Implemented: Compiler grammar_frontend uses CompiledGrammar
+
+- `interloko_compiler::grammar_frontend::interpreter::parse_source_authored_grammar`
+  now returns a `CompiledGrammar<'static>` (with the existing reserved-word
+  policy applied during build). The downstream `interpret_region_result`
+  and `interpret_rule_error` helpers take `&CompiledGrammar` and dispatch
+  to the kernel's `interpret_region_compiled` /
+  `interpret_rule_error_compiled` entry points.
+- `base_loko_primary.rs`, `calculator.rs`, and `records.rs` parse via the
+  compiled grammar; the staged-rule projection paths (`rules(...)`) clone
+  through `grammar.rules()` to keep producing the existing `Vec<GrammarRule>`
+  output without owning the kernel-side rule list.
+- The grammar_frontend inline tests pass `&rules` (now `&CompiledGrammar`)
+  unchanged; one site that indexed the slice (`rules[0].expression`) is
+  now `rules.rules()[0].expression`.
+- Kernel-side rule lookups during parsing now use the compiled binary
+  search instead of the linear scan. The action-evaluator helpers in
+  `actions.rs` still take a slice and continue with their existing linear
+  pattern.
+
+Deferred:
+
+- Migrating `evaluate_rule_action` and helpers in `actions.rs` to take
+  `&CompiledGrammar` and use `grammar.rule(name)`. Their scans only fire
+  once per region, not on the parse hot path, and the broader rewrite is
+  best paired with the Phase 2 action vocabulary work.
+
 ## Implemented: Tighten string-literal terminator and drop compensating workarounds
 
 - `base_loko.grammar` `string-literal` now requires the closing `"` instead

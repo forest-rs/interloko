@@ -26,9 +26,9 @@ pub(super) fn parse_file(
     source_file: SourceFileId,
     source: &str,
 ) -> Result<BaseLokoParseSuccess, Diagnostic> {
-    let rules = parse_source_authored_grammar(BASE_LOKO_GRAMMAR_SOURCE);
-    let parse = interpret_region_result(&rules, "source-file", source, 0)
-        .map_err(|error| base_loko_parse_diagnostic(&rules, source, error))?;
+    let grammar = parse_source_authored_grammar(BASE_LOKO_GRAMMAR_SOURCE);
+    let parse = interpret_region_result(&grammar, "source-file", source, 0)
+        .map_err(|error| base_loko_parse_diagnostic(&grammar, source, error))?;
     let tokens = syntax::lex(source);
     let projector = BaseLokoCstProjector {
         source_file,
@@ -42,15 +42,15 @@ pub(super) fn parse_file(
 }
 
 fn base_loko_parse_diagnostic(
-    rules: &[super::interpreter::SourceAuthoredRule],
+    grammar: &super::interpreter::CompiledGrammar,
     source: &str,
     error: InterpretedParseError,
 ) -> Diagnostic {
-    grammar_parse_diagnostic(base_loko_parse_error(rules, source, error))
+    grammar_parse_diagnostic(base_loko_parse_error(grammar, source, error))
 }
 
 fn base_loko_parse_error(
-    rules: &[super::interpreter::SourceAuthoredRule],
+    grammar: &super::interpreter::CompiledGrammar,
     source: &str,
     mut error: InterpretedParseError,
 ) -> InterpretedParseError {
@@ -59,7 +59,7 @@ fn base_loko_parse_error(
         .iter()
         .any(|expected| matches!(expected, ExpectedFragment::EndOfRegion))
     {
-        error = interpret_rule_error(rules, "definition", source, error.span.start, 0);
+        error = interpret_rule_error(grammar, "definition", source, error.span.start, 0);
     }
     error
 }

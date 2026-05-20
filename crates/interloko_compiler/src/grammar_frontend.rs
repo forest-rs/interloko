@@ -3750,7 +3750,7 @@ mod tests {
             Some(" 1 + 2\n")
         );
         assert_eq!(
-            rules[0].expression.to_string(),
+            rules.rules()[0].expression.to_string(),
             "`begin` until(`end`) `end`"
         );
     }
