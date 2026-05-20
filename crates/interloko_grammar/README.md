@@ -64,7 +64,9 @@ Supported expression forms include:
 
 - rule references: `item`
 - literals: `` `record` ``
-- character classes: `[A-Za-z_]`
+- character classes: `[A-Za-z_]`, with negation `[^a-z]`, escapes
+  (`\\`, `\]`, `\-`, `\n`, `\r`, `\t`), and ASCII shorthand classes
+  (`\d`, `\D`, `\w`, `\W`, `\s`, `\S`)
 - sequence: `` name `:` type-name ``
 - choice: `` `a` | `b` ``
 - optional: `item?`

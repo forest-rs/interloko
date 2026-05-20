@@ -1,5 +1,29 @@
 # Interloko Progress
 
+## Implemented: Richer character classes
+
+- `character_class_contains` is now a zero-allocation state machine that
+  walks the class body once. New syntax inside `[...]`:
+  - Leading `^` negates the class (`[^a-z]`).
+  - Backslash escapes for metachars and whitespace controls (`\\`, `\]`,
+    `\[`, `\^`, `\-`, `\n`, `\r`, `\t`).
+  - ASCII shorthand classes `\d`, `\D`, `\w`, `\W`, `\s`, `\S` with the
+    expected complements.
+- Byte-for-byte preserves existing grammars: `[A-Za-z]`, `[A-Za-z_]`,
+  `[0-9]`, `[$A-Za-z_]`, and `[A-Za-z0-9_?-]` (trailing `-` stays literal
+  because the parser only forms a range when both endpoints are present
+  and the end isn't a backslash).
+- Tests cover the trailing-dash pitfall explicitly, negation, escapes,
+  shorthand classes, and the four `base_loko`/`records`/`calculator`
+  class shapes already in use.
+- README's "Supported expression forms" section is updated to document
+  the new syntax.
+
+Deferred:
+
+- Unicode-category classes (`\p{...}`) and non-ASCII shorthands — Phase 2
+  territory.
+
 ## Implemented: CompiledGrammar with binary-search rule lookup
 
 - New `CompiledGrammar<'g>` owns a rule list and a sorted-by-name index.

@@ -1756,25 +1756,69 @@ fn is_delimiter_like(ch: char) -> bool {
 }
 
 fn character_class_contains(class: &str, ch: char) -> bool {
-    let mut chars = class.chars().peekable();
-    let mut previous = None;
-    while let Some(current) = chars.next() {
-        if current == '-'
-            && let (Some(start), Some(&end)) = (previous, chars.peek())
-        {
-            let _ = chars.next();
-            if start <= ch && ch <= end {
-                return true;
+    let (negated, body) = match class.strip_prefix('^') {
+        Some(rest) => (true, rest),
+        None => (false, class),
+    };
+    let bytes = body.as_bytes();
+    let mut found = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let head = &body[index..];
+        let current = head.chars().next().expect("non-empty head");
+        let current_len = current.len_utf8();
+
+        if current == '\\' && index + 1 < bytes.len() {
+            let escaped = body[index + 1..].chars().next().expect("non-empty escape");
+            if shorthand_class_matches(escaped, ch) || escape_value(escaped) == ch {
+                found = true;
             }
-            previous = Some(end);
+            index += 1 + escaped.len_utf8();
             continue;
         }
-        if current == ch {
-            return true;
+
+        let after_current = index + current_len;
+        if after_current < bytes.len() && bytes[after_current] == b'-' {
+            let after_dash = after_current + 1;
+            if after_dash < bytes.len() {
+                let end = body[after_dash..].chars().next().expect("non-empty end");
+                if end != '\\' {
+                    if current <= ch && ch <= end {
+                        found = true;
+                    }
+                    index = after_dash + end.len_utf8();
+                    continue;
+                }
+            }
         }
-        previous = Some(current);
+
+        if current == ch {
+            found = true;
+        }
+        index = after_current;
     }
-    false
+    found ^ negated
+}
+
+fn shorthand_class_matches(escape: char, ch: char) -> bool {
+    match escape {
+        'd' => ch.is_ascii_digit(),
+        'D' => !ch.is_ascii_digit(),
+        'w' => ch == '_' || ch.is_ascii_alphanumeric(),
+        'W' => !(ch == '_' || ch.is_ascii_alphanumeric()),
+        's' => matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c'),
+        'S' => !matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c'),
+        _ => false,
+    }
+}
+
+fn escape_value(escape: char) -> char {
+    match escape {
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        other => other,
+    }
 }
 
 fn skip_trivia(source: &str, mut position: usize) -> usize {
@@ -2235,6 +2279,66 @@ mod tests {
                 GrammarActionTerm::Capture { rule: "name" }
             )]
         );
+    }
+
+    #[test]
+    fn character_class_handles_trailing_dash() {
+        assert!(character_class_contains("A-Z?-", '?'));
+        assert!(character_class_contains("A-Z?-", '-'));
+        assert!(character_class_contains("A-Z?-", 'A'));
+        assert!(character_class_contains("A-Z?-", 'Z'));
+        assert!(!character_class_contains("A-Z?-", '_'));
+        // base_loko style: trailing dash inside larger class.
+        assert!(character_class_contains("A-Za-z0-9_?-", '-'));
+        assert!(character_class_contains("A-Za-z0-9_?-", '_'));
+        assert!(character_class_contains("A-Za-z0-9_?-", 'x'));
+        assert!(!character_class_contains("A-Za-z0-9_?-", '$'));
+    }
+
+    #[test]
+    fn character_class_supports_negation() {
+        assert!(!character_class_contains("^a-z", 'a'));
+        assert!(!character_class_contains("^a-z", 'm'));
+        assert!(character_class_contains("^a-z", 'A'));
+        assert!(character_class_contains("^a-z", '0'));
+    }
+
+    #[test]
+    fn character_class_supports_escapes() {
+        assert!(character_class_contains(r"\]", ']'));
+        assert!(character_class_contains(r"\-", '-'));
+        assert!(character_class_contains(r"\\", '\\'));
+        assert!(character_class_contains(r"\n", '\n'));
+        assert!(character_class_contains(r"\t", '\t'));
+        assert!(!character_class_contains(r"\]", '['));
+    }
+
+    #[test]
+    fn character_class_supports_ascii_shorthands() {
+        assert!(character_class_contains(r"\d", '5'));
+        assert!(!character_class_contains(r"\d", 'x'));
+        assert!(character_class_contains(r"\D", 'x'));
+        assert!(character_class_contains(r"\w", '_'));
+        assert!(character_class_contains(r"\w", 'a'));
+        assert!(character_class_contains(r"\w", '0'));
+        assert!(!character_class_contains(r"\w", ' '));
+        assert!(character_class_contains(r"\s", ' '));
+        assert!(character_class_contains(r"\s", '\t'));
+        assert!(!character_class_contains(r"\S", ' '));
+    }
+
+    #[test]
+    fn character_class_preserves_existing_grammars() {
+        // `[$A-Za-z_]` from base_loko `name` rule.
+        assert!(character_class_contains("$A-Za-z_", '$'));
+        assert!(character_class_contains("$A-Za-z_", 'a'));
+        assert!(character_class_contains("$A-Za-z_", 'Z'));
+        assert!(character_class_contains("$A-Za-z_", '_'));
+        assert!(!character_class_contains("$A-Za-z_", '0'));
+        // `[A-Za-z]` and `[0-9]` from records and calculator.
+        assert!(character_class_contains("A-Za-z", 'q'));
+        assert!(character_class_contains("0-9", '5'));
+        assert!(!character_class_contains("0-9", 'a'));
     }
 
     #[test]
