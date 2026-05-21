@@ -1,5 +1,93 @@
 # Interloko Progress
 
+## Implemented: `super.<rule>` parent-grammar references in the kernel
+
+- New `RuleExpression::Super(name)` variant. Surface syntax in
+  grammar source is `super.rule-name`, recognized when the
+  `super.` prefix is glued to an identifier.
+- `CompiledGrammar` now stores `parent: Option<Box<CompiledGrammar>>`
+  set by `compile_with_parent`. The compiled child still has the
+  parent rules flattened in for fast `Rule(name)` lookups; the
+  retained back-pointer drives both `Super` and ordinary inherited
+  rule dispatch, so every rule body runs in its authoring grammar's
+  scope.
+- `RuleLookup` exposes the parent grammar so the matcher can route
+  `Super(name)` to the parent's rule list.
+- Matcher routes every rule dispatch to the rule's *authoring*
+  ancestor. `CompiledGrammar` carries a parallel `rule_owner_depths`
+  array: depth 0 for this grammar's direct rules, +1 each level for
+  every inherited rule that was flattened in from the parent chain.
+  Both `interpret_rule` (for `Rule` lookups) and the `Apply` arm
+  (for parametric invocations) look up the rule with its depth and
+  switch to `ancestor(depth)` before running the body. `Super(name)`
+  walks one level up from the active grammar and re-runs the same
+  routing, so `super.foo` reaches the foo the active grammar's
+  immediate parent would match — including the case where that foo
+  is itself inherited and must dispatch its own `super` against a
+  grandparent. This avoids the bug where an inherited rule body
+  (authored in the parent) would have used the child's parent for
+  `super`, accidentally reaching the parent's own override rather
+  than the grandparent.
+- Parametric Apply switched from expression substitution to a
+  *parameter-binding frame* threaded through `interpret_expression`.
+  When the matcher hits a `Rule` reference whose name is bound, it
+  dispatches into the bound argument expression — but interprets it
+  in the *caller's* lookup with the caller's own active bindings.
+  This gives the right semantics for both halves of an inherited
+  parametric call: the body runs in the parametric rule's authoring
+  scope (so `super` and inner `Rule` refs resolve there), while the
+  arguments were authored by the caller and resolve through the
+  caller's grammar and frame. Chained parametrics
+  (`trailing-list-of<elem, sep> = list-of<elem, sep> sep?`) work
+  because each binding records the caller's bindings too — the
+  inner `Apply`'s argument expressions can still reach the outer
+  frame's parameters.
+- Practical consequence: overrides that *add* alternatives on top of
+  the parent compose cleanly. Overrides that need child changes to
+  propagate into the parent's body when reached through `super`
+  should call the child's rules directly instead.
+- `super` against a parent-less grammar fails as a normal
+  `expected rule` parse failure at that position; the kernel does
+  not emit a separate compile-time diagnostic so source authors get
+  the failure where it bites at runtime.
+- Display round-trips `super.greeting`. `walk_apply_nodes` and
+  `collect_binding_names` treat `Super` as a leaf with no inner
+  items. The old `substitute_params` upfront-rewrite was deleted
+  when the `Apply` arm moved to parameter-binding frames; parameter
+  resolution happens during interpretation against the active
+  `ParamBinding` slice instead. `rule_expression_source_data`
+  projects `super-rule-ref` records for the kernel-to-compiler
+  source-data bridge.
+- Nine new kernel tests cover: (1) override that splices in
+  parent's rule body via `super`, (2) inner references inside the
+  parent's body resolve in the parent's grammar (not through child
+  overrides), (3) `super` without a parent fails to match,
+  (4) parse+display round-trip for the new syntax, (5) multi-level
+  inheritance chain where each grammar's `super.foo` reaches its
+  immediate parent's effective foo and a parent's `super` reaches
+  the grandparent, (6) child inheriting a wrapper rule from parent
+  where the wrapper uses `super.item`; the super must reach the
+  grandparent (the wrapper's authoring grammar's parent), not the
+  parent's own item, (7) the same shape but the inherited wrapper
+  is parametric and reached via `Apply` rather than a plain `Rule`
+  reference, (8) an inherited parametric body that references an
+  inner rule resolves the inner reference in the parent's scope
+  even when the child overrides that inner rule, (9) chained
+  inherited parametrics (grandparent owns `pair<x,y>`, parent
+  inherits and wraps it with `outer<x,y> = pair<x,y>`, child
+  invokes `outer<digit, `,`>` against a child-only `digit` rule),
+  exercising the full binding-frame stack across multiple
+  inherited Apply hops.
+
+Deferred:
+
+- `derived_host.grammar` doesn't use `super` yet — it still has no
+  overrides. The natural follow-up adds a visible derived-only form
+  (e.g., extending `definition` with a `host-binding-definition`
+  alt) and projects the new rules into `derived_host_records()`
+  so the parser-vs-records invariant stays consistent. That slice
+  paired with the records projection wants its own commit.
+
 ## Implemented: parse path uses the environment's compiled grammar
 
 - `base_loko_primary::parse_file` now takes the compiled grammar as a

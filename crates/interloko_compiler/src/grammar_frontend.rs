@@ -446,6 +446,10 @@ pub fn rule_expression_source_data(expression: &RuleExpression<'_>) -> SourceDat
                 ),
             ],
         ),
+        RuleExpression::Super(name) => SourceData::record(
+            "super-rule-ref",
+            vec![source_data::field("name", SourceData::symbol(*name))],
+        ),
         _ => SourceData::record("unknown-rule-expression", Vec::new()),
     }
 }

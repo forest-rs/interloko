@@ -186,6 +186,46 @@ pub enum RuleExpression<'g> {
         /// Arguments substituted into the rule's formal parameters.
         args: Vec<RuleExpression<'g>>,
     },
+    /// Parent-grammar rule reference.
+    ///
+    /// Surface syntax: `super.rule-name` inside a rule body. Only
+    /// meaningful when the containing grammar was built via
+    /// [`CompiledGrammar::compile_with_parent`]. The kernel switches
+    /// to the parent grammar's own rule lookup and runs `rule-name`
+    /// the way the parent would on its own — inner `Rule(...)`
+    /// references inside the parent's body resolve against the
+    /// parent's grammar (with its own parent chain), not against the
+    /// child's overrides. This makes the semantics deterministic
+    /// across multi-level inheritance: every `super.foo` resolves to
+    /// "the foo this grammar's immediate parent would match," and a
+    /// `super.foo` inside the parent's body reaches the grandparent.
+    ///
+    /// Practical consequence: an override that wants to add an
+    /// alternative on top of the parent's behavior (a common case)
+    /// composes cleanly via `super`. An override that wants child
+    /// rule changes to propagate into the parent's body when reached
+    /// through `super` is *not* what this implements — call the
+    /// child's rules directly in those cases.
+    ///
+    /// `Super` is one face of a broader invariant: the matcher
+    /// always runs a rule body in the grammar that authored it.
+    /// That applies to *every* inherited rule, not only the ones
+    /// that contain an explicit `super`. When a child looks up a
+    /// rule inherited from an ancestor, the body executes against
+    /// the ancestor's lookup — so any `Rule(...)` references inside
+    /// resolve in the authoring grammar's scope. `Super` is the
+    /// explicit version of that same routing rule, lifted one level
+    /// up the chain.
+    ///
+    /// Currently only bare rule names are accepted after `super.`.
+    /// Parametric parent references (`super.rule-name<args>`) are
+    /// not supported; the parser falls back to treating the whole
+    /// term as a plain rule reference if angle-bracket arguments
+    /// follow.
+    ///
+    /// Matching against a grammar with no parent fails as a normal
+    /// `expected rule` parse failure at that position.
+    Super(&'g str),
 }
 
 /// Inert output attached to a transformed rule expression.
@@ -411,6 +451,12 @@ impl<'g> RuleExpression<'g> {
     pub fn apply(rule: &'g str, args: Vec<Self>) -> Self {
         Self::Apply { rule, args }
     }
+
+    /// Creates a parent-grammar rule reference.
+    #[must_use]
+    pub const fn super_rule(name: &'g str) -> Self {
+        Self::Super(name)
+    }
 }
 
 impl fmt::Display for RuleExpression<'_> {
@@ -459,6 +505,7 @@ impl fmt::Display for RuleExpression<'_> {
                 }
                 formatter.write_str(">")
             }
+            Self::Super(name) => write!(formatter, "super.{name}"),
         }
     }
 }
@@ -639,6 +686,22 @@ pub struct CompiledGrammar<'g> {
     /// broken by original position so [`CompiledGrammar::rule`] still returns
     /// the first declaration to match the slice-based lookup behavior.
     sorted_indices: Vec<usize>,
+    /// Parent grammar in the inheritance chain, set by
+    /// [`CompiledGrammar::compile_with_parent`]. Used by the matcher
+    /// to route every inherited rule dispatch to the rule's
+    /// authoring ancestor — both ordinary `Rule(...)` lookups and
+    /// explicit [`RuleExpression::Super`] references walk this chain
+    /// via `ancestor()` so a rule body always runs in the grammar
+    /// that authored it.
+    parent: Option<Box<CompiledGrammar<'g>>>,
+    /// Parallel to `rules`: the inheritance depth at which each rule
+    /// was originally authored. 0 means this grammar's own direct
+    /// rule; 1 means the immediate parent; 2 means the grandparent;
+    /// etc. The matcher uses this together with `parent` to switch
+    /// the active lookup to the rule's authoring ancestor before
+    /// running the rule body — so both ordinary inherited dispatch
+    /// and `super` resolve through the right grammar scope.
+    rule_owner_depths: Vec<u32>,
 }
 
 impl<'g> CompiledGrammar<'g> {
@@ -647,9 +710,12 @@ impl<'g> CompiledGrammar<'g> {
     pub fn compile(rules: Vec<SourceAuthoredRule<'g>>) -> Self {
         let mut sorted_indices: Vec<usize> = (0..rules.len()).collect();
         sorted_indices.sort_by(|&a, &b| rules[a].name.cmp(rules[b].name).then(a.cmp(&b)));
+        let rule_owner_depths = vec![0; rules.len()];
         Self {
             rules,
             sorted_indices,
+            parent: None,
+            rule_owner_depths,
         }
     }
 
@@ -685,13 +751,28 @@ impl<'g> CompiledGrammar<'g> {
         rules: Vec<SourceAuthoredRule<'g>>,
         parent: &CompiledGrammar<'g>,
     ) -> Self {
+        // Child's own rules are at depth 0 (authored in this grammar).
+        // Parent rules not overridden by the child are flattened in
+        // for fast `Rule(name)` lookup; their depth is `parent's
+        // depth for that rule + 1`, so the matcher can route `super`
+        // references inside the inherited body to the rule's
+        // authoring ancestor rather than to the child's parent.
         let mut merged = rules;
-        for parent_rule in parent.rules() {
+        let mut depths = vec![0_u32; merged.len()];
+        for (parent_index, parent_rule) in parent.rules.iter().enumerate() {
             if !merged.iter().any(|rule| rule.name == parent_rule.name) {
                 merged.push(parent_rule.clone());
+                depths.push(parent.rule_owner_depths[parent_index] + 1);
             }
         }
-        Self::compile(merged)
+        let mut sorted_indices: Vec<usize> = (0..merged.len()).collect();
+        sorted_indices.sort_by(|&a, &b| merged[a].name.cmp(merged[b].name).then(a.cmp(&b)));
+        Self {
+            rules: merged,
+            sorted_indices,
+            parent: Some(Box::new(parent.clone())),
+            rule_owner_depths: depths,
+        }
     }
 
     /// Strict variant of [`compile_with_parent`] that runs
@@ -734,13 +815,33 @@ impl<'g> CompiledGrammar<'g> {
     /// Looks up the first rule with `name`, returning `None` when not found.
     #[must_use]
     pub fn rule(&self, name: &str) -> Option<&SourceAuthoredRule<'g>> {
+        self.rule_with_depth(name).map(|(rule, _)| rule)
+    }
+
+    /// Like [`rule`] but also returns the inheritance depth at which
+    /// the rule was originally authored. The matcher uses the depth to
+    /// route `super` references to the rule's authoring ancestor.
+    ///
+    /// [`rule`]: CompiledGrammar::rule
+    fn rule_with_depth(&self, name: &str) -> Option<(&SourceAuthoredRule<'g>, u32)> {
         let rules = self.rules.as_slice();
         let indices = self.sorted_indices.as_slice();
         let position = indices.partition_point(|&idx| rules[idx].name < name);
-        indices
-            .get(position)
-            .map(|&idx| &rules[idx])
-            .filter(|rule| rule.name == name)
+        indices.get(position).and_then(|&idx| {
+            let rule = &rules[idx];
+            (rule.name == name).then_some((rule, self.rule_owner_depths[idx]))
+        })
+    }
+
+    /// Walks the parent chain `depth` levels and returns the resulting
+    /// grammar (or `self` for `depth == 0`). Returns `None` when the
+    /// chain is shorter than `depth`.
+    fn ancestor(&self, depth: u32) -> Option<&CompiledGrammar<'g>> {
+        let mut current = self;
+        for _ in 0..depth {
+            current = current.parent.as_deref()?;
+        }
+        Some(current)
     }
 
     /// Returns arity-mismatch diagnostics for every parametric Apply
@@ -784,6 +885,7 @@ impl<'g> CompiledGrammar<'g> {
         RuleLookup {
             rules: &self.rules,
             sorted_indices: Some(&self.sorted_indices),
+            grammar: Some(self),
         }
     }
 }
@@ -792,6 +894,10 @@ impl<'g> CompiledGrammar<'g> {
 struct RuleLookup<'a, 'g> {
     rules: &'a [SourceAuthoredRule<'g>],
     sorted_indices: Option<&'a [usize]>,
+    /// Compiled grammar this lookup belongs to. `None` for slice-mode
+    /// lookups built from raw rule slices, which do not support
+    /// inheritance (`Super`) since there is no parent chain.
+    grammar: Option<&'a CompiledGrammar<'g>>,
 }
 
 impl<'a, 'g> RuleLookup<'a, 'g> {
@@ -799,19 +905,63 @@ impl<'a, 'g> RuleLookup<'a, 'g> {
         Self {
             rules,
             sorted_indices: None,
+            grammar: None,
         }
     }
 
     fn rule(self, name: &str) -> Option<&'a SourceAuthoredRule<'g>> {
-        if let Some(indices) = self.sorted_indices {
+        self.rule_with_depth(name).map(|(rule, _)| rule)
+    }
+
+    fn rule_with_depth(self, name: &str) -> Option<(&'a SourceAuthoredRule<'g>, u32)> {
+        if let Some(grammar) = self.grammar {
+            grammar.rule_with_depth(name)
+        } else if let Some(indices) = self.sorted_indices {
             let position = indices.partition_point(|&idx| self.rules[idx].name < name);
-            indices
-                .get(position)
-                .map(|&idx| &self.rules[idx])
-                .filter(|rule| rule.name == name)
+            indices.get(position).and_then(|&idx| {
+                let rule = &self.rules[idx];
+                (rule.name == name).then_some((rule, 0))
+            })
         } else {
-            self.rules.iter().find(|rule| rule.name == name)
+            self.rules
+                .iter()
+                .find(|rule| rule.name == name)
+                .map(|rule| (rule, 0))
         }
+    }
+
+    fn ancestor(self, depth: u32) -> Option<RuleLookup<'a, 'g>> {
+        if depth == 0 {
+            return Some(self);
+        }
+        self.grammar
+            .and_then(|g| g.ancestor(depth))
+            .map(|g| g.lookup())
+    }
+
+    fn parent(self) -> Option<RuleLookup<'a, 'g>> {
+        self.grammar
+            .and_then(|g| g.parent.as_deref())
+            .map(|p| p.lookup())
+    }
+
+    /// Resolves `name` to its rule definition and the lookup scope
+    /// the rule was authored in. Both `Rule` dispatch and parametric
+    /// `Apply` go through this helper so the "switch active lookup
+    /// to the rule's authoring ancestor" invariant cannot drift
+    /// between call sites.
+    ///
+    /// Panics when [`CompiledGrammar::rule_owner_depths`] records a
+    /// depth that the parent chain cannot satisfy — that would mean
+    /// a kernel invariant was broken at compile time, not that the
+    /// caller passed bad data. Returning `None` is reserved for the
+    /// "name not found" case.
+    fn resolve_rule(self, name: &str) -> Option<(&'a SourceAuthoredRule<'g>, RuleLookup<'a, 'g>)> {
+        let (rule, depth) = self.rule_with_depth(name)?;
+        let active = self
+            .ancestor(depth)
+            .expect("rule_owner_depths invariant: ancestor must exist for any recorded depth");
+        Some((rule, active))
     }
 }
 
@@ -1639,6 +1789,7 @@ where
         RuleExpression::Transform { input, .. } => walk_apply_nodes(input, visit),
         RuleExpression::Named { inner, .. } => walk_apply_nodes(inner, visit),
         RuleExpression::Rule(_)
+        | RuleExpression::Super(_)
         | RuleExpression::Literal(_)
         | RuleExpression::CharacterClass(_)
         | RuleExpression::UntilLiteral(_) => {}
@@ -1918,6 +2069,7 @@ fn collect_binding_names<'g>(expression: &RuleExpression<'g>, out: &mut Vec<&'g 
             }
         }
         RuleExpression::Rule(_)
+        | RuleExpression::Super(_)
         | RuleExpression::Literal(_)
         | RuleExpression::CharacterClass(_)
         | RuleExpression::UntilLiteral(_) => {}
@@ -1979,6 +2131,12 @@ fn parse_rule_term(term: &str) -> RuleExpression<'_> {
     }
     if let Some((rule, args)) = parse_apply_term(trimmed) {
         return RuleExpression::apply(rule, args);
+    }
+    if let Some(name) = trimmed.strip_prefix("super.") {
+        let name = name.trim();
+        if !name.is_empty() && name.chars().all(is_named_binding_char) {
+            return RuleExpression::Super(name);
+        }
     }
     RuleExpression::rule(trimmed)
 }
@@ -2308,54 +2466,12 @@ fn interpret_rule<'g, 's>(
     position: usize,
     source_offset: usize,
 ) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
-    if let Some(rule) = lookup.rule(name) {
-        let raw = matches!(rule.trivia, TriviaMode::Raw);
-        let start = if raw {
-            position
-        } else {
-            skip_trivia(source, position)
-        };
-        // Direct left recursion: when the rule's body is a Choice with at
-        // least one alternative starting with a self-reference, seed from
-        // the non-LR alternatives and iteratively grow with the LR tails.
-        // This is the classical PEG-style left-recursion technique
-        // (Sergio Medeiros' bounded recursion / Warth's grow-the-seed
-        // without packrat memoization).
-        if let Some((non_lr_alts, lr_tails)) = direct_lr_partitions(&rule.expression, name) {
-            return interpret_left_recursive_rule(
-                lookup,
-                rule,
-                name,
-                source,
-                start,
-                source_offset,
-                raw,
-                &non_lr_alts,
-                &lr_tails,
-            );
-        }
-        let matched =
-            interpret_expression(lookup, &rule.expression, source, start, source_offset, raw)?;
-        let end = matched.end;
-        if rule
-            .excluded_text
-            .iter()
-            .any(|excluded| *excluded == &source[start..end])
-        {
-            return Err(ParseFailure::expected_at_source(
-                source,
-                start,
-                ExpectedFragment::Rule(name),
-                raw,
-            ));
-        }
-        return Ok(RuleNode {
-            kind: RuleNodeKind::Rule { name },
-            span: Span::new(source_offset + start, source_offset + end),
-            text: &source[start..end],
-            children: matched.children,
-            binding_name: None,
-        });
+    if let Some((rule, active)) = lookup.resolve_rule(name) {
+        // `resolve_rule` switches to the rule's authoring grammar so
+        // `super` references inside an inherited rule resolve against
+        // that rule's own parent chain, not against whichever grammar
+        // the lookup started in.
+        return interpret_rule_definition(active, rule, name, source, position, source_offset);
     }
     // Rule not found: we have no per-rule trivia context, so report the
     // unexpected fragment using the default (trivia-skipping) heuristic.
@@ -2365,6 +2481,80 @@ fn interpret_rule<'g, 's>(
         ExpectedFragment::Rule(name),
         false,
     ))
+}
+
+/// Runs `rule`'s body using `lookup` for inner rule references and
+/// `name` as the label on the produced node.
+///
+/// The caller (`interpret_rule`) is responsible for selecting the
+/// right `lookup`: it routes to the rule's authoring ancestor using
+/// the rule-owner depth tracked in [`CompiledGrammar`], so any
+/// `Rule(...)` or `Super(...)` references inside `rule`'s body
+/// resolve against the grammar that actually authored the rule —
+/// not against an arbitrary descendant the rule was looked up
+/// through.
+fn interpret_rule_definition<'g, 's>(
+    lookup: RuleLookup<'_, 'g>,
+    rule: &SourceAuthoredRule<'g>,
+    name: &'g str,
+    source: &'s str,
+    position: usize,
+    source_offset: usize,
+) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
+    let raw = matches!(rule.trivia, TriviaMode::Raw);
+    let start = if raw {
+        position
+    } else {
+        skip_trivia(source, position)
+    };
+    // Direct left recursion: when the rule's body is a Choice with at
+    // least one alternative starting with a self-reference, seed from
+    // the non-LR alternatives and iteratively grow with the LR tails.
+    // This is the classical PEG-style left-recursion technique
+    // (Sergio Medeiros' bounded recursion / Warth's grow-the-seed
+    // without packrat memoization).
+    if let Some((non_lr_alts, lr_tails)) = direct_lr_partitions(&rule.expression, name) {
+        return interpret_left_recursive_rule(
+            lookup,
+            rule,
+            name,
+            source,
+            start,
+            source_offset,
+            raw,
+            &non_lr_alts,
+            &lr_tails,
+        );
+    }
+    let matched = interpret_expression(
+        lookup,
+        &[],
+        &rule.expression,
+        source,
+        start,
+        source_offset,
+        raw,
+    )?;
+    let end = matched.end;
+    if rule
+        .excluded_text
+        .iter()
+        .any(|excluded| *excluded == &source[start..end])
+    {
+        return Err(ParseFailure::expected_at_source(
+            source,
+            start,
+            ExpectedFragment::Rule(name),
+            raw,
+        ));
+    }
+    Ok(RuleNode {
+        kind: RuleNodeKind::Rule { name },
+        span: Span::new(source_offset + start, source_offset + end),
+        text: &source[start..end],
+        children: matched.children,
+        binding_name: None,
+    })
 }
 
 /// Detects direct left recursion in a rule body.
@@ -2465,7 +2655,7 @@ fn interpret_left_recursive_rule<'g, 's>(
     let mut accumulated: Option<ParseFailure<'g>> = None;
     let mut seed: Option<ExpressionMatch<'g, 's>> = None;
     for alt in non_lr_alts {
-        match interpret_expression(lookup, alt, source, start, source_offset, raw) {
+        match interpret_expression(lookup, &[], alt, source, start, source_offset, raw) {
             Ok(matched) => {
                 seed = Some(matched);
                 break;
@@ -2498,7 +2688,8 @@ fn interpret_left_recursive_rule<'g, 's>(
             let mut tail_children = Vec::new();
             let mut tail_ok = true;
             for item in tail {
-                match interpret_expression(lookup, item, source, tail_end, source_offset, raw) {
+                match interpret_expression(lookup, &[], item, source, tail_end, source_offset, raw)
+                {
                     Ok(matched) => {
                         tail_end = matched.end;
                         tail_children.extend(matched.children);
@@ -2547,8 +2738,29 @@ fn interpret_left_recursive_rule<'g, 's>(
     Ok(current_node)
 }
 
+/// Parameter binding active while interpreting a parametric rule body.
+///
+/// Each binding remembers the argument expression plus the *caller's*
+/// execution context (its lookup and its own active bindings) at the
+/// moment the parametric `Apply` was invoked. When the body refers to
+/// a parameter, the argument is interpreted in that caller frame so
+/// references inside the argument resolve through the caller's
+/// grammar and through the caller's own parameter scope — important
+/// for chained parametric calls like
+/// `trailing-list-of<elem, sep> = list-of<elem, sep> sep?` where the
+/// inner `Apply`'s argument expressions are themselves parameter
+/// references from the outer frame.
+#[derive(Clone, Copy)]
+struct ParamBinding<'a, 'g> {
+    name: &'g str,
+    arg: &'a RuleExpression<'g>,
+    caller_lookup: RuleLookup<'a, 'g>,
+    caller_bindings: &'a [ParamBinding<'a, 'g>],
+}
+
 fn interpret_expression<'g, 's>(
     lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     source: &'s str,
     position: usize,
@@ -2557,6 +2769,24 @@ fn interpret_expression<'g, 's>(
 ) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
     match expression {
         RuleExpression::Rule(name) => {
+            // Inside a parametric body, a rule name that matches a
+            // parameter dispatches to the bound argument expression
+            // — interpreted in the *caller's* lookup so anything the
+            // caller wrote (e.g. `Rule("digit")` for a child rule)
+            // still resolves in the caller's grammar. The parameter
+            // binding does not propagate into the recursive call,
+            // so nested parametric invocations get a fresh frame.
+            if let Some(binding) = params.iter().find(|b| b.name == *name) {
+                return interpret_expression(
+                    binding.caller_lookup,
+                    binding.caller_bindings,
+                    binding.arg,
+                    source,
+                    position,
+                    source_offset,
+                    raw,
+                );
+            }
             // Cut commits never cross rule boundaries; the rule's own choice
             // already cleared the flag on success, and we deliberately drop
             // it on failure too.
@@ -2655,7 +2885,7 @@ fn interpret_expression<'g, 's>(
             let mut children = Vec::new();
             let mut committed = false;
             for item in items {
-                match interpret_expression(lookup, item, source, end, source_offset, raw) {
+                match interpret_expression(lookup, params, item, source, end, source_offset, raw) {
                     Ok(matched) => {
                         committed |= matched.committed;
                         end = matched.end;
@@ -2676,7 +2906,15 @@ fn interpret_expression<'g, 's>(
         RuleExpression::Choice(items) => {
             let mut failure = None;
             for item in items {
-                match interpret_expression(lookup, item, source, position, source_offset, raw) {
+                match interpret_expression(
+                    lookup,
+                    params,
+                    item,
+                    source,
+                    position,
+                    source_offset,
+                    raw,
+                ) {
                     Ok(matched) => {
                         return Ok(ExpressionMatch {
                             end: matched.end,
@@ -2702,7 +2940,7 @@ fn interpret_expression<'g, 's>(
         RuleExpression::Optional(item) => {
             // Cut commits bounded by the innermost choice; an Optional
             // contains the commit, on both the matched and skipped paths.
-            match interpret_expression(lookup, item, source, position, source_offset, raw) {
+            match interpret_expression(lookup, params, item, source, position, source_offset, raw) {
                 Ok(mut matched) => {
                     matched.committed = false;
                     Ok(matched)
@@ -2718,15 +2956,16 @@ fn interpret_expression<'g, 's>(
             // A repetition boundary contains any inner cut commit. Both the
             // required first match and later successful iterations have
             // their committed flag cleared before propagating outward.
-            let first = interpret_expression(lookup, item, source, position, source_offset, raw)
-                .map_err(|mut failure| {
-                    failure.committed = false;
-                    failure
-                })?;
+            let first =
+                interpret_expression(lookup, params, item, source, position, source_offset, raw)
+                    .map_err(|mut failure| {
+                        failure.committed = false;
+                        failure
+                    })?;
             let mut end = first.end;
             let mut children = first.children;
             while let Ok(matched) =
-                interpret_expression(lookup, item, source, end, source_offset, raw)
+                interpret_expression(lookup, params, item, source, end, source_offset, raw)
             {
                 if matched.end == end {
                     break;
@@ -2747,7 +2986,7 @@ fn interpret_expression<'g, 's>(
             let mut end = position;
             let mut children = Vec::new();
             while let Ok(matched) =
-                interpret_expression(lookup, item, source, end, source_offset, raw)
+                interpret_expression(lookup, params, item, source, end, source_offset, raw)
             {
                 if matched.end == end {
                     break;
@@ -2762,17 +3001,16 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Transform { input, .. } => {
-            interpret_expression(lookup, input, source, position, source_offset, raw)
+            interpret_expression(lookup, params, input, source, position, source_offset, raw)
         }
         RuleExpression::And(inner) => {
             // Lookahead is non-consuming inspection; an inner cut commit
             // must not extend out to the enclosing choice scope.
-            interpret_expression(lookup, inner, source, position, source_offset, raw).map_err(
-                |mut failure| {
+            interpret_expression(lookup, params, inner, source, position, source_offset, raw)
+                .map_err(|mut failure| {
                     failure.committed = false;
                     failure
-                },
-            )?;
+                })?;
             Ok(ExpressionMatch {
                 end: position,
                 children: Vec::new(),
@@ -2780,7 +3018,8 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Not(inner) => {
-            match interpret_expression(lookup, inner, source, position, source_offset, raw) {
+            match interpret_expression(lookup, params, inner, source, position, source_offset, raw)
+            {
                 Ok(_) => Err(ParseFailure::expected_at_source(
                     source,
                     position,
@@ -2796,13 +3035,13 @@ fn interpret_expression<'g, 's>(
         }
         RuleExpression::Cut(inner) => {
             let mut matched =
-                interpret_expression(lookup, inner, source, position, source_offset, raw)?;
+                interpret_expression(lookup, params, inner, source, position, source_offset, raw)?;
             matched.committed = true;
             Ok(matched)
         }
         RuleExpression::Named { name, inner } => {
             let matched =
-                interpret_expression(lookup, inner, source, position, source_offset, raw)?;
+                interpret_expression(lookup, params, inner, source, position, source_offset, raw)?;
             let children = matched
                 .children
                 .into_iter()
@@ -2818,7 +3057,17 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Apply { rule, args } => {
-            let target = lookup.rule(rule).ok_or_else(|| {
+            // Switch the active lookup to the parametric target's
+            // authoring ancestor (so any `Rule(...)` / `Super(...)`
+            // refs in the target's body resolve in the body's own
+            // grammar), but remember the caller's lookup on each
+            // parameter binding so argument expressions — which were
+            // written in the caller's grammar — still resolve through
+            // the caller's scope when the body references them by
+            // parameter name. This is the kernel's analogue of "args
+            // are evaluated by the caller, bodies are evaluated by
+            // the callee."
+            let (target, active) = lookup.resolve_rule(rule).ok_or_else(|| {
                 ParseFailure::expected_at_source(
                     source,
                     position,
@@ -2826,70 +3075,52 @@ fn interpret_expression<'g, 's>(
                     raw,
                 )
             })?;
-            // Substitute parameter references in the body with the
-            // invocation arguments and interpret the substituted form.
-            let substituted = substitute_params(&target.expression, &target.params, args);
-            interpret_expression(lookup, &substituted, source, position, source_offset, raw)
-        }
-    }
-}
-
-fn substitute_params<'g>(
-    expression: &RuleExpression<'g>,
-    params: &[&'g str],
-    args: &[RuleExpression<'g>],
-) -> RuleExpression<'g> {
-    match expression {
-        RuleExpression::Rule(name) => {
-            if let Some(index) = params.iter().position(|param| param == name)
-                && let Some(arg) = args.get(index)
-            {
-                return arg.clone();
-            }
-            RuleExpression::Rule(name)
-        }
-        RuleExpression::Literal(value) => RuleExpression::Literal(value),
-        RuleExpression::CharacterClass(value) => RuleExpression::CharacterClass(value),
-        RuleExpression::UntilLiteral(value) => RuleExpression::UntilLiteral(value),
-        RuleExpression::Sequence(items) => RuleExpression::sequence(
-            items
+            let bindings: Vec<ParamBinding<'_, 'g>> = target
+                .params
                 .iter()
-                .map(|item| substitute_params(item, params, args))
-                .collect(),
-        ),
-        RuleExpression::Choice(items) => RuleExpression::choice(
-            items
-                .iter()
-                .map(|item| substitute_params(item, params, args))
-                .collect(),
-        ),
-        RuleExpression::Optional(item) => {
-            RuleExpression::optional(substitute_params(item, params, args))
+                .zip(args.iter())
+                .map(|(name, arg)| ParamBinding {
+                    name,
+                    arg,
+                    caller_lookup: lookup,
+                    caller_bindings: params,
+                })
+                .collect();
+            interpret_expression(
+                active,
+                &bindings,
+                &target.expression,
+                source,
+                position,
+                source_offset,
+                raw,
+            )
         }
-        RuleExpression::OneOrMore(item) => {
-            RuleExpression::one_or_more(substitute_params(item, params, args))
-        }
-        RuleExpression::ZeroOrMore(item) => {
-            RuleExpression::zero_or_more(substitute_params(item, params, args))
-        }
-        RuleExpression::And(item) => RuleExpression::and(substitute_params(item, params, args)),
-        RuleExpression::Not(item) => RuleExpression::not(substitute_params(item, params, args)),
-        RuleExpression::Cut(item) => RuleExpression::cut(substitute_params(item, params, args)),
-        RuleExpression::Named { name, inner } => {
-            RuleExpression::named(name, substitute_params(inner, params, args))
-        }
-        RuleExpression::Apply {
-            rule,
-            args: inner_args,
-        } => RuleExpression::apply(
-            rule,
-            inner_args
-                .iter()
-                .map(|arg| substitute_params(arg, params, args))
-                .collect(),
-        ),
-        RuleExpression::Transform { input, output } => {
-            RuleExpression::transform(substitute_params(input, params, args), output.clone())
+        RuleExpression::Super(name) => {
+            // Walk one level up from the *active* grammar and let the
+            // normal rule lookup take over. Because `interpret_rule`
+            // routes to the rule's authoring ancestor, `super.foo`
+            // here always reaches the foo that the active grammar's
+            // immediate parent would match — including the case
+            // where that foo is itself inherited from further up.
+            let parent_lookup = lookup.parent().ok_or_else(|| {
+                ParseFailure::expected_at_source(
+                    source,
+                    position,
+                    ExpectedFragment::Rule(name),
+                    raw,
+                )
+            })?;
+            let node = interpret_rule(parent_lookup, name, source, position, source_offset)
+                .map_err(|mut failure| {
+                    failure.committed = false;
+                    failure
+                })?;
+            Ok(ExpressionMatch {
+                end: node.span.end.saturating_sub(source_offset),
+                children: vec![node],
+                committed: false,
+            })
         }
     }
 }
@@ -3547,6 +3778,248 @@ mod tests {
         );
         let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
         assert!(child.validate_parametric_arity().is_empty());
+    }
+
+    #[test]
+    fn super_rule_dispatches_to_parent_definition() {
+        // Child overrides `greeting` and uses super to splice in the
+        // parent's previous definition before adding its own suffix.
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule greeting = `hello`\nend\n",
+        ));
+        let child_rules = parse_grammar_source(
+            "grammar child extends parent\nrule greeting = super.greeting `world`\nend\n",
+        );
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+        let parse = interpret_region_compiled(&child, "greeting", "hello world", 0)
+            .expect("super splices in parent definition");
+        assert_eq!(parse.root.text, "hello world");
+    }
+
+    #[test]
+    fn super_rule_runs_parent_body_with_parents_lookup() {
+        // `super.outer` runs the parent's `outer` rule with the
+        // parent's own grammar in scope. The parent's body references
+        // `inner`; that `Rule("inner")` resolves to the parent's
+        // inner, NOT to the child's override. The child's override
+        // only applies to references inside the child's own bodies.
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule outer = inner\nrule inner = `1`\nend\n",
+        ));
+        let child_rules = parse_grammar_source(
+            "grammar child extends parent\n\
+             rule outer = super.outer `2`\n\
+             rule inner = `9`\n\
+             end\n",
+        );
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+        let parse = interpret_region_compiled(&child, "outer", "12", 0)
+            .expect("super.outer matches parent's inner, not child's override");
+        assert_eq!(parse.root.text, "12");
+        let child_inner_parse = interpret_region_compiled(&child, "inner", "9", 0)
+            .expect("child's own inner still uses the override");
+        assert_eq!(child_inner_parse.root.text, "9");
+    }
+
+    #[test]
+    fn super_rule_without_parent_fails_to_match() {
+        let grammar = CompiledGrammar::compile(parse_grammar_source(
+            "grammar lonely\nrule greeting = super.greeting\nend\n",
+        ));
+        let result = interpret_region_compiled(&grammar, "greeting", "hello", 0);
+        assert!(
+            result.is_err(),
+            "super reference against a parent-less grammar must fail to match",
+        );
+    }
+
+    #[test]
+    fn super_rule_inside_inherited_rule_targets_the_rules_own_parent() {
+        // grandparent: item = "g"
+        // parent extends grandparent:
+        //     item = "p"
+        //     wrapper = super.item    // refers to parent's super -> grandparent.item
+        // child extends parent (no overrides).
+        //
+        // When child invokes `wrapper`, the rule body it runs was
+        // authored in `parent`. Its `super.item` must therefore reach
+        // grandparent.item ("g"), not parent.item ("p"). A naive
+        // implementation that used `child.parent` for super would
+        // incorrectly resolve to parent.item.
+        let grandparent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar grand\nrule item = `g`\nend\n",
+        ));
+        let parent_rules = parse_grammar_source(
+            "grammar parent extends grand\n\
+             rule item = `p`\n\
+             rule wrapper = super.item\n\
+             end\n",
+        );
+        let parent = CompiledGrammar::compile_with_parent(parent_rules, &grandparent);
+        let child_rules = parse_grammar_source("grammar child extends parent\nend\n");
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        let wrapper_match = interpret_region_compiled(&child, "wrapper", "g", 0)
+            .expect("inherited wrapper resolves super through its authoring parent");
+        assert_eq!(wrapper_match.root.text, "g");
+
+        // Sanity: parent itself sees the same behavior.
+        let parent_wrapper_match = interpret_region_compiled(&parent, "wrapper", "g", 0)
+            .expect("parent's own wrapper still matches");
+        assert_eq!(parent_wrapper_match.root.text, "g");
+
+        // Child invoking `item` directly resolves to parent's item
+        // (the closest definition in the chain), not grandparent's.
+        let item_match = interpret_region_compiled(&child, "item", "p", 0)
+            .expect("inherited item resolves to parent's effective definition");
+        assert_eq!(item_match.root.text, "p");
+    }
+
+    #[test]
+    fn super_rule_inside_inherited_parametric_rule_targets_authoring_parent() {
+        // Same shape as super_rule_inside_inherited_rule_targets_the_rules_own_parent,
+        // but the inherited rule is *parametric* and reached via
+        // Apply rather than via a plain Rule reference. Without
+        // owner-aware routing in the Apply arm, super.item inside
+        // wrapper<x>'s substituted body would resolve through the
+        // child's parent (= parent) and incorrectly reach parent.item.
+        let grandparent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar grand\nrule item = `g`\nend\n",
+        ));
+        let parent_rules = parse_grammar_source(
+            "grammar parent extends grand\n\
+             rule item = `p`\n\
+             rule wrapper<x> = x super.item\n\
+             end\n",
+        );
+        let parent = CompiledGrammar::compile_with_parent(parent_rules, &grandparent);
+        let child_rules =
+            parse_grammar_source("grammar child extends parent\nrule root = wrapper<`!`>\nend\n");
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        let parse = interpret_region_compiled(&child, "root", "!g", 0)
+            .expect("inherited parametric wrapper resolves super through authoring parent");
+        assert_eq!(parse.root.text, "!g");
+    }
+
+    #[test]
+    fn super_rule_inherited_parametric_inner_ref_uses_parent_scope() {
+        // Parent defines a parametric wrapper that calls an inner
+        // rule by name. Child inherits the parametric wrapper and
+        // overrides the inner rule with a different body. The
+        // inherited wrapper's `Rule("inner")` reference must resolve
+        // in the parent's scope (where the wrapper was authored), so
+        // the child's override does NOT apply when the wrapper is
+        // reached through inheritance — matching the verbatim
+        // semantics used for ordinary inherited bodies.
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\n\
+             rule inner = `1`\n\
+             rule wrapper<x> = x inner\n\
+             end\n",
+        ));
+        let child_rules = parse_grammar_source(
+            "grammar child extends parent\n\
+             rule inner = `9`\n\
+             rule root = wrapper<`!`>\n\
+             end\n",
+        );
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        let parse = interpret_region_compiled(&child, "root", "!1", 0)
+            .expect("inherited parametric wrapper resolves inner in parent scope");
+        assert_eq!(parse.root.text, "!1");
+
+        // Sanity: child invoking inner directly still hits the override.
+        let direct = interpret_region_compiled(&child, "inner", "9", 0)
+            .expect("child's own inner still uses override");
+        assert_eq!(direct.root.text, "9");
+    }
+
+    #[test]
+    fn super_rule_chained_inherited_parametrics_pop_caller_frames() {
+        // Grandparent owns a base parametric `pair<x, y>`.
+        // Parent inherits it and defines a wrapper parametric
+        // `outer<x, y>` whose body is itself an Apply of `pair<x, y>`.
+        // Child inherits both parametrics and invokes
+        // `outer<digit, `,`>`. The full binding-frame stack:
+        //
+        //   child Apply outer<digit, `,`>
+        //     -> outer is inherited from parent; body runs in parent
+        //        scope with frame [{x=digit, y=`,`, caller=child}].
+        //     -> outer body invokes pair<x, y>.
+        //         pair is inherited (originally from grandparent);
+        //         body runs in grandparent scope with frame
+        //         [{x=Rule(x), y=Rule(y), caller=parent frame}].
+        //     -> pair body refers to Rule(x) and Rule(y).
+        //         x resolves via inner frame -> arg is Rule(x);
+        //         interpret in caller (parent) frame -> outer's x
+        //         binding -> arg is Rule(digit); interpret in
+        //         caller (child) frame with empty bindings -> the
+        //         child-defined `digit` rule matches.
+        //
+        // The test pins that each parameter ref pops to the right
+        // frame across multiple inherited Apply hops.
+        let grandparent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar grand\nrule pair<x, y> = x y\nend\n",
+        ));
+        let parent_rules = parse_grammar_source(
+            "grammar parent extends grand\nrule outer<x, y> = pair<x, y>\nend\n",
+        );
+        let parent = CompiledGrammar::compile_with_parent(parent_rules, &grandparent);
+        let child_rules = parse_grammar_source(
+            "grammar child extends parent\n\
+             rule digit = [0-9]\n\
+             rule root = outer<digit, `,`>\n\
+             end\n",
+        );
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        let parse = interpret_region_compiled(&child, "root", "1,", 0)
+            .expect("chained inherited parametrics route bindings through every frame");
+        assert_eq!(parse.root.text, "1,");
+    }
+
+    #[test]
+    fn super_rule_resolves_to_immediate_parent_in_multi_level_chain() {
+        // Grandparent: digits = "1"
+        // Parent extends grandparent: digits = super.digits "2" -> matches "12"
+        // Child extends parent: digits = super.digits "3" -> matches "123"
+        // The test pins that each grammar's `super.digits` reaches its
+        // immediate parent's effective digits (the one the parent
+        // would match if invoked directly), not the first ancestor's
+        // direct rule, and not a flattened "current" rule.
+        // Digit literals are used so the literal-boundary check
+        // doesn't reject adjacent characters as identifier
+        // continuations the way alphabetic literals would.
+        let grandparent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar grand\nrule digits = `1`\nend\n",
+        ));
+        let parent_rules = parse_grammar_source(
+            "grammar parent extends grand\nrule digits = super.digits `2`\nend\n",
+        );
+        let parent = CompiledGrammar::compile_with_parent(parent_rules, &grandparent);
+        let child_rules = parse_grammar_source(
+            "grammar child extends parent\nrule digits = super.digits `3`\nend\n",
+        );
+        let child = CompiledGrammar::compile_with_parent(child_rules, &parent);
+
+        let parent_match = interpret_region_compiled(&parent, "digits", "12", 0)
+            .expect("parent's super.digits reaches grandparent's digits");
+        assert_eq!(parent_match.root.text, "12");
+
+        let child_match = interpret_region_compiled(&child, "digits", "123", 0)
+            .expect("child's super.digits reaches parent's effective digits");
+        assert_eq!(child_match.root.text, "123");
+    }
+
+    #[test]
+    fn super_rule_round_trips_through_display() {
+        use alloc::string::ToString as _;
+        let parsed = parse_grammar_source("grammar t\nrule r = super.greeting\nend\n");
+        let body = &parsed.first().expect("rule r parsed").expression;
+        assert!(matches!(body, RuleExpression::Super(name) if *name == "greeting"));
+        assert_eq!(body.to_string(), "super.greeting");
     }
 
     #[test]
