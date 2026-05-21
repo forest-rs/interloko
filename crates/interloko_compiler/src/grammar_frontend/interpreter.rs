@@ -96,17 +96,15 @@ pub(super) fn interpret_region_result<'s>(
     interloko_grammar::interpret_region_compiled(grammar, root_rule, source, source_offset)
 }
 
-/// Inspect-style parse: returns the kernel's [`ParseReport`] so the
-/// caller can pick up the partial root tree even when parsing did
-/// not consume the full region. Used by the base-loko frontend to
-/// preserve partial parses for editor consumers.
-pub(super) fn inspect_region_result<'s>(
+/// Recovering parse: returns a root tree with inline recovery nodes
+/// when the grammar's root supports skip-and-retry recovery.
+pub(super) fn recover_region_result<'s>(
     grammar: &CompiledGrammar,
     root_rule: &'static str,
     source: &'s str,
     source_offset: usize,
-) -> interloko_grammar::ParseReport<'static, 's> {
-    interloko_grammar::inspect_region_compiled(grammar, root_rule, source, source_offset)
+) -> interloko_grammar::RecoveryReport<'static, 's> {
+    interloko_grammar::interpret_region_recovering(grammar, root_rule, source, source_offset)
 }
 
 pub(super) fn interpret_rule_error(

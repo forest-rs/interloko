@@ -4168,6 +4168,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_recovery_skips_broken_middle_and_keeps_later_forms() {
+        // The middle line is not a definition. Recovery should keep
+        // both surrounding functions in the CST and parse tree while
+        // reporting a diagnostic and inserting a recovery-error node.
+        let source = "define function before() 1 end;\n\
+                      not a definition\n\
+                      define function after() 2 end;";
+        let report = parse_file(SourceFileId::from_path("recovered.loko"), source);
+
+        assert!(
+            !report.syntax.diagnostics.is_empty(),
+            "recovery should preserve diagnostics for skipped text",
+        );
+        assert_eq!(
+            report.syntax.root.child_nodes(CstKind::Function).count(),
+            2,
+            "CST should retain both valid definitions around the error",
+        );
+
+        let parse_tree = report
+            .frontend_parse
+            .parse_tree
+            .as_ref()
+            .expect("recovering parse returns a parse tree");
+        let functions = parse_tree
+            .walk()
+            .filter(|node| node.is_rule("function-definition"))
+            .count();
+        assert_eq!(functions, 2, "parse tree retains both function definitions");
+        assert!(
+            parse_tree.walk().any(|node| node.role()
+                == interloko_grammar::RuleNodeRole::RecoveryError
+                && node.text.contains("not a definition")),
+            "parse tree includes a recovery node for skipped text",
+        );
+
+        let parse_tree_data = report
+            .frontend_parse
+            .parse_tree_data
+            .as_ref()
+            .expect("recovered parse still has source-data projection");
+        let dump = source_data::dump(parse_tree_data);
+        assert!(dump.contains("role: recovery-error"));
+    }
+
+    #[test]
     fn grammar_diagnostics_record_active_rule_and_expected_fragment() {
         let report = parse_file_with_environment(
             SourceFileId::from_path("bad.loko"),

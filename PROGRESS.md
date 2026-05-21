@@ -1,5 +1,34 @@
 # Interloko Progress
 
+## Implemented: base-loko frontend uses recovering parse trees
+
+- `base_loko_primary::parse_file` now calls the grammar kernel's
+  recovering entry point for `source-file`. When recovery produces
+  a root, the frontend projects that recovered tree into the CST,
+  keeps the owned `parse_tree` / `parse_tree_data`, and attaches
+  every recovered parse error as a syntax diagnostic.
+- `BaseLokoParseFailure` is now reserved for fallback cases where
+  the recovering parse cannot produce any root at all. In the
+  normal top-level source-file shape, malformed middle text no
+  longer drops the later valid definitions on the floor.
+- New compiler-side test
+  `parse_recovery_skips_broken_middle_and_keeps_later_forms`:
+  parses a valid function, junk text, and another valid function;
+  asserts diagnostics are present, both valid functions survive in
+  the CST and owned parse tree, and the parse tree contains a
+  `recovery-error` node for the skipped text.
+
+Deferred:
+
+- Recovery nodes are present in the grammar parse tree and
+  source-data projection, but CST projection still drops them and
+  carries errors only as diagnostics. A later editor-facing slice
+  can add explicit CST error nodes if downstream tooling needs
+  structured skipped regions there too.
+- The kernel scanner is still char-by-char. Anchor-aware scanning
+  by likely top-level starts such as `define` remains a performance
+  and diagnostics polish step, not a correctness requirement.
+
 ## Implemented: skip-and-retry recovery for top-level repetitions
 
 - New `RuleNodeKind::RecoveryError` (and matching
