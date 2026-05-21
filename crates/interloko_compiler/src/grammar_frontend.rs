@@ -2747,9 +2747,42 @@ pub fn base_loko_records() -> GrammarFrontendRecords {
     }
 }
 
+/// Source for the trusted derived host grammar.
+///
+/// The file currently declares `grammar derived-host extends base-loko`
+/// with no rule overrides; the `function-definition` override that
+/// appears below in the records is still a hand-rolled fixture marked
+/// [`ProjectionOrigin::TrustedHostFixture`]. Lifting that override into
+/// the source file needs a `super`-style parent-rule reference (the
+/// override's body is a self-delegation, which under normal inheritance
+/// would recurse into itself).
+const DERIVED_HOST_GRAMMAR_SOURCE: &str = include_str!("../grammars/derived_host.grammar");
+
+/// Slug used by `derived_host.grammar`'s `grammar` header.
+const DERIVED_HOST_GRAMMAR_HEADER_NAME: &str = "derived-host";
+/// Slug used in `derived_host.grammar`'s `extends` clause.
+const DERIVED_HOST_PARENT_HEADER_NAME: &str = "base-loko";
+
 /// Returns the trusted host-derived grammar records without parsing source.
 #[must_use]
 pub fn derived_host_records() -> GrammarFrontendRecords {
+    let parsed = interloko_grammar::parse_grammar_source_full(DERIVED_HOST_GRAMMAR_SOURCE);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "derived_host.grammar produced source diagnostics: {:?}",
+        parsed.diagnostics,
+    );
+    assert_eq!(
+        parsed.header.name,
+        Some(DERIVED_HOST_GRAMMAR_HEADER_NAME),
+        "derived_host.grammar must declare `grammar derived-host`",
+    );
+    assert_eq!(
+        parsed.header.extends,
+        Some(DERIVED_HOST_PARENT_HEADER_NAME),
+        "derived_host.grammar must declare `extends base-loko`",
+    );
+
     let base_environment = base_loko_records();
     let base_grammar_id = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
     let derived_environment_id = LanguageEnvironmentId::new(DERIVED_HOST_ENVIRONMENT_NAME);
@@ -3938,6 +3971,31 @@ mod tests {
             EffectiveGrammarRuleResolution::Inherited
         );
         assert_eq!(inherited.selected_rule_grammar, base_grammar);
+    }
+
+    #[test]
+    fn derived_host_grammar_source_compiles_against_base_loko() {
+        // Validate that derived_host.grammar parses cleanly, declares the
+        // expected `extends base-loko` header, and compiles through
+        // `try_compile_with_parent` without arity diagnostics. This pins
+        // the source file as a real consumer of Phase 2's `extends`
+        // parsing and `try_compile_with_parent` API.
+        let base_source = include_str!("../grammars/base_loko.grammar");
+        let parsed_base = interloko_grammar::parse_grammar_source_full(base_source);
+        assert!(parsed_base.diagnostics.is_empty());
+        let base_compiled = interloko_grammar::CompiledGrammar::compile(parsed_base.rules);
+
+        let parsed_derived =
+            interloko_grammar::parse_grammar_source_full(DERIVED_HOST_GRAMMAR_SOURCE);
+        assert!(parsed_derived.diagnostics.is_empty());
+        assert_eq!(parsed_derived.header.name, Some("derived-host"));
+        assert_eq!(parsed_derived.header.extends, Some("base-loko"));
+
+        interloko_grammar::CompiledGrammar::try_compile_with_parent(
+            parsed_derived.rules,
+            &base_compiled,
+        )
+        .expect("derived_host.grammar must compile against base-loko");
     }
 
     #[test]

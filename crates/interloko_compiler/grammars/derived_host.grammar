@@ -1,0 +1,2 @@
+grammar derived-host extends base-loko
+end

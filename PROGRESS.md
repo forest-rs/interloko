@@ -1,5 +1,30 @@
 # Interloko Progress
 
+## Implemented: `derived_host.grammar` declares inheritance from source
+
+- New `crates/interloko_compiler/grammars/derived_host.grammar` declares
+  `grammar derived-host extends base-loko` with no rule overrides.
+- `derived_host_records()` in `grammar_frontend.rs` now parses that file
+  via `interloko_grammar::parse_grammar_source_full` and asserts the
+  header's name and `extends` slug. The grammar source is the
+  source-of-truth for the inheritance relationship; the Rust-side
+  `GrammarId` mapping (`base-loko` → `BaseLokoGrammar`) stays in code.
+- A new test `derived_host_grammar_source_compiles_against_base_loko`
+  parses both `base_loko.grammar` and `derived_host.grammar` and runs
+  `CompiledGrammar::try_compile_with_parent` end-to-end — the first
+  production caller of the strict-compile API Phase 2 added.
+
+Deferred:
+
+- The hand-rolled `function-definition` override in
+  `derived_host_records()` is still marked `TrustedHostFixture` and is
+  not expressed in `derived_host.grammar`. Lifting it requires either
+  a `super`-style parent-rule reference in grammar source (so the
+  override can really delegate without recursing into itself) or
+  wiring `parse_file_with_environment` to compile and parse with the
+  environment's grammar (an architectural step distinct from this
+  records-layer slice).
+
 ## Implemented: base-loko expression ladder uses direct LR
 
 - `additive-expression`, `multiplicative-expression`, and
