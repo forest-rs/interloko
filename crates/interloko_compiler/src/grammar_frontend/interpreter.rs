@@ -12,18 +12,17 @@ use crate::source_data::{self, SourceData};
 
 use super::{StagedRuleApplication, StagedRuleCount, source_span_data};
 
+pub(super) const BASE_LOKO_GRAMMAR_SOURCE: &str = include_str!("../../grammars/base_loko.grammar");
+pub(super) const DERIVED_HOST_GRAMMAR_SOURCE: &str =
+    include_str!("../../grammars/derived_host.grammar");
+
 const LOKO_RESERVED_WORDS: &[&str] = &[
     "define", "function", "class", "slot", "constant", "generic", "method", "let", "if", "then",
     "else", "handle", "with", "restart", "end",
 ];
 
-pub(super) fn parse_source_authored_grammar(source: &'static str) -> CompiledGrammar {
-    let (rules, diagnostics) = interloko_grammar::parse_grammar_source_with_diagnostics(source);
-    assert!(
-        diagnostics.is_empty(),
-        "compiler-owned grammar produced source diagnostics: {diagnostics:?}",
-    );
-    let rules = rules
+fn apply_loko_reserved_words(rules: Vec<SourceAuthoredRule>) -> Vec<SourceAuthoredRule> {
+    rules
         .into_iter()
         .map(|rule| {
             if rule.name == "name" {
@@ -32,8 +31,60 @@ pub(super) fn parse_source_authored_grammar(source: &'static str) -> CompiledGra
                 rule
             }
         })
-        .collect();
-    CompiledGrammar::compile(rules)
+        .collect()
+}
+
+pub(super) fn parse_source_authored_grammar(source: &'static str) -> CompiledGrammar {
+    let (rules, diagnostics) = interloko_grammar::parse_grammar_source_with_diagnostics(source);
+    assert!(
+        diagnostics.is_empty(),
+        "compiler-owned grammar produced source diagnostics: {diagnostics:?}",
+    );
+    CompiledGrammar::compile(apply_loko_reserved_words(rules))
+}
+
+/// Compiles the base-loko grammar from source.
+///
+/// Reserved-word exclusions are applied to the `name` rule before
+/// compilation so identifier matches don't accept Loko keywords as
+/// names. The result is fresh per call; callers that parse many files
+/// should compile once and reuse the returned grammar.
+pub(super) fn compile_base_loko_grammar() -> CompiledGrammar {
+    parse_source_authored_grammar(BASE_LOKO_GRAMMAR_SOURCE)
+}
+
+/// Compiles the derived-host grammar by composing
+/// [`compile_base_loko_grammar`] with [`DERIVED_HOST_GRAMMAR_SOURCE`].
+///
+/// Inheritance is resolved at compile time via
+/// [`interloko_grammar::CompiledGrammar::try_compile_with_parent`], so
+/// the returned grammar is interpreted just like a flat grammar.
+/// Panics if `derived_host.grammar` produces source diagnostics or
+/// inherited arity mismatches; both grammars ship with the compiler
+/// and must always compile cleanly.
+pub(super) fn compile_derived_host_grammar() -> CompiledGrammar {
+    let parent = compile_base_loko_grammar();
+    compile_derived_host_grammar_with_parent(&parent)
+}
+
+/// Compiles derived-host against a caller-supplied base grammar.
+///
+/// Used by call sites that already have a compiled base-loko grammar
+/// in hand and want to avoid compiling it twice. The parent must be
+/// the base-loko grammar; passing an unrelated grammar leaves the
+/// derived-host references unresolved.
+pub(super) fn compile_derived_host_grammar_with_parent(
+    parent: &CompiledGrammar,
+) -> CompiledGrammar {
+    let parsed = interloko_grammar::parse_grammar_source_full(DERIVED_HOST_GRAMMAR_SOURCE);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "derived_host.grammar produced source diagnostics: {:?}",
+        parsed.diagnostics,
+    );
+    let rules = apply_loko_reserved_words(parsed.rules);
+    CompiledGrammar::try_compile_with_parent(rules, parent)
+        .expect("derived_host.grammar must compile against base-loko")
 }
 
 pub(super) fn interpret_region_result<'s>(

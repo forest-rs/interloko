@@ -1618,12 +1618,27 @@ pub fn compare_parser_products(
     }
 }
 
+/// Compiles the grammar that drives parsing for `environment_slug`.
+///
+/// Returns `derived-host`'s parametric grammar when the slug names that
+/// environment; otherwise returns plain base-loko. Unknown slugs map
+/// to base-loko so the fallback path in
+/// [`parse_file_with_registry`] still produces a parse.
+fn compile_grammar_for_environment(environment_slug: &str) -> interpreter::CompiledGrammar {
+    if environment_slug == DERIVED_HOST_ENVIRONMENT_SLUG {
+        interpreter::compile_derived_host_grammar()
+    } else {
+        interpreter::compile_base_loko_grammar()
+    }
+}
+
 fn parse_file_with_records(
     source_file: SourceFileId,
     source: &str,
     records: GrammarFrontendRecords,
 ) -> GrammarParseReport {
-    let (syntax, parse_tree) = match base_loko_primary::parse_file(source_file, source) {
+    let grammar = compile_grammar_for_environment(&records.environment.slug);
+    let (syntax, parse_tree) = match base_loko_primary::parse_file(&grammar, source_file, source) {
         Ok(success) => (success.syntax, Some(success.parse_tree)),
         Err(diagnostic) => (
             syntax_tree_with_diagnostic(source_file, source, diagnostic),
@@ -2116,14 +2131,15 @@ fn parse_staged_file(
     }
 
     let parser_source = source_with_staged_regions_blanked(source, &discovery.regions);
-    let (mut syntax, parse_tree) = match base_loko_primary::parse_file(source_file, &parser_source)
-    {
-        Ok(success) => (success.syntax, Some(success.parse_tree)),
-        Err(diagnostic) => (
-            syntax_tree_with_diagnostic(source_file, &parser_source, diagnostic),
-            None,
-        ),
-    };
+    let staged_grammar = interpreter::compile_base_loko_grammar();
+    let (mut syntax, parse_tree) =
+        match base_loko_primary::parse_file(&staged_grammar, source_file, &parser_source) {
+            Ok(success) => (success.syntax, Some(success.parse_tree)),
+            Err(diagnostic) => (
+                syntax_tree_with_diagnostic(source_file, &parser_source, diagnostic),
+                None,
+            ),
+        };
     syntax.diagnostics.extend(diagnostics);
 
     let active_effective_rules = records.effective_rules.to_vec();
@@ -2747,26 +2763,24 @@ pub fn base_loko_records() -> GrammarFrontendRecords {
     }
 }
 
-/// Source for the trusted derived host grammar.
-///
-/// The file currently declares `grammar derived-host extends base-loko`
-/// with no rule overrides; the `function-definition` override that
-/// appears below in the records is still a hand-rolled fixture marked
-/// [`ProjectionOrigin::TrustedHostFixture`]. Lifting that override into
-/// the source file needs a `super`-style parent-rule reference (the
-/// override's body is a self-delegation, which under normal inheritance
-/// would recurse into itself).
-const DERIVED_HOST_GRAMMAR_SOURCE: &str = include_str!("../grammars/derived_host.grammar");
-
 /// Slug used by `derived_host.grammar`'s `grammar` header.
 const DERIVED_HOST_GRAMMAR_HEADER_NAME: &str = "derived-host";
 /// Slug used in `derived_host.grammar`'s `extends` clause.
 const DERIVED_HOST_PARENT_HEADER_NAME: &str = "base-loko";
 
 /// Returns the trusted host-derived grammar records without parsing source.
+///
+/// The grammar source lives in `derived_host.grammar` (loaded via
+/// [`interpreter::DERIVED_HOST_GRAMMAR_SOURCE`]); the hand-rolled
+/// `function-definition` override that appears in the records is
+/// still a fixture marked [`ProjectionOrigin::TrustedHostFixture`].
+/// Lifting that override into the source file needs a `super`-style
+/// parent-rule reference (the override's body is a self-delegation,
+/// which under normal inheritance would recurse into itself).
 #[must_use]
 pub fn derived_host_records() -> GrammarFrontendRecords {
-    let parsed = interloko_grammar::parse_grammar_source_full(DERIVED_HOST_GRAMMAR_SOURCE);
+    let parsed =
+        interloko_grammar::parse_grammar_source_full(interpreter::DERIVED_HOST_GRAMMAR_SOURCE);
     assert!(
         parsed.diagnostics.is_empty(),
         "derived_host.grammar produced source diagnostics: {:?}",
@@ -2787,32 +2801,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
     let base_grammar_id = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
     let derived_environment_id = LanguageEnvironmentId::new(DERIVED_HOST_ENVIRONMENT_NAME);
     let derived_grammar_id = GrammarId::new(DERIVED_HOST_GRAMMAR_NAME);
-    let override_rule = GrammarRule {
-        id: GrammarRuleId::new(derived_grammar_id, "function-definition"),
-        grammar: derived_grammar_id,
-        grammar_slug: DERIVED_HOST_ENVIRONMENT_SLUG.to_string(),
-        name: "function-definition".to_string(),
-        expression: RuleExpression::transform(
-            RuleExpression::rule("function-definition"),
-            TransformOutput::Symbol("delegates-to-base-loko"),
-        ),
-        expression_data: SourceData::record(
-            "host-grammar-rule",
-            vec![
-                source_data::field("name", SourceData::symbol("function-definition")),
-                source_data::field("extends", SourceData::symbol("BaseLokoGrammar")),
-                source_data::field("delegates-to", SourceData::symbol("BaseLokoGrammar")),
-            ],
-        ),
-        action: None,
-        projection: GrammarProjection {
-            origin: ProjectionOrigin::TrustedHostFixture,
-            location: "host:DerivedHostGrammar/function-definition".to_string(),
-            source_span: None,
-        },
-    };
-    let mut rules = base_environment.rules;
-    rules.push(override_rule.clone());
+    let rules = base_environment.rules;
     let mut grammars = base_environment.grammars;
     let base_effective_rules = base_environment.effective_rules;
     let derived_effective_rules = derived_effective_rules(
@@ -2830,7 +2819,7 @@ pub fn derived_host_records() -> GrammarFrontendRecords {
         slug: DERIVED_HOST_ENVIRONMENT_SLUG.to_string(),
         name: DERIVED_HOST_GRAMMAR_NAME.to_string(),
         extends: vec![base_grammar_id],
-        direct_rules: vec![override_rule.id],
+        direct_rules: Vec::new(),
         effective_rules: derived_effective_rule_ids,
     });
     let mut effective_rules = base_effective_rules;
@@ -3913,7 +3902,13 @@ mod tests {
     }
 
     #[test]
-    fn derived_host_records_distinguish_direct_and_effective_rules() {
+    fn derived_host_records_reflect_no_direct_overrides() {
+        // derived_host.grammar currently has no rule overrides, so the
+        // records must report zero direct rules and every effective
+        // rule must resolve as `Inherited` from base-loko. This
+        // matches what the parser actually compiles via
+        // `compile_derived_host_grammar` — provenance and behavior
+        // agree.
         let records = derived_host_records();
         let derived_grammar = GrammarId::new(DERIVED_HOST_GRAMMAR_NAME);
         let base_grammar = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
@@ -3924,53 +3919,67 @@ mod tests {
             .expect("derived grammar exists");
 
         assert_eq!(grammar.extends, vec![base_grammar]);
-        assert_eq!(grammar.direct_rules.len(), 1);
+        assert!(grammar.direct_rules.is_empty());
         assert_eq!(grammar.effective_rules.len(), 26);
 
-        let direct_override = records
-            .rules
-            .iter()
-            .find(|rule| rule.grammar == derived_grammar && rule.name == "function-definition")
-            .expect("derived direct override");
-        assert_eq!(
-            direct_override.projection.origin,
-            ProjectionOrigin::TrustedHostFixture
-        );
-        assert_eq!(
-            source_data::dump(&direct_override.expression_data),
-            "host-grammar-rule(name: function-definition, extends: BaseLokoGrammar, delegates-to: BaseLokoGrammar)"
-        );
-        assert_eq!(
-            direct_override.expression.to_string(),
-            "function-definition => delegates-to-base-loko"
-        );
-        assert_eq!(
-            source_data::dump(&rule_expression_source_data(&direct_override.expression)),
-            "transform(input: rule-ref(name: function-definition), output: delegates-to-base-loko)"
+        assert!(
+            !records
+                .rules
+                .iter()
+                .any(|rule| rule.grammar == derived_grammar),
+            "derived-host must not contribute any direct rules until the source declares overrides",
         );
 
-        let effective_override = records
+        for effective in records
+            .effective_rules
+            .iter()
+            .filter(|rule| rule.grammar == derived_grammar)
+        {
+            assert_eq!(
+                effective.resolution,
+                EffectiveGrammarRuleResolution::Inherited,
+                "every derived-host effective rule must be Inherited (rule `{}`)",
+                effective.name,
+            );
+            assert_eq!(effective.selected_rule_grammar, base_grammar);
+        }
+    }
+
+    #[test]
+    fn derived_host_parsed_function_definition_resolves_as_inherited() {
+        // A function defined in derived-host source must be attributed
+        // to the inherited base-loko rule, not a fictional override.
+        // This pins the records-vs-parser invariant after the synthetic
+        // override was removed.
+        let report = parse_file_with_environment(
+            SourceFileId::from_path("derived.loko"),
+            "define function main() 1 end",
+            GrammarEnvironmentSelection::derived_host(),
+        );
+        let derived_grammar = GrammarId::new(DERIVED_HOST_GRAMMAR_NAME);
+        let base_grammar = GrammarId::new(BASE_LOKO_GRAMMAR_NAME);
+
+        let effective = report
             .effective_rules
             .iter()
             .find(|rule| rule.grammar == derived_grammar && rule.name == "function-definition")
-            .expect("derived effective override");
+            .expect("derived-host has an effective function-definition entry");
         assert_eq!(
-            effective_override.resolution,
-            EffectiveGrammarRuleResolution::Override
-        );
-        assert_eq!(effective_override.selected_rule, direct_override.id);
-        assert!(effective_override.overridden_rule.is_some());
-
-        let inherited = records
-            .effective_rules
-            .iter()
-            .find(|rule| rule.grammar == derived_grammar && rule.name == "class-definition")
-            .expect("derived inherited rule");
-        assert_eq!(
-            inherited.resolution,
+            effective.resolution,
             EffectiveGrammarRuleResolution::Inherited
         );
-        assert_eq!(inherited.selected_rule_grammar, base_grammar);
+        assert_eq!(effective.selected_rule_grammar, base_grammar);
+
+        let application_rule_names: Vec<&str> = report
+            .provenance
+            .applications
+            .iter()
+            .map(|app| app.rule_name.as_str())
+            .collect();
+        assert!(
+            application_rule_names.contains(&"function-definition"),
+            "parser must report at least one function-definition application",
+        );
     }
 
     #[test]
@@ -3985,8 +3994,9 @@ mod tests {
         assert!(parsed_base.diagnostics.is_empty());
         let base_compiled = interloko_grammar::CompiledGrammar::compile(parsed_base.rules);
 
-        let parsed_derived =
-            interloko_grammar::parse_grammar_source_full(DERIVED_HOST_GRAMMAR_SOURCE);
+        let parsed_derived = interloko_grammar::parse_grammar_source_full(
+            super::interpreter::DERIVED_HOST_GRAMMAR_SOURCE,
+        );
         assert!(parsed_derived.diagnostics.is_empty());
         assert_eq!(parsed_derived.header.name, Some("derived-host"));
         assert_eq!(parsed_derived.header.extends, Some("base-loko"));

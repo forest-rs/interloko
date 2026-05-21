@@ -11,11 +11,9 @@ use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree, Token,
 use crate::source_data::SourceData;
 
 use super::interpreter::{
-    InterpretedParseError, InterpretedRuleNode, interpret_region_result, interpret_rule_error,
-    interpreted_rule_node_source_data, parse_source_authored_grammar,
+    CompiledGrammar, InterpretedParseError, InterpretedRuleNode, interpret_region_result,
+    interpret_rule_error, interpreted_rule_node_source_data,
 };
-
-const BASE_LOKO_GRAMMAR_SOURCE: &str = include_str!("../../grammars/base_loko.grammar");
 
 pub(super) struct BaseLokoParseSuccess {
     pub(super) syntax: SyntaxTree,
@@ -23,12 +21,12 @@ pub(super) struct BaseLokoParseSuccess {
 }
 
 pub(super) fn parse_file(
+    grammar: &CompiledGrammar,
     source_file: SourceFileId,
     source: &str,
 ) -> Result<BaseLokoParseSuccess, Diagnostic> {
-    let grammar = parse_source_authored_grammar(BASE_LOKO_GRAMMAR_SOURCE);
-    let parse = interpret_region_result(&grammar, "source-file", source, 0)
-        .map_err(|error| base_loko_parse_diagnostic(&grammar, source, error))?;
+    let parse = interpret_region_result(grammar, "source-file", source, 0)
+        .map_err(|error| base_loko_parse_diagnostic(grammar, source, error))?;
     let tokens = syntax::lex(source);
     let projector = BaseLokoCstProjector {
         source_file,

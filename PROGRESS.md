@@ -1,5 +1,55 @@
 # Interloko Progress
 
+## Implemented: parse path uses the environment's compiled grammar
+
+- `base_loko_primary::parse_file` now takes the compiled grammar as a
+  parameter instead of compiling `BASE_LOKO_GRAMMAR_SOURCE` internally.
+  Callers decide which grammar drives the parse.
+- `grammar_frontend::parse_file_with_records` looks at
+  `records.environment.slug` and routes through
+  `compile_grammar_for_environment` to pick the right grammar:
+  base-loko for everyone except the `derived-host` slug, which uses
+  `compile_derived_host_grammar` (composes
+  `derived_host.grammar` against the base via
+  `try_compile_with_parent` at load time).
+- Two new helpers in `grammar_frontend::interpreter`:
+  `compile_base_loko_grammar` and `compile_derived_host_grammar` (plus
+  the lower-level `compile_derived_host_grammar_with_parent` for call
+  sites that already hold a base grammar). The
+  reserved-word post-processing for the `name` rule is factored into
+  `apply_loko_reserved_words` and shared between both helpers.
+- `try_compile_with_parent` now runs on the hot parse path for
+  derived-host, not only in a startup test. Inheritance is load-bearing
+  in the parser, not just in the records layer.
+- Removed the synthetic `function-definition` override that
+  `derived_host_records` used to inject. The parser does not use that
+  override (it compiles `derived_host.grammar`, which has no
+  overrides), and matching applications against the synthetic record
+  would attribute parsed function-definitions to a derived rule the
+  compiler never ran. The records now reflect reality: zero direct
+  rules, every effective rule resolves as `Inherited` from base. A
+  new test
+  `derived_host_parsed_function_definition_resolves_as_inherited`
+  pins the records-vs-parser invariant by parsing a function under
+  derived-host and checking the effective-rule resolution.
+
+Deferred:
+
+- Compiled grammars are not yet cached across calls. Each parse
+  recompiles its grammar; the previous code did the same so this is
+  not a regression, but a `OnceLock`-or-equivalent cache would help
+  once profiling shows the cost. The kernel crate is `no_std + alloc`,
+  so the cache primitive needs to stay no-std-clean.
+- `derived_host.grammar` still has no rule overrides — derived-host
+  parses the same surface language as base-loko. The natural follow-up
+  is either a `super.<rule>` kernel feature so overrides can extend
+  parent rules without duplication, or a duplication-style override
+  that adds a derived-only form to demonstrate the path end-to-end.
+- `compile_grammar_for_environment` is a hardcoded slug switch. If
+  another environment provider lands, this is the next call site to
+  generalize — likely by moving the compiled-grammar accessor onto
+  `GrammarEnvironmentProvider` itself.
+
 ## Implemented: `derived_host.grammar` declares inheritance from source
 
 - New `crates/interloko_compiler/grammars/derived_host.grammar` declares

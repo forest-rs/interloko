@@ -387,18 +387,22 @@ fn registry_command_lists_registered_frontend_entries() {
 
 #[test]
 fn grammar_header_selects_derived_host_stack() {
+    // derived_host.grammar currently has no rule overrides, so every
+    // derived-host rule is inherited from base-loko. EOP records must
+    // not advertise direct overrides that the parser does not use.
     let file = fixture("derived_grammar.loko");
     let path = file.to_str().expect("fixture path should be utf8");
     let eop = run_lab(&["eop", path]);
 
     assert!(eop.contains("object language-environment:derived-host"));
     assert!(eop.contains("object grammar:derived-host"));
-    assert!(eop.contains("object grammar-rule:derived-host/function-definition"));
-    assert!(eop.contains("origin=host-provided storage=cached-artifact"));
-    assert!(eop.contains("data=host-grammar-rule"));
+    assert!(
+        !eop.contains("object grammar-rule:derived-host/"),
+        "derived-host must not emit direct grammar-rule records until the source declares overrides",
+    );
     assert!(eop.contains("object effective-grammar-rule:derived-host/function-definition"));
-    assert!(eop.contains("resolution=override"));
     assert!(eop.contains("object effective-grammar-rule:derived-host/class-definition"));
+    assert!(!eop.contains("resolution=override"));
     assert!(eop.contains("resolution=inherited"));
 
     let stack = run_lab(&[
@@ -417,7 +421,7 @@ fn grammar_header_selects_derived_host_stack() {
         "show-grammar-rule",
     ]);
     assert!(rule.contains("effective grammar rule"));
-    assert!(rule.contains("resolution override"));
+    assert!(rule.contains("resolution inherited"));
 }
 
 #[test]
