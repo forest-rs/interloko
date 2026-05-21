@@ -1155,6 +1155,17 @@ pub struct FrontendParseArtifact {
     /// (`rule_at_offset`, `smallest_covering_span`, `path_to_offset`)
     /// should walk this tree.
     ///
+    /// On parse failure this may still be `Some`, holding the
+    /// matched root prefix when the root rule itself completed but
+    /// complete-region parsing later failed — typically trailing or
+    /// unconsumed input after a well-formed prefix. The kernel does
+    /// not preserve in-progress subtrees from a *root rule that did
+    /// not complete*, so a hard failure inside the root leaves this
+    /// `None` and the diagnostic is the only signal. Editors should
+    /// treat the partial tree as authoritative for the spans it
+    /// covers and rely on the parse diagnostic for the failure
+    /// position.
+    ///
     /// Spans and `text` on this tree describe the *parsed* source —
     /// which may differ from the original file when
     /// [`Self::source`] is [`FrontendParseSource::StagedRegionsBlanked`].
@@ -1671,10 +1682,10 @@ fn parse_file_with_records(
                 Some(success.parse_tree),
                 Some(success.parse_tree_data),
             ),
-            Err(diagnostic) => (
-                syntax_tree_with_diagnostic(source_file, source, diagnostic),
-                None,
-                None,
+            Err(failure) => (
+                syntax_tree_with_diagnostic(source_file, source, failure.diagnostic),
+                failure.partial_tree,
+                failure.partial_tree_data,
             ),
         };
     let active_grammar = records.active_grammar;
@@ -2172,10 +2183,10 @@ fn parse_staged_file(
                 Some(success.parse_tree),
                 Some(success.parse_tree_data),
             ),
-            Err(diagnostic) => (
-                syntax_tree_with_diagnostic(source_file, &parser_source, diagnostic),
-                None,
-                None,
+            Err(failure) => (
+                syntax_tree_with_diagnostic(source_file, &parser_source, failure.diagnostic),
+                failure.partial_tree,
+                failure.partial_tree_data,
             ),
         };
     syntax.diagnostics.extend(diagnostics);
@@ -4123,6 +4134,37 @@ mod tests {
         let dump = source_data::dump(parse_tree_data);
         assert!(dump.contains("rule: source-file"));
         assert!(dump.contains("rule: function-definition"));
+    }
+
+    #[test]
+    fn parse_failure_still_preserves_partial_parse_tree() {
+        // The first definition is well-formed; the second has a
+        // truncated parameter list that the parser cannot complete.
+        // Editor-grade behavior: report the diagnostic AND keep the
+        // well-formed prefix navigable.
+        let source = "define function ok() 1 end;\n\
+                      define function broken(";
+        let report = parse_file(SourceFileId::from_path("partial.loko"), source);
+
+        assert!(
+            !report.syntax.diagnostics.is_empty(),
+            "syntax diagnostic must be reported for the truncated input",
+        );
+
+        let parse_tree = report
+            .frontend_parse
+            .parse_tree
+            .as_ref()
+            .expect("partial parse tree preserved after failure");
+        assert_eq!(parse_tree.name(), Some("source-file"));
+        let ok_definition = parse_tree
+            .walk()
+            .find(|node| node.is_rule("function-definition") && node.text.contains("ok"))
+            .expect("the well-formed function-definition is still in the partial tree");
+        assert!(
+            ok_definition.span.end <= source.len(),
+            "partial tree spans stay within the parsed source",
+        );
     }
 
     #[test]

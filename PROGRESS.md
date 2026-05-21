@@ -1,5 +1,47 @@
 # Interloko Progress
 
+## Implemented: partial parse tree preserved through failure
+
+- `base_loko_primary::parse_file` switched from the Result-returning
+  `interpret_region_result` to the inspect-style
+  `inspect_region_result`. The kernel's `ParseReport` carries both
+  a possibly-partial root and an optional error; we keep the root
+  on either path.
+- New `BaseLokoParseFailure { diagnostic, partial_tree,
+  partial_tree_data }` returned on parse failure. Callers in
+  `parse_file_with_records` and the staged-parse path extract the
+  partial tree and stash it on `FrontendParseArtifact.parse_tree`
+  alongside the synthetic syntax diagnostic. (Clippy flagged the
+  large `Err` variant, so the failure is boxed.)
+- Editor consumers now see a navigable parse tree when the root
+  rule itself completed and complete-region parsing failed only
+  on trailing/unconsumed input — the common shape for a
+  well-formed prefix followed by junk or a broken trailing form.
+  `rule_at_offset` / `path_to_offset` work over the prefix. The
+  kernel does *not* preserve in-progress subtrees from a root
+  rule that did not complete, so a mid-root hard failure still
+  leaves `parse_tree` as `None`.
+- The `parse_tree` field doc on `FrontendParseArtifact` spells
+  this out: `Some` with diagnostics means the matched root prefix
+  is present; `None` covers the case where the root rule never
+  completed.
+- New compiler-side test
+  `parse_failure_still_preserves_partial_parse_tree`: parses a
+  well-formed function followed by a truncated one, asserts the
+  diagnostic is present AND the partial tree contains the
+  well-formed function-definition with sane spans.
+
+Deferred:
+
+- This is panic-mode-style preservation only — no skip-and-retry
+  recovery. A file with a typo in the middle still stops parsing
+  at the first failure; everything after is unstructured. The
+  next slice in Phase 3 error recovery would add anchor-based
+  resync (skip forward to the next plausible top-level form and
+  continue iterating).
+- Editor-grade recovery proper still wants error-node insertion
+  inside the parse tree, not just at the top level.
+
 ## Implemented: lossless parse tree on `GrammarParseReport`
 
 - New `OwnedRuleNode` and `OwnedRuleNodeKind` types in the kernel:

@@ -11,7 +11,7 @@ use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree, Token,
 use crate::source_data::SourceData;
 
 use super::interpreter::{
-    CompiledGrammar, InterpretedParseError, InterpretedRuleNode, interpret_region_result,
+    CompiledGrammar, InterpretedParseError, InterpretedRuleNode, inspect_region_result,
     interpret_rule_error, interpreted_rule_node_source_data,
 };
 
@@ -21,27 +21,56 @@ pub(super) struct BaseLokoParseSuccess {
     pub(super) parse_tree_data: SourceData,
 }
 
+/// Parse failure that still carries whatever the kernel matched
+/// before stopping. Editor consumers use [`Self::partial_tree`] to
+/// keep highlighting and navigating a half-broken file; the
+/// diagnostic still drives error reporting.
+pub(super) struct BaseLokoParseFailure {
+    pub(super) diagnostic: Diagnostic,
+    pub(super) partial_tree: Option<interloko_grammar::OwnedRuleNode>,
+    pub(super) partial_tree_data: Option<SourceData>,
+}
+
 pub(super) fn parse_file(
     grammar: &CompiledGrammar,
     source_file: SourceFileId,
     source: &str,
-) -> Result<BaseLokoParseSuccess, Diagnostic> {
-    let parse = interpret_region_result(grammar, "source-file", source, 0)
-        .map_err(|error| base_loko_parse_diagnostic(grammar, source, error))?;
-    let tokens = syntax::lex(source);
-    let projector = BaseLokoCstProjector {
-        source_file,
-        source,
-        tokens,
-    };
-    let parse_tree_data = interpreted_rule_node_source_data(&parse.root);
-    let parse_tree = parse.root.to_owned_tree();
-    let syntax = projector.project(&parse.root);
-    Ok(BaseLokoParseSuccess {
-        parse_tree,
-        parse_tree_data,
-        syntax,
-    })
+) -> Result<BaseLokoParseSuccess, alloc::boxed::Box<BaseLokoParseFailure>> {
+    let report = inspect_region_result(grammar, "source-file", source, 0);
+    match (report.root, report.error) {
+        (Some(root), None) => {
+            let tokens = syntax::lex(source);
+            let projector = BaseLokoCstProjector {
+                source_file,
+                source,
+                tokens,
+            };
+            let parse_tree_data = interpreted_rule_node_source_data(&root);
+            let parse_tree = root.to_owned_tree();
+            let syntax = projector.project(&root);
+            Ok(BaseLokoParseSuccess {
+                parse_tree,
+                parse_tree_data,
+                syntax,
+            })
+        }
+        (root, Some(error)) => {
+            let partial_tree_data = root.as_ref().map(interpreted_rule_node_source_data);
+            let partial_tree = root.map(|r| r.to_owned_tree());
+            let diagnostic = base_loko_parse_diagnostic(grammar, source, error);
+            Err(alloc::boxed::Box::new(BaseLokoParseFailure {
+                diagnostic,
+                partial_tree,
+                partial_tree_data,
+            }))
+        }
+        (None, None) => {
+            // The kernel always returns at least one of root or error;
+            // an empty report would be a kernel bug, not a recoverable
+            // condition.
+            unreachable!("inspect_region_compiled returned neither a root nor an error");
+        }
+    }
 }
 
 fn base_loko_parse_diagnostic(
