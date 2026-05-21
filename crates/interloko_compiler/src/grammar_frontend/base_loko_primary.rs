@@ -17,7 +17,8 @@ use super::interpreter::{
 
 pub(super) struct BaseLokoParseSuccess {
     pub(super) syntax: SyntaxTree,
-    pub(super) parse_tree: SourceData,
+    pub(super) parse_tree: interloko_grammar::OwnedRuleNode,
+    pub(super) parse_tree_data: SourceData,
 }
 
 pub(super) fn parse_file(
@@ -33,9 +34,13 @@ pub(super) fn parse_file(
         source,
         tokens,
     };
+    let parse_tree_data = interpreted_rule_node_source_data(&parse.root);
+    let parse_tree = parse.root.to_owned_tree();
+    let syntax = projector.project(&parse.root);
     Ok(BaseLokoParseSuccess {
-        parse_tree: interpreted_rule_node_source_data(&parse.root),
-        syntax: projector.project(&parse.root),
+        parse_tree,
+        parse_tree_data,
+        syntax,
     })
 }
 

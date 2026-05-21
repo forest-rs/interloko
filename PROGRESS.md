@@ -1,5 +1,47 @@
 # Interloko Progress
 
+## Implemented: lossless parse tree on `GrammarParseReport`
+
+- New `OwnedRuleNode` and `OwnedRuleNodeKind` types in the kernel:
+  lifetime-free clones of `RuleNode` / `RuleNodeKind`, owning the
+  matched source text and grammar names. `RuleNode::to_owned_tree`
+  produces the owned form in a single walk.
+- Position-query helpers live on both forms:
+  - `path_to_offset(offset)` — root-to-leaf path of nodes covering
+    the offset.
+  - `smallest_covering_span(span)` — smallest node whose span fully
+    contains the input.
+  - `descendants_in_span(span)` — preorder list of nodes contained
+    in the input span.
+  - `rule_at_offset(offset)` — **new** convenience: deepest *named*
+    rule containing the offset, skipping literals and character
+    classes. The natural query for editor consumers asking "what
+    rule is the cursor in?"
+  The borrowed `RuleNode` already had the first three; this commit
+  adds `rule_at_offset` there and mirrors all four on the owned
+  form so downstream consumers don't have to keep the kernel parse
+  alive to use them.
+- `FrontendParseArtifact.parse_tree` is now `Option<OwnedRuleNode>`
+  (was `Option<SourceData>`). The flat-data projection moves to a
+  new `parse_tree_data: Option<SourceData>` field, populated
+  alongside, so dump-style callers keep working. Editor and tool
+  consumers asking position questions go through `parse_tree`.
+- Kernel tests pin: owned-form round-trip preserves structure and
+  text; `rule_at_offset` returns the deepest named rule for each
+  cursor position (and falls back to the enclosing rule when the
+  offset lies on a literal); owned-form `path_to_offset` and
+  `smallest_covering_span` agree with the borrowed-form versions
+  on the same input.
+
+Deferred:
+
+- Position-query coverage on the source-data projection isn't
+  needed: callers that want structured queries should use
+  `parse_tree` directly. `parse_tree_data` stays untyped for
+  dumps and golden tests.
+- Incremental reparse, editor-grade error recovery, and indirect
+  left recursion are the remaining Phase 3 items.
+
 ## Implemented: `super.<rule>` parent-grammar references in the kernel
 
 - New `RuleExpression::Super(name)` variant. Surface syntax in

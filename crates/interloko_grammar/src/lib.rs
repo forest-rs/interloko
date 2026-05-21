@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -1278,6 +1279,249 @@ impl<'g, 's> RuleNode<'g, 's> {
                 None => return path,
             }
         }
+    }
+}
+
+impl RuleNode<'_, '_> {
+    /// Returns the deepest *named-rule* node whose span contains `offset`.
+    ///
+    /// Filters out literal, character-class, and opaque-region nodes
+    /// so the result is the most specific named grammar rule active
+    /// at the offset — useful for editor consumers that want to ask
+    /// "what rule is the cursor in?" without seeing punctuation
+    /// tokens.
+    ///
+    /// In a successful root parse this practically always returns
+    /// some named rule: when the offset falls on punctuation or
+    /// trivia, the walk falls back to the enclosing rule whose span
+    /// covers that text. `None` is reserved for the case where
+    /// `offset` lies entirely outside this subtree's span.
+    #[must_use]
+    pub fn rule_at_offset(&self, offset: usize) -> Option<&RuleNode<'_, '_>> {
+        self.path_to_offset(offset)
+            .into_iter()
+            .rev()
+            .find(|node| node.is_named())
+    }
+}
+
+/// Owned, lifetime-free parse tree that mirrors [`RuleNode`].
+///
+/// The borrowed [`RuleNode`] is convenient inside the parser but it
+/// borrows from both the grammar source and the parsed text, so it
+/// can't be carried across those lifetimes. [`OwnedRuleNode`] is the
+/// long-lived form for downstream consumers (compiler frontend,
+/// editors, doc generators): produced once via
+/// [`RuleNode::to_owned_tree`] and queried freely thereafter.
+///
+/// Marked `#[non_exhaustive]` so future kernel commits can add
+/// per-node metadata without breaking downstream pattern matches.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct OwnedRuleNode {
+    /// Grammar node kind, with owned strings.
+    pub kind: OwnedRuleNodeKind,
+    /// Matched source span.
+    pub span: Span,
+    /// Matched source text (owned).
+    pub text: String,
+    /// Child rule/literal/class nodes produced while matching this rule.
+    pub children: Vec<OwnedRuleNode>,
+    /// Optional binding name attached by a parent `name:expr` wrapper.
+    pub binding_name: Option<String>,
+}
+
+/// Owned analogue of [`RuleNodeKind`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum OwnedRuleNodeKind {
+    /// A node produced by a named grammar rule.
+    Rule {
+        /// Matched grammar rule name.
+        name: String,
+    },
+    /// A node produced by a literal expression.
+    Literal {
+        /// Literal token from the grammar.
+        value: String,
+    },
+    /// A node produced by a character-class expression.
+    CharacterClass {
+        /// Character-class expression from the grammar.
+        value: String,
+    },
+    /// A node produced by an opaque `until(...)` expression.
+    OpaqueRegion {
+        /// Delimiter that ended the opaque region.
+        delimiter: String,
+    },
+}
+
+impl OwnedRuleNodeKind {
+    /// Returns the structural role for this node kind.
+    #[must_use]
+    pub const fn role(&self) -> RuleNodeRole {
+        match self {
+            Self::Rule { .. } => RuleNodeRole::NamedRule,
+            Self::Literal { .. } => RuleNodeRole::Literal,
+            Self::CharacterClass { .. } => RuleNodeRole::CharacterClass,
+            Self::OpaqueRegion { .. } => RuleNodeRole::OpaqueRegion,
+        }
+    }
+
+    /// Returns the grammar rule name when this is a named-rule kind.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Rule { name } => Some(name.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl OwnedRuleNode {
+    /// Builds an owned copy of `node`, cloning all borrowed strings.
+    #[must_use]
+    pub fn from_rule_node(node: &RuleNode<'_, '_>) -> Self {
+        Self {
+            kind: match node.kind {
+                RuleNodeKind::Rule { name } => OwnedRuleNodeKind::Rule {
+                    name: name.to_string(),
+                },
+                RuleNodeKind::Literal { value } => OwnedRuleNodeKind::Literal {
+                    value: value.to_string(),
+                },
+                RuleNodeKind::CharacterClass { value } => OwnedRuleNodeKind::CharacterClass {
+                    value: value.to_string(),
+                },
+                RuleNodeKind::OpaqueRegion { delimiter } => OwnedRuleNodeKind::OpaqueRegion {
+                    delimiter: delimiter.to_string(),
+                },
+            },
+            span: node.span,
+            text: node.text.to_string(),
+            children: node.children.iter().map(Self::from_rule_node).collect(),
+            binding_name: node.binding_name.map(ToString::to_string),
+        }
+    }
+
+    /// Returns the structural role of this parse-tree node.
+    #[must_use]
+    pub fn role(&self) -> RuleNodeRole {
+        self.kind.role()
+    }
+
+    /// Returns the grammar rule name when this is a named-rule node.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.kind.name()
+    }
+
+    /// Returns true when this node is a named grammar rule with `rule_name`.
+    #[must_use]
+    pub fn is_rule(&self, rule_name: &str) -> bool {
+        self.name() == Some(rule_name)
+    }
+
+    /// Returns true when this node came from a named grammar rule.
+    #[must_use]
+    pub fn is_named(&self) -> bool {
+        self.role() == RuleNodeRole::NamedRule
+    }
+
+    /// Returns a preorder iterator over this node and all descendants.
+    pub fn walk(&self) -> OwnedRuleNodeWalk<'_> {
+        OwnedRuleNodeWalk { stack: vec![self] }
+    }
+
+    /// Returns the smallest node that fully contains `span`.
+    #[must_use]
+    pub fn smallest_covering_span(&self, span: Span) -> Option<&OwnedRuleNode> {
+        if !self.span.contains_span(span) {
+            return None;
+        }
+        self.children
+            .iter()
+            .filter_map(|child| child.smallest_covering_span(span))
+            .min_by_key(|node| node.span.end.saturating_sub(node.span.start))
+            .or(Some(self))
+    }
+
+    /// Returns every node in this subtree whose span is fully contained
+    /// in `span`, in preorder.
+    #[must_use]
+    pub fn descendants_in_span(&self, span: Span) -> Vec<&OwnedRuleNode> {
+        self.walk()
+            .filter(|node| span.contains_span(node.span))
+            .collect()
+    }
+
+    /// Returns the path of nodes covering `offset`, root first.
+    #[must_use]
+    pub fn path_to_offset(&self, offset: usize) -> Vec<&OwnedRuleNode> {
+        let mut path = Vec::new();
+        if !self.span.contains_offset(offset) {
+            return path;
+        }
+        let mut current = self;
+        path.push(current);
+        loop {
+            let next = current
+                .children
+                .iter()
+                .find(|child| child.span.contains_offset(offset));
+            match next {
+                Some(child) => {
+                    path.push(child);
+                    current = child;
+                }
+                None => return path,
+            }
+        }
+    }
+
+    /// Returns the deepest *named-rule* node whose span contains `offset`.
+    ///
+    /// Filters out literal, character-class, and opaque-region nodes
+    /// so the result is the most specific named grammar rule active
+    /// at the offset — useful for editor consumers that want to ask
+    /// "what rule is the cursor in?" without seeing punctuation
+    /// tokens.
+    ///
+    /// In a successful root parse this practically always returns
+    /// some named rule: when the offset falls on punctuation or
+    /// trivia, the walk falls back to the enclosing rule whose span
+    /// covers that text. `None` is reserved for the case where
+    /// `offset` lies entirely outside this subtree's span.
+    #[must_use]
+    pub fn rule_at_offset(&self, offset: usize) -> Option<&OwnedRuleNode> {
+        self.path_to_offset(offset)
+            .into_iter()
+            .rev()
+            .find(|node| node.is_named())
+    }
+}
+
+impl RuleNode<'_, '_> {
+    /// Builds an owned, lifetime-free copy of this parse tree.
+    #[must_use]
+    pub fn to_owned_tree(&self) -> OwnedRuleNode {
+        OwnedRuleNode::from_rule_node(self)
+    }
+}
+
+/// Preorder iterator returned by [`OwnedRuleNode::walk`].
+pub struct OwnedRuleNodeWalk<'a> {
+    stack: Vec<&'a OwnedRuleNode>,
+}
+
+impl<'a> Iterator for OwnedRuleNodeWalk<'a> {
+    type Item = &'a OwnedRuleNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.stack.pop()?;
+        self.stack.extend(node.children.iter().rev());
+        Some(node)
     }
 }
 
@@ -3397,6 +3641,81 @@ fn count_rule<'g>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_rule_node_round_trips_from_borrowed_tree() {
+        // Build a borrowed parse tree, convert to the owned form,
+        // and confirm the structure and texts survive intact.
+        let grammar = "grammar tiny\nrule pair = name `:` type-name\nrule name = [A-Za-z]+ \nrule type-name = `<` name `>`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse =
+            interpret_region(&rules, "pair", "radius: <integer>", 0).expect("pair should parse");
+        let owned = parse.root.to_owned_tree();
+
+        assert_eq!(owned.name(), Some("pair"));
+        assert_eq!(owned.span, Span::new(0, 17));
+        assert_eq!(owned.text, "radius: <integer>");
+        assert!(owned.walk().any(|node| node.is_rule("type-name")));
+    }
+
+    #[test]
+    fn owned_rule_node_rule_at_offset_returns_deepest_named_rule() {
+        // `radius: <integer>` — at the `r` (offset 0) the deepest
+        // named rule is `name`. At the `i` inside `<integer>`
+        // (offset 9) the deepest named rule is the inner `name`
+        // child of `type-name`. At the `:` (offset 6) no named
+        // rule contains the offset; the only thing covering it is
+        // a literal child, so rule_at_offset returns the enclosing
+        // `pair` rule.
+        let grammar = "grammar tiny\nrule pair = name `:` type-name\nrule name = [A-Za-z]+ \nrule type-name = `<` name `>`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse =
+            interpret_region(&rules, "pair", "radius: <integer>", 0).expect("pair should parse");
+        let owned = parse.root.to_owned_tree();
+
+        let at_radius = owned.rule_at_offset(0).expect("rule at radius");
+        assert_eq!(at_radius.name(), Some("name"));
+        assert_eq!(at_radius.text, "radius");
+
+        let at_integer = owned.rule_at_offset(9).expect("rule at integer");
+        // The inner `name` inside `type-name` is the deepest named
+        // rule at this offset.
+        assert_eq!(at_integer.name(), Some("name"));
+        assert_eq!(at_integer.text, "integer");
+
+        let at_colon = owned.rule_at_offset(6).expect("pair encloses colon");
+        assert_eq!(at_colon.name(), Some("pair"));
+    }
+
+    #[test]
+    fn owned_rule_node_path_and_enclosing_span_helpers_match_borrowed() {
+        // Sanity-check that the owned-form path_to_offset and
+        // smallest_covering_span agree with the borrowed-form
+        // versions on the same source. Mirrors the borrowed tests
+        // so future changes to either side stay in lockstep.
+        let grammar = "grammar tiny\nrule pair = name `:` type-name\nrule name = [A-Za-z]+ \nrule type-name = `<` name `>`\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parse =
+            interpret_region(&rules, "pair", "radius: <integer>", 0).expect("pair should parse");
+        let owned = parse.root.to_owned_tree();
+
+        let borrowed_path = parse.root.path_to_offset(9);
+        let owned_path = owned.path_to_offset(9);
+        assert_eq!(borrowed_path.len(), owned_path.len());
+        for (borrowed_node, owned_node) in borrowed_path.iter().zip(owned_path.iter()) {
+            assert_eq!(borrowed_node.name(), owned_node.name());
+            assert_eq!(borrowed_node.span, owned_node.span);
+        }
+
+        let span = Span::new(9, 16);
+        let borrowed_cover = parse
+            .root
+            .smallest_covering_span(span)
+            .expect("borrowed covers");
+        let owned_cover = owned.smallest_covering_span(span).expect("owned covers");
+        assert_eq!(borrowed_cover.name(), owned_cover.name());
+        assert_eq!(borrowed_cover.span, owned_cover.span);
+    }
 
     #[test]
     fn parses_and_interprets_tiny_grammar() {

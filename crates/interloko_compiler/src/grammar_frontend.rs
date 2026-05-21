@@ -1147,8 +1147,30 @@ pub struct FrontendParseArtifact {
     pub source: FrontendParseSource,
     /// Span of the source parsed by this artifact.
     pub source_span: Span,
-    /// Owned parse-tree projection when the grammar parse succeeded.
-    pub parse_tree: Option<SourceData>,
+    /// Owned, navigable parse tree produced by the kernel matcher.
+    ///
+    /// This is the lossless form: spans, raw text, and child
+    /// structure are preserved exactly as the matcher built them.
+    /// Editor consumers and tools that want position-based queries
+    /// (`rule_at_offset`, `smallest_covering_span`, `path_to_offset`)
+    /// should walk this tree.
+    ///
+    /// Spans and `text` on this tree describe the *parsed* source —
+    /// which may differ from the original file when
+    /// [`Self::source`] is [`FrontendParseSource::StagedRegionsBlanked`].
+    /// In that mode the parser consumed a copy of the file with
+    /// staged regions blanked out, so `parse_tree.text` does *not*
+    /// slice the original file across blanked spans. Tools that
+    /// need original-file text should keep the file contents
+    /// alongside and use spans rather than the embedded `text`.
+    pub parse_tree: Option<interloko_grammar::OwnedRuleNode>,
+    /// Inert structural projection of the parse tree as `SourceData`.
+    ///
+    /// Equivalent in content to [`Self::parse_tree`] but flattened to
+    /// generic data records — convenient for dumps, golden tests, and
+    /// tools that traverse parser facts without a parse-tree
+    /// dependency. Populated alongside [`Self::parse_tree`].
+    pub parse_tree_data: Option<SourceData>,
     /// Number of CST nodes produced by projection.
     pub cst_node_count: usize,
     /// Number of parser diagnostics attached to the syntax tree.
@@ -1642,13 +1664,19 @@ fn parse_file_with_records(
     records: GrammarFrontendRecords,
 ) -> GrammarParseReport {
     let grammar = compile_grammar_for_environment(&records.environment.slug);
-    let (syntax, parse_tree) = match base_loko_primary::parse_file(&grammar, source_file, source) {
-        Ok(success) => (success.syntax, Some(success.parse_tree)),
-        Err(diagnostic) => (
-            syntax_tree_with_diagnostic(source_file, source, diagnostic),
-            None,
-        ),
-    };
+    let (syntax, parse_tree, parse_tree_data) =
+        match base_loko_primary::parse_file(&grammar, source_file, source) {
+            Ok(success) => (
+                success.syntax,
+                Some(success.parse_tree),
+                Some(success.parse_tree_data),
+            ),
+            Err(diagnostic) => (
+                syntax_tree_with_diagnostic(source_file, source, diagnostic),
+                None,
+                None,
+            ),
+        };
     let active_grammar = records.active_grammar;
     let active_grammar_slug = records
         .grammars
@@ -1682,6 +1710,7 @@ fn parse_file_with_records(
         source: FrontendParseSource::OriginalSource,
         source_span: Span::new(0, source.len()),
         parse_tree,
+        parse_tree_data,
         cst_node_count: cst_node_count(&syntax.root),
         diagnostic_count: syntax.diagnostics.len(),
     };
@@ -2136,11 +2165,16 @@ fn parse_staged_file(
 
     let parser_source = source_with_staged_regions_blanked(source, &discovery.regions);
     let staged_grammar = interpreter::compile_base_loko_grammar();
-    let (mut syntax, parse_tree) =
+    let (mut syntax, parse_tree, parse_tree_data) =
         match base_loko_primary::parse_file(&staged_grammar, source_file, &parser_source) {
-            Ok(success) => (success.syntax, Some(success.parse_tree)),
+            Ok(success) => (
+                success.syntax,
+                Some(success.parse_tree),
+                Some(success.parse_tree_data),
+            ),
             Err(diagnostic) => (
                 syntax_tree_with_diagnostic(source_file, &parser_source, diagnostic),
+                None,
                 None,
             ),
         };
@@ -2188,6 +2222,7 @@ fn parse_staged_file(
         source: FrontendParseSource::StagedRegionsBlanked,
         source_span: Span::new(0, source.len()),
         parse_tree,
+        parse_tree_data,
         cst_node_count: cst_node_count(&syntax.root),
         diagnostic_count: syntax.diagnostics.len(),
     };
@@ -2775,7 +2810,7 @@ const DERIVED_HOST_PARENT_HEADER_NAME: &str = "base-loko";
 /// Returns the trusted host-derived grammar records without parsing source.
 ///
 /// The grammar source lives in `derived_host.grammar` (loaded via
-/// [`interpreter::DERIVED_HOST_GRAMMAR_SOURCE`]); the hand-rolled
+/// `interpreter::DERIVED_HOST_GRAMMAR_SOURCE`); the hand-rolled
 /// `function-definition` override that appears in the records is
 /// still a fixture marked [`ProjectionOrigin::TrustedHostFixture`].
 /// Lifting that override into the source file needs a `super`-style
@@ -4072,7 +4107,20 @@ mod tests {
             .parse_tree
             .as_ref()
             .expect("successful parse preserves an owned parse-tree artifact");
-        let dump = source_data::dump(parse_tree);
+        assert_eq!(parse_tree.name(), Some("source-file"));
+        assert!(
+            parse_tree
+                .walk()
+                .any(|node| node.is_rule("function-definition")),
+            "parse tree contains the function-definition rule"
+        );
+
+        let parse_tree_data = report
+            .frontend_parse
+            .parse_tree_data
+            .as_ref()
+            .expect("source-data projection alongside the typed tree");
+        let dump = source_data::dump(parse_tree_data);
         assert!(dump.contains("rule: source-file"));
         assert!(dump.contains("rule: function-definition"));
     }
