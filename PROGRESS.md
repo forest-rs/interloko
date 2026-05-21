@@ -1,5 +1,47 @@
 # Interloko Progress
 
+## Implemented: skip-and-retry recovery for top-level repetitions
+
+- New `RuleNodeKind::RecoveryError` (and matching
+  `OwnedRuleNodeKind::RecoveryError`, `RuleNodeRole::RecoveryError`):
+  a synthetic kind never produced by ordinary parsing, only by
+  recovering entry points. The node's span and text describe a
+  source region the matcher could not parse.
+- New `interpret_region_recovering(grammar, root_rule, source,
+  source_offset) -> RecoveryReport<'g, 's>` kernel entry point.
+  When the root rule's body is `Rule(inner)*` or `Rule(inner)+`,
+  the matcher repeatedly tries `inner`; on per-iteration failure
+  it scans forward (char-by-char) for the next position where
+  `inner` matches, emits a `RecoveryError` child for the skipped
+  region, and continues iterating. For non-repetition root rules
+  the matcher falls back to `inspect_region_compiled` and surfaces
+  the result through the same shape.
+- New `RecoveryReport` type carries the (possibly-partial) root
+  plus a `Vec<ParseError>` listing every failure the recovery
+  skipped past — editor consumers can use both: the tree drives
+  navigation, the errors drive diagnostics.
+- The recovery loop bails on zero-width matches so a rule that
+  succeeds without consuming input can't infinite-loop the
+  scanner; it falls into the failure branch instead.
+- Four kernel tests cover the contract: broken middle gets
+  skipped and the parser resumes after it; trailing junk with no
+  resync produces a single trailing `RecoveryError` plus the
+  well-formed prefix; non-repetition root rules fall back
+  cleanly; clean input round-trips with zero recovery nodes.
+
+Deferred:
+
+- The compiler frontend (`base_loko_primary::parse_file`) does
+  not yet call the recovering entry point. Today's
+  `FrontendParseArtifact` keeps the panic-mode preservation
+  from the previous slice. Wiring base-loko parsing through
+  `interpret_region_recovering` is the natural follow-up so
+  editor consumers see recovered trees by default.
+- The forward scan is char-by-char. For grammars with a clear
+  anchor literal (e.g., base-loko's `define`), an anchor-aware
+  scan would be faster on very broken files but isn't required
+  for correctness.
+
 ## Implemented: partial parse tree preserved through failure
 
 - `base_loko_primary::parse_file` switched from the Result-returning

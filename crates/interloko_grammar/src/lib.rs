@@ -986,6 +986,11 @@ pub enum RuleNodeRole {
     CharacterClass,
     /// A node produced by an opaque `until(...)` expression.
     OpaqueRegion,
+    /// A synthetic node inserted by recovery to cover source that
+    /// the matcher could not parse. Only produced by recovering
+    /// entry points such as [`interpret_region_recovering`]; never
+    /// produced by ordinary parsing.
+    RecoveryError,
 }
 
 /// Stable kind metadata for a [`RuleNode`].
@@ -1019,6 +1024,12 @@ pub enum RuleNodeKind<'g> {
         /// Delimiter that ended the opaque region.
         delimiter: &'g str,
     },
+    /// Synthetic node inserted by recovering parse paths to cover a
+    /// source region the matcher could not parse. The node's
+    /// [`RuleNode::span`] and [`RuleNode::text`] describe the
+    /// skipped region. Only produced by recovering entry points
+    /// such as [`interpret_region_recovering`].
+    RecoveryError,
 }
 
 impl<'g> RuleNodeKind<'g> {
@@ -1030,6 +1041,7 @@ impl<'g> RuleNodeKind<'g> {
             Self::Literal { .. } => RuleNodeRole::Literal,
             Self::CharacterClass { .. } => RuleNodeRole::CharacterClass,
             Self::OpaqueRegion { .. } => RuleNodeRole::OpaqueRegion,
+            Self::RecoveryError => RuleNodeRole::RecoveryError,
         }
     }
 
@@ -1038,7 +1050,10 @@ impl<'g> RuleNodeKind<'g> {
     pub const fn name(self) -> Option<&'g str> {
         match self {
             Self::Rule { name } => Some(name),
-            Self::Literal { .. } | Self::CharacterClass { .. } | Self::OpaqueRegion { .. } => None,
+            Self::Literal { .. }
+            | Self::CharacterClass { .. }
+            | Self::OpaqueRegion { .. }
+            | Self::RecoveryError => None,
         }
     }
 
@@ -1047,7 +1062,10 @@ impl<'g> RuleNodeKind<'g> {
     pub const fn literal(self) -> Option<&'g str> {
         match self {
             Self::Literal { value } => Some(value),
-            Self::Rule { .. } | Self::CharacterClass { .. } | Self::OpaqueRegion { .. } => None,
+            Self::Rule { .. }
+            | Self::CharacterClass { .. }
+            | Self::OpaqueRegion { .. }
+            | Self::RecoveryError => None,
         }
     }
 
@@ -1056,7 +1074,10 @@ impl<'g> RuleNodeKind<'g> {
     pub const fn character_class(self) -> Option<&'g str> {
         match self {
             Self::CharacterClass { value } => Some(value),
-            Self::Rule { .. } | Self::Literal { .. } | Self::OpaqueRegion { .. } => None,
+            Self::Rule { .. }
+            | Self::Literal { .. }
+            | Self::OpaqueRegion { .. }
+            | Self::RecoveryError => None,
         }
     }
 
@@ -1065,7 +1086,10 @@ impl<'g> RuleNodeKind<'g> {
     pub const fn opaque_delimiter(self) -> Option<&'g str> {
         match self {
             Self::OpaqueRegion { delimiter } => Some(delimiter),
-            Self::Rule { .. } | Self::Literal { .. } | Self::CharacterClass { .. } => None,
+            Self::Rule { .. }
+            | Self::Literal { .. }
+            | Self::CharacterClass { .. }
+            | Self::RecoveryError => None,
         }
     }
 
@@ -1086,6 +1110,7 @@ impl fmt::Display for RuleNodeKindLabel<'_> {
             RuleNodeKind::Literal { value } => write!(formatter, "literal:{value}"),
             RuleNodeKind::CharacterClass { value } => write!(formatter, "class:{value}"),
             RuleNodeKind::OpaqueRegion { delimiter } => write!(formatter, "until:{delimiter}"),
+            RuleNodeKind::RecoveryError => formatter.write_str("recovery-error"),
         }
     }
 }
@@ -1099,6 +1124,7 @@ impl RuleNodeRole {
             Self::Literal => "literal",
             Self::CharacterClass => "character-class",
             Self::OpaqueRegion => "opaque-region",
+            Self::RecoveryError => "recovery-error",
         }
     }
 }
@@ -1355,6 +1381,9 @@ pub enum OwnedRuleNodeKind {
         /// Delimiter that ended the opaque region.
         delimiter: String,
     },
+    /// Synthetic node inserted by recovering parse paths to cover a
+    /// region the matcher could not parse. See [`RuleNodeKind::RecoveryError`].
+    RecoveryError,
 }
 
 impl OwnedRuleNodeKind {
@@ -1366,6 +1395,7 @@ impl OwnedRuleNodeKind {
             Self::Literal { .. } => RuleNodeRole::Literal,
             Self::CharacterClass { .. } => RuleNodeRole::CharacterClass,
             Self::OpaqueRegion { .. } => RuleNodeRole::OpaqueRegion,
+            Self::RecoveryError => RuleNodeRole::RecoveryError,
         }
     }
 
@@ -1397,6 +1427,7 @@ impl OwnedRuleNode {
                 RuleNodeKind::OpaqueRegion { delimiter } => OwnedRuleNodeKind::OpaqueRegion {
                     delimiter: delimiter.to_string(),
                 },
+                RuleNodeKind::RecoveryError => OwnedRuleNodeKind::RecoveryError,
             },
             span: node.span,
             text: node.text.to_string(),
@@ -1584,6 +1615,39 @@ impl<'g, 's> ParseReport<'g, 's> {
                 span: Span::default(),
                 expected: Vec::new(),
             }),
+        }
+    }
+}
+
+/// Result of a recovering parse over a top-level repetition.
+///
+/// Returned by [`interpret_region_recovering`]. The root node always
+/// covers the requested region; unparseable spans are represented as
+/// [`RuleNodeKind::RecoveryError`] children inline in the root's
+/// `children`. The `errors` vector lists every parse failure the
+/// recovery had to skip past, in source order — editor
+/// consumers can use both: the tree drives navigation, the errors
+/// drive diagnostics.
+///
+/// When the root rule is not a recoverable shape (not a top-level
+/// `Rule(...)*` / `Rule(...)+` repetition) the matcher falls back to
+/// [`inspect_region_compiled`] and surfaces the result through this
+/// shape; in that case [`Self::root`] may be `None`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryReport<'g, 's> {
+    /// Recovered root node spanning the whole requested region, or
+    /// `None` when the matcher could not begin the root rule at all
+    /// (only possible on the non-repetition fallback path).
+    pub root: Option<RuleNode<'g, 's>>,
+    /// Parse failures the recovery skipped past, in source order.
+    pub errors: Vec<ParseError<'g>>,
+}
+
+impl<'g, 's> RecoveryReport<'g, 's> {
+    fn from_inspect(report: ParseReport<'g, 's>) -> Self {
+        Self {
+            root: report.root,
+            errors: report.error.into_iter().collect(),
         }
     }
 }
@@ -2597,6 +2661,159 @@ pub fn inspect_region_compiled<'g, 's>(
     source_offset: usize,
 ) -> ParseReport<'g, 's> {
     inspect_region_with(grammar.lookup(), root_rule, source, source_offset)
+}
+
+/// Recovering parse over a top-level repetition.
+///
+/// Editor-style entry point: when the root rule's body is
+/// `Rule(inner)*` or `Rule(inner)+`, the matcher repeatedly tries
+/// `inner` and skips forward past per-iteration failures, emitting a
+/// [`RuleNodeKind::RecoveryError`] child for each skipped region.
+/// Returns a [`RecoveryReport`] with a root that always spans the
+/// whole input plus a list of every recovered failure.
+///
+/// For non-repetition root rules this falls back to
+/// [`inspect_region_compiled`] and wraps the result in a
+/// [`RecoveryReport`] — the report's root may be missing if the root
+/// rule itself failed to match at all.
+#[must_use]
+pub fn interpret_region_recovering<'g, 's>(
+    grammar: &CompiledGrammar<'g>,
+    root_rule: &'g str,
+    source: &'s str,
+    source_offset: usize,
+) -> RecoveryReport<'g, 's> {
+    let Some(rule) = grammar.rule(root_rule) else {
+        let report = inspect_region_compiled(grammar, root_rule, source, source_offset);
+        return RecoveryReport::from_inspect(report);
+    };
+    let iteration_target = match &rule.expression {
+        RuleExpression::ZeroOrMore(inner) | RuleExpression::OneOrMore(inner) => {
+            match inner.as_ref() {
+                RuleExpression::Rule(name) => Some(*name),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let Some(iteration_target) = iteration_target else {
+        let report = inspect_region_compiled(grammar, root_rule, source, source_offset);
+        return RecoveryReport::from_inspect(report);
+    };
+
+    let lookup = grammar.lookup();
+    let raw = matches!(rule.trivia, TriviaMode::Raw);
+    let mut children: Vec<RuleNode<'g, 's>> = Vec::new();
+    let mut errors: Vec<ParseError<'g>> = Vec::new();
+    let mut position = 0_usize;
+
+    while position < source.len() {
+        let try_position = if raw {
+            position
+        } else {
+            skip_trivia(source, position)
+        };
+        if try_position >= source.len() {
+            break;
+        }
+        match interpret_rule(
+            lookup,
+            iteration_target,
+            source,
+            try_position,
+            source_offset,
+        ) {
+            Ok(node) => {
+                let advance = node.span.end.saturating_sub(source_offset);
+                if advance <= position {
+                    // Zero-width match — avoid an infinite loop by
+                    // treating it as a failure and skipping forward.
+                    errors.push(
+                        ParseFailure::expected_at_source(
+                            source,
+                            try_position,
+                            ExpectedFragment::Rule(iteration_target),
+                            raw,
+                        )
+                        .into_error(source_offset),
+                    );
+                    position = next_char_boundary(source, try_position);
+                    continue;
+                }
+                children.push(node);
+                position = advance;
+            }
+            Err(failure) => {
+                errors.push(failure.into_error(source_offset));
+                let recovery_start = try_position;
+                let mut scan = next_char_boundary(source, try_position);
+                let mut recovered: Option<RuleNode<'g, 's>> = None;
+                while scan < source.len() {
+                    let scan_position = if raw { scan } else { skip_trivia(source, scan) };
+                    if scan_position >= source.len() {
+                        break;
+                    }
+                    if let Ok(node) = interpret_rule(
+                        lookup,
+                        iteration_target,
+                        source,
+                        scan_position,
+                        source_offset,
+                    ) {
+                        recovered = Some(node);
+                        break;
+                    }
+                    scan = next_char_boundary(source, scan);
+                }
+                let recovery_end = match &recovered {
+                    Some(node) => node.span.start.saturating_sub(source_offset),
+                    None => source.len(),
+                };
+                if recovery_end > recovery_start {
+                    children.push(RuleNode {
+                        kind: RuleNodeKind::RecoveryError,
+                        span: Span::new(
+                            source_offset + recovery_start,
+                            source_offset + recovery_end,
+                        ),
+                        text: &source[recovery_start..recovery_end],
+                        children: Vec::new(),
+                        binding_name: None,
+                    });
+                }
+                if let Some(node) = recovered {
+                    let advance = node.span.end.saturating_sub(source_offset);
+                    children.push(node);
+                    position = advance;
+                } else {
+                    position = source.len();
+                }
+            }
+        }
+    }
+
+    let root = RuleNode {
+        kind: RuleNodeKind::Rule { name: root_rule },
+        span: Span::new(source_offset, source_offset + source.len()),
+        text: source,
+        children,
+        binding_name: None,
+    };
+    RecoveryReport {
+        root: Some(root),
+        errors,
+    }
+}
+
+fn next_char_boundary(source: &str, position: usize) -> usize {
+    if position >= source.len() {
+        return source.len();
+    }
+    let mut next = position + 1;
+    while next < source.len() && !source.is_char_boundary(next) {
+        next += 1;
+    }
+    next
 }
 
 fn inspect_region_with<'g, 's>(
@@ -3641,6 +3858,133 @@ fn count_rule<'g>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovering_parse_skips_broken_middle_and_resumes() {
+        // source-file = definition*; definition starts with `define`.
+        // The middle "BAD STUFF" can't match definition; recovery
+        // skips it, emits one RecoveryError node, and matches the
+        // trailing definition.
+        let grammar = CompiledGrammar::compile(parse_grammar_source(
+            "grammar tiny\n\
+             rule source-file = definition*\n\
+             rule definition = `define` name\n\
+             rule name = [A-Za-z]+\n\
+             end\n",
+        ));
+        let source = "define alpha\nBAD STUFF\ndefine beta";
+        let report = interpret_region_recovering(&grammar, "source-file", source, 0);
+
+        let root = report
+            .root
+            .as_ref()
+            .expect("recovery always returns a root");
+        let definitions: Vec<_> = root
+            .children
+            .iter()
+            .filter(|child| child.is_rule("definition"))
+            .collect();
+        assert_eq!(definitions.len(), 2, "two definitions matched");
+        assert!(definitions[0].text.starts_with("define alpha"));
+        assert!(definitions[1].text.starts_with("define beta"));
+
+        let recoveries: Vec<_> = root
+            .children
+            .iter()
+            .filter(|child| child.role() == RuleNodeRole::RecoveryError)
+            .collect();
+        assert_eq!(recoveries.len(), 1, "one skipped region in between");
+        let recovery = recoveries[0];
+        assert!(
+            recovery.text.contains("BAD STUFF"),
+            "recovery node covers the skipped text: {:?}",
+            recovery.text,
+        );
+
+        assert!(!report.errors.is_empty(), "recovery records the failure");
+    }
+
+    #[test]
+    fn recovering_parse_emits_trailing_error_when_no_resync() {
+        // source-file = definition*; the trailing junk does not
+        // begin another definition, so recovery scans to EOF and
+        // emits one trailing RecoveryError node.
+        let grammar = CompiledGrammar::compile(parse_grammar_source(
+            "grammar tiny\n\
+             rule source-file = definition*\n\
+             rule definition = `define` name\n\
+             rule name = [A-Za-z]+\n\
+             end\n",
+        ));
+        let source = "define alpha\nGARBAGE GARBAGE";
+        let report = interpret_region_recovering(&grammar, "source-file", source, 0);
+
+        let root = report
+            .root
+            .as_ref()
+            .expect("recovery always returns a root");
+        let definitions: Vec<_> = root
+            .children
+            .iter()
+            .filter(|child| child.is_rule("definition"))
+            .collect();
+        assert_eq!(definitions.len(), 1);
+
+        let recoveries: Vec<_> = root
+            .children
+            .iter()
+            .filter(|child| child.role() == RuleNodeRole::RecoveryError)
+            .collect();
+        assert_eq!(recoveries.len(), 1);
+        assert!(recoveries[0].text.contains("GARBAGE"));
+    }
+
+    #[test]
+    fn recovering_parse_falls_back_for_non_repetition_root() {
+        // Root rule is a single literal — not a repetition. Recovery
+        // falls back to inspect-style parsing. Successful input
+        // produces a root with no errors.
+        let grammar = CompiledGrammar::compile(parse_grammar_source(
+            "grammar tiny\nrule greeting = `hello`\nend\n",
+        ));
+        let report = interpret_region_recovering(&grammar, "greeting", "hello", 0);
+        assert!(report.errors.is_empty());
+        let root = report.root.expect("greeting matched");
+        assert_eq!(root.text, "hello");
+    }
+
+    #[test]
+    fn recovering_parse_round_trips_clean_input() {
+        // No recovery needed; recovery report should match ordinary
+        // parse output for the well-formed prefix.
+        let grammar = CompiledGrammar::compile(parse_grammar_source(
+            "grammar tiny\n\
+             rule source-file = definition*\n\
+             rule definition = `define` name\n\
+             rule name = [A-Za-z]+\n\
+             end\n",
+        ));
+        let report = interpret_region_recovering(
+            &grammar,
+            "source-file",
+            "define alpha\ndefine beta\ndefine gamma",
+            0,
+        );
+        assert!(report.errors.is_empty());
+        let root = report.root.expect("clean input parses");
+        let definition_count = root
+            .children
+            .iter()
+            .filter(|child| child.is_rule("definition"))
+            .count();
+        assert_eq!(definition_count, 3);
+        assert!(
+            root.children
+                .iter()
+                .all(|child| child.role() != RuleNodeRole::RecoveryError),
+            "no recovery nodes on clean input",
+        );
+    }
 
     #[test]
     fn owned_rule_node_round_trips_from_borrowed_tree() {
