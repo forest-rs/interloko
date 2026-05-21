@@ -8,34 +8,21 @@ use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::SourceFileId;
 use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree, Token, TokenKind};
 
-use crate::source_data::SourceData;
-
 use super::interpreter::{
     CompiledGrammar, InterpretedParseError, InterpretedRuleNode, interpret_rule_error,
-    interpreted_rule_node_source_data, recover_region_result,
 };
 
-pub(super) struct BaseLokoParseSuccess {
+pub(super) struct BaseLokoParseOutput {
     pub(super) syntax: SyntaxTree,
-    pub(super) parse_tree: interloko_grammar::OwnedRuleNode,
-    pub(super) parse_tree_data: SourceData,
-}
-
-/// Parse failure for fallback cases where recovery could not produce
-/// a root. Editor consumers use [`Self::partial_tree`] when present;
-/// the diagnostic still drives error reporting.
-pub(super) struct BaseLokoParseFailure {
-    pub(super) diagnostic: Diagnostic,
-    pub(super) partial_tree: Option<interloko_grammar::OwnedRuleNode>,
-    pub(super) partial_tree_data: Option<SourceData>,
+    pub(super) parse_tree: Option<interloko_grammar::OwnedRuleNode>,
 }
 
 pub(super) fn parse_file(
     grammar: &CompiledGrammar,
     source_file: SourceFileId,
     source: &str,
-) -> Result<BaseLokoParseSuccess, alloc::boxed::Box<BaseLokoParseFailure>> {
-    let report = recover_region_result(grammar, "source-file", source, 0);
+) -> BaseLokoParseOutput {
+    let report = interloko_grammar::interpret_region_recovering(grammar, "source-file", source, 0);
     match report.root {
         Some(root) => {
             let tokens = syntax::lex(source);
@@ -44,7 +31,6 @@ pub(super) fn parse_file(
                 source,
                 tokens,
             };
-            let parse_tree_data = interpreted_rule_node_source_data(&root);
             let parse_tree = root.to_owned_tree();
             let mut syntax = projector.project(&root);
             syntax.diagnostics.extend(
@@ -53,11 +39,10 @@ pub(super) fn parse_file(
                     .into_iter()
                     .map(|error| base_loko_parse_diagnostic(grammar, source, error)),
             );
-            Ok(BaseLokoParseSuccess {
-                parse_tree,
-                parse_tree_data,
+            BaseLokoParseOutput {
+                parse_tree: Some(parse_tree),
                 syntax,
-            })
+            }
         }
         None => {
             let Some(error) = report.errors.into_iter().next() else {
@@ -67,12 +52,32 @@ pub(super) fn parse_file(
                 unreachable!("recovering parse returned neither a root nor an error");
             };
             let diagnostic = base_loko_parse_diagnostic(grammar, source, error);
-            Err(alloc::boxed::Box::new(BaseLokoParseFailure {
-                diagnostic,
-                partial_tree: None,
-                partial_tree_data: None,
-            }))
+            BaseLokoParseOutput {
+                syntax: syntax_tree_with_diagnostic(source_file, source, diagnostic),
+                parse_tree: None,
+            }
         }
+    }
+}
+
+fn syntax_tree_with_diagnostic(
+    source_file: SourceFileId,
+    source: &str,
+    diagnostic: Diagnostic,
+) -> SyntaxTree {
+    SyntaxTree {
+        source_file,
+        source: source.to_string(),
+        tokens: syntax::lex(source),
+        root: CstNode::from_children(
+            source_file,
+            CstKind::Root,
+            Vec::new(),
+            &[],
+            source,
+            Span::new(0, source.len()),
+        ),
+        diagnostics: vec![diagnostic],
     }
 }
 

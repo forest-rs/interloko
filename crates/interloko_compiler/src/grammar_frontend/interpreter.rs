@@ -96,17 +96,6 @@ pub(super) fn interpret_region_result<'s>(
     interloko_grammar::interpret_region_compiled(grammar, root_rule, source, source_offset)
 }
 
-/// Recovering parse: returns a root tree with inline recovery nodes
-/// when the grammar's root supports skip-and-retry recovery.
-pub(super) fn recover_region_result<'s>(
-    grammar: &CompiledGrammar,
-    root_rule: &'static str,
-    source: &'s str,
-    source_offset: usize,
-) -> interloko_grammar::RecoveryReport<'static, 's> {
-    interloko_grammar::interpret_region_recovering(grammar, root_rule, source, source_offset)
-}
-
 pub(super) fn interpret_rule_error(
     grammar: &CompiledGrammar,
     rule_name: &'static str,
@@ -123,40 +112,54 @@ pub(super) fn interpret_rule_error(
     )
 }
 
-pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode<'_>) -> SourceData {
+pub(super) fn owned_rule_node_source_data(node: &interloko_grammar::OwnedRuleNode) -> SourceData {
     let mut fields = vec![
         source_data::field("role", SourceData::symbol(node.role().as_str())),
         source_span_data(node.span),
-        source_data::field("text", SourceData::string(node.text)),
+        source_data::field("text", SourceData::string(node.text.as_str())),
     ];
-    if let Some(name) = node.name() {
-        fields.push(source_data::field("rule", SourceData::symbol(name)));
-    }
-    if let Some(literal) = node.literal() {
-        fields.push(source_data::field("literal", SourceData::string(literal)));
-    }
-    if let Some(class) = node.character_class() {
-        fields.push(source_data::field(
-            "character-class",
-            SourceData::string(class),
-        ));
-    }
-    if let Some(delimiter) = node.opaque_delimiter() {
-        fields.push(source_data::field(
-            "opaque-delimiter",
-            SourceData::string(delimiter),
-        ));
+    match &node.kind {
+        interloko_grammar::OwnedRuleNodeKind::Rule { name } => {
+            fields.push(source_data::field(
+                "rule",
+                SourceData::symbol(name.as_str()),
+            ));
+        }
+        interloko_grammar::OwnedRuleNodeKind::Literal { value } => {
+            fields.push(source_data::field(
+                "literal",
+                SourceData::string(value.as_str()),
+            ));
+        }
+        interloko_grammar::OwnedRuleNodeKind::CharacterClass { value } => {
+            fields.push(source_data::field(
+                "character-class",
+                SourceData::string(value.as_str()),
+            ));
+        }
+        interloko_grammar::OwnedRuleNodeKind::OpaqueRegion { delimiter } => {
+            fields.push(source_data::field(
+                "opaque-delimiter",
+                SourceData::string(delimiter.as_str()),
+            ));
+        }
+        interloko_grammar::OwnedRuleNodeKind::RecoveryError => {}
+        _ => {}
     }
     fields.push(source_data::field(
         "children",
         SourceData::list(
             node.children
                 .iter()
-                .map(interpreted_rule_node_source_data)
+                .map(owned_rule_node_source_data)
                 .collect(),
         ),
     ));
     SourceData::record("rule-node", fields)
+}
+
+pub(super) fn interpreted_rule_node_source_data(node: &InterpretedRuleNode<'_>) -> SourceData {
+    owned_rule_node_source_data(&node.to_owned_tree())
 }
 
 pub(super) fn interpreted_rule_counts(root: &InterpretedRuleNode<'_>) -> Vec<StagedRuleCount> {

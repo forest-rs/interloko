@@ -25,7 +25,7 @@ pub use interloko_grammar::{
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{SourceFileId, StableIdBuilder};
 use crate::source_data::{self, SourceData};
-use crate::syntax::{self, CstElement, CstKind, CstNode, Span, SyntaxTree};
+use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree};
 
 impl From<interloko_grammar::Span> for Span {
     fn from(span: interloko_grammar::Span) -> Self {
@@ -1127,10 +1127,6 @@ impl FrontendParseSource {
 }
 
 /// Owned frontend parse artifact preserved after CST projection.
-///
-/// The borrowed `interloko_grammar` parse tree is converted into
-/// [`SourceData`] before it enters this report so sessions can keep parse
-/// provenance without carrying parser lifetimes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendParseArtifact {
     /// Source file parsed.
@@ -1175,17 +1171,26 @@ pub struct FrontendParseArtifact {
     /// need original-file text should keep the file contents
     /// alongside and use spans rather than the embedded `text`.
     pub parse_tree: Option<interloko_grammar::OwnedRuleNode>,
-    /// Inert structural projection of the parse tree as `SourceData`.
-    ///
-    /// Equivalent in content to [`Self::parse_tree`] but flattened to
-    /// generic data records — convenient for dumps, golden tests, and
-    /// tools that traverse parser facts without a parse-tree
-    /// dependency. Populated alongside [`Self::parse_tree`].
-    pub parse_tree_data: Option<SourceData>,
     /// Number of CST nodes produced by projection.
     pub cst_node_count: usize,
     /// Number of parser diagnostics attached to the syntax tree.
     pub diagnostic_count: usize,
+}
+
+impl FrontendParseArtifact {
+    /// Returns an inert structural projection of [`Self::parse_tree`].
+    ///
+    /// This view is derived on demand so the owned parse tree remains
+    /// the only stored parse-tree artifact. It is convenient for
+    /// dumps, golden tests, and generic tooling that wants parser
+    /// facts as [`SourceData`] without depending on parse-tree helper
+    /// methods.
+    #[must_use]
+    pub fn parse_tree_source_data(&self) -> Option<SourceData> {
+        self.parse_tree
+            .as_ref()
+            .map(interpreter::owned_rule_node_source_data)
+    }
 }
 
 /// Complete report for parsing one source through a grammar frontend.
@@ -1675,19 +1680,9 @@ fn parse_file_with_records(
     records: GrammarFrontendRecords,
 ) -> GrammarParseReport {
     let grammar = compile_grammar_for_environment(&records.environment.slug);
-    let (syntax, parse_tree, parse_tree_data) =
-        match base_loko_primary::parse_file(&grammar, source_file, source) {
-            Ok(success) => (
-                success.syntax,
-                Some(success.parse_tree),
-                Some(success.parse_tree_data),
-            ),
-            Err(failure) => (
-                syntax_tree_with_diagnostic(source_file, source, failure.diagnostic),
-                failure.partial_tree,
-                failure.partial_tree_data,
-            ),
-        };
+    let base_parse = base_loko_primary::parse_file(&grammar, source_file, source);
+    let syntax = base_parse.syntax;
+    let parse_tree = base_parse.parse_tree;
     let active_grammar = records.active_grammar;
     let active_grammar_slug = records
         .grammars
@@ -1721,7 +1716,6 @@ fn parse_file_with_records(
         source: FrontendParseSource::OriginalSource,
         source_span: Span::new(0, source.len()),
         parse_tree,
-        parse_tree_data,
         cst_node_count: cst_node_count(&syntax.root),
         diagnostic_count: syntax.diagnostics.len(),
     };
@@ -1772,28 +1766,6 @@ fn parse_file_with_records(
         frontend_parse,
         diagnostics: syntax.diagnostics.clone(),
         syntax,
-    }
-}
-
-fn syntax_tree_with_diagnostic(
-    source_file: SourceFileId,
-    source: &str,
-    diagnostic: Diagnostic,
-) -> SyntaxTree {
-    let tokens = syntax::lex(source);
-    SyntaxTree {
-        source_file,
-        source: source.into(),
-        tokens,
-        root: CstNode::from_children(
-            source_file,
-            CstKind::Root,
-            Vec::new(),
-            &[],
-            source,
-            Span::new(0, source.len()),
-        ),
-        diagnostics: vec![diagnostic],
     }
 }
 
@@ -2176,19 +2148,9 @@ fn parse_staged_file(
 
     let parser_source = source_with_staged_regions_blanked(source, &discovery.regions);
     let staged_grammar = interpreter::compile_base_loko_grammar();
-    let (mut syntax, parse_tree, parse_tree_data) =
-        match base_loko_primary::parse_file(&staged_grammar, source_file, &parser_source) {
-            Ok(success) => (
-                success.syntax,
-                Some(success.parse_tree),
-                Some(success.parse_tree_data),
-            ),
-            Err(failure) => (
-                syntax_tree_with_diagnostic(source_file, &parser_source, failure.diagnostic),
-                failure.partial_tree,
-                failure.partial_tree_data,
-            ),
-        };
+    let base_parse = base_loko_primary::parse_file(&staged_grammar, source_file, &parser_source);
+    let mut syntax = base_parse.syntax;
+    let parse_tree = base_parse.parse_tree;
     syntax.diagnostics.extend(diagnostics);
 
     let active_effective_rules = records.effective_rules.to_vec();
@@ -2233,7 +2195,6 @@ fn parse_staged_file(
         source: FrontendParseSource::StagedRegionsBlanked,
         source_span: Span::new(0, source.len()),
         parse_tree,
-        parse_tree_data,
         cst_node_count: cst_node_count(&syntax.root),
         diagnostic_count: syntax.diagnostics.len(),
     };
@@ -4128,10 +4089,9 @@ mod tests {
 
         let parse_tree_data = report
             .frontend_parse
-            .parse_tree_data
-            .as_ref()
-            .expect("source-data projection alongside the typed tree");
-        let dump = source_data::dump(parse_tree_data);
+            .parse_tree_source_data()
+            .expect("source-data projection derived from the typed tree");
+        let dump = source_data::dump(&parse_tree_data);
         assert!(dump.contains("rule: source-file"));
         assert!(dump.contains("rule: function-definition"));
     }
@@ -4206,10 +4166,9 @@ mod tests {
 
         let parse_tree_data = report
             .frontend_parse
-            .parse_tree_data
-            .as_ref()
-            .expect("recovered parse still has source-data projection");
-        let dump = source_data::dump(parse_tree_data);
+            .parse_tree_source_data()
+            .expect("recovered parse still derives source-data projection");
+        let dump = source_data::dump(&parse_tree_data);
         assert!(dump.contains("role: recovery-error"));
     }
 

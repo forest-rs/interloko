@@ -1,5 +1,49 @@
 # Plans
 
+## Streamline Grammar Frontend Parse Artifacts
+
+### Goal
+
+Remove transitional parse plumbing now that the recovering grammar parser is
+load-bearing for base Loko. Make the owned parse tree the single stored parse
+artifact, derive generic dump data from it when needed, and collapse the
+base-loko primary parser into one output shape.
+
+### Non-Goals
+
+- No grammar semantics changes.
+- No change to recovery behavior or diagnostic wording.
+- No removal of strict/interpreted APIs used by staged records/calculator.
+- No compatibility aliases; callers are internal and may be updated directly.
+
+### Fence
+
+`interloko_grammar` owns matching, recovery, and parse-tree shape. It
+explicitly does not own Loko CST projection, compiler diagnostics, EOP records,
+or report formatting.
+
+`grammar_frontend` owns converting parser output into CST, diagnostics,
+artifacts, and provenance. It explicitly does not duplicate parser report
+semantics or store parallel projections of the same parse tree.
+
+### Invariants
+
+- `OwnedRuleNode` is the only stored parse-tree artifact.
+- `SourceData` parse-tree dumps are derived from `OwnedRuleNode` on demand.
+- Base-loko parsing returns one output object with syntax and optional parse
+  tree, not success/failure wrapper types.
+- Parse diagnostics remain attached to the syntax tree.
+- Staged records/calculator keep their current strict interpreted parse path.
+
+### Sequence
+
+1. Add owned parse-tree `SourceData` projection and remove stored
+   `parse_tree_data`.
+2. Collapse `BaseLokoParseSuccess` / `BaseLokoParseFailure` into a single
+   base-loko parse output.
+3. Remove now-unused wrappers/imports and update tests/progress docs.
+4. Run fmt, clippy, workspace tests, and docs before committing.
+
 ## Add Binding Type Annotations
 
 ### Goal

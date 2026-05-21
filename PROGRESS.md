@@ -5,12 +5,17 @@
 - `base_loko_primary::parse_file` now calls the grammar kernel's
   recovering entry point for `source-file`. When recovery produces
   a root, the frontend projects that recovered tree into the CST,
-  keeps the owned `parse_tree` / `parse_tree_data`, and attaches
+  keeps the owned `parse_tree`, and attaches
   every recovered parse error as a syntax diagnostic.
-- `BaseLokoParseFailure` is now reserved for fallback cases where
-  the recovering parse cannot produce any root at all. In the
-  normal top-level source-file shape, malformed middle text no
-  longer drops the later valid definitions on the floor.
+- `base_loko_primary::parse_file` now returns one parse output
+  shape: a syntax tree plus an optional owned parse tree. Fallback
+  cases where recovery cannot produce a root attach the diagnostic
+  to an empty syntax tree instead of using separate success/failure
+  wrapper types.
+- `FrontendParseArtifact` stores only `parse_tree:
+  Option<OwnedRuleNode>`. Dump-friendly `SourceData` is derived on
+  demand through `parse_tree_source_data()` so the owned tree is the
+  single stored parse-tree artifact.
 - New compiler-side test
   `parse_recovery_skips_broken_middle_and_keeps_later_forms`:
   parses a valid function, junk text, and another valid function;
@@ -21,10 +26,10 @@
 Deferred:
 
 - Recovery nodes are present in the grammar parse tree and
-  source-data projection, but CST projection still drops them and
-  carries errors only as diagnostics. A later editor-facing slice
-  can add explicit CST error nodes if downstream tooling needs
-  structured skipped regions there too.
+  derived source-data projection, but CST projection still drops
+  them and carries errors only as diagnostics. A later editor-facing
+  slice can add explicit CST error nodes if downstream tooling
+  needs structured skipped regions there too.
 - The kernel scanner is still char-by-char. Anchor-aware scanning
   by likely top-level starts such as `define` remains a performance
   and diagnostics polish step, not a correctness requirement.
@@ -60,12 +65,10 @@ Deferred:
 
 Deferred:
 
-- The compiler frontend (`base_loko_primary::parse_file`) does
-  not yet call the recovering entry point. Today's
-  `FrontendParseArtifact` keeps the panic-mode preservation
-  from the previous slice. Wiring base-loko parsing through
-  `interpret_region_recovering` is the natural follow-up so
-  editor consumers see recovered trees by default.
+- The compiler frontend now calls the recovering entry point for
+  base-loko source files. Remaining recovery polish belongs in CST
+  error-node projection and scanning strategy, not in parse-artifact
+  storage.
 - The forward scan is char-by-char. For grammars with a clear
   anchor literal (e.g., base-loko's `define`), an anchor-aware
   scan would be faster on very broken files but isn't required
@@ -73,17 +76,11 @@ Deferred:
 
 ## Implemented: partial parse tree preserved through failure
 
-- `base_loko_primary::parse_file` switched from the Result-returning
-  `interpret_region_result` to the inspect-style
-  `inspect_region_result`. The kernel's `ParseReport` carries both
-  a possibly-partial root and an optional error; we keep the root
-  on either path.
-- New `BaseLokoParseFailure { diagnostic, partial_tree,
-  partial_tree_data }` returned on parse failure. Callers in
-  `parse_file_with_records` and the staged-parse path extract the
-  partial tree and stash it on `FrontendParseArtifact.parse_tree`
-  alongside the synthetic syntax diagnostic. (Clippy flagged the
-  large `Err` variant, so the failure is boxed.)
+- `base_loko_primary::parse_file` originally switched from the
+  Result-returning strict path to the inspect-style report and now
+  uses the recovering report. The frontend keeps any completed root
+  tree directly on `FrontendParseArtifact.parse_tree` and attaches
+  parse errors to the syntax diagnostics.
 - Editor consumers now see a navigable parse tree when the root
   rule itself completed and complete-region parsing failed only
   on trailing/unconsumed input — the common shape for a
@@ -135,10 +132,10 @@ Deferred:
   form so downstream consumers don't have to keep the kernel parse
   alive to use them.
 - `FrontendParseArtifact.parse_tree` is now `Option<OwnedRuleNode>`
-  (was `Option<SourceData>`). The flat-data projection moves to a
-  new `parse_tree_data: Option<SourceData>` field, populated
-  alongside, so dump-style callers keep working. Editor and tool
-  consumers asking position questions go through `parse_tree`.
+  (was `Option<SourceData>`). Dump-style callers derive a flat
+  `SourceData` projection from the owned tree with
+  `parse_tree_source_data()`. Editor and tool consumers asking
+  position questions go through `parse_tree`.
 - Kernel tests pin: owned-form round-trip preserves structure and
   text; `rule_at_offset` returns the deepest named rule for each
   cursor position (and falls back to the enclosing rule when the
@@ -150,8 +147,8 @@ Deferred:
 
 - Position-query coverage on the source-data projection isn't
   needed: callers that want structured queries should use
-  `parse_tree` directly. `parse_tree_data` stays untyped for
-  dumps and golden tests.
+  `parse_tree` directly. The source-data view is derived and exists
+  only for dumps and golden tests.
 - Incremental reparse, editor-grade error recovery, and indirect
   left recursion are the remaining Phase 3 items.
 
