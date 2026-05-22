@@ -1,5 +1,50 @@
 # Plans
 
+## Add Packrat Memoization To The Grammar Kernel
+
+### Goal
+
+Make `interloko_grammar` memoize rule applications during one parse so
+backtracking-heavy grammars reuse prior work instead of repeatedly matching the
+same `(grammar scope, rule, input position)` tuple. Keep the public grammar
+semantics unchanged while exposing lightweight parse metrics for inspection.
+
+### Non-Goals
+
+- No Pratt parser or precedence table.
+- No tree/value matcher.
+- No new production dependencies; keep `interloko_grammar` `no_std`.
+- No change to direct left-recursion semantics.
+- No persistent cache across parses.
+
+### Fence
+
+`interloko_grammar` owns per-parse rule memoization and parser work metrics. It
+explicitly does not own compiler artifact caching, semantic lowering, or
+cross-parse scheduling.
+
+### Invariants
+
+- Memoization keys include grammar scope, rule name, and local input position.
+- Memoized failures preserve the same expected fragments and cut-boundary
+  behavior as direct matching.
+- Direct left-recursive rules still use the existing seed/grow algorithm.
+- Slice-mode and compiled-mode parsing produce the same parse trees and errors
+  as before.
+- Metrics are observational only; callers must not need them to get correct
+  parses.
+
+### Sequence
+
+1. Introduce a parse context with a small dependency-free memo table and
+   `ParseMetrics`.
+2. Thread the context through rule/expression interpretation.
+3. Memoize concrete rule dispatches, bypassing cache for parametric argument
+   substitution while still memoizing concrete inner rules.
+4. Surface metrics on inspection/recovery reports and compiler parse artifacts;
+   add tests proving reuse.
+5. Run fmt, clippy, workspace tests, and docs, then commit.
+
 ## Streamline Grammar Frontend Parse Artifacts
 
 ### Goal

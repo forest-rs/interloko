@@ -1175,6 +1175,8 @@ pub struct FrontendParseArtifact {
     pub cst_node_count: usize,
     /// Number of parser diagnostics attached to the syntax tree.
     pub diagnostic_count: usize,
+    /// Parser work counters reported by the grammar kernel.
+    pub parse_metrics: interloko_grammar::ParseMetrics,
 }
 
 impl FrontendParseArtifact {
@@ -1681,6 +1683,7 @@ fn parse_file_with_records(
 ) -> GrammarParseReport {
     let grammar = compile_grammar_for_environment(&records.environment.slug);
     let base_parse = base_loko_primary::parse_file(&grammar, source_file, source);
+    let parse_metrics = base_parse.metrics;
     let syntax = base_parse.syntax;
     let parse_tree = base_parse.parse_tree;
     let active_grammar = records.active_grammar;
@@ -1718,6 +1721,7 @@ fn parse_file_with_records(
         parse_tree,
         cst_node_count: cst_node_count(&syntax.root),
         diagnostic_count: syntax.diagnostics.len(),
+        parse_metrics,
     };
     let active_effective_rules = records
         .effective_rules
@@ -2149,6 +2153,7 @@ fn parse_staged_file(
     let parser_source = source_with_staged_regions_blanked(source, &discovery.regions);
     let staged_grammar = interpreter::compile_base_loko_grammar();
     let base_parse = base_loko_primary::parse_file(&staged_grammar, source_file, &parser_source);
+    let parse_metrics = base_parse.metrics;
     let mut syntax = base_parse.syntax;
     let parse_tree = base_parse.parse_tree;
     syntax.diagnostics.extend(diagnostics);
@@ -2197,6 +2202,7 @@ fn parse_staged_file(
         parse_tree,
         cst_node_count: cst_node_count(&syntax.root),
         diagnostic_count: syntax.diagnostics.len(),
+        parse_metrics,
     };
     let provenance = ParseProvenance {
         id: ParseProvenanceId::new(source_file, records.environment.id),
@@ -4071,6 +4077,10 @@ mod tests {
         assert_eq!(
             report.frontend_parse.cst_node_count,
             cst_node_count(&report.syntax.root)
+        );
+        assert!(
+            report.frontend_parse.parse_metrics.memo_misses > 0,
+            "base parse should expose grammar-kernel work counters",
         );
         assert_eq!(report.syntax.root.child_nodes(CstKind::Function).count(), 1);
 

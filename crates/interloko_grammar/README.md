@@ -203,6 +203,26 @@ assert_eq!(report.root.as_ref().map(|root| root.text), Some("ok"));
 assert_eq!(report.error.as_ref().map(|error| error.span), Some(Span::new(8, 12)));
 ```
 
+`inspect_region` and recovering parse reports also expose [`ParseMetrics`].
+These counters are observational: they let callers see packrat memo hits,
+misses, and final memo-table size for one parse without changing matching
+semantics.
+
+```rust
+use interloko_grammar::{inspect_region, parse_grammar_source};
+
+let rules = parse_grammar_source(
+    "grammar tiny\n\
+     rule root = item `x` | item `y`\n\
+     rule item = [a]\n\
+     end\n",
+);
+let report = inspect_region(&rules, "root", "ay", 0);
+
+assert!(report.is_success());
+assert_eq!(report.metrics.memo_hits, 1);
+```
+
 ## Caller-Owned Policy
 
 The kernel does not know about Interloko or any other language's keywords.
@@ -249,15 +269,16 @@ parse-tree and action-descriptor data.
 - Grammar source parsing is intentionally small and line-oriented.
 - Semantic actions are not executed here.
 - There is no package loader or import system.
-- There is no left-recursion support.
+- Direct left recursion is supported; indirect left-recursive cycles are not.
 - Partial parse reports are inspection reports, not parser recovery.
 - Diagnostics are structural spans and expected fragments, not localized prose.
-- Performance is tuned for clarity and current compiler/workbench use, not for a
-  high-throughput parser generator.
+- Packrat memoization is per parse and in-memory only; there is no persistent
+  parser cache across calls.
 
 [`GrammarAction`]: crate::GrammarAction
 [`Parse`]: crate::Parse
 [`ParseError`]: crate::ParseError
+[`ParseMetrics`]: crate::ParseMetrics
 [`RuleExpression`]: crate::RuleExpression
 [`RuleNode`]: crate::RuleNode
 [`RuleNode::find_by_role`]: crate::RuleNode::find_by_role

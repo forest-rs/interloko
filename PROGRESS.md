@@ -1,5 +1,36 @@
 # Interloko Progress
 
+## Implemented: packrat memoization in `interloko_grammar`
+
+- The grammar kernel now threads a per-parse `ParseContext` through
+  rule and expression interpretation. The context owns a small
+  dependency-free memo table keyed by grammar scope, rule name, and
+  local input position.
+- `interpret_rule` memoizes both successful `RuleNode` results and
+  `ParseFailure` values. Parametric argument substitution still runs
+  through the caller's binding frame, while concrete inner rule
+  dispatches benefit from the same memo table.
+- `ParseReport` and `RecoveryReport` now expose `ParseMetrics`
+  (`rule_attempts`, `memo_hits`, `memo_misses`, `memo_entries`) so
+  callers can inspect parser work without relying on it for
+  correctness.
+- `grammar_frontend::FrontendParseArtifact` preserves those metrics
+  for compiler sessions, and parse-trace dumps render them alongside
+  the grammar stack.
+- The implementation stays `no_std` and adds no dependencies; the
+  memo table is a linear `Vec`, which is enough for the current
+  grammar sizes and keeps the crate surface calm.
+- New kernel tests prove memo reuse for both a successful repeated
+  rule application and a repeated failure.
+
+Deferred:
+
+- Indirect left-recursive cycles still need explicit in-progress
+  seed/grow handling across memoized rule entries. The new memo table
+  is a prerequisite, not a complete indirect-LR implementation.
+- The memo table is linear. A hash/indexed table may be worthwhile
+  after real parser work counters show it matters.
+
 ## Implemented: base-loko frontend uses recovering parse trees
 
 - `base_loko_primary::parse_file` now calls the grammar kernel's

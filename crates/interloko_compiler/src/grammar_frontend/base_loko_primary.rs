@@ -15,6 +15,7 @@ use super::interpreter::{
 pub(super) struct BaseLokoParseOutput {
     pub(super) syntax: SyntaxTree,
     pub(super) parse_tree: Option<interloko_grammar::OwnedRuleNode>,
+    pub(super) metrics: interloko_grammar::ParseMetrics,
 }
 
 pub(super) fn parse_file(
@@ -42,6 +43,7 @@ pub(super) fn parse_file(
             BaseLokoParseOutput {
                 parse_tree: Some(parse_tree),
                 syntax,
+                metrics: report.metrics,
             }
         }
         None => {
@@ -55,6 +57,7 @@ pub(super) fn parse_file(
             BaseLokoParseOutput {
                 syntax: syntax_tree_with_diagnostic(source_file, source, diagnostic),
                 parse_tree: None,
+                metrics: report.metrics,
             }
         }
     }

@@ -964,6 +964,13 @@ impl<'a, 'g> RuleLookup<'a, 'g> {
             .expect("rule_owner_depths invariant: ancestor must exist for any recorded depth");
         Some((rule, active))
     }
+
+    fn memo_scope(self) -> usize {
+        self.grammar.map_or_else(
+            || self.rules.as_ptr().cast::<()>() as usize,
+            |grammar| core::ptr::from_ref(grammar).cast::<()>() as usize,
+        )
+    }
 }
 
 /// Structural role of a [`RuleNode`].
@@ -1597,6 +1604,8 @@ pub struct ParseReport<'g, 's> {
     pub root: Option<RuleNode<'g, 's>>,
     /// Complete-region parse failure, if parsing did not consume the region.
     pub error: Option<ParseError<'g>>,
+    /// Parser work counters collected while producing this report.
+    pub metrics: ParseMetrics,
 }
 
 impl<'g, 's> ParseReport<'g, 's> {
@@ -1606,7 +1615,8 @@ impl<'g, 's> ParseReport<'g, 's> {
         self.root.is_some() && self.error.is_none()
     }
 
-    /// Converts this report into the legacy success/failure result shape.
+    /// Converts this report into the success/failure result shape used
+    /// by [`interpret_region`].
     pub fn into_result(self) -> Result<Parse<'g, 's>, ParseError<'g>> {
         match (self.root, self.error) {
             (Some(root), None) => Ok(Parse { root }),
@@ -1641,6 +1651,8 @@ pub struct RecoveryReport<'g, 's> {
     pub root: Option<RuleNode<'g, 's>>,
     /// Parse failures the recovery skipped past, in source order.
     pub errors: Vec<ParseError<'g>>,
+    /// Parser work counters collected while producing this report.
+    pub metrics: ParseMetrics,
 }
 
 impl<'g, 's> RecoveryReport<'g, 's> {
@@ -1648,8 +1660,30 @@ impl<'g, 's> RecoveryReport<'g, 's> {
         Self {
             root: report.root,
             errors: report.error.into_iter().collect(),
+            metrics: report.metrics,
         }
     }
+}
+
+/// Parser work counters for one interpreted parse.
+///
+/// Reports return this value so callers can inspect whether packrat
+/// memoization is doing useful work without changing parse semantics.
+/// The counters are per parse only; the kernel does not keep a
+/// persistent cache across calls. Memo hits, misses, and entries cover
+/// both named-rule dispatch and parametric-rule application.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ParseMetrics {
+    /// Number of concrete named-rule dispatches requested.
+    pub rule_attempts: usize,
+    /// Number of dispatches or parametric applications satisfied from
+    /// the per-parse memo table.
+    pub memo_hits: usize,
+    /// Number of dispatches or parametric applications that missed the
+    /// memo table and evaluated the rule body.
+    pub memo_misses: usize,
+    /// Number of entries stored in all memo tables at the end of the parse.
+    pub memo_entries: usize,
 }
 
 /// One expected fragment in an interpreted parse failure.
@@ -1733,6 +1767,70 @@ struct ParseFailure<'g> {
     /// choice's failure (no fallthrough) and clears the flag so an outer
     /// choice can still try its alternatives.
     committed: bool,
+}
+
+struct ParseContext<'g, 's> {
+    source: &'s str,
+    source_offset: usize,
+    memo: Vec<MemoEntry<'g, 's>>,
+    apply_memo: Vec<ApplyMemoEntry<'g, 's>>,
+    metrics: ParseMetrics,
+}
+
+impl<'g, 's> ParseContext<'g, 's> {
+    fn new(source: &'s str, source_offset: usize) -> Self {
+        Self {
+            source,
+            source_offset,
+            memo: Vec::new(),
+            apply_memo: Vec::new(),
+            metrics: ParseMetrics::default(),
+        }
+    }
+
+    fn finish_metrics(&self) -> ParseMetrics {
+        ParseMetrics {
+            memo_entries: self.memo.len().saturating_add(self.apply_memo.len()),
+            ..self.metrics
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MemoKey<'g> {
+    scope: usize,
+    name: &'g str,
+    position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoEntry<'g, 's> {
+    key: MemoKey<'g>,
+    result: Result<RuleNode<'g, 's>, ParseFailure<'g>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApplyMemoKey<'g> {
+    scope: usize,
+    caller_scope: usize,
+    name: &'g str,
+    position: usize,
+    args: Vec<RuleExpression<'g>>,
+    params: Vec<ParamBindingMemoKey<'g>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApplyMemoEntry<'g, 's> {
+    key: ApplyMemoKey<'g>,
+    result: Result<ExpressionMatch<'g, 's>, ParseFailure<'g>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParamBindingMemoKey<'g> {
+    name: &'g str,
+    arg: RuleExpression<'g>,
+    caller_scope: usize,
+    caller_bindings: Vec<ParamBindingMemoKey<'g>>,
 }
 
 /// Stable code for a [`GrammarSourceDiagnostic`].
@@ -2703,6 +2801,7 @@ pub fn interpret_region_recovering<'g, 's>(
 
     let lookup = grammar.lookup();
     let raw = matches!(rule.trivia, TriviaMode::Raw);
+    let mut context = ParseContext::new(source, source_offset);
     let mut children: Vec<RuleNode<'g, 's>> = Vec::new();
     let mut errors: Vec<ParseError<'g>> = Vec::new();
     let mut position = 0_usize;
@@ -2716,13 +2815,7 @@ pub fn interpret_region_recovering<'g, 's>(
         if try_position >= source.len() {
             break;
         }
-        match interpret_rule(
-            lookup,
-            iteration_target,
-            source,
-            try_position,
-            source_offset,
-        ) {
+        match interpret_rule(&mut context, lookup, iteration_target, try_position) {
             Ok(node) => {
                 let advance = node.span.end.saturating_sub(source_offset);
                 if advance <= position {
@@ -2753,13 +2846,9 @@ pub fn interpret_region_recovering<'g, 's>(
                     if scan_position >= source.len() {
                         break;
                     }
-                    if let Ok(node) = interpret_rule(
-                        lookup,
-                        iteration_target,
-                        source,
-                        scan_position,
-                        source_offset,
-                    ) {
+                    if let Ok(node) =
+                        interpret_rule(&mut context, lookup, iteration_target, scan_position)
+                    {
                         recovered = Some(node);
                         break;
                     }
@@ -2802,6 +2891,7 @@ pub fn interpret_region_recovering<'g, 's>(
     RecoveryReport {
         root: Some(root),
         errors,
+        metrics: context.finish_metrics(),
     }
 }
 
@@ -2822,15 +2912,17 @@ fn inspect_region_with<'g, 's>(
     source: &'s str,
     source_offset: usize,
 ) -> ParseReport<'g, 's> {
+    let mut context = ParseContext::new(source, source_offset);
     let root_raw = lookup
         .rule(root_rule)
         .is_some_and(|rule| matches!(rule.trivia, TriviaMode::Raw));
-    let root = match interpret_rule(lookup, root_rule, source, 0, source_offset) {
+    let root = match interpret_rule(&mut context, lookup, root_rule, 0) {
         Ok(root) => root,
         Err(failure) => {
             return ParseReport {
                 root: None,
                 error: Some(failure.into_error(source_offset)),
+                metrics: context.finish_metrics(),
             };
         }
     };
@@ -2846,6 +2938,7 @@ fn inspect_region_with<'g, 's>(
         ParseReport {
             root: Some(root),
             error: None,
+            metrics: context.finish_metrics(),
         }
     } else {
         ParseReport {
@@ -2859,6 +2952,7 @@ fn inspect_region_with<'g, 's>(
                 )
                 .into_error(source_offset),
             ),
+            metrics: context.finish_metrics(),
         }
     }
 }
@@ -2907,7 +3001,8 @@ fn interpret_rule_error_with<'g>(
     let raw = lookup
         .rule(rule_name)
         .is_some_and(|rule| matches!(rule.trivia, TriviaMode::Raw));
-    interpret_rule(lookup, rule_name, source, position, source_offset)
+    let mut context = ParseContext::new(source, source_offset);
+    interpret_rule(&mut context, lookup, rule_name, position)
         .err()
         .unwrap_or_else(|| {
             ParseFailure::expected_at_source(
@@ -2921,27 +3016,57 @@ fn interpret_rule_error_with<'g>(
 }
 
 fn interpret_rule<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
     lookup: RuleLookup<'_, 'g>,
     name: &'g str,
-    source: &'s str,
     position: usize,
-    source_offset: usize,
 ) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
+    context.metrics.rule_attempts = context.metrics.rule_attempts.saturating_add(1);
     if let Some((rule, active)) = lookup.resolve_rule(name) {
+        let key = MemoKey {
+            scope: active.memo_scope(),
+            name,
+            position,
+        };
+        if let Some(entry) = context.memo.iter().find(|entry| entry.key == key) {
+            context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
+            return entry.result.clone();
+        }
+        context.metrics.memo_misses = context.metrics.memo_misses.saturating_add(1);
         // `resolve_rule` switches to the rule's authoring grammar so
         // `super` references inside an inherited rule resolve against
         // that rule's own parent chain, not against whichever grammar
         // the lookup started in.
-        return interpret_rule_definition(active, rule, name, source, position, source_offset);
+        let result = interpret_rule_definition(context, active, rule, name, position);
+        context.memo.push(MemoEntry {
+            key,
+            result: result.clone(),
+        });
+        return result;
     }
     // Rule not found: we have no per-rule trivia context, so report the
     // unexpected fragment using the default (trivia-skipping) heuristic.
-    Err(ParseFailure::expected_at_source(
-        source,
+    let key = MemoKey {
+        scope: lookup.memo_scope(),
+        name,
+        position,
+    };
+    if let Some(entry) = context.memo.iter().find(|entry| entry.key == key) {
+        context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
+        return entry.result.clone();
+    }
+    context.metrics.memo_misses = context.metrics.memo_misses.saturating_add(1);
+    let result = Err(ParseFailure::expected_at_source(
+        context.source,
         position,
         ExpectedFragment::Rule(name),
         false,
-    ))
+    ));
+    context.memo.push(MemoEntry {
+        key,
+        result: result.clone(),
+    });
+    result
 }
 
 /// Runs `rule`'s body using `lookup` for inner rule references and
@@ -2955,18 +3080,17 @@ fn interpret_rule<'g, 's>(
 /// not against an arbitrary descendant the rule was looked up
 /// through.
 fn interpret_rule_definition<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
     lookup: RuleLookup<'_, 'g>,
     rule: &SourceAuthoredRule<'g>,
     name: &'g str,
-    source: &'s str,
     position: usize,
-    source_offset: usize,
 ) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
     let raw = matches!(rule.trivia, TriviaMode::Raw);
     let start = if raw {
         position
     } else {
-        skip_trivia(source, position)
+        skip_trivia(context.source, position)
     };
     // Direct left recursion: when the rule's body is a Choice with at
     // least one alternative starting with a self-reference, seed from
@@ -2976,34 +3100,25 @@ fn interpret_rule_definition<'g, 's>(
     // without packrat memoization).
     if let Some((non_lr_alts, lr_tails)) = direct_lr_partitions(&rule.expression, name) {
         return interpret_left_recursive_rule(
+            context,
             lookup,
             rule,
             name,
-            source,
             start,
-            source_offset,
             raw,
             &non_lr_alts,
             &lr_tails,
         );
     }
-    let matched = interpret_expression(
-        lookup,
-        &[],
-        &rule.expression,
-        source,
-        start,
-        source_offset,
-        raw,
-    )?;
+    let matched = interpret_expression(context, lookup, &[], &rule.expression, start, raw)?;
     let end = matched.end;
     if rule
         .excluded_text
         .iter()
-        .any(|excluded| *excluded == &source[start..end])
+        .any(|excluded| *excluded == &context.source[start..end])
     {
         return Err(ParseFailure::expected_at_source(
-            source,
+            context.source,
             start,
             ExpectedFragment::Rule(name),
             raw,
@@ -3011,8 +3126,8 @@ fn interpret_rule_definition<'g, 's>(
     }
     Ok(RuleNode {
         kind: RuleNodeKind::Rule { name },
-        span: Span::new(source_offset + start, source_offset + end),
-        text: &source[start..end],
+        span: Span::new(context.source_offset + start, context.source_offset + end),
+        text: &context.source[start..end],
         children: matched.children,
         binding_name: None,
     })
@@ -3102,12 +3217,11 @@ fn peel_self_reference<'g>(expr: &RuleExpression<'g>, rule_name: &str) -> Option
 
 #[allow(clippy::too_many_arguments)]
 fn interpret_left_recursive_rule<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
     lookup: RuleLookup<'_, 'g>,
     rule: &SourceAuthoredRule<'g>,
     name: &'g str,
-    source: &'s str,
     start: usize,
-    source_offset: usize,
     raw: bool,
     non_lr_alts: &[&RuleExpression<'g>],
     lr_tails: &[LrTail<'_, 'g>],
@@ -3116,7 +3230,7 @@ fn interpret_left_recursive_rule<'g, 's>(
     let mut accumulated: Option<ParseFailure<'g>> = None;
     let mut seed: Option<ExpressionMatch<'g, 's>> = None;
     for alt in non_lr_alts {
-        match interpret_expression(lookup, &[], alt, source, start, source_offset, raw) {
+        match interpret_expression(context, lookup, &[], alt, start, raw) {
             Ok(matched) => {
                 seed = Some(matched);
                 break;
@@ -3126,14 +3240,22 @@ fn interpret_left_recursive_rule<'g, 's>(
     }
     let seed = seed.ok_or_else(|| {
         accumulated.unwrap_or_else(|| {
-            ParseFailure::expected_at_source(source, start, ExpectedFragment::Rule(name), raw)
+            ParseFailure::expected_at_source(
+                context.source,
+                start,
+                ExpectedFragment::Rule(name),
+                raw,
+            )
         })
     })?;
     let mut current_end = seed.end;
     let mut current_node = RuleNode {
         kind: RuleNodeKind::Rule { name },
-        span: Span::new(source_offset + start, source_offset + current_end),
-        text: &source[start..current_end],
+        span: Span::new(
+            context.source_offset + start,
+            context.source_offset + current_end,
+        ),
+        text: &context.source[start..current_end],
         children: seed.children,
         binding_name: None,
     };
@@ -3149,8 +3271,7 @@ fn interpret_left_recursive_rule<'g, 's>(
             let mut tail_children = Vec::new();
             let mut tail_ok = true;
             for item in tail {
-                match interpret_expression(lookup, &[], item, source, tail_end, source_offset, raw)
-                {
+                match interpret_expression(context, lookup, &[], item, tail_end, raw) {
                     Ok(matched) => {
                         tail_end = matched.end;
                         tail_children.extend(matched.children);
@@ -3170,8 +3291,11 @@ fn interpret_left_recursive_rule<'g, 's>(
                 current_end = tail_end;
                 current_node = RuleNode {
                     kind: RuleNodeKind::Rule { name },
-                    span: Span::new(source_offset + start, source_offset + current_end),
-                    text: &source[start..current_end],
+                    span: Span::new(
+                        context.source_offset + start,
+                        context.source_offset + current_end,
+                    ),
+                    text: &context.source[start..current_end],
                     children: combined,
                     binding_name: None,
                 };
@@ -3187,10 +3311,10 @@ fn interpret_left_recursive_rule<'g, 's>(
     if rule
         .excluded_text
         .iter()
-        .any(|excluded| *excluded == &source[start..current_end])
+        .any(|excluded| *excluded == &context.source[start..current_end])
     {
         return Err(ParseFailure::expected_at_source(
-            source,
+            context.source,
             start,
             ExpectedFragment::Rule(name),
             raw,
@@ -3219,13 +3343,24 @@ struct ParamBinding<'a, 'g> {
     caller_bindings: &'a [ParamBinding<'a, 'g>],
 }
 
+fn params_memo_key<'g>(params: &[ParamBinding<'_, 'g>]) -> Vec<ParamBindingMemoKey<'g>> {
+    params
+        .iter()
+        .map(|param| ParamBindingMemoKey {
+            name: param.name,
+            arg: param.arg.clone(),
+            caller_scope: param.caller_lookup.memo_scope(),
+            caller_bindings: params_memo_key(param.caller_bindings),
+        })
+        .collect()
+}
+
 fn interpret_expression<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
-    source: &'s str,
     position: usize,
-    source_offset: usize,
     raw: bool,
 ) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
     match expression {
@@ -3239,26 +3374,23 @@ fn interpret_expression<'g, 's>(
             // so nested parametric invocations get a fresh frame.
             if let Some(binding) = params.iter().find(|b| b.name == *name) {
                 return interpret_expression(
+                    context,
                     binding.caller_lookup,
                     binding.caller_bindings,
                     binding.arg,
-                    source,
                     position,
-                    source_offset,
                     raw,
                 );
             }
             // Cut commits never cross rule boundaries; the rule's own choice
             // already cleared the flag on success, and we deliberately drop
             // it on failure too.
-            let node = interpret_rule(lookup, name, source, position, source_offset).map_err(
-                |mut failure| {
-                    failure.committed = false;
-                    failure
-                },
-            )?;
+            let node = interpret_rule(context, lookup, name, position).map_err(|mut failure| {
+                failure.committed = false;
+                failure
+            })?;
             Ok(ExpressionMatch {
-                end: node.span.end.saturating_sub(source_offset),
+                end: node.span.end.saturating_sub(context.source_offset),
                 children: vec![node],
                 committed: false,
             })
@@ -3267,15 +3399,15 @@ fn interpret_expression<'g, 's>(
             let start = if raw {
                 position
             } else {
-                skip_trivia(source, position)
+                skip_trivia(context.source, position)
             };
-            let end = source[start..]
+            let end = context.source[start..]
                 .starts_with(value)
                 .then_some(start + value.len())
-                .filter(|end| literal_boundary_ok(source, *end, value))
+                .filter(|end| literal_boundary_ok(context.source, *end, value))
                 .ok_or_else(|| {
                     ParseFailure::expected_at_source(
-                        source,
+                        context.source,
                         start,
                         ExpectedFragment::Literal(value),
                         raw,
@@ -3285,8 +3417,8 @@ fn interpret_expression<'g, 's>(
                 end,
                 children: vec![RuleNode {
                     kind: RuleNodeKind::Literal { value },
-                    span: Span::new(source_offset + start, source_offset + end),
-                    text: &source[start..end],
+                    span: Span::new(context.source_offset + start, context.source_offset + end),
+                    text: &context.source[start..end],
                     children: Vec::new(),
                     binding_name: None,
                 }],
@@ -3295,13 +3427,13 @@ fn interpret_expression<'g, 's>(
         }
         RuleExpression::CharacterClass(value) => {
             let start = position;
-            let ch = source[start..]
+            let ch = context.source[start..]
                 .chars()
                 .next()
                 .filter(|ch| character_class_contains(value, *ch))
                 .ok_or_else(|| {
                     ParseFailure::expected_at_source(
-                        source,
+                        context.source,
                         start,
                         ExpectedFragment::CharacterClass(value),
                         raw,
@@ -3312,8 +3444,8 @@ fn interpret_expression<'g, 's>(
                 end,
                 children: vec![RuleNode {
                     kind: RuleNodeKind::CharacterClass { value },
-                    span: Span::new(source_offset + start, source_offset + end),
-                    text: &source[start..end],
+                    span: Span::new(context.source_offset + start, context.source_offset + end),
+                    text: &context.source[start..end],
                     children: Vec::new(),
                     binding_name: None,
                 }],
@@ -3322,19 +3454,22 @@ fn interpret_expression<'g, 's>(
         }
         RuleExpression::UntilLiteral(value) => {
             let start = position;
-            let relative_end = source[start..]
+            let relative_end = context.source[start..]
                 .match_indices(value)
                 .find_map(|(index, _)| {
                     let end = start + index + value.len();
-                    literal_boundary_ok(source, end, value).then_some(start + index)
+                    literal_boundary_ok(context.source, end, value).then_some(start + index)
                 })
-                .unwrap_or(source.len());
+                .unwrap_or(context.source.len());
             Ok(ExpressionMatch {
                 end: relative_end,
                 children: vec![RuleNode {
                     kind: RuleNodeKind::OpaqueRegion { delimiter: value },
-                    span: Span::new(source_offset + start, source_offset + relative_end),
-                    text: &source[start..relative_end],
+                    span: Span::new(
+                        context.source_offset + start,
+                        context.source_offset + relative_end,
+                    ),
+                    text: &context.source[start..relative_end],
                     children: Vec::new(),
                     binding_name: None,
                 }],
@@ -3346,7 +3481,7 @@ fn interpret_expression<'g, 's>(
             let mut children = Vec::new();
             let mut committed = false;
             for item in items {
-                match interpret_expression(lookup, params, item, source, end, source_offset, raw) {
+                match interpret_expression(context, lookup, params, item, end, raw) {
                     Ok(matched) => {
                         committed |= matched.committed;
                         end = matched.end;
@@ -3367,15 +3502,7 @@ fn interpret_expression<'g, 's>(
         RuleExpression::Choice(items) => {
             let mut failure = None;
             for item in items {
-                match interpret_expression(
-                    lookup,
-                    params,
-                    item,
-                    source,
-                    position,
-                    source_offset,
-                    raw,
-                ) {
+                match interpret_expression(context, lookup, params, item, position, raw) {
                     Ok(matched) => {
                         return Ok(ExpressionMatch {
                             end: matched.end,
@@ -3395,13 +3522,18 @@ fn interpret_expression<'g, 's>(
                 }
             }
             Err(failure.unwrap_or_else(|| {
-                ParseFailure::expected_at_source(source, position, ExpectedFragment::Choice, raw)
+                ParseFailure::expected_at_source(
+                    context.source,
+                    position,
+                    ExpectedFragment::Choice,
+                    raw,
+                )
             }))
         }
         RuleExpression::Optional(item) => {
             // Cut commits bounded by the innermost choice; an Optional
             // contains the commit, on both the matched and skipped paths.
-            match interpret_expression(lookup, params, item, source, position, source_offset, raw) {
+            match interpret_expression(context, lookup, params, item, position, raw) {
                 Ok(mut matched) => {
                     matched.committed = false;
                     Ok(matched)
@@ -3417,17 +3549,14 @@ fn interpret_expression<'g, 's>(
             // A repetition boundary contains any inner cut commit. Both the
             // required first match and later successful iterations have
             // their committed flag cleared before propagating outward.
-            let first =
-                interpret_expression(lookup, params, item, source, position, source_offset, raw)
-                    .map_err(|mut failure| {
-                        failure.committed = false;
-                        failure
-                    })?;
+            let first = interpret_expression(context, lookup, params, item, position, raw)
+                .map_err(|mut failure| {
+                    failure.committed = false;
+                    failure
+                })?;
             let mut end = first.end;
             let mut children = first.children;
-            while let Ok(matched) =
-                interpret_expression(lookup, params, item, source, end, source_offset, raw)
-            {
+            while let Ok(matched) = interpret_expression(context, lookup, params, item, end, raw) {
                 if matched.end == end {
                     break;
                 }
@@ -3446,9 +3575,7 @@ fn interpret_expression<'g, 's>(
             // propagation needs the explicit clear.
             let mut end = position;
             let mut children = Vec::new();
-            while let Ok(matched) =
-                interpret_expression(lookup, params, item, source, end, source_offset, raw)
-            {
+            while let Ok(matched) = interpret_expression(context, lookup, params, item, end, raw) {
                 if matched.end == end {
                     break;
                 }
@@ -3462,16 +3589,17 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Transform { input, .. } => {
-            interpret_expression(lookup, params, input, source, position, source_offset, raw)
+            interpret_expression(context, lookup, params, input, position, raw)
         }
         RuleExpression::And(inner) => {
             // Lookahead is non-consuming inspection; an inner cut commit
             // must not extend out to the enclosing choice scope.
-            interpret_expression(lookup, params, inner, source, position, source_offset, raw)
-                .map_err(|mut failure| {
+            interpret_expression(context, lookup, params, inner, position, raw).map_err(
+                |mut failure| {
                     failure.committed = false;
                     failure
-                })?;
+                },
+            )?;
             Ok(ExpressionMatch {
                 end: position,
                 children: Vec::new(),
@@ -3479,10 +3607,9 @@ fn interpret_expression<'g, 's>(
             })
         }
         RuleExpression::Not(inner) => {
-            match interpret_expression(lookup, params, inner, source, position, source_offset, raw)
-            {
+            match interpret_expression(context, lookup, params, inner, position, raw) {
                 Ok(_) => Err(ParseFailure::expected_at_source(
-                    source,
+                    context.source,
                     position,
                     ExpectedFragment::NegativeLookahead,
                     raw,
@@ -3495,14 +3622,12 @@ fn interpret_expression<'g, 's>(
             }
         }
         RuleExpression::Cut(inner) => {
-            let mut matched =
-                interpret_expression(lookup, params, inner, source, position, source_offset, raw)?;
+            let mut matched = interpret_expression(context, lookup, params, inner, position, raw)?;
             matched.committed = true;
             Ok(matched)
         }
         RuleExpression::Named { name, inner } => {
-            let matched =
-                interpret_expression(lookup, params, inner, source, position, source_offset, raw)?;
+            let matched = interpret_expression(context, lookup, params, inner, position, raw)?;
             let children = matched
                 .children
                 .into_iter()
@@ -3530,12 +3655,25 @@ fn interpret_expression<'g, 's>(
             // the callee."
             let (target, active) = lookup.resolve_rule(rule).ok_or_else(|| {
                 ParseFailure::expected_at_source(
-                    source,
+                    context.source,
                     position,
                     ExpectedFragment::Rule(rule),
                     raw,
                 )
             })?;
+            let key = ApplyMemoKey {
+                scope: active.memo_scope(),
+                caller_scope: lookup.memo_scope(),
+                name: rule,
+                position,
+                args: args.clone(),
+                params: params_memo_key(params),
+            };
+            if let Some(entry) = context.apply_memo.iter().find(|entry| entry.key == key) {
+                context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
+                return entry.result.clone();
+            }
+            context.metrics.memo_misses = context.metrics.memo_misses.saturating_add(1);
             let bindings: Vec<ParamBinding<'_, 'g>> = target
                 .params
                 .iter()
@@ -3547,15 +3685,19 @@ fn interpret_expression<'g, 's>(
                     caller_bindings: params,
                 })
                 .collect();
-            interpret_expression(
+            let result = interpret_expression(
+                context,
                 active,
                 &bindings,
                 &target.expression,
-                source,
                 position,
-                source_offset,
                 raw,
-            )
+            );
+            context.apply_memo.push(ApplyMemoEntry {
+                key,
+                result: result.clone(),
+            });
+            result
         }
         RuleExpression::Super(name) => {
             // Walk one level up from the *active* grammar and let the
@@ -3566,19 +3708,19 @@ fn interpret_expression<'g, 's>(
             // where that foo is itself inherited from further up.
             let parent_lookup = lookup.parent().ok_or_else(|| {
                 ParseFailure::expected_at_source(
-                    source,
+                    context.source,
                     position,
                     ExpectedFragment::Rule(name),
                     raw,
                 )
             })?;
-            let node = interpret_rule(parent_lookup, name, source, position, source_offset)
-                .map_err(|mut failure| {
+            let node =
+                interpret_rule(context, parent_lookup, name, position).map_err(|mut failure| {
                     failure.committed = false;
                     failure
                 })?;
             Ok(ExpressionMatch {
-                end: node.span.end.saturating_sub(source_offset),
+                end: node.span.end.saturating_sub(context.source_offset),
                 children: vec![node],
                 committed: false,
             })
@@ -3984,6 +4126,85 @@ mod tests {
                 .all(|child| child.role() != RuleNodeRole::RecoveryError),
             "no recovery nodes on clean input",
         );
+    }
+
+    #[test]
+    fn packrat_memo_reuses_successful_rule_application() {
+        // Both alternatives start by matching `item` at byte 0.
+        // The first alternative fails on `x`; the second should reuse
+        // the earlier successful `item` match before accepting `y`.
+        let rules = parse_grammar_source(
+            "grammar tiny\n\
+             rule root = item `x` | item `y`\n\
+             rule item = [a]\n\
+             end\n",
+        );
+        let report = inspect_region(&rules, "root", "ay", 0);
+
+        assert!(report.is_success());
+        assert_eq!(report.metrics.memo_hits, 1);
+        assert_eq!(report.metrics.memo_misses, 2);
+        assert_eq!(report.metrics.memo_entries, 2);
+    }
+
+    #[test]
+    fn packrat_memo_reuses_failed_rule_application() {
+        // The first alternative records that `item` cannot match at
+        // byte 0. The second alternative should reuse that failure
+        // rather than matching `item` again.
+        let rules = parse_grammar_source(
+            "grammar tiny\n\
+             rule root = item `x` | item `y`\n\
+             rule item = [a]\n\
+             end\n",
+        );
+        let report = inspect_region(&rules, "root", "by", 0);
+
+        assert!(!report.is_success());
+        assert_eq!(report.metrics.memo_hits, 1);
+        assert_eq!(report.metrics.memo_misses, 2);
+        assert_eq!(report.metrics.memo_entries, 2);
+    }
+
+    #[test]
+    fn packrat_memo_keys_inherited_rules_by_authoring_scope() {
+        // The bare `item` lookup through child and the explicit
+        // `super.item` lookup both resolve to the same parent-authored
+        // rule at byte 0. They should share one memo entry.
+        let parent = CompiledGrammar::compile(parse_grammar_source(
+            "grammar parent\nrule item = [a]\nend\n",
+        ));
+        let child = CompiledGrammar::compile_with_parent(
+            parse_grammar_source("grammar child\nrule root = item `x` | super.item `y`\nend\n"),
+            &parent,
+        );
+        let report = inspect_region_compiled(&child, "root", "ay", 0);
+
+        assert!(report.is_success());
+        assert_eq!(report.metrics.memo_hits, 1);
+        assert_eq!(report.metrics.memo_misses, 2);
+        assert_eq!(report.metrics.memo_entries, 2);
+    }
+
+    #[test]
+    fn packrat_memo_reuses_parametric_application() {
+        // Both alternatives invoke the same `list-of<digit, `,`>` apply
+        // at byte 0. The first alternative then fails on `x`; the second
+        // should reuse the whole parametric application before accepting
+        // `y`, not re-run the list structure and its inner digit rules.
+        let rules = parse_grammar_source(
+            "grammar tiny\n\
+             rule root = list-of<digit, `,`> `x` | list-of<digit, `,`> `y`\n\
+             rule list-of<elem, sep> = elem (sep elem)*\n\
+             rule digit = [0-9]\n\
+             end\n",
+        );
+        let report = inspect_region(&rules, "root", "1,2y", 0);
+
+        assert!(report.is_success());
+        assert_eq!(report.metrics.memo_hits, 1);
+        assert_eq!(report.metrics.memo_misses, 4);
+        assert_eq!(report.metrics.memo_entries, 4);
     }
 
     #[test]

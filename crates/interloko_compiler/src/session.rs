@@ -6722,6 +6722,12 @@ fn dump_parse_trace(report: &GrammarParseReport) -> String {
         let _ = write!(out, " {grammar_id}:{name}");
     }
     out.push('\n');
+    let metrics = report.frontend_parse.parse_metrics;
+    let _ = writeln!(
+        out,
+        "parser metrics rule-attempts={} memo-hits={} memo-misses={} memo-entries={}",
+        metrics.rule_attempts, metrics.memo_hits, metrics.memo_misses, metrics.memo_entries
+    );
     let _ = writeln!(out, "activations:");
     for activation in &report.activations {
         let _ = writeln!(
