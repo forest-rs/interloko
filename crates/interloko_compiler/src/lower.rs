@@ -48,6 +48,8 @@ pub enum ValueKind {
     U64,
     /// Boolean value used by control-flow conditions.
     Bool,
+    /// First-class direct function reference.
+    Function(Option<sem::FunctionId>),
     /// Runtime object, optionally tied to a statically known nominal class.
     Object(Option<sem::ClassId>),
     /// Class metaobject, optionally tied to the class it represents.
@@ -256,6 +258,15 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Direct function constant.
+    ConstFunction {
+        /// Destination register.
+        dst: Register,
+        /// Source function represented by this value.
+        function: FunctionId,
+        /// Source span.
+        span: Span,
+    },
     /// Boxes a concrete value into the top `<object>` runtime value.
     BoxValue {
         /// Destination register.
@@ -314,6 +325,21 @@ pub enum Instr {
         callee: FunctionId,
         /// Argument registers.
         args: Vec<Register>,
+        /// Source span.
+        span: Span,
+    },
+    /// Indirect call through a first-class callable value.
+    CallIndirect {
+        /// Destination register.
+        dst: Register,
+        /// Callable value register.
+        callee: Register,
+        /// Argument registers.
+        args: Vec<Register>,
+        /// Argument value categories.
+        arg_kinds: Vec<ValueKind>,
+        /// Result value category.
+        ret: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -1109,9 +1135,9 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::GenericFunctionObject { generic, span } => {
                 self.lower_generic_meta_object(*generic, *span)
             }
-            sem::Expr::KnownCallable { .. } => Err(invalid_semantic(
-                "known callable values have no runtime representation",
-            )),
+            sem::Expr::KnownCallable { callable, span } => {
+                self.lower_known_callable(*callable, *span)
+            }
             sem::Expr::IntrinsicCall {
                 intrinsic,
                 args,
@@ -1168,6 +1194,12 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::CallableCall {
+                callable,
+                args,
+                result_kind,
+                span,
+            } => self.lower_callable_call(callable, args, *result_kind, *span),
             sem::Expr::Signal {
                 condition,
                 condition_class,
@@ -1445,6 +1477,69 @@ impl<'module> BodyLowering<'module> {
         Ok(result)
     }
 
+    fn lower_known_callable(
+        &mut self,
+        callable: sem::KnownCallable,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        match callable {
+            sem::KnownCallable::DirectFunction(function) => {
+                let lowered = self
+                    .ids
+                    .functions
+                    .get(function.0 as usize)
+                    .copied()
+                    .ok_or_else(|| invalid_semantic("function id is out of range"))?;
+                let result = self.alloc(ValueKind::Function(Some(function)));
+                self.instructions.push(Instr::ConstFunction {
+                    dst: result.reg,
+                    function: lowered,
+                    span,
+                });
+                Ok(result)
+            }
+            sem::KnownCallable::GenericFunction(generic) => {
+                self.lower_generic_meta_object(generic, span)
+            }
+            sem::KnownCallable::SlotAccessor { .. } => Err(invalid_semantic(
+                "slot accessor callable values have no runtime representation",
+            )),
+        }
+    }
+
+    fn lower_callable_call(
+        &mut self,
+        callable: &sem::Expr,
+        args: &[sem::Expr],
+        result_kind: sem::ValueKind,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let callee = self.lower_expr(callable)?;
+        let ValueKind::Function(Some(function)) = callee.kind else {
+            return Err(invalid_semantic(
+                "callable call target is not a direct function value",
+            ));
+        };
+        let function_info = self
+            .module
+            .functions
+            .get(function.0 as usize)
+            .ok_or_else(|| invalid_semantic("function id is out of range"))?;
+        let (args, arg_kinds) =
+            self.lower_args_with_expected_values(args, &function_info.param_kinds)?;
+        let ret = value_kind(result_kind)?;
+        let result = self.alloc(ret);
+        self.instructions.push(Instr::CallIndirect {
+            dst: result.reg,
+            callee: callee.reg,
+            args,
+            arg_kinds,
+            ret,
+            span,
+        });
+        Ok(result)
+    }
+
     fn lower_intrinsic_call(
         &mut self,
         intrinsic: sem::Intrinsic,
@@ -1666,6 +1761,23 @@ impl<'module> BodyLowering<'module> {
         Ok(lowered)
     }
 
+    fn lower_args_with_expected_values(
+        &mut self,
+        args: &[sem::Expr],
+        expected: &[sem::ValueKind],
+    ) -> Result<(Vec<Register>, Vec<ValueKind>), LowerError> {
+        let mut regs = Vec::with_capacity(args.len());
+        let mut kinds = Vec::with_capacity(args.len());
+        for (arg, expected) in args.iter().zip(expected) {
+            let value = self.lower_expr(arg)?;
+            let expected = value_kind(*expected)?;
+            let value = self.coerce_value(value, expected, arg.span())?;
+            regs.push(value.reg);
+            kinds.push(value.kind);
+        }
+        Ok((regs, kinds))
+    }
+
     fn lower_generic_args(
         &mut self,
         args: &[sem::Expr],
@@ -1840,17 +1952,21 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         }
         sem::ValueKind::MethodObject(method) => Ok(ValueKind::MethodObject(Some(method))),
         sem::ValueKind::SlotDescriptorObject { .. } => Ok(ValueKind::SlotDescriptorObject),
-        sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => {
-            Err(invalid_semantic("semantic value kind is invalid"))
+        sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(function)) => {
+            Ok(ValueKind::Function(Some(function)))
         }
+        sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) => {
+            Ok(ValueKind::GenericFunctionObject(Some(generic)))
+        }
+        sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. })
+        | sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
     }
 }
 
 fn is_compile_time_only(kind: sem::ValueKind) -> bool {
     matches!(
         kind,
-        sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(_))
-            | sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. })
+        sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. })
     )
 }
 
@@ -1949,6 +2065,7 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         | ValueKind::I64
         | ValueKind::U64
         | ValueKind::Bool
+        | ValueKind::Function(_)
         | ValueKind::Object(None) => None,
     }
 }
@@ -2106,6 +2223,14 @@ impl Module {
                 self.fmt_class(f, *class)?;
                 fmt_span(f, *span)
             }
+            Instr::ConstFunction {
+                dst,
+                function,
+                span,
+            } => {
+                write!(f, "  {dst} = const.function l{}", function.0)?;
+                fmt_span(f, *span)
+            }
             Instr::BoxValue {
                 dst,
                 src,
@@ -2167,6 +2292,20 @@ impl Module {
             } => {
                 write!(f, "  {dst} = call l{}", callee.0)?;
                 self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
+            Instr::CallIndirect {
+                dst,
+                callee,
+                args,
+                ret,
+                span,
+                ..
+            } => {
+                write!(f, "  {dst} = call.indirect {callee}")?;
+                self.fmt_arg_list(f, args)?;
+                write!(f, ": ")?;
+                self.fmt_kind(f, *ret)?;
                 fmt_span(f, *span)
             }
             Instr::MakeObject {
@@ -2306,6 +2445,18 @@ impl Module {
             ValueKind::I64 => write!(f, "i64"),
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
+            ValueKind::Function(Some(function)) => {
+                if let Some(function_info) = self
+                    .functions
+                    .iter()
+                    .find(|candidate| candidate.kind == FunctionKind::Function(function))
+                {
+                    write!(f, "function({})", function_info.name)
+                } else {
+                    write!(f, "function#{}", function.0)
+                }
+            }
+            ValueKind::Function(None) => write!(f, "function"),
             ValueKind::Object(Some(class)) => {
                 write!(f, "object(")?;
                 self.fmt_class(f, class)?;
@@ -2443,9 +2594,10 @@ mod tests {
         let dump = module.dump();
         assert!(dump.contains("fn l0 inc"));
         assert!(dump.contains("fn l1 main"));
-        assert!(dump.contains("call l0("));
+        assert!(dump.contains("const.function l0"));
+        assert!(dump.contains("call.indirect"));
         assert!(dump.contains("call l3("));
-        assert!(!dump.contains("local l0 f"));
+        assert!(dump.contains("local l0 f"));
         assert!(dump.contains("local l1 g"));
     }
 

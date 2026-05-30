@@ -3639,6 +3639,12 @@ fn collect_dispatch_sites_in_expr(
                 collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
             }
         }
+        sem::Expr::CallableCall { callable, args, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner.clone(), callable, owner_index, sites);
+            for arg in args {
+                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+            }
+        }
         sem::Expr::GenericCall {
             generic,
             args,
@@ -4306,6 +4312,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
             .generics
             .get(generic.0 as usize)
             .map_or(sem::ValueKind::Error, |generic| generic.result_kind),
+        sem::Expr::CallableCall { result_kind, .. } => *result_kind,
         sem::Expr::Signal { result_kind, .. } => *result_kind,
         sem::Expr::Handle { restart, .. } => restart.result_kind,
         sem::Expr::Cast { class, .. } => sem_builtin_value_kind_for_class(module, *class)
@@ -4343,6 +4350,7 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
             .constants
             .get(constant.0 as usize)
             .and_then(|constant| exact_static_class(module, &constant.value)),
+        sem::Expr::CallableCall { result_kind, .. } => sem_value_kind_class(module, *result_kind),
         sem::Expr::Cast { value, .. } => exact_static_class(module, value),
         sem::Expr::If {
             then_branch,
@@ -9835,6 +9843,22 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 dump_sem_expr(out, arg, indent + 2);
             }
         }
+        sem::Expr::CallableCall {
+            callable,
+            args,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "callable-call result={}",
+                sem_kind_label_for_expr(*result_kind)
+            );
+            dump_sem_expr(out, callable, indent + 2);
+            for arg in args {
+                dump_sem_expr(out, arg, indent + 2);
+            }
+        }
         sem::Expr::GenericCall { generic, args, .. } => {
             let _ = writeln!(out, "generic-call g{}", generic.0);
             for arg in args {
@@ -10642,6 +10666,19 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .get(function.0 as usize)
                 .map_or(0, |function| function.definition.raw());
             let _ = write!(out, "call({definition}:");
+            fingerprint_args(module, args, out);
+            out.push(')');
+        }
+        sem::Expr::CallableCall {
+            callable,
+            args,
+            result_kind,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(out, "callable({result}:");
+            fingerprint_sem_expr(module, callable, out);
+            out.push(':');
             fingerprint_args(module, args, out);
             out.push(')');
         }

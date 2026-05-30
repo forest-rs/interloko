@@ -1192,6 +1192,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Call through a first-class callable value.
+    CallableCall {
+        /// Callable expression.
+        callable: Box<Expr>,
+        /// Argument expressions.
+        args: Vec<Expr>,
+        /// Result value category.
+        result_kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Recoverable condition signal.
     Signal {
         /// Condition object expression.
@@ -1355,6 +1366,7 @@ impl Expr {
             | Self::IntrinsicCall { span, .. }
             | Self::DirectCall { span, .. }
             | Self::GenericCall { span, .. }
+            | Self::CallableCall { span, .. }
             | Self::Signal { span, .. }
             | Self::ClassOf { span, .. }
             | Self::InstanceOf { span, .. }
@@ -3244,7 +3256,7 @@ impl Lowering {
             .collect::<Vec<_>>();
         match self.expr_kind(&target) {
             ValueKind::KnownCallable(KnownCallable::DirectFunction(function)) => {
-                self.lower_applied_direct_call(ctx, function, lowered_args, span)
+                self.lower_applied_direct_call(ctx, target, function, lowered_args, span)
             }
             ValueKind::KnownCallable(KnownCallable::GenericFunction(generic))
             | ValueKind::GenericFunctionObject(generic) => {
@@ -3405,6 +3417,7 @@ impl Lowering {
     fn lower_applied_direct_call(
         &self,
         ctx: &mut FunctionContext,
+        target: Expr,
         function: FunctionId,
         args: Vec<Expr>,
         span: Span,
@@ -3442,9 +3455,10 @@ impl Lowering {
                 );
             }
         }
-        Expr::DirectCall {
-            function,
+        Expr::CallableCall {
+            callable: Box::new(target),
             args,
+            result_kind: symbol.return_kind,
             span,
         }
     }
@@ -4146,6 +4160,7 @@ impl Lowering {
                 .generic_symbols
                 .get(generic.0 as usize)
                 .map_or(ValueKind::Error, |symbol| symbol.return_kind),
+            Expr::CallableCall { result_kind, .. } => *result_kind,
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
             }
@@ -4802,10 +4817,14 @@ mod tests {
         let Expr::Binary { lhs, rhs, .. } = &module.functions[1].body.result else {
             panic!("expected binary result");
         };
+        let Expr::CallableCall { callable, .. } = lhs.as_ref() else {
+            panic!("expected direct apply to remain a callable call");
+        };
         assert!(matches!(
-            lhs.as_ref(),
-            Expr::DirectCall {
-                function: FunctionId(0),
+            callable.as_ref(),
+            Expr::Local {
+                local: LocalId(0),
+                result_kind: ValueKind::KnownCallable(KnownCallable::DirectFunction(FunctionId(0))),
                 ..
             }
         ));

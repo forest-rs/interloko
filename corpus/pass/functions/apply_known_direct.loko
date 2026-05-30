@@ -1,8 +1,11 @@
 // expect: run 42
 // expect: diagnostics 0
 // expect: dump sem contains known-callable function f0
-// expect: dump sem contains direct-call f0
-// expect: dump lowered contains call l0
+// expect: dump sem contains callable-call result=integer
+// expect: dump lowered contains const.function l0
+// expect: dump lowered contains call.indirect
+// expect: dump tape contains const.func
+// expect: dump tape contains call.indirect
 
 define function inc(x)
   x + 1

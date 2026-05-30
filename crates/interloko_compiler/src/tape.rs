@@ -11,7 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
-use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
+use execution_tape::program::{CallSigId, ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -137,6 +137,7 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::I64 => ValueType::I64,
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
+        lower::ValueKind::Function(_) => ValueType::Func,
         lower::ValueKind::Object(_) => runtime::object_type(),
         lower::ValueKind::ClassObject(_)
         | lower::ValueKind::GenericFunctionObject(_)
@@ -168,6 +169,7 @@ struct HostSigs {
     symbol_literal: Option<HostSigId>,
     symbol_literal_consts: Vec<(String, ConstId)>,
     vector_literal: Option<(HostSigId, ElemTypeId)>,
+    indirect_calls: Vec<(Vec<lower::ValueKind>, lower::ValueKind, CallSigId)>,
     value_eq: HostSigId,
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
     box_i64: HostSigId,
@@ -263,6 +265,7 @@ impl HostSigs {
             builder.host_sig_for(runtime::SYMBOL_LITERAL, runtime::symbol_literal_signature())
         });
         let vector_literal = vector_literal_sig(builder, module);
+        let indirect_calls = call_indirect_sigs(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
         Ok(Self {
@@ -276,6 +279,7 @@ impl HostSigs {
             symbol_literal,
             symbol_literal_consts,
             vector_literal,
+            indirect_calls,
             value_eq,
             runtime_calls,
             box_i64,
@@ -321,6 +325,20 @@ impl HostSigs {
             .find(|(candidate, _)| *candidate == op)
             .map(|(_, sig)| *sig)
             .ok_or_else(|| invalid_lowered("runtime call signature is missing"))
+    }
+
+    fn indirect_call(
+        &self,
+        arg_kinds: &[lower::ValueKind],
+        ret: lower::ValueKind,
+    ) -> Result<CallSigId, TapeError> {
+        self.indirect_calls
+            .iter()
+            .find(|(candidate_args, candidate_ret, _)| {
+                candidate_args.as_slice() == arg_kinds && *candidate_ret == ret
+            })
+            .map(|(_, _, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("indirect call signature is missing"))
     }
 }
 
@@ -476,6 +494,33 @@ fn vector_literal_sig(
     None
 }
 
+fn call_indirect_sigs(
+    builder: &mut ProgramBuilder,
+    module: &lower::Module,
+) -> Vec<(Vec<lower::ValueKind>, lower::ValueKind, CallSigId)> {
+    let mut sigs = Vec::new();
+    for function in &module.functions {
+        for instr in &function.instructions {
+            let lower::Instr::CallIndirect { arg_kinds, ret, .. } = instr else {
+                continue;
+            };
+            if sigs.iter().any(|(existing_args, existing_ret, _)| {
+                existing_args == arg_kinds && existing_ret == ret
+            }) {
+                continue;
+            }
+            let args = arg_kinds
+                .iter()
+                .map(|kind| value_type(*kind))
+                .collect::<Vec<_>>();
+            let rets = [value_type(*ret)];
+            let sig = builder.call_sig(&args, &rets);
+            sigs.push((arg_kinds.clone(), *ret, sig));
+        }
+    }
+    sigs
+}
+
 struct FunctionEmitter<'a> {
     function: &'a lower::Function,
     ids: &'a TapeIds,
@@ -546,6 +591,20 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(dst.0, u64::from(class.0));
             }
+            lower::Instr::ConstFunction {
+                dst,
+                function,
+                span,
+            } => {
+                let function = self
+                    .ids
+                    .functions
+                    .get(function.0 as usize)
+                    .copied()
+                    .ok_or_else(|| invalid_lowered("function id is out of range"))?;
+                self.set_span(*span);
+                self.asm.const_func(dst.0, function);
+            }
             lower::Instr::BoxValue {
                 dst,
                 src,
@@ -560,7 +619,9 @@ impl<'a> FunctionEmitter<'a> {
                     | lower::ValueKind::GenericFunctionObject(_)
                     | lower::ValueKind::MethodObject(_)
                     | lower::ValueKind::SlotDescriptorObject => self.host_sigs.box_object,
-                    lower::ValueKind::Any | lower::ValueKind::U64 => {
+                    lower::ValueKind::Any
+                    | lower::ValueKind::U64
+                    | lower::ValueKind::Function(_) => {
                         return Err(invalid_lowered("invalid boxed value input kind"));
                     }
                 };
@@ -639,6 +700,19 @@ impl<'a> FunctionEmitter<'a> {
                 let args = reg_slice(args);
                 self.set_span(*span);
                 self.asm.call(0, callee, 0, &args, &[dst.0]);
+            }
+            lower::Instr::CallIndirect {
+                dst,
+                callee,
+                args,
+                arg_kinds,
+                ret,
+                span,
+            } => {
+                let sig = self.host_sigs.indirect_call(arg_kinds, *ret)?;
+                let args = reg_slice(args);
+                self.set_span(*span);
+                self.asm.call_indirect(0, sig, callee.0, 0, &args, &[dst.0]);
             }
             lower::Instr::MakeObject {
                 dst,
@@ -886,7 +960,8 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         | lower::Instr::StringLiteral { dst, .. }
         | lower::Instr::SymbolLiteral { dst, .. }
         | lower::Instr::ConstU64 { dst, .. }
-        | lower::Instr::ConstClass { dst, .. } => {
+        | lower::Instr::ConstClass { dst, .. }
+        | lower::Instr::ConstFunction { dst, .. } => {
             note_register(*dst, max);
         }
         lower::Instr::BoxValue { dst, src, .. } => {
@@ -903,6 +978,13 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         }
         lower::Instr::Call { dst, args, .. } => {
             note_register(*dst, max);
+            note_registers(args, max);
+        }
+        lower::Instr::CallIndirect {
+            dst, callee, args, ..
+        } => {
+            note_register(*dst, max);
+            note_register(*callee, max);
             note_registers(args, max);
         }
         lower::Instr::MakeObject { dst, fields, .. } => {
@@ -982,6 +1064,7 @@ fn span_id(span: Span) -> Option<SpanId> {
 mod tests {
     use super::*;
     use crate::{ast, grammar_frontend, identity::SourceFileId, sem};
+    use alloc::string::ToString;
 
     fn lower_source(source: &str) -> lower::Module {
         let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
@@ -1007,6 +1090,34 @@ mod tests {
         let tape = emit(&module).expect("tape emission should succeed");
         assert_eq!(tape.program.program().functions.len(), 2);
         assert_eq!(tape.main, Some(FuncId(1)));
+    }
+
+    #[test]
+    fn emits_known_callable_apply_through_indirect_call_signature() {
+        let module = lower_source(
+            "define function inc(x)\n  x + 1\nend;\n\
+             define function main()\n  let f = inc;\n  apply(f, 2)\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+        let program = tape.program.program();
+
+        assert_eq!(program.call_sigs.len(), 1);
+        assert_eq!(
+            program
+                .call_sig_args(&program.call_sigs[0])
+                .expect("indirect call args should decode"),
+            &[ValueType::I64],
+        );
+        assert_eq!(
+            program
+                .call_sig_rets(&program.call_sigs[0])
+                .expect("indirect call rets should decode"),
+            &[ValueType::I64],
+        );
+
+        let disassembly = execution_tape::disasm::disassemble_verified(&tape.program).to_string();
+        assert!(disassembly.contains("const.func"));
+        assert!(disassembly.contains("call.indirect"));
     }
 
     #[test]
