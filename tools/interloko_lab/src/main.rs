@@ -67,7 +67,7 @@ fn run(args: Vec<String>) -> Result<()> {
                     }
                     Ok(())
                 }
-                Some(result) => Err(LabError::Runtime(format!("{result:?}"))),
+                Some(result) => Err(LabError::Runtime(result.to_string())),
                 None => Err(LabError::Runtime("runtime was not requested".into())),
             }
         }
@@ -965,7 +965,7 @@ fn print_runtime_result(artifacts: &SessionArtifacts) -> Result<()> {
             println!("{value}");
             Ok(())
         }
-        Some(result) => Err(LabError::Runtime(format!("{result:?}"))),
+        Some(result) => Err(LabError::Runtime(result.to_string())),
         None => Err(LabError::Runtime("runtime was not requested".into())),
     }
 }

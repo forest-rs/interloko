@@ -3,6 +3,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use execution_tape::trace::TraceMask;
 use execution_tape::value::FuncId;
@@ -73,6 +74,32 @@ impl CompileError {
         }
     }
 }
+
+impl fmt::Display for CompileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Diagnostics { diagnostics } => {
+                write!(
+                    formatter,
+                    "compilation produced {} diagnostic(s)",
+                    diagnostics.len()
+                )
+            }
+            Self::Lower { error } => write!(formatter, "lowering failed: {error:?}"),
+            Self::Tape { error } => write!(formatter, "tape emission failed: {error:?}"),
+            Self::MissingMain => formatter.write_str("missing main"),
+            Self::MissingFunction { name } => write!(formatter, "missing function `{name}`"),
+            Self::MainHasParameters => formatter.write_str("main has parameters"),
+            Self::Runtime { trap } => write!(formatter, "runtime trap: {trap}"),
+            Self::MainReturnedNonI64 => formatter.write_str("main returned a non-integer result"),
+            Self::FunctionReturnedNonI64 { name } => {
+                write!(formatter, "function `{name}` returned a non-integer result")
+            }
+        }
+    }
+}
+
+impl core::error::Error for CompileError {}
 
 /// Fully compiled milestone-0 module.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,6 +236,8 @@ mod tests {
     use super::*;
     use crate::diagnostic::DiagnosticArgValue;
     use crate::sem::{HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind};
+    use execution_tape::host::{HostError, SigHash};
+    use execution_tape::vm::Trap;
     use interloko_runtime::{HostObjectAdapter, RuntimeError, ValueKind as RuntimeValueKind};
 
     #[derive(Debug)]
@@ -237,6 +266,28 @@ mod tests {
                 _ => Err(RuntimeError::HostAdapterReadFailed { slot }),
             }
         }
+    }
+
+    #[test]
+    fn compile_error_display_preserves_runtime_trap_details() {
+        let error = CompileError::Runtime {
+            trap: TrapInfo {
+                func: FuncId(7),
+                pc: 19,
+                span_id: Some(23),
+                trap: Trap::HostCallFailed {
+                    symbol: "interloko.literal.vector".into(),
+                    sig_hash: SigHash(123),
+                    error: HostError::SignatureMismatch,
+                },
+            },
+        };
+        let rendered = format!("{error}");
+
+        assert!(rendered.contains("trap at f7 pc=19 span=23"));
+        assert!(rendered.contains("host_call=interloko.literal.vector"));
+        assert!(rendered.contains("sig_hash=123"));
+        assert!(rendered.contains("host signature mismatch"));
     }
 
     fn host_registry() -> HostMetaRegistry {

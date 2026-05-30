@@ -354,7 +354,7 @@ fn check_case(case: &Case) -> Vec<String> {
             Expectation::Run(expected) => match &artifacts.runtime_result {
                 Some(RuntimeResult::ReturnedI64(actual)) if actual == expected => {}
                 Some(actual) => {
-                    failures.push(format!("expected run result {expected}, got {actual:?}"))
+                    failures.push(format!("expected run result {expected}, got {actual}"))
                 }
                 None => failures.push(format!(
                     "expected run result {expected}, but main did not run"

@@ -150,6 +150,18 @@ impl RuntimeResult {
     }
 }
 
+impl fmt::Display for RuntimeResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReturnedI64(value) => write!(formatter, "returned {value}"),
+            Self::MissingMain => formatter.write_str("missing main"),
+            Self::MainHasParameters => formatter.write_str("main has parameters"),
+            Self::Trap { trap } => write!(formatter, "runtime trap: {trap}"),
+            Self::MainReturnedNonI64 => formatter.write_str("main returned a non-integer result"),
+        }
+    }
+}
+
 /// Result of running a named zero-argument function from compiled artifacts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FunctionRunResult {
@@ -177,6 +189,23 @@ pub enum FunctionRunResult {
         /// Requested function name.
         name: String,
     },
+}
+
+impl fmt::Display for FunctionRunResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReturnedI64(value) => write!(formatter, "returned {value}"),
+            Self::MissingFunction { name } => write!(formatter, "missing function `{name}`"),
+            Self::FunctionHasParameters { name } => {
+                write!(formatter, "function `{name}` has parameters")
+            }
+            Self::TapeUnavailable => formatter.write_str("tape unavailable"),
+            Self::Trap { trap } => write!(formatter, "runtime trap: {trap}"),
+            Self::FunctionReturnedNonI64 { name } => {
+                write!(formatter, "function `{name}` returned a non-integer result")
+            }
+        }
+    }
 }
 
 /// Result and optional trace from running a zero-argument function.
@@ -10887,6 +10916,28 @@ mod tests {
             .find(|method| method.specializer == class)
             .map(|method| method.id)
             .expect("method should exist")
+    }
+
+    #[test]
+    fn runtime_result_display_preserves_trap_details() {
+        let result = RuntimeResult::Trap {
+            trap: TrapInfo {
+                func: execution_tape::value::FuncId(3),
+                pc: 11,
+                span_id: Some(17),
+                trap: execution_tape::vm::Trap::HostCallFailed {
+                    symbol: "interloko.slot_get".into(),
+                    sig_hash: execution_tape::host::SigHash(456),
+                    error: execution_tape::host::HostError::Failed,
+                },
+            },
+        };
+        let rendered = format!("{result}");
+
+        assert!(rendered.contains("trap at f3 pc=11 span=17"));
+        assert!(rendered.contains("host_call=interloko.slot_get"));
+        assert!(rendered.contains("sig_hash=456"));
+        assert!(rendered.contains("host call failed"));
     }
 
     #[test]

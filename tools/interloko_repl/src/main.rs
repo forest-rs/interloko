@@ -2737,18 +2737,7 @@ const FORM_AFFORDANCES: &[&str] = &[
 ];
 
 fn function_run_message(result: &FunctionRunResult) -> String {
-    match result {
-        FunctionRunResult::ReturnedI64(value) => format!("returned {value}"),
-        FunctionRunResult::MissingFunction { name } => format!("missing function `{name}`"),
-        FunctionRunResult::FunctionHasParameters { name } => {
-            format!("function `{name}` has parameters")
-        }
-        FunctionRunResult::TapeUnavailable => "tape unavailable".into(),
-        FunctionRunResult::Trap { trap } => format!("trap {trap}"),
-        FunctionRunResult::FunctionReturnedNonI64 { name } => {
-            format!("function `{name}` returned a non-integer result")
-        }
-    }
+    result.to_string()
 }
 
 fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
