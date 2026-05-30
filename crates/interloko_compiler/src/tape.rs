@@ -74,7 +74,7 @@ impl TapeError {
 pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     let mut builder = ProgramBuilder::new();
     builder.set_program_name("interloko");
-    let host_sigs = HostSigs::new(&mut builder, module)?;
+    let abi = AbiTables::new(&mut builder, module)?;
 
     let mut ids = TapeIds::default();
     let mut main = None;
@@ -118,7 +118,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
             .get(function.id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_lowered("function id is out of range"))?;
-        let asm = FunctionEmitter::new(function, &ids, &host_sigs).emit()?;
+        let asm = FunctionEmitter::new(function, &ids, &abi).emit()?;
         builder.define_function(func, asm).map_err(build_error)?;
     }
 
@@ -158,7 +158,7 @@ struct TapeIds {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct HostSigs {
+struct AbiTables {
     make_object: HostSigId,
     class_count: usize,
     class_of: HostSigId,
@@ -181,7 +181,7 @@ struct HostSigs {
     cast_object: HostSigId,
 }
 
-impl HostSigs {
+impl AbiTables {
     fn new(builder: &mut ProgramBuilder, module: &lower::Module) -> Result<Self, TapeError> {
         let make_object =
             builder.host_sig_for(runtime::MAKE_OBJECT, runtime::make_object_signature());
@@ -524,20 +524,20 @@ fn call_indirect_sigs(
 struct FunctionEmitter<'a> {
     function: &'a lower::Function,
     ids: &'a TapeIds,
-    host_sigs: &'a HostSigs,
+    abi: &'a AbiTables,
     asm: Asm,
     labels: Vec<Label>,
     next_temp: u32,
 }
 
 impl<'a> FunctionEmitter<'a> {
-    fn new(function: &'a lower::Function, ids: &'a TapeIds, host_sigs: &'a HostSigs) -> Self {
+    fn new(function: &'a lower::Function, ids: &'a TapeIds, abi: &'a AbiTables) -> Self {
         let mut asm = Asm::new();
         let labels = labels_for(function, &mut asm);
         Self {
             function,
             ids,
-            host_sigs,
+            abi,
             asm,
             labels,
             next_temp: max_register(function).saturating_add(1),
@@ -568,7 +568,7 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::StringLiteral {
                 dst, value, span, ..
             } => {
-                let (sig, value_const) = self.host_sigs.string_literal(value)?;
+                let (sig, value_const) = self.abi.string_literal(value)?;
                 let value_reg = self.alloc_temp();
                 self.set_span(*span);
                 self.asm.const_pool(value_reg, value_const);
@@ -577,7 +577,7 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::SymbolLiteral {
                 dst, name, span, ..
             } => {
-                let (sig, name_const) = self.host_sigs.symbol_literal(name)?;
+                let (sig, name_const) = self.abi.symbol_literal(name)?;
                 let name_reg = self.alloc_temp();
                 self.set_span(*span);
                 self.asm.const_pool(name_reg, name_const);
@@ -612,13 +612,13 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 let sig = match from {
-                    lower::ValueKind::I64 => self.host_sigs.box_i64,
-                    lower::ValueKind::Bool => self.host_sigs.box_bool,
+                    lower::ValueKind::I64 => self.abi.box_i64,
+                    lower::ValueKind::Bool => self.abi.box_bool,
                     lower::ValueKind::Object(_)
                     | lower::ValueKind::ClassObject(_)
                     | lower::ValueKind::GenericFunctionObject(_)
                     | lower::ValueKind::MethodObject(_)
-                    | lower::ValueKind::SlotDescriptorObject => self.host_sigs.box_object,
+                    | lower::ValueKind::SlotDescriptorObject => self.abi.box_object,
                     lower::ValueKind::Any
                     | lower::ValueKind::U64
                     | lower::ValueKind::Function(_) => {
@@ -683,7 +683,7 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.set_span(*span);
                 self.asm
-                    .host_call(0, self.host_sigs.value_eq, 0, &[lhs.0, rhs.0], &[dst.0]);
+                    .host_call(0, self.abi.value_eq, 0, &[lhs.0, rhs.0], &[dst.0]);
             }
             lower::Instr::Call {
                 dst,
@@ -709,7 +709,7 @@ impl<'a> FunctionEmitter<'a> {
                 ret,
                 span,
             } => {
-                let sig = self.host_sigs.indirect_call(arg_kinds, *ret)?;
+                let sig = self.abi.indirect_call(arg_kinds, *ret)?;
                 let args = reg_slice(args);
                 self.set_span(*span);
                 self.asm.call_indirect(0, sig, callee.0, 0, &args, &[dst.0]);
@@ -720,7 +720,7 @@ impl<'a> FunctionEmitter<'a> {
                 fields,
                 span,
             } => {
-                if class.0 as usize >= self.host_sigs.class_count {
+                if class.0 as usize >= self.abi.class_count {
                     return Err(invalid_lowered("class id is out of range"));
                 }
                 let class_reg = self.alloc_temp();
@@ -730,7 +730,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm.tuple_new(fields_reg, &reg_slice(fields));
                 self.asm.host_call(
                     0,
-                    self.host_sigs.make_object,
+                    self.abi.make_object,
                     0,
                     &[class_reg, fields_reg],
                     &[dst.0],
@@ -742,7 +742,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
                 ..
             } => {
-                let (sig, elem) = self.host_sigs.vector_literal()?;
+                let (sig, elem) = self.abi.vector_literal()?;
                 let elements = reg_slice(elements);
                 let aggregate = self.alloc_temp();
                 self.set_span(*span);
@@ -756,7 +756,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
                 ..
             } => {
-                let sig = self.host_sigs.runtime_call(*op)?;
+                let sig = self.abi.runtime_call(*op)?;
                 let args = reg_slice(args);
                 self.set_span(*span);
                 self.asm.host_call(0, sig, 0, &args, &[dst.0]);
@@ -770,7 +770,7 @@ impl<'a> FunctionEmitter<'a> {
                 ..
             } => {
                 let sig = self
-                    .host_sigs
+                    .abi
                     .slot_get
                     .get(class.0 as usize)
                     .and_then(|slots| slots.get(slot.0 as usize))
@@ -792,7 +792,7 @@ impl<'a> FunctionEmitter<'a> {
                 ..
             } => {
                 let sig = self
-                    .host_sigs
+                    .abi
                     .slot_set
                     .get(class.0 as usize)
                     .and_then(|slots| slots.get(slot.0 as usize))
@@ -807,7 +807,7 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::ClassOf { dst, object, span } => {
                 self.set_span(*span);
                 self.asm
-                    .host_call(0, self.host_sigs.class_of, 0, &[object.0], &[dst.0]);
+                    .host_call(0, self.abi.class_of, 0, &[object.0], &[dst.0]);
             }
             lower::Instr::InstanceOf {
                 dst,
@@ -899,16 +899,16 @@ impl<'a> FunctionEmitter<'a> {
 
     fn instance_sig(&self, kind: lower::ValueKind) -> Result<HostSigId, TapeError> {
         match kind {
-            lower::ValueKind::Any => Ok(self.host_sigs.instance_any),
-            lower::ValueKind::Object(_) => Ok(self.host_sigs.instance_object),
+            lower::ValueKind::Any => Ok(self.abi.instance_any),
+            lower::ValueKind::Object(_) => Ok(self.abi.instance_object),
             _ => Err(invalid_lowered("instance? input kind is invalid")),
         }
     }
 
     fn cast_sig(&self, kind: lower::ValueKind) -> Result<HostSigId, TapeError> {
         match kind {
-            lower::ValueKind::Any => Ok(self.host_sigs.cast_any),
-            lower::ValueKind::Object(_) => Ok(self.host_sigs.cast_object),
+            lower::ValueKind::Any => Ok(self.abi.cast_any),
+            lower::ValueKind::Object(_) => Ok(self.abi.cast_object),
             _ => Err(invalid_lowered("cast input kind is invalid")),
         }
     }
