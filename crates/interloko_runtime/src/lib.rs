@@ -1466,12 +1466,9 @@ impl Host for InterlokoHost {
                 let mut values = Vec::with_capacity(len);
                 for index in 0..len {
                     let value = ctx
-                        .array_get(*elements, index)
+                        .array_get_ref(*elements, index)
                         .map_err(|_| HostError::Failed)?;
-                    let Value::Obj(object) = value else {
-                        return Err(HostError::Failed);
-                    };
-                    values.push(self.value_for_any(ValueRef::Obj(object))?);
+                    values.push(self.value_for_any(value)?);
                 }
                 rets[0] = self.push_object(RuntimeObject {
                     class,
@@ -1729,11 +1726,11 @@ impl Host for InterlokoHost {
                 let mut values = Vec::with_capacity(len);
                 for index in 0..len {
                     values.push(
-                        ctx.tuple_get(*fields, index)
+                        ctx.tuple_get_ref(*fields, index)
                             .map_err(|_| HostError::Failed)?,
                     );
                 }
-                rets[0] = self.make_object_values(runtime_class_id(*class_raw)?, &values)?;
+                rets[0] = self.make_object(runtime_class_id(*class_raw)?, &values)?;
                 Ok(0)
             }
             CLASS_OF => {
@@ -2143,55 +2140,6 @@ impl InterlokoHost {
             }
             _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),
         }
-    }
-
-    fn make_object_values(
-        &mut self,
-        class: ClassId,
-        fields: &[Value],
-    ) -> Result<Value, RuntimeError> {
-        let class_info = self
-            .layout
-            .class(class)
-            .ok_or(RuntimeError::InvalidClass { class })?;
-        if class_info.kind != HostObjectKind::Native {
-            return Err(RuntimeError::ClassIsNotNative {
-                class,
-                kind: class_info.kind,
-            });
-        }
-        if fields.len() != class_info.slots.len() {
-            return Err(RuntimeError::FieldArityMismatch {
-                class,
-                expected: class_info.slots.len(),
-                actual: fields.len(),
-            });
-        }
-        let mut slots = Vec::with_capacity(class_info.slots.len());
-        for (field, slot) in fields.iter().zip(&class_info.slots) {
-            slots.push(self.value_for_slot(value_ref(field), slot.kind)?);
-        }
-        Ok(self.push_object(RuntimeObject {
-            class,
-            storage: RuntimeObjectStorage::Native { slots },
-        }))
-    }
-}
-
-fn value_ref(value: &Value) -> ValueRef<'_> {
-    match value {
-        Value::Unit => ValueRef::Unit,
-        Value::Bool(value) => ValueRef::Bool(*value),
-        Value::I64(value) => ValueRef::I64(*value),
-        Value::U64(value) => ValueRef::U64(*value),
-        Value::F64(value) => ValueRef::F64(*value),
-        Value::Decimal(value) => ValueRef::Decimal(*value),
-        Value::Bytes(value) => ValueRef::Bytes(value.as_slice()),
-        Value::Str(value) => ValueRef::Str(value.as_str()),
-        Value::Obj(value) => ValueRef::Obj(*value),
-        Value::Agg(value) => ValueRef::Agg(*value),
-        Value::Func(value) => ValueRef::Func(*value),
-        Value::Closure(value) => ValueRef::Closure(*value),
     }
 }
 
