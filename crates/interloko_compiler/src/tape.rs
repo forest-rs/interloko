@@ -11,7 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
-use execution_tape::program::{CallSigId, ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
+use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -118,7 +118,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
             .get(function.id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_lowered("function id is out of range"))?;
-        let asm = FunctionEmitter::new(function, &ids, &abi).emit()?;
+        let asm = FunctionEmitter::new(function, &ids, &abi, &mut builder).emit()?;
         builder.define_function(func, asm).map_err(build_error)?;
     }
 
@@ -169,7 +169,6 @@ struct AbiTables {
     symbol_literal: Option<HostSigId>,
     symbol_literal_consts: Vec<(String, ConstId)>,
     vector_literal: Option<(HostSigId, ElemTypeId)>,
-    indirect_calls: Vec<(Vec<lower::ValueKind>, lower::ValueKind, CallSigId)>,
     value_eq: HostSigId,
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
     box_i64: HostSigId,
@@ -265,7 +264,6 @@ impl AbiTables {
             builder.host_sig_for(runtime::SYMBOL_LITERAL, runtime::symbol_literal_signature())
         });
         let vector_literal = vector_literal_sig(builder, module);
-        let indirect_calls = call_indirect_sigs(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
         Ok(Self {
@@ -279,7 +277,6 @@ impl AbiTables {
             symbol_literal,
             symbol_literal_consts,
             vector_literal,
-            indirect_calls,
             value_eq,
             runtime_calls,
             box_i64,
@@ -325,20 +322,6 @@ impl AbiTables {
             .find(|(candidate, _)| *candidate == op)
             .map(|(_, sig)| *sig)
             .ok_or_else(|| invalid_lowered("runtime call signature is missing"))
-    }
-
-    fn indirect_call(
-        &self,
-        arg_kinds: &[lower::ValueKind],
-        ret: lower::ValueKind,
-    ) -> Result<CallSigId, TapeError> {
-        self.indirect_calls
-            .iter()
-            .find(|(candidate_args, candidate_ret, _)| {
-                candidate_args.as_slice() == arg_kinds && *candidate_ret == ret
-            })
-            .map(|(_, _, sig)| *sig)
-            .ok_or_else(|| invalid_lowered("indirect call signature is missing"))
     }
 }
 
@@ -494,50 +477,30 @@ fn vector_literal_sig(
     None
 }
 
-fn call_indirect_sigs(
-    builder: &mut ProgramBuilder,
-    module: &lower::Module,
-) -> Vec<(Vec<lower::ValueKind>, lower::ValueKind, CallSigId)> {
-    let mut sigs = Vec::new();
-    for function in &module.functions {
-        for instr in &function.instructions {
-            let lower::Instr::CallIndirect { arg_kinds, ret, .. } = instr else {
-                continue;
-            };
-            if sigs.iter().any(|(existing_args, existing_ret, _)| {
-                existing_args == arg_kinds && existing_ret == ret
-            }) {
-                continue;
-            }
-            let args = arg_kinds
-                .iter()
-                .map(|kind| value_type(*kind))
-                .collect::<Vec<_>>();
-            let rets = [value_type(*ret)];
-            let sig = builder.call_sig(&args, &rets);
-            sigs.push((arg_kinds.clone(), *ret, sig));
-        }
-    }
-    sigs
-}
-
 struct FunctionEmitter<'a> {
     function: &'a lower::Function,
     ids: &'a TapeIds,
     abi: &'a AbiTables,
+    builder: &'a mut ProgramBuilder,
     asm: Asm,
     labels: Vec<Label>,
     next_temp: u32,
 }
 
 impl<'a> FunctionEmitter<'a> {
-    fn new(function: &'a lower::Function, ids: &'a TapeIds, abi: &'a AbiTables) -> Self {
+    fn new(
+        function: &'a lower::Function,
+        ids: &'a TapeIds,
+        abi: &'a AbiTables,
+        builder: &'a mut ProgramBuilder,
+    ) -> Self {
         let mut asm = Asm::new();
         let labels = labels_for(function, &mut asm);
         Self {
             function,
             ids,
             abi,
+            builder,
             asm,
             labels,
             next_temp: max_register(function).saturating_add(1),
@@ -709,7 +672,12 @@ impl<'a> FunctionEmitter<'a> {
                 ret,
                 span,
             } => {
-                let sig = self.abi.indirect_call(arg_kinds, *ret)?;
+                let args_types = arg_kinds
+                    .iter()
+                    .map(|kind| value_type(*kind))
+                    .collect::<Vec<_>>();
+                let ret_types = [value_type(*ret)];
+                let sig = self.builder.call_sig(&args_types, &ret_types);
                 let args = reg_slice(args);
                 self.set_span(*span);
                 self.asm.call_indirect(0, sig, callee.0, 0, &args, &[dst.0]);
