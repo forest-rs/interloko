@@ -11,7 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
-use execution_tape::program::{HostSigId, SpanId, ValueType};
+use execution_tape::program::{Const, ConstId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -162,8 +162,10 @@ struct HostSigs {
     class_of: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
     slot_set: Vec<Vec<HostSigId>>,
-    string_literals: Vec<(String, HostSigId)>,
-    symbol_literals: Vec<(String, HostSigId)>,
+    string_literal: Option<HostSigId>,
+    string_literal_consts: Vec<(String, ConstId)>,
+    symbol_literal: Option<HostSigId>,
+    symbol_literal_consts: Vec<(String, ConstId)>,
     vector_literals: Vec<(usize, HostSigId)>,
     value_eq: HostSigId,
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
@@ -255,24 +257,20 @@ impl HostSigs {
             runtime::CAST_OBJECT,
             runtime::cast_object_signature(runtime::object_type()),
         );
-        let string_literals = literal_sigs(
-            builder,
-            module,
-            |instr| match instr {
-                lower::Instr::StringLiteral { value, .. } => Some(value.as_str()),
-                _ => None,
-            },
-            runtime::STRING_LITERAL_PREFIX,
-        );
-        let symbol_literals = literal_sigs(
-            builder,
-            module,
-            |instr| match instr {
-                lower::Instr::SymbolLiteral { name, .. } => Some(name.as_str()),
-                _ => None,
-            },
-            runtime::SYMBOL_LITERAL_PREFIX,
-        );
+        let string_literal_consts = literal_consts(builder, module, |instr| match instr {
+            lower::Instr::StringLiteral { value, .. } => Some(value.as_str()),
+            _ => None,
+        });
+        let string_literal = (!string_literal_consts.is_empty()).then(|| {
+            builder.host_sig_for(runtime::STRING_LITERAL, runtime::string_literal_signature())
+        });
+        let symbol_literal_consts = literal_consts(builder, module, |instr| match instr {
+            lower::Instr::SymbolLiteral { name, .. } => Some(name.as_str()),
+            _ => None,
+        });
+        let symbol_literal = (!symbol_literal_consts.is_empty()).then(|| {
+            builder.host_sig_for(runtime::SYMBOL_LITERAL, runtime::symbol_literal_signature())
+        });
         let vector_literals = vector_literal_sigs(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
@@ -281,8 +279,10 @@ impl HostSigs {
             class_of,
             slot_get,
             slot_set,
-            string_literals,
-            symbol_literals,
+            string_literal,
+            string_literal_consts,
+            symbol_literal,
+            symbol_literal_consts,
             vector_literals,
             value_eq,
             runtime_calls,
@@ -296,20 +296,26 @@ impl HostSigs {
         })
     }
 
-    fn string_literal(&self, value: &str) -> Result<HostSigId, TapeError> {
-        self.string_literals
+    fn string_literal(&self, value: &str) -> Result<(HostSigId, ConstId), TapeError> {
+        let sig = self
+            .string_literal
+            .ok_or_else(|| invalid_lowered("string literal signature is missing"))?;
+        self.string_literal_consts
             .iter()
             .find(|(literal, _)| literal == value)
-            .map(|(_, sig)| *sig)
-            .ok_or_else(|| invalid_lowered("string literal signature is missing"))
+            .map(|(_, const_id)| (sig, *const_id))
+            .ok_or_else(|| invalid_lowered("string literal constant is missing"))
     }
 
-    fn symbol_literal(&self, name: &str) -> Result<HostSigId, TapeError> {
-        self.symbol_literals
+    fn symbol_literal(&self, name: &str) -> Result<(HostSigId, ConstId), TapeError> {
+        let sig = self
+            .symbol_literal
+            .ok_or_else(|| invalid_lowered("symbol literal signature is missing"))?;
+        self.symbol_literal_consts
             .iter()
             .find(|(literal, _)| literal == name)
-            .map(|(_, sig)| *sig)
-            .ok_or_else(|| invalid_lowered("symbol literal signature is missing"))
+            .map(|(_, const_id)| (sig, *const_id))
+            .ok_or_else(|| invalid_lowered("symbol literal constant is missing"))
     }
 
     fn vector_literal(&self, arity: usize) -> Result<HostSigId, TapeError> {
@@ -443,13 +449,12 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
     .collect()
 }
 
-fn literal_sigs(
+fn literal_consts(
     builder: &mut ProgramBuilder,
     module: &lower::Module,
     select: fn(&lower::Instr) -> Option<&str>,
-    prefix: &str,
-) -> Vec<(String, HostSigId)> {
-    let mut literals: Vec<(String, HostSigId)> = Vec::new();
+) -> Vec<(String, ConstId)> {
+    let mut literals: Vec<(String, ConstId)> = Vec::new();
     for function in &module.functions {
         for instr in &function.instructions {
             let Some(value) = select(instr) else {
@@ -458,9 +463,8 @@ fn literal_sigs(
             if literals.iter().any(|(literal, _)| literal == value) {
                 continue;
             }
-            let symbol = runtime::literal_symbol(prefix, value);
-            let sig = builder.host_sig_for(&symbol, runtime::object_literal_signature());
-            literals.push((value.into(), sig));
+            let const_id = builder.constant(Const::Str(value.into()));
+            literals.push((value.into(), const_id));
         }
     }
     literals
@@ -537,16 +541,20 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::StringLiteral {
                 dst, value, span, ..
             } => {
-                let sig = self.host_sigs.string_literal(value)?;
+                let (sig, value_const) = self.host_sigs.string_literal(value)?;
+                let value_reg = self.alloc_temp();
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
+                self.asm.const_pool(value_reg, value_const);
+                self.asm.host_call(0, sig, 0, &[value_reg], &[dst.0]);
             }
             lower::Instr::SymbolLiteral {
                 dst, name, span, ..
             } => {
-                let sig = self.host_sigs.symbol_literal(name)?;
+                let (sig, name_const) = self.host_sigs.symbol_literal(name)?;
+                let name_reg = self.alloc_temp();
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
+                self.asm.const_pool(name_reg, name_const);
+                self.asm.host_call(0, sig, 0, &[name_reg], &[dst.0]);
             }
             lower::Instr::ConstU64 { dst, value, span } => {
                 self.set_span(*span);

@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use execution_tape::host::{AccessSink, Host, HostError, SigHash, ValueRef};
+use execution_tape::host::{AccessSink, Host, HostError, HostSig, SigHash, ValueRef};
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 use interloko_model::{
@@ -38,10 +38,10 @@ pub const BOX_VALUE: &str = "interloko.box_value";
 pub const INSTANCE_OF: &str = "interloko.instance_of";
 /// Host-call symbol for casting a value to a known runtime object class.
 pub const CAST_OBJECT: &str = "interloko.cast_object";
-/// Host-call symbol prefix for string literals.
-pub const STRING_LITERAL_PREFIX: &str = "interloko.literal.string:";
-/// Host-call symbol prefix for symbol literals.
-pub const SYMBOL_LITERAL_PREFIX: &str = "interloko.literal.symbol:";
+/// Host-call symbol for constructing a string object from an execution string.
+pub const STRING_LITERAL: &str = "interloko.literal.string";
+/// Host-call symbol for constructing an interned symbol object from an execution string.
+pub const SYMBOL_LITERAL: &str = "interloko.literal.symbol";
 /// Host-call symbol for immutable vector literals.
 pub const VECTOR_LITERAL: &str = "interloko.literal.vector";
 /// Host-call symbol for runtime value equality.
@@ -1412,18 +1412,24 @@ impl Host for InterlokoHost {
         _access: Option<&mut dyn AccessSink>,
     ) -> Result<u64, HostError> {
         match symbol {
-            _ if symbol.starts_with(STRING_LITERAL_PREFIX) => {
-                let value = decode_literal_suffix(symbol, STRING_LITERAL_PREFIX)?;
+            STRING_LITERAL => {
+                let [ValueRef::Str(value)] = args else {
+                    return Err(HostError::Failed);
+                };
                 let class = self.builtin_class(BuiltinValueClass::String)?;
                 rets[0] = self.push_object(RuntimeObject {
                     class,
-                    storage: RuntimeObjectStorage::String { value },
+                    storage: RuntimeObjectStorage::String {
+                        value: String::from(*value),
+                    },
                 });
                 Ok(0)
             }
-            _ if symbol.starts_with(SYMBOL_LITERAL_PREFIX) => {
-                let name = decode_literal_suffix(symbol, SYMBOL_LITERAL_PREFIX)?;
-                rets[0] = self.intern_symbol(name)?;
+            SYMBOL_LITERAL => {
+                let [ValueRef::Str(name)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.intern_symbol(String::from(*name))?;
                 Ok(0)
             }
             VECTOR_LITERAL => {
@@ -2097,12 +2103,12 @@ impl InterlokoHost {
 
 /// Host signature for object construction for a runtime class.
 #[must_use]
-pub fn make_object_signature(class: &RuntimeClass) -> Option<execution_tape::host::HostSig> {
+pub fn make_object_signature(class: &RuntimeClass) -> Option<HostSig> {
     let mut args = vec![ValueType::U64];
     for slot in &class.slots {
         args.push(value_type(slot.kind)?);
     }
-    Some(execution_tape::host::HostSig {
+    Some(HostSig {
         args,
         rets: vec![object_type()],
     })
@@ -2110,8 +2116,8 @@ pub fn make_object_signature(class: &RuntimeClass) -> Option<execution_tape::hos
 
 /// Host signature for `class_of`.
 #[must_use]
-pub fn class_of_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn class_of_signature() -> HostSig {
+    HostSig {
         args: vec![object_type()],
         rets: vec![ValueType::U64],
     }
@@ -2119,8 +2125,8 @@ pub fn class_of_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for `slot_get`.
 #[must_use]
-pub fn slot_get_signature(kind: ValueKind) -> Option<execution_tape::host::HostSig> {
-    Some(execution_tape::host::HostSig {
+pub fn slot_get_signature(kind: ValueKind) -> Option<HostSig> {
+    Some(HostSig {
         args: vec![object_type(), ValueType::U64],
         rets: vec![value_type(kind)?],
     })
@@ -2128,8 +2134,8 @@ pub fn slot_get_signature(kind: ValueKind) -> Option<execution_tape::host::HostS
 
 /// Host signature for `slot_set`.
 #[must_use]
-pub fn slot_set_signature(kind: ValueKind) -> Option<execution_tape::host::HostSig> {
-    Some(execution_tape::host::HostSig {
+pub fn slot_set_signature(kind: ValueKind) -> Option<HostSig> {
+    Some(HostSig {
         args: vec![object_type(), ValueType::U64, value_type(kind)?],
         rets: vec![value_type(kind)?],
     })
@@ -2137,8 +2143,8 @@ pub fn slot_set_signature(kind: ValueKind) -> Option<execution_tape::host::HostS
 
 /// Host signature for boxing a concrete value as top `<object>`.
 #[must_use]
-pub fn box_value_signature(input: ValueType) -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn box_value_signature(input: ValueType) -> HostSig {
+    HostSig {
         args: vec![input],
         rets: vec![any_type()],
     }
@@ -2146,8 +2152,8 @@ pub fn box_value_signature(input: ValueType) -> execution_tape::host::HostSig {
 
 /// Host signature for `instance?`.
 #[must_use]
-pub fn instance_of_signature(input: ValueType) -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn instance_of_signature(input: ValueType) -> HostSig {
+    HostSig {
         args: vec![input, ValueType::U64],
         rets: vec![ValueType::Bool],
     }
@@ -2155,26 +2161,35 @@ pub fn instance_of_signature(input: ValueType) -> execution_tape::host::HostSig 
 
 /// Host signature for `as` to a runtime object.
 #[must_use]
-pub fn cast_object_signature(input: ValueType) -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn cast_object_signature(input: ValueType) -> HostSig {
+    HostSig {
         args: vec![input, ValueType::U64],
         rets: vec![object_type()],
     }
 }
 
-/// Host signature for a literal host call with no runtime arguments.
+/// Host signature for constructing a string object from an execution string literal.
 #[must_use]
-pub fn object_literal_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
-        args: Vec::new(),
+pub fn string_literal_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::Str],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for constructing an interned symbol object from an execution string literal.
+#[must_use]
+pub fn symbol_literal_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::Str],
         rets: vec![object_type()],
     }
 }
 
 /// Host signature for a vector literal of `arity` boxed elements.
 #[must_use]
-pub fn vector_literal_signature(arity: usize) -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn vector_literal_signature(arity: usize) -> HostSig {
+    HostSig {
         args: vec![any_type(); arity],
         rets: vec![object_type()],
     }
@@ -2182,8 +2197,8 @@ pub fn vector_literal_signature(arity: usize) -> execution_tape::host::HostSig {
 
 /// Host signature for runtime value equality.
 #[must_use]
-pub fn value_eq_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn value_eq_signature() -> HostSig {
+    HostSig {
         args: vec![object_type(), object_type()],
         rets: vec![ValueType::Bool],
     }
@@ -2191,8 +2206,8 @@ pub fn value_eq_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for constructing a class metaobject from a class id.
 #[must_use]
-pub fn meta_class_object_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn meta_class_object_signature() -> HostSig {
+    HostSig {
         args: vec![ValueType::U64],
         rets: vec![object_type()],
     }
@@ -2200,8 +2215,8 @@ pub fn meta_class_object_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for constructing a generic-function metaobject.
 #[must_use]
-pub fn meta_generic_object_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn meta_generic_object_signature() -> HostSig {
+    HostSig {
         args: vec![ValueType::U64],
         rets: vec![object_type()],
     }
@@ -2209,8 +2224,8 @@ pub fn meta_generic_object_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for constructing a method metaobject.
 #[must_use]
-pub fn meta_method_object_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn meta_method_object_signature() -> HostSig {
+    HostSig {
         args: vec![ValueType::U64],
         rets: vec![object_type()],
     }
@@ -2218,8 +2233,8 @@ pub fn meta_method_object_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for constructing a slot descriptor metaobject.
 #[must_use]
-pub fn meta_slot_descriptor_object_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn meta_slot_descriptor_object_signature() -> HostSig {
+    HostSig {
         args: vec![ValueType::U64, ValueType::U64],
         rets: vec![object_type()],
     }
@@ -2227,8 +2242,8 @@ pub fn meta_slot_descriptor_object_signature() -> execution_tape::host::HostSig 
 
 /// Host signature for a one-argument metaobject query returning an object.
 #[must_use]
-pub fn meta_query_object_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn meta_query_object_signature() -> HostSig {
+    HostSig {
         args: vec![any_type()],
         rets: vec![object_type()],
     }
@@ -2236,8 +2251,8 @@ pub fn meta_query_object_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for a one-argument metaobject query returning `<object>`.
 #[must_use]
-pub fn meta_query_any_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn meta_query_any_signature() -> HostSig {
+    HostSig {
         args: vec![any_type()],
         rets: vec![any_type()],
     }
@@ -2245,8 +2260,8 @@ pub fn meta_query_any_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for a one-argument metaobject query returning `<boolean>`.
 #[must_use]
-pub fn meta_query_bool_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn meta_query_bool_signature() -> HostSig {
+    HostSig {
         args: vec![any_type()],
         rets: vec![ValueType::Bool],
     }
@@ -2254,8 +2269,8 @@ pub fn meta_query_bool_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for immutable vector length.
 #[must_use]
-pub fn vector_size_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn vector_size_signature() -> HostSig {
+    HostSig {
         args: vec![any_type()],
         rets: vec![ValueType::I64],
     }
@@ -2263,8 +2278,8 @@ pub fn vector_size_signature() -> execution_tape::host::HostSig {
 
 /// Host signature for immutable vector indexing.
 #[must_use]
-pub fn vector_ref_signature() -> execution_tape::host::HostSig {
-    execution_tape::host::HostSig {
+pub fn vector_ref_signature() -> HostSig {
+    HostSig {
         args: vec![any_type(), ValueType::I64],
         rets: vec![any_type()],
     }
@@ -2302,49 +2317,6 @@ fn runtime_method_id(raw: u64) -> Result<MethodId, HostError> {
 
 fn runtime_slot_id(raw: u64) -> Result<SlotId, HostError> {
     Ok(SlotId(u32::try_from(raw).map_err(|_| HostError::Failed)?))
-}
-
-/// Encodes a string-like literal into a host-call symbol.
-#[must_use]
-pub fn literal_symbol(prefix: &str, value: &str) -> String {
-    let mut symbol = String::with_capacity(prefix.len() + value.len() * 2);
-    symbol.push_str(prefix);
-    for byte in value.as_bytes() {
-        push_hex(&mut symbol, *byte);
-    }
-    symbol
-}
-
-fn decode_literal_suffix(symbol: &str, prefix: &str) -> Result<String, HostError> {
-    let encoded = symbol.strip_prefix(prefix).ok_or(HostError::Failed)?;
-    if encoded.len() % 2 != 0 {
-        return Err(HostError::Failed);
-    }
-    let bytes = encoded.as_bytes();
-    let mut decoded = Vec::with_capacity(encoded.len() / 2);
-    let mut index = 0;
-    while index < bytes.len() {
-        let high = hex_value(bytes[index])?;
-        let low = hex_value(bytes[index + 1])?;
-        decoded.push((high << 4) | low);
-        index += 2;
-    }
-    String::from_utf8(decoded).map_err(|_| HostError::Failed)
-}
-
-fn push_hex(out: &mut String, byte: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    out.push(char::from(HEX[usize::from(byte >> 4)]));
-    out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-}
-
-fn hex_value(byte: u8) -> Result<u8, HostError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(HostError::Failed),
-    }
 }
 
 #[cfg(test)]
