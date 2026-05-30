@@ -11,7 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
-use execution_tape::program::{Const, ConstId, HostSigId, SpanId, ValueType};
+use execution_tape::program::{ConstId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -463,7 +463,7 @@ fn literal_consts(
             if literals.iter().any(|(literal, _)| literal == value) {
                 continue;
             }
-            let const_id = builder.constant(Const::Str(value.into()));
+            let const_id = builder.const_str(value);
             literals.push((value.into(), const_id));
         }
     }

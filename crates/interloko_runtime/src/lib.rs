@@ -12,8 +12,10 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[cfg(test)]
+use execution_tape::host::AccessSink;
 use execution_tape::host::{
-    AccessSink, Host, HostError, HostSig, ResourceKeyRef, SigHash, ValueRef,
+    Host, HostContext, HostError, HostSig, ResourceKeyRef, SigHash, ValueRef,
 };
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
@@ -1265,11 +1267,8 @@ impl InterlokoHost {
         object: Obj,
         slot: SlotId,
         sig_hash: SigHash,
-        access: Option<&mut dyn AccessSink>,
+        ctx: &mut HostContext<'_, '_>,
     ) -> Result<(), RuntimeError> {
-        let Some(access) = access else {
-            return Ok(());
-        };
         let object = self.object(object)?;
         let object_class = object.class;
         self.layout
@@ -1279,7 +1278,7 @@ impl InterlokoHost {
                 slot,
             })?;
         if matches!(object.storage, RuntimeObjectStorage::HostBacked { .. }) {
-            access.read(ResourceKeyRef::OpaqueHost { op: sig_hash });
+            ctx.record_read(ResourceKeyRef::OpaqueHost { op: sig_hash });
         }
         Ok(())
     }
@@ -1435,7 +1434,7 @@ impl Host for InterlokoHost {
         sig_hash: SigHash,
         args: &[ValueRef<'_>],
         rets: &mut [Value],
-        access: Option<&mut dyn AccessSink>,
+        mut ctx: HostContext<'_, '_>,
     ) -> Result<u64, HostError> {
         match symbol {
             STRING_LITERAL => {
@@ -1732,7 +1731,7 @@ impl Host for InterlokoHost {
                     return Err(HostError::Failed);
                 };
                 let slot = runtime_slot_id(*slot_raw)?;
-                self.record_slot_read_access(*obj, slot, sig_hash, access)?;
+                self.record_slot_read_access(*obj, slot, sig_hash, &mut ctx)?;
                 rets[0] = self.read_slot(*obj, slot)?;
                 Ok(0)
             }
@@ -2350,6 +2349,9 @@ fn runtime_slot_id(raw: u64) -> Result<SlotId, HostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use execution_tape::asm::{Asm, FunctionSig, ProgramBuilder};
+    use execution_tape::trace::TraceMask;
+    use execution_tape::vm::{ExecutionContext, Limits, Vm};
 
     fn slot(
         name: &str,
@@ -2567,6 +2569,47 @@ mod tests {
         }
     }
 
+    fn run_slot_get_with_access(
+        host: InterlokoHost,
+        object: Obj,
+        slot: SlotId,
+        access: &mut dyn AccessSink,
+    ) -> Vec<Value> {
+        let sig = slot_get_signature(ValueKind::I64).expect("slot kind should have host sig");
+        let mut builder = ProgramBuilder::new();
+        let host_sig = builder.host_sig_for(SLOT_GET, sig);
+
+        let mut asm = Asm::new();
+        asm.const_u64(2, u64::from(slot.0));
+        asm.host_call(0, host_sig, 0, &[1, 2], &[3]);
+        asm.ret(0, &[3]);
+        let entry = builder
+            .push_function_checked(
+                asm,
+                FunctionSig {
+                    arg_types: vec![object_type()],
+                    ret_types: vec![ValueType::I64],
+                },
+            )
+            .expect("test tape should verify");
+        let program = builder
+            .build_verified()
+            .expect("test program should verify");
+
+        let mut vm = Vm::new(host, Limits::default());
+        let mut ctx = ExecutionContext::new();
+        vm.run_with_ctx(
+            &mut ctx,
+            &program,
+            entry,
+            &[Value::Obj(object)],
+            TraceMask::NONE,
+            None,
+            Some(access),
+        )
+        .expect("slot-get program should run")
+    }
+
     #[test]
     fn slot_api_reads_host_backed_slots_but_rejects_writes() {
         let mut layout = dispatch_layout();
@@ -2625,21 +2668,11 @@ mod tests {
         };
         let sig = slot_get_signature(ValueKind::I64).expect("slot kind should have host sig");
         let sig_hash = execution_tape::host::sig_hash(&sig);
-        let mut rets = [Value::Unit];
         let mut access = RecordingAccessSink::default();
 
-        assert_eq!(
-            host.call(
-                SLOT_GET,
-                sig_hash,
-                &[ValueRef::Obj(object), ValueRef::U64(0)],
-                &mut rets,
-                Some(&mut access),
-            ),
-            Ok(0)
-        );
+        let out = run_slot_get_with_access(host, object, SlotId(0), &mut access);
 
-        assert_eq!(rets, [Value::I64(99)]);
+        assert_eq!(out, vec![Value::I64(99)]);
         assert_eq!(access.reads, vec![sig_hash]);
         assert_eq!(access.writes, 0);
     }
@@ -2654,23 +2687,11 @@ mod tests {
         let Value::Obj(object) = value else {
             panic!("expected object");
         };
-        let sig = slot_get_signature(ValueKind::I64).expect("slot kind should have host sig");
-        let sig_hash = execution_tape::host::sig_hash(&sig);
-        let mut rets = [Value::Unit];
         let mut access = RecordingAccessSink::default();
 
-        assert_eq!(
-            host.call(
-                SLOT_GET,
-                sig_hash,
-                &[ValueRef::Obj(object), ValueRef::U64(1)],
-                &mut rets,
-                Some(&mut access),
-            ),
-            Ok(0)
-        );
+        let out = run_slot_get_with_access(host, object, SlotId(1), &mut access);
 
-        assert_eq!(rets, [Value::I64(10)]);
+        assert_eq!(out, vec![Value::I64(10)]);
         assert!(access.reads.is_empty());
         assert_eq!(access.writes, 0);
     }
