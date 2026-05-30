@@ -7716,6 +7716,9 @@ fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
         lower::FunctionKind::Function(id) => format!("function:f{}", id.0),
         lower::FunctionKind::Method(id) => format!("method:m{}", id.0),
         lower::FunctionKind::Dispatcher(id) => format!("dispatcher generic:g{}", id.0),
+        lower::FunctionKind::SlotAccessor { class, slot, .. } => {
+            format!("accessor c{}.s{}", class.0, slot.0)
+        }
     }
 }
 

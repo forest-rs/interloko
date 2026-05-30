@@ -91,7 +91,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/functions/apply_known_direct.loko"));
     assert!(out.contains("pass/generics/apply_known_generic.loko"));
     assert!(out.contains("pass/objects/accessor_callable_identity.loko"));
-    assert!(out.contains("fail/diagnostics/apply_accessor_unsupported.loko"));
+    assert!(out.contains("pass/objects/apply_accessor_callable.loko"));
     assert!(out.contains("fail/diagnostics/apply_non_callable.loko"));
     assert!(out.contains("pass/objects/instance_refinement.loko"));
     assert!(out.contains("pass/objects/cast_object_slot.loko"));

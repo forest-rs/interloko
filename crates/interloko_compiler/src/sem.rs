@@ -3262,12 +3262,8 @@ impl Lowering {
             | ValueKind::GenericFunctionObject(generic) => {
                 self.lower_applied_generic_call(ctx, generic, lowered_args, span)
             }
-            ValueKind::KnownCallable(KnownCallable::SlotAccessor { .. }) => {
-                ctx.diagnostics.push(Diagnostic::error(
-                    target.span(),
-                    DiagnosticCode::ApplyAccessorUnsupported,
-                ));
-                Expr::Error { span }
+            ValueKind::KnownCallable(KnownCallable::SlotAccessor { class, slot, .. }) => {
+                self.lower_applied_accessor_call(ctx, target, class, slot, lowered_args, span)
             }
             ValueKind::Error => Expr::Error { span },
             actual => {
@@ -3275,7 +3271,7 @@ impl Lowering {
                     Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
                         .with_arg(DiagnosticArg::text(
                             "expected",
-                            "known direct or generic function",
+                            "known callable or generic function",
                         ))
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
                 );
@@ -3459,6 +3455,62 @@ impl Lowering {
             callable: Box::new(target),
             args,
             result_kind: symbol.return_kind,
+            span,
+        }
+    }
+
+    fn lower_applied_accessor_call(
+        &self,
+        ctx: &mut FunctionContext,
+        target: Expr,
+        class: ClassId,
+        slot: SlotId,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        let Some(class_info) = self.classes.get(class.0 as usize) else {
+            return Expr::Error { span };
+        };
+        let Some(slot_info) = class_info.effective_slots.get(slot.0 as usize) else {
+            return Expr::Error { span };
+        };
+        let expected_arity = 1;
+        if args.len() != expected_arity {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                    .with_arg(DiagnosticArg::text(
+                        "callee",
+                        slot_info.accessor.name.clone(),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "expected_count",
+                        u64::try_from(expected_arity).unwrap_or(u64::MAX),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
+            return Expr::Error { span };
+        }
+        let expected = ValueKind::Object(class);
+        let actual = self.expr_kind(&args[0]);
+        if !self.kinds_match(expected, actual) {
+            ctx.diagnostics.push(
+                Diagnostic::error(args[0].span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                    .with_arg(DiagnosticArg::text(
+                        "function",
+                        slot_info.accessor.name.clone(),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned("argument_index", 1))
+                    .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+            );
+        }
+        Expr::CallableCall {
+            callable: Box::new(target),
+            args,
+            result_kind: slot_info.kind,
             span,
         }
     }
@@ -4857,22 +4909,49 @@ mod tests {
     }
 
     #[test]
+    fn resolves_slot_accessor_values_as_callable_apply_targets() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let getter = radius;\n  apply(getter, make(<circle>, radius: 3))\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let circle = class(&module, "<circle>");
+        let expected = KnownCallable::SlotAccessor {
+            accessor: circle.direct_slots[0].accessor.definition,
+            class: circle.id,
+            slot: SlotId(0),
+        };
+        assert_eq!(
+            module.functions[0].locals[0].kind,
+            ValueKind::KnownCallable(expected)
+        );
+        let Expr::CallableCall {
+            callable,
+            result_kind,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected accessor apply to remain a callable call");
+        };
+        assert_eq!(*result_kind, ValueKind::I64);
+        assert!(matches!(
+            callable.as_ref(),
+            Expr::Local {
+                local: LocalId(0),
+                result_kind: ValueKind::KnownCallable(callable),
+                ..
+            } if *callable == expected
+        ));
+    }
+
+    #[test]
     fn reports_invalid_apply_targets() {
         let non_callable = lower_source("define function main()\n  apply(1, 2)\nend;");
         assert!(has_diagnostic(
             &non_callable,
             DiagnosticCode::ApplyTargetTypeMismatch,
             &[("actual", "<integer>")]
-        ));
-
-        let accessor = lower_source(
-            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define function main()\n  apply(radius, make(<circle>, radius: 3))\nend;",
-        );
-        assert!(has_diagnostic(
-            &accessor,
-            DiagnosticCode::ApplyAccessorUnsupported,
-            &[]
         ));
     }
 

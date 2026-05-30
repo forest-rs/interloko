@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::identity::DefinitionId;
 use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
@@ -48,8 +49,8 @@ pub enum ValueKind {
     U64,
     /// Boolean value used by control-flow conditions.
     Bool,
-    /// First-class direct function reference.
-    Function(Option<sem::FunctionId>),
+    /// First-class function reference, optionally tied to a lowered callee.
+    Function(Option<FunctionId>),
     /// Runtime object, optionally tied to a statically known nominal class.
     Object(Option<sem::ClassId>),
     /// Class metaobject, optionally tied to the class it represents.
@@ -96,6 +97,15 @@ pub enum FunctionKind {
     Method(sem::MethodId),
     /// A generated runtime dispatcher for a generic function.
     Dispatcher(sem::GenericFunctionId),
+    /// A generated callable getter for a slot accessor.
+    SlotAccessor {
+        /// Stable accessor identity.
+        accessor: DefinitionId,
+        /// Receiver class accepted by this accessor function.
+        class: sem::ClassId,
+        /// Effective slot read by this accessor function.
+        slot: sem::SlotId,
+    },
 }
 
 /// Runtime host operation emitted by lowered IR.
@@ -542,6 +552,22 @@ struct LowerIds {
     functions: Vec<FunctionId>,
     methods: Vec<FunctionId>,
     generics: Vec<FunctionId>,
+    accessors: Vec<AccessorFunction>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct AccessorFunction {
+    accessor: DefinitionId,
+    class: sem::ClassId,
+    slot: sem::SlotId,
+    function: FunctionId,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct AccessorTarget {
+    accessor: DefinitionId,
+    class: sem::ClassId,
+    slot: sem::SlotId,
 }
 
 struct Lowering<'module> {
@@ -566,13 +592,25 @@ impl<'module> Lowering<'module> {
             ids.generics.push(FunctionId(next));
             next = next.saturating_add(1);
         }
+        for callable in collect_accessor_callables(module) {
+            ids.accessors.push(AccessorFunction {
+                accessor: callable.accessor,
+                class: callable.class,
+                slot: callable.slot,
+                function: FunctionId(next),
+            });
+            next = next.saturating_add(1);
+        }
 
         Self { module, ids }
     }
 
     fn lower_module(&self) -> Result<Module, LowerError> {
         let mut functions = Vec::with_capacity(
-            self.module.functions.len() + self.module.methods.len() + self.module.generics.len(),
+            self.module.functions.len()
+                + self.module.methods.len()
+                + self.module.generics.len()
+                + self.ids.accessors.len(),
         );
         let mut main = None;
 
@@ -587,6 +625,9 @@ impl<'module> Lowering<'module> {
         }
         for generic in &self.module.generics {
             functions.push(self.lower_dispatcher(generic)?);
+        }
+        for accessor in &self.ids.accessors {
+            functions.push(self.lower_accessor(*accessor)?);
         }
 
         Ok(Module {
@@ -654,6 +695,53 @@ impl<'module> Lowering<'module> {
         })
     }
 
+    fn lower_accessor(&self, accessor: AccessorFunction) -> Result<Function, LowerError> {
+        let class = self
+            .module
+            .classes
+            .get(accessor.class.0 as usize)
+            .ok_or_else(|| invalid_semantic("accessor class id is out of range"))?;
+        let slot = class
+            .effective_slots
+            .get(accessor.slot.0 as usize)
+            .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
+        let receiver = input_register(0);
+        let result = input_register(1);
+        let ret = value_kind(slot.kind)?;
+        Ok(Function {
+            id: accessor.function,
+            name: format!("{}#accessor{}", slot.accessor.name, accessor.function.0),
+            kind: FunctionKind::SlotAccessor {
+                accessor: accessor.accessor,
+                class: accessor.class,
+                slot: accessor.slot,
+            },
+            params: vec![Param {
+                source: None,
+                name: "receiver".into(),
+                kind: ValueKind::Object(Some(accessor.class)),
+                reg: receiver,
+            }],
+            ret,
+            locals: Vec::new(),
+            instructions: vec![
+                Instr::ReadSlot {
+                    dst: result,
+                    receiver,
+                    class: accessor.class,
+                    slot: accessor.slot,
+                    kind: ret,
+                    span: slot.span,
+                },
+                Instr::Return {
+                    value: result,
+                    span: slot.span,
+                },
+            ],
+            span: slot.span,
+        })
+    }
+
     fn lower_function_id(&self, id: sem::FunctionId) -> Result<FunctionId, LowerError> {
         self.ids
             .functions
@@ -676,6 +764,127 @@ impl<'module> Lowering<'module> {
             .get(id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_semantic("generic id is out of range"))
+    }
+}
+
+fn collect_accessor_callables(module: &sem::Module) -> Vec<AccessorTarget> {
+    let mut targets = Vec::new();
+    for constant in &module.constants {
+        collect_accessor_callables_in_expr(&constant.value, &mut targets);
+    }
+    for function in &module.functions {
+        collect_accessor_callables_in_block(&function.body, &mut targets);
+    }
+    for method in &module.methods {
+        collect_accessor_callables_in_block(&method.body, &mut targets);
+    }
+    targets
+}
+
+fn collect_accessor_callables_in_block(block: &sem::Block, targets: &mut Vec<AccessorTarget>) {
+    for let_binding in &block.lets {
+        collect_accessor_callables_in_expr(&let_binding.value, targets);
+    }
+    collect_accessor_callables_in_expr(&block.result, targets);
+}
+
+fn collect_accessor_callables_in_expr(expr: &sem::Expr, targets: &mut Vec<AccessorTarget>) {
+    match expr {
+        sem::Expr::KnownCallable {
+            callable:
+                sem::KnownCallable::SlotAccessor {
+                    accessor,
+                    class,
+                    slot,
+                },
+            ..
+        } => {
+            push_accessor_target(
+                targets,
+                AccessorTarget {
+                    accessor: *accessor,
+                    class: *class,
+                    slot: *slot,
+                },
+            );
+        }
+        sem::Expr::VectorLiteral { elements, .. }
+        | sem::Expr::IntrinsicCall { args: elements, .. }
+        | sem::Expr::DirectCall { args: elements, .. }
+        | sem::Expr::GenericCall { args: elements, .. } => {
+            for element in elements {
+                collect_accessor_callables_in_expr(element, targets);
+            }
+        }
+        sem::Expr::CallableCall { callable, args, .. } => {
+            collect_accessor_callables_in_expr(callable, targets);
+            for arg in args {
+                collect_accessor_callables_in_expr(arg, targets);
+            }
+        }
+        sem::Expr::Signal { condition, .. }
+        | sem::Expr::ClassOf {
+            object: condition, ..
+        }
+        | sem::Expr::InstanceOf {
+            value: condition, ..
+        }
+        | sem::Expr::Cast {
+            value: condition, ..
+        } => {
+            collect_accessor_callables_in_expr(condition, targets);
+        }
+        sem::Expr::MakeObject { class, fields, .. } => {
+            collect_accessor_callables_in_expr(class, targets);
+            for field in fields {
+                collect_accessor_callables_in_expr(&field.value, targets);
+            }
+        }
+        sem::Expr::AccessorCall { receiver, .. } => {
+            collect_accessor_callables_in_expr(receiver, targets);
+        }
+        sem::Expr::SlotWrite {
+            receiver, value, ..
+        } => {
+            collect_accessor_callables_in_expr(receiver, targets);
+            collect_accessor_callables_in_expr(value, targets);
+        }
+        sem::Expr::Binary { lhs, rhs, .. }
+        | sem::Expr::Compare { lhs, rhs, .. }
+        | sem::Expr::ValueEqual { lhs, rhs, .. } => {
+            collect_accessor_callables_in_expr(lhs, targets);
+            collect_accessor_callables_in_expr(rhs, targets);
+        }
+        sem::Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_accessor_callables_in_expr(condition, targets);
+            collect_accessor_callables_in_expr(then_branch, targets);
+            collect_accessor_callables_in_expr(else_branch, targets);
+        }
+        sem::Expr::Handle { body, restart, .. } => {
+            collect_accessor_callables_in_expr(body, targets);
+            collect_accessor_callables_in_expr(&restart.body, targets);
+        }
+        sem::Expr::ConstI64 { .. }
+        | sem::Expr::ConstBool { .. }
+        | sem::Expr::StringLiteral { .. }
+        | sem::Expr::SymbolLiteral { .. }
+        | sem::Expr::Local { .. }
+        | sem::Expr::ConstantRef { .. }
+        | sem::Expr::ClassObject { .. }
+        | sem::Expr::KnownCallable { .. }
+        | sem::Expr::GenericFunctionObject { .. }
+        | sem::Expr::Error { .. } => {}
+    }
+}
+
+fn push_accessor_target(targets: &mut Vec<AccessorTarget>, target: AccessorTarget) {
+    if !targets.contains(&target) {
+        targets.push(target);
     }
 }
 
@@ -839,9 +1048,6 @@ impl<'module> BodyLowering<'module> {
                     .ok_or_else(|| invalid_semantic("local id is out of range"))?;
                 (local.name.clone(), local.kind)
             };
-            if is_compile_time_only(local_kind) {
-                continue;
-            }
             let value = self.lower_expr(&let_binding.value)?;
             let value = self.coerce_value(value, value_kind(local_kind)?, let_binding.span)?;
             self.set_local(let_binding.local, value)?;
@@ -1490,7 +1696,7 @@ impl<'module> BodyLowering<'module> {
                     .get(function.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_semantic("function id is out of range"))?;
-                let result = self.alloc(ValueKind::Function(Some(function)));
+                let result = self.alloc(ValueKind::Function(Some(lowered)));
                 self.instructions.push(Instr::ConstFunction {
                     dst: result.reg,
                     function: lowered,
@@ -1501,10 +1707,37 @@ impl<'module> BodyLowering<'module> {
             sem::KnownCallable::GenericFunction(generic) => {
                 self.lower_generic_meta_object(generic, span)
             }
-            sem::KnownCallable::SlotAccessor { .. } => Err(invalid_semantic(
-                "slot accessor callable values have no runtime representation",
-            )),
+            sem::KnownCallable::SlotAccessor {
+                accessor,
+                class,
+                slot,
+            } => {
+                let lowered = self.lower_accessor_id(accessor, class, slot)?;
+                let result = self.alloc(ValueKind::Function(Some(lowered)));
+                self.instructions.push(Instr::ConstFunction {
+                    dst: result.reg,
+                    function: lowered,
+                    span,
+                });
+                Ok(result)
+            }
         }
+    }
+
+    fn lower_accessor_id(
+        &self,
+        accessor: DefinitionId,
+        class: sem::ClassId,
+        slot: sem::SlotId,
+    ) -> Result<FunctionId, LowerError> {
+        self.ids
+            .accessors
+            .iter()
+            .find(|candidate| {
+                candidate.accessor == accessor && candidate.class == class && candidate.slot == slot
+            })
+            .map(|candidate| candidate.function)
+            .ok_or_else(|| invalid_semantic("accessor function id is missing"))
     }
 
     fn lower_callable_call(
@@ -1517,17 +1750,17 @@ impl<'module> BodyLowering<'module> {
         let callee = self.lower_expr(callable)?;
         let ValueKind::Function(Some(function)) = callee.kind else {
             return Err(invalid_semantic(
-                "callable call target is not a direct function value",
+                "callable call target is not a function value",
             ));
         };
-        let function_info = self
-            .module
-            .functions
-            .get(function.0 as usize)
-            .ok_or_else(|| invalid_semantic("function id is out of range"))?;
-        let (args, arg_kinds) =
-            self.lower_args_with_expected_values(args, &function_info.param_kinds)?;
+        let (expected_args, expected_ret) = self.callable_signature(function)?;
+        let (args, arg_kinds) = self.lower_args_with_expected_values(args, &expected_args)?;
         let ret = value_kind(result_kind)?;
+        if ret != value_kind(expected_ret)? {
+            return Err(invalid_semantic(
+                "callable result kind does not match callee",
+            ));
+        }
         let result = self.alloc(ret);
         self.instructions.push(Instr::CallIndirect {
             dst: result.reg,
@@ -1538,6 +1771,44 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(result)
+    }
+
+    fn callable_signature(
+        &self,
+        function: FunctionId,
+    ) -> Result<(Vec<sem::ValueKind>, sem::ValueKind), LowerError> {
+        if let Some((index, _)) = self
+            .ids
+            .functions
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| **candidate == function)
+        {
+            let function_info = self
+                .module
+                .functions
+                .get(index)
+                .ok_or_else(|| invalid_semantic("function id is out of range"))?;
+            return Ok((function_info.param_kinds.clone(), function_info.result_kind));
+        }
+        if let Some(accessor) = self
+            .ids
+            .accessors
+            .iter()
+            .find(|candidate| candidate.function == function)
+        {
+            let class = self
+                .module
+                .classes
+                .get(accessor.class.0 as usize)
+                .ok_or_else(|| invalid_semantic("accessor class id is out of range"))?;
+            let slot = class
+                .effective_slots
+                .get(accessor.slot.0 as usize)
+                .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
+            return Ok((vec![sem::ValueKind::Object(accessor.class)], slot.kind));
+        }
+        Err(invalid_semantic("callable function id is out of range"))
     }
 
     fn lower_intrinsic_call(
@@ -1819,6 +2090,12 @@ impl<'module> BodyLowering<'module> {
         if value.kind == expected {
             return Ok(value);
         }
+        if matches!(
+            (value.kind, expected),
+            (ValueKind::Function(Some(_)), ValueKind::Function(None))
+        ) {
+            return Ok(value);
+        }
         if let (ValueKind::Object(Some(actual)), ValueKind::Object(Some(expected_class))) =
             (value.kind, expected)
             && self.module.is_same_or_subclass(actual, expected_class)
@@ -1893,9 +2170,9 @@ impl<'module> BodyLowering<'module> {
         if value.kind == ValueKind::Any {
             return Ok(value);
         }
-        if value.kind == ValueKind::U64 {
+        if matches!(value.kind, ValueKind::U64 | ValueKind::Function(_)) {
             return Err(invalid_semantic(
-                "runtime metadata cannot be boxed as <object>",
+                "runtime metadata or callable values cannot be boxed as <object>",
             ));
         }
         let boxed = self.alloc(ValueKind::Any);
@@ -1952,22 +2229,15 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         }
         sem::ValueKind::MethodObject(method) => Ok(ValueKind::MethodObject(Some(method))),
         sem::ValueKind::SlotDescriptorObject { .. } => Ok(ValueKind::SlotDescriptorObject),
-        sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(function)) => {
-            Ok(ValueKind::Function(Some(function)))
+        sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(_))
+        | sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. }) => {
+            Ok(ValueKind::Function(None))
         }
         sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) => {
             Ok(ValueKind::GenericFunctionObject(Some(generic)))
         }
-        sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. })
-        | sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
+        sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
     }
-}
-
-fn is_compile_time_only(kind: sem::ValueKind) -> bool {
-    matches!(
-        kind,
-        sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. })
-    )
 }
 
 fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
@@ -2178,6 +2448,11 @@ impl Module {
             FunctionKind::Function(id) => writeln!(f, " ; source function {}", id.0),
             FunctionKind::Method(id) => writeln!(f, " ; method {}", id.0),
             FunctionKind::Dispatcher(id) => writeln!(f, " ; dispatcher for generic {}", id.0),
+            FunctionKind::SlotAccessor { class, slot, .. } => {
+                write!(f, " ; slot accessor ")?;
+                self.fmt_slot(f, class, slot)?;
+                writeln!(f)
+            }
         }
     }
 
@@ -2449,7 +2724,7 @@ impl Module {
                 if let Some(function_info) = self
                     .functions
                     .iter()
-                    .find(|candidate| candidate.kind == FunctionKind::Function(function))
+                    .find(|candidate| candidate.id == function)
                 {
                     write!(f, "function({})", function_info.name)
                 } else {
@@ -2599,6 +2874,23 @@ mod tests {
         assert!(dump.contains("call l3("));
         assert!(dump.contains("local l0 f"));
         assert!(dump.contains("local l1 g"));
+    }
+
+    #[test]
+    fn lowers_slot_accessor_apply_to_indirect_call() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let getter = radius;\n  apply(getter, make(<circle>, radius: 3))\nend;",
+        );
+
+        let dump = module.dump();
+        assert!(dump.contains("fn l0 main"));
+        assert!(dump.contains("radius#accessor"));
+        assert!(dump.contains(" ; slot accessor <circle>.radius"));
+        assert!(dump.contains("local l0 getter"));
+        assert!(dump.contains("const.function l"));
+        assert!(dump.contains("call.indirect"));
+        assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
     }
 
     #[test]

@@ -45,7 +45,6 @@
 "sem.arithmetic-operand-type-mismatch" = "arithmetic operands must be integers"
 "sem.comparison-operand-type-mismatch" = "comparison operands must be integers"
 "sem.apply-arity-mismatch" = "apply expects a callable and arguments"
-"sem.apply-accessor-unsupported" = "apply does not support slot accessors yet"
 "sem.apply-target-type-mismatch" = "apply target must be a { $expected }, got { $actual }"
 "sem.signal-condition-type-mismatch" = "signal condition must be a known object"
 "sem.signal-requires-restart" = "signal requires an active restart"

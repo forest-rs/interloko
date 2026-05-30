@@ -110,8 +110,6 @@ pub enum DiagnosticCode {
     ComparisonOperandTypeMismatch,
     /// `apply` is missing its callable target.
     ApplyArityMismatch,
-    /// `apply` cannot use slot accessors yet.
-    ApplyAccessorUnsupported,
     /// `apply` target is not a known callable.
     ApplyTargetTypeMismatch,
     /// A signal expression is not a known condition object.
@@ -233,7 +231,6 @@ impl DiagnosticCode {
         Self::ArithmeticOperandTypeMismatch,
         Self::ComparisonOperandTypeMismatch,
         Self::ApplyArityMismatch,
-        Self::ApplyAccessorUnsupported,
         Self::ApplyTargetTypeMismatch,
         Self::SignalConditionTypeMismatch,
         Self::SignalRequiresRestart,
@@ -323,7 +320,6 @@ impl DiagnosticCode {
             Self::ArithmeticOperandTypeMismatch => "sem.arithmetic-operand-type-mismatch",
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
-            Self::ApplyAccessorUnsupported => "sem.apply-accessor-unsupported",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
             Self::SignalConditionTypeMismatch => "sem.signal-condition-type-mismatch",
             Self::SignalRequiresRestart => "sem.signal-requires-restart",
@@ -414,7 +410,6 @@ impl DiagnosticCode {
             "sem.arithmetic-operand-type-mismatch" => Self::ArithmeticOperandTypeMismatch,
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
-            "sem.apply-accessor-unsupported" => Self::ApplyAccessorUnsupported,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,
             "sem.signal-condition-type-mismatch" => Self::SignalConditionTypeMismatch,
             "sem.signal-requires-restart" => Self::SignalRequiresRestart,

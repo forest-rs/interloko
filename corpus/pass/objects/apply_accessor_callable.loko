@@ -1,0 +1,16 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump sem contains callable-call result=integer
+// expect: dump lowered contains const.function
+// expect: dump lowered contains call.indirect
+// expect: dump lowered contains slot.read
+// expect: dump tape contains const.func
+// expect: dump tape contains call.indirect
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function main()
+  apply(radius, make(<circle>, radius: 3))
+end;

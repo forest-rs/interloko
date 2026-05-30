@@ -476,6 +476,16 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_slot_accessor_apply() {
+        let value = compile_and_run_main(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function main()\n  let getter = radius;\n  apply(getter, make(<circle>, radius: 7))\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 7);
+    }
+
+    #[test]
     fn compiles_and_reads_host_backed_slots() {
         let registry = host_registry();
         let compiled = compile_with_host_registry(
