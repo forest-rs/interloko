@@ -158,7 +158,8 @@ struct TapeIds {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HostSigs {
-    make_object: Vec<HostSigId>,
+    make_object: HostSigId,
+    class_count: usize,
     class_of: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
     slot_set: Vec<Vec<HostSigId>>,
@@ -180,18 +181,8 @@ struct HostSigs {
 
 impl HostSigs {
     fn new(builder: &mut ProgramBuilder, module: &lower::Module) -> Result<Self, TapeError> {
-        let make_object = module
-            .runtime
-            .classes
-            .iter()
-            .map(|class| {
-                Ok(builder.host_sig_for(
-                    runtime::MAKE_OBJECT,
-                    runtime::make_object_signature(class)
-                        .ok_or_else(|| invalid_lowered("runtime class has invalid slot kind"))?,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let make_object =
+            builder.host_sig_for(runtime::MAKE_OBJECT, runtime::make_object_signature());
         let slot_get = module
             .runtime
             .classes
@@ -276,6 +267,7 @@ impl HostSigs {
         let runtime_calls = runtime_call_sigs(builder);
         Ok(Self {
             make_object,
+            class_count: module.runtime.classes.len(),
             class_of,
             slot_get,
             slot_set,
@@ -654,19 +646,21 @@ impl<'a> FunctionEmitter<'a> {
                 fields,
                 span,
             } => {
-                let sig = self
-                    .host_sigs
-                    .make_object
-                    .get(class.0 as usize)
-                    .copied()
-                    .ok_or_else(|| invalid_lowered("class id is out of range"))?;
+                if class.0 as usize >= self.host_sigs.class_count {
+                    return Err(invalid_lowered("class id is out of range"));
+                }
                 let class_reg = self.alloc_temp();
+                let fields_reg = self.alloc_temp();
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
-                let mut args = Vec::with_capacity(fields.len() + 1);
-                args.push(class_reg);
-                args.extend(reg_slice(fields));
-                self.asm.host_call(0, sig, 0, &args, &[dst.0]);
+                self.asm.tuple_new(fields_reg, &reg_slice(fields));
+                self.asm.host_call(
+                    0,
+                    self.host_sigs.make_object,
+                    0,
+                    &[class_reg, fields_reg],
+                    &[dst.0],
+                );
             }
             lower::Instr::VectorLiteral {
                 dst,
@@ -1078,6 +1072,41 @@ mod tests {
         let box_class = runtime_class(&tape, "<box>");
         assert_eq!(box_class.slots[0].name, "value");
         assert_eq!(box_class.slots[0].kind, runtime::ValueKind::Any);
+    }
+
+    #[test]
+    fn emits_object_construction_through_one_aggregate_host_signature() {
+        let module = lower_source(
+            "define class <point> (<object>)\n  slot x :: <integer>;\n  slot y :: <integer>;\nend;\n\
+             define class <box> (<object>)\n  slot value;\nend;\n\
+             define function point()\n  make(<point>, x: 1, y: 2)\nend;\n\
+             define function box()\n  make(<box>, value: 3)\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+        let program = tape.program.program();
+        let make_sigs: Vec<_> = program
+            .host_sigs
+            .iter()
+            .filter(|sig| {
+                program
+                    .symbol_str(sig.symbol)
+                    .is_ok_and(|symbol| symbol == runtime::MAKE_OBJECT)
+            })
+            .collect();
+
+        assert_eq!(make_sigs.len(), 1);
+        assert_eq!(
+            program
+                .host_sig_args(make_sigs[0])
+                .expect("make_object host args should decode"),
+            &[ValueType::U64, ValueType::Agg],
+        );
+        assert_eq!(
+            program
+                .host_sig_rets(make_sigs[0])
+                .expect("make_object host rets should decode"),
+            &[runtime::object_type()],
+        );
     }
 
     #[test]

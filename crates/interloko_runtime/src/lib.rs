@@ -1722,10 +1722,18 @@ impl Host for InterlokoHost {
                 Ok(0)
             }
             MAKE_OBJECT => {
-                let Some(ValueRef::U64(class_raw)) = args.first().copied() else {
+                let [ValueRef::U64(class_raw), ValueRef::Agg(fields)] = args else {
                     return Err(HostError::Failed);
                 };
-                rets[0] = self.make_object(runtime_class_id(class_raw)?, &args[1..])?;
+                let len = ctx.tuple_len(*fields).map_err(|_| HostError::Failed)?;
+                let mut values = Vec::with_capacity(len);
+                for index in 0..len {
+                    values.push(
+                        ctx.tuple_get(*fields, index)
+                            .map_err(|_| HostError::Failed)?,
+                    );
+                }
+                rets[0] = self.make_object_values(runtime_class_id(*class_raw)?, &values)?;
                 Ok(0)
             }
             CLASS_OF => {
@@ -2136,19 +2144,64 @@ impl InterlokoHost {
             _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),
         }
     }
+
+    fn make_object_values(
+        &mut self,
+        class: ClassId,
+        fields: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        let class_info = self
+            .layout
+            .class(class)
+            .ok_or(RuntimeError::InvalidClass { class })?;
+        if class_info.kind != HostObjectKind::Native {
+            return Err(RuntimeError::ClassIsNotNative {
+                class,
+                kind: class_info.kind,
+            });
+        }
+        if fields.len() != class_info.slots.len() {
+            return Err(RuntimeError::FieldArityMismatch {
+                class,
+                expected: class_info.slots.len(),
+                actual: fields.len(),
+            });
+        }
+        let mut slots = Vec::with_capacity(class_info.slots.len());
+        for (field, slot) in fields.iter().zip(&class_info.slots) {
+            slots.push(self.value_for_slot(value_ref(field), slot.kind)?);
+        }
+        Ok(self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::Native { slots },
+        }))
+    }
 }
 
-/// Host signature for object construction for a runtime class.
-#[must_use]
-pub fn make_object_signature(class: &RuntimeClass) -> Option<HostSig> {
-    let mut args = vec![ValueType::U64];
-    for slot in &class.slots {
-        args.push(value_type(slot.kind)?);
+fn value_ref(value: &Value) -> ValueRef<'_> {
+    match value {
+        Value::Unit => ValueRef::Unit,
+        Value::Bool(value) => ValueRef::Bool(*value),
+        Value::I64(value) => ValueRef::I64(*value),
+        Value::U64(value) => ValueRef::U64(*value),
+        Value::F64(value) => ValueRef::F64(*value),
+        Value::Decimal(value) => ValueRef::Decimal(*value),
+        Value::Bytes(value) => ValueRef::Bytes(value.as_slice()),
+        Value::Str(value) => ValueRef::Str(value.as_str()),
+        Value::Obj(value) => ValueRef::Obj(*value),
+        Value::Agg(value) => ValueRef::Agg(*value),
+        Value::Func(value) => ValueRef::Func(*value),
+        Value::Closure(value) => ValueRef::Closure(*value),
     }
-    Some(HostSig {
-        args,
+}
+
+/// Host signature for object construction from a class id and aggregate payload.
+#[must_use]
+pub fn make_object_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::U64, ValueType::Agg],
         rets: vec![object_type()],
-    })
+    }
 }
 
 /// Host signature for `class_of`.
