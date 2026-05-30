@@ -11,7 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
-use execution_tape::program::{ConstId, HostSigId, SpanId, ValueType};
+use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -166,7 +166,7 @@ struct HostSigs {
     string_literal_consts: Vec<(String, ConstId)>,
     symbol_literal: Option<HostSigId>,
     symbol_literal_consts: Vec<(String, ConstId)>,
-    vector_literals: Vec<(usize, HostSigId)>,
+    vector_literal: Option<(HostSigId, ElemTypeId)>,
     value_eq: HostSigId,
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
     box_i64: HostSigId,
@@ -271,7 +271,7 @@ impl HostSigs {
         let symbol_literal = (!symbol_literal_consts.is_empty()).then(|| {
             builder.host_sig_for(runtime::SYMBOL_LITERAL, runtime::symbol_literal_signature())
         });
-        let vector_literals = vector_literal_sigs(builder, module);
+        let vector_literal = vector_literal_sig(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
         Ok(Self {
@@ -283,7 +283,7 @@ impl HostSigs {
             string_literal_consts,
             symbol_literal,
             symbol_literal_consts,
-            vector_literals,
+            vector_literal,
             value_eq,
             runtime_calls,
             box_i64,
@@ -318,11 +318,8 @@ impl HostSigs {
             .ok_or_else(|| invalid_lowered("symbol literal constant is missing"))
     }
 
-    fn vector_literal(&self, arity: usize) -> Result<HostSigId, TapeError> {
-        self.vector_literals
-            .iter()
-            .find(|(literal_arity, _)| *literal_arity == arity)
-            .map(|(_, sig)| *sig)
+    fn vector_literal(&self) -> Result<(HostSigId, ElemTypeId), TapeError> {
+        self.vector_literal
             .ok_or_else(|| invalid_lowered("vector literal signature is missing"))
     }
 
@@ -470,28 +467,21 @@ fn literal_consts(
     literals
 }
 
-fn vector_literal_sigs(
+fn vector_literal_sig(
     builder: &mut ProgramBuilder,
     module: &lower::Module,
-) -> Vec<(usize, HostSigId)> {
-    let mut arities = Vec::new();
+) -> Option<(HostSigId, ElemTypeId)> {
     for function in &module.functions {
         for instr in &function.instructions {
-            let lower::Instr::VectorLiteral { elements, .. } = instr else {
-                continue;
-            };
-            let arity = elements.len();
-            if arities.iter().any(|(existing, _)| *existing == arity) {
-                continue;
+            if matches!(instr, lower::Instr::VectorLiteral { .. }) {
+                let sig = builder
+                    .host_sig_for(runtime::VECTOR_LITERAL, runtime::vector_literal_signature());
+                let elem = builder.array_elem(runtime::any_type());
+                return Some((sig, elem));
             }
-            let sig = builder.host_sig_for(
-                runtime::VECTOR_LITERAL,
-                runtime::vector_literal_signature(arity),
-            );
-            arities.push((arity, sig));
         }
     }
-    arities
+    None
 }
 
 struct FunctionEmitter<'a> {
@@ -684,10 +674,12 @@ impl<'a> FunctionEmitter<'a> {
                 span,
                 ..
             } => {
-                let sig = self.host_sigs.vector_literal(elements.len())?;
+                let (sig, elem) = self.host_sigs.vector_literal()?;
                 let elements = reg_slice(elements);
+                let aggregate = self.alloc_temp();
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &elements, &[dst.0]);
+                self.asm.array_new(aggregate, elem, &elements);
+                self.asm.host_call(0, sig, 0, &[aggregate], &[dst.0]);
             }
             lower::Instr::RuntimeCall {
                 dst,
@@ -1086,5 +1078,38 @@ mod tests {
         let box_class = runtime_class(&tape, "<box>");
         assert_eq!(box_class.slots[0].name, "value");
         assert_eq!(box_class.slots[0].kind, runtime::ValueKind::Any);
+    }
+
+    #[test]
+    fn emits_vector_literals_through_one_aggregate_host_signature() {
+        let module = lower_source(
+            "define function first()\n  #[1, 2]\nend;\n\
+             define function second()\n  #[3]\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+        let program = tape.program.program();
+        let vector_sigs: Vec<_> = program
+            .host_sigs
+            .iter()
+            .filter(|sig| {
+                program
+                    .symbol_str(sig.symbol)
+                    .is_ok_and(|symbol| symbol == runtime::VECTOR_LITERAL)
+            })
+            .collect();
+
+        assert_eq!(vector_sigs.len(), 1);
+        assert_eq!(
+            program
+                .host_sig_args(vector_sigs[0])
+                .expect("vector host args should decode"),
+            &[ValueType::Agg],
+        );
+        assert_eq!(
+            program
+                .host_sig_rets(vector_sigs[0])
+                .expect("vector host rets should decode"),
+            &[runtime::object_type()],
+        );
     }
 }

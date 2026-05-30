@@ -1458,14 +1458,24 @@ impl Host for InterlokoHost {
                 Ok(0)
             }
             VECTOR_LITERAL => {
+                let [ValueRef::Agg(elements)] = args else {
+                    return Err(HostError::Failed);
+                };
                 let class = self.builtin_class(BuiltinValueClass::Vector)?;
-                let mut elements = Vec::with_capacity(args.len());
-                for arg in args {
-                    elements.push(self.value_for_any(*arg)?);
+                let len = ctx.array_len(*elements).map_err(|_| HostError::Failed)?;
+                let mut values = Vec::with_capacity(len);
+                for index in 0..len {
+                    let value = ctx
+                        .array_get(*elements, index)
+                        .map_err(|_| HostError::Failed)?;
+                    let Value::Obj(object) = value else {
+                        return Err(HostError::Failed);
+                    };
+                    values.push(self.value_for_any(ValueRef::Obj(object))?);
                 }
                 rets[0] = self.push_object(RuntimeObject {
                     class,
-                    storage: RuntimeObjectStorage::Vector { elements },
+                    storage: RuntimeObjectStorage::Vector { elements: values },
                 });
                 Ok(0)
             }
@@ -2213,11 +2223,11 @@ pub fn symbol_literal_signature() -> HostSig {
     }
 }
 
-/// Host signature for a vector literal of `arity` boxed elements.
+/// Host signature for constructing a vector literal from an aggregate payload.
 #[must_use]
-pub fn vector_literal_signature(arity: usize) -> HostSig {
+pub fn vector_literal_signature() -> HostSig {
     HostSig {
-        args: vec![any_type(); arity],
+        args: vec![ValueType::Agg],
         rets: vec![object_type()],
     }
 }
