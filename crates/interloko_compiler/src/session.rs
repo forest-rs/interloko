@@ -13,7 +13,7 @@ use core::fmt::{self, Write as _};
 use execution_tape::program::Program;
 use execution_tape::trace::{ScopeKind, TraceMask, TraceOutcome, TraceSink};
 use execution_tape::value::Value;
-use execution_tape::vm::{Limits, Vm};
+use execution_tape::vm::{Limits, TrapInfo, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::grammar_frontend::{
@@ -130,7 +130,7 @@ pub enum RuntimeResult {
     /// Runtime trapped.
     Trap {
         /// Trap details.
-        message: String,
+        trap: TrapInfo,
     },
     /// `main` returned a non-integer result.
     MainReturnedNonI64,
@@ -170,7 +170,7 @@ pub enum FunctionRunResult {
     /// Runtime trapped.
     Trap {
         /// Trap details.
-        message: String,
+        trap: TrapInfo,
     },
     /// The function returned a non-integer result.
     FunctionReturnedNonI64 {
@@ -259,7 +259,7 @@ pub enum ExecutionTraceOutcome {
     /// Runtime trapped.
     Trap {
         /// Trap details.
-        message: String,
+        trap: TrapInfo,
     },
 }
 
@@ -4564,7 +4564,7 @@ fn run_main_with_trace(
             RuntimeResult::MissingMain
         }
         FunctionRunResult::FunctionHasParameters { .. } => RuntimeResult::MainHasParameters,
-        FunctionRunResult::Trap { message } => RuntimeResult::Trap { message },
+        FunctionRunResult::Trap { trap } => RuntimeResult::Trap { trap },
         FunctionRunResult::FunctionReturnedNonI64 { .. } => RuntimeResult::MainReturnedNonI64,
     };
     (result, traced.trace)
@@ -4624,9 +4624,7 @@ fn run_zero_arg_function_i64_with_trace(
         Ok(output) => output,
         Err(trap) => {
             return TracedFunctionRunResult {
-                result: FunctionRunResult::Trap {
-                    message: format!("{trap:?}"),
-                },
+                result: FunctionRunResult::Trap { trap },
                 trace: trace.map(ExecutionTraceSink::finish),
             };
         }
@@ -4737,9 +4735,7 @@ impl TraceSink for ExecutionTraceSink {
     fn run_end(&mut self, _program: &Program, outcome: TraceOutcome<'_>) {
         let outcome = match outcome {
             TraceOutcome::Ok => ExecutionTraceOutcome::Ok,
-            TraceOutcome::Trap(trap) => ExecutionTraceOutcome::Trap {
-                message: format!("{trap:?}"),
-            },
+            TraceOutcome::Trap(trap) => ExecutionTraceOutcome::Trap { trap: trap.clone() },
         };
         self.trace
             .events
@@ -4786,7 +4782,7 @@ fn execution_trace_event_label(event: &ExecutionTraceEvent) -> String {
         }
         ExecutionTraceEvent::RunEnd { outcome } => match outcome {
             ExecutionTraceOutcome::Ok => "run-end ok".into(),
-            ExecutionTraceOutcome::Trap { message } => format!("run-end trap {message}"),
+            ExecutionTraceOutcome::Trap { trap } => format!("run-end trap {trap}"),
         },
         ExecutionTraceEvent::ScopeEnter {
             scope,

@@ -2041,7 +2041,7 @@ fn trace_event_detail(event: &ExecutionTraceEvent) -> String {
         ExecutionTraceEvent::RunStart { arg_count, .. } => format!("args={arg_count}"),
         ExecutionTraceEvent::RunEnd { outcome } => match outcome {
             ExecutionTraceOutcome::Ok => "outcome=ok".into(),
-            ExecutionTraceOutcome::Trap { message } => format!("trap={message}"),
+            ExecutionTraceOutcome::Trap { trap } => format!("trap={trap}"),
         },
         ExecutionTraceEvent::ScopeEnter {
             depth,

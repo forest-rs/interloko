@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use execution_tape::trace::TraceMask;
 use execution_tape::value::FuncId;
 use execution_tape::value::Value;
-use execution_tape::vm::{Limits, Vm};
+use execution_tape::vm::{Limits, TrapInfo, Vm};
 use interloko_runtime::InterlokoHost;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -45,7 +45,7 @@ pub enum CompileError {
     /// Runtime execution trapped.
     Runtime {
         /// Trap details.
-        message: String,
+        trap: TrapInfo,
     },
     /// `main` returned a non-`I64` result.
     MainReturnedNonI64,
@@ -196,9 +196,7 @@ fn run_tape_function_i64(
     let mut vm = Vm::new(host, Limits::default());
     let output = vm
         .run(program, function, args, TraceMask::NONE, None)
-        .map_err(|trap| CompileError::Runtime {
-            message: format!("{trap:?}"),
-        })?;
+        .map_err(|trap| CompileError::Runtime { trap })?;
 
     match output.as_slice() {
         [Value::I64(value)] => Ok(*value),

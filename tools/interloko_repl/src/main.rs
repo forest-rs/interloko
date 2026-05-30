@@ -2744,7 +2744,7 @@ fn function_run_message(result: &FunctionRunResult) -> String {
             format!("function `{name}` has parameters")
         }
         FunctionRunResult::TapeUnavailable => "tape unavailable".into(),
-        FunctionRunResult::Trap { message } => format!("trap {message}"),
+        FunctionRunResult::Trap { trap } => format!("trap {trap}"),
         FunctionRunResult::FunctionReturnedNonI64 { name } => {
             format!("function `{name}` returned a non-integer result")
         }
