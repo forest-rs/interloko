@@ -12,7 +12,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use execution_tape::host::{AccessSink, Host, HostError, HostSig, SigHash, ValueRef};
+use execution_tape::host::{
+    AccessSink, Host, HostError, HostSig, ResourceKeyRef, SigHash, ValueRef,
+};
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 use interloko_model::{
@@ -1258,6 +1260,30 @@ impl InterlokoHost {
         }
     }
 
+    fn record_slot_read_access(
+        &self,
+        object: Obj,
+        slot: SlotId,
+        sig_hash: SigHash,
+        access: Option<&mut dyn AccessSink>,
+    ) -> Result<(), RuntimeError> {
+        let Some(access) = access else {
+            return Ok(());
+        };
+        let object = self.object(object)?;
+        let object_class = object.class;
+        self.layout
+            .slot(object_class, slot)
+            .ok_or(RuntimeError::InvalidSlot {
+                class: object_class,
+                slot,
+            })?;
+        if matches!(object.storage, RuntimeObjectStorage::HostBacked { .. }) {
+            access.read(ResourceKeyRef::OpaqueHost { op: sig_hash });
+        }
+        Ok(())
+    }
+
     /// Writes one mutable runtime effective slot and returns the stored value.
     pub fn write_slot(
         &mut self,
@@ -1406,10 +1432,10 @@ impl Host for InterlokoHost {
     fn call(
         &mut self,
         symbol: &str,
-        _sig_hash: SigHash,
+        sig_hash: SigHash,
         args: &[ValueRef<'_>],
         rets: &mut [Value],
-        _access: Option<&mut dyn AccessSink>,
+        access: Option<&mut dyn AccessSink>,
     ) -> Result<u64, HostError> {
         match symbol {
             STRING_LITERAL => {
@@ -1705,7 +1731,9 @@ impl Host for InterlokoHost {
                 let [ValueRef::Obj(obj), ValueRef::U64(slot_raw)] = args else {
                     return Err(HostError::Failed);
                 };
-                rets[0] = self.read_slot(*obj, runtime_slot_id(*slot_raw)?)?;
+                let slot = runtime_slot_id(*slot_raw)?;
+                self.record_slot_read_access(*obj, slot, sig_hash, access)?;
+                rets[0] = self.read_slot(*obj, slot)?;
                 Ok(0)
             }
             SLOT_SET => {
@@ -2520,6 +2548,25 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingAccessSink {
+        reads: Vec<SigHash>,
+        writes: usize,
+    }
+
+    impl AccessSink for RecordingAccessSink {
+        fn read(&mut self, key: ResourceKeyRef<'_>) {
+            let ResourceKeyRef::OpaqueHost { op } = key else {
+                panic!("expected opaque host read key");
+            };
+            self.reads.push(op);
+        }
+
+        fn write(&mut self, _key: ResourceKeyRef<'_>) {
+            self.writes += 1;
+        }
+    }
+
     #[test]
     fn slot_api_reads_host_backed_slots_but_rejects_writes() {
         let mut layout = dispatch_layout();
@@ -2559,6 +2606,73 @@ mod tests {
                 reason: RuntimeSlotWriteRejection::HostBackedSlot
             })
         );
+    }
+
+    #[test]
+    fn host_call_records_access_for_host_backed_slot_reads() {
+        let mut layout = dispatch_layout();
+        layout.classes.push(host_backed_class(
+            "<rust-counter>",
+            Some(OBJECT_CLASS_ID),
+            vec![slot("value", ValueKind::I64, ClassId(4), SlotId(0))],
+        ));
+        let mut host = InterlokoHost::new_checked(layout).expect("layout should validate");
+        let value = host
+            .push_host_object(ClassId(4), TestHostObject { value: 99 })
+            .expect("host object should install");
+        let Value::Obj(object) = value else {
+            panic!("expected object");
+        };
+        let sig = slot_get_signature(ValueKind::I64).expect("slot kind should have host sig");
+        let sig_hash = execution_tape::host::sig_hash(&sig);
+        let mut rets = [Value::Unit];
+        let mut access = RecordingAccessSink::default();
+
+        assert_eq!(
+            host.call(
+                SLOT_GET,
+                sig_hash,
+                &[ValueRef::Obj(object), ValueRef::U64(0)],
+                &mut rets,
+                Some(&mut access),
+            ),
+            Ok(0)
+        );
+
+        assert_eq!(rets, [Value::I64(99)]);
+        assert_eq!(access.reads, vec![sig_hash]);
+        assert_eq!(access.writes, 0);
+    }
+
+    #[test]
+    fn host_call_does_not_record_access_for_native_slot_reads() {
+        let layout = dispatch_layout();
+        let mut host = InterlokoHost::new_checked(layout).expect("layout should validate");
+        let value = host
+            .make_object(ClassId(2), &[ValueRef::I64(4), ValueRef::I64(10)])
+            .expect("object should be allocated");
+        let Value::Obj(object) = value else {
+            panic!("expected object");
+        };
+        let sig = slot_get_signature(ValueKind::I64).expect("slot kind should have host sig");
+        let sig_hash = execution_tape::host::sig_hash(&sig);
+        let mut rets = [Value::Unit];
+        let mut access = RecordingAccessSink::default();
+
+        assert_eq!(
+            host.call(
+                SLOT_GET,
+                sig_hash,
+                &[ValueRef::Obj(object), ValueRef::U64(1)],
+                &mut rets,
+                Some(&mut access),
+            ),
+            Ok(0)
+        );
+
+        assert_eq!(rets, [Value::I64(10)]);
+        assert!(access.reads.is_empty());
+        assert_eq!(access.writes, 0);
     }
 
     #[test]
