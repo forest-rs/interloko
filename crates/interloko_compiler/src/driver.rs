@@ -486,6 +486,17 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_runtime_callable_parameter_apply() {
+        let value = compile_and_run_main(
+            "define function inc(x)\n  x + 1\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
+             define function main()\n  callit(inc)\nend;",
+        )
+        .expect("program should compile and run");
+        assert_eq!(value, 42);
+    }
+
+    #[test]
     fn compiles_and_reads_host_backed_slots() {
         let registry = host_registry();
         let compiled = compile_with_host_registry(

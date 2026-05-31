@@ -105,6 +105,8 @@ pub enum ValueKind {
         /// Effective slot described by this value.
         slot: SlotId,
     },
+    /// First-class callable value with a runtime `Func` representation.
+    Callable,
     /// Compile-time-known callable object.
     KnownCallable(KnownCallable),
     /// Invalid or unknown value.
@@ -1198,6 +1200,8 @@ pub enum Expr {
         callable: Box<Expr>,
         /// Argument expressions.
         args: Vec<Expr>,
+        /// Expected argument categories for this indirect call.
+        arg_kinds: Vec<ValueKind>,
         /// Result value category.
         result_kind: ValueKind,
         /// Source span.
@@ -2560,10 +2564,17 @@ impl Lowering {
         for (index, constant) in module.constants.iter().enumerate() {
             let id = ConstantId(u32::try_from(index).unwrap_or(u32::MAX));
             let mut ctx = FunctionContext::new();
-            let value = self.lower_expr(&mut ctx, &constant.value);
+            let expected_kind = self
+                .constant_symbols
+                .get(index)
+                .and_then(|symbol| symbol.annotation);
+            let value = self.lower_expr_expected(&mut ctx, &constant.value, expected_kind);
             self.diagnostics.extend(ctx.diagnostics);
             let actual_kind = self.expr_kind(&value);
-            if matches!(actual_kind, ValueKind::KnownCallable(_) | ValueKind::Error) {
+            if matches!(actual_kind, ValueKind::Error)
+                || (matches!(actual_kind, ValueKind::KnownCallable(_))
+                    && !matches!(expected_kind, Some(ValueKind::Callable)))
+            {
                 self.diagnostics.push(
                     Diagnostic::error(
                         constant.value.span(),
@@ -2573,10 +2584,6 @@ impl Lowering {
                     .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
                 );
             }
-            let expected_kind = self
-                .constant_symbols
-                .get(index)
-                .and_then(|symbol| symbol.annotation);
             if let Some(expected) = expected_kind
                 && !self.kinds_match(expected, actual_kind)
             {
@@ -2718,12 +2725,12 @@ impl Lowering {
             .flatten()
             .or_else(|| specializers.iter().copied().flatten().next())
             .unwrap_or(ClassId(u32::MAX));
-        let body = self.lower_block(&mut ctx, &method.body);
-        let body_kind = self.expr_kind(&body.result);
         let return_annotation = method
             .return_type
             .as_ref()
             .map(|annotation| self.resolve_type_annotation(annotation));
+        let body = self.lower_block(&mut ctx, &method.body, return_annotation);
+        let body_kind = self.expr_kind(&body.result);
         let result_kind = return_annotation.unwrap_or(body_kind);
         if let Some(expected) = return_annotation
             && !self.kinds_match(expected, body_kind)
@@ -2792,9 +2799,9 @@ impl Lowering {
             ));
         }
 
-        let body = self.lower_block(&mut ctx, &function.body);
-        let body_kind = self.expr_kind(&body.result);
         let return_annotation = symbol.as_ref().and_then(|symbol| symbol.return_annotation);
+        let body = self.lower_block(&mut ctx, &function.body, return_annotation);
+        let body_kind = self.expr_kind(&body.result);
         let result_kind = return_annotation.unwrap_or(body_kind);
         if let Some(expected) = return_annotation
             && !self.kinds_match(expected, body_kind)
@@ -2830,15 +2837,20 @@ impl Lowering {
         }
     }
 
-    fn lower_block(&self, ctx: &mut FunctionContext, block: &ast::Block) -> Block {
+    fn lower_block(
+        &self,
+        ctx: &mut FunctionContext,
+        block: &ast::Block,
+        expected_result: Option<ValueKind>,
+    ) -> Block {
         let mut lets = Vec::new();
         for local in &block.lets {
-            let value = self.lower_expr(ctx, &local.value);
-            let actual_kind = self.expr_kind(&value);
             let expected_kind = local
                 .type_annotation
                 .as_ref()
                 .map(|annotation| self.resolve_type_annotation_in_context(ctx, annotation));
+            let value = self.lower_expr_expected(ctx, &local.value, expected_kind);
+            let actual_kind = self.expr_kind(&value);
             if let Some(expected) = expected_kind
                 && !self.kinds_match(expected, actual_kind)
             {
@@ -2871,12 +2883,21 @@ impl Lowering {
 
         Block {
             lets,
-            result: self.lower_expr(ctx, &block.result),
+            result: self.lower_expr_expected(ctx, &block.result, expected_result),
             span: block.span,
         }
     }
 
     fn lower_expr(&self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
+        self.lower_expr_expected(ctx, expr, None)
+    }
+
+    fn lower_expr_expected(
+        &self,
+        ctx: &mut FunctionContext,
+        expr: &ast::Expr,
+        expected_result: Option<ValueKind>,
+    ) -> Expr {
         match expr {
             ast::Expr::Number { value, span, .. } => Expr::ConstI64 {
                 value: *value,
@@ -2937,7 +2958,7 @@ impl Lowering {
                 callee, args, span, ..
             } => {
                 if callee == "apply" {
-                    return self.lower_apply(ctx, args, *span);
+                    return self.lower_apply(ctx, args, expected_result, *span);
                 }
                 let lowered_args: Vec<_> =
                     args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
@@ -3104,8 +3125,8 @@ impl Lowering {
             ast::Expr::Binary {
                 op, lhs, rhs, span, ..
             } => {
-                let lhs = self.lower_expr(ctx, lhs);
-                let rhs = self.lower_expr(ctx, rhs);
+                let lhs = self.lower_expr_expected(ctx, lhs, Some(ValueKind::I64));
+                let rhs = self.lower_expr_expected(ctx, rhs, Some(ValueKind::I64));
                 self.expect_i64_operands(
                     ctx,
                     *span,
@@ -3125,7 +3146,7 @@ impl Lowering {
                     value: 0,
                     span: *span,
                 };
-                let rhs = self.lower_expr(ctx, expr);
+                let rhs = self.lower_expr_expected(ctx, expr, Some(ValueKind::I64));
                 self.expect_i64_operands(
                     ctx,
                     *span,
@@ -3143,8 +3164,9 @@ impl Lowering {
             ast::Expr::Compare {
                 op, lhs, rhs, span, ..
             } => {
-                let lhs = self.lower_expr(ctx, lhs);
-                let rhs = self.lower_expr(ctx, rhs);
+                let expected = (*op != ast::CompareOp::Eq).then_some(ValueKind::I64);
+                let lhs = self.lower_expr_expected(ctx, lhs, expected);
+                let rhs = self.lower_expr_expected(ctx, rhs, expected);
                 self.lower_compare(ctx, *op, lhs, rhs, *span)
             }
             ast::Expr::If {
@@ -3158,11 +3180,11 @@ impl Lowering {
                 let refinement = self.true_branch_refinement(&condition);
                 let previous_kind = refinement
                     .and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
-                let then_branch = self.lower_expr(ctx, then_branch);
+                let then_branch = self.lower_expr_expected(ctx, then_branch, expected_result);
                 if let (Some(refinement), Some(previous_kind)) = (refinement, previous_kind) {
                     let _ = ctx.refine_local(refinement.local, previous_kind);
                 }
-                let else_branch = self.lower_expr(ctx, else_branch);
+                let else_branch = self.lower_expr_expected(ctx, else_branch, expected_result);
                 let condition_kind = self.expr_kind(&condition);
                 if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
                     ctx.diagnostics.push(
@@ -3243,7 +3265,13 @@ impl Lowering {
         }
     }
 
-    fn lower_apply(&self, ctx: &mut FunctionContext, args: &[ast::Expr], span: Span) -> Expr {
+    fn lower_apply(
+        &self,
+        ctx: &mut FunctionContext,
+        args: &[ast::Expr],
+        expected_result: Option<ValueKind>,
+        span: Span,
+    ) -> Expr {
         let Some((target, args)) = args.split_first() else {
             ctx.diagnostics
                 .push(Diagnostic::error(span, DiagnosticCode::ApplyArityMismatch));
@@ -3265,13 +3293,20 @@ impl Lowering {
             ValueKind::KnownCallable(KnownCallable::SlotAccessor { class, slot, .. }) => {
                 self.lower_applied_accessor_call(ctx, target, class, slot, lowered_args, span)
             }
+            ValueKind::Callable => self.lower_applied_dynamic_callable_call(
+                ctx,
+                target,
+                lowered_args,
+                expected_result,
+                span,
+            ),
             ValueKind::Error => Expr::Error { span },
             actual => {
                 ctx.diagnostics.push(
                     Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
                         .with_arg(DiagnosticArg::text(
                             "expected",
-                            "known callable or generic function",
+                            "known callable, generic function, or <callable>",
                         ))
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
                 );
@@ -3481,6 +3516,7 @@ impl Lowering {
         Expr::CallableCall {
             callable: Box::new(target),
             args,
+            arg_kinds: symbol.param_kinds.clone(),
             result_kind: symbol.return_kind,
             span,
         }
@@ -3537,6 +3573,7 @@ impl Lowering {
         Expr::CallableCall {
             callable: Box::new(target),
             args,
+            arg_kinds: vec![ValueKind::Object(class)],
             result_kind: slot_info.kind,
             span,
         }
@@ -3589,8 +3626,57 @@ impl Lowering {
         Expr::CallableCall {
             callable: Box::new(target),
             args,
+            arg_kinds: (0..symbol.arity())
+                .map(|index| self.generic_callable_arg_kind(generic, index))
+                .collect(),
             result_kind: symbol.return_kind,
             span,
+        }
+    }
+
+    fn lower_applied_dynamic_callable_call(
+        &self,
+        ctx: &mut FunctionContext,
+        target: Expr,
+        args: Vec<Expr>,
+        expected_result: Option<ValueKind>,
+        span: Span,
+    ) -> Expr {
+        let Some(result_kind) = expected_result else {
+            ctx.diagnostics.push(
+                Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
+                    .with_arg(DiagnosticArg::text(
+                        "expected",
+                        "<callable> with known result context",
+                    ))
+                    .with_arg(DiagnosticArg::text("actual", "<callable>")),
+            );
+            return Expr::Error { span };
+        };
+        let arg_kinds = args
+            .iter()
+            .map(|arg| self.expr_kind(arg))
+            .collect::<Vec<_>>();
+        Expr::CallableCall {
+            callable: Box::new(target),
+            args,
+            arg_kinds,
+            result_kind,
+            span,
+        }
+    }
+
+    fn generic_callable_arg_kind(&self, generic: GenericFunctionId, index: usize) -> ValueKind {
+        let Some(generic) = self.generics.get(generic.0 as usize) else {
+            return ValueKind::Error;
+        };
+        match generic.param_kinds.get(index).copied().flatten() {
+            Some(ValueKind::Any) if generic.dispatch_params.contains(&index) => {
+                ValueKind::Object(OBJECT_CLASS_ID)
+            }
+            Some(kind) => kind,
+            None if generic.dispatch_params.contains(&index) => ValueKind::Object(OBJECT_CLASS_ID),
+            None => ValueKind::Any,
         }
     }
 
@@ -4355,9 +4441,11 @@ impl Lowering {
             ValueKind::SlotDescriptorObject { .. } => {
                 self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
             }
-            ValueKind::Any | ValueKind::Bool | ValueKind::KnownCallable(_) | ValueKind::Error => {
-                None
-            }
+            ValueKind::Any
+            | ValueKind::Bool
+            | ValueKind::Callable
+            | ValueKind::KnownCallable(_)
+            | ValueKind::Error => None,
         }
     }
 
@@ -4488,6 +4576,7 @@ impl Lowering {
                 .builtin_value_class(BuiltinValueClass::Symbol)
                 .map_or(ValueKind::Error, ValueKind::Symbol),
             "<integer>" => ValueKind::I64,
+            "<callable>" => ValueKind::Callable,
             "<vector>" => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
@@ -4517,7 +4606,13 @@ impl Lowering {
     }
 
     fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
-        (matches!(expected, ValueKind::Any) && !matches!(actual, ValueKind::KnownCallable(_)))
+        (matches!(expected, ValueKind::Any)
+            && !matches!(
+                actual,
+                ValueKind::Callable | ValueKind::KnownCallable(_)
+            ))
+            || (matches!(expected, ValueKind::Callable)
+                && matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_)))
             || matches!((expected, actual), (ValueKind::Object(expected), ValueKind::Object(actual)) if self.is_same_or_subclass(actual, expected))
             || self
                 .value_kind_class(actual)
@@ -4545,6 +4640,7 @@ impl Lowering {
                 .kind_for_builtin_class(specializer)
                 .is_some_and(|kind| kind == ValueKind::I64),
             ValueKind::Bool
+            | ValueKind::Callable
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -4580,6 +4676,10 @@ impl Lowering {
                     || matches!(actual, ValueKind::Error)
             }
             ValueKind::Error => true,
+            ValueKind::Callable => matches!(
+                actual,
+                ValueKind::Callable | ValueKind::KnownCallable(_) | ValueKind::Error
+            ),
             ValueKind::I64
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
@@ -4603,6 +4703,7 @@ impl Lowering {
             ValueKind::Any => "<object>".into(),
             ValueKind::I64 => "<integer>".into(),
             ValueKind::Bool => "<boolean>".into(),
+            ValueKind::Callable => "<callable>".into(),
             ValueKind::String(_) => "<string>".into(),
             ValueKind::Symbol(_) => "<symbol>".into(),
             ValueKind::Vector(_) => "<vector>".into(),
@@ -5001,6 +5102,37 @@ mod tests {
                 result_kind: ValueKind::KnownCallable(callable),
                 ..
             } if *callable == expected
+        ));
+    }
+
+    #[test]
+    fn resolves_runtime_callable_parameters() {
+        let module = lower_source(
+            "define function inc(x)\n  x + 1\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
+             define function main()\n  callit(inc)\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(module.functions[1].param_kinds, [ValueKind::Callable]);
+        let Expr::CallableCall {
+            callable,
+            arg_kinds,
+            result_kind,
+            ..
+        } = &module.functions[1].body.result
+        else {
+            panic!("expected runtime callable apply");
+        };
+        assert_eq!(arg_kinds, &[ValueKind::I64]);
+        assert_eq!(*result_kind, ValueKind::I64);
+        assert!(matches!(
+            callable.as_ref(),
+            Expr::Local {
+                local: LocalId(0),
+                result_kind: ValueKind::Callable,
+                ..
+            }
         ));
     }
 

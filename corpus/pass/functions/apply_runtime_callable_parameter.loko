@@ -1,0 +1,20 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains f:function
+// expect: dump sem contains callable-call result=integer
+// expect: dump lowered contains f: function
+// expect: dump lowered contains call.indirect
+// expect: dump tape contains const.func
+// expect: dump tape contains call.indirect
+
+define function inc(x)
+  x + 1
+end;
+
+define function callit(f :: <callable>) => <integer>
+  apply(f, 41)
+end;
+
+define function main()
+  callit(inc)
+end;

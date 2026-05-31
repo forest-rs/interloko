@@ -1120,6 +1120,28 @@ mod tests {
     }
 
     #[test]
+    fn emits_runtime_callable_parameter_apply_through_indirect_call() {
+        let module = lower_source(
+            "define function inc(x)\n  x + 1\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
+             define function main()\n  callit(inc)\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+        let program = tape.program.program();
+
+        assert_eq!(
+            program
+                .function_arg_types(&program.functions[1])
+                .expect("callit args should decode"),
+            &[ValueType::Func],
+        );
+        let disassembly = execution_tape::disasm::disassemble_verified(&tape.program).to_string();
+        assert!(disassembly.contains("name=\"callit\""));
+        assert!(disassembly.contains("const.func"));
+        assert!(disassembly.contains("call.indirect"));
+    }
+
+    #[test]
     fn emits_verified_tape_with_generic_dispatcher() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\

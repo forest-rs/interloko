@@ -1780,6 +1780,7 @@ fn value_kind_label(module: &sem::Module, kind: ValueKind) -> String {
         ValueKind::SlotDescriptorObject { class, slot } => {
             format!("slot:c{}.s{}", class.0, slot.0)
         }
+        ValueKind::Callable => "<callable>".into(),
         ValueKind::KnownCallable(callable) => format!("known callable {callable:?}"),
         ValueKind::Error => "error".into(),
     }

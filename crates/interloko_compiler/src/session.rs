@@ -4384,6 +4384,7 @@ fn sem_value_kind_class(module: &sem::Module, kind: sem::ValueKind) -> Option<se
         }
         sem::ValueKind::Any
         | sem::ValueKind::Bool
+        | sem::ValueKind::Callable
         | sem::ValueKind::KnownCallable(_)
         | sem::ValueKind::Error => None,
     }
@@ -9458,6 +9459,7 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Callable => "function".into(),
         sem::ValueKind::String(class) => value_class_label(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
         sem::ValueKind::Vector(class) => value_class_label(module, "vector", class),
@@ -9520,6 +9522,7 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Callable => "function".into(),
         sem::ValueKind::String(class) => format!("string(c{})", class.0),
         sem::ValueKind::Symbol(class) => format!("symbol(c{})", class.0),
         sem::ValueKind::Vector(class) => format!("vector(c{})", class.0),
@@ -9544,6 +9547,7 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Callable => "function".into(),
         sem::ValueKind::String(class) => value_class_fingerprint(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_fingerprint(module, "symbol", class),
         sem::ValueKind::Vector(class) => value_class_fingerprint(module, "vector", class),
@@ -9591,6 +9595,7 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         | sem::ValueKind::GenericFunctionObject(_)
         | sem::ValueKind::MethodObject(_)
         | sem::ValueKind::SlotDescriptorObject { .. } => "object-handle",
+        sem::ValueKind::Callable => "func",
         sem::ValueKind::KnownCallable(_) => "compile-time-callable",
         sem::ValueKind::Error => "error",
     }

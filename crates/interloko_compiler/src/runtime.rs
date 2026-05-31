@@ -96,7 +96,7 @@ pub const fn runtime_value_kind(kind: sem::ValueKind) -> Option<RuntimeValueKind
         sem::ValueKind::SlotDescriptorObject { class, slot } => {
             Some(RuntimeValueKind::SlotDescriptorObject { class, slot })
         }
-        sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => None,
+        sem::ValueKind::Callable | sem::ValueKind::KnownCallable(_) | sem::ValueKind::Error => None,
     }
 }
 

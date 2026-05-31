@@ -1,5 +1,5 @@
 // expect: diagnostics 1
-// expect: diagnostic contains apply target must be a known callable or generic function, got <integer>
+// expect: diagnostic contains apply target must be a known callable, generic function, or <callable>, got <integer>
 
 define function main()
   apply(1, 2)

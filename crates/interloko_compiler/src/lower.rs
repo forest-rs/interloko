@@ -678,7 +678,7 @@ impl<'module> Lowering<'module> {
 
     fn lower_function(&self, function: &sem::Function) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_function(self.module, &self.ids, function)?;
-        let ret = value_kind(function.result_kind)?;
+        let ret = self.value_kind(function.result_kind)?;
         body.lower_block(&function.body, ret)?;
         Ok(Function {
             id: self.lower_function_id(function.id)?,
@@ -694,7 +694,7 @@ impl<'module> Lowering<'module> {
 
     fn lower_method(&self, method: &sem::Method) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_method(self.module, &self.ids, method)?;
-        let ret = value_kind(method.result_kind)?;
+        let ret = self.value_kind(method.result_kind)?;
         body.lower_block(&method.body, ret)?;
         let generic = self
             .module
@@ -727,7 +727,7 @@ impl<'module> Lowering<'module> {
             name: format!("{}#dispatch", generic.name),
             kind: FunctionKind::Dispatcher(generic.id),
             params: body.params,
-            ret: value_kind(generic.result_kind)?,
+            ret: self.value_kind(generic.result_kind)?,
             locals: body.locals,
             instructions: body.instructions,
             span: generic.span,
@@ -746,7 +746,7 @@ impl<'module> Lowering<'module> {
             .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
         let receiver = input_register(0);
         let result = input_register(1);
-        let ret = value_kind(slot.kind)?;
+        let ret = self.value_kind(slot.kind)?;
         Ok(Function {
             id: accessor.function,
             name: format!("{}#accessor{}", slot.accessor.name, accessor.function.0),
@@ -803,6 +803,45 @@ impl<'module> Lowering<'module> {
             .get(id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_semantic("generic id is out of range"))
+    }
+
+    fn value_kind(&self, kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
+        match kind {
+            sem::ValueKind::KnownCallable(callable) => Ok(ValueKind::Function(Some(
+                known_callable_sig(&self.ids, callable)?,
+            ))),
+            _ => value_kind(kind),
+        }
+    }
+}
+
+fn known_callable_sig(
+    ids: &LowerIds,
+    callable: sem::KnownCallable,
+) -> Result<CallableSigId, LowerError> {
+    match callable {
+        sem::KnownCallable::DirectFunction(function) => ids
+            .function_sigs
+            .get(function.0 as usize)
+            .copied()
+            .ok_or_else(|| invalid_semantic("function signature id is out of range")),
+        sem::KnownCallable::GenericFunction(generic) => ids
+            .generic_sigs
+            .get(generic.0 as usize)
+            .copied()
+            .ok_or_else(|| invalid_semantic("generic signature id is out of range")),
+        sem::KnownCallable::SlotAccessor {
+            accessor,
+            class,
+            slot,
+        } => ids
+            .accessors
+            .iter()
+            .find(|candidate| {
+                candidate.accessor == accessor && candidate.class == class && candidate.slot == slot
+            })
+            .map(|accessor| accessor.sig)
+            .ok_or_else(|| invalid_semantic("accessor function id is missing")),
     }
 }
 
@@ -1116,7 +1155,7 @@ impl<'module> BodyLowering<'module> {
         let Some(local) = local else {
             return Err(invalid_semantic("parameter local id is out of range"));
         };
-        let kind = value_kind(local.kind)?;
+        let kind = self.value_kind(local.kind)?;
         let value = Value {
             reg,
             kind,
@@ -1147,7 +1186,7 @@ impl<'module> BodyLowering<'module> {
                 (local.name.clone(), local.kind)
             };
             let value = self.lower_expr(&let_binding.value)?;
-            let value = self.coerce_value(value, value_kind(local_kind)?, let_binding.span)?;
+            let value = self.coerce_value(value, self.value_kind(local_kind)?, let_binding.span)?;
             self.set_local(let_binding.local, value)?;
             self.locals.push(Local {
                 source: let_binding.local,
@@ -1173,7 +1212,7 @@ impl<'module> BodyLowering<'module> {
             }
             let class_const = self.alloc(ValueKind::U64);
             let cond = self.alloc(ValueKind::Bool);
-            let method_result = self.alloc(value_kind(method.result_kind)?);
+            let method_result = self.alloc(self.value_kind(method.result_kind)?);
             let matched = self.alloc_label();
             let unmatched = self.alloc_label();
 
@@ -1214,7 +1253,7 @@ impl<'module> BodyLowering<'module> {
                     kind: dispatcher_param_kind(generic, index),
                     reachable: true,
                 };
-                let value = self.coerce_value(value, value_kind(local.kind)?, method.span)?;
+                let value = self.coerce_value(value, self.value_kind(local.kind)?, method.span)?;
                 call_args.push(value.reg);
             }
             self.instructions.push(Instr::Call {
@@ -1228,8 +1267,11 @@ impl<'module> BodyLowering<'module> {
                 args: call_args,
                 span: method.span,
             });
-            let result =
-                self.coerce_value(method_result, value_kind(generic.result_kind)?, method.span)?;
+            let result = self.coerce_value(
+                method_result,
+                self.value_kind(generic.result_kind)?,
+                method.span,
+            )?;
             self.instructions.push(Instr::Return {
                 value: result.reg,
                 span: method.span,
@@ -1413,7 +1455,7 @@ impl<'module> BodyLowering<'module> {
                     .get(local.0 as usize)
                     .and_then(|value| *value)
                     .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
-                self.coerce_value(value, value_kind(*result_kind)?, *span)
+                self.coerce_value(value, self.value_kind(*result_kind)?, *span)
             }
             sem::Expr::ConstantRef { constant, span, .. } => {
                 if self
@@ -1428,7 +1470,7 @@ impl<'module> BodyLowering<'module> {
                     .constants
                     .get(constant.0 as usize)
                     .ok_or_else(|| invalid_semantic("constant id is out of range"))?;
-                let expected = value_kind(constant_info.result_kind)?;
+                let expected = self.value_kind(constant_info.result_kind)?;
                 let value = constant_info.value.clone();
                 self.active_constants.push(*constant);
                 let lowered = self.lower_expr(&value);
@@ -1459,7 +1501,7 @@ impl<'module> BodyLowering<'module> {
                     .get(function.0 as usize)
                     .ok_or_else(|| invalid_semantic("function id is out of range"))?;
                 let args = self.lower_args_with_expected(args, &function_info.param_kinds)?;
-                let result = self.alloc(value_kind(function_info.result_kind)?);
+                let result = self.alloc(self.value_kind(function_info.result_kind)?);
                 self.instructions.push(Instr::Call {
                     dst: result.reg,
                     callee: self
@@ -1484,7 +1526,7 @@ impl<'module> BodyLowering<'module> {
                     .get(generic.0 as usize)
                     .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
                 let args = self.lower_generic_args(args, generic_info)?;
-                let result = self.alloc(value_kind(generic_info.result_kind)?);
+                let result = self.alloc(self.value_kind(generic_info.result_kind)?);
                 self.instructions.push(Instr::Call {
                     dst: result.reg,
                     callee: self
@@ -1501,9 +1543,10 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::CallableCall {
                 callable,
                 args,
+                arg_kinds,
                 result_kind,
                 span,
-            } => self.lower_callable_call(callable, args, *result_kind, *span),
+            } => self.lower_callable_call(callable, args, arg_kinds, *result_kind, *span),
             sem::Expr::Signal {
                 condition,
                 condition_class,
@@ -1636,7 +1679,7 @@ impl<'module> BodyLowering<'module> {
                 ..
             } => {
                 let receiver = self.lower_expr(receiver)?;
-                let kind = value_kind(*result_kind)?;
+                let kind = self.value_kind(*result_kind)?;
                 let result = self.alloc(kind);
                 self.instructions.push(Instr::ReadSlot {
                     dst: result.reg,
@@ -1659,7 +1702,7 @@ impl<'module> BodyLowering<'module> {
             } => {
                 let receiver = self.lower_expr(receiver)?;
                 let value = self.lower_expr(value)?;
-                let kind = value_kind(*result_kind)?;
+                let kind = self.value_kind(*result_kind)?;
                 let value = self.coerce_value(value, kind, *span)?;
                 let result = self.alloc(kind);
                 self.instructions.push(Instr::WriteSlot {
@@ -1712,7 +1755,7 @@ impl<'module> BodyLowering<'module> {
                     dst: result.reg,
                     lhs: lhs.reg,
                     rhs: rhs.reg,
-                    kind: value_kind(*kind)?,
+                    kind: self.value_kind(*kind)?,
                     span: *span,
                 });
                 Ok(result)
@@ -1866,23 +1909,18 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         callable: &sem::Expr,
         args: &[sem::Expr],
+        arg_kinds: &[sem::ValueKind],
         result_kind: sem::ValueKind,
         span: Span,
     ) -> Result<Value, LowerError> {
         let callee = self.lower_expr(callable)?;
-        let ValueKind::Function(Some(sig)) = callee.kind else {
+        if !matches!(callee.kind, ValueKind::Function(_)) {
             return Err(invalid_semantic(
                 "callable call target is not a function value",
             ));
-        };
-        let signature = self.callable_signature(sig)?.clone();
-        let (args, arg_kinds) = self.lower_args_with_expected_kinds(args, &signature.params)?;
-        let ret = value_kind(result_kind)?;
-        if ret != signature.ret {
-            return Err(invalid_semantic(
-                "callable result kind does not match callee",
-            ));
         }
+        let (args, arg_kinds) = self.lower_args_with_expected_and_kinds(args, arg_kinds)?;
+        let ret = self.value_kind(result_kind)?;
         let result = self.alloc(ret);
         self.instructions.push(Instr::CallIndirect {
             dst: result.reg,
@@ -1895,11 +1933,13 @@ impl<'module> BodyLowering<'module> {
         Ok(result)
     }
 
-    fn callable_signature(&self, sig: CallableSigId) -> Result<&CallableSignature, LowerError> {
-        self.ids
-            .call_sigs
-            .get(sig.0 as usize)
-            .ok_or_else(|| invalid_semantic("callable signature id is out of range"))
+    fn value_kind(&self, kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
+        match kind {
+            sem::ValueKind::KnownCallable(callable) => Ok(ValueKind::Function(Some(
+                known_callable_sig(self.ids, callable)?,
+            ))),
+            _ => value_kind(kind),
+        }
     }
 
     fn lower_intrinsic_call(
@@ -1920,7 +1960,7 @@ impl<'module> BodyLowering<'module> {
             };
             regs.push(value.reg);
         }
-        let result = self.alloc(value_kind(result_kind)?);
+        let result = self.alloc(self.value_kind(result_kind)?);
         self.instructions.push(Instr::RuntimeCall {
             dst: result.reg,
             op,
@@ -2041,7 +2081,7 @@ impl<'module> BodyLowering<'module> {
         restart: &sem::Restart,
         span: Span,
     ) -> Result<Value, LowerError> {
-        let result = self.alloc(value_kind(restart.result_kind)?);
+        let result = self.alloc(self.value_kind(restart.result_kind)?);
         let condition = restart
             .condition_local
             .map(|_| self.alloc(ValueKind::Object(Some(restart.specializer))));
@@ -2116,23 +2156,24 @@ impl<'module> BodyLowering<'module> {
         let mut lowered = Vec::with_capacity(args.len());
         for (arg, expected) in args.iter().zip(expected) {
             let value = self.lower_expr(arg)?;
-            let expected = value_kind(*expected)?;
+            let expected = self.value_kind(*expected)?;
             let value = self.coerce_value(value, expected, arg.span())?;
             lowered.push(value.reg);
         }
         Ok(lowered)
     }
 
-    fn lower_args_with_expected_kinds(
+    fn lower_args_with_expected_and_kinds(
         &mut self,
         args: &[sem::Expr],
-        expected: &[ValueKind],
+        expected: &[sem::ValueKind],
     ) -> Result<(Vec<Register>, Vec<ValueKind>), LowerError> {
         let mut regs = Vec::with_capacity(args.len());
         let mut kinds = Vec::with_capacity(args.len());
         for (arg, expected) in args.iter().zip(expected) {
             let value = self.lower_expr(arg)?;
-            let value = self.coerce_value(value, *expected, arg.span())?;
+            let expected = self.value_kind(*expected)?;
+            let value = self.coerce_value(value, expected, arg.span())?;
             regs.push(value.reg);
             kinds.push(value.kind);
         }
@@ -2153,7 +2194,7 @@ impl<'module> BodyLowering<'module> {
                 {
                     ValueKind::Object(None)
                 } else {
-                    value_kind(expected)?
+                    self.value_kind(expected)?
                 };
                 self.coerce_value(value, expected, arg.span())?
             } else if generic.dispatch_params.contains(&index)
@@ -2319,6 +2360,7 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         }
         sem::ValueKind::MethodObject(method) => Ok(ValueKind::MethodObject(Some(method))),
         sem::ValueKind::SlotDescriptorObject { .. } => Ok(ValueKind::SlotDescriptorObject),
+        sem::ValueKind::Callable => Ok(ValueKind::Function(None)),
         sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(_))
         | sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(_))
         | sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. }) => {
@@ -2390,6 +2432,7 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueK
         ) => ValueKind::Object(Some(class)),
         Some(sem::ValueKind::I64) => ValueKind::I64,
         Some(sem::ValueKind::Bool) => ValueKind::Bool,
+        Some(sem::ValueKind::Callable) => ValueKind::Function(None),
         None if generic.dispatch_params.contains(&index) => ValueKind::Object(None),
         None => ValueKind::Any,
         Some(_) => ValueKind::Object(None),
@@ -2985,7 +3028,10 @@ mod tests {
              define function main()\n  let f = inc;\n  let g = dec;\n  apply(f, 2) + apply(g, 2)\nend;",
         );
 
-        assert_eq!(module.call_sigs.len(), 2);
+        assert!(module.call_sigs.contains(&CallableSignature {
+            params: vec![ValueKind::I64],
+            ret: ValueKind::I64,
+        }));
         assert_eq!(
             module.call_sigs[0],
             CallableSignature {
@@ -3004,6 +3050,28 @@ mod tests {
         let dump = module.dump();
         assert!(dump.contains("const.function l0"));
         assert!(dump.contains("const.function l1"));
+    }
+
+    #[test]
+    fn lowers_runtime_callable_parameter_apply_to_indirect_call() {
+        let module = lower_source(
+            "define function inc(x)\n  x + 1\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
+             define function main()\n  callit(inc)\nend;",
+        );
+
+        assert!(module.call_sigs.contains(&CallableSignature {
+            params: vec![ValueKind::I64],
+            ret: ValueKind::I64,
+        }));
+        assert_eq!(
+            module.functions[1].params[0].kind,
+            ValueKind::Function(None)
+        );
+        let dump = module.dump();
+        assert!(dump.contains("fn l1 callit(%r1 f: function) -> i64"));
+        assert!(dump.contains("= call.indirect %r1(%r2): i64"));
+        assert!(dump.contains("const.function l0"));
     }
 
     #[test]
