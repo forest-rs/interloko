@@ -1089,6 +1089,37 @@ mod tests {
     }
 
     #[test]
+    fn emits_generic_callable_apply_through_indirect_dispatcher() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
+             define function main()\n  let g = area;\n  apply(g, make(<circle>, radius: 5))\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+        let program = tape.program.program();
+
+        assert_eq!(program.call_sigs.len(), 1);
+        assert_eq!(
+            program
+                .call_sig_args(&program.call_sigs[0])
+                .expect("indirect generic args should decode"),
+            &[runtime::object_type()],
+        );
+        assert_eq!(
+            program
+                .call_sig_rets(&program.call_sigs[0])
+                .expect("indirect generic rets should decode"),
+            &[ValueType::I64],
+        );
+
+        let disassembly = execution_tape::disasm::disassemble_verified(&tape.program).to_string();
+        assert!(disassembly.contains("name=\"area#dispatch\""));
+        assert!(disassembly.contains("const.func"));
+        assert!(disassembly.contains("call.indirect"));
+    }
+
+    #[test]
     fn emits_verified_tape_with_generic_dispatcher() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\

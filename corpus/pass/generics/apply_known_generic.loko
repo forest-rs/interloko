@@ -1,8 +1,12 @@
 // expect: run 25
 // expect: diagnostics 0
-// expect: dump sem contains generic-function-object g0
-// expect: dump sem contains generic-call g0
+// expect: dump sem contains known-callable generic g0
+// expect: dump sem contains callable-call result=integer
+// expect: dump lowered contains const.function
+// expect: dump lowered contains call.indirect
 // expect: dump lowered contains area#dispatch
+// expect: dump tape contains const.func
+// expect: dump tape contains call.indirect
 
 define class <circle> (<object>)
   slot radius :: <integer>;

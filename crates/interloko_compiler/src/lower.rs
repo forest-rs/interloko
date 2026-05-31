@@ -577,6 +577,7 @@ struct LowerIds {
     function_sigs: Vec<CallableSigId>,
     methods: Vec<FunctionId>,
     generics: Vec<FunctionId>,
+    generic_sigs: Vec<CallableSigId>,
     accessors: Vec<AccessorFunction>,
     call_sigs: Vec<CallableSignature>,
 }
@@ -619,8 +620,11 @@ impl<'module> Lowering<'module> {
             ids.methods.push(FunctionId(next));
             next = next.saturating_add(1);
         }
-        for _ in &module.generics {
+        for generic in &module.generics {
             ids.generics.push(FunctionId(next));
+            let signature = generic_callable_signature(generic)?;
+            let sig = intern_callable_signature(&mut ids.call_sigs, signature);
+            ids.generic_sigs.push(sig);
             next = next.saturating_add(1);
         }
         for callable in collect_accessor_callables(module) {
@@ -953,6 +957,17 @@ fn accessor_callable_signature(
     Ok(CallableSignature {
         params: vec![ValueKind::Object(Some(accessor.class))],
         ret: value_kind(slot.kind)?,
+    })
+}
+
+fn generic_callable_signature(
+    generic: &sem::GenericFunction,
+) -> Result<CallableSignature, LowerError> {
+    Ok(CallableSignature {
+        params: (0..generic.arity)
+            .map(|index| dispatcher_param_kind(generic, index))
+            .collect(),
+        ret: value_kind(generic.result_kind)?,
     })
 }
 
@@ -1794,7 +1809,25 @@ impl<'module> BodyLowering<'module> {
                 Ok(result)
             }
             sem::KnownCallable::GenericFunction(generic) => {
-                self.lower_generic_meta_object(generic, span)
+                let lowered = self
+                    .ids
+                    .generics
+                    .get(generic.0 as usize)
+                    .copied()
+                    .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
+                let sig = self
+                    .ids
+                    .generic_sigs
+                    .get(generic.0 as usize)
+                    .copied()
+                    .ok_or_else(|| invalid_semantic("generic signature id is out of range"))?;
+                let result = self.alloc(ValueKind::Function(Some(sig)));
+                self.instructions.push(Instr::ConstFunction {
+                    dst: result.reg,
+                    function: lowered,
+                    span,
+                });
+                Ok(result)
             }
             sem::KnownCallable::SlotAccessor {
                 accessor,
@@ -1879,7 +1912,19 @@ impl<'module> BodyLowering<'module> {
         let op = runtime_op_for_intrinsic(intrinsic);
         let mut regs = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
-            let value = self.lower_expr(arg)?;
+            let value = if index == 0
+                && matches!(
+                    op,
+                    RuntimeOp::GenericFunctionName | RuntimeOp::GenericFunctionMethods
+                ) {
+                if let Some(generic) = known_generic_value(arg) {
+                    self.lower_generic_meta_object(generic, arg.span())?
+                } else {
+                    self.lower_expr(arg)?
+                }
+            } else {
+                self.lower_expr(arg)?
+            };
             let value = if runtime_op_arg_is_any(op, index) {
                 self.box_any(value, arg.span())?
             } else {
@@ -2287,13 +2332,34 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::MethodObject(method) => Ok(ValueKind::MethodObject(Some(method))),
         sem::ValueKind::SlotDescriptorObject { .. } => Ok(ValueKind::SlotDescriptorObject),
         sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(_))
+        | sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(_))
         | sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. }) => {
             Ok(ValueKind::Function(None))
         }
-        sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) => {
-            Ok(ValueKind::GenericFunctionObject(Some(generic)))
-        }
         sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
+    }
+}
+
+fn known_generic_value(expr: &sem::Expr) -> Option<sem::GenericFunctionId> {
+    match expr {
+        sem::Expr::KnownCallable {
+            callable: sem::KnownCallable::GenericFunction(generic),
+            ..
+        }
+        | sem::Expr::GenericFunctionObject { generic, .. } => Some(*generic),
+        sem::Expr::Local {
+            result_kind:
+                sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic))
+                | sem::ValueKind::GenericFunctionObject(generic),
+            ..
+        }
+        | sem::Expr::ConstantRef {
+            result_kind:
+                sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic))
+                | sem::ValueKind::GenericFunctionObject(generic),
+            ..
+        } => Some(*generic),
+        _ => None,
     }
 }
 

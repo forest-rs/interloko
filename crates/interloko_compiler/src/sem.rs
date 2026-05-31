@@ -3219,8 +3219,8 @@ impl Lowering {
             };
         }
         if let Some(symbol) = self.resolve_generic(name) {
-            return Expr::GenericFunctionObject {
-                generic: symbol.id,
+            return Expr::KnownCallable {
+                callable: KnownCallable::GenericFunction(symbol.id),
                 span,
             };
         }
@@ -3260,7 +3260,7 @@ impl Lowering {
             }
             ValueKind::KnownCallable(KnownCallable::GenericFunction(generic))
             | ValueKind::GenericFunctionObject(generic) => {
-                self.lower_applied_generic_call(ctx, generic, lowered_args, span)
+                self.lower_applied_generic_callable_call(ctx, target, generic, lowered_args, span)
             }
             ValueKind::KnownCallable(KnownCallable::SlotAccessor { class, slot, .. }) => {
                 self.lower_applied_accessor_call(ctx, target, class, slot, lowered_args, span)
@@ -3515,9 +3515,10 @@ impl Lowering {
         }
     }
 
-    fn lower_applied_generic_call(
+    fn lower_applied_generic_callable_call(
         &self,
         ctx: &mut FunctionContext,
+        target: Expr,
         generic: GenericFunctionId,
         args: Vec<Expr>,
         span: Span,
@@ -3558,9 +3559,10 @@ impl Lowering {
                 );
             }
         }
-        Expr::GenericCall {
-            generic,
+        Expr::CallableCall {
+            callable: Box::new(target),
             args,
+            result_kind: symbol.return_kind,
             span,
         }
     }
@@ -4864,7 +4866,7 @@ mod tests {
         );
         assert_eq!(
             module.functions[1].locals[1].kind,
-            ValueKind::GenericFunctionObject(GenericFunctionId(0))
+            ValueKind::KnownCallable(KnownCallable::GenericFunction(GenericFunctionId(0)))
         );
         let Expr::Binary { lhs, rhs, .. } = &module.functions[1].body.result else {
             panic!("expected binary result");
@@ -4880,10 +4882,16 @@ mod tests {
                 ..
             }
         ));
+        let Expr::CallableCall { callable, .. } = rhs.as_ref() else {
+            panic!("expected generic apply to remain a callable call");
+        };
         assert!(matches!(
-            rhs.as_ref(),
-            Expr::GenericCall {
-                generic: GenericFunctionId(0),
+            callable.as_ref(),
+            Expr::Local {
+                local: LocalId(1),
+                result_kind: ValueKind::KnownCallable(KnownCallable::GenericFunction(
+                    GenericFunctionId(0)
+                )),
                 ..
             }
         ));
