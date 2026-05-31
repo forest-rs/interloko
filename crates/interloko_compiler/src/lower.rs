@@ -38,6 +38,13 @@ pub struct LabelId(
     pub u32,
 );
 
+/// Durable callable signature identifier within a lowered module.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct CallableSigId(
+    /// Zero-based callable signature index.
+    pub u32,
+);
+
 /// Lowered value category.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ValueKind {
@@ -49,8 +56,8 @@ pub enum ValueKind {
     U64,
     /// Boolean value used by control-flow conditions.
     Bool,
-    /// First-class function reference, optionally tied to a lowered callee.
-    Function(Option<FunctionId>),
+    /// First-class function reference, optionally tied to a callable signature.
+    Function(Option<CallableSigId>),
     /// Runtime object, optionally tied to a statically known nominal class.
     Object(Option<sem::ClassId>),
     /// Class metaobject, optionally tied to the class it represents.
@@ -63,11 +70,22 @@ pub enum ValueKind {
     SlotDescriptorObject,
 }
 
+/// Typed call ABI for a first-class callable value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableSignature {
+    /// Argument value categories in call order.
+    pub params: Vec<ValueKind>,
+    /// Return value category.
+    pub ret: ValueKind,
+}
+
 /// A lowered module ready for backend emission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Module {
     /// Runtime layout required by object host calls.
     pub runtime: RuntimeLayout,
+    /// Interned callable signatures used by first-class function values.
+    pub call_sigs: Vec<CallableSignature>,
     /// Lowered functions in [`FunctionId`] order.
     pub functions: Vec<Function>,
     /// Lowered function id for `main`, if present.
@@ -85,6 +103,12 @@ impl Module {
     #[must_use]
     pub fn function(&self, id: FunctionId) -> Option<&Function> {
         self.functions.get(id.0 as usize)
+    }
+
+    /// Returns a callable signature by id.
+    #[must_use]
+    pub fn callable_signature(&self, id: CallableSigId) -> Option<&CallableSignature> {
+        self.call_sigs.get(id.0 as usize)
     }
 }
 
@@ -544,15 +568,17 @@ pub fn lower(module: &sem::Module) -> Result<Module, LowerError> {
         });
     }
 
-    Lowering::new(module).lower_module()
+    Lowering::new(module)?.lower_module()
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct LowerIds {
     functions: Vec<FunctionId>,
+    function_sigs: Vec<CallableSigId>,
     methods: Vec<FunctionId>,
     generics: Vec<FunctionId>,
     accessors: Vec<AccessorFunction>,
+    call_sigs: Vec<CallableSignature>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -561,6 +587,7 @@ struct AccessorFunction {
     class: sem::ClassId,
     slot: sem::SlotId,
     function: FunctionId,
+    sig: CallableSigId,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -576,12 +603,16 @@ struct Lowering<'module> {
 }
 
 impl<'module> Lowering<'module> {
-    fn new(module: &'module sem::Module) -> Self {
+    fn new(module: &'module sem::Module) -> Result<Self, LowerError> {
         let mut ids = LowerIds::default();
         let mut next = 0_u32;
 
-        for _ in &module.functions {
+        for function in &module.functions {
             ids.functions.push(FunctionId(next));
+            let signature =
+                callable_signature_from_sem(&function.param_kinds, function.result_kind)?;
+            let sig = intern_callable_signature(&mut ids.call_sigs, signature);
+            ids.function_sigs.push(sig);
             next = next.saturating_add(1);
         }
         for _ in &module.methods {
@@ -593,16 +624,19 @@ impl<'module> Lowering<'module> {
             next = next.saturating_add(1);
         }
         for callable in collect_accessor_callables(module) {
+            let signature = accessor_callable_signature(module, callable)?;
+            let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.accessors.push(AccessorFunction {
                 accessor: callable.accessor,
                 class: callable.class,
                 slot: callable.slot,
                 function: FunctionId(next),
+                sig,
             });
             next = next.saturating_add(1);
         }
 
-        Self { module, ids }
+        Ok(Self { module, ids })
     }
 
     fn lower_module(&self) -> Result<Module, LowerError> {
@@ -632,6 +666,7 @@ impl<'module> Lowering<'module> {
 
         Ok(Module {
             runtime: runtime_bridge::runtime_layout_from_sem(self.module),
+            call_sigs: self.ids.call_sigs.clone(),
             functions,
             main,
         })
@@ -886,6 +921,54 @@ fn push_accessor_target(targets: &mut Vec<AccessorTarget>, target: AccessorTarge
     if !targets.contains(&target) {
         targets.push(target);
     }
+}
+
+fn callable_signature_from_sem(
+    params: &[sem::ValueKind],
+    ret: sem::ValueKind,
+) -> Result<CallableSignature, LowerError> {
+    let params = params
+        .iter()
+        .copied()
+        .map(value_kind)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CallableSignature {
+        params,
+        ret: value_kind(ret)?,
+    })
+}
+
+fn accessor_callable_signature(
+    module: &sem::Module,
+    accessor: AccessorTarget,
+) -> Result<CallableSignature, LowerError> {
+    let class = module
+        .classes
+        .get(accessor.class.0 as usize)
+        .ok_or_else(|| invalid_semantic("accessor class id is out of range"))?;
+    let slot = class
+        .effective_slots
+        .get(accessor.slot.0 as usize)
+        .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
+    Ok(CallableSignature {
+        params: vec![ValueKind::Object(Some(accessor.class))],
+        ret: value_kind(slot.kind)?,
+    })
+}
+
+fn intern_callable_signature(
+    signatures: &mut Vec<CallableSignature>,
+    signature: CallableSignature,
+) -> CallableSigId {
+    if let Some(index) = signatures
+        .iter()
+        .position(|candidate| *candidate == signature)
+    {
+        return CallableSigId(u32::try_from(index).unwrap_or(u32::MAX));
+    }
+    let id = CallableSigId(u32::try_from(signatures.len()).unwrap_or(u32::MAX));
+    signatures.push(signature);
+    id
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1696,7 +1779,13 @@ impl<'module> BodyLowering<'module> {
                     .get(function.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_semantic("function id is out of range"))?;
-                let result = self.alloc(ValueKind::Function(Some(lowered)));
+                let sig = self
+                    .ids
+                    .function_sigs
+                    .get(function.0 as usize)
+                    .copied()
+                    .ok_or_else(|| invalid_semantic("function signature id is out of range"))?;
+                let result = self.alloc(ValueKind::Function(Some(sig)));
                 self.instructions.push(Instr::ConstFunction {
                     dst: result.reg,
                     function: lowered,
@@ -1712,11 +1801,11 @@ impl<'module> BodyLowering<'module> {
                 class,
                 slot,
             } => {
-                let lowered = self.lower_accessor_id(accessor, class, slot)?;
-                let result = self.alloc(ValueKind::Function(Some(lowered)));
+                let accessor = self.lower_accessor_function(accessor, class, slot)?;
+                let result = self.alloc(ValueKind::Function(Some(accessor.sig)));
                 self.instructions.push(Instr::ConstFunction {
                     dst: result.reg,
-                    function: lowered,
+                    function: accessor.function,
                     span,
                 });
                 Ok(result)
@@ -1724,19 +1813,19 @@ impl<'module> BodyLowering<'module> {
         }
     }
 
-    fn lower_accessor_id(
+    fn lower_accessor_function(
         &self,
         accessor: DefinitionId,
         class: sem::ClassId,
         slot: sem::SlotId,
-    ) -> Result<FunctionId, LowerError> {
+    ) -> Result<AccessorFunction, LowerError> {
         self.ids
             .accessors
             .iter()
             .find(|candidate| {
                 candidate.accessor == accessor && candidate.class == class && candidate.slot == slot
             })
-            .map(|candidate| candidate.function)
+            .copied()
             .ok_or_else(|| invalid_semantic("accessor function id is missing"))
     }
 
@@ -1748,15 +1837,15 @@ impl<'module> BodyLowering<'module> {
         span: Span,
     ) -> Result<Value, LowerError> {
         let callee = self.lower_expr(callable)?;
-        let ValueKind::Function(Some(function)) = callee.kind else {
+        let ValueKind::Function(Some(sig)) = callee.kind else {
             return Err(invalid_semantic(
                 "callable call target is not a function value",
             ));
         };
-        let (expected_args, expected_ret) = self.callable_signature(function)?;
-        let (args, arg_kinds) = self.lower_args_with_expected_values(args, &expected_args)?;
+        let signature = self.callable_signature(sig)?.clone();
+        let (args, arg_kinds) = self.lower_args_with_expected_kinds(args, &signature.params)?;
         let ret = value_kind(result_kind)?;
-        if ret != value_kind(expected_ret)? {
+        if ret != signature.ret {
             return Err(invalid_semantic(
                 "callable result kind does not match callee",
             ));
@@ -1773,42 +1862,11 @@ impl<'module> BodyLowering<'module> {
         Ok(result)
     }
 
-    fn callable_signature(
-        &self,
-        function: FunctionId,
-    ) -> Result<(Vec<sem::ValueKind>, sem::ValueKind), LowerError> {
-        if let Some((index, _)) = self
-            .ids
-            .functions
-            .iter()
-            .enumerate()
-            .find(|(_, candidate)| **candidate == function)
-        {
-            let function_info = self
-                .module
-                .functions
-                .get(index)
-                .ok_or_else(|| invalid_semantic("function id is out of range"))?;
-            return Ok((function_info.param_kinds.clone(), function_info.result_kind));
-        }
-        if let Some(accessor) = self
-            .ids
-            .accessors
-            .iter()
-            .find(|candidate| candidate.function == function)
-        {
-            let class = self
-                .module
-                .classes
-                .get(accessor.class.0 as usize)
-                .ok_or_else(|| invalid_semantic("accessor class id is out of range"))?;
-            let slot = class
-                .effective_slots
-                .get(accessor.slot.0 as usize)
-                .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
-            return Ok((vec![sem::ValueKind::Object(accessor.class)], slot.kind));
-        }
-        Err(invalid_semantic("callable function id is out of range"))
+    fn callable_signature(&self, sig: CallableSigId) -> Result<&CallableSignature, LowerError> {
+        self.ids
+            .call_sigs
+            .get(sig.0 as usize)
+            .ok_or_else(|| invalid_semantic("callable signature id is out of range"))
     }
 
     fn lower_intrinsic_call(
@@ -2032,17 +2090,16 @@ impl<'module> BodyLowering<'module> {
         Ok(lowered)
     }
 
-    fn lower_args_with_expected_values(
+    fn lower_args_with_expected_kinds(
         &mut self,
         args: &[sem::Expr],
-        expected: &[sem::ValueKind],
+        expected: &[ValueKind],
     ) -> Result<(Vec<Register>, Vec<ValueKind>), LowerError> {
         let mut regs = Vec::with_capacity(args.len());
         let mut kinds = Vec::with_capacity(args.len());
         for (arg, expected) in args.iter().zip(expected) {
             let value = self.lower_expr(arg)?;
-            let expected = value_kind(*expected)?;
-            let value = self.coerce_value(value, expected, arg.span())?;
+            let value = self.coerce_value(value, *expected, arg.span())?;
             regs.push(value.reg);
             kinds.push(value.kind);
         }
@@ -2720,15 +2777,13 @@ impl Module {
             ValueKind::I64 => write!(f, "i64"),
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
-            ValueKind::Function(Some(function)) => {
-                if let Some(function_info) = self
-                    .functions
-                    .iter()
-                    .find(|candidate| candidate.id == function)
-                {
-                    write!(f, "function({})", function_info.name)
+            ValueKind::Function(Some(sig)) => {
+                if let Some(signature) = self.callable_signature(sig) {
+                    write!(f, "function(")?;
+                    self.fmt_callable_signature(f, signature)?;
+                    write!(f, ")")
                 } else {
-                    write!(f, "function#{}", function.0)
+                    write!(f, "function#{}", sig.0)
                 }
             }
             ValueKind::Function(None) => write!(f, "function"),
@@ -2756,6 +2811,21 @@ impl Module {
             ValueKind::MethodObject(None) => write!(f, "method"),
             ValueKind::SlotDescriptorObject => write!(f, "slot-descriptor"),
         }
+    }
+
+    fn fmt_callable_signature(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        signature: &CallableSignature,
+    ) -> fmt::Result {
+        for (index, param) in signature.params.iter().enumerate() {
+            if index != 0 {
+                write!(f, ", ")?;
+            }
+            self.fmt_kind(f, *param)?;
+        }
+        write!(f, " -> ")?;
+        self.fmt_kind(f, signature.ret)
     }
 
     fn fmt_class(&self, f: &mut fmt::Formatter<'_>, class: sem::ClassId) -> fmt::Result {
@@ -2874,6 +2944,35 @@ mod tests {
         assert!(dump.contains("call l3("));
         assert!(dump.contains("local l0 f"));
         assert!(dump.contains("local l1 g"));
+    }
+
+    #[test]
+    fn interns_callable_signatures_separately_from_function_targets() {
+        let module = lower_source(
+            "define function inc(x)\n  x + 1\nend;\n\
+             define function dec(x)\n  x - 1\nend;\n\
+             define function main()\n  let f = inc;\n  let g = dec;\n  apply(f, 2) + apply(g, 2)\nend;",
+        );
+
+        assert_eq!(module.call_sigs.len(), 2);
+        assert_eq!(
+            module.call_sigs[0],
+            CallableSignature {
+                params: vec![ValueKind::I64],
+                ret: ValueKind::I64,
+            }
+        );
+        assert_eq!(
+            module.functions[2].locals[0].kind,
+            ValueKind::Function(Some(CallableSigId(0)))
+        );
+        assert_eq!(
+            module.functions[2].locals[1].kind,
+            ValueKind::Function(Some(CallableSigId(0)))
+        );
+        let dump = module.dump();
+        assert!(dump.contains("const.function l0"));
+        assert!(dump.contains("const.function l1"));
     }
 
     #[test]
