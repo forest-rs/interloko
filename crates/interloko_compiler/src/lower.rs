@@ -1912,19 +1912,7 @@ impl<'module> BodyLowering<'module> {
         let op = runtime_op_for_intrinsic(intrinsic);
         let mut regs = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
-            let value = if index == 0
-                && matches!(
-                    op,
-                    RuntimeOp::GenericFunctionName | RuntimeOp::GenericFunctionMethods
-                ) {
-                if let Some(generic) = known_generic_value(arg) {
-                    self.lower_generic_meta_object(generic, arg.span())?
-                } else {
-                    self.lower_expr(arg)?
-                }
-            } else {
-                self.lower_expr(arg)?
-            };
+            let value = self.lower_expr(arg)?;
             let value = if runtime_op_arg_is_any(op, index) {
                 self.box_any(value, arg.span())?
             } else {
@@ -2337,29 +2325,6 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
             Ok(ValueKind::Function(None))
         }
         sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
-    }
-}
-
-fn known_generic_value(expr: &sem::Expr) -> Option<sem::GenericFunctionId> {
-    match expr {
-        sem::Expr::KnownCallable {
-            callable: sem::KnownCallable::GenericFunction(generic),
-            ..
-        }
-        | sem::Expr::GenericFunctionObject { generic, .. } => Some(*generic),
-        sem::Expr::Local {
-            result_kind:
-                sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic))
-                | sem::ValueKind::GenericFunctionObject(generic),
-            ..
-        }
-        | sem::Expr::ConstantRef {
-            result_kind:
-                sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic))
-                | sem::ValueKind::GenericFunctionObject(generic),
-            ..
-        } => Some(*generic),
-        _ => None,
     }
 }
 

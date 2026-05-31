@@ -3304,6 +3304,12 @@ impl Lowering {
             );
             return Some(Expr::Error { span });
         }
+        let args = args
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, arg)| self.lower_intrinsic_arg(intrinsic, index, arg))
+            .collect::<Vec<_>>();
         for (index, arg) in args.iter().enumerate() {
             let actual = self.expr_kind(arg);
             if !self.intrinsic_arg_matches(intrinsic, index, actual) {
@@ -3324,10 +3330,34 @@ impl Lowering {
         }
         Some(Expr::IntrinsicCall {
             intrinsic,
-            args: args.to_vec(),
+            args,
             result_kind: self.intrinsic_result_kind(intrinsic),
             span,
         })
+    }
+
+    fn lower_intrinsic_arg(&self, intrinsic: Intrinsic, index: usize, arg: Expr) -> Expr {
+        if index == 0
+            && matches!(
+                intrinsic,
+                Intrinsic::GenericFunctionName | Intrinsic::GenericFunctionMethods
+            )
+            && let Some(generic) = self.generic_metaobject_arg(&arg)
+        {
+            return Expr::GenericFunctionObject {
+                generic,
+                span: arg.span(),
+            };
+        }
+        arg
+    }
+
+    fn generic_metaobject_arg(&self, arg: &Expr) -> Option<GenericFunctionId> {
+        match self.expr_kind(arg) {
+            ValueKind::KnownCallable(KnownCallable::GenericFunction(generic))
+            | ValueKind::GenericFunctionObject(generic) => Some(generic),
+            _ => None,
+        }
     }
 
     fn intrinsic_result_kind(&self, intrinsic: Intrinsic) -> ValueKind {
@@ -3393,12 +3423,9 @@ impl Lowering {
                 actual,
                 ValueKind::SlotDescriptorObject { .. } | ValueKind::Any
             ),
-            (Intrinsic::GenericFunctionName | Intrinsic::GenericFunctionMethods, 0) => matches!(
-                actual,
-                ValueKind::GenericFunctionObject(_)
-                    | ValueKind::KnownCallable(KnownCallable::GenericFunction(_))
-                    | ValueKind::Any
-            ),
+            (Intrinsic::GenericFunctionName | Intrinsic::GenericFunctionMethods, 0) => {
+                matches!(actual, ValueKind::GenericFunctionObject(_) | ValueKind::Any)
+            }
             (Intrinsic::MethodGenericFunction | Intrinsic::MethodSpecializers, 0) => {
                 matches!(actual, ValueKind::MethodObject(_) | ValueKind::Any)
             }
@@ -4894,6 +4921,30 @@ mod tests {
                 )),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn resolves_generic_callable_metaobject_intrinsic_args() {
+        let module = lower_source(
+            "define generic area(x);\n\
+             define function main() => <string>\n  generic-function-name(area)\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::IntrinsicCall {
+            intrinsic, args, ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected intrinsic call");
+        };
+        assert_eq!(*intrinsic, Intrinsic::GenericFunctionName);
+        assert!(matches!(
+            args.as_slice(),
+            [Expr::GenericFunctionObject {
+                generic: GenericFunctionId(0),
+                ..
+            }]
         ));
     }
 

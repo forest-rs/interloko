@@ -1,5 +1,5 @@
 // expect: run 2
-// expect: dump sem contains known-callable generic g0
+// expect: dump sem contains generic-function-object g0
 // expect: dump lowered contains runtime.generic-function-methods
 
 define class <shape> (<object>)
