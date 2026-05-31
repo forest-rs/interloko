@@ -93,6 +93,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/objects/accessor_callable_identity.loko"));
     assert!(out.contains("pass/objects/apply_accessor_callable.loko"));
     assert!(out.contains("pass/functions/apply_runtime_callable_parameter.loko"));
+    assert!(out.contains("pass/functions/closure_capture.loko"));
     assert!(out.contains("fail/diagnostics/apply_non_callable.loko"));
     assert!(out.contains("pass/objects/instance_refinement.loko"));
     assert!(out.contains("pass/objects/cast_object_slot.loko"));
@@ -113,7 +114,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/typed_slots_and_dispatch.loko"));
     assert!(out.contains("fail/values/malformed_string.loko"));
     assert!(out.contains("fail/syntax/expected_expression.loko"));
-    assert!(out.contains("corpus: 146 passed, 0 failed, 146 total"));
+    assert!(out.contains("corpus: 147 passed, 0 failed, 147 total"));
 }
 
 #[test]

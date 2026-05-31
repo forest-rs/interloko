@@ -11,7 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
-use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
+use execution_tape::program::{AggShape, ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -83,14 +83,19 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         if function.id.0 as usize != ids.functions.len() {
             return Err(invalid_lowered("lowered functions are not in id order"));
         }
-        let func = builder.declare_function(FunctionSig {
+        let sig = FunctionSig {
             arg_types: function
                 .params
                 .iter()
                 .map(|param| value_type(param.kind))
                 .collect(),
             ret_types: vec![value_type(function.ret)],
-        });
+        };
+        let func = if let Some(env_shape) = closure_env_shape(function)? {
+            builder.declare_function(sig.with_arg_agg_shape(0, env_shape))
+        } else {
+            builder.declare_function(sig)
+        };
         builder
             .set_function_name(func, &function.name)
             .map_err(build_error)?;
@@ -138,11 +143,44 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
         lower::ValueKind::Function(_) => ValueType::Func,
+        lower::ValueKind::Closure(_) => ValueType::Closure,
+        lower::ValueKind::Aggregate => ValueType::Agg,
         lower::ValueKind::Object(_) => runtime::object_type(),
         lower::ValueKind::ClassObject(_)
         | lower::ValueKind::GenericFunctionObject(_)
         | lower::ValueKind::MethodObject(_)
         | lower::ValueKind::SlotDescriptorObject => runtime::object_type(),
+    }
+}
+
+fn closure_env_shape(function: &lower::Function) -> Result<Option<AggShape>, TapeError> {
+    if !matches!(function.kind, lower::FunctionKind::Closure(_)) {
+        return Ok(None);
+    }
+
+    let mut elems: Vec<Option<ValueType>> = Vec::new();
+    for instr in &function.instructions {
+        let lower::Instr::CaptureGet { index, kind, .. } = instr else {
+            continue;
+        };
+        if elems.len() <= *index {
+            elems.resize(index.saturating_add(1), None);
+        }
+        let ty = value_type(*kind);
+        match elems[*index] {
+            Some(existing) if existing != ty => {
+                return Err(invalid_lowered("capture index has conflicting value kinds"));
+            }
+            _ => {
+                elems[*index] = Some(ty);
+            }
+        }
+    }
+
+    if elems.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(AggShape::tuple(elems)))
     }
 }
 
@@ -568,6 +606,36 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_func(dst.0, function);
             }
+            lower::Instr::ClosureNew {
+                dst,
+                function,
+                captures,
+                span,
+            } => {
+                let function = self
+                    .ids
+                    .functions
+                    .get(function.0 as usize)
+                    .copied()
+                    .ok_or_else(|| invalid_lowered("closure function id is out of range"))?;
+                let func_reg = self.alloc_temp();
+                let env_reg = self.alloc_temp();
+                self.set_span(*span);
+                self.asm.const_func(func_reg, function);
+                self.asm.tuple_new(env_reg, &reg_slice(captures));
+                self.asm.closure_new(dst.0, func_reg, env_reg);
+            }
+            lower::Instr::CaptureGet {
+                dst,
+                env,
+                index,
+                span,
+                ..
+            } => {
+                self.set_span(*span);
+                self.asm
+                    .tuple_get(dst.0, env.0, u32::try_from(*index).unwrap_or(u32::MAX));
+            }
             lower::Instr::BoxValue {
                 dst,
                 src,
@@ -584,7 +652,9 @@ impl<'a> FunctionEmitter<'a> {
                     | lower::ValueKind::SlotDescriptorObject => self.abi.box_object,
                     lower::ValueKind::Any
                     | lower::ValueKind::U64
-                    | lower::ValueKind::Function(_) => {
+                    | lower::ValueKind::Function(_)
+                    | lower::ValueKind::Closure(_)
+                    | lower::ValueKind::Aggregate => {
                         return Err(invalid_lowered("invalid boxed value input kind"));
                     }
                 };
@@ -932,6 +1002,14 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
         | lower::Instr::ConstFunction { dst, .. } => {
             note_register(*dst, max);
         }
+        lower::Instr::ClosureNew { dst, captures, .. } => {
+            note_register(*dst, max);
+            note_registers(captures, max);
+        }
+        lower::Instr::CaptureGet { dst, env, .. } => {
+            note_register(*dst, max);
+            note_register(*env, max);
+        }
         lower::Instr::BoxValue { dst, src, .. } => {
             note_register(*dst, max);
             note_register(*src, max);
@@ -1133,11 +1211,12 @@ mod tests {
             program
                 .function_arg_types(&program.functions[1])
                 .expect("callit args should decode"),
-            &[ValueType::Func],
+            &[ValueType::Closure],
         );
         let disassembly = execution_tape::disasm::disassemble_verified(&tape.program).to_string();
         assert!(disassembly.contains("name=\"callit\""));
         assert!(disassembly.contains("const.func"));
+        assert!(disassembly.contains("closure.new"));
         assert!(disassembly.contains("call.indirect"));
     }
 

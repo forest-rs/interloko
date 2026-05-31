@@ -3042,8 +3042,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "primary-expression",
-            "literal | name | type-name | call | parenthesized | vector",
+            "function-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | symbol-literal | number-literal | type-expression | name-expression",
             "syntax.rs:Parser::parse_primary",
+        ),
+        (
+            "function-expression",
+            "`function` `(` parameter-list? `)` result-annotation? body `end`",
+            "syntax.rs:Parser::parse_function_expr",
         ),
         (
             "vector-expression",
@@ -3531,6 +3536,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         | CstKind::SymbolExpr
         | CstKind::KeywordExpr
         | CstKind::TypeExpr => Some("primary-expression"),
+        CstKind::FunctionExpr => Some("function-expression"),
         CstKind::VectorExpr => Some("vector-expression"),
         CstKind::IfExpr => Some("if-expression"),
         CstKind::HandleExpr => Some("handle-expression"),
@@ -3937,7 +3943,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 26);
+        assert_eq!(grammar.effective_rules.len(), 27);
 
         assert!(
             !records

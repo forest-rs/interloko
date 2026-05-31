@@ -336,6 +336,19 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Anonymous function expression.
+    Function {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Function parameters.
+        params: Vec<FunctionParam>,
+        /// Optional declared return type.
+        return_type: Option<TypeAnnotation>,
+        /// Function body.
+        body: Box<Block>,
+        /// Source span.
+        span: Span,
+    },
     /// Name reference.
     Name {
         /// Stable-ish AST node identity.
@@ -509,6 +522,7 @@ impl Expr {
             | Self::String { id, .. }
             | Self::Symbol { id, .. }
             | Self::Vector { id, .. }
+            | Self::Function { id, .. }
             | Self::Name { id, .. }
             | Self::ClassName { id, .. }
             | Self::InstanceOf { id, .. }
@@ -536,6 +550,7 @@ impl Expr {
             | Self::String { span, .. }
             | Self::Symbol { span, .. }
             | Self::Vector { span, .. }
+            | Self::Function { span, .. }
             | Self::Name { span, .. }
             | Self::ClassName { span, .. }
             | Self::InstanceOf { span, .. }
@@ -1172,6 +1187,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::SymbolExpr => self.lower_symbol(node),
             CstKind::KeywordExpr => self.lower_keyword_value(node),
             CstKind::VectorExpr => self.lower_vector(node),
+            CstKind::FunctionExpr => self.lower_function_expr(node),
             CstKind::NameExpr => self.lower_name(node),
             CstKind::TypeExpr => self.lower_class_name(node),
             CstKind::CallExpr => self.lower_call(node),
@@ -1185,6 +1201,45 @@ impl<'tree> Lowering<'tree> {
                 id: self.ast_id(node),
                 span: node.span,
             },
+        }
+    }
+
+    fn lower_function_expr(&mut self, node: &CstNode) -> Expr {
+        let mut params = Vec::new();
+        let mut return_type = None;
+        let mut body = None;
+
+        for child in &node.children {
+            match child {
+                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
+                    return_type = self.type_annotation_after(node, *index);
+                }
+                CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
+                    params = self.lower_function_params(child_node);
+                }
+                CstElement::Node(child_node) if child_node.kind == CstKind::Body => {
+                    body = Some(self.lower_block(child_node));
+                }
+                _ => {}
+            }
+        }
+
+        let body = body.unwrap_or_else(|| Block {
+            id: self.ast_id(node),
+            lets: Vec::new(),
+            result: Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            },
+            span: node.span,
+        });
+
+        Expr::Function {
+            id: self.ast_id(node),
+            params,
+            return_type,
+            body: Box::new(body),
+            span: node.span,
         }
     }
 

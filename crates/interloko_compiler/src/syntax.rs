@@ -213,6 +213,8 @@ pub enum CstKind {
     IfExpr,
     /// Recoverable condition handler expression.
     HandleExpr,
+    /// Anonymous function expression.
+    FunctionExpr,
     /// Restart clause in a handler expression.
     RestartClause,
     /// Type/class name expression.
@@ -458,6 +460,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::KeywordExpr => 26,
         CstKind::VectorExpr => 27,
         CstKind::UnaryExpr => 28,
+        CstKind::FunctionExpr => 31,
     }
 }
 

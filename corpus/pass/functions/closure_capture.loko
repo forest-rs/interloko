@@ -1,0 +1,22 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump ast contains function params=1 return=<integer>
+// expect: dump sem contains closure c0 (x:integer) captures=1
+// expect: dump sem contains capture c0 l0 n integer
+// expect: dump sem contains capture c0 as integer
+// expect: dump lowered contains closure.new
+// expect: dump lowered contains capture.get
+// expect: dump tape contains closure.new
+// expect: dump tape contains tuple.get
+// expect: dump tape contains call.indirect
+
+define function make-adder(n :: <integer>) => <callable>
+  function (x :: <integer>) => <integer>
+    x + n
+  end
+end;
+
+define function main() => <integer>
+  let add-one :: <callable> = make-adder(1);
+  apply(add-one, 41)
+end;

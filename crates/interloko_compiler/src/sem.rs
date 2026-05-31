@@ -22,6 +22,13 @@ pub struct FunctionId(
     pub u32,
 );
 
+/// Durable anonymous closure identifier within a semantic module.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ClosureId(
+    /// Zero-based closure index.
+    pub u32,
+);
+
 /// Durable top-level constant identifier within a semantic module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ConstantId(
@@ -33,6 +40,13 @@ pub struct ConstantId(
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct LocalId(
     /// Zero-based local index.
+    pub u32,
+);
+
+/// Durable capture identifier within a semantic closure.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct CaptureId(
+    /// Zero-based capture index.
     pub u32,
 );
 
@@ -105,7 +119,7 @@ pub enum ValueKind {
         /// Effective slot described by this value.
         slot: SlotId,
     },
-    /// First-class callable value with a runtime `Func` representation.
+    /// First-class callable value with a runtime closure representation.
     Callable,
     /// Compile-time-known callable object.
     KnownCallable(KnownCallable),
@@ -417,6 +431,8 @@ pub struct Module {
     pub methods: Vec<Method>,
     /// Direct function definitions.
     pub functions: Vec<Function>,
+    /// Anonymous closure definitions.
+    pub closures: Vec<Closure>,
     /// Immutable top-level constants.
     pub constants: Vec<Constant>,
     /// Semantic diagnostics.
@@ -897,6 +913,44 @@ pub struct Function {
     pub span: Span,
 }
 
+/// Semantic anonymous function body and closure capture table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Closure {
+    /// Closure identifier.
+    pub id: ClosureId,
+    /// Parameter local IDs in source order.
+    pub params: Vec<LocalId>,
+    /// Resolved parameter value categories in source order.
+    pub param_kinds: Vec<ValueKind>,
+    /// Captures read from the closure environment.
+    pub captures: Vec<Capture>,
+    /// Local table containing parameters followed by `let` bindings.
+    pub locals: Vec<Local>,
+    /// Closure body.
+    pub body: Block,
+    /// Result value category.
+    pub result_kind: ValueKind,
+    /// Explicit declared result category, when present.
+    pub return_annotation: Option<ValueKind>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// One source local captured by an anonymous function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Capture {
+    /// Capture identifier within the closure.
+    pub id: CaptureId,
+    /// Local in the enclosing function or closure context.
+    pub source: LocalId,
+    /// Captured local name.
+    pub name: String,
+    /// Captured value category.
+    pub kind: ValueKind,
+    /// Source span of the captured binding.
+    pub span: Span,
+}
+
 /// Immutable top-level constant value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Constant {
@@ -1135,6 +1189,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Resolved closure capture reference.
+    Capture {
+        /// Capture identifier.
+        capture: CaptureId,
+        /// Value category at this use site.
+        result_kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Immutable top-level constant reference.
     ConstantRef {
         /// Referenced constant.
@@ -1155,6 +1218,17 @@ pub enum Expr {
     KnownCallable {
         /// Known callable identity.
         callable: KnownCallable,
+        /// Source span.
+        span: Span,
+    },
+    /// Anonymous function value with an explicit capture vector.
+    Closure {
+        /// Closure body.
+        closure: ClosureId,
+        /// Captures read from the enclosing context in environment order.
+        captures: Vec<Capture>,
+        /// Result value category.
+        result_kind: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -1363,9 +1437,11 @@ impl Expr {
             | Self::SymbolLiteral { span, .. }
             | Self::VectorLiteral { span, .. }
             | Self::Local { span, .. }
+            | Self::Capture { span, .. }
             | Self::ConstantRef { span, .. }
             | Self::ClassObject { span, .. }
             | Self::KnownCallable { span, .. }
+            | Self::Closure { span, .. }
             | Self::GenericFunctionObject { span, .. }
             | Self::IntrinsicCall { span, .. }
             | Self::DirectCall { span, .. }
@@ -1461,6 +1537,8 @@ impl GenericSymbol {
 struct FunctionContext {
     locals: Vec<Local>,
     visible_locals: Vec<bool>,
+    capture_sources: Vec<Local>,
+    captures: Vec<Capture>,
     active_restarts: Vec<ActiveRestart>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -1490,6 +1568,19 @@ impl FunctionContext {
         Self {
             locals: Vec::new(),
             visible_locals: Vec::new(),
+            capture_sources: Vec::new(),
+            captures: Vec::new(),
+            active_restarts: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn for_closure(capture_sources: Vec<Local>) -> Self {
+        Self {
+            locals: Vec::new(),
+            visible_locals: Vec::new(),
+            capture_sources,
+            captures: Vec::new(),
             active_restarts: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -1522,6 +1613,41 @@ impl FunctionContext {
             .map(|(_, local)| local)
             .find(|local| local.name == name)
             .map(|local| local.id)
+    }
+
+    fn visible_local_sources(&self) -> Vec<Local> {
+        self.locals
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.visible_locals.get(*index).copied().unwrap_or(false))
+            .map(|(_, local)| local.clone())
+            .collect()
+    }
+
+    fn find_capture_or_add(&mut self, name: &str) -> Option<CaptureId> {
+        if let Some(capture) = self.captures.iter().find(|capture| capture.name == name) {
+            return Some(capture.id);
+        }
+        let source = self
+            .capture_sources
+            .iter()
+            .find(|source| source.name == name)?
+            .clone();
+        let id = CaptureId(u32::try_from(self.captures.len()).unwrap_or(u32::MAX));
+        self.captures.push(Capture {
+            id,
+            source: source.id,
+            name: source.name,
+            kind: source.kind,
+            span: source.span,
+        });
+        Some(id)
+    }
+
+    fn capture_kind(&self, id: CaptureId) -> ValueKind {
+        self.captures
+            .get(id.0 as usize)
+            .map_or(ValueKind::Error, |capture| capture.kind)
     }
 
     fn local_kind(&self, id: LocalId) -> ValueKind {
@@ -1567,6 +1693,7 @@ struct Lowering {
     generics: Vec<GenericFunction>,
     methods: Vec<Method>,
     functions: Vec<FunctionSymbol>,
+    closures: Vec<Closure>,
     constants: Vec<Constant>,
     constant_symbols: Vec<ConstantSymbol>,
     generic_symbols: Vec<GenericSymbol>,
@@ -1582,6 +1709,7 @@ impl Lowering {
             generics: Vec::new(),
             methods: Vec::new(),
             functions: Vec::new(),
+            closures: Vec::new(),
             constants: Vec::new(),
             constant_symbols: Vec::new(),
             generic_symbols: Vec::new(),
@@ -2637,6 +2765,7 @@ impl Lowering {
             generics: self.generics.clone(),
             methods: self.methods.clone(),
             functions,
+            closures: self.closures.clone(),
             constants: self.constants.clone(),
             diagnostics: self.diagnostics.clone(),
         }
@@ -2838,7 +2967,7 @@ impl Lowering {
     }
 
     fn lower_block(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         block: &ast::Block,
         expected_result: Option<ValueKind>,
@@ -2888,12 +3017,12 @@ impl Lowering {
         }
     }
 
-    fn lower_expr(&self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
+    fn lower_expr(&mut self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
         self.lower_expr_expected(ctx, expr, None)
     }
 
     fn lower_expr_expected(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         expr: &ast::Expr,
         expected_result: Option<ValueKind>,
@@ -2931,13 +3060,27 @@ impl Lowering {
                     .unwrap_or(ClassId(u32::MAX)),
                 span: *span,
             },
+            ast::Expr::Function {
+                params,
+                return_type,
+                body,
+                span,
+                ..
+            } => self.lower_closure_expr(ctx, params, return_type.as_ref(), body, *span),
             ast::Expr::Name { name, span, .. } => match ctx.find_local(name) {
                 Some(local) => Expr::Local {
                     local,
                     result_kind: ctx.local_kind(local),
                     span: *span,
                 },
-                None => self.lower_known_name(ctx, name, *span),
+                None => match ctx.find_capture_or_add(name) {
+                    Some(capture) => Expr::Capture {
+                        capture,
+                        result_kind: ctx.capture_kind(capture),
+                        span: *span,
+                    },
+                    None => self.lower_known_name(ctx, name, *span),
+                },
             },
             ast::Expr::ClassName {
                 class_name, span, ..
@@ -3265,8 +3408,101 @@ impl Lowering {
         }
     }
 
+    fn lower_closure_expr(
+        &mut self,
+        ctx: &mut FunctionContext,
+        params: &[ast::FunctionParam],
+        return_type: Option<&ast::TypeAnnotation>,
+        body: &ast::Block,
+        span: Span,
+    ) -> Expr {
+        let id = ClosureId(u32::try_from(self.closures.len()).unwrap_or(u32::MAX));
+        self.closures.push(Closure {
+            id,
+            params: Vec::new(),
+            param_kinds: Vec::new(),
+            captures: Vec::new(),
+            locals: Vec::new(),
+            body: Block {
+                lets: Vec::new(),
+                result: Expr::Error { span },
+                span,
+            },
+            result_kind: ValueKind::Error,
+            return_annotation: None,
+            span,
+        });
+
+        let mut closure_ctx = FunctionContext::for_closure(ctx.visible_local_sources());
+        let mut param_ids = Vec::new();
+        let mut param_kinds = Vec::new();
+        for param in params {
+            if closure_ctx.find_local(&param.name).is_some() {
+                closure_ctx.diagnostics.push(
+                    Diagnostic::error(param.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("local", param.name.clone())),
+                );
+            }
+            let kind = self.resolve_function_type(param.type_annotation.as_ref(), ValueKind::I64);
+            param_kinds.push(kind);
+            param_ids.push(closure_ctx.add_local(
+                DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Local,
+                    &param.name,
+                    &format!("closure:{}:param", id.0),
+                ),
+                param.name.clone(),
+                kind,
+                param.span,
+            ));
+        }
+
+        let return_annotation =
+            return_type.map(|annotation| self.resolve_type_annotation(annotation));
+        let lowered_body = self.lower_block(&mut closure_ctx, body, return_annotation);
+        let body_kind = self.expr_kind(&lowered_body.result);
+        let result_kind = return_annotation.unwrap_or(body_kind);
+        if let Some(expected) = return_annotation
+            && !self.kinds_match(expected, body_kind)
+        {
+            closure_ctx.diagnostics.push(
+                Diagnostic::error(
+                    body.result.span(),
+                    DiagnosticCode::FunctionReturnTypeMismatch,
+                )
+                .with_arg(DiagnosticArg::text("function", "<closure>"))
+                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                .with_arg(DiagnosticArg::text("actual", self.kind_name(body_kind))),
+            );
+        }
+
+        let captures = closure_ctx.captures.clone();
+        self.diagnostics.extend(closure_ctx.diagnostics);
+        if let Some(slot) = self.closures.get_mut(id.0 as usize) {
+            *slot = Closure {
+                id,
+                params: param_ids,
+                param_kinds,
+                captures: captures.clone(),
+                locals: closure_ctx.locals,
+                body: lowered_body,
+                result_kind,
+                return_annotation,
+                span,
+            };
+        }
+
+        Expr::Closure {
+            closure: id,
+            captures,
+            result_kind: ValueKind::Callable,
+            span,
+        }
+    }
+
     fn lower_apply(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         args: &[ast::Expr],
         expected_result: Option<ValueKind>,
@@ -3680,7 +3916,12 @@ impl Lowering {
         }
     }
 
-    fn lower_signal(&self, ctx: &mut FunctionContext, condition: &ast::Expr, span: Span) -> Expr {
+    fn lower_signal(
+        &mut self,
+        ctx: &mut FunctionContext,
+        condition: &ast::Expr,
+        span: Span,
+    ) -> Expr {
         let condition = self.lower_expr(ctx, condition);
         let condition_class = match self.expr_kind(&condition) {
             ValueKind::Object(class) => class,
@@ -3736,7 +3977,7 @@ impl Lowering {
     }
 
     fn lower_handle(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         body: &ast::Expr,
         restart: &ast::Restart,
@@ -3914,7 +4155,7 @@ impl Lowering {
     }
 
     fn lower_instance_of(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         value: &ast::Expr,
         class_name: &str,
@@ -3927,6 +4168,7 @@ impl Lowering {
             );
             return Expr::Error { span };
         };
+        let class_id = class.id;
         let value = self.lower_expr(ctx, value);
         match self.expr_kind(&value) {
             ValueKind::Any
@@ -3949,7 +4191,7 @@ impl Lowering {
             }
         }
         if let Some(actual) = self.value_kind_class(self.expr_kind(&value))
-            && !self.classes_may_overlap(actual, class.id)
+            && !self.classes_may_overlap(actual, class_id)
         {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::InstanceOfImpossible)
@@ -3959,19 +4201,19 @@ impl Lowering {
                     ))
                     .with_arg(DiagnosticArg::text(
                         "expected",
-                        self.kind_name(ValueKind::Object(class.id)),
+                        self.kind_name(ValueKind::Object(class_id)),
                     )),
             );
         }
         Expr::InstanceOf {
             value: Box::new(value),
-            class: class.id,
+            class: class_id,
             span,
         }
     }
 
     fn lower_cast(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         value: &ast::Expr,
         class_name: &str,
@@ -3984,6 +4226,7 @@ impl Lowering {
             );
             return Expr::Error { span };
         };
+        let class_id = class.id;
         let value = self.lower_expr(ctx, value);
         match self.expr_kind(&value) {
             ValueKind::Any
@@ -4006,7 +4249,7 @@ impl Lowering {
             }
         }
         if let Some(actual) = self.value_kind_class(self.expr_kind(&value))
-            && !self.classes_may_overlap(actual, class.id)
+            && !self.classes_may_overlap(actual, class_id)
         {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::CastImpossible)
@@ -4016,19 +4259,19 @@ impl Lowering {
                     ))
                     .with_arg(DiagnosticArg::text(
                         "expected",
-                        self.kind_name(ValueKind::Object(class.id)),
+                        self.kind_name(ValueKind::Object(class_id)),
                     )),
             );
         }
         Expr::Cast {
             value: Box::new(value),
-            class: class.id,
+            class: class_id,
             span,
         }
     }
 
     fn lower_make_object(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         class_expr: &ast::Expr,
         fields: &[ast::KeywordArg],
@@ -4055,17 +4298,21 @@ impl Lowering {
         let Some(class) = self.classes.get(class_id.0 as usize) else {
             return Expr::Error { span };
         };
-        if matches!(class.origin, ClassOrigin::HostBacked { .. }) {
+        let class_name = class.name.clone();
+        let class_origin = class.origin;
+        let effective_slots = class.effective_slots.clone();
+        let initialization_plan = class.initialization_plan.clone();
+        if matches!(class_origin, ClassOrigin::HostBacked { .. }) {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::HostBackedMake)
-                    .with_arg(DiagnosticArg::text("class", class.name.clone())),
+                    .with_arg(DiagnosticArg::text("class", class_name.clone())),
             );
             return Expr::Error { span };
         }
-        if matches!(class.origin, ClassOrigin::BuiltinValue { .. }) {
+        if matches!(class_origin, ClassOrigin::BuiltinValue { .. }) {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::BuiltinValueMake)
-                    .with_arg(DiagnosticArg::text("class", class.name.clone())),
+                    .with_arg(DiagnosticArg::text("class", class_name.clone())),
             );
             return Expr::Error { span };
         }
@@ -4082,14 +4329,13 @@ impl Lowering {
                 );
                 continue;
             }
-            let Some(slot) = class
-                .effective_slots
+            let Some(slot) = effective_slots
                 .iter()
                 .find(|slot| slot.init_keyword == field.name)
             else {
                 ctx.diagnostics.push(
                     Diagnostic::error(field.span, DiagnosticCode::UnknownInitKeyword)
-                        .with_arg(DiagnosticArg::text("class", class.name.clone()))
+                        .with_arg(DiagnosticArg::text("class", class_name.clone()))
                         .with_arg(DiagnosticArg::text("keyword", format!("{}:", field.name))),
                 );
                 continue;
@@ -4113,8 +4359,8 @@ impl Lowering {
         }
 
         let mut resolved = Vec::new();
-        for step in &class.initialization_plan.steps {
-            let slot = &class.effective_slots[step.slot.0 as usize];
+        for step in &initialization_plan.steps {
+            let slot = &effective_slots[step.slot.0 as usize];
             if let Some(arg) = init_args.iter().find(|arg| arg.slot == step.slot) {
                 resolved.push(FieldInit {
                     slot: step.slot,
@@ -4158,7 +4404,7 @@ impl Lowering {
     }
 
     fn lower_slot_read(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         receiver: &ast::Expr,
         slot_name: &str,
@@ -4169,7 +4415,7 @@ impl Lowering {
     }
 
     fn lower_slot_assign(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         receiver: &ast::Expr,
         slot_name: &str,
@@ -4332,6 +4578,7 @@ impl Lowering {
                 ValueKind::ClassObject(*class)
             }
             Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
+            Expr::Closure { result_kind, .. } => *result_kind,
             Expr::GenericFunctionObject { generic, .. } => {
                 ValueKind::GenericFunctionObject(*generic)
             }
@@ -4343,6 +4590,7 @@ impl Lowering {
             | Expr::ValueEqual { .. }
             | Expr::InstanceOf { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,
+            Expr::Capture { result_kind, .. } => *result_kind,
             Expr::ConstantRef { result_kind, .. } => *result_kind,
             Expr::Cast { class, .. } => self
                 .kind_for_builtin_class(*class)

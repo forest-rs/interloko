@@ -1,10 +1,11 @@
 // expect: run 42
 // expect: diagnostics 0
-// expect: dump sem contains f:function
+// expect: dump sem contains f:callable
 // expect: dump sem contains callable-call result=integer
-// expect: dump lowered contains f: function
+// expect: dump lowered contains f: callable
 // expect: dump lowered contains call.indirect
 // expect: dump tape contains const.func
+// expect: dump tape contains closure.new
 // expect: dump tape contains call.indirect
 
 define function inc(x)

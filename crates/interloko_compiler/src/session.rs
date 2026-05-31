@@ -3755,8 +3755,10 @@ fn collect_dispatch_sites_in_expr(
         | sem::Expr::StringLiteral { .. }
         | sem::Expr::SymbolLiteral { .. }
         | sem::Expr::Local { .. }
+        | sem::Expr::Capture { .. }
         | sem::Expr::ClassObject { .. }
         | sem::Expr::KnownCallable { .. }
+        | sem::Expr::Closure { .. }
         | sem::Expr::GenericFunctionObject { .. }
         | sem::Expr::Error { .. } => {}
     }
@@ -4295,11 +4297,13 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
         sem::Expr::SymbolLiteral { class, .. } => sem::ValueKind::Symbol(*class),
         sem::Expr::VectorLiteral { class, .. } => sem::ValueKind::Vector(*class),
         sem::Expr::Local { result_kind, .. } => *result_kind,
+        sem::Expr::Capture { result_kind, .. } => *result_kind,
         sem::Expr::ConstantRef { result_kind, .. } => *result_kind,
         sem::Expr::ClassObject { class, .. } | sem::Expr::ClassOf { class, .. } => {
             sem::ValueKind::ClassObject(*class)
         }
         sem::Expr::KnownCallable { callable, .. } => sem::ValueKind::KnownCallable(*callable),
+        sem::Expr::Closure { result_kind, .. } => *result_kind,
         sem::Expr::GenericFunctionObject { generic, .. } => {
             sem::ValueKind::GenericFunctionObject(*generic)
         }
@@ -5320,6 +5324,23 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
                 dump_ast_expr(out, element, indent + 2);
             }
         }
+        ast::Expr::Function {
+            id,
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            let return_type = return_type
+                .as_ref()
+                .map_or("inferred", |annotation| annotation.name.as_str());
+            let _ = writeln!(
+                out,
+                "{id} function params={} return={return_type}",
+                params.len()
+            );
+            dump_ast_block(out, body, indent + 2);
+        }
         ast::Expr::Name { id, name, .. } => {
             let _ = writeln!(out, "{id} name {name}");
         }
@@ -5581,6 +5602,44 @@ fn dump_sem(module: &sem::Module) -> String {
             sem_kind_label(module, constant.result_kind)
         );
         dump_sem_expr(&mut out, &constant.value, 2);
+    }
+    for closure in &module.closures {
+        let params = closure
+            .params
+            .iter()
+            .zip(&closure.param_kinds)
+            .map(|(local, kind)| {
+                let name = closure
+                    .locals
+                    .get(local.0 as usize)
+                    .map_or("?", |local| local.name.as_str());
+                format!("{name}:{}", sem_kind_label(module, *kind))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let return_annotation = closure.return_annotation.map_or_else(
+            || "inferred".to_string(),
+            |kind| sem_kind_label(module, kind),
+        );
+        let _ = writeln!(
+            out,
+            "closure c{} ({params}) captures={} result={:?} return={return_annotation}",
+            closure.id.0,
+            closure.captures.len(),
+            closure.result_kind
+        );
+        for capture in &closure.captures {
+            let _ = writeln!(
+                out,
+                "  capture c{} l{} {} {}",
+                capture.id.0,
+                capture.source.0,
+                capture.name,
+                sem_kind_label(module, capture.kind)
+            );
+        }
+        dump_sem_locals(module, &mut out, &closure.locals, 2);
+        dump_sem_block(&mut out, &closure.body, 2);
     }
     for function in &module.functions {
         let params = function
@@ -7720,6 +7779,10 @@ fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
         lower::FunctionKind::SlotAccessor { class, slot, .. } => {
             format!("accessor c{}.s{}", class.0, slot.0)
         }
+        lower::FunctionKind::CallableThunk { callable } => {
+            format!("callable-thunk {callable:?}")
+        }
+        lower::FunctionKind::Closure(id) => format!("closure:{}", id.0),
     }
 }
 
@@ -9459,7 +9522,7 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
-        sem::ValueKind::Callable => "function".into(),
+        sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_label(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
         sem::ValueKind::Vector(class) => value_class_label(module, "vector", class),
@@ -9522,7 +9585,7 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
-        sem::ValueKind::Callable => "function".into(),
+        sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => format!("string(c{})", class.0),
         sem::ValueKind::Symbol(class) => format!("symbol(c{})", class.0),
         sem::ValueKind::Vector(class) => format!("vector(c{})", class.0),
@@ -9547,7 +9610,7 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::Bool => "boolean".into(),
-        sem::ValueKind::Callable => "function".into(),
+        sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_fingerprint(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_fingerprint(module, "symbol", class),
         sem::ValueKind::Vector(class) => value_class_fingerprint(module, "vector", class),
@@ -9595,7 +9658,7 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         | sem::ValueKind::GenericFunctionObject(_)
         | sem::ValueKind::MethodObject(_)
         | sem::ValueKind::SlotDescriptorObject { .. } => "object-handle",
-        sem::ValueKind::Callable => "func",
+        sem::ValueKind::Callable => "closure",
         sem::ValueKind::KnownCallable(_) => "compile-time-callable",
         sem::ValueKind::Error => "error",
     }
@@ -9804,6 +9867,18 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 sem_kind_label_for_expr(*result_kind)
             );
         }
+        sem::Expr::Capture {
+            capture,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "capture c{} as {}",
+                capture.0,
+                sem_kind_label_for_expr(*result_kind)
+            );
+        }
         sem::Expr::ConstantRef {
             constant,
             result_kind,
@@ -9824,6 +9899,20 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 out,
                 "known-callable {}",
                 sem_callable_label_for_expr(*callable)
+            );
+        }
+        sem::Expr::Closure {
+            closure,
+            captures,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "closure c{} captures={} result={}",
+                closure.0,
+                captures.len(),
+                sem_kind_label_for_expr(*result_kind)
             );
         }
         sem::Expr::GenericFunctionObject { generic, .. } => {
@@ -10623,6 +10712,14 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             let result = sem_kind_fingerprint(module, *result_kind);
             let _ = write!(out, "local({}:{result})", local.0);
         }
+        sem::Expr::Capture {
+            capture,
+            result_kind,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(out, "capture({}:{result})", capture.0);
+        }
         sem::Expr::ConstantRef {
             constant,
             result_kind,
@@ -10645,6 +10742,20 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::KnownCallable { callable, .. } => {
             let fingerprint = sem_callable_fingerprint(module, *callable);
             let _ = write!(out, "known-callable({fingerprint})");
+        }
+        sem::Expr::Closure {
+            closure,
+            captures,
+            result_kind,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(out, "closure({}:{result}:", closure.0);
+            for capture in captures {
+                let kind = sem_kind_fingerprint(module, capture.kind);
+                let _ = write!(out, "{}:{}:{kind},", capture.id.0, capture.source.0);
+            }
+            out.push(')');
         }
         sem::Expr::GenericFunctionObject { generic, .. } => {
             let definition = module
