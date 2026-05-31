@@ -2987,7 +2987,22 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ("body", "let* expression", "syntax.rs:Parser::parse_body"),
         (
             "let-statement",
-            "`let` name type-annotation? `=` expression `;`",
+            "`let` let-binding `=` expression `;`",
+            "syntax.rs:Parser::parse_let",
+        ),
+        (
+            "let-binding",
+            "let-name-binding | let-values-binding",
+            "syntax.rs:Parser::parse_let",
+        ),
+        (
+            "let-name-binding",
+            "name type-annotation?",
+            "syntax.rs:Parser::parse_let",
+        ),
+        (
+            "let-values-binding",
+            "`(` name* `)`",
             "syntax.rs:Parser::parse_let",
         ),
         (
@@ -3943,7 +3958,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 27);
+        assert_eq!(grammar.effective_rules.len(), 30);
 
         assert!(
             !records

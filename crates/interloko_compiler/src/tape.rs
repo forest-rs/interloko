@@ -7,7 +7,6 @@
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
@@ -89,7 +88,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
                 .iter()
                 .map(|param| value_type(param.kind))
                 .collect(),
-            ret_types: vec![value_type(function.ret)],
+            ret_types: function.rets.iter().copied().map(value_type).collect(),
         };
         let func = if let Some(env_shape) = closure_env_shape(function)? {
             builder.declare_function(sig.with_arg_agg_shape(0, env_shape))
@@ -108,9 +107,15 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
                 )
                 .map_err(build_error)?;
         }
-        builder
-            .set_function_output_name(func, 0, "result")
-            .map_err(build_error)?;
+        for index in 0..function.rets.len() {
+            builder
+                .set_function_output_name(
+                    func,
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    &format!("result{index}"),
+                )
+                .map_err(build_error)?;
+        }
         if module.main == Some(function.id) {
             main = Some(func);
         }
@@ -719,7 +724,7 @@ impl<'a> FunctionEmitter<'a> {
                     .host_call(0, self.abi.value_eq, 0, &[lhs.0, rhs.0], &[dst.0]);
             }
             lower::Instr::Call {
-                dst,
+                dsts,
                 callee,
                 args,
                 span,
@@ -731,26 +736,28 @@ impl<'a> FunctionEmitter<'a> {
                     .copied()
                     .ok_or_else(|| invalid_lowered("callee id is out of range"))?;
                 let args = reg_slice(args);
+                let dsts = reg_slice(dsts);
                 self.set_span(*span);
-                self.asm.call(0, callee, 0, &args, &[dst.0]);
+                self.asm.call(0, callee, 0, &args, &dsts);
             }
             lower::Instr::CallIndirect {
-                dst,
+                dsts,
                 callee,
                 args,
                 arg_kinds,
-                ret,
+                rets,
                 span,
             } => {
                 let args_types = arg_kinds
                     .iter()
                     .map(|kind| value_type(*kind))
                     .collect::<Vec<_>>();
-                let ret_types = [value_type(*ret)];
+                let ret_types = rets.iter().copied().map(value_type).collect::<Vec<_>>();
                 let sig = self.builder.call_sig(&args_types, &ret_types);
                 let args = reg_slice(args);
+                let dsts = reg_slice(dsts);
                 self.set_span(*span);
-                self.asm.call_indirect(0, sig, callee.0, 0, &args, &[dst.0]);
+                self.asm.call_indirect(0, sig, callee.0, 0, &args, &dsts);
             }
             lower::Instr::MakeObject {
                 dst,
@@ -904,9 +911,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.mov(dst.0, src.0);
             }
-            lower::Instr::Return { value, span } => {
+            lower::Instr::Return { values, span } => {
+                let values = reg_slice(values);
                 self.set_span(*span);
-                self.asm.ret(0, &[value.0]);
+                self.asm.ret(0, &values);
             }
             lower::Instr::Trap { code, span } => {
                 self.set_span(*span);
@@ -1022,14 +1030,14 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
             note_register(*lhs, max);
             note_register(*rhs, max);
         }
-        lower::Instr::Call { dst, args, .. } => {
-            note_register(*dst, max);
+        lower::Instr::Call { dsts, args, .. } => {
+            note_registers(dsts, max);
             note_registers(args, max);
         }
         lower::Instr::CallIndirect {
-            dst, callee, args, ..
+            dsts, callee, args, ..
         } => {
-            note_register(*dst, max);
+            note_registers(dsts, max);
             note_register(*callee, max);
             note_registers(args, max);
         }
@@ -1075,8 +1083,8 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
             note_register(*dst, max);
             note_register(*src, max);
         }
-        lower::Instr::Return { value, .. } => {
-            note_register(*value, max);
+        lower::Instr::Return { values, .. } => {
+            note_registers(values, max);
         }
     }
 }

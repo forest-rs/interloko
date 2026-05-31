@@ -254,11 +254,38 @@ pub struct Let {
     pub definition: DefinitionId,
     /// Local name.
     pub name: String,
+    /// Binding pattern introduced by this let.
+    pub pattern: LetPattern,
     /// Optional value type annotation.
     pub type_annotation: Option<TypeAnnotation>,
     /// Bound value expression.
     pub value: Expr,
     /// Source span.
+    pub span: Span,
+}
+
+/// Local binding pattern.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LetPattern {
+    /// One local binding.
+    Name(LetBinding),
+    /// Positional multiple-value destructuring.
+    Tuple {
+        /// Bound names in result order.
+        bindings: Vec<LetBinding>,
+        /// Source span.
+        span: Span,
+    },
+}
+
+/// One local introduced by a let binding pattern.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LetBinding {
+    /// Stable definition identity for the local binding.
+    pub definition: DefinitionId,
+    /// Local name.
+    pub name: String,
+    /// Source span of the binding name.
     pub span: Span,
 }
 
@@ -1145,17 +1172,14 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_let(&mut self, node: &CstNode) -> Let {
-        let mut name = String::new();
+        let pattern = self.lower_let_pattern(node);
+        let name = let_pattern_name(&pattern);
+        let definition = let_pattern_definition(&pattern);
         let mut type_annotation = None;
         let mut value = None;
 
         for child in &node.children {
             match child {
-                CstElement::Token(index)
-                    if self.tree.tokens[*index].kind == TokenKind::Ident && name.is_empty() =>
-                {
-                    name = self.tree.tokens[*index].text(&self.tree.source).to_string();
-                }
                 CstElement::Token(index)
                     if self.tree.tokens[*index].kind == TokenKind::DoubleColon =>
                 {
@@ -1168,13 +1192,73 @@ impl<'tree> Lowering<'tree> {
 
         Let {
             id: self.ast_id(node),
-            definition: self.definition(DefinitionKind::Local, &name, ""),
+            definition,
             name,
+            pattern,
             type_annotation,
             value: value.unwrap_or(Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
             }),
+            span: node.span,
+        }
+    }
+
+    fn lower_let_pattern(&self, node: &CstNode) -> LetPattern {
+        let tokens = self.node_token_indices(node);
+        let Some(let_position) = tokens
+            .iter()
+            .position(|index| self.tree.tokens[*index].kind == TokenKind::Let)
+        else {
+            return LetPattern::Name(LetBinding {
+                definition: self.definition(DefinitionKind::Local, "", ""),
+                name: String::new(),
+                span: node.span,
+            });
+        };
+        let Some(first_index) = tokens.get(let_position + 1).copied() else {
+            return LetPattern::Name(LetBinding {
+                definition: self.definition(DefinitionKind::Local, "", ""),
+                name: String::new(),
+                span: node.span,
+            });
+        };
+        if self.tree.tokens[first_index].kind != TokenKind::LParen {
+            let name = self.tree.tokens[first_index]
+                .text(&self.tree.source)
+                .to_string();
+            return LetPattern::Name(LetBinding {
+                definition: self.definition(DefinitionKind::Local, &name, ""),
+                name,
+                span: self.tree.tokens[first_index].span,
+            });
+        }
+
+        let mut bindings = Vec::new();
+        for (binding_index, token_index) in
+            tokens.iter().copied().skip(let_position + 2).enumerate()
+        {
+            let token = self.tree.tokens[token_index];
+            match token.kind {
+                TokenKind::Ident => {
+                    let name = token.text(&self.tree.source).to_string();
+                    bindings.push(LetBinding {
+                        definition: self.definition(
+                            DefinitionKind::Local,
+                            &name,
+                            &format!("tuple-let:{}:{binding_index}", node.id.raw()),
+                        ),
+                        name,
+                        span: token.span,
+                    });
+                }
+                TokenKind::RParen | TokenKind::Equal | TokenKind::DoubleColon => break,
+                _ => {}
+            }
+        }
+
+        LetPattern::Tuple {
+            bindings,
             span: node.span,
         }
     }
@@ -1999,6 +2083,37 @@ impl<'tree> Lowering<'tree> {
             }
         }
         String::new()
+    }
+}
+
+fn let_pattern_name(pattern: &LetPattern) -> String {
+    match pattern {
+        LetPattern::Name(binding) => binding.name.clone(),
+        LetPattern::Tuple { bindings, .. } => {
+            let names = bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({names})")
+        }
+    }
+}
+
+fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
+    match pattern {
+        LetPattern::Name(binding) => binding.definition,
+        LetPattern::Tuple { bindings, .. } => bindings.first().map_or_else(
+            || {
+                DefinitionId::new(
+                    SourceFileId::ANONYMOUS,
+                    DefinitionKind::Local,
+                    "",
+                    "tuple-let",
+                )
+            },
+            |binding| binding.definition,
+        ),
     }
 }
 

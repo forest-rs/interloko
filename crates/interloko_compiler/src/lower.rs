@@ -203,6 +203,8 @@ pub struct Function {
     pub params: Vec<Param>,
     /// Function return value kind.
     pub ret: ValueKind,
+    /// Function return value kinds in order.
+    pub rets: Vec<ValueKind>,
     /// Source locals assigned to lowered registers.
     pub locals: Vec<Local>,
     /// Lowered instruction stream.
@@ -388,8 +390,8 @@ pub enum Instr {
     },
     /// Ordinary direct call to another lowered function.
     Call {
-        /// Destination register.
-        dst: Register,
+        /// Destination registers.
+        dsts: Vec<Register>,
         /// Lowered callee function.
         callee: FunctionId,
         /// Argument registers.
@@ -399,16 +401,16 @@ pub enum Instr {
     },
     /// Indirect call through a first-class callable value.
     CallIndirect {
-        /// Destination register.
-        dst: Register,
+        /// Destination registers.
+        dsts: Vec<Register>,
         /// Callable value register.
         callee: Register,
         /// Argument registers.
         args: Vec<Register>,
         /// Argument value categories.
         arg_kinds: Vec<ValueKind>,
-        /// Result value category.
-        ret: ValueKind,
+        /// Result value categories.
+        rets: Vec<ValueKind>,
         /// Source span.
         span: Span,
     },
@@ -555,8 +557,8 @@ pub enum Instr {
     },
     /// Function return.
     Return {
-        /// Return value register.
-        value: Register,
+        /// Return value registers.
+        values: Vec<Register>,
         /// Source span.
         span: Span,
     },
@@ -814,14 +816,16 @@ impl<'module> Lowering<'module> {
 
     fn lower_function(&self, function: &sem::Function) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_function(self.module, &self.ids, function)?;
-        let ret = self.value_kind(function.result_kind)?;
-        body.lower_block(&function.body, ret)?;
+        let rets = self.value_kinds(&function.result_kinds)?;
+        let ret = rets.first().copied().unwrap_or(ValueKind::Any);
+        body.lower_block(&function.body, &rets)?;
         Ok(Function {
             id: self.lower_function_id(function.id)?,
             name: function.name.clone(),
             kind: FunctionKind::Function(function.id),
             params: body.params,
             ret,
+            rets,
             locals: body.locals,
             instructions: body.instructions,
             span: function.span,
@@ -831,7 +835,7 @@ impl<'module> Lowering<'module> {
     fn lower_method(&self, method: &sem::Method) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_method(self.module, &self.ids, method)?;
         let ret = self.value_kind(method.result_kind)?;
-        body.lower_block(&method.body, ret)?;
+        body.lower_block(&method.body, &[ret])?;
         let generic = self
             .module
             .generics
@@ -843,6 +847,7 @@ impl<'module> Lowering<'module> {
             kind: FunctionKind::Method(method.id),
             params: body.params,
             ret,
+            rets: vec![ret],
             locals: body.locals,
             instructions: body.instructions,
             span: method.span,
@@ -864,6 +869,7 @@ impl<'module> Lowering<'module> {
             kind: FunctionKind::Dispatcher(generic.id),
             params: body.params,
             ret: self.value_kind(generic.result_kind)?,
+            rets: vec![self.value_kind(generic.result_kind)?],
             locals: body.locals,
             instructions: body.instructions,
             span: generic.span,
@@ -898,6 +904,7 @@ impl<'module> Lowering<'module> {
                 reg: receiver,
             }],
             ret,
+            rets: vec![ret],
             locals: Vec::new(),
             instructions: vec![
                 Instr::ReadSlot {
@@ -909,7 +916,7 @@ impl<'module> Lowering<'module> {
                     span: slot.span,
                 },
                 Instr::Return {
-                    value: result,
+                    values: vec![result],
                     span: slot.span,
                 },
             ],
@@ -1036,16 +1043,17 @@ impl<'module> Lowering<'module> {
             },
             params,
             ret: spec.ret,
+            rets: vec![spec.ret],
             locals: Vec::new(),
             instructions: vec![
                 Instr::Call {
-                    dst: result,
+                    dsts: vec![result],
                     callee: spec.target,
                     args: call_args,
                     span: spec.span,
                 },
                 Instr::Return {
-                    value: result,
+                    values: vec![result],
                     span: spec.span,
                 },
             ],
@@ -1055,14 +1063,16 @@ impl<'module> Lowering<'module> {
 
     fn lower_closure(&self, closure: &sem::Closure) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_closure(self.module, &self.ids, closure)?;
-        let ret = self.value_kind(closure.result_kind)?;
-        body.lower_block(&closure.body, ret)?;
+        let rets = self.value_kinds(&closure.result_kinds)?;
+        let ret = rets.first().copied().unwrap_or(ValueKind::Any);
+        body.lower_block(&closure.body, &rets)?;
         Ok(Function {
             id: self.lower_closure_id(closure.id)?,
             name: format!("closure#{}", closure.id.0),
             kind: FunctionKind::Closure(closure.id),
             params: body.params,
             ret,
+            rets,
             locals: body.locals,
             instructions: body.instructions,
             span: closure.span,
@@ -1108,6 +1118,14 @@ impl<'module> Lowering<'module> {
             ))),
             _ => value_kind(kind),
         }
+    }
+
+    fn value_kinds(&self, kinds: &[sem::ValueKind]) -> Result<Vec<ValueKind>, LowerError> {
+        kinds
+            .iter()
+            .copied()
+            .map(|kind| self.value_kind(kind))
+            .collect()
     }
 }
 
@@ -1171,6 +1189,9 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             push_known_callable_use(uses, *callable);
         }
         sem::Expr::VectorLiteral { elements, .. }
+        | sem::Expr::Values {
+            values: elements, ..
+        }
         | sem::Expr::IntrinsicCall { args: elements, .. }
         | sem::Expr::DirectCall { args: elements, .. }
         | sem::Expr::GenericCall { args: elements, .. } => {
@@ -1526,29 +1547,67 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    fn lower_block(&mut self, block: &sem::Block, expected: ValueKind) -> Result<(), LowerError> {
+    fn lower_block(
+        &mut self,
+        block: &sem::Block,
+        expected: &[ValueKind],
+    ) -> Result<(), LowerError> {
         for let_binding in &block.lets {
-            let (local_name, local_kind) = {
-                let local = self
-                    .current_local(let_binding.local)
-                    .ok_or_else(|| invalid_semantic("local id is out of range"))?;
-                (local.name.clone(), local.kind)
-            };
-            let value = self.lower_expr(&let_binding.value)?;
-            let value = self.coerce_value(value, self.value_kind(local_kind)?, let_binding.span)?;
-            self.set_local(let_binding.local, value)?;
-            self.locals.push(Local {
-                source: let_binding.local,
-                name: local_name,
-                kind: value.kind,
-                reg: value.reg,
-            });
+            if let [local] = let_binding.locals.as_slice() {
+                let (local_name, local_kind) = {
+                    let local_info = self
+                        .current_local(*local)
+                        .ok_or_else(|| invalid_semantic("local id is out of range"))?;
+                    (local_info.name.clone(), local_info.kind)
+                };
+                let value = self.lower_expr(&let_binding.value)?;
+                let value =
+                    self.coerce_value(value, self.value_kind(local_kind)?, let_binding.span)?;
+                self.set_local(*local, value)?;
+                self.locals.push(Local {
+                    source: *local,
+                    name: local_name,
+                    kind: value.kind,
+                    reg: value.reg,
+                });
+                continue;
+            }
+
+            let values = self.lower_results_expr(&let_binding.value)?;
+            for (local, value) in let_binding.locals.iter().copied().zip(values) {
+                let (local_name, local_kind) = {
+                    let local_info = self
+                        .current_local(local)
+                        .ok_or_else(|| invalid_semantic("local id is out of range"))?;
+                    (local_info.name.clone(), local_info.kind)
+                };
+                let value =
+                    self.coerce_value(value, self.value_kind(local_kind)?, let_binding.span)?;
+                self.set_local(local, value)?;
+                self.locals.push(Local {
+                    source: local,
+                    name: local_name,
+                    kind: value.kind,
+                    reg: value.reg,
+                });
+            }
         }
 
-        let result = self.lower_expr(&block.result)?;
-        let result = self.coerce_value(result, expected, block.result.span())?;
+        let results = self.lower_results_expr(&block.result)?;
+        if results.len() != expected.len() {
+            return Err(invalid_semantic(
+                "return arity does not match function signature",
+            ));
+        }
+        let mut values = Vec::with_capacity(results.len());
+        for (result, expected) in results.into_iter().zip(expected.iter().copied()) {
+            values.push(
+                self.coerce_value(result, expected, block.result.span())?
+                    .reg,
+            );
+        }
         self.instructions.push(Instr::Return {
-            value: result.reg,
+            values,
             span: block.result.span(),
         });
         Ok(())
@@ -1606,7 +1665,7 @@ impl<'module> BodyLowering<'module> {
                 call_args.push(value.reg);
             }
             self.instructions.push(Instr::Call {
-                dst: method_result.reg,
+                dsts: vec![method_result.reg],
                 callee: self
                     .ids
                     .methods
@@ -1622,7 +1681,7 @@ impl<'module> BodyLowering<'module> {
                 method.span,
             )?;
             self.instructions.push(Instr::Return {
-                value: result.reg,
+                values: vec![result.reg],
                 span: method.span,
             });
             self.instructions.push(Instr::Label { label: unmatched });
@@ -1794,6 +1853,9 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::Values { .. } => Err(invalid_semantic(
+                "multiple values cannot be used in a scalar expression",
+            )),
             sem::Expr::Local {
                 local,
                 result_kind,
@@ -1879,9 +1941,14 @@ impl<'module> BodyLowering<'module> {
                     .get(function.0 as usize)
                     .ok_or_else(|| invalid_semantic("function id is out of range"))?;
                 let args = self.lower_args_with_expected(args, &function_info.param_kinds)?;
+                if function_info.result_kinds.len() != 1 {
+                    return Err(invalid_semantic(
+                        "multiple-value function call used in a scalar expression",
+                    ));
+                }
                 let result = self.alloc(self.value_kind(function_info.result_kind)?);
                 self.instructions.push(Instr::Call {
-                    dst: result.reg,
+                    dsts: vec![result.reg],
                     callee: self
                         .ids
                         .functions
@@ -1906,7 +1973,7 @@ impl<'module> BodyLowering<'module> {
                 let args = self.lower_generic_args(args, generic_info)?;
                 let result = self.alloc(self.value_kind(generic_info.result_kind)?);
                 self.instructions.push(Instr::Call {
-                    dst: result.reg,
+                    dsts: vec![result.reg],
                     callee: self
                         .ids
                         .generics
@@ -2154,6 +2221,133 @@ impl<'module> BodyLowering<'module> {
         }
     }
 
+    fn lower_results_expr(&mut self, expr: &sem::Expr) -> Result<Vec<Value>, LowerError> {
+        match expr {
+            sem::Expr::Values { values, .. } => {
+                values.iter().map(|value| self.lower_expr(value)).collect()
+            }
+            sem::Expr::DirectCall {
+                function,
+                args,
+                span,
+            } => {
+                let function_info = self
+                    .module
+                    .functions
+                    .get(function.0 as usize)
+                    .ok_or_else(|| invalid_semantic("function id is out of range"))?;
+                if function_info.result_kinds.len() == 1 {
+                    return Ok(vec![self.lower_expr(expr)?]);
+                }
+                let args = self.lower_args_with_expected(args, &function_info.param_kinds)?;
+                let rets = self.value_kinds(&function_info.result_kinds)?;
+                let results = rets
+                    .iter()
+                    .copied()
+                    .map(|kind| self.alloc(kind))
+                    .collect::<Vec<_>>();
+                self.instructions.push(Instr::Call {
+                    dsts: results.iter().map(|result| result.reg).collect(),
+                    callee: self
+                        .ids
+                        .functions
+                        .get(function.0 as usize)
+                        .copied()
+                        .ok_or_else(|| invalid_semantic("function id is out of range"))?,
+                    args,
+                    span: *span,
+                });
+                Ok(results)
+            }
+            sem::Expr::If {
+                condition,
+                refinement: _,
+                then_branch,
+                else_branch,
+                span,
+            } => self.lower_results_if(condition, then_branch, else_branch, *span),
+            _ => Ok(vec![self.lower_expr(expr)?]),
+        }
+    }
+
+    fn lower_results_if(
+        &mut self,
+        condition: &sem::Expr,
+        then_branch: &sem::Expr,
+        else_branch: &sem::Expr,
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let condition = self.lower_expr(condition)?;
+        if condition.kind != ValueKind::Bool {
+            return Err(invalid_semantic("if condition is not bool"));
+        }
+
+        let then_label = self.alloc_label();
+        let else_label = self.alloc_label();
+        let join_label = self.alloc_label();
+        self.instructions.push(Instr::Branch {
+            cond: condition.reg,
+            then_label,
+            else_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: then_label });
+        let then_values = self.lower_results_expr(then_branch)?;
+        let results = then_values
+            .iter()
+            .map(|value| self.alloc(value.kind))
+            .collect::<Vec<_>>();
+        let then_reachable = then_values.iter().all(|value| value.reachable);
+        if then_reachable {
+            for (result, value) in results.iter().zip(&then_values) {
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: value.reg,
+                    span: then_branch.span(),
+                });
+            }
+            self.instructions.push(Instr::Jump {
+                label: join_label,
+                span,
+            });
+        }
+
+        self.instructions.push(Instr::Label { label: else_label });
+        let else_values = self.lower_results_expr(else_branch)?;
+        if else_values.len() != results.len() {
+            return Err(invalid_semantic("if branch result arities differ"));
+        }
+        for (else_value, result) in else_values.iter().zip(&results) {
+            if else_value.kind != result.kind {
+                return Err(invalid_semantic("if branch result kinds differ"));
+            }
+        }
+        let else_reachable = else_values.iter().all(|value| value.reachable);
+        if else_reachable {
+            for (result, value) in results.iter().zip(&else_values) {
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: value.reg,
+                    span: else_branch.span(),
+                });
+            }
+            self.instructions.push(Instr::Jump {
+                label: join_label,
+                span,
+            });
+        }
+
+        self.instructions.push(Instr::Label { label: join_label });
+        Ok(results
+            .into_iter()
+            .map(|result| Value {
+                reachable: then_reachable || else_reachable,
+                ..result
+            })
+            .collect())
+    }
+
     fn lower_class_meta_object(
         &mut self,
         class: sem::ClassId,
@@ -2332,11 +2526,11 @@ impl<'module> BodyLowering<'module> {
         let ret = self.value_kind(result_kind)?;
         let result = self.alloc(ret);
         self.instructions.push(Instr::CallIndirect {
-            dst: result.reg,
+            dsts: vec![result.reg],
             callee: callee.reg,
             args,
             arg_kinds,
-            ret,
+            rets: vec![ret],
             span,
         });
         Ok(result)
@@ -2349,6 +2543,14 @@ impl<'module> BodyLowering<'module> {
             ))),
             _ => value_kind(kind),
         }
+    }
+
+    fn value_kinds(&self, kinds: &[sem::ValueKind]) -> Result<Vec<ValueKind>, LowerError> {
+        kinds
+            .iter()
+            .copied()
+            .map(|kind| self.value_kind(kind))
+            .collect()
     }
 
     fn lower_intrinsic_call(
@@ -2970,7 +3172,7 @@ impl Module {
             self.fmt_kind(f, param.kind)?;
         }
         write!(f, ") -> ")?;
-        self.fmt_kind(f, function.ret)?;
+        self.fmt_kind_list(f, &function.rets)?;
         self.fmt_kind_comment(f, function.kind)?;
         writeln!(f)?;
 
@@ -3131,27 +3333,31 @@ impl Module {
                 fmt_span(f, *span)
             }
             Instr::Call {
-                dst,
+                dsts,
                 callee,
                 args,
                 span,
             } => {
-                write!(f, "  {dst} = call l{}", callee.0)?;
+                write!(f, "  ")?;
+                self.fmt_result_list(f, dsts)?;
+                write!(f, " = call l{}", callee.0)?;
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
             Instr::CallIndirect {
-                dst,
+                dsts,
                 callee,
                 args,
-                ret,
+                rets,
                 span,
                 ..
             } => {
-                write!(f, "  {dst} = call.indirect {callee}")?;
+                write!(f, "  ")?;
+                self.fmt_result_list(f, dsts)?;
+                write!(f, " = call.indirect {callee}")?;
                 self.fmt_arg_list(f, args)?;
                 write!(f, ": ")?;
-                self.fmt_kind(f, *ret)?;
+                self.fmt_kind_list(f, rets)?;
                 fmt_span(f, *span)
             }
             Instr::MakeObject {
@@ -3274,8 +3480,9 @@ impl Module {
                 write!(f, "  {dst} = mov {src}")?;
                 fmt_span(f, *span)
             }
-            Instr::Return { value, span } => {
-                write!(f, "  return {value}")?;
+            Instr::Return { values, span } => {
+                write!(f, "  return ")?;
+                self.fmt_result_list(f, values)?;
                 fmt_span(f, *span)
             }
             Instr::Trap { code, span } => {
@@ -3390,6 +3597,31 @@ impl Module {
             write!(f, "{arg}")?;
         }
         write!(f, ")")
+    }
+
+    fn fmt_result_list(&self, f: &mut fmt::Formatter<'_>, regs: &[Register]) -> fmt::Result {
+        match regs {
+            [] => write!(f, "()"),
+            [reg] => write!(f, "{reg}"),
+            _ => self.fmt_arg_list(f, regs),
+        }
+    }
+
+    fn fmt_kind_list(&self, f: &mut fmt::Formatter<'_>, kinds: &[ValueKind]) -> fmt::Result {
+        match kinds {
+            [] => write!(f, "()"),
+            [kind] => self.fmt_kind(f, *kind),
+            _ => {
+                write!(f, "(")?;
+                for (index, kind) in kinds.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, ", ")?;
+                    }
+                    self.fmt_kind(f, *kind)?;
+                }
+                write!(f, ")")
+            }
+        }
     }
 }
 

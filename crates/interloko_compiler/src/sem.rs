@@ -907,6 +907,8 @@ pub struct Function {
     pub body: Block,
     /// Result value category.
     pub result_kind: ValueKind,
+    /// Result value categories in return order.
+    pub result_kinds: Vec<ValueKind>,
     /// Explicit declared result category, when present.
     pub return_annotation: Option<ValueKind>,
     /// Source span.
@@ -930,6 +932,8 @@ pub struct Closure {
     pub body: Block,
     /// Result value category.
     pub result_kind: ValueKind,
+    /// Result value categories in return order.
+    pub result_kinds: Vec<ValueKind>,
     /// Explicit declared result category, when present.
     pub return_annotation: Option<ValueKind>,
     /// Source span.
@@ -999,6 +1003,8 @@ pub struct Block {
 pub struct Let {
     /// Newly introduced local.
     pub local: LocalId,
+    /// Newly introduced locals in binding order.
+    pub locals: Vec<LocalId>,
     /// Bound expression.
     pub value: Expr,
     /// Source span.
@@ -1177,6 +1183,15 @@ pub enum Expr {
         elements: Vec<Expr>,
         /// Built-in vector class.
         class: ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Multiple values produced for return or destructuring contexts.
+    Values {
+        /// Ordered value expressions.
+        values: Vec<Expr>,
+        /// Result value categories in order.
+        result_kinds: Vec<ValueKind>,
         /// Source span.
         span: Span,
     },
@@ -1436,6 +1451,7 @@ impl Expr {
             | Self::StringLiteral { span, .. }
             | Self::SymbolLiteral { span, .. }
             | Self::VectorLiteral { span, .. }
+            | Self::Values { span, .. }
             | Self::Local { span, .. }
             | Self::Capture { span, .. }
             | Self::ConstantRef { span, .. }
@@ -1498,6 +1514,7 @@ struct FunctionSymbol {
     id: FunctionId,
     param_kinds: Vec<ValueKind>,
     return_kind: ValueKind,
+    return_kinds: Vec<ValueKind>,
     return_annotation: Option<ValueKind>,
     span: Span,
 }
@@ -2619,6 +2636,7 @@ impl Lowering {
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
                 param_kinds,
                 return_kind: return_annotation.unwrap_or(ValueKind::I64),
+                return_kinds: vec![return_annotation.unwrap_or(ValueKind::I64)],
                 return_annotation,
                 span: function.span,
             });
@@ -2931,7 +2949,10 @@ impl Lowering {
         let return_annotation = symbol.as_ref().and_then(|symbol| symbol.return_annotation);
         let body = self.lower_block(&mut ctx, &function.body, return_annotation);
         let body_kind = self.expr_kind(&body.result);
-        let result_kind = return_annotation.unwrap_or(body_kind);
+        let body_kinds = self.expr_kinds(&body.result);
+        let result_kind =
+            return_annotation.unwrap_or_else(|| body_kinds.first().copied().unwrap_or(body_kind));
+        let result_kinds = return_annotation.map_or_else(|| body_kinds.clone(), |kind| vec![kind]);
         if let Some(expected) = return_annotation
             && !self.kinds_match(expected, body_kind)
         {
@@ -2949,6 +2970,7 @@ impl Lowering {
             && symbol.return_annotation.is_none()
         {
             symbol.return_kind = result_kind;
+            symbol.return_kinds = result_kinds.clone();
         }
         self.diagnostics.extend(ctx.diagnostics);
 
@@ -2961,6 +2983,7 @@ impl Lowering {
             locals: ctx.locals,
             body,
             result_kind,
+            result_kinds,
             return_annotation,
             span: function.span,
         }
@@ -2974,40 +2997,108 @@ impl Lowering {
     ) -> Block {
         let mut lets = Vec::new();
         for local in &block.lets {
-            let expected_kind = local
-                .type_annotation
-                .as_ref()
-                .map(|annotation| self.resolve_type_annotation_in_context(ctx, annotation));
-            let value = self.lower_expr_expected(ctx, &local.value, expected_kind);
-            let actual_kind = self.expr_kind(&value);
-            if let Some(expected) = expected_kind
-                && !self.kinds_match(expected, actual_kind)
-            {
-                ctx.diagnostics.push(
-                    Diagnostic::error(local.value.span(), DiagnosticCode::LocalTypeMismatch)
-                        .with_arg(DiagnosticArg::text("local", local.name.clone()))
-                        .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
-                );
+            match &local.pattern {
+                ast::LetPattern::Name(binding) => {
+                    let expected_kind = local
+                        .type_annotation
+                        .as_ref()
+                        .map(|annotation| self.resolve_type_annotation_in_context(ctx, annotation));
+                    let value = self.lower_expr_expected(ctx, &local.value, expected_kind);
+                    let actual_kind = self.expr_kind(&value);
+                    let actual_kinds = self.expr_kinds(&value);
+                    if actual_kinds.len() != 1 {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                local.value.span(),
+                                DiagnosticCode::LocalTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::text("local", binding.name.clone()))
+                            .with_arg(DiagnosticArg::text("expected", "1 value"))
+                            .with_arg(DiagnosticArg::text(
+                                "actual",
+                                self.result_kinds_name(&actual_kinds),
+                            )),
+                        );
+                    }
+                    if let Some(expected) = expected_kind
+                        && !self.kinds_match(expected, actual_kind)
+                    {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                local.value.span(),
+                                DiagnosticCode::LocalTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::text("local", binding.name.clone()))
+                            .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
+                        );
+                    }
+                    let local_kind = expected_kind.unwrap_or(actual_kind);
+                    if ctx.find_local(&binding.name).is_some() {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(binding.span, DiagnosticCode::DuplicateLocal)
+                                .with_arg(DiagnosticArg::text("local", binding.name.clone())),
+                        );
+                    }
+                    let id = ctx.add_local(
+                        self.local_definition(binding.definition, &binding.name),
+                        binding.name.clone(),
+                        local_kind,
+                        binding.span,
+                    );
+                    lets.push(Let {
+                        local: id,
+                        locals: vec![id],
+                        value: value.clone(),
+                        span: local.span,
+                    });
+                }
+                ast::LetPattern::Tuple { bindings, .. } => {
+                    let value = self.lower_expr(ctx, &local.value);
+                    let actual_kinds = self.expr_kinds(&value);
+                    if bindings.len() != actual_kinds.len() {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                local.value.span(),
+                                DiagnosticCode::LocalTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::text("local", local.name.clone()))
+                            .with_arg(DiagnosticArg::text(
+                                "expected",
+                                format!("{} values", bindings.len()),
+                            ))
+                            .with_arg(DiagnosticArg::text(
+                                "actual",
+                                self.result_kinds_name(&actual_kinds),
+                            )),
+                        );
+                    }
+                    let mut local_ids = Vec::with_capacity(bindings.len());
+                    for (index, binding) in bindings.iter().enumerate() {
+                        if ctx.find_local(&binding.name).is_some() {
+                            ctx.diagnostics.push(
+                                Diagnostic::error(binding.span, DiagnosticCode::DuplicateLocal)
+                                    .with_arg(DiagnosticArg::text("local", binding.name.clone())),
+                            );
+                        }
+                        let kind = actual_kinds.get(index).copied().unwrap_or(ValueKind::Error);
+                        let id = ctx.add_local(
+                            self.local_definition(binding.definition, &binding.name),
+                            binding.name.clone(),
+                            kind,
+                            binding.span,
+                        );
+                        local_ids.push(id);
+                    }
+                    let local_id = local_ids.first().copied().unwrap_or(LocalId(u32::MAX));
+                    lets.push(Let {
+                        local: local_id,
+                        locals: local_ids,
+                        value: value.clone(),
+                        span: local.span,
+                    });
+                }
             }
-            let local_kind = expected_kind.unwrap_or(actual_kind);
-            if ctx.find_local(&local.name).is_some() {
-                ctx.diagnostics.push(
-                    Diagnostic::error(local.span, DiagnosticCode::DuplicateLocal)
-                        .with_arg(DiagnosticArg::text("local", local.name.clone())),
-                );
-            }
-            let id = ctx.add_local(
-                self.local_definition(local.definition, &local.name),
-                local.name.clone(),
-                local_kind,
-                local.span,
-            );
-            lets.push(Let {
-                local: id,
-                value,
-                span: local.span,
-            });
         }
 
         Block {
@@ -3102,6 +3193,21 @@ impl Lowering {
             } => {
                 if callee == "apply" {
                     return self.lower_apply(ctx, args, expected_result, *span);
+                }
+                if callee == "values" {
+                    let values = args
+                        .iter()
+                        .map(|arg| self.lower_expr(ctx, arg))
+                        .collect::<Vec<_>>();
+                    let result_kinds = values
+                        .iter()
+                        .map(|value| self.expr_kind(value))
+                        .collect::<Vec<_>>();
+                    return Expr::Values {
+                        values,
+                        result_kinds,
+                        span: *span,
+                    };
                 }
                 let lowered_args: Vec<_> =
                     args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
@@ -3429,6 +3535,7 @@ impl Lowering {
                 span,
             },
             result_kind: ValueKind::Error,
+            result_kinds: vec![ValueKind::Error],
             return_annotation: None,
             span,
         });
@@ -3462,7 +3569,10 @@ impl Lowering {
             return_type.map(|annotation| self.resolve_type_annotation(annotation));
         let lowered_body = self.lower_block(&mut closure_ctx, body, return_annotation);
         let body_kind = self.expr_kind(&lowered_body.result);
-        let result_kind = return_annotation.unwrap_or(body_kind);
+        let body_kinds = self.expr_kinds(&lowered_body.result);
+        let result_kind =
+            return_annotation.unwrap_or_else(|| body_kinds.first().copied().unwrap_or(body_kind));
+        let result_kinds = return_annotation.map_or_else(|| body_kinds.clone(), |kind| vec![kind]);
         if let Some(expected) = return_annotation
             && !self.kinds_match(expected, body_kind)
         {
@@ -3488,6 +3598,7 @@ impl Lowering {
                 locals: closure_ctx.locals,
                 body: lowered_body,
                 result_kind,
+                result_kinds,
                 return_annotation,
                 span,
             };
@@ -4569,6 +4680,13 @@ impl Lowering {
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
             Expr::VectorLiteral { class, .. } => ValueKind::Vector(*class),
+            Expr::Values { result_kinds, .. } => {
+                if result_kinds.len() == 1 {
+                    result_kinds[0]
+                } else {
+                    ValueKind::Error
+                }
+            }
             Expr::GenericCall { generic, .. } => self
                 .generic_symbols
                 .get(generic.0 as usize)
@@ -4596,10 +4714,16 @@ impl Lowering {
                 .kind_for_builtin_class(*class)
                 .unwrap_or(ValueKind::Object(*class)),
             Expr::Signal { result_kind, .. } => *result_kind,
-            Expr::DirectCall { function, .. } => self
-                .functions
-                .get(function.0 as usize)
-                .map_or(ValueKind::Error, |symbol| symbol.return_kind),
+            Expr::DirectCall { function, .. } => {
+                self.functions
+                    .get(function.0 as usize)
+                    .map_or(ValueKind::Error, |symbol| {
+                        match symbol.return_kinds.as_slice() {
+                            [kind] => *kind,
+                            _ => ValueKind::Error,
+                        }
+                    })
+            }
             Expr::MakeObject { class_id, .. } => ValueKind::Object(*class_id),
             Expr::If {
                 then_branch,
@@ -4616,6 +4740,31 @@ impl Lowering {
             }
             Expr::Handle { restart, .. } => restart.result_kind,
             Expr::Error { .. } => ValueKind::Error,
+        }
+    }
+
+    fn expr_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
+        match expr {
+            Expr::Values { result_kinds, .. } => result_kinds.clone(),
+            Expr::DirectCall { function, .. } => {
+                self.functions.get(function.0 as usize).map_or_else(
+                    || vec![ValueKind::Error],
+                    |symbol| symbol.return_kinds.clone(),
+                )
+            }
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_kinds = self.expr_kinds(then_branch);
+                if then_kinds == self.expr_kinds(else_branch) {
+                    then_kinds
+                } else {
+                    vec![ValueKind::Error]
+                }
+            }
+            _ => vec![self.expr_kind(expr)],
         }
     }
 
@@ -4983,6 +5132,21 @@ impl Lowering {
             ),
             ValueKind::KnownCallable(callable) => self.callable_name(callable),
             ValueKind::Error => "<error>".into(),
+        }
+    }
+
+    fn result_kinds_name(&self, kinds: &[ValueKind]) -> String {
+        match kinds {
+            [] => "0 values".into(),
+            [kind] => self.kind_name(*kind),
+            _ => {
+                let names = kinds
+                    .iter()
+                    .map(|kind| self.kind_name(*kind))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} values ({names})", kinds.len())
+            }
         }
     }
 

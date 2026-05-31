@@ -1,7 +1,7 @@
 // expect: run 1
 // expect: diagnostics 0
 // expect: dump ast contains flag :: <boolean>
-// expect: dump sem contains keep?(flag:boolean) result=Bool return=boolean
+// expect: dump sem contains keep?(flag:boolean) result=boolean return=boolean
 // expect: dump lowered contains flag: bool
 
 define function keep?(flag :: <boolean>) => <boolean>

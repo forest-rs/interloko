@@ -21,7 +21,10 @@ rule type-annotation = `::` type-annotation-value
 rule type-annotation-value = class-object-type? type-name
 rule class-object-type = `class`
 rule body = let-statement* expression?
-rule let-statement = `let` name type-annotation? `=` expression `;`
+rule let-statement = `let` let-binding `=` expression `;`
+rule let-binding = let-name-binding | let-values-binding
+rule let-name-binding = name type-annotation?
+rule let-values-binding = `(` trailing-list-of<name, `,`> `)`
 rule expression = handle-expression | if-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
 rule restart-clause = `restart` restart-binding? type-name expression

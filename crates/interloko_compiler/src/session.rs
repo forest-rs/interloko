@@ -3703,7 +3703,10 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
         }
-        sem::Expr::VectorLiteral { elements, .. } => {
+        sem::Expr::VectorLiteral { elements, .. }
+        | sem::Expr::Values {
+            values: elements, ..
+        } => {
             for element in elements {
                 collect_dispatch_sites_in_expr(
                     artifacts,
@@ -4296,6 +4299,13 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
         sem::Expr::StringLiteral { class, .. } => sem::ValueKind::String(*class),
         sem::Expr::SymbolLiteral { class, .. } => sem::ValueKind::Symbol(*class),
         sem::Expr::VectorLiteral { class, .. } => sem::ValueKind::Vector(*class),
+        sem::Expr::Values { result_kinds, .. } => {
+            if result_kinds.len() == 1 {
+                result_kinds[0]
+            } else {
+                sem::ValueKind::Error
+            }
+        }
         sem::Expr::Local { result_kind, .. } => *result_kind,
         sem::Expr::Capture { result_kind, .. } => *result_kind,
         sem::Expr::ConstantRef { result_kind, .. } => *result_kind,
@@ -4308,10 +4318,17 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
             sem::ValueKind::GenericFunctionObject(*generic)
         }
         sem::Expr::IntrinsicCall { result_kind, .. } => *result_kind,
-        sem::Expr::DirectCall { function, .. } => module
-            .functions
-            .get(function.0 as usize)
-            .map_or(sem::ValueKind::Error, |function| function.result_kind),
+        sem::Expr::DirectCall { function, .. } => {
+            module
+                .functions
+                .get(function.0 as usize)
+                .map_or(sem::ValueKind::Error, |function| {
+                    match function.result_kinds.as_slice() {
+                        [kind] => *kind,
+                        _ => sem::ValueKind::Error,
+                    }
+                })
+        }
         sem::Expr::GenericCall { generic, .. } => module
             .generics
             .get(generic.0 as usize)
@@ -5623,10 +5640,10 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "closure c{} ({params}) captures={} result={:?} return={return_annotation}",
+            "closure c{} ({params}) captures={} result={} return={return_annotation}",
             closure.id.0,
             closure.captures.len(),
-            closure.result_kind
+            sem_kind_list_label(module, &closure.result_kinds)
         );
         for capture in &closure.captures {
             let _ = writeln!(
@@ -5661,8 +5678,11 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "function f{} {} {}({params}) result={:?} return={return_annotation}",
-            function.id.0, function.definition, function.name, function.result_kind
+            "function f{} {} {}({params}) result={} return={return_annotation}",
+            function.id.0,
+            function.definition,
+            function.name,
+            sem_kind_list_label(module, &function.result_kinds)
         );
         dump_sem_locals(module, &mut out, &function.locals, 2);
         dump_sem_block(&mut out, &function.body, 2);
@@ -9551,6 +9571,21 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
     }
 }
 
+fn sem_kind_list_label(module: &sem::Module, kinds: &[sem::ValueKind]) -> String {
+    match kinds {
+        [] => "()".into(),
+        [kind] => sem_kind_label(module, *kind),
+        _ => {
+            let labels = kinds
+                .iter()
+                .map(|kind| sem_kind_label(module, *kind))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({labels})")
+        }
+    }
+}
+
 fn runtime_kind_label(module: &sem::Module, kind: runtime::ValueKind) -> String {
     match kind {
         runtime::ValueKind::Any => "object-top".into(),
@@ -9821,12 +9856,35 @@ fn dump_sem_locals(module: &sem::Module, out: &mut String, locals: &[sem::Local]
 fn dump_sem_block(out: &mut String, block: &sem::Block, indent: usize) {
     for binding in &block.lets {
         indent_line(out, indent);
-        let _ = writeln!(out, "let l{}", binding.local.0);
+        let _ = write!(out, "let ");
+        dump_sem_local_list(out, &binding.locals);
+        out.push('\n');
         dump_sem_expr(out, &binding.value, indent + 2);
     }
     indent_line(out, indent);
     let _ = writeln!(out, "result");
     dump_sem_expr(out, &block.result, indent + 2);
+}
+
+fn dump_sem_local_list(out: &mut String, locals: &[sem::LocalId]) {
+    match locals {
+        [] => {
+            let _ = write!(out, "()");
+        }
+        [local] => {
+            let _ = write!(out, "l{}", local.0);
+        }
+        _ => {
+            out.push('(');
+            for (index, local) in locals.iter().enumerate() {
+                if index != 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, "l{}", local.0);
+            }
+            out.push(')');
+        }
+    }
 }
 
 fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
@@ -9855,6 +9913,16 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             );
             for element in elements {
                 dump_sem_expr(out, element, indent + 2);
+            }
+        }
+        sem::Expr::Values {
+            values,
+            result_kinds,
+            ..
+        } => {
+            let _ = writeln!(out, "values results={result_kinds:?}");
+            for value in values {
+                dump_sem_expr(out, value, indent + 2);
             }
         }
         sem::Expr::Local {
@@ -10664,7 +10732,11 @@ fn effective_slot_init_fingerprint(module: &sem::Module, slot: &sem::EffectiveSl
 fn fingerprint_sem_block(module: &sem::Module, block: &sem::Block) -> String {
     let mut out = String::new();
     for binding in &block.lets {
-        let _ = write!(out, "let:{}=", binding.local.0);
+        out.push_str("let:");
+        for local in &binding.locals {
+            let _ = write!(out, "{};", local.0);
+        }
+        out.push('=');
         fingerprint_sem_expr(module, &binding.value, &mut out);
         out.push(';');
     }
@@ -10704,6 +10776,19 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "vector({definition}:");
             fingerprint_args(module, elements, out);
+            out.push(')');
+        }
+        sem::Expr::Values {
+            values,
+            result_kinds,
+            ..
+        } => {
+            out.push_str("values(");
+            for kind in result_kinds {
+                let _ = write!(out, "{};", sem_kind_fingerprint(module, *kind));
+            }
+            out.push(':');
+            fingerprint_args(module, values, out);
             out.push(')');
         }
         sem::Expr::Local {
@@ -13583,7 +13668,7 @@ mod tests {
             update
                 .artifacts
                 .dump_stage(DumpStage::Sem)
-                .contains("hold(x:object-top) result=Any return=object-top")
+                .contains("hold(x:object-top) result=object-top return=object-top")
         );
         assert!(
             update

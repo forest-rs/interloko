@@ -1,6 +1,6 @@
 // expect: run 6
 // expect: diagnostics 0
-// expect: dump sem contains pass(c:object(<circle>)) result=Object(ClassId(1)) return=object(<circle>)
+// expect: dump sem contains pass(c:object(<circle>)) result=object(<circle>) return=object(<circle>)
 // expect: dump lowered contains c: object(<circle>)
 
 define class <circle> (<object>)

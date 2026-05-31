@@ -114,7 +114,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/typed_slots_and_dispatch.loko"));
     assert!(out.contains("fail/values/malformed_string.loko"));
     assert!(out.contains("fail/syntax/expected_expression.loko"));
-    assert!(out.contains("corpus: 147 passed, 0 failed, 147 total"));
+    assert!(out.contains("corpus: 148 passed, 0 failed, 148 total"));
 }
 
 #[test]

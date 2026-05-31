@@ -1,0 +1,20 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump ast contains let
+// expect: dump sem contains split(use_large:boolean) result=(integer, integer)
+// expect: dump sem contains values results=[I64, I64]
+// expect: dump lowered contains (%r
+// expect: dump tape contains rets=[result0
+
+define function split(use_large :: <boolean>)
+  if use_large then
+    values(40, 2)
+  else
+    values(10, 5)
+  end
+end;
+
+define function main()
+  let (base, extra) = split(#t);
+  base + extra
+end;
