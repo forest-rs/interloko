@@ -3,7 +3,7 @@
 // expect: dump ast contains area(x :: <object>)
 // expect: dump ast contains returns <integer>
 // expect: dump sem contains generic g0
-// expect: dump sem contains area(x:object-top) result=I64 return=integer
+// expect: dump sem contains area(x:object-top) result=integer return=integer
 // expect: dump lowered contains area#dispatch
 
 define class <circle> (<object>)

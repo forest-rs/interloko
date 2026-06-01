@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.generic-method-result-type-mismatch
+// expect: diagnostic contains method `split` result <integer> does not satisfy generic return 2 values
+
+define class <source> (<object>)
+end;
+
+define generic split(x :: <object>) => (<integer>, <integer>);
+
+define method split(x :: <source>) => <integer>
+  1
+end;

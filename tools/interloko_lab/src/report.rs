@@ -1514,7 +1514,7 @@ fn generic_object_facts(artifacts: &SessionArtifacts, object_id: &str) -> Vec<Ob
         ),
         ObjectFact::new(
             "result",
-            value_kind_label(&artifacts.sem, generic.result_kind),
+            value_kind_list_label(&artifacts.sem, &generic.result_kinds),
             "Resolved generic result category.",
         ),
     ])
@@ -1561,7 +1561,7 @@ fn method_object_facts(artifacts: &SessionArtifacts, object_id: &str) -> Vec<Obj
         ),
         ObjectFact::new(
             "result",
-            value_kind_label(&artifacts.sem, method.result_kind),
+            value_kind_list_label(&artifacts.sem, &method.result_kinds),
             "Resolved method result category.",
         ),
     ])

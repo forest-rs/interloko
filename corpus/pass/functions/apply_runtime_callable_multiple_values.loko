@@ -1,0 +1,24 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains f:callable
+// expect: dump sem contains callable-call result=(integer, integer)
+// expect: dump lowered contains call.indirect
+// expect: dump tape contains call.indirect
+// expect: dump tape contains rets=[result0
+
+define function split(use_large :: <boolean>) => (<integer>, <integer>)
+  if use_large then
+    values(40, 2)
+  else
+    values(10, 5)
+  end
+end;
+
+define function callit(f :: <callable>) => (<integer>, <integer>)
+  apply(f, #t)
+end;
+
+define function main()
+  let (base :: <integer>, extra :: <integer>) = callit(split);
+  base + extra
+end;

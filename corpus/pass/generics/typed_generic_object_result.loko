@@ -1,6 +1,6 @@
 // expect: run 42
 // expect: diagnostics 0
-// expect: dump sem contains keep(x:object-top) result=Any return=object-top
+// expect: dump sem contains keep(x:object-top) result=object-top return=object-top
 // expect: dump lowered contains keep#dispatch
 // expect: dump lowered contains box.any
 

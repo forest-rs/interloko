@@ -820,10 +820,10 @@ pub struct GenericFunction {
     pub dispatch_param: usize,
     /// Zero-based parameter indexes considered by generic dispatch.
     pub dispatch_params: Vec<usize>,
-    /// Result value category.
-    pub result_kind: ValueKind,
-    /// Explicit declared result category, when present.
-    pub return_annotation: Option<ValueKind>,
+    /// Result value categories in return order.
+    pub result_kinds: Vec<ValueKind>,
+    /// Explicit declared result categories, when present.
+    pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
     /// Source or synthesized origin.
@@ -878,10 +878,10 @@ pub struct Method {
     pub locals: Vec<Local>,
     /// Method body.
     pub body: Block,
-    /// Result value category.
-    pub result_kind: ValueKind,
-    /// Explicit declared result category, when present.
-    pub return_annotation: Option<ValueKind>,
+    /// Result value categories in return order.
+    pub result_kinds: Vec<ValueKind>,
+    /// Explicit declared result categories, when present.
+    pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
     /// Source or synthesized origin.
@@ -1527,13 +1527,6 @@ fn scalar_result_kind(kinds: &[ValueKind]) -> ValueKind {
     }
 }
 
-fn scalar_expected_result(kinds: &[ValueKind]) -> Option<ValueKind> {
-    match kinds {
-        [kind] => Some(*kind),
-        _ => None,
-    }
-}
-
 fn result_kinds_contain_error(kinds: &[ValueKind]) -> bool {
     kinds.iter().any(|kind| matches!(kind, ValueKind::Error))
 }
@@ -1552,8 +1545,8 @@ struct GenericSymbol {
     name: String,
     id: GenericFunctionId,
     param_kinds: Vec<GenericParamKind>,
-    return_kind: ValueKind,
-    return_annotation: Option<ValueKind>,
+    return_kinds: Vec<ValueKind>,
+    return_annotation: Option<Vec<ValueKind>>,
     dispatch_param: usize,
     span: Span,
 }
@@ -2298,19 +2291,19 @@ impl Lowering {
                     );
                 }
             }
-            let return_annotation = generic.return_type.as_ref().and_then(|annotation| {
-                self.resolve_single_result_annotation(
-                    annotation,
-                    generic.span,
-                    DiagnosticCode::GenericMethodResultTypeMismatch,
-                )
-            });
+            let return_annotation = generic
+                .return_type
+                .as_ref()
+                .map(|annotation| self.resolve_result_annotation(annotation));
+            let return_kinds = return_annotation
+                .clone()
+                .unwrap_or_else(|| vec![ValueKind::I64]);
             self.generic_symbols.push(GenericSymbol {
                 name: generic.name.clone(),
                 id,
                 param_kinds: param_kinds.clone(),
-                return_kind: return_annotation.unwrap_or(ValueKind::I64),
-                return_annotation,
+                return_kinds: return_kinds.clone(),
+                return_annotation: return_annotation.clone(),
                 dispatch_param: 0,
                 span: generic.span,
             });
@@ -2327,7 +2320,7 @@ impl Lowering {
                 arity: generic.params.len(),
                 dispatch_param: 0,
                 dispatch_params: (0..generic.params.len()).collect(),
-                result_kind: return_annotation.unwrap_or(ValueKind::I64),
+                result_kinds: return_kinds,
                 return_annotation,
                 span: generic.span,
                 origin: GenericFunctionOrigin::Source,
@@ -2382,8 +2375,8 @@ impl Lowering {
                 name: setter_name.clone(),
                 id,
                 param_kinds: param_kinds.clone(),
-                return_kind: slot_kind,
-                return_annotation: Some(slot_kind),
+                return_kinds: vec![slot_kind],
+                return_annotation: Some(vec![slot_kind]),
                 dispatch_param: 1,
                 span: slot_span,
             });
@@ -2396,8 +2389,8 @@ impl Lowering {
                 arity: 2,
                 dispatch_param: 1,
                 dispatch_params: vec![0, 1],
-                result_kind: slot_kind,
-                return_annotation: Some(slot_kind),
+                result_kinds: vec![slot_kind],
+                return_annotation: Some(vec![slot_kind]),
                 span: slot_span,
                 origin,
             });
@@ -2492,8 +2485,8 @@ impl Lowering {
                 params: vec![value_param, object_param],
                 locals: ctx.locals,
                 body,
-                result_kind: slot.kind,
-                return_annotation: Some(slot.kind),
+                result_kinds: vec![slot.kind],
+                return_annotation: Some(vec![slot.kind]),
                 span: slot.span,
                 origin: MethodOrigin::SlotSetter {
                     class,
@@ -2890,30 +2883,34 @@ impl Lowering {
             .flatten()
             .or_else(|| specializers.iter().copied().flatten().next())
             .unwrap_or(ClassId(u32::MAX));
-        let return_annotation = method.return_type.as_ref().and_then(|annotation| {
-            self.resolve_single_result_annotation(
-                annotation,
-                method.span,
-                DiagnosticCode::MethodReturnTypeMismatch,
-            )
-        });
-        let expected_results = return_annotation.map(|kind| vec![kind]);
-        let body = self.lower_block(&mut ctx, &method.body, expected_results.as_deref());
-        let body_kind = self.expr_kind(&body.result);
-        let result_kind = return_annotation.unwrap_or(body_kind);
-        if let Some(expected) = return_annotation
-            && !self.kinds_match(expected, body_kind)
+        let return_annotation = method
+            .return_type
+            .as_ref()
+            .map(|annotation| self.resolve_result_annotation(annotation));
+        let body = self.lower_block(&mut ctx, &method.body, return_annotation.as_deref());
+        let body_kinds = self.expr_kinds(&body.result);
+        let result_kinds = return_annotation
+            .clone()
+            .unwrap_or_else(|| body_kinds.clone());
+        if let Some(expected) = &return_annotation
+            && !self.result_kinds_match(expected, &body_kinds)
         {
             ctx.diagnostics.push(
                 Diagnostic::error(body.result.span(), DiagnosticCode::MethodReturnTypeMismatch)
                     .with_arg(DiagnosticArg::text("method", method.name.clone()))
-                    .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
-                    .with_arg(DiagnosticArg::text("actual", self.kind_name(body_kind))),
+                    .with_arg(DiagnosticArg::text(
+                        "expected",
+                        self.result_kinds_name(expected),
+                    ))
+                    .with_arg(DiagnosticArg::text(
+                        "actual",
+                        self.result_kinds_name(&body_kinds),
+                    )),
             );
         }
         if let Some(symbol) = &generic_symbol
-            && let Some(expected) = symbol.return_annotation
-            && !self.kinds_match(expected, result_kind)
+            && let Some(expected) = &symbol.return_annotation
+            && !self.result_kinds_match(expected, &result_kinds)
         {
             ctx.diagnostics.push(
                 Diagnostic::error(
@@ -2921,8 +2918,14 @@ impl Lowering {
                     DiagnosticCode::GenericMethodResultTypeMismatch,
                 )
                 .with_arg(DiagnosticArg::text("method", method.name.clone()))
-                .with_arg(DiagnosticArg::text("actual", self.kind_name(result_kind)))
-                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected))),
+                .with_arg(DiagnosticArg::text(
+                    "actual",
+                    self.result_kinds_name(&result_kinds),
+                ))
+                .with_arg(DiagnosticArg::text(
+                    "expected",
+                    self.result_kinds_name(expected),
+                )),
             );
         }
         self.diagnostics.extend(ctx.diagnostics);
@@ -2936,7 +2939,7 @@ impl Lowering {
             params,
             locals: ctx.locals,
             body,
-            result_kind,
+            result_kinds,
             return_annotation,
             span: method.span,
             origin: MethodOrigin::Source,
@@ -3081,7 +3084,21 @@ impl Lowering {
                     });
                 }
                 ast::LetPattern::Tuple { bindings, .. } => {
-                    let value = self.lower_expr(ctx, &local.value);
+                    let expected_kinds = bindings
+                        .iter()
+                        .map(|binding| {
+                            binding.type_annotation.as_ref().map(|annotation| {
+                                self.resolve_type_annotation_in_context(ctx, annotation)
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let expected_results =
+                        expected_kinds.iter().copied().collect::<Option<Vec<_>>>();
+                    let value = self.lower_expr_expected_results(
+                        ctx,
+                        &local.value,
+                        expected_results.as_deref(),
+                    );
                     let actual_kinds = self.expr_kinds(&value);
                     if bindings.len() != actual_kinds.len() {
                         ctx.diagnostics.push(
@@ -3108,9 +3125,7 @@ impl Lowering {
                                     .with_arg(DiagnosticArg::text("local", binding.name.clone())),
                             );
                         }
-                        let expected_kind = binding.type_annotation.as_ref().map(|annotation| {
-                            self.resolve_type_annotation_in_context(ctx, annotation)
-                        });
+                        let expected_kind = expected_kinds.get(index).copied().flatten();
                         let actual_kind =
                             actual_kinds.get(index).copied().unwrap_or(ValueKind::Error);
                         if let Some(expected) = expected_kind
@@ -3151,17 +3166,13 @@ impl Lowering {
 
         Block {
             lets,
-            result: self.lower_expr_expected(
-                ctx,
-                &block.result,
-                expected_result.and_then(scalar_expected_result),
-            ),
+            result: self.lower_expr_expected_results(ctx, &block.result, expected_result),
             span: block.span,
         }
     }
 
     fn lower_expr(&mut self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
-        self.lower_expr_expected(ctx, expr, None)
+        self.lower_expr_expected_results(ctx, expr, None)
     }
 
     fn lower_expr_expected(
@@ -3169,6 +3180,20 @@ impl Lowering {
         ctx: &mut FunctionContext,
         expr: &ast::Expr,
         expected_result: Option<ValueKind>,
+    ) -> Expr {
+        match expected_result {
+            Some(kind) => {
+                self.lower_expr_expected_results(ctx, expr, Some(core::slice::from_ref(&kind)))
+            }
+            None => self.lower_expr_expected_results(ctx, expr, None),
+        }
+    }
+
+    fn lower_expr_expected_results(
+        &mut self,
+        ctx: &mut FunctionContext,
+        expr: &ast::Expr,
+        expected_results: Option<&[ValueKind]>,
     ) -> Expr {
         match expr {
             ast::Expr::Number { value, span, .. } => Expr::ConstI64 {
@@ -3244,7 +3269,7 @@ impl Lowering {
                 callee, args, span, ..
             } => {
                 if callee == "apply" {
-                    return self.lower_apply(ctx, args, expected_result, *span);
+                    return self.lower_apply(ctx, args, expected_results, *span);
                 }
                 if callee == "values" {
                     let values = args
@@ -3481,11 +3506,13 @@ impl Lowering {
                 let refinement = self.true_branch_refinement(&condition);
                 let previous_kind = refinement
                     .and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
-                let then_branch = self.lower_expr_expected(ctx, then_branch, expected_result);
+                let then_branch =
+                    self.lower_expr_expected_results(ctx, then_branch, expected_results);
                 if let (Some(refinement), Some(previous_kind)) = (refinement, previous_kind) {
                     let _ = ctx.refine_local(refinement.local, previous_kind);
                 }
-                let else_branch = self.lower_expr_expected(ctx, else_branch, expected_result);
+                let else_branch =
+                    self.lower_expr_expected_results(ctx, else_branch, expected_results);
                 let condition_kind = self.expr_kind(&condition);
                 if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
                     ctx.diagnostics.push(
@@ -3677,7 +3704,7 @@ impl Lowering {
         &mut self,
         ctx: &mut FunctionContext,
         args: &[ast::Expr],
-        expected_result: Option<ValueKind>,
+        expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
         let Some((target, args)) = args.split_first() else {
@@ -3705,7 +3732,7 @@ impl Lowering {
                 ctx,
                 target,
                 lowered_args,
-                expected_result,
+                expected_results,
                 span,
             ),
             ValueKind::Error => Expr::Error { span },
@@ -4037,7 +4064,7 @@ impl Lowering {
             arg_kinds: (0..symbol.arity())
                 .map(|index| self.generic_callable_arg_kind(generic, index))
                 .collect(),
-            result_kinds: vec![symbol.return_kind],
+            result_kinds: symbol.return_kinds.clone(),
             span,
         }
     }
@@ -4047,10 +4074,10 @@ impl Lowering {
         ctx: &mut FunctionContext,
         target: Expr,
         args: Vec<Expr>,
-        expected_result: Option<ValueKind>,
+        expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
-        let Some(result_kind) = expected_result else {
+        let Some(result_kinds) = expected_results else {
             ctx.diagnostics.push(
                 Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
                     .with_arg(DiagnosticArg::text(
@@ -4069,7 +4096,7 @@ impl Lowering {
             callable: Box::new(target),
             args,
             arg_kinds,
-            result_kinds: vec![result_kind],
+            result_kinds: result_kinds.to_vec(),
             span,
         }
     }
@@ -4751,7 +4778,9 @@ impl Lowering {
             Expr::GenericCall { generic, .. } => self
                 .generic_symbols
                 .get(generic.0 as usize)
-                .map_or(ValueKind::Error, |symbol| symbol.return_kind),
+                .map_or(ValueKind::Error, |symbol| {
+                    scalar_result_kind(&symbol.return_kinds)
+                }),
             Expr::CallableCall { result_kinds, .. } => scalar_result_kind(result_kinds),
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
@@ -4804,6 +4833,12 @@ impl Lowering {
         match expr {
             Expr::Values { result_kinds, .. } => result_kinds.clone(),
             Expr::CallableCall { result_kinds, .. } => result_kinds.clone(),
+            Expr::GenericCall { generic, .. } => {
+                self.generic_symbols.get(generic.0 as usize).map_or_else(
+                    || vec![ValueKind::Error],
+                    |symbol| symbol.return_kinds.clone(),
+                )
+            }
             Expr::DirectCall { function, .. } => {
                 self.functions.get(function.0 as usize).map_or_else(
                     || vec![ValueKind::Error],
@@ -4967,27 +5002,6 @@ impl Lowering {
             .iter()
             .map(|value| self.resolve_type_annotation(value))
             .collect()
-    }
-
-    fn resolve_single_result_annotation(
-        &mut self,
-        annotation: &ast::ResultAnnotation,
-        span: Span,
-        code: DiagnosticCode,
-    ) -> Option<ValueKind> {
-        let values = self.resolve_result_annotation(annotation);
-        if values.len() != 1 {
-            self.diagnostics.push(
-                Diagnostic::error(span, code)
-                    .with_arg(DiagnosticArg::text("expected", "1 value"))
-                    .with_arg(DiagnosticArg::text(
-                        "actual",
-                        self.result_kinds_name(&values),
-                    )),
-            );
-            return Some(ValueKind::Error);
-        }
-        values.first().copied()
     }
 
     fn resolve_type_annotation_in_context(
@@ -5946,10 +5960,16 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.generics[0].params, ["x"]);
         assert_eq!(module.generics[0].param_kinds, [Some(ValueKind::Any)]);
-        assert_eq!(module.generics[0].result_kind, ValueKind::I64);
-        assert_eq!(module.generics[0].return_annotation, Some(ValueKind::I64));
-        assert_eq!(module.methods[0].return_annotation, Some(ValueKind::I64));
-        assert_eq!(module.methods[0].result_kind, ValueKind::I64);
+        assert_eq!(module.generics[0].result_kinds, [ValueKind::I64]);
+        assert_eq!(
+            module.generics[0].return_annotation,
+            Some(vec![ValueKind::I64])
+        );
+        assert_eq!(
+            module.methods[0].return_annotation,
+            Some(vec![ValueKind::I64])
+        );
+        assert_eq!(module.methods[0].result_kinds, [ValueKind::I64]);
         let Expr::GenericCall { generic, .. } = &module.functions[0].body.result else {
             panic!("expected generic call");
         };

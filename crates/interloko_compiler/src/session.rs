@@ -3434,7 +3434,7 @@ fn fingerprint_dispatcher(module: &sem::Module, generic: DefinitionId) -> String
             ))
             .collect::<Vec<_>>()
             .join(","),
-        sem_kind_fingerprint(module, generic.result_kind)
+        sem_kind_list_fingerprint(module, &generic.result_kinds)
     );
     let mut methods: Vec<_> = module
         .methods
@@ -4328,7 +4328,9 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
         sem::Expr::GenericCall { generic, .. } => module
             .generics
             .get(generic.0 as usize)
-            .map_or(sem::ValueKind::Error, |generic| generic.result_kind),
+            .map_or(sem::ValueKind::Error, |generic| {
+                sem_scalar_result_kind(&generic.result_kinds)
+            }),
         sem::Expr::CallableCall { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
         sem::Expr::Signal { result_kind, .. } => *result_kind,
         sem::Expr::Handle { restart, .. } => restart.result_kind,
@@ -4496,7 +4498,7 @@ fn generic_contract_label(module: &sem::Module, generic_id: sem::GenericFunction
             format!(
                 "{}({params}) -> {}",
                 generic.name,
-                sem_kind_label(module, generic.result_kind)
+                sem_kind_list_label(module, &generic.result_kinds)
             )
         },
     )
@@ -5589,34 +5591,34 @@ fn dump_sem(module: &sem::Module) -> String {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let return_annotation = generic.return_annotation.map_or_else(
+        let return_annotation = generic.return_annotation.as_ref().map_or_else(
             || "inferred".to_string(),
-            |kind| sem_kind_label(module, kind),
+            |kinds| sem_kind_list_label(module, kinds),
         );
         let _ = writeln!(
             out,
-            "generic g{} {} {}({params}) result={:?} return={return_annotation} dispatch-params={} origin={}",
+            "generic g{} {} {}({params}) result={} return={return_annotation} dispatch-params={} origin={}",
             generic.id.0,
             generic.definition,
             generic.name,
-            generic.result_kind,
+            sem_kind_list_label(module, &generic.result_kinds),
             dispatch_params_label(&generic.dispatch_params),
             sem_generic_origin_label(generic.origin)
         );
     }
     for method in &module.methods {
-        let return_annotation = method.return_annotation.map_or_else(
+        let return_annotation = method.return_annotation.as_ref().map_or_else(
             || "inferred".to_string(),
-            |kind| sem_kind_label(module, kind),
+            |kinds| sem_kind_list_label(module, kinds),
         );
         let _ = writeln!(
             out,
-            "method m{} {} generic=g{} specializers={} result={:?} return={return_annotation} origin={}",
+            "method m{} {} generic=g{} specializers={} result={} return={return_annotation} origin={}",
             method.id.0,
             method.definition,
             method.generic.0,
             sem_specializer_vector_label(module, &method.specializers),
-            method.result_kind,
+            sem_kind_list_label(module, &method.result_kinds),
             sem_method_origin_label(method.origin)
         );
         dump_sem_locals(module, &mut out, &method.locals, 2);
@@ -5971,7 +5973,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             generic.id.0,
             generic.definition,
             generic.name,
-            sem_kind_label(module, generic.result_kind),
+            sem_kind_list_label(module, &generic.result_kinds),
             dispatch_params_label(&generic.dispatch_params),
             sem_generic_origin_label(generic.origin)
         );
@@ -5988,7 +5990,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
                 sem_specializer_vector_label(module, &method.specializers),
                 sem_specializer_origin_vector_label(module, &method.specializers),
                 sem_method_origin_label(method.origin),
-                sem_kind_label(module, method.result_kind),
+                sem_kind_list_label(module, &method.result_kinds),
                 sem_dispatch_applicability_vector_label(module, &method.specializers)
             );
         }
@@ -7288,7 +7290,7 @@ fn dump_sem_environment_object(artifacts: &SessionArtifacts, object: &Environmen
                 let _ = writeln!(
                     out,
                     "result: {}",
-                    sem_kind_label(&artifacts.sem, method.result_kind)
+                    sem_kind_list_label(&artifacts.sem, &method.result_kinds)
                 );
                 let _ = writeln!(out, "locals: {}", method.locals.len());
             } else {
@@ -9200,7 +9202,7 @@ fn project_environment_generic(
         title: format!(
             "{}({params}) -> {}",
             generic.name,
-            sem_kind_label(module, generic.result_kind)
+            sem_kind_list_label(module, &generic.result_kinds)
         ),
         affordances,
         execution: Some(format!(
@@ -9257,7 +9259,7 @@ fn project_environment_method(
         },
         title: format!(
             "{generic_name}{specializers} -> {}",
-            sem_kind_label(module, method.result_kind)
+            sem_kind_list_label(module, &method.result_kinds)
         ),
         affordances,
         execution: Some(format!(
@@ -10696,9 +10698,9 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     ))
                     .collect::<Vec<_>>()
                     .join(","),
-                generic.return_annotation.map_or_else(
+                generic.return_annotation.as_ref().map_or_else(
                     || "inferred".into(),
-                    |kind| sem_kind_fingerprint(module, kind)
+                    |kinds| sem_kind_list_fingerprint(module, kinds)
                 ),
                 generic.arity
             ),
@@ -10718,9 +10720,9 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
             },
             fingerprint: format!(
                 "method:{generic}:{specializers}:{}:{}",
-                method.return_annotation.map_or_else(
+                method.return_annotation.as_ref().map_or_else(
                     || "inferred".into(),
-                    |kind| sem_kind_fingerprint(module, kind)
+                    |kinds| sem_kind_list_fingerprint(module, kinds)
                 ),
                 fingerprint_sem_block(module, &method.body)
             ),

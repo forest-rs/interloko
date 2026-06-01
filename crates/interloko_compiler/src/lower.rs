@@ -835,8 +835,9 @@ impl<'module> Lowering<'module> {
 
     fn lower_method(&self, method: &sem::Method) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_method(self.module, &self.ids, method)?;
-        let ret = self.value_kind(method.result_kind)?;
-        body.lower_block(&method.body, &[ret])?;
+        let rets = self.value_kinds(&method.result_kinds)?;
+        let ret = rets.first().copied().unwrap_or(ValueKind::Any);
+        body.lower_block(&method.body, &rets)?;
         let generic = self
             .module
             .generics
@@ -848,7 +849,7 @@ impl<'module> Lowering<'module> {
             kind: FunctionKind::Method(method.id),
             params: body.params,
             ret,
-            rets: vec![ret],
+            rets,
             locals: body.locals,
             instructions: body.instructions,
             span: method.span,
@@ -863,14 +864,16 @@ impl<'module> Lowering<'module> {
         }
 
         let mut body = BodyLowering::for_dispatcher(self.module, &self.ids, generic);
+        let rets = self.value_kinds(&generic.result_kinds)?;
+        let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_dispatcher(generic)?;
         Ok(Function {
             id: self.lower_generic_id(generic.id)?,
             name: format!("{}#dispatch", generic.name),
             kind: FunctionKind::Dispatcher(generic.id),
             params: body.params,
-            ret: self.value_kind(generic.result_kind)?,
-            rets: vec![self.value_kind(generic.result_kind)?],
+            ret,
+            rets,
             locals: body.locals,
             instructions: body.instructions,
             span: generic.span,
@@ -975,7 +978,7 @@ impl<'module> Lowering<'module> {
             callable: sem::KnownCallable::GenericFunction(generic.id),
             target,
             call_params: &params,
-            rets: vec![self.value_kind(generic.result_kind)?],
+            rets: self.value_kinds(&generic.result_kinds)?,
             span: generic.span,
         })
     }
@@ -1352,7 +1355,12 @@ fn generic_callable_signature(
         params: (0..generic.arity)
             .map(|index| dispatcher_param_kind(generic, index))
             .collect(),
-        rets: vec![value_kind(generic.result_kind)?],
+        rets: generic
+            .result_kinds
+            .iter()
+            .copied()
+            .map(value_kind)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -1629,7 +1637,12 @@ impl<'module> BodyLowering<'module> {
             }
             let class_const = self.alloc(ValueKind::U64);
             let cond = self.alloc(ValueKind::Bool);
-            let method_result = self.alloc(self.value_kind(method.result_kind)?);
+            let method_rets = self.value_kinds(&method.result_kinds)?;
+            let method_results = method_rets
+                .iter()
+                .copied()
+                .map(|kind| self.alloc(kind))
+                .collect::<Vec<_>>();
             let matched = self.alloc_label();
             let unmatched = self.alloc_label();
 
@@ -1674,7 +1687,7 @@ impl<'module> BodyLowering<'module> {
                 call_args.push(value.reg);
             }
             self.instructions.push(Instr::Call {
-                dsts: vec![method_result.reg],
+                dsts: method_results.iter().map(|result| result.reg).collect(),
                 callee: self
                     .ids
                     .methods
@@ -1684,13 +1697,25 @@ impl<'module> BodyLowering<'module> {
                 args: call_args,
                 span: method.span,
             });
-            let result = self.coerce_value(
-                method_result,
-                self.value_kind(generic.result_kind)?,
-                method.span,
-            )?;
+            let generic_rets = self.value_kinds(&generic.result_kinds)?;
+            if method_results.len() != generic_rets.len() {
+                return Err(invalid_semantic(
+                    "method return arity does not match generic signature",
+                ));
+            }
+            let mut results = Vec::with_capacity(method_results.len());
+            for (method_result, generic_ret) in method_results
+                .iter()
+                .copied()
+                .zip(generic_rets.iter().copied())
+            {
+                results.push(
+                    self.coerce_value(method_result, generic_ret, method.span)?
+                        .reg,
+                );
+            }
             self.instructions.push(Instr::Return {
-                values: vec![result.reg],
+                values: results,
                 span: method.span,
             });
             self.instructions.push(Instr::Label { label: unmatched });
@@ -1980,7 +2005,12 @@ impl<'module> BodyLowering<'module> {
                     .get(generic.0 as usize)
                     .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
                 let args = self.lower_generic_args(args, generic_info)?;
-                let result = self.alloc(self.value_kind(generic_info.result_kind)?);
+                if generic_info.result_kinds.len() != 1 {
+                    return Err(invalid_semantic(
+                        "multiple-value generic call used in a scalar expression",
+                    ));
+                }
+                let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
                 self.instructions.push(Instr::Call {
                     dsts: vec![result.reg],
                     callee: self
@@ -2270,6 +2300,39 @@ impl<'module> BodyLowering<'module> {
                         .get(function.0 as usize)
                         .copied()
                         .ok_or_else(|| invalid_semantic("function id is out of range"))?,
+                    args,
+                    span: *span,
+                });
+                Ok(results)
+            }
+            sem::Expr::GenericCall {
+                generic,
+                args,
+                span,
+            } => {
+                let generic_info = self
+                    .module
+                    .generics
+                    .get(generic.0 as usize)
+                    .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
+                if generic_info.result_kinds.len() == 1 {
+                    return Ok(vec![self.lower_expr(expr)?]);
+                }
+                let args = self.lower_generic_args(args, generic_info)?;
+                let rets = self.value_kinds(&generic_info.result_kinds)?;
+                let results = rets
+                    .iter()
+                    .copied()
+                    .map(|kind| self.alloc(kind))
+                    .collect::<Vec<_>>();
+                self.instructions.push(Instr::Call {
+                    dsts: results.iter().map(|result| result.reg).collect(),
+                    callee: self
+                        .ids
+                        .generics
+                        .get(generic.0 as usize)
+                        .copied()
+                        .ok_or_else(|| invalid_semantic("generic id is out of range"))?,
                     args,
                     span: *span,
                 });
