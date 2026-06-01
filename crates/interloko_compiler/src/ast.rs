@@ -790,9 +790,13 @@ impl<'tree> Lowering<'tree> {
             };
             let option_span = *option_span;
             let option_name = (*option_name).to_string();
+            let slot_keyword = option
+                .child_nodes(CstKind::SlotKeyword)
+                .next()
+                .and_then(|keyword| self.first_token_text(keyword, TokenKind::Ident));
             match option_name.as_str() {
                 "init-keyword" => {
-                    let Some((keyword_span, keyword_name)) = idents.get(1) else {
+                    let Some((keyword_span, keyword_name)) = slot_keyword else {
                         self.diagnostics.push(
                             Diagnostic::error(
                                 option_span,
@@ -803,10 +807,10 @@ impl<'tree> Lowering<'tree> {
                         continue;
                     };
                     init_keyword = Some((*keyword_name).to_string());
-                    init_keyword_span = *keyword_span;
+                    init_keyword_span = keyword_span;
                 }
                 "required-init-keyword" => {
-                    let Some((keyword_span, keyword_name)) = idents.get(1) else {
+                    let Some((keyword_span, keyword_name)) = slot_keyword else {
                         self.diagnostics.push(
                             Diagnostic::error(
                                 option_span,
@@ -817,7 +821,7 @@ impl<'tree> Lowering<'tree> {
                         continue;
                     };
                     init_keyword = Some((*keyword_name).to_string());
-                    init_keyword_span = *keyword_span;
+                    init_keyword_span = keyword_span;
                     required_init_keyword = true;
                 }
                 "init-value" => {
@@ -1528,7 +1532,14 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_keyword_value(&self, node: &CstNode) -> Expr {
-        let Some((span, text)) = self.first_token_text(node, TokenKind::Keyword) else {
+        let symbol = self
+            .first_token_text(node, TokenKind::Keyword)
+            .map(|(span, text)| (span, text[2..].to_string()))
+            .or_else(|| {
+                self.first_token_text(node, TokenKind::Ident)
+                    .map(|(span, text)| (span, text.to_string()))
+            });
+        let Some((span, name)) = symbol else {
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1536,7 +1547,7 @@ impl<'tree> Lowering<'tree> {
         };
         Expr::Symbol {
             id: self.ast_id(node),
-            name: text[2..].to_string(),
+            name,
             span,
         }
     }
@@ -1770,7 +1781,11 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_keyword_arg(&mut self, node: &CstNode) -> KeywordArg {
-        let Some((name_span, name)) = self.first_token_text(node, TokenKind::Ident) else {
+        let keyword_node = node
+            .child_nodes(CstKind::ArgumentKeyword)
+            .next()
+            .unwrap_or(node);
+        let Some((name_span, name)) = self.first_token_text(keyword_node, TokenKind::Ident) else {
             return KeywordArg {
                 id: self.ast_id(node),
                 name: String::new(),
@@ -1785,7 +1800,9 @@ impl<'tree> Lowering<'tree> {
             .children
             .iter()
             .find_map(|child| match child {
-                CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                CstElement::Node(expr) if expr.kind != CstKind::ArgumentKeyword => {
+                    Some(self.lower_expr(expr))
+                }
                 _ => None,
             })
             .unwrap_or(Expr::Error {

@@ -11520,6 +11520,69 @@ mod tests {
     }
 
     #[test]
+    fn syntax_tooling_preserves_keyword_context_roles() {
+        let source = "define class <circle> (<object>)\n  slot radius :: <integer>, required-init-keyword: r:;\nend;\n\
+                      define function main()\n  let keyword = fallback:;\n  make(<circle>, r: 1)\nend";
+        let artifacts =
+            CompilerSession::compile_source("keyword-roles.loko", source, RuntimeMode::CompileOnly);
+
+        let expression_keyword_start = source
+            .find("fallback:")
+            .expect("expression keyword symbol present");
+        let expression_keyword_span = Span::new(
+            expression_keyword_start,
+            expression_keyword_start + "fallback:".len(),
+        );
+        let expression_keyword_nodes =
+            artifacts.syntax_nodes_containing_span(expression_keyword_span);
+        assert!(
+            expression_keyword_nodes
+                .iter()
+                .any(|node| node.kind == CstKind::KeywordExpr)
+        );
+        assert!(
+            artifacts
+                .grammar_rule_applications_containing_span(expression_keyword_span)
+                .iter()
+                .any(|application| application.rule_name == "keyword-symbol")
+        );
+
+        let slot_keyword_context = source
+            .find("required-init-keyword: r:")
+            .expect("slot keyword option present");
+        let slot_keyword_start = slot_keyword_context + "required-init-keyword: ".len();
+        let slot_keyword_span = Span::new(slot_keyword_start, slot_keyword_start + "r:".len());
+        let slot_keyword_nodes = artifacts.syntax_nodes_containing_span(slot_keyword_span);
+        assert!(
+            slot_keyword_nodes
+                .iter()
+                .any(|node| node.kind == CstKind::SlotKeyword)
+        );
+        assert!(
+            artifacts
+                .grammar_rule_applications_containing_span(slot_keyword_span)
+                .iter()
+                .any(|application| application.rule_name == "slot-keyword")
+        );
+
+        let argument_keyword_start = source.rfind("r: 1").expect("argument keyword present");
+        let argument_keyword_span =
+            Span::new(argument_keyword_start, argument_keyword_start + "r:".len());
+        let argument_keyword_nodes = artifacts.syntax_nodes_containing_span(argument_keyword_span);
+        assert!(
+            argument_keyword_nodes
+                .iter()
+                .any(|node| node.kind == CstKind::ArgumentKeyword)
+        );
+        assert!(
+            artifacts
+                .grammar_rule_applications_containing_span(argument_keyword_span)
+                .iter()
+                .any(|application| application.rule_name == "argument-keyword")
+        );
+    }
+
+    #[test]
     fn parse_view_reports_grammar_diagnostics_for_source_span() {
         let source = "define classs foo (<object>) end;";
         let artifacts =

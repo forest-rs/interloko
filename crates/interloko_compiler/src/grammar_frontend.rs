@@ -2956,8 +2956,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "slot-option",
-            "init-keyword | required-init-keyword | init-value",
+            "init-value-option | init-keyword-option | required-init-keyword-option | extension-slot-option",
             "syntax.rs:Parser::parse_slot_option",
+        ),
+        (
+            "slot-keyword",
+            "name `:`",
+            "base_loko_primary::BaseLokoCstBuilder::build_slot_option",
         ),
         (
             "generic-definition",
@@ -3082,8 +3087,18 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "keyword-argument",
-            "keyword-name `:` expression",
+            "argument-keyword expression",
             "syntax.rs:Parser::parse_keyword_arg",
+        ),
+        (
+            "argument-keyword",
+            "name `:`",
+            "base_loko_primary::BaseLokoCstBuilder::build_keyword_arg",
+        ),
+        (
+            "keyword-symbol",
+            "explicit-keyword-symbol | expression-keyword-symbol",
+            "syntax.rs:Parser::parse_primary",
         ),
     ];
 
@@ -3538,6 +3553,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::Class => Some("class-definition"),
         CstKind::SlotDecl => Some("slot-declaration"),
         CstKind::SlotOption => Some("slot-option"),
+        CstKind::SlotKeyword => Some("slot-keyword"),
         CstKind::Generic => Some("generic-definition"),
         CstKind::Method => Some("method-definition"),
         CstKind::ParameterList => Some("parameter-list"),
@@ -3549,13 +3565,14 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::SlotExpr => Some("postfix-expression"),
         CstKind::SlotAssignExpr => Some("assignment-expression"),
         CstKind::KeywordArg => Some("keyword-argument"),
+        CstKind::ArgumentKeyword => Some("argument-keyword"),
         CstKind::NameExpr
         | CstKind::NumberExpr
         | CstKind::BoolExpr
         | CstKind::StringExpr
         | CstKind::SymbolExpr
-        | CstKind::KeywordExpr
         | CstKind::TypeExpr => Some("primary-expression"),
+        CstKind::KeywordExpr => Some("keyword-symbol"),
         CstKind::FunctionExpr => Some("function-expression"),
         CstKind::VectorExpr => Some("vector-expression"),
         CstKind::IfExpr => Some("if-expression"),
@@ -3963,7 +3980,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 31);
+        assert_eq!(grammar.effective_rules.len(), 34);
 
         assert!(
             !records

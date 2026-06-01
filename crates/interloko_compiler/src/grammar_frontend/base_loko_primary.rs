@@ -228,7 +228,10 @@ impl BaseLokoCstProjector<'_> {
             .find(|child| {
                 matches!(
                     child.name().unwrap_or(""),
-                    "init-value-option" | "keyword-slot-option"
+                    "init-value-option"
+                        | "init-keyword-option"
+                        | "required-init-keyword-option"
+                        | "extension-slot-option"
                 )
             })
             .unwrap_or(node);
@@ -237,8 +240,22 @@ impl BaseLokoCstProjector<'_> {
             .iter()
             .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
-        let excluded = expr.as_ref().map_or_else(Vec::new, |expr| vec![expr.span]);
+        let slot_keyword = inner
+            .children
+            .iter()
+            .find(|child| child.is_rule("slot-keyword"))
+            .map(|keyword| self.leaf(CstKind::SlotKeyword, keyword));
+        let mut excluded = Vec::new();
+        if let Some(expr) = &expr {
+            excluded.push(expr.span);
+        }
+        if let Some(slot_keyword) = &slot_keyword {
+            excluded.push(slot_keyword.span);
+        }
         let mut children = self.direct_tokens(inner.span, &excluded);
+        if let Some(slot_keyword) = slot_keyword {
+            children.push(CstElement::Node(slot_keyword));
+        }
         if let Some(expr) = expr {
             children.push(CstElement::Node(expr));
         }
@@ -380,15 +397,7 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_keyword_symbol(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        let kind =
-            if self.tokens.iter().any(|token| {
-                token.kind == TokenKind::Keyword && span_contains(node.span, token.span)
-            }) {
-                CstKind::KeywordExpr
-            } else {
-                CstKind::SymbolExpr
-            };
-        self.leaf(kind, node)
+        self.leaf(CstKind::KeywordExpr, node)
     }
 
     fn build_handle(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -667,13 +676,27 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_keyword_arg(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let argument_keyword = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("argument-keyword"))
+            .map(|keyword| self.leaf(CstKind::ArgumentKeyword, keyword));
         let expr = node
             .children
             .iter()
             .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
-        let excluded = expr.as_ref().map_or_else(Vec::new, |expr| vec![expr.span]);
+        let mut excluded = Vec::new();
+        if let Some(argument_keyword) = &argument_keyword {
+            excluded.push(argument_keyword.span);
+        }
+        if let Some(expr) = &expr {
+            excluded.push(expr.span);
+        }
         let mut children = self.direct_tokens(node.span, &excluded);
+        if let Some(argument_keyword) = argument_keyword {
+            children.push(CstElement::Node(argument_keyword));
+        }
         if let Some(expr) = expr {
             children.push(CstElement::Node(expr));
         }

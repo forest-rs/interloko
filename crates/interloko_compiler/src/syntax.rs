@@ -171,6 +171,8 @@ pub enum CstKind {
     SlotDecl,
     /// Slot option such as `init-keyword: radius:`.
     SlotOption,
+    /// Keyword value used by a slot option, such as `radius:`.
+    SlotKeyword,
     /// Generic function declaration.
     Generic,
     /// Method definition.
@@ -195,6 +197,8 @@ pub enum CstKind {
     ArgList,
     /// Keyword argument.
     KeywordArg,
+    /// Keyword introducer in an argument list, such as `radius:`.
+    ArgumentKeyword,
     /// Name reference expression.
     NameExpr,
     /// Integer literal expression.
@@ -205,7 +209,7 @@ pub enum CstKind {
     StringExpr,
     /// Symbol literal expression.
     SymbolExpr,
-    /// Legacy keyword-style symbol literal expression.
+    /// Keyword symbol literal expression.
     KeywordExpr,
     /// Vector literal expression.
     VectorExpr,
@@ -330,8 +334,10 @@ fn syntax_node_id(
         }
         CstKind::SlotDecl
         | CstKind::SlotOption
+        | CstKind::SlotKeyword
         | CstKind::LetStmt
         | CstKind::KeywordArg
+        | CstKind::ArgumentKeyword
         | CstKind::NameExpr
         | CstKind::NumberExpr
         | CstKind::BoolExpr
@@ -461,6 +467,8 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::VectorExpr => 27,
         CstKind::UnaryExpr => 28,
         CstKind::FunctionExpr => 31,
+        CstKind::SlotKeyword => 32,
+        CstKind::ArgumentKeyword => 33,
     }
 }
 
