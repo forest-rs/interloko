@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-return-type-mismatch
+// expect: diagnostic contains function `quiet` returns 0 values
+// expect: diagnostic contains body has <integer>
+
+define function quiet() => ()
+  1
+end;

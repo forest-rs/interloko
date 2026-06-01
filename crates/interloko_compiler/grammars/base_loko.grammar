@@ -18,7 +18,7 @@ rule parameter-list = trailing-list-of<parameter, `,`>
 rule parameter = name type-annotation?
 rule result-annotation = `=>` result-annotation-value
 rule result-annotation-value = type-annotation-value | result-annotation-values
-rule result-annotation-values = `(` trailing-list-of<type-annotation-value, `,`> `)`
+rule result-annotation-values = `(` trailing-list-of<type-annotation-value, `,`>? `)`
 rule type-annotation = `::` type-annotation-value
 rule type-annotation-value = class-object-type? type-name
 rule class-object-type = `class`

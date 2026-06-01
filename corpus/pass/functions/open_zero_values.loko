@@ -1,0 +1,8 @@
+// expect: diagnostics 0
+// expect: dump sem contains open() result=() return=inferred
+// expect: dump lowered contains open() -> ()
+// expect: dump tape contains rets=[]
+
+define function open()
+  values()
+end;

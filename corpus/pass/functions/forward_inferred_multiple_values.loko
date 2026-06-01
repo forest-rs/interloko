@@ -1,0 +1,14 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains split() result=(integer, integer) return=inferred
+// expect: dump sem contains main() result=integer return=inferred
+// expect: dump tape contains rets=[result0
+
+define function main()
+  let (base :: <integer>, extra :: <integer>) = split();
+  base + extra
+end;
+
+define function split()
+  values(40, 2)
+end;

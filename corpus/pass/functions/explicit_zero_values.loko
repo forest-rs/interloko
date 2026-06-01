@@ -1,0 +1,9 @@
+// expect: diagnostics 0
+// expect: dump ast contains returns ()
+// expect: dump sem contains quiet() result=() return=()
+// expect: dump lowered contains quiet() -> ()
+// expect: dump tape contains rets=[]
+
+define function quiet() => ()
+  values()
+end;

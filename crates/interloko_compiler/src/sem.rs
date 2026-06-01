@@ -822,7 +822,9 @@ pub struct GenericFunction {
     pub dispatch_params: Vec<usize>,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
-    /// Explicit declared result categories, when present.
+    /// Explicit declared result categories, when present. `None` means the
+    /// source declaration has an open result contract and the concrete result
+    /// categories are inferred for lowering.
     pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
@@ -880,7 +882,9 @@ pub struct Method {
     pub body: Block,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
-    /// Explicit declared result categories, when present.
+    /// Explicit declared result categories, when present. `None` means the
+    /// source declaration has an open result contract and the concrete result
+    /// categories are inferred for lowering.
     pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
@@ -907,7 +911,9 @@ pub struct Function {
     pub body: Block,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
-    /// Explicit declared result categories, when present.
+    /// Explicit declared result categories, when present. `None` means the
+    /// source declaration has an open result contract and the concrete result
+    /// categories are inferred for lowering.
     pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
@@ -930,7 +936,9 @@ pub struct Closure {
     pub body: Block,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
-    /// Explicit declared result categories, when present.
+    /// Explicit declared result categories, when present. `None` means the
+    /// source declaration has an open result contract and the concrete result
+    /// categories are inferred for lowering.
     pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
@@ -1525,6 +1533,10 @@ fn scalar_result_kind(kinds: &[ValueKind]) -> ValueKind {
         [kind] => *kind,
         _ => ValueKind::Error,
     }
+}
+
+fn provisional_open_result_kinds() -> Vec<ValueKind> {
+    vec![ValueKind::I64]
 }
 
 fn result_kinds_contain_error(kinds: &[ValueKind]) -> bool {
@@ -2297,7 +2309,7 @@ impl Lowering {
                 .map(|annotation| self.resolve_result_annotation(annotation));
             let return_kinds = return_annotation
                 .clone()
-                .unwrap_or_else(|| vec![ValueKind::I64]);
+                .unwrap_or_else(provisional_open_result_kinds);
             self.generic_symbols.push(GenericSymbol {
                 name: generic.name.clone(),
                 id,
@@ -2642,7 +2654,7 @@ impl Lowering {
                 .map(|annotation| self.resolve_result_annotation(annotation));
             let return_kinds = return_annotation
                 .clone()
-                .unwrap_or_else(|| vec![ValueKind::I64]);
+                .unwrap_or_else(provisional_open_result_kinds);
             self.functions.push(FunctionSymbol {
                 name: function.name.clone(),
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
@@ -2767,6 +2779,11 @@ impl Lowering {
     }
 
     fn lower_module(&mut self, module: &ast::Module) -> Module {
+        let diagnostic_len = self.diagnostics.len();
+        let closure_len = self.closures.len();
+        self.infer_open_result_signatures(module, diagnostic_len, closure_len);
+        self.diagnostics.truncate(diagnostic_len);
+        self.closures.truncate(closure_len);
         self.methods.clear();
         for method in &module.methods {
             let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
@@ -2774,6 +2791,7 @@ impl Lowering {
             self.methods.push(method);
         }
         self.collect_slot_setter_methods();
+        self.refresh_inferred_generic_results();
         self.check_ambiguous_generic_methods();
 
         let functions = module
@@ -2798,6 +2816,146 @@ impl Lowering {
             constants: self.constants.clone(),
             diagnostics: self.diagnostics.clone(),
         }
+    }
+
+    fn infer_open_result_signatures(
+        &mut self,
+        module: &ast::Module,
+        diagnostic_len: usize,
+        closure_len: usize,
+    ) {
+        let max_passes = module
+            .methods
+            .len()
+            .saturating_add(module.functions.len())
+            .saturating_add(self.generics.len())
+            .saturating_add(2);
+        for _ in 0..max_passes {
+            let before = self.result_signature_snapshot();
+            self.diagnostics.truncate(diagnostic_len);
+            self.closures.truncate(closure_len);
+            self.methods.clear();
+
+            for method in &module.methods {
+                let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+                let method = self.lower_method(id, method);
+                self.methods.push(method);
+            }
+            self.collect_slot_setter_methods();
+            self.refresh_inferred_generic_results();
+            for (index, function) in module.functions.iter().enumerate() {
+                let _ = self.lower_function(
+                    FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
+                    function,
+                );
+            }
+
+            if self.result_signature_snapshot() == before {
+                break;
+            }
+        }
+    }
+
+    fn result_signature_snapshot(&self) -> Vec<Vec<ValueKind>> {
+        self.generic_symbols
+            .iter()
+            .map(|symbol| symbol.return_kinds.clone())
+            .chain(
+                self.functions
+                    .iter()
+                    .map(|symbol| symbol.return_kinds.clone()),
+            )
+            .collect()
+    }
+
+    fn refresh_inferred_generic_results(&mut self) {
+        let mut updates = Vec::new();
+        for generic in &self.generics {
+            if generic.return_annotation.is_some() {
+                continue;
+            }
+            let mut inferred: Option<Vec<ValueKind>> = None;
+            for method in self
+                .methods
+                .iter()
+                .filter(|method| method.generic == generic.id)
+            {
+                let Some(current) = &inferred else {
+                    inferred = Some(method.result_kinds.clone());
+                    continue;
+                };
+                let Some(joined) = self.join_result_kinds(current, &method.result_kinds) else {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            method.body.result.span(),
+                            DiagnosticCode::GenericMethodResultTypeMismatch,
+                        )
+                        .with_arg(DiagnosticArg::text("method", generic.name.clone()))
+                        .with_arg(DiagnosticArg::text(
+                            "actual",
+                            self.result_kinds_name(&method.result_kinds),
+                        ))
+                        .with_arg(DiagnosticArg::text(
+                            "expected",
+                            self.result_kinds_name(current),
+                        )),
+                    );
+                    break;
+                };
+                inferred = Some(joined);
+            }
+            if let Some(result_kinds) = inferred {
+                updates.push((generic.id, result_kinds));
+            }
+        }
+
+        for (id, result_kinds) in updates {
+            if let Some(generic) = self.generics.get_mut(id.0 as usize) {
+                generic.result_kinds = result_kinds.clone();
+            }
+            if let Some(symbol) = self.generic_symbols.get_mut(id.0 as usize) {
+                symbol.return_kinds = result_kinds;
+            }
+        }
+    }
+
+    fn join_result_kinds(
+        &self,
+        current: &[ValueKind],
+        next: &[ValueKind],
+    ) -> Option<Vec<ValueKind>> {
+        if current.len() != next.len() {
+            return None;
+        }
+        current
+            .iter()
+            .copied()
+            .zip(next.iter().copied())
+            .map(|(current, next)| self.join_result_kind(current, next))
+            .collect()
+    }
+
+    fn join_result_kind(&self, current: ValueKind, next: ValueKind) -> Option<ValueKind> {
+        if current == next {
+            return Some(current);
+        }
+        if current == ValueKind::Error {
+            return Some(next);
+        }
+        if next == ValueKind::Error {
+            return Some(current);
+        }
+        if self.is_callable_kind(current) && self.is_callable_kind(next) {
+            return Some(ValueKind::Callable);
+        }
+        if !self.is_callable_kind(current) && !self.is_callable_kind(next) {
+            return Some(ValueKind::Any);
+        }
+        None
+    }
+
+    fn is_callable_kind(&self, kind: ValueKind) -> bool {
+        matches!(kind, ValueKind::Callable | ValueKind::KnownCallable(_))
     }
 
     fn lower_method(&mut self, id: MethodId, method: &ast::Method) -> Method {

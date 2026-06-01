@@ -1,0 +1,19 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains split(x:object-top) result=(integer, integer) return=inferred
+// expect: dump lowered contains split#dispatch
+// expect: dump tape contains rets=[result0
+
+define class <source> (<object>)
+end;
+
+define generic split(x :: <object>);
+
+define method split(x :: <source>)
+  values(40, 2)
+end;
+
+define function main()
+  let (base :: <integer>, extra :: <integer>) = split(make(<source>));
+  base + extra
+end;
