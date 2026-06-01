@@ -6,7 +6,7 @@
 // expect: dump lowered contains (%r
 // expect: dump tape contains rets=[result0
 
-define function split(use_large :: <boolean>)
+define function split(use_large :: <boolean>) => (<integer>, <integer>)
   if use_large then
     values(40, 2)
   else
@@ -15,6 +15,6 @@ define function split(use_large :: <boolean>)
 end;
 
 define function main()
-  let (base, extra) = split(#t);
+  let (base :: <integer>, extra :: <integer>) = split(#t);
   base + extra
 end;

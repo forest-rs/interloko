@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.local-type-mismatch
+// expect: diagnostic contains local `flag` expects <boolean> but initializer has <integer>
+
+define function split() => (<integer>, <integer>)
+  values(1, 2)
+end;
+
+define function main()
+  let (flag :: <boolean>, count :: <integer>) = split();
+  count
+end;

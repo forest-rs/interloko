@@ -5217,7 +5217,7 @@ fn dump_ast(module: &ast::Module) -> String {
         );
         if let Some(return_type) = &generic.return_type {
             indent_line(&mut out, 2);
-            let _ = writeln!(out, "returns {}", dump_type_annotation(return_type));
+            let _ = writeln!(out, "returns {}", dump_result_annotation(return_type));
         }
     }
     for method in &module.methods {
@@ -5234,7 +5234,7 @@ fn dump_ast(module: &ast::Module) -> String {
         );
         if let Some(return_type) = &method.return_type {
             indent_line(&mut out, 2);
-            let _ = writeln!(out, "returns {}", dump_type_annotation(return_type));
+            let _ = writeln!(out, "returns {}", dump_result_annotation(return_type));
         }
         dump_ast_block(&mut out, &method.body, 2);
     }
@@ -5254,7 +5254,7 @@ fn dump_ast(module: &ast::Module) -> String {
         );
         if let Some(return_type) = &function.return_type {
             indent_line(&mut out, 2);
-            let _ = writeln!(out, "returns {}", dump_type_annotation(return_type));
+            let _ = writeln!(out, "returns {}", dump_result_annotation(return_type));
         }
         dump_ast_block(&mut out, &function.body, 2);
     }
@@ -5280,6 +5280,21 @@ fn dump_type_annotation(annotation: &ast::TypeAnnotation) -> String {
         format!("class {}", annotation.name)
     } else {
         annotation.name.clone()
+    }
+}
+
+fn dump_result_annotation(annotation: &ast::ResultAnnotation) -> String {
+    match annotation.values.as_slice() {
+        [] => "()".into(),
+        [value] => dump_type_annotation(value),
+        values => {
+            let values = values
+                .iter()
+                .map(dump_type_annotation)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        }
     }
 }
 
@@ -5350,7 +5365,7 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         } => {
             let return_type = return_type
                 .as_ref()
-                .map_or("inferred", |annotation| annotation.name.as_str());
+                .map_or_else(|| "inferred".into(), dump_result_annotation);
             let _ = writeln!(
                 out,
                 "{id} function params={} return={return_type}",
@@ -5634,9 +5649,9 @@ fn dump_sem(module: &sem::Module) -> String {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let return_annotation = closure.return_annotation.map_or_else(
+        let return_annotation = closure.return_annotation.as_ref().map_or_else(
             || "inferred".to_string(),
-            |kind| sem_kind_label(module, kind),
+            |kinds| sem_kind_list_label(module, kinds),
         );
         let _ = writeln!(
             out,
@@ -5672,9 +5687,9 @@ fn dump_sem(module: &sem::Module) -> String {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let return_annotation = function.return_annotation.map_or_else(
+        let return_annotation = function.return_annotation.as_ref().map_or_else(
             || "inferred".to_string(),
-            |kind| sem_kind_label(module, kind),
+            |kinds| sem_kind_list_label(module, kinds),
         );
         let _ = writeln!(
             out,
@@ -9680,6 +9695,21 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
     }
 }
 
+fn sem_kind_list_fingerprint(module: &sem::Module, kinds: &[sem::ValueKind]) -> String {
+    match kinds {
+        [] => "()".into(),
+        [kind] => sem_kind_fingerprint(module, *kind),
+        _ => {
+            let kinds = kinds
+                .iter()
+                .map(|kind| sem_kind_fingerprint(module, *kind))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("({kinds})")
+        }
+    }
+}
+
 fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
     match kind {
         sem::ValueKind::Any => "boxed-any",
@@ -10700,9 +10730,9 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     .map(|kind| sem_kind_fingerprint(module, *kind))
                     .collect::<Vec<_>>()
                     .join(","),
-                function.return_annotation.map_or_else(
+                function.return_annotation.as_ref().map_or_else(
                     || "inferred".into(),
-                    |kind| sem_kind_fingerprint(module, kind)
+                    |kinds| sem_kind_list_fingerprint(module, kinds)
                 ),
                 fingerprint_sem_block(module, &function.body)
             ),

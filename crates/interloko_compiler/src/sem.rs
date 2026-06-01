@@ -905,12 +905,12 @@ pub struct Function {
     pub locals: Vec<Local>,
     /// Function body.
     pub body: Block,
-    /// Result value category.
+    /// Scalar result mirror for callers that still require one value.
     pub result_kind: ValueKind,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
-    /// Explicit declared result category, when present.
-    pub return_annotation: Option<ValueKind>,
+    /// Explicit declared result categories, when present.
+    pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
 }
@@ -930,12 +930,12 @@ pub struct Closure {
     pub locals: Vec<Local>,
     /// Closure body.
     pub body: Block,
-    /// Result value category.
+    /// Scalar result mirror for callers that still require one value.
     pub result_kind: ValueKind,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
-    /// Explicit declared result category, when present.
-    pub return_annotation: Option<ValueKind>,
+    /// Explicit declared result categories, when present.
+    pub return_annotation: Option<Vec<ValueKind>>,
     /// Source span.
     pub span: Span,
 }
@@ -1293,6 +1293,8 @@ pub enum Expr {
         arg_kinds: Vec<ValueKind>,
         /// Result value category.
         result_kind: ValueKind,
+        /// Result value categories in return order.
+        result_kinds: Vec<ValueKind>,
         /// Source span.
         span: Span,
     },
@@ -1515,7 +1517,7 @@ struct FunctionSymbol {
     param_kinds: Vec<ValueKind>,
     return_kind: ValueKind,
     return_kinds: Vec<ValueKind>,
-    return_annotation: Option<ValueKind>,
+    return_annotation: Option<Vec<ValueKind>>,
     span: Span,
 }
 
@@ -1523,6 +1525,24 @@ impl FunctionSymbol {
     fn arity(&self) -> usize {
         self.param_kinds.len()
     }
+}
+
+fn scalar_result_kind(kinds: &[ValueKind]) -> ValueKind {
+    match kinds {
+        [kind] => *kind,
+        _ => ValueKind::Error,
+    }
+}
+
+fn scalar_expected_result(kinds: &[ValueKind]) -> Option<ValueKind> {
+    match kinds {
+        [kind] => Some(*kind),
+        _ => None,
+    }
+}
+
+fn result_kinds_contain_error(kinds: &[ValueKind]) -> bool {
+    kinds.iter().any(|kind| matches!(kind, ValueKind::Error))
 }
 
 #[derive(Clone, Debug)]
@@ -2285,10 +2305,13 @@ impl Lowering {
                     );
                 }
             }
-            let return_annotation = generic
-                .return_type
-                .as_ref()
-                .map(|annotation| self.resolve_type_annotation(annotation));
+            let return_annotation = generic.return_type.as_ref().and_then(|annotation| {
+                self.resolve_single_result_annotation(
+                    annotation,
+                    generic.span,
+                    DiagnosticCode::GenericMethodResultTypeMismatch,
+                )
+            });
             self.generic_symbols.push(GenericSymbol {
                 name: generic.name.clone(),
                 id,
@@ -2630,13 +2653,17 @@ impl Lowering {
             let return_annotation = function
                 .return_type
                 .as_ref()
-                .map(|annotation| self.resolve_type_annotation(annotation));
+                .map(|annotation| self.resolve_result_annotation(annotation));
+            let return_kinds = return_annotation
+                .clone()
+                .unwrap_or_else(|| vec![ValueKind::I64]);
+            let return_kind = scalar_result_kind(&return_kinds);
             self.functions.push(FunctionSymbol {
                 name: function.name.clone(),
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
                 param_kinds,
-                return_kind: return_annotation.unwrap_or(ValueKind::I64),
-                return_kinds: vec![return_annotation.unwrap_or(ValueKind::I64)],
+                return_kind,
+                return_kinds,
                 return_annotation,
                 span: function.span,
             });
@@ -2872,11 +2899,15 @@ impl Lowering {
             .flatten()
             .or_else(|| specializers.iter().copied().flatten().next())
             .unwrap_or(ClassId(u32::MAX));
-        let return_annotation = method
-            .return_type
-            .as_ref()
-            .map(|annotation| self.resolve_type_annotation(annotation));
-        let body = self.lower_block(&mut ctx, &method.body, return_annotation);
+        let return_annotation = method.return_type.as_ref().and_then(|annotation| {
+            self.resolve_single_result_annotation(
+                annotation,
+                method.span,
+                DiagnosticCode::MethodReturnTypeMismatch,
+            )
+        });
+        let expected_results = return_annotation.map(|kind| vec![kind]);
+        let body = self.lower_block(&mut ctx, &method.body, expected_results.as_deref());
         let body_kind = self.expr_kind(&body.result);
         let result_kind = return_annotation.unwrap_or(body_kind);
         if let Some(expected) = return_annotation
@@ -2946,15 +2977,17 @@ impl Lowering {
             ));
         }
 
-        let return_annotation = symbol.as_ref().and_then(|symbol| symbol.return_annotation);
-        let body = self.lower_block(&mut ctx, &function.body, return_annotation);
-        let body_kind = self.expr_kind(&body.result);
+        let return_annotation = symbol
+            .as_ref()
+            .and_then(|symbol| symbol.return_annotation.clone());
+        let body = self.lower_block(&mut ctx, &function.body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&body.result);
-        let result_kind =
-            return_annotation.unwrap_or_else(|| body_kinds.first().copied().unwrap_or(body_kind));
-        let result_kinds = return_annotation.map_or_else(|| body_kinds.clone(), |kind| vec![kind]);
-        if let Some(expected) = return_annotation
-            && !self.kinds_match(expected, body_kind)
+        let result_kinds = return_annotation
+            .clone()
+            .unwrap_or_else(|| body_kinds.clone());
+        let result_kind = scalar_result_kind(&result_kinds);
+        if let Some(expected) = &return_annotation
+            && !self.result_kinds_match(expected, &body_kinds)
         {
             ctx.diagnostics.push(
                 Diagnostic::error(
@@ -2962,8 +2995,14 @@ impl Lowering {
                     DiagnosticCode::FunctionReturnTypeMismatch,
                 )
                 .with_arg(DiagnosticArg::text("function", function.name.clone()))
-                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
-                .with_arg(DiagnosticArg::text("actual", self.kind_name(body_kind))),
+                .with_arg(DiagnosticArg::text(
+                    "expected",
+                    self.result_kinds_name(expected),
+                ))
+                .with_arg(DiagnosticArg::text(
+                    "actual",
+                    self.result_kinds_name(&body_kinds),
+                )),
             );
         }
         if let Some(symbol) = self.functions.get_mut(id.0 as usize)
@@ -2993,13 +3032,13 @@ impl Lowering {
         &mut self,
         ctx: &mut FunctionContext,
         block: &ast::Block,
-        expected_result: Option<ValueKind>,
+        expected_result: Option<&[ValueKind]>,
     ) -> Block {
         let mut lets = Vec::new();
         for local in &block.lets {
             match &local.pattern {
                 ast::LetPattern::Name(binding) => {
-                    let expected_kind = local
+                    let expected_kind = binding
                         .type_annotation
                         .as_ref()
                         .map(|annotation| self.resolve_type_annotation_in_context(ctx, annotation));
@@ -3081,7 +3120,28 @@ impl Lowering {
                                     .with_arg(DiagnosticArg::text("local", binding.name.clone())),
                             );
                         }
-                        let kind = actual_kinds.get(index).copied().unwrap_or(ValueKind::Error);
+                        let expected_kind = binding.type_annotation.as_ref().map(|annotation| {
+                            self.resolve_type_annotation_in_context(ctx, annotation)
+                        });
+                        let actual_kind =
+                            actual_kinds.get(index).copied().unwrap_or(ValueKind::Error);
+                        if let Some(expected) = expected_kind
+                            && !self.kinds_match(expected, actual_kind)
+                        {
+                            ctx.diagnostics.push(
+                                Diagnostic::error(
+                                    local.value.span(),
+                                    DiagnosticCode::LocalTypeMismatch,
+                                )
+                                .with_arg(DiagnosticArg::text("local", binding.name.clone()))
+                                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                                .with_arg(DiagnosticArg::text(
+                                    "actual",
+                                    self.kind_name(actual_kind),
+                                )),
+                            );
+                        }
+                        let kind = expected_kind.unwrap_or(actual_kind);
                         let id = ctx.add_local(
                             self.local_definition(binding.definition, &binding.name),
                             binding.name.clone(),
@@ -3103,7 +3163,11 @@ impl Lowering {
 
         Block {
             lets,
-            result: self.lower_expr_expected(ctx, &block.result, expected_result),
+            result: self.lower_expr_expected(
+                ctx,
+                &block.result,
+                expected_result.and_then(scalar_expected_result),
+            ),
             span: block.span,
         }
     }
@@ -3445,16 +3509,22 @@ impl Lowering {
                             )),
                     );
                 }
-                let then_kind = self.expr_kind(&then_branch);
-                let else_kind = self.expr_kind(&else_branch);
-                if then_kind != else_kind
-                    && !matches!(then_kind, ValueKind::Error)
-                    && !matches!(else_kind, ValueKind::Error)
+                let then_kinds = self.expr_kinds(&then_branch);
+                let else_kinds = self.expr_kinds(&else_branch);
+                if !self.result_kinds_match(&then_kinds, &else_kinds)
+                    && !result_kinds_contain_error(&then_kinds)
+                    && !result_kinds_contain_error(&else_kinds)
                 {
                     ctx.diagnostics.push(
                         Diagnostic::error(*span, DiagnosticCode::IfBranchTypeMismatch)
-                            .with_arg(DiagnosticArg::text("then", self.kind_name(then_kind)))
-                            .with_arg(DiagnosticArg::text("else", self.kind_name(else_kind))),
+                            .with_arg(DiagnosticArg::text(
+                                "then",
+                                self.result_kinds_name(&then_kinds),
+                            ))
+                            .with_arg(DiagnosticArg::text(
+                                "else",
+                                self.result_kinds_name(&else_kinds),
+                            )),
                     );
                 }
                 Expr::If {
@@ -3518,7 +3588,7 @@ impl Lowering {
         &mut self,
         ctx: &mut FunctionContext,
         params: &[ast::FunctionParam],
-        return_type: Option<&ast::TypeAnnotation>,
+        return_type: Option<&ast::ResultAnnotation>,
         body: &ast::Block,
         span: Span,
     ) -> Expr {
@@ -3566,15 +3636,15 @@ impl Lowering {
         }
 
         let return_annotation =
-            return_type.map(|annotation| self.resolve_type_annotation(annotation));
-        let lowered_body = self.lower_block(&mut closure_ctx, body, return_annotation);
-        let body_kind = self.expr_kind(&lowered_body.result);
+            return_type.map(|annotation| self.resolve_result_annotation(annotation));
+        let lowered_body = self.lower_block(&mut closure_ctx, body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&lowered_body.result);
-        let result_kind =
-            return_annotation.unwrap_or_else(|| body_kinds.first().copied().unwrap_or(body_kind));
-        let result_kinds = return_annotation.map_or_else(|| body_kinds.clone(), |kind| vec![kind]);
-        if let Some(expected) = return_annotation
-            && !self.kinds_match(expected, body_kind)
+        let result_kinds = return_annotation
+            .clone()
+            .unwrap_or_else(|| body_kinds.clone());
+        let result_kind = scalar_result_kind(&result_kinds);
+        if let Some(expected) = &return_annotation
+            && !self.result_kinds_match(expected, &body_kinds)
         {
             closure_ctx.diagnostics.push(
                 Diagnostic::error(
@@ -3582,8 +3652,14 @@ impl Lowering {
                     DiagnosticCode::FunctionReturnTypeMismatch,
                 )
                 .with_arg(DiagnosticArg::text("function", "<closure>"))
-                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
-                .with_arg(DiagnosticArg::text("actual", self.kind_name(body_kind))),
+                .with_arg(DiagnosticArg::text(
+                    "expected",
+                    self.result_kinds_name(expected),
+                ))
+                .with_arg(DiagnosticArg::text(
+                    "actual",
+                    self.result_kinds_name(&body_kinds),
+                )),
             );
         }
 
@@ -3865,6 +3941,7 @@ impl Lowering {
             args,
             arg_kinds: symbol.param_kinds.clone(),
             result_kind: symbol.return_kind,
+            result_kinds: symbol.return_kinds.clone(),
             span,
         }
     }
@@ -3922,6 +3999,7 @@ impl Lowering {
             args,
             arg_kinds: vec![ValueKind::Object(class)],
             result_kind: slot_info.kind,
+            result_kinds: vec![slot_info.kind],
             span,
         }
     }
@@ -3977,6 +4055,7 @@ impl Lowering {
                 .map(|index| self.generic_callable_arg_kind(generic, index))
                 .collect(),
             result_kind: symbol.return_kind,
+            result_kinds: vec![symbol.return_kind],
             span,
         }
     }
@@ -4009,6 +4088,7 @@ impl Lowering {
             args,
             arg_kinds,
             result_kind,
+            result_kinds: vec![result_kind],
             span,
         }
     }
@@ -4746,6 +4826,7 @@ impl Lowering {
     fn expr_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
         match expr {
             Expr::Values { result_kinds, .. } => result_kinds.clone(),
+            Expr::CallableCall { result_kinds, .. } => result_kinds.clone(),
             Expr::DirectCall { function, .. } => {
                 self.functions.get(function.0 as usize).map_or_else(
                     || vec![ValueKind::Error],
@@ -4901,6 +4982,35 @@ impl Lowering {
 
     fn resolve_type_annotation(&mut self, annotation: &ast::TypeAnnotation) -> ValueKind {
         self.resolve_type_name(&annotation.name, annotation.class_object, annotation.span)
+    }
+
+    fn resolve_result_annotation(&mut self, annotation: &ast::ResultAnnotation) -> Vec<ValueKind> {
+        annotation
+            .values
+            .iter()
+            .map(|value| self.resolve_type_annotation(value))
+            .collect()
+    }
+
+    fn resolve_single_result_annotation(
+        &mut self,
+        annotation: &ast::ResultAnnotation,
+        span: Span,
+        code: DiagnosticCode,
+    ) -> Option<ValueKind> {
+        let values = self.resolve_result_annotation(annotation);
+        if values.len() != 1 {
+            self.diagnostics.push(
+                Diagnostic::error(span, code)
+                    .with_arg(DiagnosticArg::text("expected", "1 value"))
+                    .with_arg(DiagnosticArg::text(
+                        "actual",
+                        self.result_kinds_name(&values),
+                    )),
+            );
+            return Some(ValueKind::Error);
+        }
+        values.first().copied()
     }
 
     fn resolve_type_annotation_in_context(
@@ -5148,6 +5258,15 @@ impl Lowering {
                 format!("{} values ({names})", kinds.len())
             }
         }
+    }
+
+    fn result_kinds_match(&self, expected: &[ValueKind], actual: &[ValueKind]) -> bool {
+        expected.len() == actual.len()
+            && expected
+                .iter()
+                .copied()
+                .zip(actual.iter().copied())
+                .all(|(expected, actual)| self.kinds_match(expected, actual))
     }
 
     fn method_specializer_label(&self, specializer: MethodSpecializer) -> String {
@@ -5990,14 +6109,17 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         let circle_id = class_id(&module, "<circle>");
         assert_eq!(module.functions[0].param_kinds, [ValueKind::Bool]);
-        assert_eq!(module.functions[0].return_annotation, Some(ValueKind::Bool));
+        assert_eq!(
+            module.functions[0].return_annotation,
+            Some(vec![ValueKind::Bool])
+        );
         assert_eq!(
             module.functions[1].param_kinds,
             [ValueKind::ClassObject(circle_id), ValueKind::I64]
         );
         assert_eq!(
             module.functions[1].return_annotation,
-            Some(ValueKind::Object(circle_id))
+            Some(vec![ValueKind::Object(circle_id)])
         );
         assert_eq!(module.functions[2].result_kind, ValueKind::I64);
     }

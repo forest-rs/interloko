@@ -79,8 +79,8 @@ pub enum ValueKind {
 pub struct CallableSignature {
     /// Argument value categories in call order.
     pub params: Vec<ValueKind>,
-    /// Return value category.
-    pub ret: ValueKind,
+    /// Return value categories in order.
+    pub rets: Vec<ValueKind>,
 }
 
 /// A lowered module ready for backend emission.
@@ -646,7 +646,7 @@ struct KnownCallableThunk<'a> {
     callable: sem::KnownCallable,
     target: FunctionId,
     call_params: &'a [ValueKind],
-    ret: ValueKind,
+    rets: Vec<ValueKind>,
     span: Span,
 }
 
@@ -671,7 +671,7 @@ impl<'module> Lowering<'module> {
         for function in &module.functions {
             ids.functions.push(FunctionId(next));
             let signature =
-                callable_signature_from_sem(&function.param_kinds, function.result_kind)?;
+                callable_signature_from_sem(&function.param_kinds, &function.result_kinds)?;
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.function_sigs.push(sig);
             next = next.saturating_add(1);
@@ -730,7 +730,8 @@ impl<'module> Lowering<'module> {
         }
         for closure in &module.closures {
             ids.closures.push(FunctionId(next));
-            let signature = callable_signature_from_sem(&closure.param_kinds, closure.result_kind)?;
+            let signature =
+                callable_signature_from_sem(&closure.param_kinds, &closure.result_kinds)?;
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.closure_sigs.push(sig);
             next = next.saturating_add(1);
@@ -948,7 +949,7 @@ impl<'module> Lowering<'module> {
             callable: sem::KnownCallable::DirectFunction(function.id),
             target,
             call_params: &params,
-            ret: self.value_kind(function.result_kind)?,
+            rets: self.value_kinds(&function.result_kinds)?,
             span: function.span,
         })
     }
@@ -974,7 +975,7 @@ impl<'module> Lowering<'module> {
             callable: sem::KnownCallable::GenericFunction(generic.id),
             target,
             call_params: &params,
-            ret: self.value_kind(generic.result_kind)?,
+            rets: vec![self.value_kind(generic.result_kind)?],
             span: generic.span,
         })
     }
@@ -1003,7 +1004,7 @@ impl<'module> Lowering<'module> {
             },
             target: accessor.function,
             call_params: &params,
-            ret: self.value_kind(slot.kind)?,
+            rets: vec![self.value_kind(slot.kind)?],
             span: slot.span,
         })
     }
@@ -1034,7 +1035,13 @@ impl<'module> Lowering<'module> {
         let call_args = (0..spec.call_params.len())
             .map(|index| input_register(index + 1))
             .collect::<Vec<_>>();
-        let result = input_register(spec.call_params.len() + 1);
+        let results = spec
+            .rets
+            .iter()
+            .enumerate()
+            .map(|(index, _)| input_register(spec.call_params.len() + 1 + index))
+            .collect::<Vec<_>>();
+        let ret = spec.rets.first().copied().unwrap_or(ValueKind::Any);
         Ok(Function {
             id: spec.id,
             name: spec.name,
@@ -1042,18 +1049,18 @@ impl<'module> Lowering<'module> {
                 callable: spec.callable,
             },
             params,
-            ret: spec.ret,
-            rets: vec![spec.ret],
+            ret,
+            rets: spec.rets,
             locals: Vec::new(),
             instructions: vec![
                 Instr::Call {
-                    dsts: vec![result],
+                    dsts: results.clone(),
                     callee: spec.target,
                     args: call_args,
                     span: spec.span,
                 },
                 Instr::Return {
-                    values: vec![result],
+                    values: results,
                     span: spec.span,
                 },
             ],
@@ -1305,17 +1312,19 @@ fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
 
 fn callable_signature_from_sem(
     params: &[sem::ValueKind],
-    ret: sem::ValueKind,
+    rets: &[sem::ValueKind],
 ) -> Result<CallableSignature, LowerError> {
     let params = params
         .iter()
         .copied()
         .map(value_kind)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(CallableSignature {
-        params,
-        ret: value_kind(ret)?,
-    })
+    let rets = rets
+        .iter()
+        .copied()
+        .map(value_kind)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CallableSignature { params, rets })
 }
 
 fn accessor_callable_signature(
@@ -1332,7 +1341,7 @@ fn accessor_callable_signature(
         .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
     Ok(CallableSignature {
         params: vec![ValueKind::Object(Some(accessor.class))],
-        ret: value_kind(slot.kind)?,
+        rets: vec![value_kind(slot.kind)?],
     })
 }
 
@@ -1343,7 +1352,7 @@ fn generic_callable_signature(
         params: (0..generic.arity)
             .map(|index| dispatcher_param_kind(generic, index))
             .collect(),
-        ret: value_kind(generic.result_kind)?,
+        rets: vec![value_kind(generic.result_kind)?],
     })
 }
 
@@ -1990,8 +1999,16 @@ impl<'module> BodyLowering<'module> {
                 args,
                 arg_kinds,
                 result_kind,
+                result_kinds,
                 span,
-            } => self.lower_callable_call(callable, args, arg_kinds, *result_kind, *span),
+            } => {
+                if result_kinds.len() != 1 {
+                    return Err(invalid_semantic(
+                        "multiple-value callable call used in a scalar expression",
+                    ));
+                }
+                self.lower_callable_call(callable, args, arg_kinds, *result_kind, *span)
+            }
             sem::Expr::Signal {
                 condition,
                 condition_class,
@@ -2259,6 +2276,14 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(results)
             }
+            sem::Expr::CallableCall {
+                callable,
+                args,
+                arg_kinds,
+                result_kinds,
+                span,
+                ..
+            } => self.lower_callable_results(callable, args, arg_kinds, result_kinds, *span),
             sem::Expr::If {
                 condition,
                 refinement: _,
@@ -2534,6 +2559,47 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(result)
+    }
+
+    fn lower_callable_results(
+        &mut self,
+        callable: &sem::Expr,
+        args: &[sem::Expr],
+        arg_kinds: &[sem::ValueKind],
+        result_kinds: &[sem::ValueKind],
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        if result_kinds.len() == 1 {
+            return Ok(vec![self.lower_callable_call(
+                callable,
+                args,
+                arg_kinds,
+                result_kinds[0],
+                span,
+            )?]);
+        }
+        let callee = self.lower_expr(callable)?;
+        if !matches!(callee.kind, ValueKind::Function(_) | ValueKind::Closure(_)) {
+            return Err(invalid_semantic(
+                "callable call target is not a function or closure value",
+            ));
+        }
+        let (args, arg_kinds) = self.lower_args_with_expected_and_kinds(args, arg_kinds)?;
+        let rets = self.value_kinds(result_kinds)?;
+        let results = rets
+            .iter()
+            .copied()
+            .map(|kind| self.alloc(kind))
+            .collect::<Vec<_>>();
+        self.instructions.push(Instr::CallIndirect {
+            dsts: results.iter().map(|result| result.reg).collect(),
+            callee: callee.reg,
+            args,
+            arg_kinds,
+            rets,
+            span,
+        });
+        Ok(results)
     }
 
     fn value_kind(&self, kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
@@ -3557,7 +3623,7 @@ impl Module {
             self.fmt_kind(f, *param)?;
         }
         write!(f, " -> ")?;
-        self.fmt_kind(f, signature.ret)
+        self.fmt_kind_list(f, &signature.rets)
     }
 
     fn fmt_class(&self, f: &mut fmt::Formatter<'_>, class: sem::ClassId) -> fmt::Result {
@@ -3713,13 +3779,13 @@ mod tests {
 
         assert!(module.call_sigs.contains(&CallableSignature {
             params: vec![ValueKind::I64],
-            ret: ValueKind::I64,
+            rets: vec![ValueKind::I64],
         }));
         assert_eq!(
             module.call_sigs[0],
             CallableSignature {
                 params: vec![ValueKind::I64],
-                ret: ValueKind::I64,
+                rets: vec![ValueKind::I64],
             }
         );
         assert_eq!(
@@ -3745,7 +3811,7 @@ mod tests {
 
         assert!(module.call_sigs.contains(&CallableSignature {
             params: vec![ValueKind::I64],
-            ret: ValueKind::I64,
+            rets: vec![ValueKind::I64],
         }));
         assert_eq!(module.functions[1].params[0].kind, ValueKind::Closure(None));
         let dump = module.dump();

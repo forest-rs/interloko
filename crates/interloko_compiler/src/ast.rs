@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
@@ -42,8 +43,8 @@ pub struct Function {
     pub name: String,
     /// Parameters in source order.
     pub params: Vec<FunctionParam>,
-    /// Optional declared return type.
-    pub return_type: Option<TypeAnnotation>,
+    /// Optional declared return value types.
+    pub return_type: Option<ResultAnnotation>,
     /// Function body.
     pub body: Block,
     /// Source span.
@@ -87,6 +88,15 @@ pub struct TypeAnnotation {
     pub name: String,
     /// Whether this annotation denotes the class object named by `name`.
     pub class_object: bool,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Source result annotation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResultAnnotation {
+    /// Result value annotations in return order.
+    pub values: Vec<TypeAnnotation>,
     /// Source span.
     pub span: Span,
 }
@@ -178,8 +188,8 @@ pub struct Generic {
     pub name: String,
     /// Parameters in source order.
     pub params: Vec<GenericParam>,
-    /// Optional declared result type.
-    pub return_type: Option<TypeAnnotation>,
+    /// Optional declared result value types.
+    pub return_type: Option<ResultAnnotation>,
     /// Source span.
     pub span: Span,
 }
@@ -208,8 +218,8 @@ pub struct Method {
     pub name: String,
     /// Specialized parameters in call order.
     pub params: Vec<MethodParam>,
-    /// Optional declared method result type.
-    pub return_type: Option<TypeAnnotation>,
+    /// Optional declared method result value types.
+    pub return_type: Option<ResultAnnotation>,
     /// Method body.
     pub body: Block,
     /// Source span.
@@ -285,6 +295,8 @@ pub struct LetBinding {
     pub definition: DefinitionId,
     /// Local name.
     pub name: String,
+    /// Optional declared local type.
+    pub type_annotation: Option<TypeAnnotation>,
     /// Source span of the binding name.
     pub span: Span,
 }
@@ -369,8 +381,8 @@ pub enum Expr {
         id: AstNodeId,
         /// Function parameters.
         params: Vec<FunctionParam>,
-        /// Optional declared return type.
-        return_type: Option<TypeAnnotation>,
+        /// Optional declared return value types.
+        return_type: Option<ResultAnnotation>,
         /// Function body.
         body: Box<Block>,
         /// Source span.
@@ -871,7 +883,7 @@ impl<'tree> Lowering<'tree> {
                     name = self.tree.tokens[*index].text(&self.tree.source).to_string();
                 }
                 CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
-                    return_type = self.type_annotation_after(node, *index);
+                    return_type = self.result_annotation_after(node, *index);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_generic_params(child_node);
@@ -900,7 +912,7 @@ impl<'tree> Lowering<'tree> {
             if let CstElement::Token(index) = child
                 && self.tree.tokens[*index].kind == TokenKind::Arrow
             {
-                return_type = self.type_annotation_after(node, *index);
+                return_type = self.result_annotation_after(node, *index);
             }
         }
         for param in &params {
@@ -964,7 +976,7 @@ impl<'tree> Lowering<'tree> {
                     name = self.tree.tokens[*index].text(&self.tree.source).to_string();
                 }
                 CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
-                    return_type = self.type_annotation_after(node, *index);
+                    return_type = self.result_annotation_after(node, *index);
                 }
                 CstElement::Token(_) => {}
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
@@ -1175,18 +1187,11 @@ impl<'tree> Lowering<'tree> {
         let pattern = self.lower_let_pattern(node);
         let name = let_pattern_name(&pattern);
         let definition = let_pattern_definition(&pattern);
-        let mut type_annotation = None;
         let mut value = None;
 
         for child in &node.children {
-            match child {
-                CstElement::Token(index)
-                    if self.tree.tokens[*index].kind == TokenKind::DoubleColon =>
-                {
-                    type_annotation = self.type_annotation_after(node, *index);
-                }
-                CstElement::Node(child_node) => value = Some(self.lower_expr(child_node)),
-                _ => {}
+            if let CstElement::Node(child_node) = child {
+                value = Some(self.lower_expr(child_node));
             }
         }
 
@@ -1194,8 +1199,8 @@ impl<'tree> Lowering<'tree> {
             id: self.ast_id(node),
             definition,
             name,
+            type_annotation: let_pattern_scalar_annotation(&pattern),
             pattern,
-            type_annotation,
             value: value.unwrap_or(Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1213,6 +1218,7 @@ impl<'tree> Lowering<'tree> {
             return LetPattern::Name(LetBinding {
                 definition: self.definition(DefinitionKind::Local, "", ""),
                 name: String::new(),
+                type_annotation: None,
                 span: node.span,
             });
         };
@@ -1220,6 +1226,7 @@ impl<'tree> Lowering<'tree> {
             return LetPattern::Name(LetBinding {
                 definition: self.definition(DefinitionKind::Local, "", ""),
                 name: String::new(),
+                type_annotation: None,
                 span: node.span,
             });
         };
@@ -1227,21 +1234,31 @@ impl<'tree> Lowering<'tree> {
             let name = self.tree.tokens[first_index]
                 .text(&self.tree.source)
                 .to_string();
+            let type_annotation = tokens
+                .get(let_position + 2)
+                .filter(|token| self.tree.tokens[**token].kind == TokenKind::DoubleColon)
+                .and_then(|token| self.type_annotation_after(node, *token));
             return LetPattern::Name(LetBinding {
                 definition: self.definition(DefinitionKind::Local, &name, ""),
                 name,
+                type_annotation,
                 span: self.tree.tokens[first_index].span,
             });
         }
 
         let mut bindings = Vec::new();
-        for (binding_index, token_index) in
-            tokens.iter().copied().skip(let_position + 2).enumerate()
-        {
+        let mut index = let_position + 2;
+        while index < tokens.len() {
+            let token_index = tokens[index];
             let token = self.tree.tokens[token_index];
             match token.kind {
                 TokenKind::Ident => {
                     let name = token.text(&self.tree.source).to_string();
+                    let type_annotation = tokens
+                        .get(index + 1)
+                        .filter(|token| self.tree.tokens[**token].kind == TokenKind::DoubleColon)
+                        .and_then(|token| self.type_annotation_after(node, *token));
+                    let binding_index = bindings.len();
                     bindings.push(LetBinding {
                         definition: self.definition(
                             DefinitionKind::Local,
@@ -1249,11 +1266,23 @@ impl<'tree> Lowering<'tree> {
                             &format!("tuple-let:{}:{binding_index}", node.id.raw()),
                         ),
                         name,
+                        type_annotation,
                         span: token.span,
                     });
+                    index += 1;
+                    while index < tokens.len()
+                        && !matches!(
+                            self.tree.tokens[tokens[index]].kind,
+                            TokenKind::Comma | TokenKind::RParen | TokenKind::Equal
+                        )
+                    {
+                        index += 1;
+                    }
                 }
                 TokenKind::RParen | TokenKind::Equal | TokenKind::DoubleColon => break,
-                _ => {}
+                _ => {
+                    index += 1;
+                }
             }
         }
 
@@ -1296,7 +1325,7 @@ impl<'tree> Lowering<'tree> {
         for child in &node.children {
             match child {
                 CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
-                    return_type = self.type_annotation_after(node, *index);
+                    return_type = self.result_annotation_after(node, *index);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_function_params(child_node);
@@ -2019,7 +2048,66 @@ impl<'tree> Lowering<'tree> {
     fn type_annotation_after(&self, node: &CstNode, marker_index: usize) -> Option<TypeAnnotation> {
         let tokens = self.node_token_indices(node);
         let marker = tokens.iter().position(|index| *index == marker_index)?;
-        let mut index = marker + 1;
+        self.type_annotation_from_tokens(&tokens, marker + 1)
+            .map(|(annotation, _)| annotation)
+    }
+
+    fn result_annotation_after(
+        &self,
+        node: &CstNode,
+        marker_index: usize,
+    ) -> Option<ResultAnnotation> {
+        let tokens = self.node_token_indices(node);
+        let marker = tokens.iter().position(|index| *index == marker_index)?;
+        let start = marker + 1;
+        if tokens
+            .get(start)
+            .is_some_and(|token| self.tree.tokens[*token].kind == TokenKind::LParen)
+        {
+            let mut values = Vec::new();
+            let mut index = start + 1;
+            while index < tokens.len() {
+                match self.tree.tokens[tokens[index]].kind {
+                    TokenKind::RParen => break,
+                    TokenKind::Comma => {
+                        index += 1;
+                    }
+                    _ => {
+                        if let Some((annotation, next)) =
+                            self.type_annotation_from_tokens(&tokens, index)
+                        {
+                            values.push(annotation);
+                            index = next;
+                        } else {
+                            index += 1;
+                        }
+                    }
+                }
+            }
+            let end = tokens
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| *tokens.get(start).unwrap_or(&marker_index));
+            return Some(ResultAnnotation {
+                values,
+                span: self.tree.tokens[tokens[start]]
+                    .span
+                    .cover(self.tree.tokens[end].span),
+            });
+        }
+        self.type_annotation_from_tokens(&tokens, start)
+            .map(|(annotation, _)| ResultAnnotation {
+                span: annotation.span,
+                values: vec![annotation],
+            })
+    }
+
+    fn type_annotation_from_tokens(
+        &self,
+        tokens: &[usize],
+        mut index: usize,
+    ) -> Option<(TypeAnnotation, usize)> {
+        let start = index;
         let class_object = tokens
             .get(index)
             .is_some_and(|token| self.tree.tokens[*token].kind == TokenKind::Class);
@@ -2032,9 +2120,7 @@ impl<'tree> Lowering<'tree> {
             return None;
         }
         let span = if class_object {
-            self.tree.tokens[tokens[marker + 1]]
-                .span
-                .cover(type_token.span)
+            self.tree.tokens[tokens[start]].span.cover(type_token.span)
         } else {
             type_token.span
         };
@@ -2043,6 +2129,7 @@ impl<'tree> Lowering<'tree> {
             class_object,
             span,
         })
+        .map(|annotation| (annotation, index + 1))
     }
 
     fn first_restart_condition_name(&self, node: &CstNode) -> Option<(Span, &'tree str)> {
@@ -2114,6 +2201,13 @@ fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
             },
             |binding| binding.definition,
         ),
+    }
+}
+
+fn let_pattern_scalar_annotation(pattern: &LetPattern) -> Option<TypeAnnotation> {
+    match pattern {
+        LetPattern::Name(binding) => binding.type_annotation.clone(),
+        LetPattern::Tuple { .. } => None,
     }
 }
 
@@ -2393,6 +2487,7 @@ mod tests {
             function
                 .return_type
                 .as_ref()
+                .and_then(|annotation| annotation.values.first())
                 .map(|annotation| (annotation.class_object, annotation.name.as_str())),
             Some((false, "<circle>"))
         );
@@ -2550,6 +2645,7 @@ mod tests {
             module.generics[0]
                 .return_type
                 .as_ref()
+                .and_then(|annotation| annotation.values.first())
                 .map(|annotation| (annotation.class_object, annotation.name.as_str())),
             Some((false, "<integer>"))
         );
@@ -2559,6 +2655,7 @@ mod tests {
             module.methods[0]
                 .return_type
                 .as_ref()
+                .and_then(|annotation| annotation.values.first())
                 .map(|annotation| (annotation.class_object, annotation.name.as_str())),
             Some((false, "<integer>"))
         );

@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-return-type-mismatch
+// expect: diagnostic contains function `bad` returns 2 values
+// expect: diagnostic contains body has <integer>
+
+define function bad() => (<integer>, <integer>)
+  1
+end;

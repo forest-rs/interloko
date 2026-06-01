@@ -3002,7 +3002,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "let-values-binding",
-            "`(` name* `)`",
+            "`(` let-name-binding* `)`",
             "syntax.rs:Parser::parse_let",
         ),
         (
