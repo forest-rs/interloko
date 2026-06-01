@@ -826,8 +826,10 @@ impl<'tree> Lowering<'tree> {
                 }
                 "init-value" => {
                     let Some(expr) = option.children.iter().find_map(|child| match child {
-                        CstElement::Node(expr) => Some(self.lower_expr(expr)),
-                        CstElement::Token(_) => None,
+                        CstElement::Node(expr) if !expr.kind.is_role() => {
+                            Some(self.lower_expr(expr))
+                        }
+                        _ => None,
                     }) else {
                         self.diagnostics.push(
                             Diagnostic::error(
@@ -1037,8 +1039,8 @@ impl<'tree> Lowering<'tree> {
             .children
             .iter()
             .find_map(|child| match child {
-                CstElement::Node(expr) => Some(self.lower_expr(expr)),
-                CstElement::Token(_) => None,
+                CstElement::Node(expr) if !expr.kind.is_role() => Some(self.lower_expr(expr)),
+                _ => None,
             })
             .unwrap_or_else(|| Expr::Error {
                 id: self.ast_id(node),
@@ -1219,7 +1221,9 @@ impl<'tree> Lowering<'tree> {
         let mut value = None;
 
         for child in &node.children {
-            if let CstElement::Node(child_node) = child {
+            if let CstElement::Node(child_node) = child
+                && !child_node.kind.is_role()
+            {
                 value = Some(self.lower_expr(child_node));
             }
         }
@@ -1800,9 +1804,7 @@ impl<'tree> Lowering<'tree> {
             .children
             .iter()
             .find_map(|child| match child {
-                CstElement::Node(expr) if expr.kind != CstKind::ArgumentKeyword => {
-                    Some(self.lower_expr(expr))
-                }
+                CstElement::Node(expr) if !expr.kind.is_role() => Some(self.lower_expr(expr)),
                 _ => None,
             })
             .unwrap_or(Expr::Error {
@@ -1819,7 +1821,7 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_slot_read(&mut self, node: &CstNode) -> Expr {
         let receiver = node.children.iter().find_map(|child| match child {
-            CstElement::Node(expr) => Some(self.lower_expr(expr)),
+            CstElement::Node(expr) if !expr.kind.is_role() => Some(self.lower_expr(expr)),
             _ => None,
         });
         let slot = node.children.iter().rev().find_map(|child| match child {
@@ -2032,7 +2034,7 @@ impl<'tree> Lowering<'tree> {
             .children
             .iter()
             .find_map(|child| match child {
-                CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                CstElement::Node(expr) if !expr.kind.is_role() => Some(self.lower_expr(expr)),
                 _ => None,
             })
             .unwrap_or(Expr::Error {

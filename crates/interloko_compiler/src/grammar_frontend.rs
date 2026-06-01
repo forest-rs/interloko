@@ -2946,13 +2946,28 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "class-definition",
-            "`define class` type-name superclass? slot-declaration* `end`",
+            "`define class` type-definition-name superclass? slot-declaration* `end`",
             "syntax.rs:Parser::parse_class",
         ),
         (
+            "type-definition-name",
+            "type-name",
+            "base_loko_primary::BaseLokoCstBuilder::build_class",
+        ),
+        (
+            "superclass-type",
+            "type-name",
+            "base_loko_primary::BaseLokoCstBuilder::build_class",
+        ),
+        (
             "slot-declaration",
-            "(`slot` | `constant slot`) name type-annotation? slot-option* `;`?",
+            "(`slot` | `constant slot`) slot-name type-annotation? slot-option* `;`?",
             "syntax.rs:Parser::parse_slot_decl",
+        ),
+        (
+            "slot-name",
+            "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_slot",
         ),
         (
             "slot-option",
@@ -2966,28 +2981,48 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "generic-definition",
-            "`define generic` name parameter-list result-annotation? `;`?",
+            "`define generic` value-definition-name parameter-list result-annotation? `;`?",
             "syntax.rs:Parser::parse_generic",
         ),
         (
             "method-definition",
-            "`define method` name parameter-list result-annotation? body `end`",
+            "`define method` value-definition-name parameter-list result-annotation? body `end`",
             "syntax.rs:Parser::parse_method",
         ),
         (
             "function-definition",
-            "`define function` name parameter-list result-annotation? body `end`",
+            "`define function` value-definition-name parameter-list result-annotation? body `end`",
             "syntax.rs:Parser::parse_function",
         ),
         (
             "constant-definition",
-            "`define constant` name type-annotation? `=` expression `;`",
+            "`define constant` value-definition-name type-annotation? `=` expression `;`",
             "base_loko_primary::BaseLokoCstBuilder::build_constant",
+        ),
+        (
+            "value-definition-name",
+            "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_definition",
         ),
         (
             "parameter-list",
             "`(` parameter* `)`",
             "syntax.rs:Parser::parse_parameter_list",
+        ),
+        (
+            "parameter-name",
+            "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_parameter_list",
+        ),
+        (
+            "annotation-type",
+            "type-name",
+            "base_loko_primary::BaseLokoCstBuilder::collect_annotation_type_roles",
+        ),
+        (
+            "class-object-annotation-type",
+            "`class` annotation-type",
+            "base_loko_primary::BaseLokoCstBuilder::collect_annotation_type_roles",
         ),
         ("body", "let* expression", "syntax.rs:Parser::parse_body"),
         (
@@ -3002,8 +3037,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "let-name-binding",
-            "name type-annotation?",
+            "let-name type-annotation?",
             "syntax.rs:Parser::parse_let",
+        ),
+        (
+            "let-name",
+            "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_let",
         ),
         (
             "let-values-binding",
@@ -3022,8 +3062,18 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "restart-clause",
-            "`restart` (name type-annotation | type-name) expression",
+            "`restart` (restart-name type-annotation | restart-condition-type) expression",
             "syntax.rs:Parser::parse_restart_clause",
+        ),
+        (
+            "restart-name",
+            "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_restart",
+        ),
+        (
+            "restart-condition-type",
+            "type-name",
+            "base_loko_primary::BaseLokoCstBuilder::build_restart",
         ),
         (
             "if-expression",
@@ -3062,8 +3112,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "postfix-expression",
-            "primary-expression (`.` name)*",
+            "primary-expression (`.` member-name)*",
             "syntax.rs:Parser::parse_postfix",
+        ),
+        (
+            "member-name",
+            "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_postfix",
         ),
         (
             "primary-expression",
@@ -3074,6 +3129,16 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "function-expression",
             "`function` `(` parameter-list? `)` result-annotation? body `end`",
             "syntax.rs:Parser::parse_function_expr",
+        ),
+        (
+            "call-name",
+            "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_call",
+        ),
+        (
+            "expression-type-name",
+            "type-name",
+            "base_loko_primary::BaseLokoCstBuilder::build_type_expr",
         ),
         (
             "vector-expression",
@@ -3553,15 +3618,23 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::Class => Some("class-definition"),
         CstKind::SlotDecl => Some("slot-declaration"),
         CstKind::SlotOption => Some("slot-option"),
+        CstKind::TypeDefinitionName => Some("type-definition-name"),
+        CstKind::ValueDefinitionName => Some("value-definition-name"),
+        CstKind::SlotName => Some("slot-name"),
         CstKind::SlotKeyword => Some("slot-keyword"),
         CstKind::Generic => Some("generic-definition"),
         CstKind::Method => Some("method-definition"),
         CstKind::ParameterList => Some("parameter-list"),
         CstKind::Body => Some("body"),
         CstKind::LetStmt => Some("let-statement"),
+        CstKind::ParameterName => Some("parameter-name"),
+        CstKind::LetName => Some("let-name"),
+        CstKind::RestartName => Some("restart-name"),
         CstKind::BinaryExpr => None,
         CstKind::UnaryExpr => Some("unary-expression"),
+        CstKind::CallName => Some("call-name"),
         CstKind::CallExpr | CstKind::ArgList => Some("argument-list"),
+        CstKind::MemberName => Some("member-name"),
         CstKind::SlotExpr => Some("postfix-expression"),
         CstKind::SlotAssignExpr => Some("assignment-expression"),
         CstKind::KeywordArg => Some("keyword-argument"),
@@ -3578,6 +3651,11 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::IfExpr => Some("if-expression"),
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
+        CstKind::SuperclassType => Some("superclass-type"),
+        CstKind::AnnotationType => Some("annotation-type"),
+        CstKind::ClassObjectAnnotationType => Some("class-object-annotation-type"),
+        CstKind::RestartConditionType => Some("restart-condition-type"),
+        CstKind::ExpressionTypeName => Some("expression-type-name"),
         CstKind::Error => None,
     }
 }
@@ -3980,7 +4058,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 34);
+        assert_eq!(grammar.effective_rules.len(), 47);
 
         assert!(
             !records

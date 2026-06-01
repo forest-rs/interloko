@@ -170,10 +170,19 @@ impl BaseLokoCstProjector<'_> {
             .iter()
             .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
+        let mut roles = Vec::new();
+        self.collect_role_nodes(
+            node,
+            "value-definition-name",
+            CstKind::ValueDefinitionName,
+            &mut roles,
+        );
+        self.collect_type_roles_from_rule_children(node, &["type-annotation"], &mut roles);
         let excluded = value
             .as_ref()
             .map_or_else(Vec::new, |value| vec![value.span]);
         let mut children = self.direct_tokens(node.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         if let Some(value) = value {
             children.push(CstElement::Node(value));
         }
@@ -181,6 +190,14 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_class(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut roles = Vec::new();
+        self.collect_role_nodes(
+            node,
+            "type-definition-name",
+            CstKind::TypeDefinitionName,
+            &mut roles,
+        );
+        self.collect_role_nodes(node, "superclass-type", CstKind::SuperclassType, &mut roles);
         let slots = node
             .children
             .iter()
@@ -189,6 +206,7 @@ impl BaseLokoCstProjector<'_> {
             .collect::<Vec<_>>();
         let excluded = slots.iter().map(|slot| slot.span).collect::<Vec<_>>();
         let mut children = self.direct_tokens(node.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         children.extend(slots.into_iter().map(CstElement::Node));
         self.node(CstKind::Class, self.sorted(children), node.span)
     }
@@ -215,8 +233,12 @@ impl BaseLokoCstProjector<'_> {
             })
             .map(|option| self.build_slot_option(option))
             .collect::<Vec<_>>();
+        let mut roles = Vec::new();
+        self.collect_role_nodes(inner, "slot-name", CstKind::SlotName, &mut roles);
+        self.collect_type_roles_from_rule_children(inner, &["type-annotation"], &mut roles);
         let excluded = options.iter().map(|option| option.span).collect::<Vec<_>>();
         let mut children = self.direct_tokens(inner.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         children.extend(options.into_iter().map(CstElement::Node));
         self.node(CstKind::SlotDecl, self.sorted(children), inner.span)
     }
@@ -268,10 +290,19 @@ impl BaseLokoCstProjector<'_> {
             .iter()
             .find(|child| child.is_rule("parameter-list"))
             .map(|params| self.build_parameter_list(params));
+        let mut roles = Vec::new();
+        self.collect_role_nodes(
+            node,
+            "value-definition-name",
+            CstKind::ValueDefinitionName,
+            &mut roles,
+        );
+        self.collect_type_roles_from_rule_children(node, &["result-annotation"], &mut roles);
         let excluded = params
             .as_ref()
             .map_or_else(Vec::new, |params| vec![params.span]);
         let mut children = self.direct_tokens(node.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         if let Some(params) = params {
             children.push(CstElement::Node(params));
         }
@@ -289,6 +320,14 @@ impl BaseLokoCstProjector<'_> {
             .iter()
             .find(|child| child.is_rule("body"))
             .map(|body| self.build_body(body));
+        let mut roles = Vec::new();
+        self.collect_role_nodes(
+            node,
+            "value-definition-name",
+            CstKind::ValueDefinitionName,
+            &mut roles,
+        );
+        self.collect_type_roles_from_rule_children(node, &["result-annotation"], &mut roles);
         let mut excluded = Vec::new();
         if let Some(params) = &params {
             excluded.push(params.span);
@@ -297,6 +336,7 @@ impl BaseLokoCstProjector<'_> {
             excluded.push(body.span);
         }
         let mut children = self.direct_tokens(node.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         if let Some(params) = params {
             children.push(CstElement::Node(params));
         }
@@ -307,11 +347,12 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_parameter_list(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        self.node(
-            CstKind::ParameterList,
-            self.direct_tokens(node.span, &[]),
-            node.span,
-        )
+        let mut roles = Vec::new();
+        self.collect_role_nodes(node, "parameter-name", CstKind::ParameterName, &mut roles);
+        self.collect_annotation_type_roles(node, &mut roles);
+        let mut children = self.direct_tokens(node.span, &[]);
+        children.extend(roles.into_iter().map(CstElement::Node));
+        self.node(CstKind::ParameterList, self.sorted(children), node.span)
     }
 
     fn build_body(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -342,8 +383,18 @@ impl BaseLokoCstProjector<'_> {
             .iter()
             .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
+        let mut roles = Vec::new();
+        if let Some(binding) = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("let-binding"))
+        {
+            self.collect_role_nodes(binding, "let-name", CstKind::LetName, &mut roles);
+            self.collect_annotation_type_roles(binding, &mut roles);
+        }
         let excluded = expr.as_ref().map_or_else(Vec::new, |expr| vec![expr.span]);
         let mut children = self.direct_tokens(node.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         if let Some(expr) = expr {
             children.push(CstElement::Node(expr));
         }
@@ -376,7 +427,7 @@ impl BaseLokoCstProjector<'_> {
             "argument-list" => self.build_argument_list(node),
             "keyword-argument" => self.build_keyword_arg(node),
             "name-expression" => self.leaf(CstKind::NameExpr, node),
-            "type-expression" => self.leaf(CstKind::TypeExpr, node),
+            "type-expression" => self.build_type_expr(node),
             "number-literal" => self.leaf(CstKind::NumberExpr, node),
             "bool-literal" => self.leaf(CstKind::BoolExpr, node),
             "string-literal" => self.leaf(CstKind::StringExpr, node),
@@ -400,6 +451,19 @@ impl BaseLokoCstProjector<'_> {
         self.leaf(CstKind::KeywordExpr, node)
     }
 
+    fn build_type_expr(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut roles = Vec::new();
+        self.collect_role_nodes(
+            node,
+            "expression-type-name",
+            CstKind::ExpressionTypeName,
+            &mut roles,
+        );
+        let mut children = self.direct_tokens(node.span, &[]);
+        children.extend(roles.into_iter().map(CstElement::Node));
+        self.node(CstKind::TypeExpr, self.sorted(children), node.span)
+    }
+
     fn build_handle(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let nested = node
             .children
@@ -417,7 +481,22 @@ impl BaseLokoCstProjector<'_> {
             .find(|child| child.is_rule("expression"))
             .map(|expr| vec![self.build_expr(expr)])
             .unwrap_or_default();
-        self.node_with_nested(CstKind::RestartClause, node, nested)
+        let mut roles = Vec::new();
+        if let Some(condition) = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("restart-condition"))
+        {
+            self.collect_role_nodes(condition, "restart-name", CstKind::RestartName, &mut roles);
+            self.collect_role_nodes(
+                condition,
+                "restart-condition-type",
+                CstKind::RestartConditionType,
+                &mut roles,
+            );
+            self.collect_annotation_type_roles(condition, &mut roles);
+        }
+        self.node_with_nested_and_roles(CstKind::RestartClause, node, nested, roles)
     }
 
     fn build_if(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -591,12 +670,17 @@ impl BaseLokoCstProjector<'_> {
             return self.error_node(node.span);
         };
         let mut folded = self.build_expr(primary);
-        for name_node in node.children.iter().filter(|child| child.is_rule("name")) {
+        for name_node in node
+            .children
+            .iter()
+            .filter(|child| child.is_rule("member-name"))
+        {
             let dot = self.first_token_index(
                 Span::new(folded.span.end, name_node.span.start),
                 TokenKind::Dot,
             );
             let name = self.first_token_index(Span::from(name_node.span), TokenKind::Ident);
+            let member_name = self.leaf(CstKind::MemberName, name_node);
             let span = folded.span.cover(self.tokens[name].span);
             folded = self.node(
                 CstKind::SlotExpr,
@@ -604,6 +688,7 @@ impl BaseLokoCstProjector<'_> {
                     CstElement::Node(folded),
                     CstElement::Token(dot),
                     CstElement::Token(name),
+                    CstElement::Node(member_name),
                 ],
                 span,
             );
@@ -637,10 +722,13 @@ impl BaseLokoCstProjector<'_> {
             .iter()
             .find(|child| child.is_rule("argument-list"))
             .map(|args| self.build_argument_list(args));
+        let mut roles = Vec::new();
+        self.collect_role_nodes(node, "call-name", CstKind::CallName, &mut roles);
         let excluded = arg_list
             .as_ref()
             .map_or_else(Vec::new, |args| vec![args.span]);
         let mut children = self.direct_tokens(node.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         if let Some(arg_list) = arg_list {
             children.push(CstElement::Node(arg_list));
         }
@@ -703,14 +791,75 @@ impl BaseLokoCstProjector<'_> {
         self.node(CstKind::KeywordArg, self.sorted(children), node.span)
     }
 
+    fn collect_role_nodes(
+        &self,
+        node: &InterpretedRuleNode<'_>,
+        rule_name: &str,
+        kind: CstKind,
+        out: &mut Vec<CstNode>,
+    ) {
+        if node.is_rule(rule_name) {
+            out.push(self.leaf(kind, node));
+            return;
+        }
+        for child in &node.children {
+            self.collect_role_nodes(child, rule_name, kind, out);
+        }
+    }
+
+    fn collect_type_roles_from_rule_children(
+        &self,
+        node: &InterpretedRuleNode<'_>,
+        rule_names: &[&str],
+        out: &mut Vec<CstNode>,
+    ) {
+        for child in &node.children {
+            if child.name().is_some_and(|name| rule_names.contains(&name)) {
+                self.collect_annotation_type_roles(child, out);
+            }
+        }
+    }
+
+    fn collect_annotation_type_roles(
+        &self,
+        node: &InterpretedRuleNode<'_>,
+        out: &mut Vec<CstNode>,
+    ) {
+        match node.name().unwrap_or("") {
+            "class-object-annotation-type" => {
+                out.push(self.leaf(CstKind::ClassObjectAnnotationType, node));
+                return;
+            }
+            "annotation-type" => {
+                out.push(self.leaf(CstKind::AnnotationType, node));
+                return;
+            }
+            _ => {}
+        }
+        for child in &node.children {
+            self.collect_annotation_type_roles(child, out);
+        }
+    }
+
     fn node_with_nested(
         &self,
         kind: CstKind,
         source: &InterpretedRuleNode<'_>,
         nested: Vec<CstNode>,
     ) -> CstNode {
+        self.node_with_nested_and_roles(kind, source, nested, Vec::new())
+    }
+
+    fn node_with_nested_and_roles(
+        &self,
+        kind: CstKind,
+        source: &InterpretedRuleNode<'_>,
+        nested: Vec<CstNode>,
+        roles: Vec<CstNode>,
+    ) -> CstNode {
         let excluded = nested.iter().map(|node| node.span).collect::<Vec<_>>();
         let mut children = self.direct_tokens(source.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
         children.extend(nested.into_iter().map(CstElement::Node));
         self.node(kind, self.sorted(children), source.span)
     }

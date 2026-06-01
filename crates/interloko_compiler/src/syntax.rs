@@ -171,6 +171,12 @@ pub enum CstKind {
     SlotDecl,
     /// Slot option such as `init-keyword: radius:`.
     SlotOption,
+    /// Class/type definition name, such as `<point>` in `define class`.
+    TypeDefinitionName,
+    /// Value definition name, such as `area` in `define function area`.
+    ValueDefinitionName,
+    /// Declared object slot name.
+    SlotName,
     /// Keyword value used by a slot option, such as `radius:`.
     SlotKeyword,
     /// Generic function declaration.
@@ -183,14 +189,24 @@ pub enum CstKind {
     Body,
     /// Local binding statement.
     LetStmt,
+    /// Function, method, or generic parameter name.
+    ParameterName,
+    /// Local binding name.
+    LetName,
+    /// Restart condition binding name.
+    RestartName,
     /// Binary expression.
     BinaryExpr,
     /// Prefix unary expression.
     UnaryExpr,
     /// Direct function call expression.
     CallExpr,
+    /// Direct call callee name.
+    CallName,
     /// Object slot read expression.
     SlotExpr,
+    /// Member name used after `.` in a slot read.
+    MemberName,
     /// Object slot assignment expression.
     SlotAssignExpr,
     /// Call argument list.
@@ -221,10 +237,45 @@ pub enum CstKind {
     FunctionExpr,
     /// Restart clause in a handler expression.
     RestartClause,
+    /// Superclass type name in a class definition.
+    SuperclassType,
+    /// Nominal type name in an annotation.
+    AnnotationType,
+    /// Class-object type name in an annotation.
+    ClassObjectAnnotationType,
+    /// Bare condition type name in a restart clause.
+    RestartConditionType,
     /// Type/class name expression.
     TypeExpr,
+    /// Type name used as an expression.
+    ExpressionTypeName,
     /// Malformed syntax placeholder.
     Error,
+}
+
+impl CstKind {
+    /// Returns true when this kind is role metadata layered over syntax tokens.
+    #[must_use]
+    pub const fn is_role(self) -> bool {
+        matches!(
+            self,
+            Self::TypeDefinitionName
+                | Self::ValueDefinitionName
+                | Self::SlotName
+                | Self::SlotKeyword
+                | Self::ParameterName
+                | Self::LetName
+                | Self::RestartName
+                | Self::CallName
+                | Self::MemberName
+                | Self::ArgumentKeyword
+                | Self::SuperclassType
+                | Self::AnnotationType
+                | Self::ClassObjectAnnotationType
+                | Self::RestartConditionType
+                | Self::ExpressionTypeName
+        )
+    }
 }
 
 /// Child element of a CST node.
@@ -334,8 +385,16 @@ fn syntax_node_id(
         }
         CstKind::SlotDecl
         | CstKind::SlotOption
+        | CstKind::TypeDefinitionName
+        | CstKind::ValueDefinitionName
+        | CstKind::SlotName
         | CstKind::SlotKeyword
         | CstKind::LetStmt
+        | CstKind::ParameterName
+        | CstKind::LetName
+        | CstKind::RestartName
+        | CstKind::CallName
+        | CstKind::MemberName
         | CstKind::KeywordArg
         | CstKind::ArgumentKeyword
         | CstKind::NameExpr
@@ -345,13 +404,21 @@ fn syntax_node_id(
         | CstKind::SymbolExpr
         | CstKind::KeywordExpr
         | CstKind::RestartClause
-        | CstKind::TypeExpr => {
+        | CstKind::SuperclassType
+        | CstKind::AnnotationType
+        | CstKind::ClassObjectAnnotationType
+        | CstKind::RestartConditionType
+        | CstKind::TypeExpr
+        | CstKind::ExpressionTypeName => {
             mix_first_named_token(&mut builder, children, tokens, source);
         }
         _ => {
             for child in children {
                 match child {
-                    CstElement::Node(node) => builder.mix_u64(node.id.raw()),
+                    CstElement::Node(node) if !node.kind.is_role() => {
+                        builder.mix_u64(node.id.raw());
+                    }
+                    CstElement::Node(_) => {}
                     CstElement::Token(index) => {
                         let token = tokens[*index];
                         if token.kind.is_trivia() {
@@ -469,6 +536,19 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::FunctionExpr => 31,
         CstKind::SlotKeyword => 32,
         CstKind::ArgumentKeyword => 33,
+        CstKind::TypeDefinitionName => 34,
+        CstKind::ValueDefinitionName => 35,
+        CstKind::SlotName => 36,
+        CstKind::ParameterName => 37,
+        CstKind::LetName => 38,
+        CstKind::RestartName => 39,
+        CstKind::CallName => 40,
+        CstKind::MemberName => 41,
+        CstKind::SuperclassType => 42,
+        CstKind::AnnotationType => 43,
+        CstKind::ClassObjectAnnotationType => 44,
+        CstKind::RestartConditionType => 45,
+        CstKind::ExpressionTypeName => 46,
     }
 }
 

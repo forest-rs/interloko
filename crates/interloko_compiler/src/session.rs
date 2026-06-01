@@ -11583,6 +11583,103 @@ mod tests {
     }
 
     #[test]
+    fn syntax_tooling_preserves_name_and_type_context_roles() {
+        let source = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+                      define function main(c :: class <circle>) => <integer>\n  let r :: <integer> = 1;\n  let t = <circle>;\n  make(<circle>, radius: r).radius\nend";
+        let artifacts = CompilerSession::compile_source(
+            "name-type-roles.loko",
+            source,
+            RuntimeMode::CompileOnly,
+        );
+
+        let assert_role = |start: usize, text: &str, kind: CstKind, rule_name: &str| {
+            let span = Span::new(start, start + text.len());
+            let nodes = artifacts.syntax_nodes_containing_span(span);
+            assert!(
+                nodes.iter().any(|node| node.kind == kind),
+                "expected {kind:?} for `{text}`"
+            );
+            assert!(
+                artifacts
+                    .grammar_rule_applications_containing_span(span)
+                    .iter()
+                    .any(|application| application.rule_name == rule_name),
+                "expected rule `{rule_name}` for `{text}`"
+            );
+        };
+
+        assert_role(
+            source.find("<circle>").expect("class name"),
+            "<circle>",
+            CstKind::TypeDefinitionName,
+            "type-definition-name",
+        );
+        assert_role(
+            source.find("<object>").expect("superclass"),
+            "<object>",
+            CstKind::SuperclassType,
+            "superclass-type",
+        );
+        assert_role(
+            source.find("slot radius").expect("slot") + "slot ".len(),
+            "radius",
+            CstKind::SlotName,
+            "slot-name",
+        );
+        assert_role(
+            source.find("function main").expect("function") + "function ".len(),
+            "main",
+            CstKind::ValueDefinitionName,
+            "value-definition-name",
+        );
+        assert_role(
+            source.find("(c ::").expect("parameter") + "(".len(),
+            "c",
+            CstKind::ParameterName,
+            "parameter-name",
+        );
+        assert_role(
+            source
+                .find("(c :: class <circle>")
+                .expect("class object annotation")
+                + "(c :: class ".len(),
+            "<circle>",
+            CstKind::ClassObjectAnnotationType,
+            "class-object-annotation-type",
+        );
+        assert_role(
+            source.find("=> <integer>").expect("result annotation") + "=> ".len(),
+            "<integer>",
+            CstKind::AnnotationType,
+            "annotation-type",
+        );
+        assert_role(
+            source.find("let r").expect("let") + "let ".len(),
+            "r",
+            CstKind::LetName,
+            "let-name",
+        );
+        assert_role(
+            source.find("let t = <circle>").expect("type expression") + "let t = ".len(),
+            "<circle>",
+            CstKind::ExpressionTypeName,
+            "expression-type-name",
+        );
+        assert_role(
+            source.find("make(<circle>").expect("call name"),
+            "make",
+            CstKind::CallName,
+            "call-name",
+        );
+        assert_role(
+            source.rfind(".radius").expect("member") + ".".len(),
+            "radius",
+            CstKind::MemberName,
+            "member-name",
+        );
+    }
+
+    #[test]
     fn parse_view_reports_grammar_diagnostics_for_source_span() {
         let source = "define classs foo (<object>) end;";
         let artifacts =
