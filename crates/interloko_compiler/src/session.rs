@@ -4289,6 +4289,13 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
     out
 }
 
+fn sem_scalar_result_kind(kinds: &[sem::ValueKind]) -> sem::ValueKind {
+    match kinds {
+        [kind] => *kind,
+        _ => sem::ValueKind::Error,
+    }
+}
+
 fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
     match expr {
         sem::Expr::ConstI64 { .. } | sem::Expr::Binary { .. } => sem::ValueKind::I64,
@@ -4299,13 +4306,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
         sem::Expr::StringLiteral { class, .. } => sem::ValueKind::String(*class),
         sem::Expr::SymbolLiteral { class, .. } => sem::ValueKind::Symbol(*class),
         sem::Expr::VectorLiteral { class, .. } => sem::ValueKind::Vector(*class),
-        sem::Expr::Values { result_kinds, .. } => {
-            if result_kinds.len() == 1 {
-                result_kinds[0]
-            } else {
-                sem::ValueKind::Error
-            }
-        }
+        sem::Expr::Values { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
         sem::Expr::Local { result_kind, .. } => *result_kind,
         sem::Expr::Capture { result_kind, .. } => *result_kind,
         sem::Expr::ConstantRef { result_kind, .. } => *result_kind,
@@ -4318,22 +4319,17 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
             sem::ValueKind::GenericFunctionObject(*generic)
         }
         sem::Expr::IntrinsicCall { result_kind, .. } => *result_kind,
-        sem::Expr::DirectCall { function, .. } => {
-            module
-                .functions
-                .get(function.0 as usize)
-                .map_or(sem::ValueKind::Error, |function| {
-                    match function.result_kinds.as_slice() {
-                        [kind] => *kind,
-                        _ => sem::ValueKind::Error,
-                    }
-                })
-        }
+        sem::Expr::DirectCall { function, .. } => module
+            .functions
+            .get(function.0 as usize)
+            .map_or(sem::ValueKind::Error, |function| {
+                sem_scalar_result_kind(&function.result_kinds)
+            }),
         sem::Expr::GenericCall { generic, .. } => module
             .generics
             .get(generic.0 as usize)
             .map_or(sem::ValueKind::Error, |generic| generic.result_kind),
-        sem::Expr::CallableCall { result_kind, .. } => *result_kind,
+        sem::Expr::CallableCall { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
         sem::Expr::Signal { result_kind, .. } => *result_kind,
         sem::Expr::Handle { restart, .. } => restart.result_kind,
         sem::Expr::Cast { class, .. } => sem_builtin_value_kind_for_class(module, *class)
@@ -4371,7 +4367,9 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
             .constants
             .get(constant.0 as usize)
             .and_then(|constant| exact_static_class(module, &constant.value)),
-        sem::Expr::CallableCall { result_kind, .. } => sem_value_kind_class(module, *result_kind),
+        sem::Expr::CallableCall { result_kinds, .. } => {
+            sem_value_kind_class(module, sem_scalar_result_kind(result_kinds))
+        }
         sem::Expr::Cast { value, .. } => exact_static_class(module, value),
         sem::Expr::If {
             then_branch,
@@ -7228,7 +7226,7 @@ fn dump_sem_environment_object(artifacts: &SessionArtifacts, object: &Environmen
                 let _ = writeln!(
                     out,
                     "result: {}",
-                    sem_kind_label(&artifacts.sem, function.result_kind)
+                    sem_kind_list_label(&artifacts.sem, &function.result_kinds)
                 );
                 let _ = writeln!(out, "params:");
                 for local_id in &function.params {
@@ -9304,7 +9302,7 @@ fn project_environment_function(
         title: format!(
             "{}({params}) -> {}",
             function.name,
-            sem_kind_label(module, function.result_kind)
+            sem_kind_list_label(module, &function.result_kinds)
         ),
         affordances: Vec::from([
             Aff::Inspect,
@@ -9652,6 +9650,21 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
             format!("known-callable({})", sem_callable_label_for_expr(callable))
         }
         sem::ValueKind::Error => "error".into(),
+    }
+}
+
+fn sem_kind_list_label_for_expr(kinds: &[sem::ValueKind]) -> String {
+    match kinds {
+        [] => "()".into(),
+        [kind] => sem_kind_label_for_expr(*kind),
+        values => {
+            let values = values
+                .iter()
+                .map(|kind| sem_kind_label_for_expr(*kind))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        }
     }
 }
 
@@ -10041,13 +10054,13 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::CallableCall {
             callable,
             args,
-            result_kind,
+            result_kinds,
             ..
         } => {
             let _ = writeln!(
                 out,
                 "callable-call result={}",
-                sem_kind_label_for_expr(*result_kind)
+                sem_kind_list_label_for_expr(result_kinds)
             );
             dump_sem_expr(out, callable, indent + 2);
             for arg in args {
@@ -10906,10 +10919,10 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::CallableCall {
             callable,
             args,
-            result_kind,
+            result_kinds,
             ..
         } => {
-            let result = sem_kind_fingerprint(module, *result_kind);
+            let result = sem_kind_list_fingerprint(module, result_kinds);
             let _ = write!(out, "callable({result}:");
             fingerprint_sem_expr(module, callable, out);
             out.push(':');

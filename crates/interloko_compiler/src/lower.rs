@@ -1955,7 +1955,7 @@ impl<'module> BodyLowering<'module> {
                         "multiple-value function call used in a scalar expression",
                     ));
                 }
-                let result = self.alloc(self.value_kind(function_info.result_kind)?);
+                let result = self.alloc(self.value_kind(function_info.result_kinds[0])?);
                 self.instructions.push(Instr::Call {
                     dsts: vec![result.reg],
                     callee: self
@@ -1998,7 +1998,6 @@ impl<'module> BodyLowering<'module> {
                 callable,
                 args,
                 arg_kinds,
-                result_kind,
                 result_kinds,
                 span,
             } => {
@@ -2007,7 +2006,7 @@ impl<'module> BodyLowering<'module> {
                         "multiple-value callable call used in a scalar expression",
                     ));
                 }
-                self.lower_callable_call(callable, args, arg_kinds, *result_kind, *span)
+                self.lower_callable_call(callable, args, arg_kinds, result_kinds[0], *span)
             }
             sem::Expr::Signal {
                 condition,

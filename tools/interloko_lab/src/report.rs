@@ -1587,7 +1587,7 @@ fn function_object_facts(artifacts: &SessionArtifacts, object_id: &str) -> Vec<O
         ),
         ObjectFact::new(
             "result",
-            value_kind_label(&artifacts.sem, function.result_kind),
+            value_kind_list_label(&artifacts.sem, &function.result_kinds),
             "Resolved function result category.",
         ),
     ])
@@ -1783,6 +1783,21 @@ fn value_kind_label(module: &sem::Module, kind: ValueKind) -> String {
         ValueKind::Callable => "<callable>".into(),
         ValueKind::KnownCallable(callable) => format!("known callable {callable:?}"),
         ValueKind::Error => "error".into(),
+    }
+}
+
+fn value_kind_list_label(module: &sem::Module, kinds: &[ValueKind]) -> String {
+    match kinds {
+        [] => "()".into(),
+        [kind] => value_kind_label(module, *kind),
+        values => {
+            let values = values
+                .iter()
+                .map(|kind| value_kind_label(module, *kind))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        }
     }
 }
 

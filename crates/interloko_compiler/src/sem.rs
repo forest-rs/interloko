@@ -905,8 +905,6 @@ pub struct Function {
     pub locals: Vec<Local>,
     /// Function body.
     pub body: Block,
-    /// Scalar result mirror for callers that still require one value.
-    pub result_kind: ValueKind,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
     /// Explicit declared result categories, when present.
@@ -930,8 +928,6 @@ pub struct Closure {
     pub locals: Vec<Local>,
     /// Closure body.
     pub body: Block,
-    /// Scalar result mirror for callers that still require one value.
-    pub result_kind: ValueKind,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
     /// Explicit declared result categories, when present.
@@ -1291,8 +1287,6 @@ pub enum Expr {
         args: Vec<Expr>,
         /// Expected argument categories for this indirect call.
         arg_kinds: Vec<ValueKind>,
-        /// Result value category.
-        result_kind: ValueKind,
         /// Result value categories in return order.
         result_kinds: Vec<ValueKind>,
         /// Source span.
@@ -1515,7 +1509,6 @@ struct FunctionSymbol {
     name: String,
     id: FunctionId,
     param_kinds: Vec<ValueKind>,
-    return_kind: ValueKind,
     return_kinds: Vec<ValueKind>,
     return_annotation: Option<Vec<ValueKind>>,
     span: Span,
@@ -2657,12 +2650,10 @@ impl Lowering {
             let return_kinds = return_annotation
                 .clone()
                 .unwrap_or_else(|| vec![ValueKind::I64]);
-            let return_kind = scalar_result_kind(&return_kinds);
             self.functions.push(FunctionSymbol {
                 name: function.name.clone(),
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
                 param_kinds,
-                return_kind,
                 return_kinds,
                 return_annotation,
                 span: function.span,
@@ -2985,7 +2976,6 @@ impl Lowering {
         let result_kinds = return_annotation
             .clone()
             .unwrap_or_else(|| body_kinds.clone());
-        let result_kind = scalar_result_kind(&result_kinds);
         if let Some(expected) = &return_annotation
             && !self.result_kinds_match(expected, &body_kinds)
         {
@@ -3008,7 +2998,6 @@ impl Lowering {
         if let Some(symbol) = self.functions.get_mut(id.0 as usize)
             && symbol.return_annotation.is_none()
         {
-            symbol.return_kind = result_kind;
             symbol.return_kinds = result_kinds.clone();
         }
         self.diagnostics.extend(ctx.diagnostics);
@@ -3021,7 +3010,6 @@ impl Lowering {
             param_kinds: symbol.map_or_else(Vec::new, |symbol| symbol.param_kinds),
             locals: ctx.locals,
             body,
-            result_kind,
             result_kinds,
             return_annotation,
             span: function.span,
@@ -3604,7 +3592,6 @@ impl Lowering {
                 result: Expr::Error { span },
                 span,
             },
-            result_kind: ValueKind::Error,
             result_kinds: vec![ValueKind::Error],
             return_annotation: None,
             span,
@@ -3642,7 +3629,6 @@ impl Lowering {
         let result_kinds = return_annotation
             .clone()
             .unwrap_or_else(|| body_kinds.clone());
-        let result_kind = scalar_result_kind(&result_kinds);
         if let Some(expected) = &return_annotation
             && !self.result_kinds_match(expected, &body_kinds)
         {
@@ -3673,7 +3659,6 @@ impl Lowering {
                 captures: captures.clone(),
                 locals: closure_ctx.locals,
                 body: lowered_body,
-                result_kind,
                 result_kinds,
                 return_annotation,
                 span,
@@ -3940,7 +3925,6 @@ impl Lowering {
             callable: Box::new(target),
             args,
             arg_kinds: symbol.param_kinds.clone(),
-            result_kind: symbol.return_kind,
             result_kinds: symbol.return_kinds.clone(),
             span,
         }
@@ -3998,7 +3982,6 @@ impl Lowering {
             callable: Box::new(target),
             args,
             arg_kinds: vec![ValueKind::Object(class)],
-            result_kind: slot_info.kind,
             result_kinds: vec![slot_info.kind],
             span,
         }
@@ -4054,7 +4037,6 @@ impl Lowering {
             arg_kinds: (0..symbol.arity())
                 .map(|index| self.generic_callable_arg_kind(generic, index))
                 .collect(),
-            result_kind: symbol.return_kind,
             result_kinds: vec![symbol.return_kind],
             span,
         }
@@ -4087,7 +4069,6 @@ impl Lowering {
             callable: Box::new(target),
             args,
             arg_kinds,
-            result_kind,
             result_kinds: vec![result_kind],
             span,
         }
@@ -4771,7 +4752,7 @@ impl Lowering {
                 .generic_symbols
                 .get(generic.0 as usize)
                 .map_or(ValueKind::Error, |symbol| symbol.return_kind),
-            Expr::CallableCall { result_kind, .. } => *result_kind,
+            Expr::CallableCall { result_kinds, .. } => scalar_result_kind(result_kinds),
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
             }
@@ -4794,16 +4775,12 @@ impl Lowering {
                 .kind_for_builtin_class(*class)
                 .unwrap_or(ValueKind::Object(*class)),
             Expr::Signal { result_kind, .. } => *result_kind,
-            Expr::DirectCall { function, .. } => {
-                self.functions
-                    .get(function.0 as usize)
-                    .map_or(ValueKind::Error, |symbol| {
-                        match symbol.return_kinds.as_slice() {
-                            [kind] => *kind,
-                            _ => ValueKind::Error,
-                        }
-                    })
-            }
+            Expr::DirectCall { function, .. } => self
+                .functions
+                .get(function.0 as usize)
+                .map_or(ValueKind::Error, |symbol| {
+                    scalar_result_kind(&symbol.return_kinds)
+                }),
             Expr::MakeObject { class_id, .. } => ValueKind::Object(*class_id),
             Expr::If {
                 then_branch,
@@ -5619,13 +5596,13 @@ mod tests {
         );
         let Expr::CallableCall {
             callable,
-            result_kind,
+            result_kinds,
             ..
         } = &module.functions[0].body.result
         else {
             panic!("expected accessor apply to remain a callable call");
         };
-        assert_eq!(*result_kind, ValueKind::I64);
+        assert_eq!(result_kinds, &[ValueKind::I64]);
         assert!(matches!(
             callable.as_ref(),
             Expr::Local {
@@ -5649,14 +5626,14 @@ mod tests {
         let Expr::CallableCall {
             callable,
             arg_kinds,
-            result_kind,
+            result_kinds,
             ..
         } = &module.functions[1].body.result
         else {
             panic!("expected runtime callable apply");
         };
         assert_eq!(arg_kinds, &[ValueKind::I64]);
-        assert_eq!(*result_kind, ValueKind::I64);
+        assert_eq!(result_kinds, &[ValueKind::I64]);
         assert!(matches!(
             callable.as_ref(),
             Expr::Local {
@@ -5822,8 +5799,14 @@ mod tests {
         let circle_id = class_id(&module, "<circle>");
         let holder = class(&module, "<holder>");
         assert_eq!(holder.direct_slots[0].kind, ValueKind::Object(shape_id));
-        assert_eq!(module.functions[0].result_kind, ValueKind::Object(shape_id));
-        assert_eq!(module.functions[1].result_kind, ValueKind::Object(shape_id));
+        assert_eq!(
+            module.functions[0].result_kinds,
+            [ValueKind::Object(shape_id)]
+        );
+        assert_eq!(
+            module.functions[1].result_kinds,
+            [ValueKind::Object(shape_id)]
+        );
         assert_eq!(module.methods[0].specializer, circle_id);
     }
 
@@ -6121,7 +6104,7 @@ mod tests {
             module.functions[1].return_annotation,
             Some(vec![ValueKind::Object(circle_id)])
         );
-        assert_eq!(module.functions[2].result_kind, ValueKind::I64);
+        assert_eq!(module.functions[2].result_kinds, [ValueKind::I64]);
     }
 
     #[test]
@@ -6266,7 +6249,7 @@ mod tests {
         assert_eq!(circle.direct_slots[0].kind, ValueKind::I64);
         assert_eq!(box_class.direct_slots[0].kind, ValueKind::Object(circle_id));
         assert_eq!(box_class.direct_slots[1].kind, ValueKind::Bool);
-        assert_eq!(module.functions[0].result_kind, ValueKind::I64);
+        assert_eq!(module.functions[0].result_kinds, [ValueKind::I64]);
     }
 
     #[test]
@@ -6283,7 +6266,7 @@ mod tests {
         assert_eq!(box_class.direct_slots[0].init_keyword, "value");
         assert!(!box_class.direct_slots[0].required_init_keyword);
         assert_eq!(box_class.direct_slots[1].kind, ValueKind::Any);
-        assert_eq!(module.functions[0].result_kind, ValueKind::Any);
+        assert_eq!(module.functions[0].result_kinds, [ValueKind::Any]);
     }
 
     #[test]
@@ -6321,7 +6304,7 @@ mod tests {
         assert_eq!(fields[0].source, FieldInitSource::Explicit);
         assert_eq!(fields[1].slot, SlotId(1));
         assert_eq!(fields[1].source, FieldInitSource::Explicit);
-        assert_eq!(module.functions[0].result_kind, ValueKind::I64);
+        assert_eq!(module.functions[0].result_kinds, [ValueKind::I64]);
     }
 
     #[test]
@@ -6499,8 +6482,8 @@ mod tests {
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        assert_eq!(module.functions[0].result_kind, ValueKind::Bool);
-        assert_eq!(module.functions[1].result_kind, ValueKind::I64);
+        assert_eq!(module.functions[0].result_kinds, [ValueKind::Bool]);
+        assert_eq!(module.functions[1].result_kinds, [ValueKind::I64]);
         let Expr::If {
             condition,
             then_branch: _,
@@ -6547,7 +6530,7 @@ mod tests {
 
         assert_eq!(module.diagnostics, Vec::new());
         let bad_id = class_id(&module, "<bad>");
-        assert_eq!(module.functions[0].result_kind, ValueKind::I64);
+        assert_eq!(module.functions[0].result_kinds, [ValueKind::I64]);
         let Expr::Handle { body, restart, .. } = &module.functions[0].body.result else {
             panic!("expected handle expression");
         };
