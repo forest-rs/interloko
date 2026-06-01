@@ -591,6 +591,18 @@ pub struct GrammarRule {
     /// Deterministic structural action attached to this rule, when any.
     pub action: Option<GrammarAction<'static>>,
     /// Inert structural expression data.
+    ///
+    /// This is the inspectable form used by grammar tooling. In addition to
+    /// the parsed expression tree, rules that invoke `list-of` or
+    /// `trailing-list-of` include `list-pattern` records describing the
+    /// element expression, separator expression, trailing-separator policy, and
+    /// minimum count.
+    ///
+    /// A caller starting from source can first call
+    /// `SessionArtifacts::grammar_rule_applications_containing_span`, resolve
+    /// the returned effective rule through `GrammarParseReport::effective_rules`
+    /// to its `selected_rule`, and then read this field on the matching direct
+    /// [`GrammarRule`].
     pub expression_data: SourceData,
     /// Projection/source location information.
     pub projection: GrammarProjection,
@@ -3006,7 +3018,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "parameter-list",
-            "`(` parameter* `)`",
+            "trailing-list-of<parameter, `,`>",
             "syntax.rs:Parser::parse_parameter_list",
         ),
         (
@@ -3047,7 +3059,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "let-values-binding",
-            "`(` let-name-binding* `)`",
+            "`(` trailing-list-of<let-name-binding, `,`> `)`",
             "syntax.rs:Parser::parse_let",
         ),
         (
@@ -3141,13 +3153,23 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "base_loko_primary::BaseLokoCstBuilder::build_type_expr",
         ),
         (
+            "result-annotation-values",
+            "`(` trailing-list-of<type-annotation-value, `,`>? `)`",
+            "syntax.rs:Parser::parse_result_annotation",
+        ),
+        (
+            "callable-parameter-types",
+            "trailing-list-of<type-annotation-value, `,`>",
+            "syntax.rs:Parser::parse_type_annotation",
+        ),
+        (
             "vector-expression",
-            "`#[` expression* `]`",
+            "`#[` trailing-list-of<expression, `,`>? `]`",
             "syntax.rs:Parser::parse_vector_literal",
         ),
         (
             "argument-list",
-            "`(` (keyword-argument | expression)* `)`",
+            "trailing-list-of<argument, `,`>",
             "syntax.rs:Parser::parse_arg_list",
         ),
         (
@@ -3209,11 +3231,104 @@ fn grammar_rule_expression_data_from_expr(
         source_data::field("name", SourceData::symbol(name)),
         source_data::field("expression", rule_expression_source_data(expression)),
     ];
+    let list_patterns = grammar_list_pattern_source_data(expression);
+    if !list_patterns.is_empty() {
+        fields.push(source_data::field(
+            "list-patterns",
+            SourceData::list(list_patterns),
+        ));
+    }
     if let Some(text) = text {
         fields.push(source_data::field("text", SourceData::string(text)));
     }
     fields.push(source_data::field("location", SourceData::string(location)));
     SourceData::record("grammar-rule", fields)
+}
+
+// Keep list combinators visible after parametric expansion. This lets editor
+// and agent tooling answer questions like "what element belongs here?", "what
+// separator should I insert?", and "is an empty list legal?" without
+// reverse-engineering punctuation from the flattened parse tree.
+fn grammar_list_pattern_source_data(expression: &RuleExpression<'_>) -> Vec<SourceData> {
+    let mut patterns = Vec::new();
+    collect_grammar_list_patterns(expression, false, &mut patterns);
+    patterns
+}
+
+fn collect_grammar_list_patterns(
+    expression: &RuleExpression<'_>,
+    optional_context: bool,
+    out: &mut Vec<SourceData>,
+) {
+    match expression {
+        RuleExpression::Apply { rule, args }
+            if matches!(*rule, "list-of" | "trailing-list-of") && args.len() == 2 =>
+        {
+            let trailing_separator = *rule == "trailing-list-of";
+            // `trailing-list-of<...>?` is the common spelling for an optional
+            // list container. Mark the combinator itself as allowing zero
+            // elements so consumers do not need to inspect its parent node.
+            let minimum_count = if optional_context { 0 } else { 1 };
+            out.push(SourceData::record(
+                "list-pattern",
+                vec![
+                    source_data::field("combinator", SourceData::symbol(*rule)),
+                    source_data::field(
+                        "element-text",
+                        SourceData::string(expression_label(&args[0])),
+                    ),
+                    source_data::field(
+                        "separator-text",
+                        SourceData::string(expression_label(&args[1])),
+                    ),
+                    source_data::field("element", rule_expression_source_data(&args[0])),
+                    source_data::field("separator", rule_expression_source_data(&args[1])),
+                    source_data::field("trailing-separator", SourceData::bool(trailing_separator)),
+                    source_data::field("minimum-count", SourceData::integer(minimum_count)),
+                    source_data::field("allows-empty", SourceData::bool(minimum_count == 0)),
+                ],
+            ));
+        }
+        RuleExpression::Apply { args, .. } => {
+            for arg in args {
+                collect_grammar_list_patterns(arg, false, out);
+            }
+        }
+        RuleExpression::Optional(inner) | RuleExpression::ZeroOrMore(inner) => {
+            collect_grammar_list_patterns(inner, true, out);
+        }
+        RuleExpression::OneOrMore(inner)
+        | RuleExpression::And(inner)
+        | RuleExpression::Not(inner)
+        | RuleExpression::Cut(inner) => collect_grammar_list_patterns(inner, optional_context, out),
+        RuleExpression::Transform { input, .. } => {
+            collect_grammar_list_patterns(input, optional_context, out);
+        }
+        RuleExpression::Named { inner, .. } => {
+            collect_grammar_list_patterns(inner, optional_context, out);
+        }
+        RuleExpression::Sequence(items) | RuleExpression::Choice(items) => {
+            for item in items {
+                collect_grammar_list_patterns(item, optional_context, out);
+            }
+        }
+        RuleExpression::Rule(_)
+        | RuleExpression::Super(_)
+        | RuleExpression::Literal(_)
+        | RuleExpression::CharacterClass(_)
+        | RuleExpression::UntilLiteral(_) => {}
+        _ => {}
+    }
+}
+
+fn expression_label(expression: &RuleExpression<'_>) -> String {
+    match expression {
+        RuleExpression::Rule(name) | RuleExpression::Super(name) => (*name).to_string(),
+        RuleExpression::Literal(value)
+        | RuleExpression::CharacterClass(value)
+        | RuleExpression::UntilLiteral(value) => (*value).to_string(),
+        _ => format!("{expression}"),
+    }
 }
 
 fn projected_rule_expression(expression: &'static str) -> RuleExpression<'static> {
@@ -4058,7 +4173,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 47);
+        assert_eq!(grammar.effective_rules.len(), 49);
 
         assert!(
             !records
@@ -4081,6 +4196,46 @@ mod tests {
             );
             assert_eq!(effective.selected_rule_grammar, base_grammar);
         }
+    }
+
+    #[test]
+    fn grammar_rule_source_data_preserves_list_patterns() {
+        let records = base_loko_records();
+
+        let rule_data = |name: &str| {
+            let rule = records
+                .rules
+                .iter()
+                .find(|rule| rule.name == name)
+                .expect("base-loko rule should exist");
+            source_data::dump(&rule.expression_data)
+        };
+
+        let parameter_list = rule_data("parameter-list");
+        assert!(parameter_list.contains("list-patterns: [list-pattern("));
+        assert!(parameter_list.contains("combinator: trailing-list-of"));
+        assert!(parameter_list.contains("element-text: \"parameter\""));
+        assert!(parameter_list.contains("separator-text: \",\""));
+        assert!(parameter_list.contains("trailing-separator: #t"));
+        assert!(parameter_list.contains("minimum-count: 1"));
+        assert!(parameter_list.contains("allows-empty: #f"));
+
+        let vector_expression = rule_data("vector-expression");
+        assert!(vector_expression.contains("element-text: \"expression\""));
+        assert!(vector_expression.contains("minimum-count: 0"));
+        assert!(vector_expression.contains("allows-empty: #t"));
+
+        let argument_list = rule_data("argument-list");
+        assert!(argument_list.contains("element-text: \"argument\""));
+        assert!(argument_list.contains("separator: literal(value: \",\")"));
+
+        let result_values = rule_data("result-annotation-values");
+        assert!(result_values.contains("element-text: \"type-annotation-value\""));
+        assert!(result_values.contains("allows-empty: #t"));
+
+        let let_values = rule_data("let-values-binding");
+        assert!(let_values.contains("element-text: \"let-name-binding\""));
+        assert!(let_values.contains("allows-empty: #f"));
     }
 
     #[test]

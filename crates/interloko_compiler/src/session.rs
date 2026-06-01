@@ -11680,6 +11680,61 @@ mod tests {
     }
 
     #[test]
+    fn syntax_tooling_connects_spans_to_list_pattern_metadata() {
+        let source = "define function main(x, y) => (<integer>, <integer>)\n  let values = #[1, 2];\n  add(x, y)\nend";
+        let artifacts =
+            CompilerSession::compile_source("list-patterns.loko", source, RuntimeMode::CompileOnly);
+
+        let rule_data_for_span = |span: Span, rule_name: &str| {
+            // This is the intended lookup path for tooling: source span ->
+            // effective rule application -> selected direct rule -> rule
+            // source data, where `list-patterns` lives.
+            let application = artifacts
+                .grammar_rule_applications_containing_span(span)
+                .into_iter()
+                .find(|application| application.rule_name == rule_name)
+                .expect("span should be contained by requested rule");
+            let effective = artifacts
+                .grammar_parse
+                .effective_rules
+                .iter()
+                .find(|rule| rule.id == application.rule)
+                .expect("application should reference an effective grammar rule");
+            let rule = artifacts
+                .grammar_parse
+                .rules
+                .iter()
+                .find(|rule| rule.id == effective.selected_rule)
+                .expect("effective rule should reference a direct grammar rule");
+            crate::source_data::dump(&rule.expression_data)
+        };
+
+        let parameter_start = source.find("x, y").expect("parameter list");
+        let parameter_data = rule_data_for_span(
+            Span::new(parameter_start, parameter_start + "x, y".len()),
+            "parameter-list",
+        );
+        assert!(parameter_data.contains("element-text: \"parameter\""));
+        assert!(parameter_data.contains("trailing-separator: #t"));
+
+        let vector_start = source.find("#[1, 2]").expect("vector literal");
+        let vector_data = rule_data_for_span(
+            Span::new(vector_start, vector_start + "#[1, 2]".len()),
+            "vector-expression",
+        );
+        assert!(vector_data.contains("element-text: \"expression\""));
+        assert!(vector_data.contains("allows-empty: #t"));
+
+        let argument_start = source.rfind("x, y").expect("argument list");
+        let argument_data = rule_data_for_span(
+            Span::new(argument_start, argument_start + "x, y".len()),
+            "argument-list",
+        );
+        assert!(argument_data.contains("element-text: \"argument\""));
+        assert!(argument_data.contains("minimum-count: 1"));
+    }
+
+    #[test]
     fn parse_view_reports_grammar_diagnostics_for_source_span() {
         let source = "define classs foo (<object>) end;";
         let artifacts =
