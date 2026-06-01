@@ -4332,8 +4332,8 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
                 sem_scalar_result_kind(&generic.result_kinds)
             }),
         sem::Expr::CallableCall { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
-        sem::Expr::Signal { result_kind, .. } => *result_kind,
-        sem::Expr::Handle { restart, .. } => restart.result_kind,
+        sem::Expr::Signal { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
+        sem::Expr::Handle { restart, .. } => sem_scalar_result_kind(&restart.result_kinds),
         sem::Expr::Cast { class, .. } => sem_builtin_value_kind_for_class(module, *class)
             .unwrap_or(sem::ValueKind::Object(*class)),
         sem::Expr::MakeObject {
@@ -5276,6 +5276,18 @@ fn dump_function_param(param: &ast::FunctionParam) -> String {
 }
 
 fn dump_type_annotation(annotation: &ast::TypeAnnotation) -> String {
+    if let Some(callable) = &annotation.callable {
+        let params = callable
+            .params
+            .iter()
+            .map(dump_type_annotation)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "callable({params}) => {}",
+            dump_result_annotation(&callable.results)
+        );
+    }
     if annotation.class_object {
         format!("class {}", annotation.name)
     } else {
@@ -10078,10 +10090,15 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::Signal {
             condition,
             condition_class,
-            result_kind,
+            result_kinds,
             ..
         } => {
-            let _ = writeln!(out, "signal c{} result={result_kind:?}", condition_class.0);
+            let _ = writeln!(
+                out,
+                "signal c{} result={}",
+                condition_class.0,
+                sem_kind_list_label_for_expr(result_kinds)
+            );
             dump_sem_expr(out, condition, indent + 2);
         }
         sem::Expr::ClassOf { object, class, .. } => {
@@ -10207,8 +10224,9 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 .map_or(String::from("none"), |local| format!("l{}", local.0));
             let _ = writeln!(
                 out,
-                "handle restart c{} condition={condition} result={:?}",
-                restart.specializer.0, restart.result_kind
+                "handle restart c{} condition={condition} result={}",
+                restart.specializer.0,
+                sem_kind_list_label_for_expr(&restart.result_kinds)
             );
             indent_line(out, indent + 2);
             let _ = writeln!(out, "body");
@@ -10943,14 +10961,14 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::Signal {
             condition,
             condition_class,
-            result_kind,
+            result_kinds,
             ..
         } => {
             let definition = module
                 .classes
                 .get(condition_class.0 as usize)
                 .map_or(0, |class| class.definition.raw());
-            let _ = write!(out, "signal({definition}:{result_kind:?}:");
+            let _ = write!(out, "signal({definition}:{result_kinds:?}:");
             fingerprint_sem_expr(module, condition, out);
             out.push(')');
         }
@@ -11129,7 +11147,7 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             let _ = write!(
                 out,
                 "handle({definition}:{:?}:condition={condition}:body=",
-                restart.result_kind
+                restart.result_kinds
             );
             fingerprint_sem_expr(module, body, out);
             out.push_str(":restart=");

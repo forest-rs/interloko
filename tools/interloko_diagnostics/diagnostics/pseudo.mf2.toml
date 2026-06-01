@@ -34,6 +34,7 @@
 "sem.constant-initializer-type-mismatch" = "[ps] constant { $constant } initializer got { $actual }, need runtime value"
 "sem.constant-type-mismatch" = "[ps] constant { $constant } expects { $expected }, initializer { $actual }"
 "sem.local-type-mismatch" = "[ps] local { $local } expects { $expected }, initializer { $actual }"
+"sem.scalar-result-arity-mismatch" = "[ps] scalar { $context } got { $actual }, need 1 value"
 "sem.generic-method-specializer-type-mismatch" = "[ps] method { $method } arg { $argument_index } specializer { $actual } violates { $expected }"
 "sem.generic-method-arity-mismatch" = "[ps] method { $method } arity { $actual_count } expected { $expected_count }"
 "sem.ambiguous-generic-method-dispatch" = "[ps] ambiguous generic { $generic } for { $actuals }: { $candidates }"

@@ -88,6 +88,8 @@ pub enum DiagnosticCode {
     ConstantTypeMismatch,
     /// A local `let` initializer does not satisfy its type annotation.
     LocalTypeMismatch,
+    /// A scalar expression context received zero or multiple values.
+    ScalarResultArityMismatch,
     /// A generic method specializer does not satisfy the generic contract.
     GenericMethodSpecializerTypeMismatch,
     /// A method definition does not match the generic arity.
@@ -220,6 +222,7 @@ impl DiagnosticCode {
         Self::ConstantInitializerTypeMismatch,
         Self::ConstantTypeMismatch,
         Self::LocalTypeMismatch,
+        Self::ScalarResultArityMismatch,
         Self::GenericMethodSpecializerTypeMismatch,
         Self::GenericMethodArityMismatch,
         Self::AmbiguousGenericMethodDispatch,
@@ -307,6 +310,7 @@ impl DiagnosticCode {
             Self::ConstantInitializerTypeMismatch => "sem.constant-initializer-type-mismatch",
             Self::ConstantTypeMismatch => "sem.constant-type-mismatch",
             Self::LocalTypeMismatch => "sem.local-type-mismatch",
+            Self::ScalarResultArityMismatch => "sem.scalar-result-arity-mismatch",
             Self::GenericMethodSpecializerTypeMismatch => {
                 "sem.generic-method-specializer-type-mismatch"
             }
@@ -397,6 +401,7 @@ impl DiagnosticCode {
             "sem.constant-initializer-type-mismatch" => Self::ConstantInitializerTypeMismatch,
             "sem.constant-type-mismatch" => Self::ConstantTypeMismatch,
             "sem.local-type-mismatch" => Self::LocalTypeMismatch,
+            "sem.scalar-result-arity-mismatch" => Self::ScalarResultArityMismatch,
             "sem.generic-method-specializer-type-mismatch" => {
                 Self::GenericMethodSpecializerTypeMismatch
             }

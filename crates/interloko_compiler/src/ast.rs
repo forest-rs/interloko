@@ -88,8 +88,19 @@ pub struct TypeAnnotation {
     pub name: String,
     /// Whether this annotation denotes the class object named by `name`.
     pub class_object: bool,
+    /// Callable type signature when this annotation uses `callable(...) => ...`.
+    pub callable: Option<CallableTypeAnnotation>,
     /// Source span.
     pub span: Span,
+}
+
+/// Source callable type annotation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableTypeAnnotation {
+    /// Callable parameter annotations in call order.
+    pub params: Vec<TypeAnnotation>,
+    /// Callable result annotations in return order.
+    pub results: ResultAnnotation,
 }
 
 /// Source result annotation.
@@ -1055,8 +1066,16 @@ impl<'tree> Lowering<'tree> {
                 .get(index + 1)
                 .is_some_and(|next| self.tree.tokens[*next].kind == TokenKind::DoubleColon)
             {
-                self.type_annotation_after(node, tokens[index + 1])
+                let parsed = self.type_annotation_from_tokens(&tokens, index + 2);
+                if let Some((annotation, next)) = parsed {
+                    index = next;
+                    Some(annotation)
+                } else {
+                    index += 1;
+                    None
+                }
             } else {
+                index += 1;
                 None
             };
             params.push(GenericParam {
@@ -1065,7 +1084,6 @@ impl<'tree> Lowering<'tree> {
                 type_annotation,
                 span: token.span,
             });
-            index += 1;
         }
         params
     }
@@ -1086,8 +1104,16 @@ impl<'tree> Lowering<'tree> {
                 .get(index + 1)
                 .is_some_and(|next| self.tree.tokens[*next].kind == TokenKind::DoubleColon)
             {
-                self.type_annotation_after(node, tokens[index + 1])
+                let parsed = self.type_annotation_from_tokens(&tokens, index + 2);
+                if let Some((annotation, next)) = parsed {
+                    index = next;
+                    Some(annotation)
+                } else {
+                    index += 1;
+                    None
+                }
             } else {
+                index += 1;
                 None
             };
             params.push(FunctionParam {
@@ -1096,7 +1122,6 @@ impl<'tree> Lowering<'tree> {
                 type_annotation,
                 span: token.span,
             });
-            index += 1;
         }
         params
     }
@@ -1254,10 +1279,21 @@ impl<'tree> Lowering<'tree> {
             match token.kind {
                 TokenKind::Ident => {
                     let name = token.text(&self.tree.source).to_string();
-                    let type_annotation = tokens
-                        .get(index + 1)
-                        .filter(|token| self.tree.tokens[**token].kind == TokenKind::DoubleColon)
-                        .and_then(|token| self.type_annotation_after(node, *token));
+                    let type_annotation = if tokens.get(index + 1).is_some_and(|token| {
+                        self.tree.tokens[*token].kind == TokenKind::DoubleColon
+                    }) {
+                        let parsed = self.type_annotation_from_tokens(&tokens, index + 2);
+                        if let Some((annotation, next)) = parsed {
+                            index = next;
+                            Some(annotation)
+                        } else {
+                            index += 1;
+                            None
+                        }
+                    } else {
+                        index += 1;
+                        None
+                    };
                     let binding_index = bindings.len();
                     bindings.push(LetBinding {
                         definition: self.definition(
@@ -1269,7 +1305,6 @@ impl<'tree> Lowering<'tree> {
                         type_annotation,
                         span: token.span,
                     });
-                    index += 1;
                     while index < tokens.len()
                         && !matches!(
                             self.tree.tokens[tokens[index]].kind,
@@ -2059,7 +2094,15 @@ impl<'tree> Lowering<'tree> {
     ) -> Option<ResultAnnotation> {
         let tokens = self.node_token_indices(node);
         let marker = tokens.iter().position(|index| *index == marker_index)?;
-        let start = marker + 1;
+        self.result_annotation_from_tokens(&tokens, marker + 1)
+            .map(|(annotation, _)| annotation)
+    }
+
+    fn result_annotation_from_tokens(
+        &self,
+        tokens: &[usize],
+        start: usize,
+    ) -> Option<(ResultAnnotation, usize)> {
         if tokens
             .get(start)
             .is_some_and(|token| self.tree.tokens[*token].kind == TokenKind::LParen)
@@ -2074,7 +2117,7 @@ impl<'tree> Lowering<'tree> {
                     }
                     _ => {
                         if let Some((annotation, next)) =
-                            self.type_annotation_from_tokens(&tokens, index)
+                            self.type_annotation_from_tokens(tokens, index)
                         {
                             values.push(annotation);
                             index = next;
@@ -2087,18 +2130,26 @@ impl<'tree> Lowering<'tree> {
             let end = tokens
                 .get(index)
                 .copied()
-                .unwrap_or_else(|| *tokens.get(start).unwrap_or(&marker_index));
-            return Some(ResultAnnotation {
-                values,
-                span: self.tree.tokens[tokens[start]]
-                    .span
-                    .cover(self.tree.tokens[end].span),
-            });
+                .unwrap_or_else(|| *tokens.get(start).unwrap_or(&tokens[start]));
+            return Some((
+                ResultAnnotation {
+                    values,
+                    span: self.tree.tokens[tokens[start]]
+                        .span
+                        .cover(self.tree.tokens[end].span),
+                },
+                index.saturating_add(1),
+            ));
         }
-        self.type_annotation_from_tokens(&tokens, start)
-            .map(|(annotation, _)| ResultAnnotation {
-                span: annotation.span,
-                values: vec![annotation],
+        self.type_annotation_from_tokens(tokens, start)
+            .map(|(annotation, next)| {
+                (
+                    ResultAnnotation {
+                        span: annotation.span,
+                        values: vec![annotation],
+                    },
+                    next,
+                )
             })
     }
 
@@ -2108,6 +2159,49 @@ impl<'tree> Lowering<'tree> {
         mut index: usize,
     ) -> Option<(TypeAnnotation, usize)> {
         let start = index;
+        if tokens.get(index).is_some_and(|token| {
+            let token = self.tree.tokens[*token];
+            token.kind == TokenKind::Ident && token.text(&self.tree.source) == "callable"
+        }) {
+            let callable_token = self.tree.tokens[tokens[index]];
+            if self.tree.tokens[tokens.get(index + 1).copied()?].kind != TokenKind::LParen {
+                return None;
+            }
+            index += 2;
+            let mut params = Vec::new();
+            while index < tokens.len() {
+                match self.tree.tokens[tokens[index]].kind {
+                    TokenKind::RParen => break,
+                    TokenKind::Comma => {
+                        index += 1;
+                    }
+                    _ => {
+                        let (annotation, next) = self.type_annotation_from_tokens(tokens, index)?;
+                        params.push(annotation);
+                        index = next;
+                    }
+                }
+            }
+            let rparen_index = tokens.get(index).copied()?;
+            if self.tree.tokens[rparen_index].kind != TokenKind::RParen {
+                return None;
+            }
+            let arrow_index = tokens.get(index + 1).copied()?;
+            if self.tree.tokens[arrow_index].kind != TokenKind::Arrow {
+                return None;
+            }
+            let (results, next) = self.result_annotation_from_tokens(tokens, index + 2)?;
+            let span = callable_token.span.cover(results.span);
+            return Some((
+                TypeAnnotation {
+                    name: "<callable>".into(),
+                    class_object: false,
+                    callable: Some(CallableTypeAnnotation { params, results }),
+                    span,
+                },
+                next,
+            ));
+        }
         let class_object = tokens
             .get(index)
             .is_some_and(|token| self.tree.tokens[*token].kind == TokenKind::Class);
@@ -2127,6 +2221,7 @@ impl<'tree> Lowering<'tree> {
         Some(TypeAnnotation {
             name: type_token.text(&self.tree.source).to_string(),
             class_object,
+            callable: None,
             span,
         })
         .map(|annotation| (annotation, index + 1))

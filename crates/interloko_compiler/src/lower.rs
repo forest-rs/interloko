@@ -670,8 +670,13 @@ impl<'module> Lowering<'module> {
 
         for function in &module.functions {
             ids.functions.push(FunctionId(next));
-            let signature =
-                callable_signature_from_sem(&function.param_kinds, &function.result_kinds)?;
+            let signature = callable_signature_from_sem(
+                &mut ids.call_sigs,
+                &function.param_kinds,
+                &function.param_callable_sigs,
+                &function.result_kinds,
+                &function.result_callable_sigs,
+            )?;
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.function_sigs.push(sig);
             next = next.saturating_add(1);
@@ -730,8 +735,13 @@ impl<'module> Lowering<'module> {
         }
         for closure in &module.closures {
             ids.closures.push(FunctionId(next));
-            let signature =
-                callable_signature_from_sem(&closure.param_kinds, &closure.result_kinds)?;
+            let signature = callable_signature_from_sem(
+                &mut ids.call_sigs,
+                &closure.param_kinds,
+                &closure.param_callable_sigs,
+                &closure.result_kinds,
+                &closure.result_callable_sigs,
+            )?;
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.closure_sigs.push(sig);
             next = next.saturating_add(1);
@@ -1314,20 +1324,99 @@ fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
 }
 
 fn callable_signature_from_sem(
+    signatures: &mut Vec<CallableSignature>,
     params: &[sem::ValueKind],
+    param_callable_sigs: &[Option<sem::CallableSignature>],
     rets: &[sem::ValueKind],
+    ret_callable_sigs: &[Option<sem::CallableSignature>],
 ) -> Result<CallableSignature, LowerError> {
     let params = params
         .iter()
         .copied()
-        .map(value_kind)
+        .enumerate()
+        .map(|(index, kind)| {
+            value_kind_with_sem_callable_signature(
+                signatures,
+                kind,
+                param_callable_sigs
+                    .get(index)
+                    .and_then(|signature| signature.as_ref()),
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let rets = rets
         .iter()
         .copied()
-        .map(value_kind)
+        .enumerate()
+        .map(|(index, kind)| {
+            value_kind_with_sem_callable_signature(
+                signatures,
+                kind,
+                ret_callable_sigs
+                    .get(index)
+                    .and_then(|signature| signature.as_ref()),
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CallableSignature { params, rets })
+}
+
+fn value_kind_with_sem_callable_signature(
+    signatures: &mut Vec<CallableSignature>,
+    kind: sem::ValueKind,
+    callable_signature: Option<&sem::CallableSignature>,
+) -> Result<ValueKind, LowerError> {
+    if let Some(signature) = callable_signature {
+        let sig = intern_sem_callable_signature(signatures, signature)?;
+        return Ok(ValueKind::Closure(Some(sig)));
+    }
+    value_kind(kind)
+}
+
+fn intern_sem_callable_signature(
+    signatures: &mut Vec<CallableSignature>,
+    signature: &sem::CallableSignature,
+) -> Result<CallableSigId, LowerError> {
+    let lowered = CallableSignature {
+        params: signature
+            .params
+            .iter()
+            .copied()
+            .map(value_kind)
+            .collect::<Result<Vec<_>, _>>()?,
+        rets: signature
+            .results
+            .iter()
+            .copied()
+            .map(value_kind)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    Ok(intern_callable_signature(signatures, lowered))
+}
+
+fn sem_callable_signature_id(
+    ids: &LowerIds,
+    signature: &sem::CallableSignature,
+) -> Result<CallableSigId, LowerError> {
+    let lowered = CallableSignature {
+        params: signature
+            .params
+            .iter()
+            .copied()
+            .map(value_kind)
+            .collect::<Result<Vec<_>, _>>()?,
+        rets: signature
+            .results
+            .iter()
+            .copied()
+            .map(value_kind)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    ids.call_sigs
+        .iter()
+        .position(|candidate| *candidate == lowered)
+        .map(|index| CallableSigId(u32::try_from(index).unwrap_or(u32::MAX)))
+        .ok_or_else(|| invalid_semantic("callable signature id is missing"))
 }
 
 fn accessor_callable_signature(
@@ -1386,11 +1475,11 @@ struct Value {
     reachable: bool,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveRestart {
     specializer: sem::ClassId,
     signal_label: LabelId,
-    result: Value,
+    results: Vec<Value>,
     condition: Option<Value>,
 }
 
@@ -1542,7 +1631,8 @@ impl<'module> BodyLowering<'module> {
         let Some(local) = local else {
             return Err(invalid_semantic("parameter local id is out of range"));
         };
-        let kind = self.value_kind(local.kind)?;
+        let kind =
+            self.value_kind_with_callable_signature(local.kind, local.callable_signature.as_ref())?;
         let value = Value {
             reg,
             kind,
@@ -1578,8 +1668,12 @@ impl<'module> BodyLowering<'module> {
                     (local_info.name.clone(), local_info.kind)
                 };
                 let value = self.lower_expr(&let_binding.value)?;
-                let value =
-                    self.coerce_value(value, self.value_kind(local_kind)?, let_binding.span)?;
+                let callable_signature = self
+                    .current_local(*local)
+                    .and_then(|local| local.callable_signature.as_ref());
+                let expected =
+                    self.value_kind_with_callable_signature(local_kind, callable_signature)?;
+                let value = self.coerce_value(value, expected, let_binding.span)?;
                 self.set_local(*local, value)?;
                 self.locals.push(Local {
                     source: *local,
@@ -1598,8 +1692,12 @@ impl<'module> BodyLowering<'module> {
                         .ok_or_else(|| invalid_semantic("local id is out of range"))?;
                     (local_info.name.clone(), local_info.kind)
                 };
-                let value =
-                    self.coerce_value(value, self.value_kind(local_kind)?, let_binding.span)?;
+                let callable_signature = self
+                    .current_local(local)
+                    .and_then(|local| local.callable_signature.as_ref());
+                let expected =
+                    self.value_kind_with_callable_signature(local_kind, callable_signature)?;
+                let value = self.coerce_value(value, expected, let_binding.span)?;
                 self.set_local(local, value)?;
                 self.locals.push(Local {
                     source: local,
@@ -1893,6 +1991,7 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::Local {
                 local,
                 result_kind,
+                callable_signature,
                 span,
             } => {
                 let value = self
@@ -1900,11 +1999,16 @@ impl<'module> BodyLowering<'module> {
                     .get(local.0 as usize)
                     .and_then(|value| *value)
                     .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
-                self.coerce_value(value, self.value_kind(*result_kind)?, *span)
+                let expected = self.value_kind_with_callable_signature(
+                    *result_kind,
+                    callable_signature.as_ref(),
+                )?;
+                self.coerce_value(value, expected, *span)
             }
             sem::Expr::Capture {
                 capture,
                 result_kind,
+                callable_signature,
                 span,
             } => {
                 let env = self
@@ -1914,7 +2018,10 @@ impl<'module> BodyLowering<'module> {
                     .captures
                     .get(capture.0 as usize)
                     .ok_or_else(|| invalid_semantic("capture id is out of range"))?;
-                let kind = self.value_kind(capture_info.kind)?;
+                let kind = self.value_kind_with_callable_signature(
+                    capture_info.kind,
+                    capture_info.callable_signature.as_ref(),
+                )?;
                 let result = self.alloc(kind);
                 self.instructions.push(Instr::CaptureGet {
                     dst: result.reg,
@@ -1923,7 +2030,11 @@ impl<'module> BodyLowering<'module> {
                     kind,
                     span: *span,
                 });
-                self.coerce_value(result, self.value_kind(*result_kind)?, *span)
+                let expected = self.value_kind_with_callable_signature(
+                    *result_kind,
+                    callable_signature.as_ref(),
+                )?;
+                self.coerce_value(result, expected, *span)
             }
             sem::Expr::ConstantRef { constant, span, .. } => {
                 if self
@@ -1938,7 +2049,10 @@ impl<'module> BodyLowering<'module> {
                     .constants
                     .get(constant.0 as usize)
                     .ok_or_else(|| invalid_semantic("constant id is out of range"))?;
-                let expected = self.value_kind(constant_info.result_kind)?;
+                let expected = self.value_kind_with_callable_signature(
+                    constant_info.result_kind,
+                    constant_info.callable_signature.as_ref(),
+                )?;
                 let value = constant_info.value.clone();
                 self.active_constants.push(*constant);
                 let lowered = self.lower_expr(&value);
@@ -1974,13 +2088,25 @@ impl<'module> BodyLowering<'module> {
                     .functions
                     .get(function.0 as usize)
                     .ok_or_else(|| invalid_semantic("function id is out of range"))?;
-                let args = self.lower_args_with_expected(args, &function_info.param_kinds)?;
+                let args = self.lower_args_with_expected(
+                    args,
+                    &function_info.param_kinds,
+                    &function_info.param_callable_sigs,
+                )?;
                 if function_info.result_kinds.len() != 1 {
                     return Err(invalid_semantic(
                         "multiple-value function call used in a scalar expression",
                     ));
                 }
-                let result = self.alloc(self.value_kind(function_info.result_kinds[0])?);
+                let result = self.alloc(
+                    self.value_kind_with_callable_signature(
+                        function_info.result_kinds[0],
+                        function_info
+                            .result_callable_sigs
+                            .first()
+                            .and_then(|signature| signature.as_ref()),
+                    )?,
+                );
                 self.instructions.push(Instr::Call {
                     dsts: vec![result.reg],
                     callee: self
@@ -2030,6 +2156,7 @@ impl<'module> BodyLowering<'module> {
                 arg_kinds,
                 result_kinds,
                 span,
+                ..
             } => {
                 if result_kinds.len() != 1 {
                     return Err(invalid_semantic(
@@ -2285,7 +2412,11 @@ impl<'module> BodyLowering<'module> {
                 if function_info.result_kinds.len() == 1 {
                     return Ok(vec![self.lower_expr(expr)?]);
                 }
-                let args = self.lower_args_with_expected(args, &function_info.param_kinds)?;
+                let args = self.lower_args_with_expected(
+                    args,
+                    &function_info.param_kinds,
+                    &function_info.param_callable_sigs,
+                )?;
                 let rets = self.value_kinds(&function_info.result_kinds)?;
                 let results = rets
                     .iter()
@@ -2346,6 +2477,12 @@ impl<'module> BodyLowering<'module> {
                 span,
                 ..
             } => self.lower_callable_results(callable, args, arg_kinds, result_kinds, *span),
+            sem::Expr::Signal {
+                condition,
+                condition_class,
+                span,
+                ..
+            } => self.lower_signal_results(condition, *condition_class, *span),
             sem::Expr::If {
                 condition,
                 refinement: _,
@@ -2353,6 +2490,11 @@ impl<'module> BodyLowering<'module> {
                 else_branch,
                 span,
             } => self.lower_results_if(condition, then_branch, else_branch, *span),
+            sem::Expr::Handle {
+                body,
+                restart,
+                span,
+            } => self.lower_handle_results(body, restart, *span),
             _ => Ok(vec![self.lower_expr(expr)?]),
         }
     }
@@ -2673,6 +2815,18 @@ impl<'module> BodyLowering<'module> {
         }
     }
 
+    fn value_kind_with_callable_signature(
+        &self,
+        kind: sem::ValueKind,
+        callable_signature: Option<&sem::CallableSignature>,
+    ) -> Result<ValueKind, LowerError> {
+        if let Some(signature) = callable_signature {
+            let sig = sem_callable_signature_id(self.ids, signature)?;
+            return Ok(ValueKind::Closure(Some(sig)));
+        }
+        self.value_kind(kind)
+    }
+
     fn value_kinds(&self, kinds: &[sem::ValueKind]) -> Result<Vec<ValueKind>, LowerError> {
         kinds
             .iter()
@@ -2716,11 +2870,26 @@ impl<'module> BodyLowering<'module> {
         condition_class: sem::ClassId,
         span: Span,
     ) -> Result<Value, LowerError> {
+        let mut results = self.lower_signal_results(condition, condition_class, span)?;
+        if results.len() != 1 {
+            return Err(invalid_semantic(
+                "multiple-value signal used in a scalar expression",
+            ));
+        }
+        Ok(results.remove(0))
+    }
+
+    fn lower_signal_results(
+        &mut self,
+        condition: &sem::Expr,
+        condition_class: sem::ClassId,
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
         let condition = self.lower_expr(condition)?;
         let ValueKind::Object(Some(lowered_class)) = condition.kind else {
             return Err(invalid_semantic("signal condition is not an object"));
         };
-        let Some(active) = self.active_restarts.last().copied() else {
+        let Some(active) = self.active_restarts.last().cloned() else {
             return Err(invalid_semantic("signal has no active restart"));
         };
         if !self
@@ -2745,11 +2914,14 @@ impl<'module> BodyLowering<'module> {
             label: active.signal_label,
             span,
         });
-        Ok(Value {
-            reg: active.result.reg,
-            kind: active.result.kind,
-            reachable: false,
-        })
+        Ok(active
+            .results
+            .into_iter()
+            .map(|result| Value {
+                reachable: false,
+                ..result
+            })
+            .collect())
     }
 
     fn lower_if(
@@ -2820,7 +2992,27 @@ impl<'module> BodyLowering<'module> {
         restart: &sem::Restart,
         span: Span,
     ) -> Result<Value, LowerError> {
-        let result = self.alloc(self.value_kind(restart.result_kind)?);
+        let mut results = self.lower_handle_results(body, restart, span)?;
+        if results.len() != 1 {
+            return Err(invalid_semantic(
+                "multiple-value handle used in a scalar expression",
+            ));
+        }
+        Ok(results.remove(0))
+    }
+
+    fn lower_handle_results(
+        &mut self,
+        body: &sem::Expr,
+        restart: &sem::Restart,
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let result_kinds = self.value_kinds(&restart.result_kinds)?;
+        let results = result_kinds
+            .iter()
+            .copied()
+            .map(|kind| self.alloc(kind))
+            .collect::<Vec<_>>();
         let condition = restart
             .condition_local
             .map(|_| self.alloc(ValueKind::Object(Some(restart.specializer))));
@@ -2829,20 +3021,28 @@ impl<'module> BodyLowering<'module> {
         self.active_restarts.push(ActiveRestart {
             specializer: restart.specializer,
             signal_label,
-            result,
+            results: results.clone(),
             condition,
         });
-        let body_value = self.lower_expr(body)?;
+        let body_values = self.lower_results_expr(body)?;
         self.active_restarts.pop();
-        if body_value.kind != result.kind {
-            return Err(invalid_semantic("handle body kind does not match restart"));
+        if body_values.len() != results.len() {
+            return Err(invalid_semantic("handle body arity does not match restart"));
         }
-        if body_value.reachable {
-            self.instructions.push(Instr::Move {
-                dst: result.reg,
-                src: body_value.reg,
-                span: body.span(),
-            });
+        for (body_value, result) in body_values.iter().zip(&results) {
+            if body_value.kind != result.kind {
+                return Err(invalid_semantic("handle body kind does not match restart"));
+            }
+        }
+        let body_reachable = body_values.iter().all(|value| value.reachable);
+        if body_reachable {
+            for (result, body_value) in results.iter().zip(&body_values) {
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: body_value.reg,
+                    span: body.span(),
+                });
+            }
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -2867,35 +3067,57 @@ impl<'module> BodyLowering<'module> {
                 reg: condition.reg,
             });
         }
-        let restart_value = self.lower_expr(&restart.body)?;
-        if restart_value.kind != result.kind {
-            return Err(invalid_semantic(
-                "restart result kind does not match handle",
-            ));
+        let restart_values = self.lower_results_expr(&restart.body)?;
+        if restart_values.len() != results.len() {
+            return Err(invalid_semantic("restart arity does not match handle"));
         }
-        self.instructions.push(Instr::Move {
-            dst: result.reg,
-            src: restart_value.reg,
-            span: restart.body.span(),
-        });
-        self.instructions.push(Instr::Jump {
-            label: join_label,
-            span,
-        });
+        for (restart_value, result) in restart_values.iter().zip(&results) {
+            if restart_value.kind != result.kind {
+                return Err(invalid_semantic(
+                    "restart result kind does not match handle",
+                ));
+            }
+        }
+        let restart_reachable = restart_values.iter().all(|value| value.reachable);
+        if restart_reachable {
+            for (result, restart_value) in results.iter().zip(&restart_values) {
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: restart_value.reg,
+                    span: restart.body.span(),
+                });
+            }
+            self.instructions.push(Instr::Jump {
+                label: join_label,
+                span,
+            });
+        }
 
         self.instructions.push(Instr::Label { label: join_label });
-        Ok(result)
+        Ok(results
+            .into_iter()
+            .map(|result| Value {
+                reachable: body_reachable || restart_reachable,
+                ..result
+            })
+            .collect())
     }
 
     fn lower_args_with_expected(
         &mut self,
         args: &[sem::Expr],
         expected: &[sem::ValueKind],
+        expected_callable_sigs: &[Option<sem::CallableSignature>],
     ) -> Result<Vec<Register>, LowerError> {
         let mut lowered = Vec::with_capacity(args.len());
-        for (arg, expected) in args.iter().zip(expected) {
+        for (index, (arg, expected)) in args.iter().zip(expected).enumerate() {
             let value = self.lower_expr(arg)?;
-            let expected = self.value_kind(*expected)?;
+            let expected = self.value_kind_with_callable_signature(
+                *expected,
+                expected_callable_sigs
+                    .get(index)
+                    .and_then(|signature| signature.as_ref()),
+            )?;
             let value = self.coerce_value(value, expected, arg.span())?;
             lowered.push(value.reg);
         }

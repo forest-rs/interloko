@@ -20,7 +20,10 @@ rule result-annotation = `=>` result-annotation-value
 rule result-annotation-value = type-annotation-value | result-annotation-values
 rule result-annotation-values = `(` trailing-list-of<type-annotation-value, `,`>? `)`
 rule type-annotation = `::` type-annotation-value
-rule type-annotation-value = class-object-type? type-name
+rule type-annotation-value = callable-type | nominal-type
+rule callable-type = `callable` `(` callable-parameter-types? `)` result-annotation
+rule callable-parameter-types = trailing-list-of<type-annotation-value, `,`>
+rule nominal-type = class-object-type? type-name
 rule class-object-type = `class`
 rule body = let-statement* expression?
 rule let-statement = `let` let-binding `=` expression `;`

@@ -1,0 +1,20 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains signal
+// expect: dump lowered contains jmp
+
+define class <need-pair> (<object>)
+end;
+
+define function recover() => (<integer>, <integer>)
+  handle
+    signal(make(<need-pair>))
+  with restart condition :: <need-pair>
+    values(40, 2)
+  end
+end;
+
+define function main()
+  let (base :: <integer>, extra :: <integer>) = recover();
+  base + extra
+end;

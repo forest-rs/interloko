@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.scalar-result-arity-mismatch
+// expect: diagnostic contains scalar expression expects 1 value but got 2 values (<integer>, <integer>)
+
+define function split() => (<integer>, <integer>)
+  values(1, 2)
+end;
+
+define function main()
+  split() + 1
+end;

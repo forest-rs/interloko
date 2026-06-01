@@ -1,0 +1,23 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump ast contains callit(f :: callable(<boolean>) => (<integer>, <integer>))
+// expect: dump sem contains callable-call result=(integer, integer)
+// expect: dump lowered contains f: callable(bool -> (i64, i64))
+// expect: dump tape contains sig=[Bool] -> [I64, I64]
+
+define function split(flag :: <boolean>) => (<integer>, <integer>)
+  if flag then
+    values(40, 2)
+  else
+    values(10, 5)
+  end
+end;
+
+define function callit(f :: callable(<boolean>) => (<integer>, <integer>))
+  apply(f, #t)
+end;
+
+define function main()
+  let (base :: <integer>, extra :: <integer>) = callit(split);
+  base + extra
+end;

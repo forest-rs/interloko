@@ -1,0 +1,15 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-argument-type-mismatch
+// expect: diagnostic contains function `callit` argument 1 expects callable(<boolean>) => <integer> but got callable(<integer>) => <integer>
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function callit(f :: callable(<boolean>) => <integer>) => <integer>
+  apply(f, #t)
+end;
+
+define function main()
+  callit(inc)
+end;

@@ -1,0 +1,19 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.scalar-result-arity-mismatch
+// expect: diagnostic contains scalar expression expects 1 value but got 2 values (<integer>, <integer>)
+
+define function split(flag :: <boolean>) => (<integer>, <integer>)
+  if flag then
+    values(1, 2)
+  else
+    values(3, 4)
+  end
+end;
+
+define function callit(f :: <callable>) => (<integer>, <integer>)
+  apply(f, #t)
+end;
+
+define function main()
+  callit(split) + 1
+end;

@@ -127,6 +127,15 @@ pub enum ValueKind {
     Error,
 }
 
+/// Callable argument and result categories carried by a typed callable value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableSignature {
+    /// Parameter value categories in call order.
+    pub params: Vec<ValueKind>,
+    /// Result value categories in return order.
+    pub results: Vec<ValueKind>,
+}
+
 fn slot_setter_name(slot_name: &str) -> String {
     format!("{slot_name}-setter")
 }
@@ -905,12 +914,16 @@ pub struct Function {
     pub params: Vec<LocalId>,
     /// Resolved parameter value categories in source order.
     pub param_kinds: Vec<ValueKind>,
+    /// Typed callable signatures for callable parameters, when declared.
+    pub param_callable_sigs: Vec<Option<CallableSignature>>,
     /// Local table containing parameters followed by `let` bindings.
     pub locals: Vec<Local>,
     /// Function body.
     pub body: Block,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
+    /// Typed callable signatures for callable results, when declared.
+    pub result_callable_sigs: Vec<Option<CallableSignature>>,
     /// Explicit declared result categories, when present. `None` means the
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
@@ -928,6 +941,8 @@ pub struct Closure {
     pub params: Vec<LocalId>,
     /// Resolved parameter value categories in source order.
     pub param_kinds: Vec<ValueKind>,
+    /// Typed callable signatures for callable parameters, when declared.
+    pub param_callable_sigs: Vec<Option<CallableSignature>>,
     /// Captures read from the closure environment.
     pub captures: Vec<Capture>,
     /// Local table containing parameters followed by `let` bindings.
@@ -936,6 +951,8 @@ pub struct Closure {
     pub body: Block,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
+    /// Typed callable signatures for callable results, when declared.
+    pub result_callable_sigs: Vec<Option<CallableSignature>>,
     /// Explicit declared result categories, when present. `None` means the
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
@@ -955,6 +972,8 @@ pub struct Capture {
     pub name: String,
     /// Captured value category.
     pub kind: ValueKind,
+    /// Typed callable signature when the capture is a typed callable value.
+    pub callable_signature: Option<CallableSignature>,
     /// Source span of the captured binding.
     pub span: Span,
 }
@@ -972,6 +991,8 @@ pub struct Constant {
     pub value: Expr,
     /// Result value category.
     pub result_kind: ValueKind,
+    /// Typed callable signature when the constant is a typed callable value.
+    pub callable_signature: Option<CallableSignature>,
     /// Source span.
     pub span: Span,
 }
@@ -987,6 +1008,8 @@ pub struct Local {
     pub name: String,
     /// Value category.
     pub kind: ValueKind,
+    /// Typed callable signature when this local is a typed callable value.
+    pub callable_signature: Option<CallableSignature>,
     /// Source span of the binding name.
     pub span: Span,
 }
@@ -1205,6 +1228,8 @@ pub enum Expr {
         local: LocalId,
         /// Value category at this use site, including local refinements.
         result_kind: ValueKind,
+        /// Typed callable signature at this use site, when known.
+        callable_signature: Option<CallableSignature>,
         /// Source span.
         span: Span,
     },
@@ -1214,6 +1239,8 @@ pub enum Expr {
         capture: CaptureId,
         /// Value category at this use site.
         result_kind: ValueKind,
+        /// Typed callable signature at this use site, when known.
+        callable_signature: Option<CallableSignature>,
         /// Source span.
         span: Span,
     },
@@ -1223,6 +1250,8 @@ pub enum Expr {
         constant: ConstantId,
         /// Constant value category.
         result_kind: ValueKind,
+        /// Typed callable signature when the constant is a typed callable value.
+        callable_signature: Option<CallableSignature>,
         /// Source span.
         span: Span,
     },
@@ -1248,6 +1277,8 @@ pub enum Expr {
         captures: Vec<Capture>,
         /// Result value category.
         result_kind: ValueKind,
+        /// Typed callable signature for this closure value.
+        callable_signature: CallableSignature,
         /// Source span.
         span: Span,
     },
@@ -1297,6 +1328,8 @@ pub enum Expr {
         arg_kinds: Vec<ValueKind>,
         /// Result value categories in return order.
         result_kinds: Vec<ValueKind>,
+        /// Typed callable signatures for callable results, when known.
+        result_callable_sigs: Vec<Option<CallableSignature>>,
         /// Source span.
         span: Span,
     },
@@ -1306,8 +1339,10 @@ pub enum Expr {
         condition: Box<Expr>,
         /// Statically known condition class.
         condition_class: ClassId,
-        /// Result category supplied by the active restart.
-        result_kind: ValueKind,
+        /// Result categories supplied by the active restart.
+        result_kinds: Vec<ValueKind>,
+        /// Typed callable signatures for signal results, when known.
+        result_callable_sigs: Vec<Option<CallableSignature>>,
         /// Source span.
         span: Span,
     },
@@ -1493,8 +1528,10 @@ pub struct Restart {
     pub condition_local: Option<LocalId>,
     /// Handler body evaluated when a matching condition is signaled.
     pub body: Box<Expr>,
-    /// Handler result category.
-    pub result_kind: ValueKind,
+    /// Handler result categories.
+    pub result_kinds: Vec<ValueKind>,
+    /// Typed callable signatures for handler results, when known.
+    pub result_callable_sigs: Vec<Option<CallableSignature>>,
     /// Source span.
     pub span: Span,
 }
@@ -1517,7 +1554,9 @@ struct FunctionSymbol {
     name: String,
     id: FunctionId,
     param_kinds: Vec<ValueKind>,
+    param_callable_sigs: Vec<Option<CallableSignature>>,
     return_kinds: Vec<ValueKind>,
+    return_callable_sigs: Vec<Option<CallableSignature>>,
     return_annotation: Option<Vec<ValueKind>>,
     span: Span,
 }
@@ -1526,6 +1565,12 @@ impl FunctionSymbol {
     fn arity(&self) -> usize {
         self.param_kinds.len()
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedType {
+    kind: ValueKind,
+    callable_signature: Option<CallableSignature>,
 }
 
 fn scalar_result_kind(kinds: &[ValueKind]) -> ValueKind {
@@ -1548,6 +1593,7 @@ struct ConstantSymbol {
     name: String,
     id: ConstantId,
     kind: ValueKind,
+    callable_signature: Option<CallableSignature>,
     annotation: Option<ValueKind>,
     span: Span,
 }
@@ -1558,6 +1604,7 @@ struct GenericSymbol {
     id: GenericFunctionId,
     param_kinds: Vec<GenericParamKind>,
     return_kinds: Vec<ValueKind>,
+    return_callable_sigs: Vec<Option<CallableSignature>>,
     return_annotation: Option<Vec<ValueKind>>,
     dispatch_param: usize,
     span: Span,
@@ -1578,10 +1625,11 @@ struct FunctionContext {
     diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveRestart {
     specializer: ClassId,
-    result_kind: ValueKind,
+    result_kinds: Vec<ValueKind>,
+    result_callable_sigs: Vec<Option<CallableSignature>>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1626,6 +1674,7 @@ impl FunctionContext {
         definition: DefinitionId,
         name: String,
         kind: ValueKind,
+        callable_signature: Option<CallableSignature>,
         span: Span,
     ) -> LocalId {
         let id = LocalId(u32::try_from(self.locals.len()).unwrap_or(u32::MAX));
@@ -1634,6 +1683,7 @@ impl FunctionContext {
             definition,
             name,
             kind,
+            callable_signature,
             span,
         });
         self.visible_locals.push(true);
@@ -1674,6 +1724,7 @@ impl FunctionContext {
             source: source.id,
             name: source.name,
             kind: source.kind,
+            callable_signature: source.callable_signature,
             span: source.span,
         });
         Some(id)
@@ -1685,10 +1736,22 @@ impl FunctionContext {
             .map_or(ValueKind::Error, |capture| capture.kind)
     }
 
+    fn capture_callable_signature(&self, id: CaptureId) -> Option<CallableSignature> {
+        self.captures
+            .get(id.0 as usize)
+            .and_then(|capture| capture.callable_signature.clone())
+    }
+
     fn local_kind(&self, id: LocalId) -> ValueKind {
         self.locals
             .get(id.0 as usize)
             .map_or(ValueKind::Error, |local| local.kind)
+    }
+
+    fn local_callable_signature(&self, id: LocalId) -> Option<CallableSignature> {
+        self.locals
+            .get(id.0 as usize)
+            .and_then(|local| local.callable_signature.clone())
     }
 
     fn refine_local(&mut self, id: LocalId, kind: ValueKind) -> Option<ValueKind> {
@@ -1717,7 +1780,7 @@ impl FunctionContext {
     }
 
     fn active_restart(&self) -> Option<ActiveRestart> {
-        self.active_restarts.last().copied()
+        self.active_restarts.last().cloned()
     }
 }
 
@@ -2303,10 +2366,15 @@ impl Lowering {
                     );
                 }
             }
-            let return_annotation = generic
-                .return_type
-                .as_ref()
-                .map(|annotation| self.resolve_result_annotation(annotation));
+            let (return_annotation, return_callable_sigs) =
+                generic.return_type.as_ref().map_or_else(
+                    || (None, vec![None; provisional_open_result_kinds().len()]),
+                    |annotation| {
+                        let (kinds, callable_sigs) =
+                            self.resolve_result_annotation_detail(annotation);
+                        (Some(kinds), callable_sigs)
+                    },
+                );
             let return_kinds = return_annotation
                 .clone()
                 .unwrap_or_else(provisional_open_result_kinds);
@@ -2315,6 +2383,7 @@ impl Lowering {
                 id,
                 param_kinds: param_kinds.clone(),
                 return_kinds: return_kinds.clone(),
+                return_callable_sigs: return_callable_sigs.clone(),
                 return_annotation: return_annotation.clone(),
                 dispatch_param: 0,
                 span: generic.span,
@@ -2388,6 +2457,7 @@ impl Lowering {
                 id,
                 param_kinds: param_kinds.clone(),
                 return_kinds: vec![slot_kind],
+                return_callable_sigs: vec![None],
                 return_annotation: Some(vec![slot_kind]),
                 dispatch_param: 1,
                 span: slot_span,
@@ -2453,6 +2523,7 @@ impl Lowering {
                 ),
                 "new-value".into(),
                 slot.kind,
+                None,
                 slot.span,
             );
             let object_param = ctx.add_local(
@@ -2464,6 +2535,7 @@ impl Lowering {
                 ),
                 "object".into(),
                 ValueKind::Object(class),
+                None,
                 slot.span,
             );
             let body = Block {
@@ -2473,11 +2545,13 @@ impl Lowering {
                     receiver: Box::new(Expr::Local {
                         local: object_param,
                         result_kind: ValueKind::Object(class),
+                        callable_signature: None,
                         span: slot.span,
                     }),
                     value: Box::new(Expr::Local {
                         local: value_param,
                         result_kind: slot.kind,
+                        callable_signature: None,
                         span: slot.span,
                     }),
                     class,
@@ -2645,13 +2719,29 @@ impl Lowering {
                 .params
                 .iter()
                 .map(|param| {
-                    self.resolve_function_type(param.type_annotation.as_ref(), ValueKind::I64)
+                    self.resolve_function_type_detail(
+                        param.type_annotation.as_ref(),
+                        ValueKind::I64,
+                    )
                 })
                 .collect::<Vec<_>>();
-            let return_annotation = function
-                .return_type
-                .as_ref()
-                .map(|annotation| self.resolve_result_annotation(annotation));
+            let param_callable_sigs = param_kinds
+                .iter()
+                .map(|param| param.callable_signature.clone())
+                .collect::<Vec<_>>();
+            let param_kinds = param_kinds
+                .into_iter()
+                .map(|param| param.kind)
+                .collect::<Vec<_>>();
+            let (return_annotation, return_callable_sigs) =
+                function.return_type.as_ref().map_or_else(
+                    || (None, vec![None; provisional_open_result_kinds().len()]),
+                    |annotation| {
+                        let (kinds, callable_sigs) =
+                            self.resolve_result_annotation_detail(annotation);
+                        (Some(kinds), callable_sigs)
+                    },
+                );
             let return_kinds = return_annotation
                 .clone()
                 .unwrap_or_else(provisional_open_result_kinds);
@@ -2659,7 +2749,9 @@ impl Lowering {
                 name: function.name.clone(),
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
                 param_kinds,
+                param_callable_sigs,
                 return_kinds,
+                return_callable_sigs,
                 return_annotation,
                 span: function.span,
             });
@@ -2717,12 +2809,17 @@ impl Lowering {
             let annotation = constant
                 .type_annotation
                 .as_ref()
-                .map(|annotation| self.resolve_type_annotation(annotation));
+                .map(|annotation| self.resolve_type_annotation_detail(annotation));
             self.constant_symbols.push(ConstantSymbol {
                 name: constant.name.clone(),
                 id,
-                kind: annotation.unwrap_or(ValueKind::Error),
-                annotation,
+                kind: annotation
+                    .as_ref()
+                    .map_or(ValueKind::Error, |annotation| annotation.kind),
+                callable_signature: annotation
+                    .as_ref()
+                    .and_then(|annotation| annotation.callable_signature.clone()),
+                annotation: annotation.map(|annotation| annotation.kind),
                 span: constant.span,
             });
         }
@@ -2737,9 +2834,14 @@ impl Lowering {
                 .constant_symbols
                 .get(index)
                 .and_then(|symbol| symbol.annotation);
+            let expected_callable_signature = self
+                .constant_symbols
+                .get(index)
+                .and_then(|symbol| symbol.callable_signature.clone());
             let value = self.lower_expr_expected(&mut ctx, &constant.value, expected_kind);
             self.diagnostics.extend(ctx.diagnostics);
             let actual_kind = self.expr_kind(&value);
+            let actual_callable_signature = self.expr_callable_signature(&value);
             if matches!(actual_kind, ValueKind::Error)
                 || (matches!(actual_kind, ValueKind::KnownCallable(_))
                     && !matches!(expected_kind, Some(ValueKind::Callable)))
@@ -2763,9 +2865,34 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
                 );
             }
+            if let Some(expected) = &expected_callable_signature
+                && !self
+                    .callable_signatures_match(Some(expected), actual_callable_signature.as_ref())
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(constant.value.span(), DiagnosticCode::ConstantTypeMismatch)
+                        .with_arg(DiagnosticArg::text("constant", constant.name.clone()))
+                        .with_arg(DiagnosticArg::text(
+                            "expected",
+                            self.callable_signature_name(expected),
+                        ))
+                        .with_arg(DiagnosticArg::text(
+                            "actual",
+                            actual_callable_signature.as_ref().map_or_else(
+                                || self.kind_name(actual_kind),
+                                |signature| self.callable_signature_name(signature),
+                            ),
+                        )),
+                );
+            }
             let result_kind = expected_kind.unwrap_or(actual_kind);
+            let callable_signature = expected_callable_signature.or(match actual_kind {
+                ValueKind::Callable => actual_callable_signature,
+                _ => None,
+            });
             if let Some(symbol) = self.constant_symbols.get_mut(index) {
                 symbol.kind = result_kind;
+                symbol.callable_signature = callable_signature.clone();
             }
             self.constants.push(Constant {
                 id,
@@ -2773,6 +2900,7 @@ impl Lowering {
                 name: constant.name.clone(),
                 value,
                 result_kind,
+                callable_signature,
                 span: constant.span,
             });
         }
@@ -2914,7 +3042,8 @@ impl Lowering {
                 generic.result_kinds = result_kinds.clone();
             }
             if let Some(symbol) = self.generic_symbols.get_mut(id.0 as usize) {
-                symbol.return_kinds = result_kinds;
+                symbol.return_kinds = result_kinds.clone();
+                symbol.return_callable_sigs = vec![None; result_kinds.len()];
             }
         }
     }
@@ -3023,6 +3152,7 @@ impl Lowering {
                 self.local_definition(method.definition, &param.name),
                 param.name.clone(),
                 kind,
+                None,
                 param.span,
             );
             params.push(local);
@@ -3121,10 +3251,16 @@ impl Lowering {
                 .and_then(|symbol| symbol.param_kinds.get(index))
                 .copied()
                 .unwrap_or(ValueKind::Error);
+            let callable_signature = symbol
+                .as_ref()
+                .and_then(|symbol| symbol.param_callable_sigs.get(index))
+                .cloned()
+                .flatten();
             params.push(ctx.add_local(
                 self.local_definition(function.definition, &param.name),
                 param.name.clone(),
                 kind,
+                callable_signature,
                 param.span,
             ));
         }
@@ -3132,11 +3268,20 @@ impl Lowering {
         let return_annotation = symbol
             .as_ref()
             .and_then(|symbol| symbol.return_annotation.clone());
+        let annotated_return_callable_sigs = symbol
+            .as_ref()
+            .map_or_else(Vec::new, |symbol| symbol.return_callable_sigs.clone());
         let body = self.lower_block(&mut ctx, &function.body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&body.result);
+        let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
         let result_kinds = return_annotation
             .clone()
             .unwrap_or_else(|| body_kinds.clone());
+        let result_callable_sigs = if return_annotation.is_some() {
+            annotated_return_callable_sigs
+        } else {
+            body_callable_sigs
+        };
         if let Some(expected) = &return_annotation
             && !self.result_kinds_match(expected, &body_kinds)
         {
@@ -3160,8 +3305,12 @@ impl Lowering {
             && symbol.return_annotation.is_none()
         {
             symbol.return_kinds = result_kinds.clone();
+            symbol.return_callable_sigs = result_callable_sigs.clone();
         }
         self.diagnostics.extend(ctx.diagnostics);
+        let param_callable_sigs = symbol
+            .as_ref()
+            .map_or_else(Vec::new, |symbol| symbol.param_callable_sigs.clone());
 
         Function {
             id,
@@ -3169,9 +3318,11 @@ impl Lowering {
             name: function.name.clone(),
             params,
             param_kinds: symbol.map_or_else(Vec::new, |symbol| symbol.param_kinds),
+            param_callable_sigs,
             locals: ctx.locals,
             body,
             result_kinds,
+            result_callable_sigs,
             return_annotation,
             span: function.span,
         }
@@ -3187,12 +3338,20 @@ impl Lowering {
         for local in &block.lets {
             match &local.pattern {
                 ast::LetPattern::Name(binding) => {
-                    let expected_kind = binding
-                        .type_annotation
-                        .as_ref()
-                        .map(|annotation| self.resolve_type_annotation_in_context(ctx, annotation));
-                    let value = self.lower_expr_expected(ctx, &local.value, expected_kind);
+                    let expected_type = binding.type_annotation.as_ref().map(|annotation| {
+                        self.resolve_type_annotation_detail_in_context(ctx, annotation)
+                    });
+                    let expected_kind = expected_type.as_ref().map(|resolved| resolved.kind);
+                    let value = match expected_kind {
+                        Some(kind) => self.lower_expr_expected_results(
+                            ctx,
+                            &local.value,
+                            Some(core::slice::from_ref(&kind)),
+                        ),
+                        None => self.lower_expr_expected_results(ctx, &local.value, None),
+                    };
                     let actual_kind = self.expr_kind(&value);
+                    let actual_callable_signature = self.expr_callable_signature(&value);
                     let actual_kinds = self.expr_kinds(&value);
                     if actual_kinds.len() != 1 {
                         ctx.diagnostics.push(
@@ -3221,7 +3380,40 @@ impl Lowering {
                             .with_arg(DiagnosticArg::text("actual", self.kind_name(actual_kind))),
                         );
                     }
+                    if let Some(expected) = expected_type
+                        .as_ref()
+                        .and_then(|resolved| resolved.callable_signature.as_ref())
+                        && !self.callable_signatures_match(
+                            Some(expected),
+                            actual_callable_signature.as_ref(),
+                        )
+                    {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                local.value.span(),
+                                DiagnosticCode::LocalTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::text("local", binding.name.clone()))
+                            .with_arg(DiagnosticArg::text(
+                                "expected",
+                                self.callable_signature_name(expected),
+                            ))
+                            .with_arg(DiagnosticArg::text(
+                                "actual",
+                                actual_callable_signature.as_ref().map_or_else(
+                                    || self.kind_name(actual_kind),
+                                    |signature| self.callable_signature_name(signature),
+                                ),
+                            )),
+                        );
+                    }
                     let local_kind = expected_kind.unwrap_or(actual_kind);
+                    let callable_signature = expected_type
+                        .and_then(|resolved| resolved.callable_signature)
+                        .or(match actual_kind {
+                            ValueKind::Callable => actual_callable_signature,
+                            _ => None,
+                        });
                     if ctx.find_local(&binding.name).is_some() {
                         ctx.diagnostics.push(
                             Diagnostic::error(binding.span, DiagnosticCode::DuplicateLocal)
@@ -3232,6 +3424,7 @@ impl Lowering {
                         self.local_definition(binding.definition, &binding.name),
                         binding.name.clone(),
                         local_kind,
+                        callable_signature,
                         binding.span,
                     );
                     lets.push(Let {
@@ -3246,18 +3439,21 @@ impl Lowering {
                         .iter()
                         .map(|binding| {
                             binding.type_annotation.as_ref().map(|annotation| {
-                                self.resolve_type_annotation_in_context(ctx, annotation)
+                                self.resolve_type_annotation_detail_in_context(ctx, annotation)
                             })
                         })
                         .collect::<Vec<_>>();
-                    let expected_results =
-                        expected_kinds.iter().copied().collect::<Option<Vec<_>>>();
+                    let expected_results = expected_kinds
+                        .iter()
+                        .map(|kind| kind.as_ref().map(|resolved| resolved.kind))
+                        .collect::<Option<Vec<_>>>();
                     let value = self.lower_expr_expected_results(
                         ctx,
                         &local.value,
                         expected_results.as_deref(),
                     );
                     let actual_kinds = self.expr_kinds(&value);
+                    let actual_callable_sigs = self.expr_result_callable_signatures(&value);
                     if bindings.len() != actual_kinds.len() {
                         ctx.diagnostics.push(
                             Diagnostic::error(
@@ -3283,7 +3479,8 @@ impl Lowering {
                                     .with_arg(DiagnosticArg::text("local", binding.name.clone())),
                             );
                         }
-                        let expected_kind = expected_kinds.get(index).copied().flatten();
+                        let expected_type = expected_kinds.get(index).cloned().flatten();
+                        let expected_kind = expected_type.as_ref().map(|resolved| resolved.kind);
                         let actual_kind =
                             actual_kinds.get(index).copied().unwrap_or(ValueKind::Error);
                         if let Some(expected) = expected_kind
@@ -3302,11 +3499,47 @@ impl Lowering {
                                 )),
                             );
                         }
+                        let actual_callable_signature =
+                            actual_callable_sigs.get(index).cloned().flatten();
+                        if let Some(expected) = expected_type
+                            .as_ref()
+                            .and_then(|resolved| resolved.callable_signature.as_ref())
+                            && !self.callable_signatures_match(
+                                Some(expected),
+                                actual_callable_signature.as_ref(),
+                            )
+                        {
+                            ctx.diagnostics.push(
+                                Diagnostic::error(
+                                    local.value.span(),
+                                    DiagnosticCode::LocalTypeMismatch,
+                                )
+                                .with_arg(DiagnosticArg::text("local", binding.name.clone()))
+                                .with_arg(DiagnosticArg::text(
+                                    "expected",
+                                    self.callable_signature_name(expected),
+                                ))
+                                .with_arg(DiagnosticArg::text(
+                                    "actual",
+                                    actual_callable_signature.as_ref().map_or_else(
+                                        || self.kind_name(actual_kind),
+                                        |signature| self.callable_signature_name(signature),
+                                    ),
+                                )),
+                            );
+                        }
                         let kind = expected_kind.unwrap_or(actual_kind);
+                        let callable_signature = expected_type
+                            .and_then(|resolved| resolved.callable_signature)
+                            .or(match actual_kind {
+                                ValueKind::Callable => actual_callable_signature,
+                                _ => None,
+                            });
                         let id = ctx.add_local(
                             self.local_definition(binding.definition, &binding.name),
                             binding.name.clone(),
                             kind,
+                            callable_signature,
                             binding.span,
                         );
                         local_ids.push(id);
@@ -3330,7 +3563,7 @@ impl Lowering {
     }
 
     fn lower_expr(&mut self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
-        self.lower_expr_expected_results(ctx, expr, None)
+        self.lower_scalar_expr(ctx, expr, None, "expression")
     }
 
     fn lower_expr_expected(
@@ -3339,12 +3572,45 @@ impl Lowering {
         expr: &ast::Expr,
         expected_result: Option<ValueKind>,
     ) -> Expr {
-        match expected_result {
+        self.lower_scalar_expr(ctx, expr, expected_result, "expression")
+    }
+
+    fn lower_scalar_expr(
+        &mut self,
+        ctx: &mut FunctionContext,
+        expr: &ast::Expr,
+        expected_result: Option<ValueKind>,
+        context: &'static str,
+    ) -> Expr {
+        let lowered = match expected_result {
             Some(kind) => {
                 self.lower_expr_expected_results(ctx, expr, Some(core::slice::from_ref(&kind)))
             }
             None => self.lower_expr_expected_results(ctx, expr, None),
+        };
+        self.require_scalar_result(ctx, &lowered, expr.span(), context);
+        lowered
+    }
+
+    fn require_scalar_result(
+        &self,
+        ctx: &mut FunctionContext,
+        expr: &Expr,
+        span: Span,
+        context: &'static str,
+    ) {
+        let actual_kinds = self.expr_kinds(expr);
+        if actual_kinds.len() == 1 || result_kinds_contain_error(&actual_kinds) {
+            return;
         }
+        ctx.diagnostics.push(
+            Diagnostic::error(span, DiagnosticCode::ScalarResultArityMismatch)
+                .with_arg(DiagnosticArg::text("context", context))
+                .with_arg(DiagnosticArg::text(
+                    "actual",
+                    self.result_kinds_name(&actual_kinds),
+                )),
+        );
     }
 
     fn lower_expr_expected_results(
@@ -3397,12 +3663,14 @@ impl Lowering {
                 Some(local) => Expr::Local {
                     local,
                     result_kind: ctx.local_kind(local),
+                    callable_signature: ctx.local_callable_signature(local),
                     span: *span,
                 },
                 None => match ctx.find_capture_or_add(name) {
                     Some(capture) => Expr::Capture {
                         capture,
                         result_kind: ctx.capture_kind(capture),
+                        callable_signature: ctx.capture_callable_signature(capture),
                         span: *span,
                     },
                     None => self.lower_known_name(ctx, name, *span),
@@ -3488,6 +3756,40 @@ impl Lowering {
                                     ))
                                     .with_arg(
                                         DiagnosticArg::text("actual", self.kind_name(actual)),
+                                    ),
+                                );
+                            }
+                            if let Some(expected) = symbol
+                                .param_callable_sigs
+                                .get(index)
+                                .and_then(|signature| signature.as_ref())
+                                && !self.callable_signatures_match(
+                                    Some(expected),
+                                    self.expr_callable_signature(arg).as_ref(),
+                                )
+                            {
+                                ctx.diagnostics.push(
+                                    Diagnostic::error(
+                                        arg.span(),
+                                        DiagnosticCode::FunctionArgumentTypeMismatch,
+                                    )
+                                    .with_arg(DiagnosticArg::text("function", callee.clone()))
+                                    .with_arg(DiagnosticArg::unsigned(
+                                        "argument_index",
+                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
+                                    ))
+                                    .with_arg(DiagnosticArg::text(
+                                        "expected",
+                                        self.callable_signature_name(expected),
+                                    ))
+                                    .with_arg(
+                                        DiagnosticArg::text(
+                                            "actual",
+                                            self.expr_callable_signature(arg).as_ref().map_or_else(
+                                                || self.kind_name(actual),
+                                                |signature| self.callable_signature_name(signature),
+                                            ),
+                                        ),
                                     ),
                                 );
                             }
@@ -3713,7 +4015,7 @@ impl Lowering {
                 restart,
                 span,
                 ..
-            } => self.lower_handle(ctx, body, restart, *span),
+            } => self.lower_handle(ctx, body, restart, *span, expected_results),
             ast::Expr::Error { span, .. } => Expr::Error { span: *span },
         }
     }
@@ -3723,6 +4025,7 @@ impl Lowering {
             return Expr::ConstantRef {
                 constant: symbol.id,
                 result_kind: symbol.kind,
+                callable_signature: symbol.callable_signature.clone(),
                 span,
             };
         }
@@ -3770,6 +4073,7 @@ impl Lowering {
             id,
             params: Vec::new(),
             param_kinds: Vec::new(),
+            param_callable_sigs: Vec::new(),
             captures: Vec::new(),
             locals: Vec::new(),
             body: Block {
@@ -3778,6 +4082,7 @@ impl Lowering {
                 span,
             },
             result_kinds: vec![ValueKind::Error],
+            result_callable_sigs: vec![None],
             return_annotation: None,
             span,
         });
@@ -3785,6 +4090,7 @@ impl Lowering {
         let mut closure_ctx = FunctionContext::for_closure(ctx.visible_local_sources());
         let mut param_ids = Vec::new();
         let mut param_kinds = Vec::new();
+        let mut param_callable_sigs = Vec::new();
         for param in params {
             if closure_ctx.find_local(&param.name).is_some() {
                 closure_ctx.diagnostics.push(
@@ -3792,8 +4098,10 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("local", param.name.clone())),
                 );
             }
-            let kind = self.resolve_function_type(param.type_annotation.as_ref(), ValueKind::I64);
-            param_kinds.push(kind);
+            let resolved =
+                self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::I64);
+            param_kinds.push(resolved.kind);
+            param_callable_sigs.push(resolved.callable_signature.clone());
             param_ids.push(closure_ctx.add_local(
                 DefinitionId::new(
                     self.source_file,
@@ -3802,18 +4110,30 @@ impl Lowering {
                     &format!("closure:{}:param", id.0),
                 ),
                 param.name.clone(),
-                kind,
+                resolved.kind,
+                resolved.callable_signature,
                 param.span,
             ));
         }
 
-        let return_annotation =
-            return_type.map(|annotation| self.resolve_result_annotation(annotation));
+        let (return_annotation, annotated_return_callable_sigs) = return_type.map_or_else(
+            || (None, Vec::new()),
+            |annotation| {
+                let (kinds, callable_sigs) = self.resolve_result_annotation_detail(annotation);
+                (Some(kinds), callable_sigs)
+            },
+        );
         let lowered_body = self.lower_block(&mut closure_ctx, body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&lowered_body.result);
+        let body_callable_sigs = self.expr_result_callable_signatures(&lowered_body.result);
         let result_kinds = return_annotation
             .clone()
             .unwrap_or_else(|| body_kinds.clone());
+        let result_callable_sigs = if return_annotation.is_some() {
+            annotated_return_callable_sigs
+        } else {
+            body_callable_sigs
+        };
         if let Some(expected) = &return_annotation
             && !self.result_kinds_match(expected, &body_kinds)
         {
@@ -3840,20 +4160,27 @@ impl Lowering {
             *slot = Closure {
                 id,
                 params: param_ids,
-                param_kinds,
+                param_kinds: param_kinds.clone(),
+                param_callable_sigs: param_callable_sigs.clone(),
                 captures: captures.clone(),
                 locals: closure_ctx.locals,
                 body: lowered_body,
-                result_kinds,
+                result_kinds: result_kinds.clone(),
+                result_callable_sigs: result_callable_sigs.clone(),
                 return_annotation,
                 span,
             };
         }
 
+        let callable_signature = CallableSignature {
+            params: param_kinds,
+            results: result_kinds,
+        };
         Expr::Closure {
             closure: id,
             captures,
             result_kind: ValueKind::Callable,
+            callable_signature,
             span,
         }
     }
@@ -4105,12 +4432,41 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
                 );
             }
+            if let Some(expected) = symbol
+                .param_callable_sigs
+                .get(index)
+                .and_then(|signature| signature.as_ref())
+            {
+                let actual_signature = self.expr_callable_signature(arg);
+                if !self.callable_signatures_match(Some(expected), actual_signature.as_ref()) {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                            .with_arg(DiagnosticArg::text("function", symbol.name.clone()))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "argument_index",
+                                u64::try_from(index + 1).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::text(
+                                "expected",
+                                self.callable_signature_name(expected),
+                            ))
+                            .with_arg(DiagnosticArg::text(
+                                "actual",
+                                actual_signature.as_ref().map_or_else(
+                                    || self.kind_name(actual),
+                                    |signature| self.callable_signature_name(signature),
+                                ),
+                            )),
+                    );
+                }
+            }
         }
         Expr::CallableCall {
             callable: Box::new(target),
             args,
             arg_kinds: symbol.param_kinds.clone(),
             result_kinds: symbol.return_kinds.clone(),
+            result_callable_sigs: symbol.return_callable_sigs.clone(),
             span,
         }
     }
@@ -4168,6 +4524,7 @@ impl Lowering {
             args,
             arg_kinds: vec![ValueKind::Object(class)],
             result_kinds: vec![slot_info.kind],
+            result_callable_sigs: vec![None],
             span,
         }
     }
@@ -4223,6 +4580,7 @@ impl Lowering {
                 .map(|index| self.generic_callable_arg_kind(generic, index))
                 .collect(),
             result_kinds: symbol.return_kinds.clone(),
+            result_callable_sigs: symbol.return_callable_sigs.clone(),
             span,
         }
     }
@@ -4235,6 +4593,47 @@ impl Lowering {
         expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
+        if let Some(signature) = self.expr_callable_signature(&target) {
+            if signature.params.len() != args.len() {
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                        .with_arg(DiagnosticArg::text("callee", "apply target"))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "expected_count",
+                            u64::try_from(signature.params.len()).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "actual_count",
+                            u64::try_from(args.len()).unwrap_or(u64::MAX),
+                        )),
+                );
+                return Expr::Error { span };
+            }
+            for (index, (arg, expected)) in args.iter().zip(&signature.params).enumerate() {
+                let actual = self.expr_kind(arg);
+                if !self.kinds_match(*expected, actual) {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                            .with_arg(DiagnosticArg::text("function", "apply target"))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "argument_index",
+                                u64::try_from(index + 1).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::text("expected", self.kind_name(*expected)))
+                            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                    );
+                }
+            }
+            let result_len = signature.results.len();
+            return Expr::CallableCall {
+                callable: Box::new(target),
+                args,
+                arg_kinds: signature.params,
+                result_kinds: signature.results,
+                result_callable_sigs: vec![None; result_len],
+                span,
+            };
+        }
         let Some(result_kinds) = expected_results else {
             ctx.diagnostics.push(
                 Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
@@ -4255,6 +4654,7 @@ impl Lowering {
             args,
             arg_kinds,
             result_kinds: result_kinds.to_vec(),
+            result_callable_sigs: vec![None; result_kinds.len()],
             span,
         }
     }
@@ -4300,7 +4700,8 @@ impl Lowering {
             return Expr::Signal {
                 condition: Box::new(condition),
                 condition_class,
-                result_kind: ValueKind::Error,
+                result_kinds: vec![ValueKind::Error],
+                result_callable_sigs: vec![None],
                 span,
             };
         };
@@ -4321,14 +4722,16 @@ impl Lowering {
             return Expr::Signal {
                 condition: Box::new(condition),
                 condition_class,
-                result_kind: ValueKind::Error,
+                result_kinds: vec![ValueKind::Error],
+                result_callable_sigs: vec![None],
                 span,
             };
         }
         Expr::Signal {
             condition: Box::new(condition),
             condition_class,
-            result_kind: active.result_kind,
+            result_kinds: active.result_kinds,
+            result_callable_sigs: active.result_callable_sigs,
             span,
         }
     }
@@ -4339,6 +4742,7 @@ impl Lowering {
         body: &ast::Expr,
         restart: &ast::Restart,
         span: Span,
+        expected_results: Option<&[ValueKind]>,
     ) -> Expr {
         let specializer = self
             .resolve_class(&restart.class_name)
@@ -4363,29 +4767,38 @@ impl Lowering {
                 self.restart_condition_definition(restart, name),
                 name.clone(),
                 ValueKind::Object(specializer),
+                None,
                 restart.condition_span,
             )
         });
-        let restart_body = self.lower_expr(ctx, &restart.body);
-        let restart_kind = self.expr_kind(&restart_body);
+        let restart_body = self.lower_expr_expected_results(ctx, &restart.body, expected_results);
+        let restart_kinds = self.expr_kinds(&restart_body);
+        let restart_callable_sigs = self.expr_result_callable_signatures(&restart_body);
         ctx.hide_locals_from(scope_start);
 
         ctx.push_restart(ActiveRestart {
             specializer,
-            result_kind: restart_kind,
+            result_kinds: restart_kinds.clone(),
+            result_callable_sigs: restart_callable_sigs.clone(),
         });
-        let body = self.lower_expr(ctx, body);
+        let body = self.lower_expr_expected_results(ctx, body, expected_results);
         ctx.pop_restart();
 
-        let body_kind = self.expr_kind(&body);
-        if body_kind != restart_kind
-            && !matches!(body_kind, ValueKind::Error)
-            && !matches!(restart_kind, ValueKind::Error)
+        let body_kinds = self.expr_kinds(&body);
+        if !self.result_kinds_match(&body_kinds, &restart_kinds)
+            && !result_kinds_contain_error(&body_kinds)
+            && !result_kinds_contain_error(&restart_kinds)
         {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::HandleRestartResultMismatch)
-                    .with_arg(DiagnosticArg::text("body", self.kind_name(body_kind)))
-                    .with_arg(DiagnosticArg::text("restart", self.kind_name(restart_kind))),
+                    .with_arg(DiagnosticArg::text(
+                        "body",
+                        self.result_kinds_name(&body_kinds),
+                    ))
+                    .with_arg(DiagnosticArg::text(
+                        "restart",
+                        self.result_kinds_name(&restart_kinds),
+                    )),
             );
         }
 
@@ -4395,7 +4808,8 @@ impl Lowering {
                 specializer,
                 condition_local,
                 body: Box::new(restart_body),
-                result_kind: restart_kind,
+                result_kinds: restart_kinds,
+                result_callable_sigs: restart_callable_sigs,
                 span: restart.span,
             },
             span,
@@ -4961,7 +5375,7 @@ impl Lowering {
             Expr::Cast { class, .. } => self
                 .kind_for_builtin_class(*class)
                 .unwrap_or(ValueKind::Object(*class)),
-            Expr::Signal { result_kind, .. } => *result_kind,
+            Expr::Signal { result_kinds, .. } => scalar_result_kind(result_kinds),
             Expr::DirectCall { function, .. } => self
                 .functions
                 .get(function.0 as usize)
@@ -4982,7 +5396,7 @@ impl Lowering {
                     ValueKind::Error
                 }
             }
-            Expr::Handle { restart, .. } => restart.result_kind,
+            Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
             Expr::Error { .. } => ValueKind::Error,
         }
     }
@@ -5015,7 +5429,67 @@ impl Lowering {
                     vec![ValueKind::Error]
                 }
             }
+            Expr::Signal { result_kinds, .. } => result_kinds.clone(),
+            Expr::Handle { restart, .. } => restart.result_kinds.clone(),
             _ => vec![self.expr_kind(expr)],
+        }
+    }
+
+    fn expr_callable_signature(&self, expr: &Expr) -> Option<CallableSignature> {
+        match expr {
+            Expr::Local {
+                callable_signature, ..
+            }
+            | Expr::Capture {
+                callable_signature, ..
+            }
+            | Expr::ConstantRef {
+                callable_signature, ..
+            } => callable_signature.clone(),
+            Expr::Closure {
+                callable_signature, ..
+            } => Some(callable_signature.clone()),
+            Expr::KnownCallable { callable, .. } => self.known_callable_signature(*callable),
+            _ => None,
+        }
+    }
+
+    fn expr_result_callable_signatures(&self, expr: &Expr) -> Vec<Option<CallableSignature>> {
+        match expr {
+            Expr::Values { values, .. } => values
+                .iter()
+                .map(|value| self.expr_callable_signature(value))
+                .collect(),
+            Expr::CallableCall {
+                result_callable_sigs,
+                ..
+            } => result_callable_sigs.clone(),
+            Expr::Signal {
+                result_callable_sigs,
+                ..
+            } => result_callable_sigs.clone(),
+            Expr::DirectCall { function, .. } => self
+                .functions
+                .get(function.0 as usize)
+                .map_or_else(|| vec![None], |symbol| symbol.return_callable_sigs.clone()),
+            Expr::GenericCall { generic, .. } => self
+                .generic_symbols
+                .get(generic.0 as usize)
+                .map_or_else(|| vec![None], |symbol| symbol.return_callable_sigs.clone()),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_signatures = self.expr_result_callable_signatures(then_branch);
+                if then_signatures == self.expr_result_callable_signatures(else_branch) {
+                    then_signatures
+                } else {
+                    vec![None; self.expr_kinds(expr).len()]
+                }
+            }
+            Expr::Handle { restart, .. } => restart.result_callable_sigs.clone(),
+            _ => vec![self.expr_callable_signature(expr)],
         }
     }
 
@@ -5140,26 +5614,69 @@ impl Lowering {
         self.resolve_type_name(type_name, false, span)
     }
 
-    fn resolve_function_type(
+    fn resolve_function_type_detail(
         &mut self,
         annotation: Option<&ast::TypeAnnotation>,
         default: ValueKind,
-    ) -> ValueKind {
-        annotation.map_or(default, |annotation| {
-            self.resolve_type_annotation(annotation)
-        })
+    ) -> ResolvedType {
+        annotation.map_or(
+            ResolvedType {
+                kind: default,
+                callable_signature: None,
+            },
+            |annotation| self.resolve_type_annotation_detail(annotation),
+        )
     }
 
     fn resolve_type_annotation(&mut self, annotation: &ast::TypeAnnotation) -> ValueKind {
-        self.resolve_type_name(&annotation.name, annotation.class_object, annotation.span)
+        self.resolve_type_annotation_detail(annotation).kind
+    }
+
+    fn resolve_type_annotation_detail(&mut self, annotation: &ast::TypeAnnotation) -> ResolvedType {
+        if let Some(callable) = &annotation.callable {
+            let signature = self.resolve_callable_type_annotation(callable);
+            return ResolvedType {
+                kind: ValueKind::Callable,
+                callable_signature: Some(signature),
+            };
+        }
+        ResolvedType {
+            kind: self.resolve_type_name(
+                &annotation.name,
+                annotation.class_object,
+                annotation.span,
+            ),
+            callable_signature: None,
+        }
     }
 
     fn resolve_result_annotation(&mut self, annotation: &ast::ResultAnnotation) -> Vec<ValueKind> {
+        self.resolve_result_annotation_detail(annotation).0
+    }
+
+    fn resolve_result_annotation_detail(
+        &mut self,
+        annotation: &ast::ResultAnnotation,
+    ) -> (Vec<ValueKind>, Vec<Option<CallableSignature>>) {
         annotation
             .values
             .iter()
-            .map(|value| self.resolve_type_annotation(value))
-            .collect()
+            .map(|value| self.resolve_type_annotation_detail(value))
+            .map(|resolved| (resolved.kind, resolved.callable_signature))
+            .unzip()
+    }
+
+    fn resolve_callable_type_annotation(
+        &mut self,
+        annotation: &ast::CallableTypeAnnotation,
+    ) -> CallableSignature {
+        let params = annotation
+            .params
+            .iter()
+            .map(|param| self.resolve_type_annotation(param))
+            .collect();
+        let results = self.resolve_result_annotation(&annotation.results);
+        CallableSignature { params, results }
     }
 
     fn resolve_type_annotation_in_context(
@@ -5167,12 +5684,50 @@ impl Lowering {
         ctx: &mut FunctionContext,
         annotation: &ast::TypeAnnotation,
     ) -> ValueKind {
-        self.resolve_type_name_with_sink(
-            &annotation.name,
-            annotation.class_object,
-            annotation.span,
-            &mut ctx.diagnostics,
-        )
+        self.resolve_type_annotation_detail_in_context(ctx, annotation)
+            .kind
+    }
+
+    fn resolve_type_annotation_detail_in_context(
+        &self,
+        ctx: &mut FunctionContext,
+        annotation: &ast::TypeAnnotation,
+    ) -> ResolvedType {
+        if let Some(callable) = &annotation.callable {
+            let signature = self.resolve_callable_type_annotation_in_context(ctx, callable);
+            return ResolvedType {
+                kind: ValueKind::Callable,
+                callable_signature: Some(signature),
+            };
+        }
+        ResolvedType {
+            kind: self.resolve_type_name_with_sink(
+                &annotation.name,
+                annotation.class_object,
+                annotation.span,
+                &mut ctx.diagnostics,
+            ),
+            callable_signature: None,
+        }
+    }
+
+    fn resolve_callable_type_annotation_in_context(
+        &self,
+        ctx: &mut FunctionContext,
+        annotation: &ast::CallableTypeAnnotation,
+    ) -> CallableSignature {
+        let params = annotation
+            .params
+            .iter()
+            .map(|param| self.resolve_type_annotation_in_context(ctx, param))
+            .collect();
+        let results = annotation
+            .results
+            .values
+            .iter()
+            .map(|result| self.resolve_type_annotation_in_context(ctx, result))
+            .collect();
+        CallableSignature { params, results }
     }
 
     fn resolve_method_specializer(
@@ -5392,6 +5947,71 @@ impl Lowering {
             ValueKind::KnownCallable(callable) => self.callable_name(callable),
             ValueKind::Error => "<error>".into(),
         }
+    }
+
+    fn known_callable_signature(&self, callable: KnownCallable) -> Option<CallableSignature> {
+        match callable {
+            KnownCallable::DirectFunction(function) => {
+                self.functions
+                    .get(function.0 as usize)
+                    .map(|function| CallableSignature {
+                        params: function.param_kinds.clone(),
+                        results: function.return_kinds.clone(),
+                    })
+            }
+            KnownCallable::GenericFunction(generic) => self
+                .generic_symbols
+                .get(generic.0 as usize)
+                .map(|generic| CallableSignature {
+                    params: (0..generic.arity())
+                        .map(|index| self.generic_callable_arg_kind(generic.id, index))
+                        .collect(),
+                    results: generic.return_kinds.clone(),
+                }),
+            KnownCallable::SlotAccessor { class, slot, .. } => {
+                let class = self.classes.get(class.0 as usize)?;
+                let slot = class.effective_slots.get(slot.0 as usize)?;
+                Some(CallableSignature {
+                    params: vec![ValueKind::Object(class.id)],
+                    results: vec![slot.kind],
+                })
+            }
+        }
+    }
+
+    fn callable_signatures_match(
+        &self,
+        expected: Option<&CallableSignature>,
+        actual: Option<&CallableSignature>,
+    ) -> bool {
+        let Some(expected) = expected else {
+            return true;
+        };
+        let Some(actual) = actual else {
+            return false;
+        };
+        expected.params.len() == actual.params.len()
+            && expected.results.len() == actual.results.len()
+            && expected
+                .params
+                .iter()
+                .copied()
+                .zip(actual.params.iter().copied())
+                .all(|(expected, actual)| self.kinds_match(expected, actual))
+            && self.result_kinds_match(&expected.results, &actual.results)
+    }
+
+    fn callable_signature_name(&self, signature: &CallableSignature) -> String {
+        let params = signature
+            .params
+            .iter()
+            .map(|kind| self.kind_name(*kind))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "callable({params}) => {}",
+            self.result_kinds_name(&signature.results)
+        )
     }
 
     fn result_kinds_name(&self, kinds: &[ValueKind]) -> String {
@@ -6713,7 +7333,7 @@ mod tests {
             panic!("expected handle expression");
         };
         assert_eq!(restart.specializer, bad_id);
-        assert_eq!(restart.result_kind, ValueKind::I64);
+        assert_eq!(restart.result_kinds, [ValueKind::I64]);
         let condition_local = restart
             .condition_local
             .expect("restart should bind condition object");
@@ -6735,9 +7355,9 @@ mod tests {
             body.as_ref(),
             Expr::Signal {
                 condition_class,
-                result_kind: ValueKind::I64,
+                result_kinds,
                 ..
-            } if *condition_class == bad_id
+            } if *condition_class == bad_id && result_kinds == &[ValueKind::I64]
         ));
     }
 

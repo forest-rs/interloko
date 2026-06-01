@@ -34,6 +34,7 @@
 "sem.constant-initializer-type-mismatch" = "constant `{ $constant }` initializer must produce a runtime value; got { $actual }"
 "sem.constant-type-mismatch" = "constant `{ $constant }` expects { $expected } but initializer has { $actual }"
 "sem.local-type-mismatch" = "local `{ $local }` expects { $expected } but initializer has { $actual }"
+"sem.scalar-result-arity-mismatch" = "scalar { $context } expects 1 value but got { $actual }"
 "sem.generic-method-specializer-type-mismatch" = "method `{ $method }` argument { $argument_index } specializer { $actual } does not satisfy generic contract { $expected }"
 "sem.generic-method-arity-mismatch" = "method `{ $method }` has { $actual_count } parameters but generic expects { $expected_count }"
 "sem.ambiguous-generic-method-dispatch" = "generic `{ $generic }` has ambiguous methods for { $actuals }: { $candidates }"
