@@ -32,20 +32,21 @@ rule let-name-binding = name type-annotation?
 rule let-values-binding = `(` trailing-list-of<let-name-binding, `,`> `)`
 rule expression = handle-expression | if-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
-rule restart-clause = `restart` restart-binding? type-name expression
-rule restart-binding = name `::`
+rule restart-clause = `restart` restart-condition expression
+rule restart-condition = restart-parameter | type-name
+rule restart-parameter = name type-annotation
 rule if-expression = `if` expression `then` expression `else` expression `end`
-rule assignment-expression = comparison-expression assignment-tail?
-rule assignment-tail = `:=` expression
+rule assignment-expression = assignment-target `:=` expression | comparison-expression
+rule assignment-target = postfix-expression
 rule comparison-expression = additive-expression comparison-tail?
 rule comparison-tail = comparison-op additive-expression
 rule comparison-op = `=` | `<=` | `<` | `>=` | `>`
-rule additive-expression = additive-expression add-op multiplicative-expression | multiplicative-expression
+rule additive-expression = multiplicative-expression (add-op multiplicative-expression)*
 rule add-op = `+` | `-`
-rule multiplicative-expression = multiplicative-expression `*` unary-expression | unary-expression
+rule multiplicative-expression = unary-expression (`*` unary-expression)*
 rule unary-expression = negative-expression | postfix-expression
 rule negative-expression = `-` unary-expression
-rule postfix-expression = postfix-expression `.` name | primary-expression
+rule postfix-expression = primary-expression (`.` name)*
 rule primary-expression = function-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | symbol-literal | number-literal | type-expression | name-expression
 rule function-expression = `function` `(` parameter-list? `)` result-annotation? body `end`
 rule parenthesized-expression = `(` expression `)`

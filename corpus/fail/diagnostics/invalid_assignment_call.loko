@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.invalid-slot-assignment
+// expect: diagnostic contains slot assignment target must be `object.slot`
+
+define function target() => <integer>
+  1
+end;
+
+define function main()
+  target() := 2
+end;

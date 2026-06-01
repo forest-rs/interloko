@@ -3012,12 +3012,12 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "handle-expression",
-            "`handle` expression `with restart` binding type-annotation expression `end`",
+            "`handle` expression `with` restart-clause `end`",
             "syntax.rs:Parser::parse_handle",
         ),
         (
             "restart-clause",
-            "`with restart` name type-annotation expression",
+            "`restart` (name type-annotation | type-name) expression",
             "syntax.rs:Parser::parse_restart_clause",
         ),
         (
@@ -3027,7 +3027,12 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "assignment-expression",
-            "comparison-expression (`:=` assignment-expression)?",
+            "assignment-target `:=` expression | comparison-expression",
+            "syntax.rs:Parser::parse_assignment",
+        ),
+        (
+            "assignment-target",
+            "postfix-expression",
             "syntax.rs:Parser::parse_assignment",
         ),
         (
@@ -3958,7 +3963,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 30);
+        assert_eq!(grammar.effective_rules.len(), 31);
 
         assert!(
             !records
