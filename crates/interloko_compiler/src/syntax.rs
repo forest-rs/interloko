@@ -129,13 +129,15 @@ pub enum TokenKind {
     Whitespace,
     /// Line comment trivia.
     Comment,
+    /// Documentation line comment trivia, written with `///`.
+    DocComment,
     /// Unknown byte or character.
     Error,
 }
 
 impl TokenKind {
     pub(crate) fn is_trivia(self) -> bool {
-        matches!(self, Self::Whitespace | Self::Comment)
+        matches!(self, Self::Whitespace | Self::Comment | Self::DocComment)
     }
 }
 
@@ -580,6 +582,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Semicolon => 23,
         TokenKind::Whitespace => 24,
         TokenKind::Comment => 25,
+        TokenKind::DocComment => 46,
         TokenKind::Error => 26,
         TokenKind::If => 27,
         TokenKind::Then => 28,
@@ -756,11 +759,16 @@ pub fn lex(source: &str) -> Vec<Token> {
                 TokenKind::Symbol
             }
             b'/' if bytes.get(pos + 1) == Some(&b'/') => {
+                let kind = if bytes.get(pos + 2) == Some(&b'/') {
+                    TokenKind::DocComment
+                } else {
+                    TokenKind::Comment
+                };
                 pos += 2;
                 while pos < bytes.len() && bytes[pos] != b'\n' {
                     pos += 1;
                 }
-                TokenKind::Comment
+                kind
             }
             b if b.is_ascii_whitespace() => {
                 pos += 1;
@@ -859,6 +867,11 @@ mod tests {
                 .any(|token| token.kind == TokenKind::Whitespace)
         );
         assert!(tokens.iter().any(|token| token.kind == TokenKind::Comment));
+        assert!(
+            lex("/// docs\n")
+                .iter()
+                .any(|token| token.kind == TokenKind::DocComment)
+        );
         assert_eq!(tokens[0].kind, TokenKind::Define);
         assert_eq!(tokens[2].kind, TokenKind::Function);
     }

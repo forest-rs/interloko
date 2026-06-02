@@ -595,21 +595,22 @@ impl fmt::Display for GroupedRuleExpression<'_, '_> {
 /// Whether a rule participates in default trivia skipping.
 ///
 /// [`SourceAuthoredRule::trivia`] selects between leaving whitespace and
-/// `//` comments to the kernel ([`TriviaMode::Default`]) and treating them
-/// as part of the matched source ([`TriviaMode::Raw`]). Raw rules are
+/// `//` line comments, including `///` documentation comments, to the kernel
+/// ([`TriviaMode::Default`]) and treating them as part of the matched source
+/// ([`TriviaMode::Raw`]). Raw rules are
 /// useful for tokens with exact internal structure, such as string literals.
 ///
 /// Marked `#[non_exhaustive]` so future kernel commits can add modes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TriviaMode {
-    /// Whitespace and `//` comments are skipped before every literal and at
-    /// the rule boundary.
+    /// Whitespace and `//` line comments are skipped before every literal and
+    /// at the rule boundary.
     #[default]
     Default,
-    /// Whitespace and `//` comments are not skipped at the rule boundary or
-    /// before literals inside this rule's body. Rule references inside a raw
-    /// rule are still evaluated according to the called rule's own trivia
+    /// Whitespace and `//` line comments are not skipped at the rule boundary
+    /// or before literals inside this rule's body. Rule references inside a
+    /// raw rule are still evaluated according to the called rule's own trivia
     /// mode.
     Raw,
 }

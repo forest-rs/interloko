@@ -1,0 +1,15 @@
+// expect: run 3
+// expect: dump eop contains documentation [Helper docs]
+// expect: dump eop contains documentation [Main entry.]
+/// Helper docs
+define function helper() => <integer>
+  1
+end;
+
+// Ordinary inter-form comments stay trivia.
+/// Main entry.
+define function main() => <integer>
+  let x = helper(); // trailing comments also stay trivia
+  /// Body comments do not attach to the function.
+  x + 2
+end

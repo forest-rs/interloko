@@ -12,11 +12,11 @@ use interloko_compiler::sem::{
     GenericFunctionId, HostClass, HostMetaRegistry, HostSlot, ValueKind,
 };
 use interloko_compiler::session::{
-    AffordanceFacet, ArtifactFacet, CompilerSession, DumpStage, EnvironmentAffordance,
-    EnvironmentKind, EnvironmentObject, EnvironmentObjectId, EnvironmentObjectSink,
-    EnvironmentOrigin, EnvironmentStorage, HostEnvironmentProvider, IncrementalCompilerSession,
-    InspectionFacet, MutationError, MutationOutcome, PresentationFacet, RecomputeStrategy,
-    RuntimeMode, RuntimeResult, SessionArtifacts, SessionMutation, SourceFacet,
+    AffordanceFacet, ArtifactFacet, CompilerSession, DocumentationFacet, DumpStage,
+    EnvironmentAffordance, EnvironmentKind, EnvironmentObject, EnvironmentObjectId,
+    EnvironmentObjectSink, EnvironmentOrigin, EnvironmentStorage, HostEnvironmentProvider,
+    IncrementalCompilerSession, InspectionFacet, MutationError, MutationOutcome, PresentationFacet,
+    RecomputeStrategy, RuntimeMode, RuntimeResult, SessionArtifacts, SessionMutation, SourceFacet,
     execution_trace_mask,
 };
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -1166,6 +1166,7 @@ fn host_environment_object(
         storage: EnvironmentStorage::HostOwned,
         presentation: PresentationFacet::new(title),
         source: SourceFacet::none(),
+        documentation: DocumentationFacet::new(Vec::new()),
         artifacts: ArtifactFacet::new(Vec::new()),
         affordances: AffordanceFacet::new(vec![
             EnvironmentAffordance::Inspect,

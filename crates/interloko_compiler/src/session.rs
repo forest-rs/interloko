@@ -752,6 +752,21 @@ impl SourceFacet {
     }
 }
 
+/// Documentation comments attached to an environment object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentationFacet {
+    /// Normalized leading `///` comment lines, without the marker.
+    pub lines: Vec<String>,
+}
+
+impl DocumentationFacet {
+    /// Creates a documentation facet from normalized lines.
+    #[must_use]
+    pub fn new(lines: Vec<String>) -> Self {
+        Self { lines }
+    }
+}
+
 /// Query artifacts related to an environment object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactFacet {
@@ -840,6 +855,8 @@ pub struct EnvironmentObject {
     /// Source provenance. Some projected objects intentionally carry an empty
     /// facet when they are host-owned, runtime-only, or session-transient.
     pub source: SourceFacet,
+    /// Documentation comments associated with this object.
+    pub documentation: DocumentationFacet,
     /// Related compiler artifacts.
     pub artifacts: ArtifactFacet,
     /// Supported environment actions.
@@ -1252,6 +1269,11 @@ pub struct SourceFormProvenance {
     pub grammar: Option<grammar_frontend::GrammarId>,
     /// Environment-object ids produced from this form when known.
     pub produced_object_ids: Vec<String>,
+    /// Leading documentation comment lines attached to this form.
+    ///
+    /// Lines come from the contiguous `///` block immediately before the
+    /// source form, with the marker and one optional following space removed.
+    pub doc_comments: Vec<String>,
     /// Grammar rule applications associated with this form.
     pub rule_applications: Vec<GrammarRuleApplication>,
     /// Staged frontend form payload, when this came from a staged grammar.
@@ -1275,11 +1297,12 @@ pub struct SyntaxNodeSummary {
     pub depth: usize,
 }
 
-/// Owned summary of one non-trivia token that intersects a tooling query.
+/// Owned summary of one token that intersects a tooling query.
 ///
-/// Returned by [`SessionArtifacts::syntax_tokens_intersecting_span`]. The
-/// token text is copied out of the source so callers can display the summary
-/// without keeping a borrow into [`SessionArtifacts`].
+/// Returned by [`SessionArtifacts::syntax_tokens_intersecting_span`] and
+/// [`SessionArtifacts::syntax_trivia_intersecting_span`]. The token text is
+/// copied out of the source so callers can display the summary without keeping
+/// a borrow into [`SessionArtifacts`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntaxTokenSummary {
     /// Token kind.
@@ -1304,6 +1327,8 @@ pub struct SourceParseView {
     pub nodes: Vec<SyntaxNodeSummary>,
     /// Non-trivia tokens intersecting the queried span.
     pub tokens: Vec<SyntaxTokenSummary>,
+    /// Trivia tokens intersecting the queried span.
+    pub trivia: Vec<SyntaxTokenSummary>,
     /// Grammar rule applications that touch the queried span, smallest first.
     pub rule_applications: Vec<GrammarRuleApplication>,
     /// Grammar diagnostic facts that touch the queried span.
@@ -1415,6 +1440,28 @@ impl SessionArtifacts {
             .collect()
     }
 
+    /// Returns trivia tokens that intersect `span`, in source order.
+    ///
+    /// A zero-width `span` acts like a cursor position and returns the trivia
+    /// token under the cursor when one exists. Comments stay out of the CST but
+    /// remain available through this query for formatters, documentation
+    /// tooling, and source-preserving edits.
+    #[must_use]
+    pub fn syntax_trivia_intersecting_span(&self, span: Span) -> Vec<SyntaxTokenSummary> {
+        self.syntax
+            .tokens
+            .iter()
+            .copied()
+            .filter(|token| token.kind.is_trivia())
+            .filter(|token| span_intersects_query(token.span, span))
+            .map(|token| SyntaxTokenSummary {
+                kind: token.kind,
+                span: token.span,
+                text: token.text(&self.syntax.source).to_string(),
+            })
+            .collect()
+    }
+
     /// Returns grammar diagnostic facts that touch `span`.
     ///
     /// This is a tooling query: non-empty spans overlap normally, while
@@ -1469,6 +1516,7 @@ impl SessionArtifacts {
             span,
             nodes: self.syntax_nodes_containing_span(span),
             tokens: self.syntax_tokens_intersecting_span(span),
+            trivia: self.syntax_trivia_intersecting_span(span),
             rule_applications: grammar_rule_applications_touching_span(&self.grammar_parse, span),
             diagnostics: self.grammar_diagnostics_intersecting_span(span),
         }
@@ -4966,6 +5014,7 @@ fn collect_base_source_forms(
             grammar: activation_for_span(&artifacts.grammar_parse, form.span)
                 .map(|activation| activation.grammar),
             produced_object_ids: produced_object_ids_for_span(objects, form.span),
+            doc_comments: leading_doc_comments_for_span(&artifacts.syntax, form.span),
             rule_applications: grammar_rule_applications_touching_span(
                 &artifacts.grammar_parse,
                 form.span,
@@ -4994,6 +5043,7 @@ fn collect_staged_source_forms(
                 activation: Some(region.activation),
                 grammar: Some(region.grammar),
                 produced_object_ids: produced_object_ids_for_span(objects, form.source_span),
+                doc_comments: Vec::new(),
                 rule_applications: grammar_rule_applications_touching_list(
                     &region.rule_applications,
                     form.source_span,
@@ -5027,6 +5077,61 @@ fn source_form_title_from_frontend(form: &FrontendForm) -> String {
         FrontendFormKind::Class(class) => format!("frontend class {}", class.name),
         FrontendFormKind::Function(function) => format!("frontend function {}", function.name),
     }
+}
+
+fn leading_doc_comments_for_span(tree: &SyntaxTree, span: Span) -> Vec<String> {
+    let mut index = tree
+        .tokens
+        .partition_point(|token| token.span.start < span.start);
+    let mut docs = Vec::new();
+    let mut saw_doc = false;
+
+    while index > 0 {
+        index -= 1;
+        let token = tree.tokens[index];
+        let text = token.text(&tree.source);
+        match token.kind {
+            TokenKind::DocComment => {
+                if !is_line_leading_comment(&tree.source, token.span.start) {
+                    break;
+                }
+                saw_doc = true;
+                docs.push(normalize_doc_comment_text(text));
+            }
+            TokenKind::Whitespace => {
+                if whitespace_has_blank_line(text) {
+                    break;
+                }
+            }
+            TokenKind::Comment => break,
+            kind if kind.is_trivia() => {
+                if saw_doc {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    docs.reverse();
+    docs
+}
+
+fn normalize_doc_comment_text(text: &str) -> String {
+    let without_marker = text.strip_prefix("///").unwrap_or(text);
+    without_marker
+        .strip_prefix(' ')
+        .unwrap_or(without_marker)
+        .to_string()
+}
+
+fn whitespace_has_blank_line(text: &str) -> bool {
+    text.bytes().filter(|byte| *byte == b'\n').count() >= 2
+}
+
+fn is_line_leading_comment(source: &str, start: usize) -> bool {
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    source[line_start..start].chars().all(char::is_whitespace)
 }
 
 fn source_form_origin_order(origin: &SourceFormOrigin) -> usize {
@@ -5146,7 +5251,7 @@ fn dump_cst_node(out: &mut String, tree: &SyntaxTree, node: &CstNode, indent: us
             CstElement::Node(child) => dump_cst_node(out, tree, child, indent + 2),
             CstElement::Token(index) => {
                 let token = tree.tokens[*index];
-                if matches!(token.kind, TokenKind::Whitespace | TokenKind::Comment) {
+                if token.kind.is_trivia() {
                     continue;
                 }
                 indent_line(out, indent + 2);
@@ -7132,6 +7237,11 @@ fn render_environment_objects(source: &SourceFile, objects: &[EnvironmentObject]
         let _ = writeln!(out, "    source {}", render_source_facet(&object.source));
         let _ = writeln!(
             out,
+            "    documentation {}",
+            render_documentation_facet(&object.documentation)
+        );
+        let _ = writeln!(
+            out,
             "    artifacts {}",
             render_artifact_facet(&object.artifacts)
         );
@@ -7161,6 +7271,22 @@ fn render_source_facet(source: &SourceFacet) -> String {
         |span| format!("{}..{}", span.start, span.end),
     );
     format!("file={source_file} definition={definition} span={span}")
+}
+
+fn render_documentation_facet(documentation: &DocumentationFacet) -> String {
+    if documentation.lines.is_empty() {
+        return "[]".into();
+    }
+    let mut out = String::new();
+    out.push('[');
+    for (index, line) in documentation.lines.iter().enumerate() {
+        if index > 0 {
+            out.push_str(" | ");
+        }
+        out.push_str(line);
+    }
+    out.push(']');
+    out
 }
 
 fn render_artifact_facet(artifacts: &ArtifactFacet) -> String {
@@ -7201,6 +7327,11 @@ fn dump_environment_object_stage(
             let _ = writeln!(out, "kind: {}", object.kind.as_str());
             let _ = writeln!(out, "title: {}", object.presentation.title);
             let _ = writeln!(out, "source {}", render_source_facet(&object.source));
+            let _ = writeln!(
+                out,
+                "documentation {}",
+                render_documentation_facet(&object.documentation)
+            );
             let _ = writeln!(out, "detail: {}", object.inspection.detail);
             out
         }
@@ -7455,6 +7586,11 @@ fn dump_mop_environment_object(artifacts: &SessionArtifacts, object: &Environmen
     let _ = writeln!(out, "origin: {}", object.origin.as_str());
     let _ = writeln!(out, "storage: {}", object.storage.as_str());
     let _ = writeln!(out, "source {}", render_source_facet(&object.source));
+    let _ = writeln!(
+        out,
+        "documentation {}",
+        render_documentation_facet(&object.documentation)
+    );
     let _ = writeln!(
         out,
         "artifacts {}",
@@ -7763,6 +7899,12 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
     let _ = writeln!(out, "  title: {}", object.presentation.title);
     let _ = writeln!(out, "source:");
     let _ = writeln!(out, "  {}", render_source_facet(&object.source));
+    let _ = writeln!(out, "documentation:");
+    let _ = writeln!(
+        out,
+        "  {}",
+        render_documentation_facet(&object.documentation)
+    );
     let _ = writeln!(out, "artifacts:");
     if object.artifacts.keys.is_empty() {
         let _ = writeln!(out, "  <none>");
@@ -7790,6 +7932,11 @@ fn dump_environment_object_summary(object: &EnvironmentObject, out: &mut String)
     let _ = writeln!(out, "kind: {}", object.kind.as_str());
     let _ = writeln!(out, "title: {}", object.presentation.title);
     let _ = writeln!(out, "source {}", render_source_facet(&object.source));
+    let _ = writeln!(
+        out,
+        "documentation {}",
+        render_documentation_facet(&object.documentation)
+    );
     let _ = writeln!(out, "inspection: {}", object.inspection.detail);
 }
 
@@ -7911,6 +8058,7 @@ fn environment_object(parts: EnvironmentObjectParts) -> EnvironmentObject {
         storage: parts.storage,
         presentation: PresentationFacet::new(parts.title),
         source: SourceFacet::none(),
+        documentation: DocumentationFacet::new(Vec::new()),
         artifacts: ArtifactFacet::new(Vec::new()),
         affordances: AffordanceFacet::new(parts.affordances),
         execution: parts.execution.map(ExecutionFacet::new),
@@ -8291,6 +8439,14 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
         EnvironmentKind::RuntimeLayoutRow
         | EnvironmentKind::HostObject
         | EnvironmentKind::Mutation => {}
+    }
+
+    if object.origin == EnvironmentOrigin::SourceAuthored
+        && object.source.source_file == Some(source_file)
+        && let Some(span) = object.source.span
+    {
+        object.documentation =
+            DocumentationFacet::new(leading_doc_comments_for_span(&artifacts.syntax, span));
     }
 }
 
@@ -11201,6 +11357,10 @@ mod tests {
             .expect("environment object should exist")
     }
 
+    fn doc_lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
     fn class_id(artifacts: &SessionArtifacts, name: &str) -> sem::ClassId {
         artifacts
             .sem
@@ -11451,6 +11611,66 @@ mod tests {
     }
 
     #[test]
+    fn session_attaches_doc_comments_to_source_forms_and_eop_objects() {
+        let source = "/// Circle docs\n\
+                      /// Carries a radius.\n\
+                      define class <circle> (<object>)\nend;\n\
+                      /// Area dispatcher.\n\
+                      define generic area(x :: <object>) => <integer>;\n\
+                      // ordinary comments do not attach\n\
+                      /// Area method.\n\
+                      define method area(x :: <object>) => <integer>\n  1\nend\n\
+                      /// Helper function.\n\
+                      define function helper()\n  2\nend\n\
+                      /// Answer constant.\n\
+                      define constant $answer = 42;\n";
+        let artifacts =
+            CompilerSession::compile_source("docs.loko", source, RuntimeMode::CompileOnly);
+        let forms = artifacts.source_forms();
+
+        let assert_form_docs = |kind, lines: &[&str]| {
+            let form = forms
+                .iter()
+                .find(|form| form.kind == kind)
+                .expect("source form should exist");
+            assert_eq!(form.doc_comments, doc_lines(lines));
+        };
+        assert_form_docs(SourceFormKind::Class, &["Circle docs", "Carries a radius."]);
+        assert_form_docs(SourceFormKind::Generic, &["Area dispatcher."]);
+        assert_form_docs(SourceFormKind::Method, &["Area method."]);
+        assert_form_docs(SourceFormKind::Function, &["Helper function."]);
+        assert_form_docs(SourceFormKind::Constant, &["Answer constant."]);
+
+        let objects = artifacts.environment_objects();
+        assert_eq!(
+            eop_object(&objects, "class:c1").documentation.lines,
+            doc_lines(&["Circle docs", "Carries a radius."])
+        );
+        assert_eq!(
+            eop_object(&objects, "generic:g0").documentation.lines,
+            doc_lines(&["Area dispatcher."])
+        );
+        assert_eq!(
+            eop_object(&objects, "method:m0").documentation.lines,
+            doc_lines(&["Area method."])
+        );
+        assert_eq!(
+            eop_object(&objects, "function:f0").documentation.lines,
+            doc_lines(&["Helper function."])
+        );
+        assert_eq!(
+            eop_object(&objects, "constant:k0").documentation.lines,
+            doc_lines(&["Answer constant."])
+        );
+
+        let eop = artifacts
+            .dump_environment_object_stage("function:f0", DumpStage::Eop)
+            .expect("function eop dump");
+        assert!(eop.contains("documentation:"));
+        assert!(eop.contains("[Helper function.]"));
+    }
+
+    #[test]
     fn session_answers_syntax_tooling_queries_by_span() {
         let source = "define function main()\n  40 + 2\nend\n";
         let artifacts =
@@ -11517,6 +11737,43 @@ mod tests {
                 .any(|application| application.rule_name == "function-definition")
         );
         assert!(view.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn session_answers_trivia_tooling_queries_by_span() {
+        let source =
+            "define function main()\n  let x = 1; // trailing\n  /// body comment\n  x\nend\n";
+        let artifacts =
+            CompilerSession::compile_source("trivia.loko", source, RuntimeMode::CompileOnly);
+        assert!(
+            artifacts.diagnostics.is_empty(),
+            "comments should parse as trivia: {:?}",
+            artifacts.diagnostics
+        );
+
+        let doc_start = source
+            .find("/// body comment")
+            .expect("doc comment present");
+        let doc_span = Span::new(doc_start, doc_start + "/// body comment".len());
+        assert!(
+            artifacts
+                .syntax_tokens_intersecting_span(doc_span)
+                .is_empty()
+        );
+
+        let trivia = artifacts.syntax_trivia_intersecting_span(doc_span);
+        assert_eq!(
+            trivia
+                .iter()
+                .map(|token| (token.kind, token.text.as_str()))
+                .collect::<Vec<_>>(),
+            Vec::from([(TokenKind::DocComment, "/// body comment")])
+        );
+
+        let view = artifacts.parse_view_for_span(doc_span);
+        assert!(view.tokens.is_empty());
+        assert_eq!(view.trivia, trivia);
+        assert!(view.nodes.iter().any(|node| node.kind == CstKind::Function));
     }
 
     #[test]
@@ -13004,6 +13261,7 @@ mod tests {
                 storage: EnvironmentStorage::HostOwned,
                 presentation: PresentationFacet::new("Rust circle instance"),
                 source: SourceFacet::none(),
+                documentation: DocumentationFacet::new(Vec::new()),
                 artifacts: ArtifactFacet::new(Vec::new()),
                 affordances: AffordanceFacet::new(Vec::from([
                     EnvironmentAffordance::Inspect,

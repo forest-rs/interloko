@@ -2904,7 +2904,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::String
         | TokenKind::Symbol
         | TokenKind::Keyword => literal_highlight_style(),
-        TokenKind::Comment => comment_highlight_style(),
+        TokenKind::Comment | TokenKind::DocComment => comment_highlight_style(),
         TokenKind::Error => error_highlight_style(),
         TokenKind::LParen
         | TokenKind::RParen
