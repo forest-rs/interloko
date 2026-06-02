@@ -552,6 +552,8 @@ pub enum EnvironmentAffordance {
     ShowRuntimeLayout,
     /// Show query artifact dependencies.
     ShowDependencies,
+    /// Show documentation comments attached to an object.
+    ShowDocumentation,
     /// Show the accessor for a slot.
     ShowAccessor,
     /// Show the slot read by an accessor.
@@ -618,6 +620,7 @@ impl EnvironmentAffordance {
             Self::ShowDispatch,
             Self::ShowRuntimeLayout,
             Self::ShowDependencies,
+            Self::ShowDocumentation,
             Self::ShowAccessor,
             Self::ShowSlot,
             Self::Run,
@@ -669,6 +672,7 @@ impl EnvironmentAffordance {
             Self::ShowDispatch => "show-dispatch",
             Self::ShowRuntimeLayout => "show-runtime-layout",
             Self::ShowDependencies => "show-dependencies",
+            Self::ShowDocumentation => "show-documentation",
             Self::ShowAccessor => "show-accessor",
             Self::ShowSlot => "show-slot",
             Self::Run => "run",
@@ -8448,6 +8452,16 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
         object.documentation =
             DocumentationFacet::new(leading_doc_comments_for_span(&artifacts.syntax, span));
     }
+    if !object.documentation.lines.is_empty()
+        && !object
+            .affordances
+            .contains(EnvironmentAffordance::ShowDocumentation)
+    {
+        object
+            .affordances
+            .names
+            .push(EnvironmentAffordance::ShowDocumentation);
+    }
 }
 
 fn grammar_extension_object_source_span(
@@ -11421,6 +11435,10 @@ mod tests {
                 "show-runtime-layout",
             ),
             (EnvironmentAffordance::ShowDependencies, "show-dependencies"),
+            (
+                EnvironmentAffordance::ShowDocumentation,
+                "show-documentation",
+            ),
             (EnvironmentAffordance::ShowAccessor, "show-accessor"),
             (EnvironmentAffordance::ShowSlot, "show-slot"),
             (EnvironmentAffordance::Run, "run"),
@@ -11657,6 +11675,11 @@ mod tests {
         assert_eq!(
             eop_object(&objects, "function:f0").documentation.lines,
             doc_lines(&["Helper function."])
+        );
+        assert!(
+            eop_object(&objects, "function:f0")
+                .affordances
+                .contains(EnvironmentAffordance::ShowDocumentation)
         );
         assert_eq!(
             eop_object(&objects, "constant:k0").documentation.lines,

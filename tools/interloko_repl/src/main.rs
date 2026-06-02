@@ -255,7 +255,7 @@ impl Repl {
             return self.handle_command(trimmed, stdout, stderr);
         }
 
-        if trimmed.starts_with("define ") {
+        if trimmed.starts_with("define ") || trimmed.starts_with("///") {
             self.pending_definition.push_str(line);
             self.pending_definition.push('\n');
             if pending_definition_state(&self.pending_definition) == PendingDefinitionState::Ready {
@@ -892,6 +892,9 @@ impl Repl {
                 "show-diagnostics" => {
                     write!(stdout, "{}", format_form_diagnostics(&entry, &artifacts))?;
                 }
+                "show-documentation" => {
+                    write!(stdout, "{}", format_form_documentation(&entry, &artifacts))?;
+                }
                 "show-source" => write_form_source(&entry, stdout)?,
                 "drop" => self.drop_form_by_id(&id, stdout, stderr)?,
                 _ => writeln!(
@@ -999,6 +1002,9 @@ impl Repl {
             }
             EnvironmentAffordance::ShowDependencies | EnvironmentAffordance::DumpArtifacts => {
                 write!(stdout, "{}", artifacts.dump_artifact_graph())?
+            }
+            EnvironmentAffordance::ShowDocumentation => {
+                write!(stdout, "{}", format_environment_documentation(object))?
             }
             EnvironmentAffordance::Artifacts => {
                 write!(stdout, "{}", artifacts.dump_artifact_graph())?
@@ -1617,7 +1623,12 @@ fn pending_definition_state(source: &str) -> PendingDefinitionState {
 fn pending_definition_boundary(source: &str) -> Option<PendingDefinitionState> {
     let tokens: Vec<_> = syntax::lex(source)
         .into_iter()
-        .filter(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::Comment))
+        .filter(|token| {
+            !matches!(
+                token.kind,
+                TokenKind::Whitespace | TokenKind::Comment | TokenKind::DocComment
+            )
+        })
         .collect();
     let [first, second, ..] = tokens.as_slice() else {
         return Some(PendingDefinitionState::Incomplete);
@@ -1944,6 +1955,8 @@ fn format_environment_object(object: &EnvironmentObject) -> String {
             |span| format!("{}..{}", span.start, span.end)
         )
     );
+    let _ = writeln!(out, "documentation:");
+    write_documentation_lines(&mut out, &object.documentation.lines, "  ");
     let _ = writeln!(out, "artifacts:");
     if object.artifacts.keys.is_empty() {
         let _ = writeln!(out, "  <none>");
@@ -1986,6 +1999,13 @@ fn format_affordances(object: &EnvironmentObject) -> String {
     for affordance in &object.affordances.names {
         let _ = writeln!(out, "{}", affordance.as_str());
     }
+    out
+}
+
+fn format_environment_documentation(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "documentation {}", object.id);
+    write_documentation_lines(&mut out, &object.documentation.lines, "");
     out
 }
 
@@ -2036,8 +2056,12 @@ fn format_form_explanation(entry: &AcceptedDefinition, artifacts: &SessionArtifa
         parse_view.rule_applications.len(),
         parse_view.diagnostics.len()
     );
+    let doc_comments = form_doc_comments(entry, artifacts);
+    let _ = writeln!(out, "documentation:");
+    write_documentation_lines(&mut out, &doc_comments, "  ");
     let _ = writeln!(out, "try:");
     let _ = writeln!(out, "  :inspect {}", form.id());
+    let _ = writeln!(out, "  :invoke {} show-documentation", form.id());
     let _ = writeln!(out, "  :invoke {} show-source", form.id());
     let _ = writeln!(out, "  :invoke {} show-defined-objects", form.id());
     let _ = writeln!(out, "  :invoke {} show-grammar", form.id());
@@ -2066,6 +2090,8 @@ fn format_environment_explanation(
     } else {
         let _ = writeln!(out, "  <none>");
     }
+    let _ = writeln!(out, "documentation:");
+    write_documentation_lines(&mut out, &object.documentation.lines, "  ");
     let _ = writeln!(out, "defined by:");
     let defining_forms = source_forms_defining_object(artifacts, object.id.as_str());
     if defining_forms.is_empty() {
@@ -2275,6 +2301,9 @@ fn format_form_object(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) 
     let _ = writeln!(out, "name: {}", form.name);
     let _ = writeln!(out, "lines: {}..{}", form.line_start, form.line_end);
     let _ = writeln!(out, "span: {}..{}", form.span.start, form.span.end);
+    let doc_comments = form_doc_comments(entry, artifacts);
+    let _ = writeln!(out, "documentation:");
+    write_documentation_lines(&mut out, &doc_comments, "  ");
     let _ = writeln!(out, "defines:");
     if defined.is_empty() {
         let _ = writeln!(out, "  <none>");
@@ -2342,6 +2371,33 @@ fn format_form_defined_objects(entry: &AcceptedDefinition, artifacts: &SessionAr
         }
     }
     out
+}
+
+fn format_form_documentation(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "documentation {}", entry.form.id());
+    let doc_comments = form_doc_comments(entry, artifacts);
+    write_documentation_lines(&mut out, &doc_comments, "");
+    out
+}
+
+fn write_documentation_lines(out: &mut String, lines: &[String], indent: &str) {
+    if lines.is_empty() {
+        let _ = writeln!(out, "{indent}<none>");
+    } else {
+        for line in lines {
+            let _ = writeln!(out, "{indent}{line}");
+        }
+    }
+}
+
+fn form_doc_comments(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> Vec<String> {
+    artifacts
+        .source_forms()
+        .into_iter()
+        .find(|form| form.id == entry.form.id())
+        .map(|form| form.doc_comments)
+        .unwrap_or_default()
 }
 
 fn format_form_grammar(entry: &AcceptedDefinition, artifacts: &SessionArtifacts) -> String {
@@ -2733,6 +2789,7 @@ const FORM_AFFORDANCES: &[&str] = &[
     "show-tokens",
     "show-rule-applications",
     "show-diagnostics",
+    "show-documentation",
     "drop",
 ];
 
@@ -3393,6 +3450,7 @@ mod tests {
         assert!(!function_affordances.contains(&"drop".to_string()));
         let form_affordances = completion_values(&mut completer, ":invoke form:f0 ");
         assert!(form_affordances.contains(&"show-source".to_string()));
+        assert!(form_affordances.contains(&"show-documentation".to_string()));
         assert!(form_affordances.contains(&"drop".to_string()));
         assert!(!form_affordances.contains(&"run".to_string()));
     }

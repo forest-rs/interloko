@@ -428,6 +428,10 @@ fn render_parse_form_card(artifacts: &SessionArtifacts, form: &SourceFormProvena
         form.span.start,
         form.span.end
     );
+    out.push_str(&render_doc_comment_block(
+        "source documentation",
+        &form.doc_comments,
+    ));
     out.push_str("            <div class=\"parse-card__body\">\n");
     out.push_str("              <pre class=\"parse-source\"><code>");
     out.push_str(&render_parse_source_excerpt(
@@ -514,6 +518,24 @@ fn render_staged_frontend_form_summary(form: &FrontendForm) -> String {
             out.push_str("                </div>\n");
         }
     }
+    out
+}
+
+fn render_doc_comment_block(label: &str, lines: &[String]) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "            <div class=\"doc-comment-block\"><span>{}</span>",
+        escape_html(label)
+    );
+    for line in lines {
+        let _ = writeln!(out, "              <p>{}</p>", escape_html(line));
+    }
+    out.push_str("            </div>\n");
     out
 }
 
@@ -1237,6 +1259,10 @@ fn render_object_card(
         escape_html(object.id.as_str())
     );
     out.push_str(&render_object_meta_chips(object));
+    out.push_str(&render_doc_comment_block(
+        "documentation",
+        &object.documentation.lines,
+    ));
     out.push_str(&render_object_links(artifacts, object));
     out.push_str(&render_object_facts(artifacts, object));
     let _ = writeln!(
@@ -2243,14 +2269,15 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
         }
         let _ = write!(
             out,
-            "{{\"id\":{},\"kind\":{},\"title\":{},\"sourceSpan\":{},\"artifactKeys\":[",
+            "{{\"id\":{},\"kind\":{},\"title\":{},\"sourceSpan\":{},\"documentation\":{},\"artifactKeys\":[",
             json_string(object.id.as_str()),
             json_string(object.kind.as_str()),
             json_string(&object.presentation.title),
             object
                 .source
                 .span
-                .map_or_else(|| "null".to_string(), span_json)
+                .map_or_else(|| "null".to_string(), span_json),
+            json_string_array(&object.documentation.lines)
         );
         for (key_index, key) in object.artifacts.keys.iter().enumerate() {
             if key_index > 0 {
@@ -2349,10 +2376,11 @@ fn parse_view_json(artifacts: &SessionArtifacts, form: &SourceFormProvenance) ->
     let mut out = String::new();
     let _ = write!(
         out,
-        "{{\"id\":{},\"kind\":{},\"span\":{},\"rules\":[",
+        "{{\"id\":{},\"kind\":{},\"span\":{},\"docComments\":{},\"rules\":[",
         json_string(&form.id),
         json_string(form.kind.as_str()),
-        span_json(form.span)
+        span_json(form.span),
+        json_string_array(&form.doc_comments)
     );
     for (index, application) in form.rule_applications.iter().enumerate() {
         if index > 0 {
@@ -3069,6 +3097,19 @@ fn json_string(input: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+fn json_string_array(values: &[String]) -> String {
+    let mut out = String::new();
+    out.push('[');
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(value));
+    }
+    out.push(']');
     out
 }
 
@@ -3997,6 +4038,33 @@ a {
 .object-card p {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.doc-comment-block {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--teal);
+  background: rgba(62, 126, 112, 0.08);
+}
+
+.doc-comment-block span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.doc-comment-block p {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.doc-comment-block p + p {
+  margin-top: 4px;
 }
 
 .meta-chip-row {

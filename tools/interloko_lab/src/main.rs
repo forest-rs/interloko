@@ -478,6 +478,7 @@ fn render_eop_object(object: &EnvironmentObject) -> String {
         "    presentation title=\"{}\"",
         object.presentation.title
     );
+    let _ = writeln!(out, "    documentation {}", documentation_summary(object));
     let _ = writeln!(out, "    affordances {}", affordance_csv(object));
     if let Some(execution) = &object.execution {
         let _ = writeln!(out, "    execution {}", execution.detail);
@@ -520,6 +521,8 @@ fn format_environment_object(object: &EnvironmentObject) -> String {
             |span| format!("{}..{}", span.start, span.end)
         )
     );
+    let _ = writeln!(out, "documentation:");
+    write_documentation_lines(&mut out, object, "  ");
     let _ = writeln!(out, "artifacts:");
     if object.artifacts.keys.is_empty() {
         let _ = writeln!(out, "  <none>");
@@ -550,6 +553,31 @@ fn format_affordances(object: &EnvironmentObject) -> String {
         let _ = writeln!(out, "{}", affordance.as_str());
     }
     out
+}
+
+fn format_documentation(object: &EnvironmentObject) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "documentation {}", object.id);
+    write_documentation_lines(&mut out, object, "");
+    out
+}
+
+fn write_documentation_lines(out: &mut String, object: &EnvironmentObject, indent: &str) {
+    if object.documentation.lines.is_empty() {
+        let _ = writeln!(out, "{indent}<none>");
+    } else {
+        for line in &object.documentation.lines {
+            let _ = writeln!(out, "{indent}{line}");
+        }
+    }
+}
+
+fn documentation_summary(object: &EnvironmentObject) -> String {
+    if object.documentation.lines.is_empty() {
+        "[]".into()
+    } else {
+        format!("[{}]", object.documentation.lines.join(" | "))
+    }
 }
 
 fn affordance_csv(object: &EnvironmentObject) -> String {
@@ -659,6 +687,10 @@ fn invoke_affordance(
         }
         EnvironmentAffordance::ShowDependencies => {
             print!("{}", workbench.artifacts.dump_artifact_graph());
+            Ok(())
+        }
+        EnvironmentAffordance::ShowDocumentation => {
+            print!("{}", format_documentation(&object));
             Ok(())
         }
         EnvironmentAffordance::ShowGrammarStack => {

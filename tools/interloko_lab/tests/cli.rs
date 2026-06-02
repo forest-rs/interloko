@@ -627,6 +627,48 @@ fn report_handles_plain_loko_sources() {
 }
 
 #[test]
+fn doc_comments_are_exposed_by_lab_and_report() {
+    let file = fixture("doc_comments.loko");
+    let path = file.to_str().expect("fixture path should be utf8");
+
+    let affordances = run_lab(&["affordances", path, "function:f1"]);
+    assert!(affordances.contains("show-documentation"));
+
+    let docs = run_lab(&[
+        "invoke-affordance",
+        path,
+        "function:f1",
+        "show-documentation",
+    ]);
+    assert!(docs.contains("documentation function:f1"));
+    assert!(docs.contains("Main docs."));
+    assert!(docs.contains("Returns three."));
+    assert!(!docs.contains("Body docs"));
+
+    let eop = run_lab(&["eop", path]);
+    assert!(eop.contains("documentation [Main docs. | Returns three.]"));
+
+    let report = std::env::temp_dir().join(format!(
+        "interloko-doc-comments-report-{}.html",
+        std::process::id()
+    ));
+    let report_path = report.to_str().expect("report path should be utf8");
+    let _ = fs::remove_file(&report);
+
+    let stdout = run_lab(&["report", path, "--output", report_path]);
+    assert!(stdout.contains("wrote "));
+    let html = fs::read_to_string(&report).expect("report should be written");
+    let _ = fs::remove_file(&report);
+
+    assert!(html.contains("source documentation"));
+    assert!(html.contains("Main docs."));
+    assert!(html.contains("Returns three."));
+    assert!(html.contains("show-documentation"));
+    assert!(html.contains("\"docComments\":[\"Main docs.\",\"Returns three.\"]"));
+    assert!(html.contains("\"documentation\":[\"Main docs.\",\"Returns three.\"]"));
+}
+
+#[test]
 fn parse_trace_reports_grammar_diagnostic_facts() {
     let file = fixture("derived_grammar_syntax_error.loko");
     let path = file.to_str().expect("fixture path should be utf8");

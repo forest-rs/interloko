@@ -214,6 +214,31 @@ fn source_forms_are_inspectable_and_invokable() {
 }
 
 #[test]
+fn doc_comments_are_exposed_by_repl_affordances() {
+    let (stdout, stderr) = run_repl(
+        "/// Main docs.\n\
+         /// Returns three.\n\
+         define function main() => <integer>\n\
+           /// Body docs stay trivia.\n\
+           3\n\
+         end;\n\
+         :affordances function:f0\n\
+         :invoke function:f0 show-documentation\n\
+         :invoke form:f0 show-documentation\n\
+         :inspect function:f0\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("show-documentation"));
+    assert!(stdout.contains("documentation function:f0"));
+    assert!(stdout.contains("documentation form:f0"));
+    assert!(stdout.contains("Main docs."));
+    assert!(stdout.contains("Returns three."));
+    assert!(!stdout.contains("Body docs"));
+}
+
+#[test]
 fn source_forms_report_defined_environment_objects() {
     let (stdout, stderr) = run_repl(
         "define class <point> slot x; end;\n\

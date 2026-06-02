@@ -1,0 +1,13 @@
+/// Helper docs.
+define function helper() => <integer>
+  1
+end;
+
+// Ordinary comments do not attach.
+/// Main docs.
+/// Returns three.
+define function main() => <integer>
+  let x = helper();
+  /// Body docs stay trivia.
+  x + 2
+end
