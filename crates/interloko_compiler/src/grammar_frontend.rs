@@ -19,7 +19,8 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub use interloko_grammar::{
-    GrammarAction, GrammarActionArg, GrammarActionTerm, RuleExpression, TransformOutput,
+    GrammarAction, GrammarActionArg, GrammarActionTerm, RuleAnnotation, RuleExpression,
+    TransformOutput,
 };
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
@@ -3218,12 +3219,13 @@ fn grammar_rule_expression_data(
     location: &str,
 ) -> SourceData {
     let structured = projected_rule_expression(expression);
-    grammar_rule_expression_data_from_expr(name, &structured, Some(expression), location)
+    grammar_rule_expression_data_from_expr(name, &structured, &[], Some(expression), location)
 }
 
 fn grammar_rule_expression_data_from_expr(
     name: &str,
     expression: &RuleExpression<'_>,
+    annotations: &[RuleAnnotation<'_>],
     text: Option<&str>,
     location: &str,
 ) -> SourceData {
@@ -3238,11 +3240,34 @@ fn grammar_rule_expression_data_from_expr(
             SourceData::list(list_patterns),
         ));
     }
+    let annotations = grammar_rule_annotation_source_data(annotations);
+    if !annotations.is_empty() {
+        fields.push(source_data::field(
+            "annotations",
+            SourceData::list(annotations),
+        ));
+    }
     if let Some(text) = text {
         fields.push(source_data::field("text", SourceData::string(text)));
     }
     fields.push(source_data::field("location", SourceData::string(location)));
     SourceData::record("grammar-rule", fields)
+}
+
+fn grammar_rule_annotation_source_data(annotations: &[RuleAnnotation<'_>]) -> Vec<SourceData> {
+    annotations
+        .iter()
+        .map(|annotation| {
+            let mut fields = vec![source_data::field(
+                "name",
+                SourceData::symbol(annotation.name),
+            )];
+            if let Some(value) = annotation.value {
+                fields.push(source_data::field("value", SourceData::string(value)));
+            }
+            SourceData::record("rule-annotation", fields)
+        })
+        .collect()
 }
 
 // Keep list combinators visible after parametric expansion. This lets editor
@@ -4236,6 +4261,30 @@ mod tests {
         let let_values = rule_data("let-values-binding");
         assert!(let_values.contains("element-text: \"let-name-binding\""));
         assert!(let_values.contains("allows-empty: #f"));
+    }
+
+    #[test]
+    fn source_authored_grammar_rule_source_data_preserves_annotations() {
+        let records = GrammarFrontendRegistry::builtin().staged_records(&[CALCULATOR_GRAMMAR_SLUG]);
+        let calculator = GrammarId::new(CALCULATOR_GRAMMAR_NAME);
+
+        let rule_data = |name: &str| {
+            let rule = records
+                .rules
+                .iter()
+                .find(|rule| rule.grammar == calculator && rule.name == name)
+                .expect("calculator rule should exist");
+            source_data::dump(&rule.expression_data)
+        };
+
+        let function = rule_data("calculator-function");
+        assert!(function.contains("annotations: [rule-annotation("));
+        assert!(function.contains("name: role"));
+        assert!(function.contains("value: \"definition\""));
+
+        let argument_list = rule_data("argument-list");
+        assert!(argument_list.contains("name: list"));
+        assert!(argument_list.contains("value: \"call-arguments\""));
     }
 
     #[test]

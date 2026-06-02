@@ -42,6 +42,8 @@ assert!(parse.root.children.iter().any(|node| node.is_rule("name")));
 - **Parse tree**: a [`RuleNode`] tree returned by [`interpret_region`].
 - **Node role**: [`RuleNodeRole`] classification that separates named grammar
   rules from anonymous literal, character-class, and opaque-region nodes.
+- **Rule annotation**: inert [`RuleAnnotation`] metadata attached to a rule
+  header with `@name` or `@name=value`.
 - **Action descriptor**: inert [`GrammarAction`] data attached with
   `=> action(...)`; this crate parses it but does not execute it.
 - **Caller policy**: language-specific behavior, such as reserved words, supplied
@@ -68,6 +70,16 @@ inside a raw rule still follow the called rule's own trivia mode.
 ```text
 grammar strings
 rule string-literal raw = `"` until(`"`) `"`
+end
+```
+
+The same rule-header position also accepts inert annotations. Annotations are
+preserved on [`SourceAuthoredRule`] for callers and tools, but the grammar
+kernel does not interpret them while matching.
+
+```text
+grammar records
+rule record-field @role=record-field @recovery-sync = name `:` type-name
 end
 ```
 

@@ -187,6 +187,7 @@ pub(super) fn rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> 
                 expression_data: grammar_rule_expression_data_from_expr(
                     rule.name,
                     &rule.expression,
+                    &rule.annotations,
                     None,
                     &location,
                 ),

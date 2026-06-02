@@ -1,6 +1,6 @@
 grammar calculator
 rule calculator-region = calculator-function+
-rule calculator-function = name `=` expression => emit-function(name: name, body: expression)
+rule calculator-function @role=definition = name `=` expression => emit-function(name: name, body: expression)
 rule expression = term additive-tail* => fold-binary(lhs: term, tails: additive-tail*)
 rule additive-tail = add-op term => emit-binary-tail(op: add-op, rhs: term)
 rule add-op = `+` | `-`
@@ -11,7 +11,7 @@ rule parenthesized = `(` expression `)`
 rule number-literal = number => emit-integer(value: number)
 rule name-ref = name => emit-name(name: name)
 rule call = name `(` argument-list? `)` => emit-call(callee: name, args: argument-list*)
-rule argument-list = expression argument-tail* => emit-argument-list(first: expression, rest: argument-tail*)
+rule argument-list @list=call-arguments = expression argument-tail* => emit-argument-list(first: expression, rest: argument-tail*)
 rule argument-tail = `,` expression => emit-argument-tail(value: expression)
 rule name = [A-Za-z_] [A-Za-z0-9_?-]*
 rule number = [0-9]+

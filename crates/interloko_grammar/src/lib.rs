@@ -615,6 +615,57 @@ pub enum TriviaMode {
     Raw,
 }
 
+/// Inert metadata attached to a grammar rule.
+///
+/// Rule annotations are parsed from modifier tokens in grammar source, such as
+/// `rule field @role=record-field = ...` or `rule item @recovery-sync = ...`.
+/// The grammar kernel preserves them, but does not interpret their names or
+/// values while matching. Callers can use annotations to carry editor,
+/// formatter, recovery, documentation, or semantic-role hints alongside the
+/// neutral grammar model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuleAnnotation<'g> {
+    /// Annotation name without the leading `@`.
+    pub name: &'g str,
+    /// Optional annotation value after `=`.
+    pub value: Option<&'g str>,
+}
+
+impl<'g> RuleAnnotation<'g> {
+    /// Creates a rule annotation.
+    #[must_use]
+    pub const fn new(name: &'g str, value: Option<&'g str>) -> Self {
+        Self { name, value }
+    }
+
+    /// Creates a flag-style annotation with no value.
+    #[must_use]
+    pub const fn flag(name: &'g str) -> Self {
+        Self::new(name, None)
+    }
+
+    /// Returns the annotation name.
+    #[must_use]
+    pub const fn name(&self) -> &'g str {
+        self.name
+    }
+
+    /// Returns the annotation value, if any.
+    #[must_use]
+    pub const fn value(&self) -> Option<&'g str> {
+        self.value
+    }
+}
+
+impl fmt::Display for RuleAnnotation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.value {
+            Some(value) => write!(formatter, "@{}={value}", self.name),
+            None => write!(formatter, "@{}", self.name),
+        }
+    }
+}
+
 /// A rule parsed from grammar source.
 ///
 /// [`parse_grammar_source`] returns a list of these. Pass that list to
@@ -644,6 +695,9 @@ pub struct SourceAuthoredRule<'g> {
     /// caller-owned reserved-word policy without baking any one language into
     /// the grammar kernel.
     pub excluded_text: Vec<&'g str>,
+    /// Inert rule annotations parsed from `@name` or `@name=value`
+    /// modifier tokens in the rule header.
+    pub annotations: Vec<RuleAnnotation<'g>>,
     /// Source span in the grammar source.
     pub source_span: Span,
     /// Per-rule trivia policy. See [`TriviaMode`].
@@ -664,6 +718,31 @@ impl<'g> SourceAuthoredRule<'g> {
     pub fn with_excluded_text(mut self, excluded_text: Vec<&'g str>) -> Self {
         self.excluded_text = excluded_text;
         self
+    }
+
+    /// Returns the first annotation with `name`.
+    #[must_use]
+    pub fn annotation(&self, name: &str) -> Option<&RuleAnnotation<'g>> {
+        self.annotations
+            .iter()
+            .find(|annotation| annotation.name == name)
+    }
+
+    /// Returns the first value for annotation `name`.
+    #[must_use]
+    pub fn annotation_value(&self, name: &str) -> Option<&'g str> {
+        self.annotation(name)
+            .and_then(|annotation| annotation.value)
+    }
+
+    /// Returns every annotation with `name`, in source order.
+    pub fn annotations_named<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a RuleAnnotation<'g>> + 'a {
+        self.annotations
+            .iter()
+            .filter(move |annotation| annotation.name == name)
     }
 }
 
@@ -1856,7 +1935,8 @@ pub enum GrammarSourceDiagnosticCode {
     /// A rule name appeared more than once in the same grammar source.
     DuplicateName,
     /// A `rule` line carried an unrecognized modifier token between the
-    /// name and the `=` (only `raw` is currently recognized).
+    /// name and the `=`. Recognized modifier tokens are `raw`, `@name`, and
+    /// `@name=value`.
     UnknownRuleModifier,
     /// A parametric rule invocation (`rule-name<arg, ...>`) supplies a
     /// different number of arguments than the target rule's declared
@@ -1892,7 +1972,9 @@ impl GrammarSourceDiagnosticCode {
             Self::EmptyName => "rule name must not be empty",
             Self::EmptyBody => "rule body must not be empty",
             Self::DuplicateName => "rule name was already declared in this grammar",
-            Self::UnknownRuleModifier => "unrecognized rule modifier; expected `raw` or nothing",
+            Self::UnknownRuleModifier => {
+                "unrecognized rule modifier; expected `raw`, `@name`, `@name=value`, or nothing"
+            }
             Self::ParametricRuleArityMismatch => {
                 "parametric rule invocation has wrong number of arguments"
             }
@@ -2077,7 +2159,7 @@ fn parse_grammar_source_inner(
             ));
             continue;
         };
-        let Some((name, expression)) = rest.split_once('=') else {
+        let Some((name, expression)) = split_rule_definition(rest) else {
             diagnostics.push(GrammarSourceDiagnostic::new(
                 trimmed_span,
                 GrammarSourceDiagnosticCode::MissingEquals,
@@ -2099,16 +2181,12 @@ fn parse_grammar_source_inner(
             ));
             continue;
         };
-        let trivia = match modifier_remainder {
-            "" => TriviaMode::Default,
-            "raw" => TriviaMode::Raw,
-            _ => {
-                diagnostics.push(GrammarSourceDiagnostic::new(
-                    trimmed_span,
-                    GrammarSourceDiagnosticCode::UnknownRuleModifier,
-                ));
-                continue;
-            }
+        let Some((trivia, annotations)) = parse_rule_modifiers(modifier_remainder) else {
+            diagnostics.push(GrammarSourceDiagnostic::new(
+                trimmed_span,
+                GrammarSourceDiagnosticCode::UnknownRuleModifier,
+            ));
+            continue;
         };
         let name = base_name;
         if expression.trim().is_empty() {
@@ -2138,6 +2216,7 @@ fn parse_grammar_source_inner(
             expression: parsed,
             action,
             excluded_text: Vec::new(),
+            annotations,
             source_span: trimmed_span,
             trivia,
             params,
@@ -2145,6 +2224,37 @@ fn parse_grammar_source_inner(
     }
     validate_parametric_arity(&rules, &mut diagnostics);
     (rules, diagnostics, header)
+}
+
+fn split_rule_definition(input: &str) -> Option<(&str, &str)> {
+    if let Some(index) = find_spaced_rule_separator(input) {
+        return Some((&input[..index], &input[index + '='.len_utf8()..]));
+    }
+    let (header, body) = input.split_once('=')?;
+    (!header.contains('@')).then_some((header, body))
+}
+
+fn find_spaced_rule_separator(input: &str) -> Option<usize> {
+    let mut in_literal = false;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '`' => in_literal = !in_literal,
+            '=' if !in_literal
+                && input[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace)
+                && input[index + ch.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace) =>
+            {
+                return Some(index);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Walks each rule's body for [`RuleExpression::Apply`] invocations and
@@ -2201,6 +2311,37 @@ where
         | RuleExpression::CharacterClass(_)
         | RuleExpression::UntilLiteral(_) => {}
     }
+}
+
+fn parse_rule_modifiers(input: &str) -> Option<(TriviaMode, Vec<RuleAnnotation<'_>>)> {
+    let mut trivia = TriviaMode::Default;
+    let mut annotations = Vec::new();
+    for modifier in split_whitespace_top_level(input) {
+        if modifier == "raw" {
+            trivia = TriviaMode::Raw;
+        } else if let Some(annotation) = parse_rule_annotation(modifier) {
+            annotations.push(annotation);
+        } else {
+            return None;
+        }
+    }
+    Some((trivia, annotations))
+}
+
+fn parse_rule_annotation(input: &str) -> Option<RuleAnnotation<'_>> {
+    let body = input.strip_prefix('@')?;
+    let (name, value) = match body.split_once('=') {
+        Some((name, value)) => (name.trim(), Some(value.trim())),
+        None => (body.trim(), None),
+    };
+    if !valid_annotation_name(name) || value.is_some_and(str::is_empty) {
+        return None;
+    }
+    Some(RuleAnnotation::new(name, value))
+}
+
+fn valid_annotation_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(is_named_binding_char)
 }
 
 /// Parses one grammar rule expression.
@@ -5225,6 +5366,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_grammar_source_preserves_rule_annotations() {
+        let grammar = "\
+grammar metadata
+rule field @role=record-field @recover raw = name `:` type-name
+rule name = [A-Za-z]+
+rule type-name = `<` name `>`
+end
+";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert!(diagnostics.is_empty());
+        let field = rules
+            .iter()
+            .find(|rule| rule.name == "field")
+            .expect("field rule");
+
+        assert_eq!(field.trivia, TriviaMode::Raw);
+        assert_eq!(
+            field.annotations,
+            vec![
+                RuleAnnotation::new("role", Some("record-field")),
+                RuleAnnotation::flag("recover"),
+            ]
+        );
+        assert_eq!(field.annotation_value("role"), Some("record-field"));
+        assert!(field.annotation("recover").is_some());
+        assert_eq!(
+            field
+                .annotations_named("role")
+                .map(|annotation| annotation.value())
+                .collect::<Vec<_>>(),
+            vec![Some("record-field")]
+        );
+    }
+
+    #[test]
     fn parse_grammar_source_reports_missing_equals() {
         let grammar = "grammar broken\nrule bad-rule no equals here\nrule good = `ok`\nend\n";
         let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
@@ -5278,6 +5454,32 @@ mod tests {
         assert_eq!(
             diagnostics[0].code(),
             GrammarSourceDiagnosticCode::DuplicateName
+        );
+    }
+
+    #[test]
+    fn parse_grammar_source_reports_bad_rule_annotation_modifier() {
+        let grammar = "grammar bad\nrule x @role= = `a`\nrule y = `b`\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "y");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            GrammarSourceDiagnosticCode::UnknownRuleModifier
+        );
+    }
+
+    #[test]
+    fn parse_grammar_source_does_not_use_annotation_equals_as_rule_separator() {
+        let grammar = "grammar bad\nrule x @role=definition\nrule y = `b`\nend\n";
+        let (rules, diagnostics) = parse_grammar_source_with_diagnostics(grammar);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "y");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            GrammarSourceDiagnosticCode::MissingEquals
         );
     }
 
