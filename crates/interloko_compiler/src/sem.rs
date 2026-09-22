@@ -7282,13 +7282,7 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.functions[0].result_kinds, [ValueKind::Bool]);
         assert_eq!(module.functions[1].result_kinds, [ValueKind::I64]);
-        let Expr::If {
-            condition,
-            then_branch: _,
-            else_branch: _,
-            ..
-        } = &module.functions[1].body.result
-        else {
+        let Expr::If { condition, .. } = &module.functions[1].body.result else {
             panic!("expected if expression");
         };
         assert!(matches!(

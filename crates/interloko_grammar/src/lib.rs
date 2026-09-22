@@ -2319,10 +2319,9 @@ fn parse_rule_modifiers(input: &str) -> Option<(TriviaMode, Vec<RuleAnnotation<'
     for modifier in split_whitespace_top_level(input) {
         if modifier == "raw" {
             trivia = TriviaMode::Raw;
-        } else if let Some(annotation) = parse_rule_annotation(modifier) {
-            annotations.push(annotation);
         } else {
-            return None;
+            let annotation = parse_rule_annotation(modifier)?;
+            annotations.push(annotation);
         }
     }
     Some((trivia, annotations))

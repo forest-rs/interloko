@@ -2773,10 +2773,7 @@ mod tests {
                 .map(|annotation| (annotation.class_object, annotation.name.as_str())),
             Some((false, "<integer>"))
         );
-        assert!(matches!(
-            module.methods[0].body.result,
-            Expr::Binary { lhs: _, rhs: _, .. }
-        ));
+        assert!(matches!(module.methods[0].body.result, Expr::Binary { .. }));
         let Expr::Call { args, .. } = &module.functions[0].body.result else {
             panic!("expected area call");
         };
@@ -2830,13 +2827,7 @@ mod tests {
         let module = lower(&tree);
 
         assert_eq!(module.diagnostics, Vec::new());
-        let Expr::Handle {
-            body,
-            restart,
-            span: _,
-            ..
-        } = &module.functions[0].body.result
-        else {
+        let Expr::Handle { body, restart, .. } = &module.functions[0].body.result else {
             panic!("expected handle expression");
         };
         assert_eq!(restart.class_name, "<bad>");
