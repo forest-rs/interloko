@@ -6,10 +6,13 @@
 //! `execution_tape` bytecode internals.
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::fmt::{self, Write as _};
 
+use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::program::Program;
 use execution_tape::trace::{ScopeKind, TraceMask, TraceOutcome, TraceSink};
 use execution_tape::value::Value;
@@ -204,6 +207,157 @@ impl fmt::Display for FunctionRunResult {
             Self::FunctionReturnedNonI64 { name } => {
                 write!(formatter, "function `{name}` returned a non-integer result")
             }
+        }
+    }
+}
+
+/// Owned scalar value passed to or returned by an Interloko direct function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionValue {
+    /// Signed integer value.
+    Integer(i64),
+    /// Boolean value.
+    Boolean(bool),
+    /// Runtime string value copied out of the execution host.
+    String(String),
+}
+
+impl FunctionValue {
+    /// Returns the scalar value's machine category.
+    #[must_use]
+    pub const fn kind(&self) -> FunctionValueKind {
+        match self {
+            Self::Integer(_) => FunctionValueKind::Integer,
+            Self::Boolean(_) => FunctionValueKind::Boolean,
+            Self::String(_) => FunctionValueKind::String,
+        }
+    }
+}
+
+/// Scalar category accepted by the calm function-call API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FunctionValueKind {
+    /// Signed integer value.
+    Integer,
+    /// Boolean value.
+    Boolean,
+    /// Runtime string value.
+    String,
+}
+
+impl fmt::Display for FunctionValueKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer => formatter.write_str("integer"),
+            Self::Boolean => formatter.write_str("boolean"),
+            Self::String => formatter.write_str("string"),
+        }
+    }
+}
+
+/// Successful scalar function call and its optional execution trace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionCallOutcome {
+    /// Scalar value returned by the function.
+    pub value: FunctionValue,
+    /// Captured trace when a non-empty trace mask was requested.
+    pub trace: Option<ExecutionTrace>,
+}
+
+/// Failure to prepare or execute a scalar Interloko direct function call.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionCallError {
+    /// The artifacts do not contain an emitted tape program.
+    TapeUnavailable,
+    /// The requested function was not present in the semantic artifacts.
+    MissingFunction {
+        /// Requested function name.
+        name: String,
+    },
+    /// Supplied argument count differs from the function signature.
+    ArgumentCountMismatch {
+        /// Requested function name.
+        name: String,
+        /// Declared parameter count.
+        expected: usize,
+        /// Supplied argument count.
+        actual: usize,
+    },
+    /// One scalar argument cannot satisfy the declared parameter category.
+    ArgumentTypeMismatch {
+        /// Requested function name.
+        name: String,
+        /// Zero-based argument position.
+        index: usize,
+        /// Declared semantic category.
+        expected: String,
+        /// Supplied scalar category.
+        actual: FunctionValueKind,
+    },
+    /// A valid scalar argument could not be represented in the runtime host.
+    ArgumentMaterializationFailed {
+        /// Zero-based argument position.
+        index: usize,
+        /// Supplied scalar category.
+        kind: FunctionValueKind,
+    },
+    /// Runtime trapped during verified execution.
+    Trap {
+        /// Trap details.
+        trap: TrapInfo,
+        /// Partial trace captured before the trap, when requested.
+        trace: Option<ExecutionTrace>,
+    },
+    /// The function does not return exactly one supported scalar value.
+    UnsupportedResult {
+        /// Requested function name.
+        name: String,
+        /// Declared result categories.
+        declared: String,
+    },
+    /// A declared string result could not be recovered from the runtime host.
+    ResultMaterializationFailed {
+        /// Requested function name.
+        name: String,
+    },
+}
+
+impl fmt::Display for FunctionCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TapeUnavailable => formatter.write_str("tape unavailable"),
+            Self::MissingFunction { name } => write!(formatter, "missing function `{name}`"),
+            Self::ArgumentCountMismatch {
+                name,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "function `{name}` expects {expected} argument(s), received {actual}"
+            ),
+            Self::ArgumentTypeMismatch {
+                name,
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "function `{name}` argument {index} expects {expected}, received {actual}"
+            ),
+            Self::ArgumentMaterializationFailed { index, kind } => write!(
+                formatter,
+                "function argument {index} of kind {kind} could not enter the runtime"
+            ),
+            Self::Trap { trap, .. } => write!(formatter, "runtime trap: {trap}"),
+            Self::UnsupportedResult { name, declared } => write!(
+                formatter,
+                "function `{name}` result {declared} is not one supported scalar"
+            ),
+            Self::ResultMaterializationFailed { name } => write!(
+                formatter,
+                "function `{name}` returned a runtime value that could not be inspected"
+            ),
         }
     }
 }
@@ -1719,6 +1873,25 @@ impl SessionArtifacts {
             },
             |tape| run_zero_arg_function_i64_with_trace(&self.sem, tape, function_name, Some(mask)),
         )
+    }
+
+    /// Calls a direct function with typed scalar arguments and captures an
+    /// optional execution trace.
+    ///
+    /// This calm embedding surface currently supports integer, boolean, and
+    /// string arguments and exactly one result of one of those categories.
+    /// Object handles and VM-owned storage do not cross the API boundary.
+    pub fn call_function(
+        &self,
+        function_name: &str,
+        arguments: &[FunctionValue],
+        trace_mask: TraceMask,
+    ) -> Result<FunctionCallOutcome, FunctionCallError> {
+        let tape = self
+            .tape
+            .as_ref()
+            .ok_or(FunctionCallError::TapeUnavailable)?;
+        call_function(&self.sem, tape, function_name, arguments, trace_mask)
     }
 
     /// Dumps the captured runtime trace, when present.
@@ -4750,6 +4923,132 @@ fn run_zero_arg_function_i64_with_trace(
     TracedFunctionRunResult {
         result,
         trace: trace.map(ExecutionTraceSink::finish),
+    }
+}
+
+fn call_function(
+    module: &sem::Module,
+    tape: &tape::TapeModule,
+    function_name: &str,
+    arguments: &[FunctionValue],
+    trace_mask: TraceMask,
+) -> Result<FunctionCallOutcome, FunctionCallError> {
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == function_name)
+        .ok_or_else(|| FunctionCallError::MissingFunction {
+            name: function_name.to_string(),
+        })?;
+    if function.param_kinds.len() != arguments.len() {
+        return Err(FunctionCallError::ArgumentCountMismatch {
+            name: function_name.to_string(),
+            expected: function.param_kinds.len(),
+            actual: arguments.len(),
+        });
+    }
+    let entry = tape
+        .functions
+        .get(function.id.0 as usize)
+        .copied()
+        .ok_or_else(|| FunctionCallError::MissingFunction {
+            name: function_name.to_string(),
+        })?;
+
+    let host = SharedInterlokoHost::new(InterlokoHost::new(tape.runtime.clone()));
+    let mut runtime_arguments = Vec::with_capacity(arguments.len());
+    for (index, (argument, expected)) in arguments
+        .iter()
+        .zip(function.param_kinds.iter().copied())
+        .enumerate()
+    {
+        let value = match (argument, expected) {
+            (FunctionValue::Integer(value), sem::ValueKind::I64) => Value::I64(*value),
+            (FunctionValue::Boolean(value), sem::ValueKind::Bool) => Value::Bool(*value),
+            (FunctionValue::String(value), sem::ValueKind::String(_)) => host
+                .make_string(value)
+                .map_err(|_| FunctionCallError::ArgumentMaterializationFailed {
+                    index,
+                    kind: argument.kind(),
+                })?,
+            _ => {
+                return Err(FunctionCallError::ArgumentTypeMismatch {
+                    name: function_name.to_string(),
+                    index,
+                    expected: sem_kind_label(module, expected),
+                    actual: argument.kind(),
+                });
+            }
+        };
+        runtime_arguments.push(value);
+    }
+
+    let mut vm = Vm::new(host.clone(), Limits::default());
+    let mut trace = (trace_mask != TraceMask::NONE).then(|| ExecutionTraceSink::new(trace_mask));
+    let sink = trace.as_mut().map(|trace| trace as &mut dyn TraceSink);
+    let output = match vm.run(&tape.program, entry, &runtime_arguments, trace_mask, sink) {
+        Ok(output) => output,
+        Err(trap) => {
+            return Err(FunctionCallError::Trap {
+                trap,
+                trace: trace.map(ExecutionTraceSink::finish),
+            });
+        }
+    };
+
+    let value = match (function.result_kinds.as_slice(), output.as_slice()) {
+        ([sem::ValueKind::I64], [Value::I64(value)]) => FunctionValue::Integer(*value),
+        ([sem::ValueKind::Bool], [Value::Bool(value)]) => FunctionValue::Boolean(*value),
+        ([sem::ValueKind::String(_)], [value]) => {
+            FunctionValue::String(host.string_text(value).map_err(|_| {
+                FunctionCallError::ResultMaterializationFailed {
+                    name: function_name.to_string(),
+                }
+            })?)
+        }
+        _ => {
+            return Err(FunctionCallError::UnsupportedResult {
+                name: function_name.to_string(),
+                declared: sem_kind_list_label(module, &function.result_kinds),
+            });
+        }
+    };
+
+    Ok(FunctionCallOutcome {
+        value,
+        trace: trace.map(ExecutionTraceSink::finish),
+    })
+}
+
+#[derive(Clone)]
+struct SharedInterlokoHost(Rc<RefCell<InterlokoHost>>);
+
+impl SharedInterlokoHost {
+    fn new(host: InterlokoHost) -> Self {
+        Self(Rc::new(RefCell::new(host)))
+    }
+
+    fn make_string(&self, value: &str) -> Result<Value, runtime::RuntimeError> {
+        self.0.borrow_mut().make_string(value)
+    }
+
+    fn string_text(&self, value: &Value) -> Result<String, runtime::RuntimeError> {
+        self.0.borrow().string_text(value).map(ToString::to_string)
+    }
+}
+
+impl Host for SharedInterlokoHost {
+    fn call(
+        &mut self,
+        symbol: &str,
+        sig_hash: SigHash,
+        args: &[ValueRef<'_>],
+        rets: &mut [Value],
+        context: HostContext<'_, '_>,
+    ) -> Result<u64, HostError> {
+        self.0
+            .borrow_mut()
+            .call(symbol, sig_hash, args, rets, context)
     }
 }
 
@@ -12468,6 +12767,64 @@ mod tests {
                 name: "object_result".into()
             }
         );
+    }
+
+    #[test]
+    fn session_calls_string_dispatchers_without_exposing_runtime_handles() {
+        let artifacts = CompilerSession::compile_source(
+            "commands.loko",
+            "define function dispatch(command :: <string>) => <string>\n  \
+               if command = \"look\" then \"a glasshouse\" else \"unknown command\" end\n\
+             end;",
+            RuntimeMode::CompileOnly,
+        );
+
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let look = artifacts
+            .call_function(
+                "dispatch",
+                &[FunctionValue::String("look".into())],
+                TraceMask::RUN | TraceMask::CALL | TraceMask::HOST,
+            )
+            .expect("string command should execute");
+        assert_eq!(look.value, FunctionValue::String("a glasshouse".into()));
+        let trace = look.trace.expect("requested trace should be present");
+        assert!(
+            trace.events.iter().any(|event| {
+                matches!(event, ExecutionTraceEvent::RunStart { arg_count: 1, .. })
+            })
+        );
+        assert!(trace.events.iter().any(|event| {
+            matches!(
+                event,
+                ExecutionTraceEvent::ScopeEnter {
+                    scope: ExecutionTraceScope::CallFrame { .. },
+                    ..
+                }
+            )
+        }));
+
+        let unknown = artifacts
+            .call_function(
+                "dispatch",
+                &[FunctionValue::String("dance".into())],
+                TraceMask::NONE,
+            )
+            .expect("fallback should execute");
+        assert_eq!(
+            unknown.value,
+            FunctionValue::String("unknown command".into())
+        );
+        assert!(unknown.trace.is_none());
+
+        assert!(matches!(
+            artifacts.call_function("dispatch", &[FunctionValue::Integer(1)], TraceMask::NONE,),
+            Err(FunctionCallError::ArgumentTypeMismatch {
+                index: 0,
+                actual: FunctionValueKind::Integer,
+                ..
+            })
+        ));
     }
 
     #[test]

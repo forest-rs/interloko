@@ -293,6 +293,11 @@ pub struct RuntimeLayout {
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
+    /// Runtime layout omits a built-in value class required by an operation.
+    MissingBuiltinClass {
+        /// Stable source-level class name.
+        name: &'static str,
+    },
     /// Runtime layout does not contain the requested class.
     InvalidClass {
         /// Invalid class id.
@@ -1192,6 +1197,42 @@ impl InterlokoHost {
     pub fn new_checked(layout: RuntimeLayout) -> Result<Self, RuntimeLayoutError> {
         layout.validate()?;
         Ok(Self::new(layout))
+    }
+
+    /// Allocates one runtime `<string>` value owned by this host.
+    pub fn make_string(&mut self, value: impl Into<String>) -> Result<Value, RuntimeError> {
+        let name = BuiltinValueClass::String.name();
+        let class = self
+            .layout
+            .class_id(name)
+            .ok_or(RuntimeError::MissingBuiltinClass { name })?;
+        Ok(self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::String {
+                value: value.into(),
+            },
+        }))
+    }
+
+    /// Borrows the UTF-8 text stored in one runtime `<string>` value.
+    pub fn string_text<'a>(&'a self, value: &Value) -> Result<&'a str, RuntimeError> {
+        let name = BuiltinValueClass::String.name();
+        let class = self
+            .layout
+            .class_id(name)
+            .ok_or(RuntimeError::MissingBuiltinClass { name })?;
+        let Value::Obj(object) = value else {
+            return Err(RuntimeError::ValueKindMismatch {
+                expected: ValueKind::String(class),
+            });
+        };
+        let object = self.object(*object)?;
+        match &object.storage {
+            RuntimeObjectStorage::String { value } => Ok(value),
+            _ => Err(RuntimeError::ValueKindMismatch {
+                expected: ValueKind::String(class),
+            }),
+        }
     }
 
     /// Allocates a native runtime object for `class` using layout-ordered fields.
