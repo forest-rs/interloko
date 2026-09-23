@@ -317,21 +317,49 @@ pub struct HostFunction {
     /// Loko-visible function name.
     pub name: String,
     /// Declared parameter value categories.
-    pub param_kinds: Vec<ValueKind>,
+    pub param_kinds: Vec<HostValueKind>,
     /// Declared result value category.
-    pub result_kind: ValueKind,
+    pub result_kind: HostValueKind,
 }
 
 impl HostFunction {
     /// Creates a host-backed function declaration.
     #[must_use]
-    pub fn new(name: &str, param_kinds: Vec<ValueKind>, result_kind: ValueKind) -> Self {
+    pub fn new(name: &str, param_kinds: Vec<HostValueKind>, result_kind: HostValueKind) -> Self {
         Self {
             name: name.into(),
             param_kinds,
             result_kind,
         }
     }
+}
+
+/// Scalar value category that may cross a host-function boundary.
+///
+/// These categories deliberately contain no compiler-local class ids. The
+/// compiler resolves [`Self::String`] to the active environment's built-in
+/// `<string>` class while it constructs semantic IR.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostValueKind {
+    /// Signed 64-bit integer.
+    Integer,
+    /// Boolean value.
+    Boolean,
+    /// Owned UTF-8 string value.
+    String,
+}
+
+/// Resolved host-backed function in a semantic module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedHostFunction {
+    /// Registry-local function id.
+    pub id: HostFunctionId,
+    /// Loko-visible function name.
+    pub name: String,
+    /// Resolved parameter categories.
+    pub param_kinds: Vec<ValueKind>,
+    /// Resolved result category.
+    pub result_kind: ValueKind,
 }
 
 /// Origin of a semantic class metaobject.
@@ -444,6 +472,8 @@ pub struct Module {
     pub closures: Vec<Closure>,
     /// Immutable top-level constants.
     pub constants: Vec<Constant>,
+    /// Host-backed functions made visible to this compilation.
+    pub host_functions: Vec<ResolvedHostFunction>,
     /// Semantic diagnostics.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -1300,6 +1330,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Call through a function declared by the embedding host.
+    HostCall {
+        /// Registry-local host function.
+        function: HostFunctionId,
+        /// Argument expressions.
+        args: Vec<Expr>,
+        /// Resolved result category.
+        result_kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Resolved direct function call.
     DirectCall {
         /// Callee function.
@@ -1499,6 +1540,7 @@ impl Expr {
             | Self::Closure { span, .. }
             | Self::GenericFunctionObject { span, .. }
             | Self::IntrinsicCall { span, .. }
+            | Self::HostCall { span, .. }
             | Self::DirectCall { span, .. }
             | Self::GenericCall { span, .. }
             | Self::CallableCall { span, .. }
@@ -1787,6 +1829,7 @@ impl FunctionContext {
 struct Lowering {
     source_file: SourceFileId,
     host_registry: HostMetaRegistry,
+    host_functions: Vec<ResolvedHostFunction>,
     classes: Vec<Class>,
     generics: Vec<GenericFunction>,
     methods: Vec<Method>,
@@ -1803,6 +1846,7 @@ impl Lowering {
         let mut lowering = Self {
             source_file: module.source_file,
             host_registry: registry.clone(),
+            host_functions: Vec::new(),
             classes: Vec::new(),
             generics: Vec::new(),
             methods: Vec::new(),
@@ -1814,14 +1858,92 @@ impl Lowering {
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
+        lowering.collect_host_functions();
         lowering.collect_generics(module);
         lowering.collect_functions(module);
         lowering.collect_constant_symbols(module);
         lowering.collect_slot_init_values(module);
         lowering.finalize_classes();
         lowering.collect_slot_setter_generics();
+        lowering.check_host_function_conflicts();
         lowering.lower_constants(module);
         lowering
+    }
+
+    fn collect_host_functions(&mut self) {
+        let declarations = self.host_registry.functions.clone();
+        for (index, function) in declarations.into_iter().enumerate() {
+            let id = HostFunctionId(u32::try_from(index).unwrap_or(u32::MAX));
+            if self
+                .host_functions
+                .iter()
+                .any(|candidate| candidate.name == function.name)
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(Span::default(), DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "host function"))
+                        .with_arg(DiagnosticArg::text("name", function.name)),
+                );
+                continue;
+            }
+            let param_kinds = function
+                .param_kinds
+                .iter()
+                .copied()
+                .map(|kind| self.resolve_host_value_kind(kind))
+                .collect();
+            let result_kind = self.resolve_host_value_kind(function.result_kind);
+            self.host_functions.push(ResolvedHostFunction {
+                id,
+                name: function.name,
+                param_kinds,
+                result_kind,
+            });
+        }
+    }
+
+    fn resolve_host_value_kind(&self, kind: HostValueKind) -> ValueKind {
+        match kind {
+            HostValueKind::Integer => ValueKind::I64,
+            HostValueKind::Boolean => ValueKind::Bool,
+            HostValueKind::String => ValueKind::String(
+                self.builtin_value_class(BuiltinValueClass::String)
+                    .unwrap_or(ClassId(u32::MAX)),
+            ),
+        }
+    }
+
+    fn check_host_function_conflicts(&mut self) {
+        let conflicts = self
+            .host_functions
+            .iter()
+            .filter(|host| {
+                intrinsic_for_name(&host.name).is_some()
+                    || self.functions.iter().any(|item| item.name == host.name)
+                    || self
+                        .generic_symbols
+                        .iter()
+                        .any(|item| item.name == host.name)
+                    || self
+                        .constant_symbols
+                        .iter()
+                        .any(|item| item.name == host.name)
+                    || self.classes.iter().any(|class| {
+                        class
+                            .effective_slots
+                            .iter()
+                            .any(|slot| slot.accessor.name == host.name)
+                    })
+            })
+            .map(|host| host.name.clone())
+            .collect::<Vec<_>>();
+        for name in conflicts {
+            self.diagnostics.push(
+                Diagnostic::error(Span::default(), DiagnosticCode::DuplicateDefinition)
+                    .with_arg(DiagnosticArg::text("kind", "host function"))
+                    .with_arg(DiagnosticArg::text("name", name)),
+            );
+        }
     }
 
     fn collect_classes(&mut self, module: &ast::Module) {
@@ -2942,6 +3064,7 @@ impl Lowering {
             functions,
             closures: self.closures.clone(),
             constants: self.constants.clone(),
+            host_functions: self.host_functions.clone(),
             diagnostics: self.diagnostics.clone(),
         }
     }
@@ -3806,6 +3929,54 @@ impl Lowering {
                             .with_arg(DiagnosticArg::unsigned(
                                 "expected_count",
                                 u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "actual_count",
+                                u64::try_from(args.len()).unwrap_or(u64::MAX),
+                            )),
+                    );
+                    return Expr::Error { span: *span };
+                }
+                if let Some(function) = self.resolve_host_function(callee).cloned() {
+                    if function.param_kinds.len() == args.len() {
+                        for (index, (arg, expected)) in
+                            lowered_args.iter().zip(&function.param_kinds).enumerate()
+                        {
+                            let actual = self.expr_kind(arg);
+                            if !self.kinds_match(*expected, actual) {
+                                ctx.diagnostics.push(
+                                    Diagnostic::error(
+                                        arg.span(),
+                                        DiagnosticCode::FunctionArgumentTypeMismatch,
+                                    )
+                                    .with_arg(DiagnosticArg::text("function", callee.clone()))
+                                    .with_arg(DiagnosticArg::unsigned(
+                                        "argument_index",
+                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
+                                    ))
+                                    .with_arg(DiagnosticArg::text(
+                                        "expected",
+                                        self.kind_name(*expected),
+                                    ))
+                                    .with_arg(
+                                        DiagnosticArg::text("actual", self.kind_name(actual)),
+                                    ),
+                                );
+                            }
+                        }
+                        return Expr::HostCall {
+                            function: function.id,
+                            args: lowered_args,
+                            result_kind: function.result_kind,
+                            span: *span,
+                        };
+                    }
+                    ctx.diagnostics.push(
+                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
+                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "expected_count",
+                                u64::try_from(function.param_kinds.len()).unwrap_or(u64::MAX),
                             ))
                             .with_arg(DiagnosticArg::unsigned(
                                 "actual_count",
@@ -5363,6 +5534,7 @@ impl Lowering {
                 ValueKind::GenericFunctionObject(*generic)
             }
             Expr::IntrinsicCall { result_kind, .. } => *result_kind,
+            Expr::HostCall { result_kind, .. } => *result_kind,
             Expr::AccessorCall { result_kind, .. } => *result_kind,
             Expr::SlotWrite { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. }
@@ -5405,6 +5577,7 @@ impl Lowering {
         match expr {
             Expr::Values { result_kinds, .. } => result_kinds.clone(),
             Expr::CallableCall { result_kinds, .. } => result_kinds.clone(),
+            Expr::HostCall { result_kind, .. } => vec![*result_kind],
             Expr::GenericCall { generic, .. } => {
                 self.generic_symbols.get(generic.0 as usize).map_or_else(
                     || vec![ValueKind::Error],
@@ -6076,6 +6249,12 @@ impl Lowering {
 
     fn resolve_function(&self, name: &str) -> Option<&FunctionSymbol> {
         self.functions.iter().find(|symbol| symbol.name == name)
+    }
+
+    fn resolve_host_function(&self, name: &str) -> Option<&ResolvedHostFunction> {
+        self.host_functions
+            .iter()
+            .find(|function| function.name == name)
     }
 
     fn resolve_constant(&self, name: &str) -> Option<&ConstantSymbol> {

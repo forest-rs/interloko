@@ -1,5 +1,26 @@
 # Interloko Progress
 
+## Implemented: typed scalar host functions execute through embedding handlers
+
+- `HostMetaRegistry::add_function` is now load-bearing. Registered functions
+  resolve in Loko source, type-check, lower into explicit `HostCall` IR, and
+  emit ordinary `execution_tape` host calls.
+- `SessionArtifacts::call_function_with_host` converts integer, boolean, and
+  string values without exposing VM handles, and reports missing handlers,
+  handler rejection, and result mismatches as structured
+  `FunctionCallError::HostFunctionFailed` values.
+- Host functions appear as `host-function:<name>` EOP objects backed by the
+  host registry, and semantic/lowered/tape dumps expose their call sites.
+- The handler is an execution capability only. It neither grants authority nor
+  implies durable mutation; embedders remain responsible for applying product
+  policy after successful execution.
+
+Migration note: `sem::HostFunction::new` now accepts `HostValueKind` rather
+than semantic `ValueKind`. Replace `ValueKind::I64` with
+`HostValueKind::Integer`, `ValueKind::Bool` with `HostValueKind::Boolean`, and
+string class-id values with `HostValueKind::String`. This removes unstable
+compiler-local class ids from host ABI declarations.
+
 ## Implemented: packrat memoization in `interloko_grammar`
 
 - The grammar kernel now threads a per-parse `ParseContext` through

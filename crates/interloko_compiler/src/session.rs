@@ -264,6 +264,49 @@ pub struct FunctionCallOutcome {
     pub trace: Option<ExecutionTrace>,
 }
 
+/// Embedding callback for scalar functions declared through
+/// [`sem::HostMetaRegistry`].
+///
+/// The compiler/runtime adapter owns conversion between VM values and
+/// [`FunctionValue`]. Implementors receive only owned scalar values and cannot
+/// access the Interloko heap or VM directly.
+pub trait HostFunctionHandler {
+    /// Executes one declared host function.
+    fn call(
+        &mut self,
+        function: &sem::HostFunction,
+        arguments: &[FunctionValue],
+    ) -> Result<FunctionValue, HostFunctionFailure>;
+}
+
+/// A host-function handler's bounded, caller-facing rejection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFunctionFailure {
+    message: String,
+}
+
+impl HostFunctionFailure {
+    /// Creates a failure with a human-readable explanation.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the handler-provided explanation.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for HostFunctionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 /// Failure to prepare or execute a scalar Interloko direct function call.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,6 +352,16 @@ pub enum FunctionCallError {
         /// Partial trace captured before the trap, when requested.
         trace: Option<ExecutionTrace>,
     },
+    /// A declared host function could not be executed by the embedding
+    /// handler.
+    HostFunctionFailed {
+        /// Loko-visible host function name.
+        name: String,
+        /// Precise handler or value-conversion failure.
+        failure: HostFunctionFailure,
+        /// Partial trace captured before the failed host call, when requested.
+        trace: Option<ExecutionTrace>,
+    },
     /// The function does not return exactly one supported scalar value.
     UnsupportedResult {
         /// Requested function name.
@@ -350,6 +403,9 @@ impl fmt::Display for FunctionCallError {
                 "function argument {index} of kind {kind} could not enter the runtime"
             ),
             Self::Trap { trap, .. } => write!(formatter, "runtime trap: {trap}"),
+            Self::HostFunctionFailed { name, failure, .. } => {
+                write!(formatter, "host function `{name}` failed: {failure}")
+            }
             Self::UnsupportedResult { name, declared } => write!(
                 formatter,
                 "function `{name}` result {declared} is not one supported scalar"
@@ -571,6 +627,8 @@ pub enum EnvironmentKind {
     RuntimeLayoutRow,
     /// A query artifact.
     Artifact,
+    /// A scalar function declared by the embedding host.
+    HostFunction,
     /// An explicitly projected host-owned environment object.
     HostObject,
     /// One entry in the session's in-memory mutation log.
@@ -610,6 +668,7 @@ impl EnvironmentKind {
             Self::Diagnostic => "diagnostic",
             Self::RuntimeLayoutRow => "runtime-layout-row",
             Self::Artifact => "artifact",
+            Self::HostFunction => "host-function",
             Self::HostObject => "host-object",
             Self::Mutation => "mutation",
         }
@@ -1891,7 +1950,43 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        call_function(&self.sem, tape, function_name, arguments, trace_mask)
+        call_function(
+            &self.sem,
+            &self.host_registry,
+            tape,
+            function_name,
+            arguments,
+            trace_mask,
+            None,
+        )
+    }
+
+    /// Calls a direct function while serving declared scalar host functions
+    /// through `handler`.
+    ///
+    /// Host calls remain inside the bounded VM run. The handler should capture
+    /// intent or answer a query; product authorization and durable mutation
+    /// belong after this method returns successfully.
+    pub fn call_function_with_host(
+        &self,
+        function_name: &str,
+        arguments: &[FunctionValue],
+        trace_mask: TraceMask,
+        handler: &mut dyn HostFunctionHandler,
+    ) -> Result<FunctionCallOutcome, FunctionCallError> {
+        let tape = self
+            .tape
+            .as_ref()
+            .ok_or(FunctionCallError::TapeUnavailable)?;
+        call_function(
+            &self.sem,
+            &self.host_registry,
+            tape,
+            function_name,
+            arguments,
+            trace_mask,
+            Some(handler),
+        )
     }
 
     /// Dumps the captured runtime trace, when present.
@@ -3859,7 +3954,7 @@ fn collect_dispatch_sites_in_expr(
     sites: &mut Vec<DispatchSiteRecord>,
 ) {
     match expr {
-        sem::Expr::DirectCall { args, .. } => {
+        sem::Expr::DirectCall { args, .. } | sem::Expr::HostCall { args, .. } => {
             for arg in args {
                 collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
             }
@@ -4544,6 +4639,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
             sem::ValueKind::GenericFunctionObject(*generic)
         }
         sem::Expr::IntrinsicCall { result_kind, .. } => *result_kind,
+        sem::Expr::HostCall { result_kind, .. } => *result_kind,
         sem::Expr::DirectCall { function, .. } => module
             .functions
             .get(function.0 as usize)
@@ -4926,12 +5022,14 @@ fn run_zero_arg_function_i64_with_trace(
     }
 }
 
-fn call_function(
+fn call_function<'a>(
     module: &sem::Module,
+    host_registry: &'a sem::HostMetaRegistry,
     tape: &tape::TapeModule,
     function_name: &str,
     arguments: &[FunctionValue],
     trace_mask: TraceMask,
+    handler: Option<&'a mut dyn HostFunctionHandler>,
 ) -> Result<FunctionCallOutcome, FunctionCallError> {
     let function = module
         .functions
@@ -4955,7 +5053,11 @@ fn call_function(
             name: function_name.to_string(),
         })?;
 
-    let host = SharedInterlokoHost::new(InterlokoHost::new(tape.runtime.clone()));
+    let host = SharedFunctionCallHost::new(
+        InterlokoHost::new(tape.runtime.clone()),
+        host_registry.functions(),
+        handler,
+    );
     let mut runtime_arguments = Vec::with_capacity(arguments.len());
     for (index, (argument, expected)) in arguments
         .iter()
@@ -4989,6 +5091,13 @@ fn call_function(
     let output = match vm.run(&tape.program, entry, &runtime_arguments, trace_mask, sink) {
         Ok(output) => output,
         Err(trap) => {
+            if let Some((name, failure)) = host.failure() {
+                return Err(FunctionCallError::HostFunctionFailed {
+                    name,
+                    failure,
+                    trace: trace.map(ExecutionTraceSink::finish),
+                });
+            }
             return Err(FunctionCallError::Trap {
                 trap,
                 trace: trace.map(ExecutionTraceSink::finish),
@@ -5021,23 +5130,40 @@ fn call_function(
 }
 
 #[derive(Clone)]
-struct SharedInterlokoHost(Rc<RefCell<InterlokoHost>>);
+struct SharedFunctionCallHost<'a>(Rc<RefCell<FunctionCallHost<'a>>>);
 
-impl SharedInterlokoHost {
-    fn new(host: InterlokoHost) -> Self {
-        Self(Rc::new(RefCell::new(host)))
+impl<'a> SharedFunctionCallHost<'a> {
+    fn new(
+        runtime: InterlokoHost,
+        functions: &'a [sem::HostFunction],
+        handler: Option<&'a mut dyn HostFunctionHandler>,
+    ) -> Self {
+        Self(Rc::new(RefCell::new(FunctionCallHost {
+            runtime,
+            functions,
+            handler,
+            failure: None,
+        })))
     }
 
     fn make_string(&self, value: &str) -> Result<Value, runtime::RuntimeError> {
-        self.0.borrow_mut().make_string(value)
+        self.0.borrow_mut().runtime.make_string(value)
     }
 
     fn string_text(&self, value: &Value) -> Result<String, runtime::RuntimeError> {
-        self.0.borrow().string_text(value).map(ToString::to_string)
+        self.0
+            .borrow()
+            .runtime
+            .string_text(value)
+            .map(ToString::to_string)
+    }
+
+    fn failure(&self) -> Option<(String, HostFunctionFailure)> {
+        self.0.borrow().failure.clone()
     }
 }
 
-impl Host for SharedInterlokoHost {
+impl Host for SharedFunctionCallHost<'_> {
     fn call(
         &mut self,
         symbol: &str,
@@ -5049,6 +5175,135 @@ impl Host for SharedInterlokoHost {
         self.0
             .borrow_mut()
             .call(symbol, sig_hash, args, rets, context)
+    }
+}
+
+struct FunctionCallHost<'a> {
+    runtime: InterlokoHost,
+    functions: &'a [sem::HostFunction],
+    handler: Option<&'a mut dyn HostFunctionHandler>,
+    failure: Option<(String, HostFunctionFailure)>,
+}
+
+impl FunctionCallHost<'_> {
+    fn fail(&mut self, name: &str, message: impl Into<String>) -> HostError {
+        self.failure = Some((name.to_string(), HostFunctionFailure::new(message)));
+        HostError::Failed
+    }
+
+    fn host_argument(
+        &self,
+        kind: sem::HostValueKind,
+        value: ValueRef<'_>,
+    ) -> Result<FunctionValue, HostFunctionFailure> {
+        match (kind, value) {
+            (sem::HostValueKind::Integer, ValueRef::I64(value)) => {
+                Ok(FunctionValue::Integer(value))
+            }
+            (sem::HostValueKind::Boolean, ValueRef::Bool(value)) => {
+                Ok(FunctionValue::Boolean(value))
+            }
+            (sem::HostValueKind::String, ValueRef::Obj(value)) => self
+                .runtime
+                .string_text(&Value::Obj(value))
+                .map(|value| FunctionValue::String(value.to_string()))
+                .map_err(|_| {
+                    HostFunctionFailure::new("string argument is not an Interloko string")
+                }),
+            _ => Err(HostFunctionFailure::new(
+                "runtime argument does not match the declared scalar kind",
+            )),
+        }
+    }
+
+    fn host_result(
+        &mut self,
+        kind: sem::HostValueKind,
+        value: FunctionValue,
+    ) -> Result<Value, HostFunctionFailure> {
+        match (kind, value) {
+            (sem::HostValueKind::Integer, FunctionValue::Integer(value)) => Ok(Value::I64(value)),
+            (sem::HostValueKind::Boolean, FunctionValue::Boolean(value)) => Ok(Value::Bool(value)),
+            (sem::HostValueKind::String, FunctionValue::String(value)) => self
+                .runtime
+                .make_string(value)
+                .map_err(|_| HostFunctionFailure::new("string result could not enter the runtime")),
+            (expected, actual) => Err(HostFunctionFailure::new(format!(
+                "handler returned {}, expected {}",
+                actual.kind(),
+                host_value_kind_label(expected)
+            ))),
+        }
+    }
+}
+
+impl Host for FunctionCallHost<'_> {
+    fn call(
+        &mut self,
+        symbol: &str,
+        sig_hash: SigHash,
+        args: &[ValueRef<'_>],
+        rets: &mut [Value],
+        context: HostContext<'_, '_>,
+    ) -> Result<u64, HostError> {
+        let Some(function) = self
+            .functions
+            .iter()
+            .find(|function| function.name == symbol)
+            .cloned()
+        else {
+            return self.runtime.call(symbol, sig_hash, args, rets, context);
+        };
+        if self.failure.is_some() {
+            return Err(HostError::Failed);
+        }
+        if args.len() != function.param_kinds.len() || rets.len() != 1 {
+            return Err(self.fail(
+                symbol,
+                "runtime host-call arity disagrees with its declaration",
+            ));
+        }
+        let mut arguments = Vec::with_capacity(args.len());
+        for (kind, value) in function
+            .param_kinds
+            .iter()
+            .copied()
+            .zip(args.iter().copied())
+        {
+            match self.host_argument(kind, value) {
+                Ok(value) => arguments.push(value),
+                Err(failure) => {
+                    self.failure = Some((symbol.to_string(), failure));
+                    return Err(HostError::Failed);
+                }
+            }
+        }
+        let Some(handler) = self.handler.as_deref_mut() else {
+            return Err(self.fail(symbol, "no host-function handler was provided"));
+        };
+        let result = match handler.call(&function, &arguments) {
+            Ok(result) => result,
+            Err(failure) => {
+                self.failure = Some((symbol.to_string(), failure));
+                return Err(HostError::Failed);
+            }
+        };
+        match self.host_result(function.result_kind, result) {
+            Ok(result) => rets[0] = result,
+            Err(failure) => {
+                self.failure = Some((symbol.to_string(), failure));
+                return Err(HostError::Failed);
+            }
+        }
+        Ok(0)
+    }
+}
+
+const fn host_value_kind_label(kind: sem::HostValueKind) -> &'static str {
+    match kind {
+        sem::HostValueKind::Integer => "integer",
+        sem::HostValueKind::Boolean => "boolean",
+        sem::HostValueKind::String => "string",
     }
 }
 
@@ -5999,6 +6254,16 @@ fn dump_sem(module: &sem::Module) -> String {
                 sem_initialization_step_detail(module, class, step)
             );
         }
+    }
+    for function in &module.host_functions {
+        let _ = writeln!(
+            out,
+            "host-function h{} {}({}) result={}",
+            function.id.0,
+            function.name,
+            sem_kind_list_label(module, &function.param_kinds),
+            sem_kind_label(module, function.result_kind)
+        );
     }
     for generic in &module.generics {
         let params = generic
@@ -8423,6 +8688,9 @@ fn project_session_environment(
     for function in &module.functions {
         project_environment_function(module, sink, function);
     }
+    for function in &module.host_functions {
+        project_environment_host_function(module, sink, function);
+    }
     for constant in &module.constants {
         project_environment_constant(module, sink, constant);
     }
@@ -8641,6 +8909,16 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
             {
                 object.artifacts = ArtifactFacet::new(Vec::from([report.key]));
             }
+        }
+        EnvironmentKind::HostFunction => {
+            object.artifacts = artifact_facet(
+                source_file,
+                &[
+                    QueryArtifact::Bind,
+                    QueryArtifact::LoweredModule,
+                    QueryArtifact::TapeProgram,
+                ],
+            );
         }
         EnvironmentKind::GrammarRegistry
         | EnvironmentKind::RegisteredGrammarEnvironment
@@ -9805,6 +10083,40 @@ fn project_environment_function(
     }));
 }
 
+fn project_environment_host_function(
+    module: &sem::Module,
+    sink: &mut dyn EnvironmentObjectSink,
+    function: &sem::ResolvedHostFunction,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let params = sem_kind_list_label(module, &function.param_kinds);
+    sink.emit(environment_object(EnvironmentObjectParts {
+        id: format!("host-function:{}", function.name),
+        kind: EnvironmentKind::HostFunction,
+        meta_class: "<host-function>",
+        origin: EnvironmentOrigin::HostBacked,
+        storage: EnvironmentStorage::HostRegistry,
+        title: format!(
+            "{}({params}) -> {}",
+            function.name,
+            sem_kind_label(module, function.result_kind)
+        ),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::DumpSem,
+            Aff::DumpLowered,
+            Aff::DumpTape,
+            Aff::DumpEop,
+        ]),
+        execution: Some(format!(
+            "callable=host scalar=true arity={}",
+            function.param_kinds.len()
+        )),
+        inspection: format!("host-function-id=h{} handler=embedding", function.id.0),
+    }));
+}
+
 fn project_environment_constant(
     module: &sem::Module,
     sink: &mut dyn EnvironmentObjectSink,
@@ -10522,6 +10834,22 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 out,
                 "intrinsic {} result={}",
                 sem_intrinsic_label(*intrinsic),
+                sem_kind_label_for_expr(*result_kind)
+            );
+            for arg in args {
+                dump_sem_expr(out, arg, indent + 2);
+            }
+        }
+        sem::Expr::HostCall {
+            function,
+            args,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "host-call h{} result={}",
+                function.0,
                 sem_kind_label_for_expr(*result_kind)
             );
             for arg in args {
@@ -11393,6 +11721,21 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 "intrinsic({}:{result}:",
                 sem_intrinsic_label(*intrinsic)
             );
+            fingerprint_args(module, args, out);
+            out.push(')');
+        }
+        sem::Expr::HostCall {
+            function,
+            args,
+            result_kind,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let name = module
+                .host_functions
+                .get(function.0 as usize)
+                .map_or("?", |function| function.name.as_str());
+            let _ = write!(out, "host-call({name}:{result}:");
             fingerprint_args(module, args, out);
             out.push(')');
         }
@@ -12825,6 +13168,122 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[derive(Default)]
+    struct RecordingHostFunctionHandler {
+        descriptions: Vec<String>,
+    }
+
+    impl HostFunctionHandler for RecordingHostFunctionHandler {
+        fn call(
+            &mut self,
+            function: &sem::HostFunction,
+            arguments: &[FunctionValue],
+        ) -> Result<FunctionValue, HostFunctionFailure> {
+            if function.name != "propose-description" {
+                return Err(HostFunctionFailure::new("unexpected host function"));
+            }
+            let [FunctionValue::String(description)] = arguments else {
+                return Err(HostFunctionFailure::new("expected one string"));
+            };
+            self.descriptions.push(description.clone());
+            Ok(FunctionValue::Boolean(true))
+        }
+    }
+
+    #[test]
+    fn session_executes_declared_scalar_host_functions_through_a_handler() {
+        let mut registry = sem::HostMetaRegistry::new();
+        registry.add_function(sem::HostFunction::new(
+            "propose-description",
+            alloc::vec![sem::HostValueKind::String],
+            sem::HostValueKind::Boolean,
+        ));
+        let artifacts = CompilerSession::compile_source_with_host_registry(
+            "commands.loko",
+            "define function dispatch(command :: <string>) => <string>\n  \
+               if command = \"describe\" then\n    \
+                 if propose-description(\"a luminous glasshouse\") then \
+                   \"accepted\" else \"rejected\" end\n  \
+               else \"unknown\" end\n\
+             end;",
+            RuntimeMode::CompileOnly,
+            &registry,
+        );
+
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        assert_eq!(artifacts.sem.host_functions.len(), 1);
+        let host_object = eop_object(
+            &artifacts.environment_objects(),
+            "host-function:propose-description",
+        )
+        .clone();
+        assert_eq!(host_object.kind, EnvironmentKind::HostFunction);
+        assert_eq!(host_object.origin, EnvironmentOrigin::HostBacked);
+        assert_eq!(host_object.storage, EnvironmentStorage::HostRegistry);
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Sem)
+                .contains("host-call h0")
+        );
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Lowered)
+                .contains("host.call h0 propose-description")
+        );
+        let tape = artifacts.dump_stage(DumpStage::Tape);
+        assert!(tape.contains("propose-description"), "{tape}");
+
+        let mut handler = RecordingHostFunctionHandler::default();
+        let outcome = artifacts
+            .call_function_with_host(
+                "dispatch",
+                &[FunctionValue::String("describe".into())],
+                TraceMask::HOST,
+                &mut handler,
+            )
+            .expect("declared host function should execute");
+        assert_eq!(outcome.value, FunctionValue::String("accepted".into()));
+        assert_eq!(handler.descriptions, ["a luminous glasshouse"]);
+        assert!(
+            outcome
+                .trace
+                .expect("trace was requested")
+                .events
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    ExecutionTraceEvent::ScopeEnter {
+                        scope: ExecutionTraceScope::HostCall { symbol_name, .. },
+                        ..
+                    } if symbol_name == "propose-description"
+                ))
+        );
+
+        assert!(matches!(
+            artifacts.call_function(
+                "dispatch",
+                &[FunctionValue::String("describe".into())],
+                TraceMask::NONE,
+            ),
+            Err(FunctionCallError::HostFunctionFailed { name, failure, .. })
+                if name == "propose-description"
+                    && failure.message() == "no host-function handler was provided"
+        ));
+
+        let conflict = CompilerSession::compile_source_with_host_registry(
+            "conflict.loko",
+            "define function propose-description(value :: <string>) => <boolean>\n  #t\nend;",
+            RuntimeMode::CompileOnly,
+            &registry,
+        );
+        assert!(
+            conflict
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::DuplicateDefinition)
+        );
     }
 
     #[test]

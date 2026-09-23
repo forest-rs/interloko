@@ -1,5 +1,28 @@
 # Plans
 
+## Complete Scalar Host Functions
+
+### Goal
+
+Make `HostMetaRegistry::add_function` load-bearing: registered integer,
+boolean, and string functions resolve in Loko source, lower to ordinary tape
+host calls, appear in EOP inspection, and execute through a calm scalar
+handler API.
+
+### Fence
+
+Interloko owns declaration, type checking, lowering, scalar value conversion,
+and bounded VM dispatch. Embedders own the meaning and lifecycle of each host
+function. A host call does not imply authorization, persistence, or mutation.
+
+### Invariants
+
+- Host signatures contain no compiler-local class ids.
+- VM handles and runtime heap values do not cross the handler API.
+- Missing, rejected, and type-invalid handlers produce structured call errors.
+- Existing calls that use no declared host function retain their behavior.
+- The compiler and runtime remain `no_std + alloc`.
+
 ## Add Packrat Memoization To The Grammar Kernel
 
 ### Goal

@@ -103,6 +103,8 @@ The current slices include:
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
+- embedding-declared scalar host functions with typed integer, boolean, and
+  string arguments/results, EOP discovery, and a handler-aware call surface;
 - read-only grammar MOP inspection plus trusted staged grammar adapters;
 - structured EOP records for environment/workbench objects and affordances;
 - explicit host-backed class/slot metadata for Rust interop experiments;

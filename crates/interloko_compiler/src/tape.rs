@@ -7,9 +7,11 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
+use execution_tape::host::HostSig;
 use execution_tape::program::{AggShape, ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
@@ -214,6 +216,7 @@ struct AbiTables {
     vector_literal: Option<(HostSigId, ElemTypeId)>,
     value_eq: HostSigId,
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
+    host_functions: Vec<HostSigId>,
     box_i64: HostSigId,
     box_bool: HostSigId,
     box_object: HostSigId,
@@ -309,6 +312,19 @@ impl AbiTables {
         let vector_literal = vector_literal_sig(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
+        let host_functions = module
+            .host_functions
+            .iter()
+            .map(|function| {
+                builder.host_sig_for(
+                    &function.name,
+                    HostSig {
+                        args: function.params.iter().copied().map(value_type).collect(),
+                        rets: vec![value_type(function.ret)],
+                    },
+                )
+            })
+            .collect();
         Ok(Self {
             make_object,
             class_count: module.runtime.classes.len(),
@@ -322,6 +338,7 @@ impl AbiTables {
             vector_literal,
             value_eq,
             runtime_calls,
+            host_functions,
             box_i64,
             box_bool,
             box_object,
@@ -365,6 +382,13 @@ impl AbiTables {
             .find(|(candidate, _)| *candidate == op)
             .map(|(_, sig)| *sig)
             .ok_or_else(|| invalid_lowered("runtime call signature is missing"))
+    }
+
+    fn host_function(&self, id: sem::HostFunctionId) -> Result<HostSigId, TapeError> {
+        self.host_functions
+            .get(id.0 as usize)
+            .copied()
+            .ok_or_else(|| invalid_lowered("host function signature is missing"))
     }
 }
 
@@ -806,6 +830,18 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.host_call(0, sig, 0, &args, &[dst.0]);
             }
+            lower::Instr::HostCall {
+                dst,
+                function,
+                args,
+                span,
+                ..
+            } => {
+                let sig = self.abi.host_function(*function)?;
+                let args = reg_slice(args);
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &args, &[dst.0]);
+            }
             lower::Instr::ReadSlot {
                 dst,
                 receiver,
@@ -1049,7 +1085,7 @@ fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
             note_register(*dst, max);
             note_registers(elements, max);
         }
-        lower::Instr::RuntimeCall { dst, args, .. } => {
+        lower::Instr::RuntimeCall { dst, args, .. } | lower::Instr::HostCall { dst, args, .. } => {
             note_register(*dst, max);
             note_registers(args, max);
         }

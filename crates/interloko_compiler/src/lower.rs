@@ -90,10 +90,25 @@ pub struct Module {
     pub runtime: RuntimeLayout,
     /// Interned callable signatures used by first-class function values.
     pub call_sigs: Vec<CallableSignature>,
+    /// Host-backed functions visible to emitted calls.
+    pub host_functions: Vec<HostFunction>,
     /// Lowered functions in [`FunctionId`] order.
     pub functions: Vec<Function>,
     /// Lowered function id for `main`, if present.
     pub main: Option<FunctionId>,
+}
+
+/// A host-backed function signature lowered to backend value categories.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFunction {
+    /// Registry-local function id.
+    pub id: sem::HostFunctionId,
+    /// Loko-visible and tape host-symbol name.
+    pub name: String,
+    /// Parameter categories in call order.
+    pub params: Vec<ValueKind>,
+    /// Single result category.
+    pub ret: ValueKind,
 }
 
 impl Module {
@@ -443,6 +458,19 @@ pub enum Instr {
         dst: Register,
         /// Runtime operation.
         op: RuntimeOp,
+        /// Argument registers.
+        args: Vec<Register>,
+        /// Result value category.
+        kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
+    /// Call through an embedding-provided host function.
+    HostCall {
+        /// Destination register.
+        dst: Register,
+        /// Registry-local host function.
+        function: sem::HostFunctionId,
         /// Argument registers.
         args: Vec<Register>,
         /// Result value category.
@@ -817,9 +845,24 @@ impl<'module> Lowering<'module> {
             functions.push(self.lower_closure(closure)?);
         }
 
+        let host_functions = self
+            .module
+            .host_functions
+            .iter()
+            .map(|function| {
+                Ok(HostFunction {
+                    id: function.id,
+                    name: function.name.clone(),
+                    params: self.value_kinds(&function.param_kinds)?,
+                    ret: self.value_kind(function.result_kind)?,
+                })
+            })
+            .collect::<Result<Vec<_>, LowerError>>()?;
+
         Ok(Module {
             runtime: runtime_bridge::runtime_layout_from_sem(self.module),
             call_sigs: self.ids.call_sigs.clone(),
+            host_functions,
             functions,
             main,
         })
@@ -1213,6 +1256,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             values: elements, ..
         }
         | sem::Expr::IntrinsicCall { args: elements, .. }
+        | sem::Expr::HostCall { args: elements, .. }
         | sem::Expr::DirectCall { args: elements, .. }
         | sem::Expr::GenericCall { args: elements, .. } => {
             for element in elements {
@@ -2078,6 +2122,33 @@ impl<'module> BodyLowering<'module> {
                 result_kind,
                 span,
             } => self.lower_intrinsic_call(*intrinsic, args, *result_kind, *span),
+            sem::Expr::HostCall {
+                function,
+                args,
+                result_kind,
+                span,
+            } => {
+                let function_info = self
+                    .module
+                    .host_functions
+                    .get(function.0 as usize)
+                    .ok_or_else(|| invalid_semantic("host function id is out of range"))?;
+                let args = self.lower_args_with_expected(
+                    args,
+                    &function_info.param_kinds,
+                    &vec![None; function_info.param_kinds.len()],
+                )?;
+                let kind = self.value_kind(*result_kind)?;
+                let result = self.alloc(kind);
+                self.instructions.push(Instr::HostCall {
+                    dst: result.reg,
+                    function: *function,
+                    args,
+                    kind,
+                    span: *span,
+                });
+                Ok(result)
+            }
             sem::Expr::DirectCall {
                 function,
                 args,
@@ -3740,6 +3811,23 @@ impl Module {
                 span,
             } => {
                 write!(f, "  {dst} = runtime.{}", runtime_op_name(*op))?;
+                self.fmt_arg_list(f, args)?;
+                write!(f, ": ")?;
+                self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
+            Instr::HostCall {
+                dst,
+                function,
+                args,
+                kind,
+                span,
+            } => {
+                let name = self
+                    .host_functions
+                    .get(function.0 as usize)
+                    .map_or("?", |function| function.name.as_str());
+                write!(f, "  {dst} = host.call h{} {name}", function.0)?;
                 self.fmt_arg_list(f, args)?;
                 write!(f, ": ")?;
                 self.fmt_kind(f, *kind)?;

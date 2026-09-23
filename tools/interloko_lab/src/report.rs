@@ -1696,6 +1696,9 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
         EnvironmentKind::Diagnostic => "Structured compiler diagnostic.",
         EnvironmentKind::RuntimeLayoutRow => "Runtime storage layout fact.",
         EnvironmentKind::Artifact => "Incremental compiler artifact.",
+        EnvironmentKind::HostFunction => {
+            "Scalar capability declared by the embedding host registry."
+        }
         EnvironmentKind::HostObject => "Object supplied by a host projection adapter.",
         EnvironmentKind::Mutation => "Entry in the session's in-memory mutation log.",
     }
