@@ -122,7 +122,7 @@ pub fn execution_trace_mask(include_instructions: bool) -> TraceMask {
 }
 
 /// Result of running `main` through the session API.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum RuntimeResult {
     /// `main` returned an integer result.
     ReturnedI64(i64),
@@ -166,7 +166,7 @@ impl fmt::Display for RuntimeResult {
 }
 
 /// Result of running a named zero-argument function from compiled artifacts.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum FunctionRunResult {
     /// The function returned an integer result.
     ReturnedI64(i64),
@@ -256,7 +256,7 @@ impl fmt::Display for FunctionValueKind {
 }
 
 /// Successful scalar function call and its optional execution trace.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FunctionCallOutcome {
     /// Scalar value returned by the function.
     pub value: FunctionValue,
@@ -309,7 +309,7 @@ impl fmt::Display for HostFunctionFailure {
 
 /// Failure to prepare or execute a scalar Interloko direct function call.
 #[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum FunctionCallError {
     /// The artifacts do not contain an emitted tape program.
     TapeUnavailable,
@@ -348,7 +348,7 @@ pub enum FunctionCallError {
     /// Runtime trapped during verified execution.
     Trap {
         /// Trap details.
-        trap: TrapInfo,
+        trap: alloc::boxed::Box<TrapInfo>,
         /// Partial trace captured before the trap, when requested.
         trace: Option<ExecutionTrace>,
     },
@@ -419,7 +419,7 @@ impl fmt::Display for FunctionCallError {
 }
 
 /// Result and optional trace from running a zero-argument function.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TracedFunctionRunResult {
     /// Function result.
     pub result: FunctionRunResult,
@@ -428,14 +428,14 @@ pub struct TracedFunctionRunResult {
 }
 
 /// Captured `execution_tape` trace for one runtime run.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct ExecutionTrace {
     /// Events in the order emitted by the VM.
     pub events: Vec<ExecutionTraceEvent>,
 }
 
 /// One captured runtime trace event.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum ExecutionTraceEvent {
     /// VM run started.
     RunStart {
@@ -491,7 +491,7 @@ pub enum ExecutionTraceEvent {
 }
 
 /// Captured runtime trace outcome.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum ExecutionTraceOutcome {
     /// Runtime completed successfully.
     Ok,
@@ -5099,7 +5099,7 @@ fn call_function<'a>(
                 });
             }
             return Err(FunctionCallError::Trap {
-                trap,
+                trap: alloc::boxed::Box::new(trap),
                 trace: trace.map(ExecutionTraceSink::finish),
             });
         }
@@ -5387,6 +5387,7 @@ impl TraceSink for ExecutionTraceSink {
         func: execution_tape::value::FuncId,
         pc: u32,
         span_id: Option<u64>,
+        _outcome: TraceOutcome<'_>,
     ) {
         self.trace.events.push(ExecutionTraceEvent::ScopeExit {
             scope: trace_scope(program, kind),
@@ -5410,7 +5411,7 @@ impl TraceSink for ExecutionTraceSink {
 
 fn trace_scope(program: &Program, kind: ScopeKind) -> ExecutionTraceScope {
     match kind {
-        ScopeKind::CallFrame { func } => ExecutionTraceScope::CallFrame { func: func.0 },
+        ScopeKind::CallFrame { func, .. } => ExecutionTraceScope::CallFrame { func: func.0 },
         ScopeKind::HostCall {
             host_sig,
             symbol,
@@ -12235,10 +12236,10 @@ mod tests {
         let artifacts =
             CompilerSession::compile_source("constant.loko", source, RuntimeMode::RunMain);
 
-        assert_eq!(
+        assert!(matches!(
             artifacts.runtime_result,
             Some(RuntimeResult::ReturnedI64(42))
-        );
+        ));
         let forms = artifacts.source_forms();
         let constant_form = forms
             .iter()
@@ -12695,10 +12696,10 @@ mod tests {
         assert_eq!(artifacts.diagnostics, Vec::new());
         assert!(artifacts.lowered.is_some());
         assert!(artifacts.tape.is_some());
-        assert_eq!(
+        assert!(matches!(
             artifacts.runtime_result,
             Some(RuntimeResult::ReturnedI64(100))
-        );
+        ));
         assert!(
             artifacts
                 .artifact_reports()
@@ -12864,10 +12865,10 @@ mod tests {
                 mask: TraceMask::RUN | TraceMask::CALL | TraceMask::HOST,
             },
         );
-        assert_eq!(
+        assert!(matches!(
             artifacts.runtime_result,
             Some(RuntimeResult::ReturnedI64(100))
-        );
+        ));
         let trace = artifacts
             .runtime_trace
             .as_ref()
@@ -12923,7 +12924,7 @@ mod tests {
             CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
         let traced =
             artifacts.run_zero_arg_function_i64_traced("main", TraceMask::RUN | TraceMask::INSTR);
-        assert_eq!(traced.result, FunctionRunResult::ReturnedI64(100));
+        assert!(matches!(traced.result, FunctionRunResult::ReturnedI64(100)));
         let trace = traced.trace.expect("trace should be captured");
         assert!(
             trace
@@ -13088,27 +13089,18 @@ mod tests {
         );
 
         assert_eq!(artifacts.diagnostics, Vec::new());
-        assert_eq!(
+        assert!(matches!(
             artifacts.run_zero_arg_function_i64("__interloko_repl_expr_0"),
             FunctionRunResult::ReturnedI64(42)
+        ));
+        assert!(
+            matches!(artifacts.run_zero_arg_function_i64("missing"), FunctionRunResult::MissingFunction { name } if name == "missing")
         );
-        assert_eq!(
-            artifacts.run_zero_arg_function_i64("missing"),
-            FunctionRunResult::MissingFunction {
-                name: "missing".into()
-            }
+        assert!(
+            matches!(artifacts.run_zero_arg_function_i64("helper"), FunctionRunResult::FunctionHasParameters { name } if name == "helper")
         );
-        assert_eq!(
-            artifacts.run_zero_arg_function_i64("helper"),
-            FunctionRunResult::FunctionHasParameters {
-                name: "helper".into()
-            }
-        );
-        assert_eq!(
-            artifacts.run_zero_arg_function_i64("object_result"),
-            FunctionRunResult::FunctionReturnedNonI64 {
-                name: "object_result".into()
-            }
+        assert!(
+            matches!(artifacts.run_zero_arg_function_i64("object_result"), FunctionRunResult::FunctionReturnedNonI64 { name } if name == "object_result")
         );
     }
 
@@ -14017,10 +14009,10 @@ mod tests {
         let artifacts =
             CompilerSession::compile_source("records.loko", source, RuntimeMode::RunMain);
 
-        assert_eq!(
+        assert!(matches!(
             artifacts.runtime_result,
             Some(RuntimeResult::ReturnedI64(10))
-        );
+        ));
         assert_eq!(artifacts.diagnostics, Vec::new());
         assert!(
             artifacts
@@ -14238,10 +14230,10 @@ mod tests {
             .expect("source should exist");
         assert_eq!(first.recomputed_count(), first.reports.len());
         assert_eq!(first.reused_count(), 0);
-        assert_eq!(
+        assert!(matches!(
             first.artifacts.runtime_result,
             Some(RuntimeResult::ReturnedI64(100))
-        );
+        ));
 
         let second = session
             .compile(file, RuntimeMode::RunMain)

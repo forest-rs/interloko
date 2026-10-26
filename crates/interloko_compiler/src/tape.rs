@@ -10,9 +10,10 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder};
+use execution_tape::asm::{Asm, FunctionAbi, FunctionSig, Label, ProgramBuilder};
+use execution_tape::contract::{Contract, ContractId};
 use execution_tape::host::HostSig;
-use execution_tape::program::{AggShape, ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
+use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -92,11 +93,11 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
                 .collect(),
             ret_types: function.rets.iter().copied().map(value_type).collect(),
         };
-        let func = if let Some(env_shape) = closure_env_shape(function)? {
-            builder.declare_function(sig.with_arg_agg_shape(0, env_shape))
-        } else {
-            builder.declare_function(sig)
-        };
+        let mut signature = FunctionAbi::from(sig);
+        if let Some(environment) = closure_env_contract(function, &mut builder)? {
+            signature.args[0] = environment.into();
+        }
+        let func = builder.declare_function(signature).map_err(build_error)?;
         builder
             .set_function_name(func, &function.name)
             .map_err(build_error)?;
@@ -160,7 +161,10 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
     }
 }
 
-fn closure_env_shape(function: &lower::Function) -> Result<Option<AggShape>, TapeError> {
+fn closure_env_contract(
+    function: &lower::Function,
+    builder: &mut ProgramBuilder,
+) -> Result<Option<ContractId>, TapeError> {
     if !matches!(function.kind, lower::FunctionKind::Closure(_)) {
         return Ok(None);
     }
@@ -187,7 +191,19 @@ fn closure_env_shape(function: &lower::Function) -> Result<Option<AggShape>, Tap
     if elems.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(AggShape::tuple(elems)))
+        let children: Vec<_> = elems
+            .into_iter()
+            .map(|kind| {
+                kind.map(|kind| builder.contract(Contract::Kind(kind)))
+                    .transpose()
+            })
+            .collect::<Result<_, _>>()
+            .map_err(build_error)?;
+        Ok(Some(
+            builder
+                .contract(Contract::Tuple(&children))
+                .map_err(build_error)?,
+        ))
     }
 }
 
@@ -551,7 +567,6 @@ struct FunctionEmitter<'a> {
     builder: &'a mut ProgramBuilder,
     asm: Asm,
     labels: Vec<Label>,
-    next_temp: u32,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -561,7 +576,12 @@ impl<'a> FunctionEmitter<'a> {
         abi: &'a AbiTables,
         builder: &'a mut ProgramBuilder,
     ) -> Self {
-        let mut asm = Asm::new();
+        let mut asm = builder
+            .function_asm(ids.functions[function.id.0 as usize])
+            .expect("function was declared before body emission");
+        for kind in function.register_kinds.iter().skip(function.params.len()) {
+            asm.alloc_register(value_type(*kind));
+        }
         let labels = labels_for(function, &mut asm);
         Self {
             function,
@@ -570,7 +590,6 @@ impl<'a> FunctionEmitter<'a> {
             builder,
             asm,
             labels,
-            next_temp: max_register(function).saturating_add(1),
         }
     }
 
@@ -599,7 +618,7 @@ impl<'a> FunctionEmitter<'a> {
                 dst, value, span, ..
             } => {
                 let (sig, value_const) = self.abi.string_literal(value)?;
-                let value_reg = self.alloc_temp();
+                let value_reg = self.alloc_temp(ValueType::Str);
                 self.set_span(*span);
                 self.asm.const_pool(value_reg, value_const);
                 self.asm.host_call(0, sig, 0, &[value_reg], &[dst.0]);
@@ -608,7 +627,7 @@ impl<'a> FunctionEmitter<'a> {
                 dst, name, span, ..
             } => {
                 let (sig, name_const) = self.abi.symbol_literal(name)?;
-                let name_reg = self.alloc_temp();
+                let name_reg = self.alloc_temp(ValueType::Str);
                 self.set_span(*span);
                 self.asm.const_pool(name_reg, name_const);
                 self.asm.host_call(0, sig, 0, &[name_reg], &[dst.0]);
@@ -647,8 +666,8 @@ impl<'a> FunctionEmitter<'a> {
                     .get(function.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_lowered("closure function id is out of range"))?;
-                let func_reg = self.alloc_temp();
-                let env_reg = self.alloc_temp();
+                let func_reg = self.alloc_temp(ValueType::Func);
+                let env_reg = self.alloc_temp(ValueType::Agg);
                 self.set_span(*span);
                 self.asm.const_func(func_reg, function);
                 self.asm.tuple_new(env_reg, &reg_slice(captures));
@@ -777,7 +796,13 @@ impl<'a> FunctionEmitter<'a> {
                     .map(|kind| value_type(*kind))
                     .collect::<Vec<_>>();
                 let ret_types = rets.iter().copied().map(value_type).collect::<Vec<_>>();
-                let sig = self.builder.call_sig(&args_types, &ret_types);
+                let sig = self
+                    .builder
+                    .call_sig(FunctionSig {
+                        arg_types: args_types,
+                        ret_types,
+                    })
+                    .map_err(build_error)?;
                 let args = reg_slice(args);
                 let dsts = reg_slice(dsts);
                 self.set_span(*span);
@@ -792,8 +817,8 @@ impl<'a> FunctionEmitter<'a> {
                 if class.0 as usize >= self.abi.class_count {
                     return Err(invalid_lowered("class id is out of range"));
                 }
-                let class_reg = self.alloc_temp();
-                let fields_reg = self.alloc_temp();
+                let class_reg = self.alloc_temp(ValueType::U64);
+                let fields_reg = self.alloc_temp(ValueType::Agg);
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm.tuple_new(fields_reg, &reg_slice(fields));
@@ -813,7 +838,7 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 let (sig, elem) = self.abi.vector_literal()?;
                 let elements = reg_slice(elements);
-                let aggregate = self.alloc_temp();
+                let aggregate = self.alloc_temp(ValueType::Agg);
                 self.set_span(*span);
                 self.asm.array_new(aggregate, elem, &elements);
                 self.asm.host_call(0, sig, 0, &[aggregate], &[dst.0]);
@@ -857,7 +882,7 @@ impl<'a> FunctionEmitter<'a> {
                     .and_then(|slots| slots.get(slot.0 as usize))
                     .copied()
                     .ok_or_else(|| invalid_lowered("slot_get signature is out of range"))?;
-                let slot_reg = self.alloc_temp();
+                let slot_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(slot_reg, u64::from(slot.0));
                 self.asm
@@ -879,7 +904,7 @@ impl<'a> FunctionEmitter<'a> {
                     .and_then(|slots| slots.get(slot.0 as usize))
                     .copied()
                     .ok_or_else(|| invalid_lowered("slot_set signature is out of range"))?;
-                let slot_reg = self.alloc_temp();
+                let slot_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(slot_reg, u64::from(slot.0));
                 self.asm
@@ -898,7 +923,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 let sig = self.instance_sig(*input)?;
-                let class_reg = self.alloc_temp();
+                let class_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm
@@ -912,7 +937,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 let sig = self.cast_sig(*input)?;
-                let class_reg = self.alloc_temp();
+                let class_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm
@@ -967,10 +992,8 @@ impl<'a> FunctionEmitter<'a> {
             .ok_or_else(|| invalid_lowered("label id is out of range"))
     }
 
-    fn alloc_temp(&mut self) -> u32 {
-        let reg = self.next_temp;
-        self.next_temp = self.next_temp.saturating_add(1);
-        reg
+    fn alloc_temp(&mut self, kind: ValueType) -> u32 {
+        self.asm.alloc_register(kind)
     }
 
     fn set_span(&mut self, span: Span) {
@@ -1018,121 +1041,6 @@ fn labels_for(function: &lower::Function, asm: &mut Asm) -> Vec<Label> {
         }
     }
     (0..count).map(|_| asm.label()).collect()
-}
-
-fn max_register(function: &lower::Function) -> u32 {
-    let mut max = 0;
-    for param in &function.params {
-        max = max.max(param.reg.0);
-    }
-    for local in &function.locals {
-        max = max.max(local.reg.0);
-    }
-    for instr in &function.instructions {
-        note_instr_registers(instr, &mut max);
-    }
-    max
-}
-
-fn note_instr_registers(instr: &lower::Instr, max: &mut u32) {
-    match instr {
-        lower::Instr::Label { .. } | lower::Instr::Jump { .. } | lower::Instr::Trap { .. } => {}
-        lower::Instr::ConstI64 { dst, .. }
-        | lower::Instr::ConstBool { dst, .. }
-        | lower::Instr::StringLiteral { dst, .. }
-        | lower::Instr::SymbolLiteral { dst, .. }
-        | lower::Instr::ConstU64 { dst, .. }
-        | lower::Instr::ConstClass { dst, .. }
-        | lower::Instr::ConstFunction { dst, .. } => {
-            note_register(*dst, max);
-        }
-        lower::Instr::ClosureNew { dst, captures, .. } => {
-            note_register(*dst, max);
-            note_registers(captures, max);
-        }
-        lower::Instr::CaptureGet { dst, env, .. } => {
-            note_register(*dst, max);
-            note_register(*env, max);
-        }
-        lower::Instr::BoxValue { dst, src, .. } => {
-            note_register(*dst, max);
-            note_register(*src, max);
-        }
-        lower::Instr::I64Binary { dst, lhs, rhs, .. }
-        | lower::Instr::I64Compare { dst, lhs, rhs, .. }
-        | lower::Instr::ValueEqual { dst, lhs, rhs, .. }
-        | lower::Instr::EqU64 { dst, lhs, rhs, .. } => {
-            note_register(*dst, max);
-            note_register(*lhs, max);
-            note_register(*rhs, max);
-        }
-        lower::Instr::Call { dsts, args, .. } => {
-            note_registers(dsts, max);
-            note_registers(args, max);
-        }
-        lower::Instr::CallIndirect {
-            dsts, callee, args, ..
-        } => {
-            note_registers(dsts, max);
-            note_register(*callee, max);
-            note_registers(args, max);
-        }
-        lower::Instr::MakeObject { dst, fields, .. } => {
-            note_register(*dst, max);
-            note_registers(fields, max);
-        }
-        lower::Instr::VectorLiteral { dst, elements, .. } => {
-            note_register(*dst, max);
-            note_registers(elements, max);
-        }
-        lower::Instr::RuntimeCall { dst, args, .. } | lower::Instr::HostCall { dst, args, .. } => {
-            note_register(*dst, max);
-            note_registers(args, max);
-        }
-        lower::Instr::ReadSlot { dst, receiver, .. } => {
-            note_register(*dst, max);
-            note_register(*receiver, max);
-        }
-        lower::Instr::WriteSlot {
-            dst,
-            receiver,
-            value,
-            ..
-        } => {
-            note_register(*dst, max);
-            note_register(*receiver, max);
-            note_register(*value, max);
-        }
-        lower::Instr::ClassOf { dst, object, .. } => {
-            note_register(*dst, max);
-            note_register(*object, max);
-        }
-        lower::Instr::InstanceOf { dst, value, .. }
-        | lower::Instr::CastObject { dst, value, .. } => {
-            note_register(*dst, max);
-            note_register(*value, max);
-        }
-        lower::Instr::Branch { cond, .. } => {
-            note_register(*cond, max);
-        }
-        lower::Instr::Move { dst, src, .. } => {
-            note_register(*dst, max);
-            note_register(*src, max);
-        }
-        lower::Instr::Return { values, .. } => {
-            note_registers(values, max);
-        }
-    }
-}
-
-fn note_register(reg: lower::Register, max: &mut u32) {
-    *max = (*max).max(reg.0);
-}
-
-fn note_registers(regs: &[lower::Register], max: &mut u32) {
-    for reg in regs {
-        note_register(*reg, max);
-    }
 }
 
 fn reg_slice(regs: &[lower::Register]) -> Vec<u32> {

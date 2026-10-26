@@ -2632,6 +2632,12 @@ mod tests {
         let host_sig = builder.host_sig_for(SLOT_GET, sig);
 
         let mut asm = Asm::new();
+        asm.set_register_types(alloc::vec![
+            ValueType::Unit,
+            object_type(),
+            ValueType::U64,
+            ValueType::I64
+        ]);
         asm.const_u64(2, u64::from(slot.0));
         asm.host_call(0, host_sig, 0, &[1, 2], &[3]);
         asm.ret(0, &[3]);
@@ -2650,16 +2656,19 @@ mod tests {
 
         let mut vm = Vm::new(host, Limits::default());
         let mut ctx = ExecutionContext::new();
+        let mut outputs = Vec::new();
         vm.run_with_ctx(
             &mut ctx,
             &program,
             entry,
             &[Value::Obj(object)],
+            &mut outputs,
             TraceMask::NONE,
             None,
             Some(access),
         )
-        .expect("slot-get program should run")
+        .expect("slot-get program should run");
+        outputs
     }
 
     #[test]

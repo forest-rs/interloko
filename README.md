@@ -200,6 +200,26 @@ Core crates should stay small and boring. New examples, experiments, and
 benchmarks should live in top-level workspace crates rather than adding
 development dependencies to the core crates.
 
+## Execution Tape Contract
+
+The compiler uses published `execution_tape` 0.1.0 from crates.io. Lowering records
+each register's storage kind when assigning its identity; the backend seeds an
+assembler from the declared function ABI and appends backend temporaries.
+It does not recover declarations by scanning emitted instructions. Closure
+environments and indirect signatures use the VM's compositional contracts.
+
+Compiled tapes are regeneratable artifacts. The current wire version is 0.5;
+recompile older tapes and regenerate any source sidecars with them. Runtime
+results use an explicit owned output vector and remain readable after their
+execution context is dropped.
+
+Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
+`Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed
+host error. Match the error variant or inspect its cause instead of comparing
+whole errors. `FunctionCallError::Trap` owns its trap in a box to keep normal
+error results compact. `lower::Function::register_kinds` contains declarations
+for registers r1 onward; r0 remains the effect token.
+
 ## Glossary
 
 - **Loko:** the current Dylan-shaped source notation and `.loko` file format.
