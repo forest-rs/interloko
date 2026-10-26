@@ -11,7 +11,7 @@ std = ["dep:serde", "dep:toml"]
 
 [dependencies]
 execution_tape = { workspace = true }
-invalidation = { version = "0.2", path = "../../../invalidation/crates/invalidation" }
+invalidation = "0.3"
 interloko_grammar = { path = "../interloko_grammar" }
 interloko_model = { path = "../interloko_model" }
 interloko_runtime = { path = "../interloko_runtime" }

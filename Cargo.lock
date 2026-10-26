@@ -513,7 +513,9 @@ dependencies = [
 
 [[package]]
 name = "invalidation"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd7ba69f0c9d4266c7723837ea73402350536c21b6708892a4517a60210ef2d"
 dependencies = [
  "hashbrown 0.17.1",
 ]
