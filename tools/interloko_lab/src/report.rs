@@ -2074,8 +2074,12 @@ fn trace_event_summary(event: &ExecutionTraceEvent) -> String {
         ExecutionTraceEvent::ScopeEnter { scope, .. } => {
             format!("enter {}", trace_scope_summary(scope))
         }
-        ExecutionTraceEvent::ScopeExit { scope, .. } => {
-            format!("exit {}", trace_scope_summary(scope))
+        ExecutionTraceEvent::ScopeExit { scope, outcome, .. } => {
+            let status = match outcome {
+                ExecutionTraceOutcome::Ok => "returned",
+                ExecutionTraceOutcome::Trap { .. } => "trapped",
+            };
+            format!("exit {} · {status}", trace_scope_summary(scope))
         }
         ExecutionTraceEvent::Instruction { opcode, .. } => format!("instruction 0x{opcode:02x}"),
     }
@@ -2120,7 +2124,10 @@ fn trace_event_detail(event: &ExecutionTraceEvent) -> String {
 
 fn trace_scope_summary(scope: &ExecutionTraceScope) -> String {
     match scope {
-        ExecutionTraceScope::CallFrame { func } => format!("call frame f{func}"),
+        ExecutionTraceScope::CallFrame { func, caller } => match caller {
+            Some(caller) => format!("call frame f{func} from f{}:{}", caller.func.0, caller.pc),
+            None => format!("call frame f{func} root"),
+        },
         ExecutionTraceScope::HostCall { symbol_name, .. } => format!("host {symbol_name}"),
     }
 }

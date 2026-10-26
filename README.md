@@ -220,6 +220,11 @@ whole errors. `FunctionCallError::Trap` owns its trap in a box to keep normal
 error results compact. `lower::Function::register_kinds` contains declarations
 for registers r1 onward; r0 remains the effect token.
 
+Requested execution traces retain the caller instruction on every guest frame
+and the return/trap outcome on every scope exit. Text dumps and HTML reports
+show this evidence. `ExecutionTraceOutcome::Trap` owns a boxed `TrapInfo`,
+keeping normal trace rows compact while preserving the full typed failure.
+
 ## Glossary
 
 - **Loko:** the current Dylan-shaped source notation and `.loko` file format.
