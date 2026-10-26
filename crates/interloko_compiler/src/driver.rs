@@ -17,7 +17,7 @@ use crate::sem::HostMetaRegistry;
 use crate::{ast, grammar_frontend, lower, sem, syntax, tape};
 
 /// End-to-end compiler or runtime error.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum CompileError {
     /// Compilation produced diagnostics.
     Diagnostics {
@@ -447,7 +447,7 @@ mod tests {
              define function main()\n  make(<box>, value: 7).value\nend;",
         )
         .expect_err("main returns a boxed <object>, not an integer");
-        assert_eq!(error, CompileError::MainReturnedNonI64);
+        assert!(matches!(error, CompileError::MainReturnedNonI64));
     }
 
     #[test]

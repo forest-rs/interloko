@@ -220,6 +220,8 @@ pub struct Function {
     pub ret: ValueKind,
     /// Function return value kinds in order.
     pub rets: Vec<ValueKind>,
+    /// Kinds of r1 onward, including every temporary; r0 is the backend effect token.
+    pub register_kinds: Vec<ValueKind>,
     /// Source locals assigned to lowered registers.
     pub locals: Vec<Local>,
     /// Lowered instruction stream.
@@ -877,6 +879,7 @@ impl<'module> Lowering<'module> {
             id: self.lower_function_id(function.id)?,
             name: function.name.clone(),
             kind: FunctionKind::Function(function.id),
+            register_kinds: body.register_kinds,
             params: body.params,
             ret,
             rets,
@@ -900,6 +903,7 @@ impl<'module> Lowering<'module> {
             id: self.lower_method_id(method.id)?,
             name: format!("{}#method{}", generic.name, method.id.0),
             kind: FunctionKind::Method(method.id),
+            register_kinds: body.register_kinds,
             params: body.params,
             ret,
             rets,
@@ -924,6 +928,7 @@ impl<'module> Lowering<'module> {
             id: self.lower_generic_id(generic.id)?,
             name: format!("{}#dispatch", generic.name),
             kind: FunctionKind::Dispatcher(generic.id),
+            register_kinds: body.register_kinds,
             params: body.params,
             ret,
             rets,
@@ -954,6 +959,7 @@ impl<'module> Lowering<'module> {
                 class: accessor.class,
                 slot: accessor.slot,
             },
+            register_kinds: vec![ValueKind::Object(Some(accessor.class)), ret],
             params: vec![Param {
                 source: None,
                 name: "receiver".into(),
@@ -1104,6 +1110,11 @@ impl<'module> Lowering<'module> {
             kind: FunctionKind::CallableThunk {
                 callable: spec.callable,
             },
+            register_kinds: params
+                .iter()
+                .map(|param| param.kind)
+                .chain(spec.rets.iter().copied())
+                .collect(),
             params,
             ret,
             rets: spec.rets,
@@ -1133,6 +1144,7 @@ impl<'module> Lowering<'module> {
             id: self.lower_closure_id(closure.id)?,
             name: format!("closure#{}", closure.id.0),
             kind: FunctionKind::Closure(closure.id),
+            register_kinds: body.register_kinds,
             params: body.params,
             ret,
             rets,
@@ -1551,6 +1563,7 @@ struct BodyLowering<'module> {
     local_regs: Vec<Option<Value>>,
     active_restarts: Vec<ActiveRestart>,
     active_constants: Vec<sem::ConstantId>,
+    register_kinds: Vec<ValueKind>,
     next_reg: u32,
     next_label: u32,
 }
@@ -1595,6 +1608,7 @@ impl<'module> BodyLowering<'module> {
             kind: ValueKind::Aggregate,
             reachable: true,
         };
+        this.register_kinds.push(ValueKind::Aggregate);
         this.env = Some(env);
         this.captures = &closure.captures;
         this.params.push(Param {
@@ -1616,7 +1630,7 @@ impl<'module> BodyLowering<'module> {
         ids: &'module LowerIds,
         generic: &'module sem::GenericFunction,
     ) -> Self {
-        let params = generic
+        let params: Vec<Param> = generic
             .params
             .iter()
             .enumerate()
@@ -1633,6 +1647,7 @@ impl<'module> BodyLowering<'module> {
             source_locals: &[],
             captures: &[],
             env: None,
+            register_kinds: params.iter().map(|param| param.kind).collect(),
             params,
             locals: Vec::new(),
             instructions: Vec::new(),
@@ -1661,6 +1676,7 @@ impl<'module> BodyLowering<'module> {
             local_regs: vec![None; source_locals.len()],
             active_restarts: Vec::new(),
             active_constants: Vec::new(),
+            register_kinds: Vec::new(),
             next_reg: 1,
             next_label: 0,
         }
@@ -1683,6 +1699,8 @@ impl<'module> BodyLowering<'module> {
             reachable: true,
         };
         self.set_local(local_id, value)?;
+        assert_eq!(self.register_kinds.len() + 1, reg.0 as usize);
+        self.register_kinds.push(kind);
         self.params.push(Param {
             source: Some(local_id),
             name: local.name.clone(),
@@ -3358,6 +3376,8 @@ impl<'module> BodyLowering<'module> {
             kind,
             reachable: true,
         };
+        assert_eq!(self.register_kinds.len() + 1, self.next_reg as usize);
+        self.register_kinds.push(kind);
         self.next_reg = self.next_reg.saturating_add(1);
         value
     }
