@@ -14,7 +14,7 @@ use core::fmt::{self, Write as _};
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::program::Program;
-use execution_tape::trace::{ScopeKind, TraceMask, TraceOutcome, TraceSink};
+use execution_tape::trace::{ScopeKind, TraceLocation, TraceMask, TraceOutcome, TraceSink};
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, TrapInfo, Vm};
 
@@ -464,6 +464,8 @@ pub enum ExecutionTraceEvent {
     },
     /// A call-frame or host-call scope was exited.
     ScopeExit {
+        /// Successful return or terminal trap observed at this boundary.
+        outcome: ExecutionTraceOutcome,
         /// Scope kind.
         scope: ExecutionTraceScope,
         /// VM frame depth at the boundary.
@@ -497,8 +499,8 @@ pub enum ExecutionTraceOutcome {
     Ok,
     /// Runtime trapped.
     Trap {
-        /// Trap details.
-        trap: TrapInfo,
+        /// Owned trap details, boxed to keep ordinary trace events compact.
+        trap: alloc::boxed::Box<TrapInfo>,
     },
 }
 
@@ -509,6 +511,8 @@ pub enum ExecutionTraceScope {
     CallFrame {
         /// Function id.
         func: u32,
+        /// Exact instruction that entered this frame; `None` for a root invocation.
+        caller: Option<TraceLocation>,
     },
     /// Host call.
     HostCall {
@@ -5387,9 +5391,10 @@ impl TraceSink for ExecutionTraceSink {
         func: execution_tape::value::FuncId,
         pc: u32,
         span_id: Option<u64>,
-        _outcome: TraceOutcome<'_>,
+        outcome: TraceOutcome<'_>,
     ) {
         self.trace.events.push(ExecutionTraceEvent::ScopeExit {
+            outcome: owned_trace_outcome(outcome),
             scope: trace_scope(program, kind),
             depth,
             func: func.0,
@@ -5399,19 +5404,28 @@ impl TraceSink for ExecutionTraceSink {
     }
 
     fn run_end(&mut self, _program: &Program, outcome: TraceOutcome<'_>) {
-        let outcome = match outcome {
-            TraceOutcome::Ok => ExecutionTraceOutcome::Ok,
-            TraceOutcome::Trap(trap) => ExecutionTraceOutcome::Trap { trap: trap.clone() },
-        };
+        let outcome = owned_trace_outcome(outcome);
         self.trace
             .events
             .push(ExecutionTraceEvent::RunEnd { outcome });
     }
 }
 
+fn owned_trace_outcome(outcome: TraceOutcome<'_>) -> ExecutionTraceOutcome {
+    match outcome {
+        TraceOutcome::Ok => ExecutionTraceOutcome::Ok,
+        TraceOutcome::Trap(trap) => ExecutionTraceOutcome::Trap {
+            trap: alloc::boxed::Box::new(trap.clone()),
+        },
+    }
+}
+
 fn trace_scope(program: &Program, kind: ScopeKind) -> ExecutionTraceScope {
     match kind {
-        ScopeKind::CallFrame { func, .. } => ExecutionTraceScope::CallFrame { func: func.0 },
+        ScopeKind::CallFrame { func, caller } => ExecutionTraceScope::CallFrame {
+            func: func.0,
+            caller,
+        },
         ScopeKind::HostCall {
             host_sig,
             symbol,
@@ -5463,14 +5477,19 @@ fn execution_trace_event_label(event: &ExecutionTraceEvent) -> String {
         ),
         ExecutionTraceEvent::ScopeExit {
             scope,
+            outcome,
             depth,
             func,
             pc,
             span_id,
         } => format!(
-            "exit {} depth={depth} func=f{func} pc={pc}{}",
+            "exit {} depth={depth} func=f{func} pc={pc}{} outcome={}",
             trace_scope_label(scope),
-            span_label(*span_id)
+            span_label(*span_id),
+            match outcome {
+                ExecutionTraceOutcome::Ok => "ok".into(),
+                ExecutionTraceOutcome::Trap { trap } => format!("trap {trap}"),
+            }
         ),
         ExecutionTraceEvent::Instruction {
             func,
@@ -5487,7 +5506,10 @@ fn execution_trace_event_label(event: &ExecutionTraceEvent) -> String {
 
 fn trace_scope_label(scope: &ExecutionTraceScope) -> String {
     match scope {
-        ExecutionTraceScope::CallFrame { func } => format!("call-frame f{func}"),
+        ExecutionTraceScope::CallFrame { func, caller } => match caller {
+            Some(caller) => format!("call-frame f{func} from f{}:{}", caller.func.0, caller.pc),
+            None => format!("call-frame f{func} root"),
+        },
         ExecutionTraceScope::HostCall {
             host_sig,
             symbol,
@@ -12916,6 +12938,95 @@ mod tests {
                 .dump_execution_trace()
                 .contains("traced execution was not requested")
         );
+    }
+
+    #[test]
+    fn traced_nested_calls_keep_exact_callers_and_scope_completion() {
+        for should_trap in [false, true] {
+            let expression = if should_trap { "helper(x)" } else { "x + 1" };
+            let source = format!(
+                "define function helper(x :: <integer>) => <integer>\n  {expression}\nend;\ndefine function main()\n  helper(41)\nend;"
+            );
+            let artifacts = CompilerSession::compile_source(
+                "nested.loko",
+                &source,
+                RuntimeMode::RunMainTraced {
+                    mask: execution_trace_mask(false),
+                },
+            );
+            assert!(
+                artifacts.diagnostics.is_empty(),
+                "{:?}",
+                artifacts.diagnostics
+            );
+            if should_trap {
+                assert!(matches!(
+                    artifacts.runtime_result,
+                    Some(RuntimeResult::Trap { .. })
+                ));
+            } else {
+                assert!(matches!(
+                    artifacts.runtime_result,
+                    Some(RuntimeResult::ReturnedI64(42))
+                ));
+            }
+            let trace = artifacts.runtime_trace.as_ref().unwrap();
+            let tape = &artifacts.tape.as_ref().unwrap().program;
+            let mut scopes = Vec::new();
+            let mut nested = 0;
+            let mut exits = 0;
+            for event in &trace.events {
+                match event {
+                    ExecutionTraceEvent::ScopeEnter { scope, .. } => {
+                        if let ExecutionTraceScope::CallFrame {
+                            caller: Some(caller),
+                            ..
+                        } = scope
+                        {
+                            let source = execution_tape::disasm::disassemble_function(
+                                tape.program(),
+                                caller.func,
+                            )
+                            .unwrap();
+                            assert!(
+                                source
+                                    .instruction(caller.pc)
+                                    .unwrap()
+                                    .opcode()
+                                    .is_call_like()
+                            );
+                            nested += 1;
+                        }
+                        scopes.push(scope.clone());
+                    }
+                    ExecutionTraceEvent::ScopeExit { scope, outcome, .. } => {
+                        assert_eq!(scopes.pop().as_ref(), Some(scope));
+                        exits += 1;
+                        match outcome {
+                            ExecutionTraceOutcome::Ok => assert!(!should_trap),
+                            ExecutionTraceOutcome::Trap { trap } => {
+                                assert!(should_trap);
+                                assert!(matches!(
+                                    trap.trap,
+                                    execution_tape::vm::Trap::CallDepthExceeded
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(scopes.is_empty());
+            assert!(nested > 0);
+            assert!(exits >= 2);
+            let dump = artifacts.dump_execution_trace();
+            assert!(dump.contains(" from f"));
+            assert!(dump.contains(if should_trap {
+                "outcome=trap"
+            } else {
+                "outcome=ok"
+            }));
+        }
     }
 
     #[test]

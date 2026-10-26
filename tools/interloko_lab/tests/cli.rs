@@ -202,6 +202,8 @@ fn run_and_trace_commands_expose_execution_trace() {
     assert!(run.contains("run-start"));
     assert!(run.contains("run-end ok"));
     assert!(run.contains("call-frame"));
+    assert!(run.contains(" from f"));
+    assert!(run.contains("outcome=ok"));
     assert!(run.contains("host-call"));
 
     let trace = run_lab(&["trace", path]);
@@ -624,6 +626,15 @@ fn report_handles_plain_loko_sources() {
     assert!(html.contains("id=\"parse-form-form-f0\""));
     assert!(html.contains("rule stack"));
     assert!(html.contains("tokens"));
+    let timeline = html
+        .split("<ol class=\"trace-timeline\">")
+        .nth(1)
+        .unwrap()
+        .split("</ol>")
+        .next()
+        .unwrap();
+    assert!(timeline.contains(" from f"));
+    assert!(timeline.contains(" · returned</strong>"));
 }
 
 #[test]
