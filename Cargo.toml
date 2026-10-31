@@ -4,6 +4,7 @@ members = [
     "crates/interloko_grammar",
     "crates/interloko_model",
     "crates/interloko_runtime",
+    "crates/interloko_session",
     "examples/forty_two",
     "examples/generic_area",
     "examples/host_backed_area",
