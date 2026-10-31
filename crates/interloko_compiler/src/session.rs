@@ -5699,6 +5699,7 @@ fn leading_doc_comments_for_span(tree: &SyntaxTree, span: Span) -> Vec<String> {
 }
 
 fn normalize_doc_comment_text(text: &str) -> String {
+    let text = text.strip_suffix('\r').unwrap_or(text);
     let without_marker = text.strip_prefix("///").unwrap_or(text);
     without_marker
         .strip_prefix(' ')
@@ -12356,6 +12357,26 @@ mod tests {
             .expect("function eop dump");
         assert!(eop.contains("documentation:"));
         assert!(eop.contains("[Helper function.]"));
+    }
+
+    #[test]
+    fn documentation_comments_normalize_windows_line_endings() {
+        let artifacts = CompilerSession::compile_source(
+            "windows-docs.loko",
+            "/// Helper docs\r\ndefine function helper() 1 end;\r\n",
+            RuntimeMode::CompileOnly,
+        );
+        let object = artifacts
+            .environment_objects()
+            .into_iter()
+            .find(|object| object.id.as_str() == "function:f0")
+            .unwrap();
+        assert_eq!(object.documentation.lines, doc_lines(&["Helper docs"]));
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Eop)
+                .contains("documentation [Helper docs]")
+        );
     }
 
     #[test]

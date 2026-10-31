@@ -3496,7 +3496,50 @@ fn params_memo_key<'g>(params: &[ParamBinding<'_, 'g>]) -> Vec<ParamBindingMemoK
         .collect()
 }
 
+// Keep recursive dispatch small: a single match containing every interpreter
+// operation reserves a large debug-build stack frame even for leaf rules.
 fn interpret_expression<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+    match expression {
+        RuleExpression::Rule(_) | RuleExpression::Super(_) => {
+            interpret_reference(context, lookup, params, expression, position, raw)
+        }
+        RuleExpression::Literal(_)
+        | RuleExpression::CharacterClass(_)
+        | RuleExpression::UntilLiteral(_) => {
+            interpret_atom(context, lookup, params, expression, position, raw)
+        }
+        RuleExpression::Sequence(_) => {
+            interpret_sequence(context, lookup, params, expression, position, raw)
+        }
+        RuleExpression::Choice(_) => {
+            interpret_choice(context, lookup, params, expression, position, raw)
+        }
+        RuleExpression::Optional(_)
+        | RuleExpression::OneOrMore(_)
+        | RuleExpression::ZeroOrMore(_) => {
+            interpret_repetition(context, lookup, params, expression, position, raw)
+        }
+        RuleExpression::Transform { .. }
+        | RuleExpression::And(_)
+        | RuleExpression::Not(_)
+        | RuleExpression::Cut(_)
+        | RuleExpression::Named { .. } => {
+            interpret_modifier(context, lookup, params, expression, position, raw)
+        }
+        RuleExpression::Apply { .. } => {
+            interpret_application(context, lookup, params, expression, position, raw)
+        }
+    }
+}
+
+fn interpret_reference<'g, 's>(
     context: &mut ParseContext<'g, 's>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
@@ -3536,6 +3579,45 @@ fn interpret_expression<'g, 's>(
                 committed: false,
             })
         }
+        RuleExpression::Super(name) => {
+            // Walk one level up from the *active* grammar and let the
+            // normal rule lookup take over. Because `interpret_rule`
+            // routes to the rule's authoring ancestor, `super.foo`
+            // here always reaches the foo that the active grammar's
+            // immediate parent would match — including the case
+            // where that foo is itself inherited from further up.
+            let parent_lookup = lookup.parent().ok_or_else(|| {
+                ParseFailure::expected_at_source(
+                    context.source,
+                    position,
+                    ExpectedFragment::Rule(name),
+                    raw,
+                )
+            })?;
+            let node =
+                interpret_rule(context, parent_lookup, name, position).map_err(|mut failure| {
+                    failure.committed = false;
+                    failure
+                })?;
+            Ok(ExpressionMatch {
+                end: node.span.end.saturating_sub(context.source_offset),
+                children: vec![node],
+                committed: false,
+            })
+        }
+        _ => unreachable!("expression dispatched to the matching interpreter"),
+    }
+}
+
+fn interpret_atom<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
+    _lookup: RuleLookup<'_, 'g>,
+    _params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+    match expression {
         RuleExpression::Literal(value) => {
             let start = if raw {
                 position
@@ -3617,6 +3699,19 @@ fn interpret_expression<'g, 's>(
                 committed: false,
             })
         }
+        _ => unreachable!("expression dispatched to the matching interpreter"),
+    }
+}
+
+fn interpret_sequence<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+    match expression {
         RuleExpression::Sequence(items) => {
             let mut end = position;
             let mut children = Vec::new();
@@ -3640,6 +3735,19 @@ fn interpret_expression<'g, 's>(
                 committed,
             })
         }
+        _ => unreachable!("expression dispatched to the matching interpreter"),
+    }
+}
+
+fn interpret_choice<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+    match expression {
         RuleExpression::Choice(items) => {
             let mut failure = None;
             for item in items {
@@ -3671,6 +3779,19 @@ fn interpret_expression<'g, 's>(
                 )
             }))
         }
+        _ => unreachable!("expression dispatched to the matching interpreter"),
+    }
+}
+
+fn interpret_repetition<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+    match expression {
         RuleExpression::Optional(item) => {
             // Cut commits bounded by the innermost choice; an Optional
             // contains the commit, on both the matched and skipped paths.
@@ -3729,6 +3850,19 @@ fn interpret_expression<'g, 's>(
                 committed: false,
             })
         }
+        _ => unreachable!("expression dispatched to the matching interpreter"),
+    }
+}
+
+fn interpret_modifier<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+    match expression {
         RuleExpression::Transform { input, .. } => {
             interpret_expression(context, lookup, params, input, position, raw)
         }
@@ -3783,6 +3917,19 @@ fn interpret_expression<'g, 's>(
                 committed: matched.committed,
             })
         }
+        _ => unreachable!("expression dispatched to the matching interpreter"),
+    }
+}
+
+fn interpret_application<'g, 's>(
+    context: &mut ParseContext<'g, 's>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+    match expression {
         RuleExpression::Apply { rule, args } => {
             // Switch the active lookup to the parametric target's
             // authoring ancestor (so any `Rule(...)` / `Super(...)`
@@ -3840,32 +3987,7 @@ fn interpret_expression<'g, 's>(
             });
             result
         }
-        RuleExpression::Super(name) => {
-            // Walk one level up from the *active* grammar and let the
-            // normal rule lookup take over. Because `interpret_rule`
-            // routes to the rule's authoring ancestor, `super.foo`
-            // here always reaches the foo that the active grammar's
-            // immediate parent would match — including the case
-            // where that foo is itself inherited from further up.
-            let parent_lookup = lookup.parent().ok_or_else(|| {
-                ParseFailure::expected_at_source(
-                    context.source,
-                    position,
-                    ExpectedFragment::Rule(name),
-                    raw,
-                )
-            })?;
-            let node =
-                interpret_rule(context, parent_lookup, name, position).map_err(|mut failure| {
-                    failure.committed = false;
-                    failure
-                })?;
-            Ok(ExpressionMatch {
-                end: node.span.end.saturating_sub(context.source_offset),
-                children: vec![node],
-                committed: false,
-            })
-        }
+        _ => unreachable!("expression dispatched to the matching interpreter"),
     }
 }
 

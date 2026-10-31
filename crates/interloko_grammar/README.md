@@ -35,6 +35,11 @@ assert!(parse.root.children.iter().any(|node| node.is_rule("name")));
 
 ## Concepts
 
+Matching uses recursive descent with packrat memoization. Recursive expression
+dispatch keeps operation-specific stack frames separate so ordinary nested input
+fits host thread stacks in debug builds. Supported direct left recursion uses
+seed-and-grow matching. This does not provide an unbounded-depth guarantee.
+
 - **Grammar source**: a compact line-oriented format passed to
   [`parse_grammar_source`] with `grammar`, `rule`, and `end` lines.
 - **Rule expression**: [`RuleExpression`] data such as rule references,
