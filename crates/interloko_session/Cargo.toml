@@ -1,0 +1,14 @@
+[package]
+name = "interloko_session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Retained, revision-checked Interloko compiler sessions for tools and embedders."
+readme = "README.md"
+
+[dependencies]
+execution_tape.workspace = true
+interloko_compiler = { path = "../interloko_compiler" }
+
+[lints]
+workspace = true

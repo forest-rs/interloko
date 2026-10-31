@@ -111,6 +111,14 @@ The current slices include:
 - compiler sessions, incremental artifacts, cache reports, and stage dumps;
 - structured diagnostics rendered through MessageFormat 2 catalogs.
 
+## Retained Sessions
+
+For embedding in a retained tool, [`interloko_session`](crates/interloko_session/README.md)
+provides accepted compiler sessions with revision-checked source replacement,
+object inspection, typed scalar calls, explicit host handlers, mutation and
+rewind. Rejected edits preserve accepted code and history. The wrapper is
+`no_std + alloc`; callers own transport, persistence and scheduling.
+
 ## What This Is Not Yet
 
 Interloko is intentionally not:
@@ -134,6 +142,7 @@ pretending the larger environment exists yet.
 crates/interloko_model       shared ids and small substrate facts
 crates/interloko_runtime     runtime layout, host calls, object storage
 crates/interloko_compiler    Loko parser, AST, semantic IR, lowering, sessions
+crates/interloko_session     retained, revision-checked embedding sessions
 
 tools/interloko_lab          command-line workbench for dumps and inspection
 tools/interloko_corpus       corpus runner for small .loko programs
