@@ -1854,6 +1854,7 @@ struct ParseContext<'g, 's> {
     source_offset: usize,
     memo: Vec<MemoEntry<'g, 's>>,
     apply_memo: Vec<ApplyMemoEntry<'g, 's>>,
+    active_rules: Vec<MemoKey<'g>>,
     metrics: ParseMetrics,
 }
 
@@ -1864,6 +1865,7 @@ impl<'g, 's> ParseContext<'g, 's> {
             source_offset,
             memo: Vec::new(),
             apply_memo: Vec::new(),
+            active_rules: Vec::new(),
             metrics: ParseMetrics::default(),
         }
     }
@@ -3173,12 +3175,25 @@ fn interpret_rule<'g, 's>(
             context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
             return entry.result.clone();
         }
+        // Direct left recursion is handled by seed/grow below. Other cycles
+        // at the same input position have no supported growing interpretation;
+        // reject that path instead of overflowing the host stack.
+        if context.active_rules.contains(&key) {
+            return Err(ParseFailure::expected_at_source(
+                context.source,
+                position,
+                ExpectedFragment::Rule(name),
+                false,
+            ));
+        }
         context.metrics.memo_misses = context.metrics.memo_misses.saturating_add(1);
         // `resolve_rule` switches to the rule's authoring grammar so
         // `super` references inside an inherited rule resolve against
         // that rule's own parent chain, not against whichever grammar
         // the lookup started in.
+        context.active_rules.push(key);
         let result = interpret_rule_definition(context, active, rule, name, position);
+        context.active_rules.pop();
         context.memo.push(MemoEntry {
             key,
             result: result.clone(),
@@ -4733,6 +4748,28 @@ mod tests {
                 GrammarActionArg::new("kind", GrammarActionTerm::Literal("thing")),
             ]
         );
+    }
+
+    #[test]
+    fn ordinary_rule_cycles_fail_at_the_original_source_position() {
+        for grammar in [
+            "grammar cycle\nrule root = root\nend\n",
+            "grammar cycle\nrule root = other\nrule other = root\nend\n",
+        ] {
+            let rules = parse_grammar_source(grammar);
+            let error = interpret_region(&rules, "root", "x", 37).expect_err("cyclic path");
+            assert_eq!(error.span, Span::new(37, 38));
+            assert!(error.expected.contains(&ExpectedFragment::Rule("root")));
+        }
+    }
+
+    #[test]
+    fn cyclic_choice_path_leaves_a_noncyclic_alternative_available() {
+        let grammar = "grammar cycle\nrule root = first | `ok`\nrule first = second\nrule second = first\nend\n";
+        let rules = parse_grammar_source(grammar);
+        let parsed = interpret_region(&rules, "root", "ok", 37).expect("fallback alternative");
+        assert_eq!(parsed.root.text, "ok");
+        assert_eq!(parsed.root.span, Span::new(37, 39));
     }
 
     #[test]
