@@ -164,6 +164,11 @@ Useful docs:
 
 ## Workbench Commands
 
+`TranscriptLoadError::Manifest` owns its TOML deserializer cause in a `Box` so
+transcript-loading errors stay compact. Code constructing that variant should
+use `Box::new(error)`; matching and inspecting the cause through a reference
+continues to work through dereferencing.
+
 `interloko_lab` is the quickest way to see what is going on:
 
 ```sh

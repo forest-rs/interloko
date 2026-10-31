@@ -55,151 +55,177 @@ fn run(args: Vec<String>) -> Result<()> {
         return Err(LabError::Usage(usage()));
     };
     match command {
-        "run" => {
-            let (file, trace) = run_args(&args)?;
-            let artifacts = compile_path(file, trace.runtime_mode())?;
-            print_diagnostics(&artifacts.diagnostics)?;
-            match artifacts.runtime_result {
-                Some(RuntimeResult::ReturnedI64(value)) => {
-                    println!("{value}");
-                    if trace.enabled {
-                        print!("{}", artifacts.dump_execution_trace());
-                    }
-                    Ok(())
-                }
-                Some(result) => Err(LabError::Runtime(result.to_string())),
-                None => Err(LabError::Runtime("runtime was not requested".into())),
-            }
-        }
-        "trace" => {
-            let (file, trace) = trace_args(&args)?;
-            let artifacts = compile_path(file, trace.runtime_mode())?;
-            print_diagnostics(&artifacts.diagnostics)?;
-            print!("{}", artifacts.dump_execution_trace());
-            Ok(())
-        }
-        "dump" => {
-            let (file, stage) = dump_args(&args)?;
-            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics)?;
-            print!("{}", workbench.dump_stage(stage));
-            Ok(())
-        }
-        "mop" => {
-            let file = single_file_arg(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics)?;
-            print!("{}", artifacts.dump_stage(DumpStage::Mop));
-            Ok(())
-        }
-        "eop" => {
-            let file = single_file_arg(&args)?;
-            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics)?;
-            print!("{}", workbench.dump_eop());
-            Ok(())
-        }
-        "registry" => {
-            let file = single_file_arg(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics)?;
-            print!("{}", artifacts.dump_grammar_registry());
-            Ok(())
-        }
-        "extensions" => {
-            let file = single_file_arg(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics)?;
-            print!("{}", artifacts.dump_grammar_extensions());
-            Ok(())
-        }
-        "dispatch" => {
-            let (file, dispatch_id) = dispatch_args(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&artifacts.diagnostics)?;
-            if let Some(dispatch_id) = dispatch_id {
-                print!("{}", dispatch_explanation(&artifacts, dispatch_id)?);
-            } else {
-                print!("{}", artifacts.dump_dispatch_sites());
-            }
-            Ok(())
-        }
-        "inspect" => {
-            let (file, object_id) = object_args(&args)?;
-            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics)?;
-            let object = workbench.object(object_id)?;
-            print!("{}", format_environment_object(&object));
-            Ok(())
-        }
-        "affordances" => {
-            let (file, object_id) = object_args(&args)?;
-            let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
-            print_diagnostics(&workbench.artifacts.diagnostics)?;
-            let object = workbench.object(object_id)?;
-            print!("{}", format_affordances(&object));
-            Ok(())
-        }
-        "invoke-affordance" => {
-            let (file, object_id, affordance, extra) = invoke_args(&args)?;
-            invoke_affordance(file, object_id, affordance, extra)?;
-            Ok(())
-        }
-        "artifacts" => {
-            let file = single_file_arg(&args)?;
-            let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
-            print!("{}", artifacts.dump_artifact_graph());
-            Ok(())
-        }
-        "report" => {
-            let (file, output) = report_args(&args)?;
-            let workbench = compile_workbench_path(
-                file,
-                RuntimeMode::RunMainTraced {
-                    mask: execution_trace_mask(false),
-                },
-            )?;
-            report::write_report(Path::new(output), &workbench).map_err(|error| LabError::Io {
-                path: output.into(),
-                error,
-            })?;
-            println!("wrote {output}");
-            Ok(())
-        }
-        "diff" => {
-            if args.len() != 3 {
-                return Err(LabError::Usage(
-                    "usage: interloko_lab diff <before.loko> <after.loko>".into(),
-                ));
-            }
-            let source_file = SourceFileId::from_path(&args[1]);
-            let before = read_path(&args[1])?;
-            let after = read_path(&args[2])?;
-            let grammar_registry = GrammarFrontendRegistry::builtin();
-            let before_grammar =
-                parse_grammar_environment(Path::new(&args[1]), &before, &grammar_registry)?;
-            let after_grammar =
-                parse_grammar_environment(Path::new(&args[2]), &after, &grammar_registry)?;
-            let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
-            session.add_source_with_id_and_grammar(source_file, &args[1], &before, before_grammar);
-            let _ = session
-                .compile(source_file, RuntimeMode::CompileOnly)
-                .expect("source was just added");
-            session
-                .edit_source(source_file, &after)
-                .expect("source was just added");
-            session
-                .set_grammar_environment(source_file, after_grammar)
-                .expect("source was just added");
-            let update = session
-                .compile(source_file, RuntimeMode::CompileOnly)
-                .expect("source was just added");
-            print!("{}", update.dump_cache_report());
-            Ok(())
-        }
-        "-h" | "--help" | "help" => Err(LabError::Usage(usage())),
+        "run" => command_run(&args),
+        "trace" => command_trace(&args),
+        "dump" => command_dump(&args),
+        "mop" => command_mop(&args),
+        "eop" => command_eop(&args),
+        "registry" => command_registry(&args),
+        "extensions" => command_extensions(&args),
+        "dispatch" => command_dispatch(&args),
+        "inspect" => command_inspect(&args),
+        "affordances" => command_affordances(&args),
+        "invoke-affordance" => command_invoke_affordance(&args),
+        "artifacts" => command_artifacts(&args),
+        "report" => command_report(&args),
+        "diff" => command_diff(&args),
         _ => Err(LabError::Usage(usage())),
     }
+}
+
+fn command_run(args: &[String]) -> Result<()> {
+    let (file, trace) = run_args(args)?;
+    let artifacts = compile_path(file, trace.runtime_mode())?;
+    print_diagnostics(&artifacts.diagnostics)?;
+    match artifacts.runtime_result {
+        Some(RuntimeResult::ReturnedI64(value)) => {
+            println!("{value}");
+            if trace.enabled {
+                print!("{}", artifacts.dump_execution_trace());
+            }
+            Ok(())
+        }
+        Some(result) => Err(LabError::Runtime(result.to_string())),
+        None => Err(LabError::Runtime("runtime was not requested".into())),
+    }
+}
+
+fn command_trace(args: &[String]) -> Result<()> {
+    let (file, trace) = trace_args(args)?;
+    let artifacts = compile_path(file, trace.runtime_mode())?;
+    print_diagnostics(&artifacts.diagnostics)?;
+    print!("{}", artifacts.dump_execution_trace());
+    Ok(())
+}
+
+fn command_dump(args: &[String]) -> Result<()> {
+    let (file, stage) = dump_args(args)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
+    print!("{}", workbench.dump_stage(stage));
+    Ok(())
+}
+
+fn command_mop(args: &[String]) -> Result<()> {
+    let file = single_file_arg(args)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&artifacts.diagnostics)?;
+    print!("{}", artifacts.dump_stage(DumpStage::Mop));
+    Ok(())
+}
+
+fn command_eop(args: &[String]) -> Result<()> {
+    let file = single_file_arg(args)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
+    print!("{}", workbench.dump_eop());
+    Ok(())
+}
+
+fn command_registry(args: &[String]) -> Result<()> {
+    let file = single_file_arg(args)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&artifacts.diagnostics)?;
+    print!("{}", artifacts.dump_grammar_registry());
+    Ok(())
+}
+
+fn command_extensions(args: &[String]) -> Result<()> {
+    let file = single_file_arg(args)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&artifacts.diagnostics)?;
+    print!("{}", artifacts.dump_grammar_extensions());
+    Ok(())
+}
+
+fn command_dispatch(args: &[String]) -> Result<()> {
+    let (file, dispatch_id) = dispatch_args(args)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&artifacts.diagnostics)?;
+    if let Some(dispatch_id) = dispatch_id {
+        print!("{}", dispatch_explanation(&artifacts, dispatch_id)?);
+    } else {
+        print!("{}", artifacts.dump_dispatch_sites());
+    }
+    Ok(())
+}
+
+fn command_inspect(args: &[String]) -> Result<()> {
+    let (file, object_id) = object_args(args)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
+    let object = workbench.object(object_id)?;
+    print!("{}", format_environment_object(&object));
+    Ok(())
+}
+
+fn command_affordances(args: &[String]) -> Result<()> {
+    let (file, object_id) = object_args(args)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
+    let object = workbench.object(object_id)?;
+    print!("{}", format_affordances(&object));
+    Ok(())
+}
+
+fn command_invoke_affordance(args: &[String]) -> Result<()> {
+    let (file, object_id, affordance, extra) = invoke_args(args)?;
+    invoke_affordance(file, object_id, affordance, extra)?;
+    Ok(())
+}
+
+fn command_artifacts(args: &[String]) -> Result<()> {
+    let file = single_file_arg(args)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    print!("{}", artifacts.dump_artifact_graph());
+    Ok(())
+}
+
+fn command_report(args: &[String]) -> Result<()> {
+    let (file, output) = report_args(args)?;
+    let workbench = compile_workbench_path(
+        file,
+        RuntimeMode::RunMainTraced {
+            mask: execution_trace_mask(false),
+        },
+    )?;
+    report::write_report(Path::new(output), &workbench).map_err(|error| LabError::Io {
+        path: output.into(),
+        error,
+    })?;
+    println!("wrote {output}");
+    Ok(())
+}
+
+fn command_diff(args: &[String]) -> Result<()> {
+    if args.len() != 3 {
+        return Err(LabError::Usage(
+            "usage: interloko_lab diff <before.loko> <after.loko>".into(),
+        ));
+    }
+    let source_file = SourceFileId::from_path(&args[1]);
+    let before = read_path(&args[1])?;
+    let after = read_path(&args[2])?;
+    let grammar_registry = GrammarFrontendRegistry::builtin();
+    let before_grammar =
+        parse_grammar_environment(Path::new(&args[1]), &before, &grammar_registry)?;
+    let after_grammar = parse_grammar_environment(Path::new(&args[2]), &after, &grammar_registry)?;
+    let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
+    session.add_source_with_id_and_grammar(source_file, &args[1], &before, before_grammar);
+    let _ = session
+        .compile(source_file, RuntimeMode::CompileOnly)
+        .expect("source was just added");
+    session
+        .edit_source(source_file, &after)
+        .expect("source was just added");
+    session
+        .set_grammar_environment(source_file, after_grammar)
+        .expect("source was just added");
+    let update = session
+        .compile(source_file, RuntimeMode::CompileOnly)
+        .expect("source was just added");
+    print!("{}", update.dump_cache_report());
+    Ok(())
 }
 
 fn compile_path(path: &str, mode: RuntimeMode) -> Result<SessionArtifacts> {

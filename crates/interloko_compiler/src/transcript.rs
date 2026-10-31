@@ -25,6 +25,7 @@
 //! session event ids (including gaps left by rewind) without
 //! reordering. See `docs/eop_mutation.md` for the user-facing contract.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -151,7 +152,7 @@ pub enum TranscriptLoadError {
         /// Path of the manifest file.
         path: PathBuf,
         /// Underlying deserializer error.
-        error: toml::de::Error,
+        error: Box<toml::de::Error>,
     },
     /// Manifest declared a `format_version` this build does not know
     /// how to read.
@@ -309,7 +310,7 @@ impl SessionTranscript {
         let manifest: Manifest =
             toml::from_str(&manifest_text).map_err(|error| TranscriptLoadError::Manifest {
                 path: manifest_path,
-                error,
+                error: Box::new(error),
             })?;
 
         // Strict equality: this build only reads transcripts produced
