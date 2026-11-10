@@ -188,8 +188,7 @@ dependencies = [
 [[package]]
 name = "execution_tape"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b511e578f0c6a477003c23eb00271e4de28e55fad70a078e1c3f0a7bc7fbdd9"
+source = "git+https://github.com/forest-rs/execution?rev=872aec85f0debd07e4ff092d385d3635ccf5b2f6#872aec85f0debd07e4ff092d385d3635ccf5b2f6"
 
 [[package]]
 name = "fastrand"

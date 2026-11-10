@@ -216,7 +216,8 @@ development dependencies to the core crates.
 
 ## Execution Tape Contract
 
-The compiler uses published `execution_tape` 0.1.0 from crates.io. Lowering records
+The compiler pins `execution_tape` to a git revision of `forest-rs/execution`
+`main` (see the root `Cargo.toml`) until the next crates.io release. Lowering records
 each register's storage kind when assigning its identity; the backend seeds an
 assembler from the declared function ABI and appends backend temporaries.
 It does not recover declarations by scanning emitted instructions. Closure
