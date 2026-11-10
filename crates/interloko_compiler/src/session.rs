@@ -4118,7 +4118,7 @@ fn make_dispatch_site(
     );
     let static_argument_kinds = args
         .iter()
-        .map(|arg| sem_expr_kind(module, arg))
+        .map(|arg| module.expr_kind(arg))
         .collect::<Vec<_>>();
     let exact_static_classes = args
         .iter()
@@ -4128,7 +4128,7 @@ fn make_dispatch_site(
     let exact_static_class = exact_static_classes.first().copied().flatten();
     let runtime_needed = exact_static_classes.iter().any(Option::is_none)
         && static_argument_kinds.iter().any(|kind| {
-            matches!(kind, sem::ValueKind::Any) || sem_value_kind_class(module, *kind).is_some()
+            matches!(kind, sem::ValueKind::Any) || module.value_kind_class(*kind).is_some()
         });
     let (applicable, rejected, selected_method) = dispatch_site_methods(
         artifacts,
@@ -4370,7 +4370,7 @@ fn method_may_apply_to_static_kinds(
                 };
                 match *kind {
                     sem::ValueKind::Any | sem::ValueKind::Error => true,
-                    kind => sem_value_kind_class(module, kind).is_some_and(|static_class| {
+                    kind => module.value_kind_class(kind).is_some_and(|static_class| {
                         classes_overlap(module, static_class, *specializer)
                     }),
                 }
@@ -4431,7 +4431,7 @@ fn static_tuple_rejection_reason(
             match *kind {
                 sem::ValueKind::Any | sem::ValueKind::Error => None,
                 kind => {
-                    let static_class = sem_value_kind_class(module, kind)?;
+                    let static_class = module.value_kind_class(kind)?;
                     (!classes_overlap(module, static_class, specializer)).then(|| {
                         format!(
                             "argument {} disjoint from static argument {}",
@@ -4624,86 +4624,11 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
     out
 }
 
-fn sem_scalar_result_kind(kinds: &[sem::ValueKind]) -> sem::ValueKind {
-    match kinds {
-        [kind] => *kind,
-        _ => sem::ValueKind::Error,
-    }
-}
-
-fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
-    match expr {
-        sem::Expr::ConstI64 { .. } => sem::ValueKind::I64,
-        sem::Expr::Binary { kind, .. } | sem::Expr::Negate { kind, .. } => kind.value_kind(),
-        sem::Expr::Convert { to, .. } => to.value_kind(),
-        sem::Expr::FloatCall { builtin, .. } => builtin.result_kind(),
-        sem::Expr::ConstF64 { .. } => sem::ValueKind::F64,
-        sem::Expr::ConstBool { .. }
-        | sem::Expr::Compare { .. }
-        | sem::Expr::ValueEqual { .. }
-        | sem::Expr::InstanceOf { .. } => sem::ValueKind::Bool,
-        sem::Expr::StringLiteral { class, .. } => sem::ValueKind::String(*class),
-        sem::Expr::SymbolLiteral { class, .. } => sem::ValueKind::Symbol(*class),
-        sem::Expr::VectorLiteral { class, .. } => sem::ValueKind::Vector(*class),
-        sem::Expr::Values { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
-        sem::Expr::Local { result_kind, .. } => *result_kind,
-        sem::Expr::Capture { result_kind, .. } => *result_kind,
-        sem::Expr::ConstantRef { result_kind, .. } => *result_kind,
-        sem::Expr::ClassObject { class, .. } | sem::Expr::ClassOf { class, .. } => {
-            sem::ValueKind::ClassObject(*class)
-        }
-        sem::Expr::KnownCallable { callable, .. } => sem::ValueKind::KnownCallable(*callable),
-        sem::Expr::Closure { result_kind, .. } => *result_kind,
-        sem::Expr::GenericFunctionObject { generic, .. } => {
-            sem::ValueKind::GenericFunctionObject(*generic)
-        }
-        sem::Expr::IntrinsicCall { result_kind, .. } => *result_kind,
-        sem::Expr::HostCall { result_kind, .. } => *result_kind,
-        sem::Expr::DirectCall { function, .. } => module
-            .functions
-            .get(function.0 as usize)
-            .map_or(sem::ValueKind::Error, |function| {
-                sem_scalar_result_kind(&function.result_kinds)
-            }),
-        sem::Expr::GenericCall { generic, .. } => module
-            .generics
-            .get(generic.0 as usize)
-            .map_or(sem::ValueKind::Error, |generic| {
-                sem_scalar_result_kind(&generic.result_kinds)
-            }),
-        sem::Expr::CallableCall { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
-        sem::Expr::Signal { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
-        sem::Expr::Handle { restart, .. } => sem_scalar_result_kind(&restart.result_kinds),
-        sem::Expr::Cast { class, .. } if *class == sem::OBJECT_CLASS_ID => sem::ValueKind::Any,
-        sem::Expr::Cast { class, .. } => sem_builtin_value_kind_for_class(module, *class)
-            .unwrap_or(sem::ValueKind::Object(*class)),
-        sem::Expr::MakeObject {
-            class_id: class, ..
-        } => sem::ValueKind::Object(*class),
-        sem::Expr::AccessorCall { result_kind, .. } => *result_kind,
-        sem::Expr::SlotWrite { result_kind, .. } => *result_kind,
-        sem::Expr::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_kind = sem_expr_kind(module, then_branch);
-            let else_kind = sem_expr_kind(module, else_branch);
-            if then_kind == else_kind {
-                then_kind
-            } else {
-                sem::ValueKind::Error
-            }
-        }
-        sem::Expr::Error { .. } => sem::ValueKind::Error,
-    }
-}
-
 fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::ClassId> {
     match expr {
-        sem::Expr::ConstI64 { .. } => sem_builtin_class(module, sem::BuiltinValueClass::Integer),
+        sem::Expr::ConstI64 { .. } => module.builtin_value_class(sem::BuiltinValueClass::Integer),
         sem::Expr::ConstF64 { .. } => {
-            sem_builtin_class(module, sem::BuiltinValueClass::DoubleFloat)
+            module.builtin_value_class(sem::BuiltinValueClass::DoubleFloat)
         }
         sem::Expr::MakeObject { class_id, .. } => Some(*class_id),
         sem::Expr::StringLiteral { class, .. }
@@ -4713,9 +4638,10 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
             .constants
             .get(constant.0 as usize)
             .and_then(|constant| exact_static_class(module, &constant.value)),
-        sem::Expr::CallableCall { result_kinds, .. } => {
-            sem_value_kind_class(module, sem_scalar_result_kind(result_kinds))
-        }
+        sem::Expr::CallableCall { result_kinds, .. } => match result_kinds.as_slice() {
+            [kind] => module.value_kind_class(*kind),
+            _ => None,
+        },
         sem::Expr::Cast { value, .. } => exact_static_class(module, value),
         sem::Expr::If {
             then_branch,
@@ -4727,76 +4653,6 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
             (then_class == else_class).then_some(then_class)
         }
         _ => None,
-    }
-}
-
-fn sem_value_kind_class(module: &sem::Module, kind: sem::ValueKind) -> Option<sem::ClassId> {
-    match kind {
-        sem::ValueKind::Object(class)
-        | sem::ValueKind::String(class)
-        | sem::ValueKind::Symbol(class)
-        | sem::ValueKind::Vector(class) => Some(class),
-        sem::ValueKind::I64 => sem_builtin_class(module, sem::BuiltinValueClass::Integer),
-        sem::ValueKind::F64 => sem_builtin_class(module, sem::BuiltinValueClass::DoubleFloat),
-        sem::ValueKind::ClassObject(_) => sem_builtin_class(module, sem::BuiltinValueClass::Class),
-        sem::ValueKind::GenericFunctionObject(_) => {
-            sem_builtin_class(module, sem::BuiltinValueClass::GenericFunction)
-        }
-        sem::ValueKind::MethodObject(_) => {
-            sem_builtin_class(module, sem::BuiltinValueClass::Method)
-        }
-        sem::ValueKind::SlotDescriptorObject { .. } => {
-            sem_builtin_class(module, sem::BuiltinValueClass::SlotDescriptor)
-        }
-        sem::ValueKind::Any
-        | sem::ValueKind::Bool
-        | sem::ValueKind::Callable
-        | sem::ValueKind::KnownCallable(_)
-        | sem::ValueKind::Error => None,
-    }
-}
-
-fn sem_builtin_class(module: &sem::Module, kind: sem::BuiltinValueClass) -> Option<sem::ClassId> {
-    module
-        .classes
-        .iter()
-        .find(|class| class.origin == sem::ClassOrigin::BuiltinValue { kind })
-        .map(|class| class.id)
-}
-
-fn sem_builtin_value_kind_for_class(
-    module: &sem::Module,
-    class: sem::ClassId,
-) -> Option<sem::ValueKind> {
-    match module.classes.get(class.0 as usize)?.origin {
-        sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::String,
-        } => Some(sem::ValueKind::String(class)),
-        sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Symbol,
-        } => Some(sem::ValueKind::Symbol(class)),
-        sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Integer,
-        } => Some(sem::ValueKind::I64),
-        sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Float | sem::BuiltinValueClass::DoubleFloat,
-        } => Some(sem::ValueKind::F64),
-        sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Number | sem::BuiltinValueClass::Real,
-        } => None,
-        sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Vector,
-        } => Some(sem::ValueKind::Vector(class)),
-        sem::ClassOrigin::BuiltinValue {
-            kind:
-                sem::BuiltinValueClass::Class
-                | sem::BuiltinValueClass::GenericFunction
-                | sem::BuiltinValueClass::Method
-                | sem::BuiltinValueClass::SlotDescriptor,
-        } => Some(sem::ValueKind::Object(class)),
-        sem::ClassOrigin::ObjectRoot
-        | sem::ClassOrigin::Native
-        | sem::ClassOrigin::HostBacked { .. } => None,
     }
 }
 
