@@ -225,8 +225,10 @@ assert_eq!(report.error.as_ref().map(|error| error.span), Some(Span::new(8, 12))
 
 `inspect_region` and recovering parse reports also expose [`ParseMetrics`].
 These counters are observational: they let callers see packrat memo hits,
-misses, and final memo-table size for one parse without changing matching
-semantics.
+misses, final memo-table size, and how many memo entries lookups compared
+for one parse without changing matching semantics. The memo is indexed by
+input position, so `memo_probes` stays proportional to the number of
+lookups rather than to the input size.
 
 ```rust
 use interloko_grammar::{inspect_region, parse_grammar_source};
