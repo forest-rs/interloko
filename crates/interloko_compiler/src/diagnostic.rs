@@ -184,6 +184,14 @@ pub enum DiagnosticCode {
     UnknownSlot,
     /// A slot read receiver is not an object.
     SlotReceiverTypeMismatch,
+    /// Soft typing: no method of a generic can apply to a call's arguments.
+    TypingDispatchNoApplicableMethod,
+    /// Soft typing: a generic call relies on runtime classes to find a method.
+    TypingDispatchRuntimeChecked,
+    /// Soft typing: a checked cast always fails when reached.
+    TypingCastAlwaysFails,
+    /// Soft typing: a checked cast relies on the value's runtime class.
+    TypingCastRuntimeChecked,
     /// Lowered IR failed an internal semantic invariant.
     LowerInvalidSemantic,
     /// Lowering stopped because earlier diagnostics exist.
@@ -290,6 +298,10 @@ impl DiagnosticCode {
         Self::MissingSlotInitializer,
         Self::UnknownSlot,
         Self::SlotReceiverTypeMismatch,
+        Self::TypingDispatchNoApplicableMethod,
+        Self::TypingDispatchRuntimeChecked,
+        Self::TypingCastAlwaysFails,
+        Self::TypingCastRuntimeChecked,
         Self::LowerInvalidSemantic,
         Self::LowerBlockedByDiagnostics,
         Self::TapeInvalidLowered,
@@ -385,6 +397,10 @@ impl DiagnosticCode {
             Self::MissingSlotInitializer => "sem.missing-slot-initializer",
             Self::UnknownSlot => "sem.unknown-slot",
             Self::SlotReceiverTypeMismatch => "sem.slot-receiver-type-mismatch",
+            Self::TypingDispatchNoApplicableMethod => "typing.dispatch-no-applicable-method",
+            Self::TypingDispatchRuntimeChecked => "typing.dispatch-runtime-checked",
+            Self::TypingCastAlwaysFails => "typing.cast-always-fails",
+            Self::TypingCastRuntimeChecked => "typing.cast-runtime-checked",
             Self::LowerInvalidSemantic => "lower.invalid-semantic",
             Self::LowerBlockedByDiagnostics => "lower.blocked-by-diagnostics",
             Self::TapeInvalidLowered => "tape.invalid-lowered",
@@ -481,6 +497,10 @@ impl DiagnosticCode {
             "sem.missing-slot-initializer" => Self::MissingSlotInitializer,
             "sem.unknown-slot" => Self::UnknownSlot,
             "sem.slot-receiver-type-mismatch" => Self::SlotReceiverTypeMismatch,
+            "typing.dispatch-no-applicable-method" => Self::TypingDispatchNoApplicableMethod,
+            "typing.dispatch-runtime-checked" => Self::TypingDispatchRuntimeChecked,
+            "typing.cast-always-fails" => Self::TypingCastAlwaysFails,
+            "typing.cast-runtime-checked" => Self::TypingCastRuntimeChecked,
             "lower.invalid-semantic" => Self::LowerInvalidSemantic,
             "lower.blocked-by-diagnostics" => Self::LowerBlockedByDiagnostics,
             "tape.invalid-lowered" => Self::TapeInvalidLowered,

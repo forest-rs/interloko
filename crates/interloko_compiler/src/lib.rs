@@ -42,3 +42,4 @@ pub mod tape;
 /// TOML serialization.
 #[cfg(feature = "std")]
 pub mod transcript;
+pub mod typing;

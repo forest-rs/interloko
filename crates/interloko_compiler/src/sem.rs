@@ -6999,7 +6999,10 @@ mod tests {
             .builtin_value_class(BuiltinValueClass::DoubleFloat)
             .expect("double-float class");
         assert_eq!(module.value_kind_class(ValueKind::F64), Some(double_float));
-        assert_eq!(module.builtin_value_kind(double_float), Some(ValueKind::F64));
+        assert_eq!(
+            module.builtin_value_kind(double_float),
+            Some(ValueKind::F64)
+        );
     }
 
     fn lower_source_with_host_registry(source: &str, registry: &HostMetaRegistry) -> Module {
