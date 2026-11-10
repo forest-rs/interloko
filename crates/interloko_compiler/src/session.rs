@@ -1622,6 +1622,15 @@ impl SessionArtifacts {
             )
     }
 
+    /// Returns true when any aggregated diagnostic is an error.
+    ///
+    /// Warnings are advisory: a compilation whose only diagnostics are
+    /// warnings still produced its lowered module and tape.
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(Diagnostic::is_error)
+    }
+
     /// Returns inspectable generic dispatch-site records in traversal order.
     #[must_use]
     pub fn dispatch_sites(&self) -> Vec<DispatchSiteRecord> {
@@ -2223,8 +2232,13 @@ impl SessionArtifacts {
         let original_generic_count = self.ast.generics.len();
         let original_function_count = self.ast.functions.len();
         let original_user_method_count = self.ast.methods.len();
-        let pre_mutation_diagnostic_codes: Vec<DiagnosticCode> =
-            self.diagnostics.iter().map(|diag| diag.code).collect();
+        // Advisory warnings never reject a mutation; only errors count.
+        let pre_mutation_diagnostic_codes: Vec<DiagnosticCode> = self
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.is_error())
+            .map(|diag| diag.code)
+            .collect();
 
         // Compose the candidate source deterministically from the pristine
         // source plus the existing log plus the pending request. This keeps
@@ -2254,6 +2268,7 @@ impl SessionArtifacts {
         let new_diagnostics: Vec<Diagnostic> = candidate
             .diagnostics
             .iter()
+            .filter(|diag| diag.is_error())
             .filter(|diag| {
                 let code = diag.code;
                 let pre_count = pre_mutation_diagnostic_codes
@@ -2263,7 +2278,7 @@ impl SessionArtifacts {
                 let after_count = candidate
                     .diagnostics
                     .iter()
-                    .filter(|d| d.code == code)
+                    .filter(|d| d.is_error() && d.code == code)
                     .count();
                 after_count > pre_count
             })

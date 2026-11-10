@@ -10,8 +10,28 @@ use crate::syntax::Span;
 /// Diagnostic severity.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Severity {
+    /// Advisory finding. The compiler produced its artifacts for the affected
+    /// input; tools may surface the finding but must not treat it as failure.
+    Warning,
     /// The compiler could not produce a valid artifact for the affected input.
     Error,
+}
+
+impl Severity {
+    /// Returns the stable lowercase label used in dumps and EOP records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Stable diagnostic identity used by tests, tools, EOP records, and future
@@ -639,6 +659,21 @@ impl Diagnostic {
         }
     }
 
+    /// Creates an advisory warning diagnostic with an explicit stable code.
+    #[must_use]
+    pub fn warning(span: Span, code: DiagnosticCode) -> Self {
+        Self {
+            severity: Severity::Warning,
+            ..Self::error(span, code)
+        }
+    }
+
+    /// Returns true when this diagnostic marks its input as failed.
+    #[must_use]
+    pub const fn is_error(&self) -> bool {
+        matches!(self.severity, Severity::Error)
+    }
+
     /// Adds one structured argument.
     #[must_use]
     pub fn with_arg(mut self, arg: DiagnosticArg) -> Self {
@@ -707,6 +742,19 @@ mod tests {
         );
         let id_arg = DiagnosticArg::id("artifact", "artabc");
         assert_eq!(id_arg.value.render(), "artabc");
+    }
+
+    #[test]
+    fn warnings_are_not_errors() {
+        let warning = Diagnostic::warning(Span::new(1, 3), DiagnosticCode::Uncategorized);
+        let error = Diagnostic::error(Span::new(1, 3), DiagnosticCode::Uncategorized);
+
+        assert_eq!(warning.severity, Severity::Warning);
+        assert!(!warning.is_error());
+        assert!(error.is_error());
+        assert_eq!(warning.labels, error.labels);
+        assert_eq!(format!("{}", Severity::Warning), "warning");
+        assert_eq!(Severity::Error.as_str(), "error");
     }
 
     #[test]
