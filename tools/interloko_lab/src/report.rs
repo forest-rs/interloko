@@ -2069,6 +2069,8 @@ fn trace_event_summary(event: &ExecutionTraceEvent) -> String {
         ExecutionTraceEvent::RunStart { entry, .. } => format!("run starts at f{entry}"),
         ExecutionTraceEvent::RunEnd { outcome } => match outcome {
             ExecutionTraceOutcome::Ok => "run ends ok".into(),
+            ExecutionTraceOutcome::Cancelled => "run cancelled".into(),
+            ExecutionTraceOutcome::Unwound { .. } => "run unwound".into(),
             ExecutionTraceOutcome::Trap { .. } => "run traps".into(),
         },
         ExecutionTraceEvent::ScopeEnter { scope, .. } => {
@@ -2077,6 +2079,8 @@ fn trace_event_summary(event: &ExecutionTraceEvent) -> String {
         ExecutionTraceEvent::ScopeExit { scope, outcome, .. } => {
             let status = match outcome {
                 ExecutionTraceOutcome::Ok => "returned",
+                ExecutionTraceOutcome::Cancelled => "cancelled",
+                ExecutionTraceOutcome::Unwound { .. } => "unwound",
                 ExecutionTraceOutcome::Trap { .. } => "trapped",
             };
             format!("exit {} · {status}", trace_scope_summary(scope))
@@ -2090,6 +2094,8 @@ fn trace_event_detail(event: &ExecutionTraceEvent) -> String {
         ExecutionTraceEvent::RunStart { arg_count, .. } => format!("args={arg_count}"),
         ExecutionTraceEvent::RunEnd { outcome } => match outcome {
             ExecutionTraceOutcome::Ok => "outcome=ok".into(),
+            ExecutionTraceOutcome::Cancelled => "outcome=cancelled".into(),
+            ExecutionTraceOutcome::Unwound { target } => format!("unwound-to=#{target}"),
             ExecutionTraceOutcome::Trap { trap } => format!("trap={trap}"),
         },
         ExecutionTraceEvent::ScopeEnter {

@@ -497,6 +497,15 @@ pub enum ExecutionTraceEvent {
 pub enum ExecutionTraceOutcome {
     /// Runtime completed successfully.
     Ok,
+    /// The invocation or an admitted host delivery was cancelled before guest
+    /// completion.
+    Cancelled,
+    /// The scope was abandoned by a typed non-local return.
+    Unwound {
+        /// Invocation-scoped activation ordinal receiving the transferred
+        /// values; this is not a function id.
+        target: u64,
+    },
     /// Runtime trapped.
     Trap {
         /// Owned trap details, boxed to keep ordinary trace events compact.
@@ -5414,6 +5423,8 @@ impl TraceSink for ExecutionTraceSink {
 fn owned_trace_outcome(outcome: TraceOutcome<'_>) -> ExecutionTraceOutcome {
     match outcome {
         TraceOutcome::Ok => ExecutionTraceOutcome::Ok,
+        TraceOutcome::Cancelled => ExecutionTraceOutcome::Cancelled,
+        TraceOutcome::Unwound { target } => ExecutionTraceOutcome::Unwound { target },
         TraceOutcome::Trap(trap) => ExecutionTraceOutcome::Trap {
             trap: alloc::boxed::Box::new(trap.clone()),
         },
@@ -5462,6 +5473,10 @@ fn execution_trace_event_label(event: &ExecutionTraceEvent) -> String {
         }
         ExecutionTraceEvent::RunEnd { outcome } => match outcome {
             ExecutionTraceOutcome::Ok => "run-end ok".into(),
+            ExecutionTraceOutcome::Cancelled => "run-end cancelled".into(),
+            ExecutionTraceOutcome::Unwound { target } => {
+                format!("run-end unwound to activation #{target}")
+            }
             ExecutionTraceOutcome::Trap { trap } => format!("run-end trap {trap}"),
         },
         ExecutionTraceEvent::ScopeEnter {
@@ -5488,6 +5503,9 @@ fn execution_trace_event_label(event: &ExecutionTraceEvent) -> String {
             span_label(*span_id),
             match outcome {
                 ExecutionTraceOutcome::Ok => "ok".into(),
+                ExecutionTraceOutcome::Cancelled => "cancelled".into(),
+                ExecutionTraceOutcome::Unwound { target } =>
+                    format!("unwound to activation #{target}"),
                 ExecutionTraceOutcome::Trap { trap } => format!("trap {trap}"),
             }
         ),
@@ -12085,6 +12103,44 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_preserves_cancelled_and_unwound_outcomes() {
+        assert!(matches!(
+            owned_trace_outcome(TraceOutcome::Cancelled),
+            ExecutionTraceOutcome::Cancelled
+        ));
+        let unwound = owned_trace_outcome(TraceOutcome::Unwound { target: 4 });
+        assert!(matches!(
+            unwound,
+            ExecutionTraceOutcome::Unwound { target: 4 }
+        ));
+
+        let trace = ExecutionTrace {
+            events: alloc::vec![
+                ExecutionTraceEvent::ScopeExit {
+                    outcome: unwound.clone(),
+                    scope: ExecutionTraceScope::CallFrame {
+                        func: 1,
+                        caller: None,
+                    },
+                    depth: 1,
+                    func: 1,
+                    pc: 2,
+                    span_id: None,
+                },
+                ExecutionTraceEvent::RunEnd { outcome: unwound },
+                ExecutionTraceEvent::RunEnd {
+                    outcome: ExecutionTraceOutcome::Cancelled,
+                },
+            ],
+        };
+        let dump = dump_execution_trace(&trace);
+
+        assert!(dump.contains("outcome=unwound to activation #4"));
+        assert!(dump.contains("run-end unwound to activation #4"));
+        assert!(dump.contains("run-end cancelled"));
+    }
+
+    #[test]
     fn environment_affordance_names_are_stable() {
         let names = [
             (EnvironmentAffordance::Inspect, "inspect"),
@@ -13025,6 +13081,10 @@ mod tests {
                         exits += 1;
                         match outcome {
                             ExecutionTraceOutcome::Ok => assert!(!should_trap),
+                            ExecutionTraceOutcome::Cancelled
+                            | ExecutionTraceOutcome::Unwound { .. } => {
+                                panic!("unexpected scope outcome {outcome:?}")
+                            }
                             ExecutionTraceOutcome::Trap { trap } => {
                                 assert!(should_trap);
                                 assert!(matches!(
