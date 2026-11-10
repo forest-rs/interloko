@@ -1764,6 +1764,14 @@ pub struct ParseMetrics {
     pub memo_misses: usize,
     /// Number of entries stored in all memo tables at the end of the parse.
     pub memo_entries: usize,
+    /// Number of memo entries compared while resolving lookups.
+    ///
+    /// The memo tables are indexed by input position, so a lookup only
+    /// compares entries recorded at that position. This counter therefore
+    /// stays proportional to `memo_hits + memo_misses` (bounded by the
+    /// number of distinct rules tried at one position) rather than growing
+    /// with the size of the input.
+    pub memo_probes: usize,
 }
 
 /// One expected fragment in an interpreted parse failure.
@@ -1852,9 +1860,9 @@ struct ParseFailure<'g> {
 struct ParseContext<'g, 's> {
     source: &'s str,
     source_offset: usize,
-    memo: Vec<MemoEntry<'g, 's>>,
-    apply_memo: Vec<ApplyMemoEntry<'g, 's>>,
-    active_rules: Vec<MemoKey<'g>>,
+    memo: PositionMemo<MemoKey<'g>, Result<RuleNode<'g, 's>, ParseFailure<'g>>>,
+    apply_memo: PositionMemo<ApplyMemoKey<'g>, Result<ExpressionMatch<'g, 's>, ParseFailure<'g>>>,
+    active_rules: Vec<(usize, MemoKey<'g>)>,
     metrics: ParseMetrics,
 }
 
@@ -1863,8 +1871,8 @@ impl<'g, 's> ParseContext<'g, 's> {
         Self {
             source,
             source_offset,
-            memo: Vec::new(),
-            apply_memo: Vec::new(),
+            memo: PositionMemo::new(),
+            apply_memo: PositionMemo::new(),
             active_rules: Vec::new(),
             metrics: ParseMetrics::default(),
         }
@@ -1878,33 +1886,90 @@ impl<'g, 's> ParseContext<'g, 's> {
     }
 }
 
+/// Per-parse packrat memo table indexed by region-relative position.
+///
+/// Every position owns a chain of entries threaded through `entries`
+/// (most recent first), so a lookup compares only the entries recorded at
+/// its own position. That chain is bounded by the number of distinct rule
+/// keys tried at one position, which depends on the grammar, not on the
+/// input size; a flat table would instead make every lookup linear in the
+/// number of entries recorded so far, and the whole parse quadratic.
+struct PositionMemo<K, V> {
+    /// Head entry index per position, or [`PositionMemo::NO_ENTRY`].
+    /// Grown on demand to cover the largest recorded position.
+    heads: Vec<usize>,
+    entries: Vec<PositionMemoEntry<K, V>>,
+}
+
+struct PositionMemoEntry<K, V> {
+    key: K,
+    value: V,
+    /// Next (older) entry at the same position, or
+    /// [`PositionMemo::NO_ENTRY`].
+    next: usize,
+}
+
+impl<K: PartialEq, V> PositionMemo<K, V> {
+    const NO_ENTRY: usize = usize::MAX;
+
+    const fn new() -> Self {
+        Self {
+            heads: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns the value recorded for `key` at `position`, adding the
+    /// number of entries compared to `probes`.
+    fn get(&self, position: usize, key: &K, probes: &mut usize) -> Option<&V> {
+        let mut index = self.heads.get(position).copied()?;
+        while index != Self::NO_ENTRY {
+            let entry = &self.entries[index];
+            *probes = probes.saturating_add(1);
+            if entry.key == *key {
+                return Some(&entry.value);
+            }
+            index = entry.next;
+        }
+        None
+    }
+
+    /// Records `value` for `key` at `position`. Callers look the key up
+    /// first, so a position never holds two entries for one key.
+    fn insert(&mut self, position: usize, key: K, value: V) {
+        if position >= self.heads.len() {
+            self.heads.resize(position + 1, Self::NO_ENTRY);
+        }
+        let index = self.entries.len();
+        self.entries.push(PositionMemoEntry {
+            key,
+            value,
+            next: self.heads[position],
+        });
+        self.heads[position] = index;
+    }
+}
+
+/// Rule-memo key within one position of a [`PositionMemo`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MemoKey<'g> {
     scope: usize,
     name: &'g str,
-    position: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct MemoEntry<'g, 's> {
-    key: MemoKey<'g>,
-    result: Result<RuleNode<'g, 's>, ParseFailure<'g>>,
-}
-
+/// Parametric-application memo key within one position of a
+/// [`PositionMemo`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ApplyMemoKey<'g> {
     scope: usize,
     caller_scope: usize,
     name: &'g str,
-    position: usize,
     args: Vec<RuleExpression<'g>>,
     params: Vec<ParamBindingMemoKey<'g>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ApplyMemoEntry<'g, 's> {
-    key: ApplyMemoKey<'g>,
-    result: Result<ExpressionMatch<'g, 's>, ParseFailure<'g>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3169,16 +3234,18 @@ fn interpret_rule<'g, 's>(
         let key = MemoKey {
             scope: active.memo_scope(),
             name,
-            position,
         };
-        if let Some(entry) = context.memo.iter().find(|entry| entry.key == key) {
+        if let Some(result) = context
+            .memo
+            .get(position, &key, &mut context.metrics.memo_probes)
+        {
             context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
-            return entry.result.clone();
+            return result.clone();
         }
         // Direct left recursion is handled by seed/grow below. Other cycles
         // at the same input position have no supported growing interpretation;
         // reject that path instead of overflowing the host stack.
-        if context.active_rules.contains(&key) {
+        if context.active_rules.contains(&(position, key)) {
             return Err(ParseFailure::expected_at_source(
                 context.source,
                 position,
@@ -3191,13 +3258,10 @@ fn interpret_rule<'g, 's>(
         // `super` references inside an inherited rule resolve against
         // that rule's own parent chain, not against whichever grammar
         // the lookup started in.
-        context.active_rules.push(key);
+        context.active_rules.push((position, key));
         let result = interpret_rule_definition(context, active, rule, name, position);
         context.active_rules.pop();
-        context.memo.push(MemoEntry {
-            key,
-            result: result.clone(),
-        });
+        context.memo.insert(position, key, result.clone());
         return result;
     }
     // Rule not found: we have no per-rule trivia context, so report the
@@ -3205,11 +3269,13 @@ fn interpret_rule<'g, 's>(
     let key = MemoKey {
         scope: lookup.memo_scope(),
         name,
-        position,
     };
-    if let Some(entry) = context.memo.iter().find(|entry| entry.key == key) {
+    if let Some(result) = context
+        .memo
+        .get(position, &key, &mut context.metrics.memo_probes)
+    {
         context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
-        return entry.result.clone();
+        return result.clone();
     }
     context.metrics.memo_misses = context.metrics.memo_misses.saturating_add(1);
     let result = Err(ParseFailure::expected_at_source(
@@ -3218,10 +3284,7 @@ fn interpret_rule<'g, 's>(
         ExpectedFragment::Rule(name),
         false,
     ));
-    context.memo.push(MemoEntry {
-        key,
-        result: result.clone(),
-    });
+    context.memo.insert(position, key, result.clone());
     result
 }
 
@@ -3968,13 +4031,16 @@ fn interpret_application<'g, 's>(
                 scope: active.memo_scope(),
                 caller_scope: lookup.memo_scope(),
                 name: rule,
-                position,
                 args: args.clone(),
                 params: params_memo_key(params),
             };
-            if let Some(entry) = context.apply_memo.iter().find(|entry| entry.key == key) {
+            if let Some(result) =
+                context
+                    .apply_memo
+                    .get(position, &key, &mut context.metrics.memo_probes)
+            {
                 context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
-                return entry.result.clone();
+                return result.clone();
             }
             context.metrics.memo_misses = context.metrics.memo_misses.saturating_add(1);
             let bindings: Vec<ParamBinding<'_, 'g>> = target
@@ -3996,10 +4062,7 @@ fn interpret_application<'g, 's>(
                 position,
                 raw,
             );
-            context.apply_memo.push(ApplyMemoEntry {
-                key,
-                result: result.clone(),
-            });
+            context.apply_memo.insert(position, key, result.clone());
             result
         }
         _ => unreachable!("expression dispatched to the matching interpreter"),
@@ -4483,6 +4546,50 @@ mod tests {
         assert_eq!(report.metrics.memo_hits, 1);
         assert_eq!(report.metrics.memo_misses, 4);
         assert_eq!(report.metrics.memo_entries, 4);
+    }
+
+    #[test]
+    fn packrat_memo_lookups_stay_bounded_as_input_grows() {
+        // Every statement backtracks across alternatives that share the
+        // `name` prefix, so the memo is consulted at most positions. A
+        // position-indexed memo compares at most one entry per distinct
+        // rule tried at that position; a flat table would compare against
+        // every entry recorded so far and grow quadratically.
+        let rules = parse_grammar_source(
+            "grammar tiny\n\
+             rule source = statement*\n\
+             rule statement = call `;` | assignment `;` | name `;`\n\
+             rule call = name `(` name `)`\n\
+             rule assignment = name `=` name\n\
+             rule name = [a-z]+\n\
+             end\n",
+        );
+        let rule_count = rules.len();
+        let metrics_for = |statements: usize| {
+            let source = "alpha = beta; f(x); gamma;\n".repeat(statements);
+            let report = inspect_region(&rules, "source", &source, 0);
+            assert!(report.is_success());
+            report.metrics
+        };
+        let sizes = [metrics_for(16), metrics_for(32), metrics_for(64)];
+
+        for metrics in sizes {
+            let lookups = metrics.memo_hits + metrics.memo_misses;
+            assert!(metrics.memo_hits > 0);
+            assert!(
+                metrics.memo_probes <= rule_count * lookups,
+                "{metrics:?} compares more than {rule_count} entries per lookup",
+            );
+        }
+        // Memo work is linear in the input: the 32 statements added by the
+        // second doubling cost exactly twice the 16 added by the first.
+        let [small, medium, large] = sizes;
+        let grows_linearly = |counter: fn(&ParseMetrics) -> usize| {
+            counter(&large) - counter(&medium) == 2 * (counter(&medium) - counter(&small))
+        };
+        assert!(grows_linearly(|metrics| metrics.memo_entries));
+        assert!(grows_linearly(|metrics| metrics.memo_hits));
+        assert!(grows_linearly(|metrics| metrics.memo_probes));
     }
 
     #[test]
