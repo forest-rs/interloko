@@ -884,13 +884,26 @@ impl BaseLokoCstProjector<'_> {
         )
     }
 
+    /// Returns the tokens contained in `span`, with their indices.
+    ///
+    /// Tokens are in source order, so only the run that starts inside
+    /// `span` can be contained in it. Finding that run by binary search
+    /// keeps each lookup proportional to the span rather than to the
+    /// file; scanning every token made projection quadratic.
+    fn tokens_in(&self, span: Span) -> impl Iterator<Item = (usize, &Token)> {
+        let first = self
+            .tokens
+            .partition_point(|token| token.span.start < span.start);
+        (first..)
+            .zip(&self.tokens[first..])
+            .take_while(move |(_, token)| token.span.start <= span.end)
+            .filter(move |(_, token)| span_contains(span, token.span))
+    }
+
     fn direct_tokens(&self, span: impl Into<Span>, excluded: &[Span]) -> Vec<CstElement> {
         let span = span.into();
-        self.tokens
-            .iter()
-            .enumerate()
+        self.tokens_in(span)
             .filter(|(_, token)| !token.kind.is_trivia())
-            .filter(|(_, token)| span_contains(span, token.span))
             .filter(|(_, token)| {
                 !excluded
                     .iter()
@@ -901,33 +914,26 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn first_token_index(&self, span: impl Into<Span>, kind: TokenKind) -> usize {
-        let span = span.into();
-        self.tokens
-            .iter()
-            .enumerate()
-            .find(|(_, token)| token.kind == kind && span_contains(span, token.span))
+        self.tokens_in(span.into())
+            .find(|(_, token)| token.kind == kind)
             .map(|(index, _)| index)
             .unwrap_or(0)
     }
 
     fn first_operator_token(&self, span: impl Into<Span>) -> usize {
-        let span = span.into();
-        self.tokens
-            .iter()
-            .enumerate()
+        self.tokens_in(span.into())
             .find(|(_, token)| {
-                span_contains(span, token.span)
-                    && matches!(
-                        token.kind,
-                        TokenKind::Plus
-                            | TokenKind::Minus
-                            | TokenKind::Star
-                            | TokenKind::Equal
-                            | TokenKind::Less
-                            | TokenKind::LessEqual
-                            | TokenKind::Greater
-                            | TokenKind::GreaterEqual
-                    )
+                matches!(
+                    token.kind,
+                    TokenKind::Plus
+                        | TokenKind::Minus
+                        | TokenKind::Star
+                        | TokenKind::Equal
+                        | TokenKind::Less
+                        | TokenKind::LessEqual
+                        | TokenKind::Greater
+                        | TokenKind::GreaterEqual
+                )
             })
             .map(|(index, _)| index)
             .unwrap_or(0)
