@@ -77,8 +77,8 @@ fn command_run(args: &[String]) -> Result<()> {
     let (file, trace) = run_args(args)?;
     let artifacts = compile_path(file, trace.runtime_mode())?;
     print_diagnostics(&artifacts.diagnostics)?;
-    match artifacts.runtime_result {
-        Some(RuntimeResult::ReturnedI64(value)) => {
+    match &artifacts.runtime_result {
+        Some(RuntimeResult::Returned(value)) => {
             println!("{value}");
             if trace.enabled {
                 print!("{}", artifacts.dump_execution_trace());
@@ -1019,7 +1019,7 @@ fn ensure_object_has_affordance(
 
 fn print_runtime_result(artifacts: &SessionArtifacts) -> Result<()> {
     match &artifacts.runtime_result {
-        Some(RuntimeResult::ReturnedI64(value)) => {
+        Some(RuntimeResult::Returned(value)) => {
             println!("{value}");
             Ok(())
         }

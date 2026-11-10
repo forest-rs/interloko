@@ -38,6 +38,18 @@ fn temp_loko_path(name: &str) -> PathBuf {
 }
 
 #[test]
+fn expressions_print_typed_scalar_results() {
+    let (stdout, stderr) = run_repl("1 < 2\n\"glass\\nhouse\"\n:quit\n");
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "#t"), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "\"glass\\nhouse\""),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn transcript_definitions_expressions_and_inspection_commands() {
     let (stdout, stderr) = run_repl(
         "define function square(x)\n  x * x\nend;\n\

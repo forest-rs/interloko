@@ -2712,7 +2712,7 @@ fn artifact_label(artifact: QueryArtifact) -> String {
 
 fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
     match result {
-        Some(RuntimeResult::ReturnedI64(value)) => RuntimeSummary {
+        Some(RuntimeResult::Returned(value)) => RuntimeSummary {
             text: format!("returned {value}"),
             class: "metric--ok",
         },
@@ -2728,8 +2728,12 @@ fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
             text: format!("runtime trap: {trap}"),
             class: "metric--warn",
         },
-        Some(RuntimeResult::MainReturnedNonI64) => RuntimeSummary {
-            text: "non-integer main".into(),
+        Some(RuntimeResult::HostFunctionFailed { name, failure }) => RuntimeSummary {
+            text: format!("host function `{name}` failed: {failure}"),
+            class: "metric--warn",
+        },
+        Some(RuntimeResult::UnsupportedResult { declared }) => RuntimeSummary {
+            text: format!("unsupported main result {declared}"),
             class: "metric--warn",
         },
         None => RuntimeSummary {

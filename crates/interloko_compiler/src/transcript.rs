@@ -565,7 +565,20 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::sem::{self, HostMetaRegistry};
-    use crate::session::{CompilerSession, FunctionRunResult, RuntimeMode, SessionMutation};
+    use crate::session::{
+        CompilerSession, FunctionCallError, FunctionValue, RuntimeMode, SessionArtifacts,
+        SessionMutation,
+    };
+    use execution_tape::trace::TraceMask;
+
+    fn run_scalar(
+        artifacts: &SessionArtifacts,
+        name: &str,
+    ) -> Result<FunctionValue, FunctionCallError> {
+        artifacts
+            .call_function(name, &[], TraceMask::NONE)
+            .map(|outcome| outcome.value)
+    }
     use tempfile::tempdir;
 
     const FIXTURE_SOURCE: &str = "\
@@ -675,12 +688,12 @@ end;
         assert_eq!(outcome.applied.len(), 2);
 
         let restored = outcome.artifacts;
-        let circle = restored.run_zero_arg_function_i64("score_circle");
-        assert!(matches!(circle, FunctionRunResult::ReturnedI64(100)));
-        let square = restored.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square, FunctionRunResult::ReturnedI64(49)));
-        let triangle = restored.run_zero_arg_function_i64("score_triangle");
-        assert!(matches!(triangle, FunctionRunResult::ReturnedI64(81)));
+        let circle = run_scalar(&restored, "score_circle");
+        assert!(matches!(circle, Ok(FunctionValue::Integer(100))));
+        let square = run_scalar(&restored, "score_square");
+        assert!(matches!(square, Ok(FunctionValue::Integer(49))));
+        let triangle = run_scalar(&restored, "score_triangle");
+        assert!(matches!(triangle, Ok(FunctionValue::Integer(81))));
     }
 
     #[test]

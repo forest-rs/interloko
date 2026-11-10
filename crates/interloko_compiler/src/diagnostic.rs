@@ -180,6 +180,10 @@ pub enum DiagnosticCode {
     RuntimeMainReturnedNonI64,
     /// A requested function returned a non-integer result.
     RuntimeFunctionReturnedNonI64,
+    /// A declared host function failed during a session-driven run.
+    RuntimeHostFunctionFailed,
+    /// `main` does not return exactly one supported scalar value.
+    RuntimeUnsupportedResult,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -268,6 +272,8 @@ impl DiagnosticCode {
         Self::RuntimeTrap,
         Self::RuntimeMainReturnedNonI64,
         Self::RuntimeFunctionReturnedNonI64,
+        Self::RuntimeHostFunctionFailed,
+        Self::RuntimeUnsupportedResult,
         Self::SessionUnknownSource,
     ];
 
@@ -358,6 +364,8 @@ impl DiagnosticCode {
             Self::RuntimeTrap => "runtime.trap",
             Self::RuntimeMainReturnedNonI64 => "runtime.main-returned-non-i64",
             Self::RuntimeFunctionReturnedNonI64 => "runtime.function-returned-non-i64",
+            Self::RuntimeHostFunctionFailed => "runtime.host-function-failed",
+            Self::RuntimeUnsupportedResult => "runtime.unsupported-result",
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -449,6 +457,8 @@ impl DiagnosticCode {
             "runtime.trap" => Self::RuntimeTrap,
             "runtime.main-returned-non-i64" => Self::RuntimeMainReturnedNonI64,
             "runtime.function-returned-non-i64" => Self::RuntimeFunctionReturnedNonI64,
+            "runtime.host-function-failed" => Self::RuntimeHostFunctionFailed,
+            "runtime.unsupported-result" => Self::RuntimeUnsupportedResult,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })

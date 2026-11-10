@@ -1,0 +1,6 @@
+// expect: run #f
+// expect: diagnostics 0
+
+define function main() => <boolean>
+  "a" = "b"
+end;

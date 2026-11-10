@@ -14,8 +14,8 @@ use interloko_compiler::identity::{ArtifactKey, SourceFileId};
 use interloko_compiler::sem;
 use interloko_compiler::session::{
     DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, EnvironmentOrigin,
-    FunctionRunResult, IncrementalCompilerSession, RuntimeMode, SessionArtifacts, TopLevelFormKind,
-    TopLevelFormSpan,
+    FunctionValue, IncrementalCompilerSession, RuntimeMode, SessionArtifacts, TopLevelFormKind,
+    TopLevelFormSpan, TraceMask,
 };
 use interloko_compiler::syntax::{self, TokenKind};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -410,15 +410,13 @@ impl Repl {
             return Ok(());
         };
         let artifacts = self.ensure_artifacts(stderr)?;
-        match artifacts.run_zero_arg_function_i64(name) {
-            FunctionRunResult::ReturnedI64(value) => {
-                writeln!(stdout, "{}", self.style.value(value))?
-            }
-            result => writeln!(
+        match artifacts.call_function(name, &[], TraceMask::NONE) {
+            Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
+            Err(error) => writeln!(
                 stderr,
                 "{} {}",
                 self.style.error_label("runtime error:"),
-                function_run_message(&result)
+                error
             )?,
         }
         Ok(())
@@ -561,15 +559,13 @@ impl Repl {
             return Ok(());
         }
 
-        match artifacts.run_zero_arg_function_i64(SCRATCH_FUNCTION) {
-            FunctionRunResult::ReturnedI64(value) => {
-                writeln!(stdout, "{}", self.style.value(value))?
-            }
-            result => writeln!(
+        match artifacts.call_function(SCRATCH_FUNCTION, &[], TraceMask::NONE) {
+            Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
+            Err(error) => writeln!(
                 stderr,
                 "{} {}",
                 self.style.error_label("runtime error:"),
-                function_run_message(&result)
+                error
             )?,
         }
         Ok(())
@@ -1198,15 +1194,13 @@ impl Repl {
             )?;
             return Ok(());
         };
-        match artifacts.run_zero_arg_function_i64(name) {
-            FunctionRunResult::ReturnedI64(value) => {
-                writeln!(stdout, "{}", self.style.value(value))?
-            }
-            result => writeln!(
+        match artifacts.call_function(name, &[], TraceMask::NONE) {
+            Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
+            Err(error) => writeln!(
                 stderr,
                 "{} {}",
                 self.style.error_label("runtime error:"),
-                function_run_message(&result)
+                error
             )?,
         }
         Ok(())
@@ -2793,10 +2787,6 @@ const FORM_AFFORDANCES: &[&str] = &[
     "drop",
 ];
 
-fn function_run_message(result: &FunctionRunResult) -> String {
-    result.to_string()
-}
-
 fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
     if let Ok(path) = env::var("INTERLOKO_DIAGNOSTIC_CATALOG") {
         let source = fs::read_to_string(&path).map_err(|error| ReplError::Io {
@@ -3033,7 +3023,7 @@ impl OutputStyle {
         }
     }
 
-    fn value(self, value: i64) -> String {
+    fn value(self, value: &FunctionValue) -> String {
         match self {
             Self::Plain => value.to_string(),
             Self::Ansi => format!("\x1b[36m{value}\x1b[0m"),
@@ -3457,8 +3447,11 @@ mod tests {
 
     #[test]
     fn ansi_style_is_separate_from_plain_transcript_style() {
-        assert_eq!(OutputStyle::Plain.value(42), "42");
-        assert_eq!(OutputStyle::Ansi.value(42), "\x1b[36m42\x1b[0m");
+        assert_eq!(OutputStyle::Plain.value(&FunctionValue::Integer(42)), "42");
+        assert_eq!(
+            OutputStyle::Ansi.value(&FunctionValue::Integer(42)),
+            "\x1b[36m42\x1b[0m"
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use core::fmt::{self, Write as _};
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::program::Program;
-use execution_tape::trace::{ScopeKind, TraceLocation, TraceMask, TraceOutcome, TraceSink};
+use execution_tape::trace::{ScopeKind, TraceLocation, TraceOutcome, TraceSink};
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, TrapInfo, Vm};
 
@@ -31,6 +31,8 @@ use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInval
 use crate::runtime as runtime_bridge;
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, tape};
+/// Execution trace event mask accepted by session run and call APIs.
+pub use execution_tape::trace::TraceMask;
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
@@ -122,10 +124,15 @@ pub fn execution_trace_mask(include_instructions: bool) -> TraceMask {
 }
 
 /// Result of running `main` through the session API.
+///
+/// A successful run carries the same owned [`FunctionValue`] that
+/// [`SessionArtifacts::call_function`] returns: `main` is executed through the
+/// typed scalar call path, so every tool renders and compares results through
+/// one value model.
 #[derive(Clone, Debug)]
 pub enum RuntimeResult {
-    /// `main` returned an integer result.
-    ReturnedI64(i64),
+    /// `main` returned one scalar value.
+    Returned(FunctionValue),
     /// No `main` function was available.
     MissingMain,
     /// `main` has parameters.
@@ -135,8 +142,20 @@ pub enum RuntimeResult {
         /// Trap details.
         trap: TrapInfo,
     },
-    /// `main` returned a non-integer result.
-    MainReturnedNonI64,
+    /// A declared host function could not be executed. Session-driven runs
+    /// supply no host-function handler, so any declared host call fails here.
+    HostFunctionFailed {
+        /// Loko-visible host function name.
+        name: String,
+        /// Precise handler or value-conversion failure.
+        failure: HostFunctionFailure,
+    },
+    /// `main` does not return exactly one scalar value that can leave the
+    /// runtime.
+    UnsupportedResult {
+        /// Declared result categories.
+        declared: String,
+    },
 }
 
 impl RuntimeResult {
@@ -144,11 +163,21 @@ impl RuntimeResult {
     #[must_use]
     pub const fn code(&self) -> Option<DiagnosticCode> {
         match self {
-            Self::ReturnedI64(_) => None,
+            Self::Returned(_) => None,
             Self::MissingMain => Some(DiagnosticCode::RuntimeMissingMain),
             Self::MainHasParameters => Some(DiagnosticCode::RuntimeMainHasParameters),
             Self::Trap { .. } => Some(DiagnosticCode::RuntimeTrap),
-            Self::MainReturnedNonI64 => Some(DiagnosticCode::RuntimeMainReturnedNonI64),
+            Self::HostFunctionFailed { .. } => Some(DiagnosticCode::RuntimeHostFunctionFailed),
+            Self::UnsupportedResult { .. } => Some(DiagnosticCode::RuntimeUnsupportedResult),
+        }
+    }
+
+    /// Returns the scalar value returned by `main`, when the run succeeded.
+    #[must_use]
+    pub const fn value(&self) -> Option<&FunctionValue> {
+        match self {
+            Self::Returned(value) => Some(value),
+            _ => None,
         }
     }
 }
@@ -156,56 +185,18 @@ impl RuntimeResult {
 impl fmt::Display for RuntimeResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ReturnedI64(value) => write!(formatter, "returned {value}"),
+            Self::Returned(value) => write!(formatter, "returned {value}"),
             Self::MissingMain => formatter.write_str("missing main"),
             Self::MainHasParameters => formatter.write_str("main has parameters"),
             Self::Trap { trap } => write!(formatter, "runtime trap: {trap}"),
-            Self::MainReturnedNonI64 => formatter.write_str("main returned a non-integer result"),
-        }
-    }
-}
-
-/// Result of running a named zero-argument function from compiled artifacts.
-#[derive(Clone, Debug)]
-pub enum FunctionRunResult {
-    /// The function returned an integer result.
-    ReturnedI64(i64),
-    /// The requested function was not present in the semantic/tape artifacts.
-    MissingFunction {
-        /// Requested function name.
-        name: String,
-    },
-    /// The requested function exists but expects parameters.
-    FunctionHasParameters {
-        /// Requested function name.
-        name: String,
-    },
-    /// The artifacts do not contain an emitted tape program.
-    TapeUnavailable,
-    /// Runtime trapped.
-    Trap {
-        /// Trap details.
-        trap: TrapInfo,
-    },
-    /// The function returned a non-integer result.
-    FunctionReturnedNonI64 {
-        /// Requested function name.
-        name: String,
-    },
-}
-
-impl fmt::Display for FunctionRunResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ReturnedI64(value) => write!(formatter, "returned {value}"),
-            Self::MissingFunction { name } => write!(formatter, "missing function `{name}`"),
-            Self::FunctionHasParameters { name } => {
-                write!(formatter, "function `{name}` has parameters")
+            Self::HostFunctionFailed { name, failure } => {
+                write!(formatter, "host function `{name}` failed: {failure}")
             }
-            Self::TapeUnavailable => formatter.write_str("tape unavailable"),
-            Self::Trap { trap } => write!(formatter, "runtime trap: {trap}"),
-            Self::FunctionReturnedNonI64 { name } => {
-                write!(formatter, "function `{name}` returned a non-integer result")
+            Self::UnsupportedResult { declared } => {
+                write!(
+                    formatter,
+                    "main result {declared} is not one supported scalar"
+                )
             }
         }
     }
@@ -220,6 +211,31 @@ pub enum FunctionValue {
     Boolean(bool),
     /// Runtime string value copied out of the execution host.
     String(String),
+}
+
+impl fmt::Display for FunctionValue {
+    /// Renders the value as Loko literal text: integers in decimal, booleans
+    /// as `#t`/`#f`, and strings quoted with Loko escapes.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(value) => write!(formatter, "{value}"),
+            Self::Boolean(true) => formatter.write_str("#t"),
+            Self::Boolean(false) => formatter.write_str("#f"),
+            Self::String(value) => {
+                formatter.write_char('"')?;
+                for ch in value.chars() {
+                    match ch {
+                        '"' => formatter.write_str("\\\"")?,
+                        '\\' => formatter.write_str("\\\\")?,
+                        '\n' => formatter.write_str("\\n")?,
+                        '\t' => formatter.write_str("\\t")?,
+                        ch => formatter.write_char(ch)?,
+                    }
+                }
+                formatter.write_char('"')
+            }
+        }
+    }
 }
 
 impl FunctionValue {
@@ -416,15 +432,6 @@ impl fmt::Display for FunctionCallError {
             ),
         }
     }
-}
-
-/// Result and optional trace from running a zero-argument function.
-#[derive(Clone, Debug)]
-pub struct TracedFunctionRunResult {
-    /// Function result.
-    pub result: FunctionRunResult,
-    /// Captured trace, when tracing was requested and the VM ran.
-    pub trace: Option<ExecutionTrace>,
 }
 
 /// Captured `execution_tape` trace for one runtime run.
@@ -1918,35 +1925,6 @@ impl SessionArtifacts {
             .map(|site| explain_dispatch_site(self, &site))
     }
 
-    /// Runs a named zero-argument function from this artifact set.
-    ///
-    /// This is intended for workbench and REPL tooling that needs to evaluate a
-    /// generated scratch function without pretending it is `main`.
-    #[must_use]
-    pub fn run_zero_arg_function_i64(&self, function_name: &str) -> FunctionRunResult {
-        self.tape
-            .as_ref()
-            .map_or(FunctionRunResult::TapeUnavailable, |tape| {
-                run_zero_arg_function_i64(&self.sem, tape, function_name)
-            })
-    }
-
-    /// Runs a named zero-argument function and captures an execution trace.
-    #[must_use]
-    pub fn run_zero_arg_function_i64_traced(
-        &self,
-        function_name: &str,
-        mask: TraceMask,
-    ) -> TracedFunctionRunResult {
-        self.tape.as_ref().map_or(
-            TracedFunctionRunResult {
-                result: FunctionRunResult::TapeUnavailable,
-                trace: None,
-            },
-            |tape| run_zero_arg_function_i64_with_trace(&self.sem, tape, function_name, Some(mask)),
-        )
-    }
-
     /// Calls a direct function with typed scalar arguments and captures an
     /// optional execution trace.
     ///
@@ -3169,7 +3147,7 @@ fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> Session
                     previous
                         .tape
                         .as_ref()
-                        .map(|tape| run_main(&previous.sem, tape))
+                        .map(|tape| run_main(&previous.sem, &previous.host_registry, tape))
                 });
                 timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
                 result
@@ -3179,7 +3157,8 @@ fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> Session
         RuntimeMode::RunMainTraced { mask } => {
             let ((result, trace), elapsed_nanos) = measure_elapsed(|| {
                 previous.tape.as_ref().map_or((None, None), |tape| {
-                    let (result, trace) = run_main_with_trace(&previous.sem, tape, Some(mask));
+                    let (result, trace) =
+                        run_main_with_trace(&previous.sem, &previous.host_registry, tape, mask);
                     (Some(result), trace)
                 })
             });
@@ -4906,9 +4885,12 @@ pub(crate) fn compile_file_with_registries(
     timings.record(QueryArtifact::TapeProgram, elapsed_nanos);
     let ((runtime_result, runtime_trace), elapsed_nanos) = measure_elapsed(|| match mode {
         RuntimeMode::CompileOnly => (None, None),
-        RuntimeMode::RunMain => (tape.as_ref().map(|tape| run_main(&sem, tape)), None),
+        RuntimeMode::RunMain => (
+            tape.as_ref().map(|tape| run_main(&sem, registry, tape)),
+            None,
+        ),
         RuntimeMode::RunMainTraced { mask } => tape.as_ref().map_or((None, None), |tape| {
-            let (result, trace) = run_main_with_trace(&sem, tape, Some(mask));
+            let (result, trace) = run_main_with_trace(&sem, registry, tape, mask);
             (Some(result), trace)
         }),
     });
@@ -4940,98 +4922,59 @@ pub(crate) fn compile_file_with_registries(
     artifacts
 }
 
-fn run_main(module: &sem::Module, tape: &tape::TapeModule) -> RuntimeResult {
-    let (result, _) = run_main_with_trace(module, tape, None);
-    result
+fn run_main(
+    module: &sem::Module,
+    host_registry: &sem::HostMetaRegistry,
+    tape: &tape::TapeModule,
+) -> RuntimeResult {
+    run_main_with_trace(module, host_registry, tape, TraceMask::NONE).0
 }
 
 fn run_main_with_trace(
     module: &sem::Module,
+    host_registry: &sem::HostMetaRegistry,
     tape: &tape::TapeModule,
-    trace_mask: Option<TraceMask>,
+    trace_mask: TraceMask,
 ) -> (RuntimeResult, Option<ExecutionTrace>) {
-    let traced = run_zero_arg_function_i64_with_trace(module, tape, "main", trace_mask);
-    let result = match traced.result {
-        FunctionRunResult::ReturnedI64(value) => RuntimeResult::ReturnedI64(value),
-        FunctionRunResult::MissingFunction { .. } | FunctionRunResult::TapeUnavailable => {
-            RuntimeResult::MissingMain
-        }
-        FunctionRunResult::FunctionHasParameters { .. } => RuntimeResult::MainHasParameters,
-        FunctionRunResult::Trap { trap } => RuntimeResult::Trap { trap },
-        FunctionRunResult::FunctionReturnedNonI64 { .. } => RuntimeResult::MainReturnedNonI64,
-    };
-    (result, traced.trace)
-}
-
-fn run_zero_arg_function_i64(
-    module: &sem::Module,
-    tape: &tape::TapeModule,
-    function_name: &str,
-) -> FunctionRunResult {
-    run_zero_arg_function_i64_with_trace(module, tape, function_name, None).result
-}
-
-fn run_zero_arg_function_i64_with_trace(
-    module: &sem::Module,
-    tape: &tape::TapeModule,
-    function_name: &str,
-    trace_mask: Option<TraceMask>,
-) -> TracedFunctionRunResult {
-    let Some(function) = module
-        .functions
-        .iter()
-        .find(|function| function.name == function_name)
-    else {
-        return TracedFunctionRunResult {
-            result: FunctionRunResult::MissingFunction {
-                name: function_name.to_string(),
-            },
-            trace: None,
-        };
-    };
-    if !function.params.is_empty() {
-        return TracedFunctionRunResult {
-            result: FunctionRunResult::FunctionHasParameters {
-                name: function_name.to_string(),
-            },
-            trace: None,
-        };
+    match call_function(module, host_registry, tape, "main", &[], trace_mask, None) {
+        Ok(outcome) => (RuntimeResult::Returned(outcome.value), outcome.trace),
+        Err(error) => runtime_result_for_main_error(module, error),
     }
-    let Some(func) = tape.functions.get(function.id.0 as usize).copied() else {
-        return TracedFunctionRunResult {
-            result: FunctionRunResult::MissingFunction {
-                name: function_name.to_string(),
-            },
-            trace: None,
-        };
-    };
+}
 
-    let host = InterlokoHost::new(tape.runtime.clone());
-    let mut vm = Vm::new(host, Limits::default());
-    let mut trace = trace_mask.map(ExecutionTraceSink::new);
-    let (mask, sink): (TraceMask, Option<&mut dyn TraceSink>) =
-        trace.as_mut().map_or((TraceMask::NONE, None), |trace| {
-            (trace.mask(), Some(trace as &mut dyn TraceSink))
-        });
-    let output = match vm.run(&tape.program, func, &[], mask, sink) {
-        Ok(output) => output,
-        Err(trap) => {
-            return TracedFunctionRunResult {
-                result: FunctionRunResult::Trap { trap },
-                trace: trace.map(ExecutionTraceSink::finish),
-            };
+fn runtime_result_for_main_error(
+    module: &sem::Module,
+    error: FunctionCallError,
+) -> (RuntimeResult, Option<ExecutionTrace>) {
+    match error {
+        FunctionCallError::TapeUnavailable | FunctionCallError::MissingFunction { .. } => {
+            (RuntimeResult::MissingMain, None)
         }
-    };
-
-    let result = match output.as_slice() {
-        [Value::I64(value)] => FunctionRunResult::ReturnedI64(*value),
-        _ => FunctionRunResult::FunctionReturnedNonI64 {
-            name: function_name.to_string(),
-        },
-    };
-    TracedFunctionRunResult {
-        result,
-        trace: trace.map(ExecutionTraceSink::finish),
+        FunctionCallError::ArgumentCountMismatch { .. }
+        | FunctionCallError::ArgumentTypeMismatch { .. }
+        | FunctionCallError::ArgumentMaterializationFailed { .. } => {
+            (RuntimeResult::MainHasParameters, None)
+        }
+        FunctionCallError::Trap { trap, trace } => (RuntimeResult::Trap { trap: *trap }, trace),
+        FunctionCallError::HostFunctionFailed {
+            name,
+            failure,
+            trace,
+        } => (RuntimeResult::HostFunctionFailed { name, failure }, trace),
+        FunctionCallError::UnsupportedResult { declared, .. } => {
+            (RuntimeResult::UnsupportedResult { declared }, None)
+        }
+        FunctionCallError::ResultMaterializationFailed { name } => {
+            let declared = module
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .map_or_else(
+                    || "<unknown>".into(),
+                    |function| sem_kind_list_label(module, &function.result_kinds),
+                );
+            (RuntimeResult::UnsupportedResult { declared }, None)
+        }
     }
 }
 
@@ -12042,6 +11985,15 @@ fn indent_line(out: &mut String, indent: usize) {
 mod tests {
     use super::*;
 
+    fn run_scalar(
+        artifacts: &SessionArtifacts,
+        name: &str,
+    ) -> Result<FunctionValue, FunctionCallError> {
+        artifacts
+            .call_function(name, &[], TraceMask::NONE)
+            .map(|outcome| outcome.value)
+    }
+
     const AREA: &str = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                         define generic area(x);\n\
                         define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
@@ -12317,7 +12269,7 @@ mod tests {
 
         assert!(matches!(
             artifacts.runtime_result,
-            Some(RuntimeResult::ReturnedI64(42))
+            Some(RuntimeResult::Returned(FunctionValue::Integer(42)))
         ));
         let forms = artifacts.source_forms();
         let constant_form = forms
@@ -12797,7 +12749,7 @@ mod tests {
         assert!(artifacts.tape.is_some());
         assert!(matches!(
             artifacts.runtime_result,
-            Some(RuntimeResult::ReturnedI64(100))
+            Some(RuntimeResult::Returned(FunctionValue::Integer(100)))
         ));
         assert!(
             artifacts
@@ -12966,7 +12918,7 @@ mod tests {
         );
         assert!(matches!(
             artifacts.runtime_result,
-            Some(RuntimeResult::ReturnedI64(100))
+            Some(RuntimeResult::Returned(FunctionValue::Integer(100)))
         ));
         let trace = artifacts
             .runtime_trace
@@ -13044,7 +12996,7 @@ mod tests {
             } else {
                 assert!(matches!(
                     artifacts.runtime_result,
-                    Some(RuntimeResult::ReturnedI64(42))
+                    Some(RuntimeResult::Returned(FunctionValue::Integer(42)))
                 ));
             }
             let trace = artifacts.runtime_trace.as_ref().unwrap();
@@ -13114,9 +13066,10 @@ mod tests {
     fn session_can_capture_instruction_trace_for_named_runs() {
         let artifacts =
             CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
-        let traced =
-            artifacts.run_zero_arg_function_i64_traced("main", TraceMask::RUN | TraceMask::INSTR);
-        assert!(matches!(traced.result, FunctionRunResult::ReturnedI64(100)));
+        let traced = artifacts
+            .call_function("main", &[], TraceMask::RUN | TraceMask::INSTR)
+            .expect("main should run");
+        assert_eq!(traced.value, FunctionValue::Integer(100));
         let trace = traced.trace.expect("trace should be captured");
         assert!(
             trace
@@ -13270,6 +13223,55 @@ mod tests {
     }
 
     #[test]
+    fn session_runs_main_through_typed_scalar_results() {
+        let run = |source: &str| {
+            CompilerSession::compile_source("main.loko", source, RuntimeMode::RunMain)
+                .runtime_result
+                .expect("main should run")
+        };
+
+        assert!(matches!(
+            run("define function main() => <boolean>\n  1 < 2\nend;"),
+            RuntimeResult::Returned(FunctionValue::Boolean(true))
+        ));
+        let string = run("define function main() => <string>\n  \"glass\\nhouse\"\nend;");
+        assert!(
+            matches!(&string, RuntimeResult::Returned(FunctionValue::String(text)) if text == "glass\nhouse")
+        );
+        assert_eq!(string.to_string(), "returned \"glass\\nhouse\"");
+        let object = run(
+            "define class <box> (<object>)\n  slot value :: <integer>;\nend;\n\
+             define function main()\n  make(<box>, value: 1)\nend;",
+        );
+        assert!(matches!(object, RuntimeResult::UnsupportedResult { .. }));
+        assert_eq!(
+            object.code(),
+            Some(DiagnosticCode::RuntimeUnsupportedResult)
+        );
+
+        let mut registry = sem::HostMetaRegistry::new();
+        registry.add_function(sem::HostFunction::new(
+            "host-answer",
+            Vec::new(),
+            sem::HostValueKind::Integer,
+        ));
+        let artifacts = CompilerSession::compile_source_with_host_registry(
+            "host.loko",
+            "define function main()\n  host-answer()\nend;",
+            RuntimeMode::RunMain,
+            &registry,
+        );
+        let result = artifacts.runtime_result.expect("main should run");
+        assert!(
+            matches!(&result, RuntimeResult::HostFunctionFailed { name, .. } if name == "host-answer")
+        );
+        assert_eq!(
+            result.code(),
+            Some(DiagnosticCode::RuntimeHostFunctionFailed)
+        );
+    }
+
+    #[test]
     fn session_runs_named_zero_arg_functions() {
         let artifacts = CompilerSession::compile_source(
             "scratch.loko",
@@ -13282,17 +13284,17 @@ mod tests {
 
         assert_eq!(artifacts.diagnostics, Vec::new());
         assert!(matches!(
-            artifacts.run_zero_arg_function_i64("__interloko_repl_expr_0"),
-            FunctionRunResult::ReturnedI64(42)
+            run_scalar(&artifacts, "__interloko_repl_expr_0"),
+            Ok(FunctionValue::Integer(42))
         ));
         assert!(
-            matches!(artifacts.run_zero_arg_function_i64("missing"), FunctionRunResult::MissingFunction { name } if name == "missing")
+            matches!(run_scalar(&artifacts, "missing"), Err(FunctionCallError::MissingFunction { name }) if name == "missing")
         );
         assert!(
-            matches!(artifacts.run_zero_arg_function_i64("helper"), FunctionRunResult::FunctionHasParameters { name } if name == "helper")
+            matches!(run_scalar(&artifacts, "helper"), Err(FunctionCallError::ArgumentCountMismatch { name, .. }) if name == "helper")
         );
         assert!(
-            matches!(artifacts.run_zero_arg_function_i64("object_result"), FunctionRunResult::FunctionReturnedNonI64 { name } if name == "object_result")
+            matches!(run_scalar(&artifacts, "object_result"), Err(FunctionCallError::UnsupportedResult { name, .. }) if name == "object_result")
         );
     }
 
@@ -14203,7 +14205,7 @@ mod tests {
 
         assert!(matches!(
             artifacts.runtime_result,
-            Some(RuntimeResult::ReturnedI64(10))
+            Some(RuntimeResult::Returned(FunctionValue::Integer(10)))
         ));
         assert_eq!(artifacts.diagnostics, Vec::new());
         assert!(
@@ -14424,7 +14426,7 @@ mod tests {
         assert_eq!(first.reused_count(), 0);
         assert!(matches!(
             first.artifacts.runtime_result,
-            Some(RuntimeResult::ReturnedI64(100))
+            Some(RuntimeResult::Returned(FunctionValue::Integer(100)))
         ));
 
         let second = session
@@ -15337,8 +15339,8 @@ end;
             .count();
         assert_eq!(circle_method_count_before, 1);
 
-        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
-        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
+        let circle_result = run_scalar(&artifacts, "score_circle");
+        assert!(matches!(circle_result, Ok(FunctionValue::Integer(100))));
 
         let outcome = artifacts
             .apply_mutation(SessionMutation::AddMethod {
@@ -15371,10 +15373,10 @@ end;
             2
         );
 
-        let circle_after = artifacts.run_zero_arg_function_i64("score_circle");
-        assert!(matches!(circle_after, FunctionRunResult::ReturnedI64(100)));
-        let square_after = artifacts.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square_after, FunctionRunResult::ReturnedI64(49)));
+        let circle_after = run_scalar(&artifacts, "score_circle");
+        assert!(matches!(circle_after, Ok(FunctionValue::Integer(100))));
+        let square_after = run_scalar(&artifacts, "score_square");
+        assert!(matches!(square_after, Ok(FunctionValue::Integer(49))));
 
         assert_eq!(artifacts.mutations().len(), 1);
     }
@@ -15468,15 +15470,12 @@ end;
         assert!(matches!(circle_method.origin, sem::MethodOrigin::Source));
 
         // All three dispatch paths work after the two mutations.
-        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
-        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
-        let square_result = artifacts.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square_result, FunctionRunResult::ReturnedI64(49)));
-        let triangle_result = artifacts.run_zero_arg_function_i64("score_triangle");
-        assert!(matches!(
-            triangle_result,
-            FunctionRunResult::ReturnedI64(81)
-        ));
+        let circle_result = run_scalar(&artifacts, "score_circle");
+        assert!(matches!(circle_result, Ok(FunctionValue::Integer(100))));
+        let square_result = run_scalar(&artifacts, "score_square");
+        assert!(matches!(square_result, Ok(FunctionValue::Integer(49))));
+        let triangle_result = run_scalar(&artifacts, "score_triangle");
+        assert!(matches!(triangle_result, Ok(FunctionValue::Integer(81))));
     }
 
     #[test]
@@ -15693,12 +15692,15 @@ end;
         // Dispatch through the surviving square method still works; the
         // triangle path is gone, so score_triangle no longer finds an
         // applicable method and traps at the runtime dispatcher.
-        let square_result = artifacts.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square_result, FunctionRunResult::ReturnedI64(49)));
-        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
-        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
-        let triangle_result = artifacts.run_zero_arg_function_i64("score_triangle");
-        assert!(matches!(triangle_result, FunctionRunResult::Trap { .. }));
+        let square_result = run_scalar(&artifacts, "score_square");
+        assert!(matches!(square_result, Ok(FunctionValue::Integer(49))));
+        let circle_result = run_scalar(&artifacts, "score_circle");
+        assert!(matches!(circle_result, Ok(FunctionValue::Integer(100))));
+        let triangle_result = run_scalar(&artifacts, "score_triangle");
+        assert!(matches!(
+            triangle_result,
+            Err(FunctionCallError::Trap { .. })
+        ));
     }
 
     #[test]
@@ -15737,10 +15739,10 @@ end;
         assert_eq!(area_methods.len(), 1);
         assert!(matches!(area_methods[0].origin, sem::MethodOrigin::Source));
 
-        let circle_result = artifacts.run_zero_arg_function_i64("score_circle");
-        assert!(matches!(circle_result, FunctionRunResult::ReturnedI64(100)));
-        let square_result = artifacts.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square_result, FunctionRunResult::Trap { .. }));
+        let circle_result = run_scalar(&artifacts, "score_circle");
+        assert!(matches!(circle_result, Ok(FunctionValue::Integer(100))));
+        let square_result = run_scalar(&artifacts, "score_square");
+        assert!(matches!(square_result, Err(FunctionCallError::Trap { .. })));
     }
 
     #[test]
@@ -15958,12 +15960,10 @@ end;
         assert_eq!(artifacts.sem.methods, snapshot_sem_methods);
 
         // Ephemeral artifacts reproduce dispatch behavior.
-        let square = outcome.artifacts.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square, FunctionRunResult::ReturnedI64(49)));
-        let triangle = outcome
-            .artifacts
-            .run_zero_arg_function_i64("score_triangle");
-        assert!(matches!(triangle, FunctionRunResult::ReturnedI64(81)));
+        let square = run_scalar(&outcome.artifacts, "score_square");
+        assert!(matches!(square, Ok(FunctionValue::Integer(49))));
+        let triangle = run_scalar(&outcome.artifacts, "score_triangle");
+        assert!(matches!(triangle, Ok(FunctionValue::Integer(81))));
     }
 
     #[test]
@@ -15986,15 +15986,13 @@ end;
         );
         assert_eq!(outcome.applied.len(), 2);
 
-        let square = outcome.artifacts.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square, FunctionRunResult::ReturnedI64(49)));
-        let triangle = outcome
-            .artifacts
-            .run_zero_arg_function_i64("score_triangle");
-        assert!(matches!(triangle, FunctionRunResult::ReturnedI64(81)));
+        let square = run_scalar(&outcome.artifacts, "score_square");
+        assert!(matches!(square, Ok(FunctionValue::Integer(49))));
+        let triangle = run_scalar(&outcome.artifacts, "score_triangle");
+        assert!(matches!(triangle, Ok(FunctionValue::Integer(81))));
         // The unrelated function is reachable on the ephemeral artifacts.
-        let answer = outcome.artifacts.run_zero_arg_function_i64("answer");
-        assert!(matches!(answer, FunctionRunResult::ReturnedI64(42)));
+        let answer = run_scalar(&outcome.artifacts, "answer");
+        assert!(matches!(answer, Ok(FunctionValue::Integer(42))));
     }
 
     #[test]
@@ -16157,8 +16155,8 @@ end;
         // The ephemeral session has the first mutation applied; dispatch
         // for square works there even though the original session is
         // unchanged.
-        let square = outcome.artifacts.run_zero_arg_function_i64("score_square");
-        assert!(matches!(square, FunctionRunResult::ReturnedI64(49)));
+        let square = run_scalar(&outcome.artifacts, "score_square");
+        assert!(matches!(square, Ok(FunctionValue::Integer(49))));
 
         assert_eq!(artifacts.mutations(), snapshot_log.as_slice());
     }
@@ -16291,7 +16289,7 @@ end;
         let area = generic_id(&artifacts, "area");
         let before_methods = artifacts.sem.methods.clone();
         let before_keys = artifact_keys(&artifacts);
-        let before_circle = artifacts.run_zero_arg_function_i64("score_circle");
+        let before_circle = run_scalar(&artifacts, "score_circle");
 
         let err = artifacts
             .apply_mutation(SessionMutation::AddMethod {
@@ -16303,9 +16301,9 @@ end;
 
         assert_eq!(artifacts.sem.methods, before_methods);
         assert_eq!(artifact_keys(&artifacts), before_keys);
-        let after_circle = artifacts.run_zero_arg_function_i64("score_circle");
-        assert!(matches!(before_circle, FunctionRunResult::ReturnedI64(100)));
-        assert!(matches!(after_circle, FunctionRunResult::ReturnedI64(100)));
+        let after_circle = run_scalar(&artifacts, "score_circle");
+        assert!(matches!(before_circle, Ok(FunctionValue::Integer(100))));
+        assert!(matches!(after_circle, Ok(FunctionValue::Integer(100))));
         assert_eq!(artifacts.mutations().len(), 0);
     }
 
