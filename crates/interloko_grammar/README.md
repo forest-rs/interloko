@@ -228,7 +228,9 @@ These counters are observational: they let callers see packrat memo hits,
 misses, final memo-table size, and how many memo entries lookups compared
 for one parse without changing matching semantics. The memo is indexed by
 input position, so `memo_probes` stays proportional to the number of
-lookups rather than to the input size.
+lookups rather than to the input size. Matched nodes are recorded once per
+parse and memo hits share them, so `nodes_recorded` measures matching work
+rather than copies of reused subtrees.
 
 ```rust
 use interloko_grammar::{inspect_region, parse_grammar_source};

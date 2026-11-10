@@ -8,6 +8,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::Range;
 
 /// A byte span in parsed source.
 ///
@@ -1772,6 +1773,13 @@ pub struct ParseMetrics {
     /// number of distinct rules tried at one position) rather than growing
     /// with the size of the input.
     pub memo_probes: usize,
+    /// Number of match nodes recorded while parsing, including nodes
+    /// from alternatives that were later abandoned.
+    ///
+    /// Memo hits share the node recorded by the original match instead
+    /// of copying its subtree, so this counter measures matching work
+    /// and memory, not the size of the returned tree.
+    pub nodes_recorded: usize,
 }
 
 /// One expected fragment in an interpreted parse failure.
@@ -1836,14 +1844,152 @@ pub struct ParseError<'g> {
     pub expected: Vec<ExpectedFragment<'g>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ExpressionMatch<'g, 's> {
+/// Successful expression match.
+///
+/// The match's children are not stored here: they are the links that
+/// [`interpret_expression`] left on [`MatchArena::pending`] above the
+/// pending length the caller observed before the call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExpressionMatch {
     end: usize,
-    children: Vec<RuleNode<'g, 's>>,
     /// Set when a [`RuleExpression::Cut`] inside this match has committed.
     /// Propagates up through Sequence / Optional / repetition; cleared by
     /// [`RuleExpression::Choice`] on success.
     committed: bool,
+}
+
+/// Memoized result of a parametric application: the match plus its
+/// children, stored as a run of [`MatchArena::links`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApplyMatch {
+    matched: ExpressionMatch,
+    children: Range<usize>,
+}
+
+/// Index of a node in [`MatchArena::nodes`].
+type NodeId = usize;
+
+/// One node matched during a parse, before materialization as a
+/// [`RuleNode`].
+struct MatchNode<'g> {
+    kind: RuleNodeKind<'g>,
+    /// Region-relative matched byte range.
+    start: usize,
+    end: usize,
+    /// This node's children as a run of [`MatchArena::links`].
+    children: Range<usize>,
+}
+
+/// Reference from a parent to a child node, carrying the `name:expr`
+/// binding the parent attached. Bindings live on the link rather than
+/// on the node so one memoized node can be shared by parents that bind
+/// it differently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChildLink<'g> {
+    node: NodeId,
+    binding: Option<&'g str>,
+}
+
+/// Per-parse storage for matched nodes.
+///
+/// Matching records nodes here and refers to them by [`NodeId`], so a
+/// memo hit hands back an id instead of copying a subtree. Nodes are
+/// immutable once recorded; nodes from abandoned alternatives stay
+/// unreferenced until the arena is dropped with the parse. The public
+/// [`RuleNode`] tree is materialized once, from the final root.
+struct MatchArena<'g> {
+    nodes: Vec<MatchNode<'g>>,
+    /// Children of finished nodes and memoized parametric applications.
+    links: Vec<ChildLink<'g>>,
+    /// Children of in-progress matches, innermost last. A successful
+    /// [`interpret_expression`] leaves its children on top; a failed one
+    /// leaves the stack as it found it.
+    pending: Vec<ChildLink<'g>>,
+}
+
+impl<'g> MatchArena<'g> {
+    const fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            links: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Records a childless node and pushes it as a pending child.
+    fn push_leaf(&mut self, kind: RuleNodeKind<'g>, start: usize, end: usize) {
+        let node = self.record(kind, start, end, 0..0);
+        self.push_child(node);
+    }
+
+    fn push_child(&mut self, node: NodeId) {
+        self.pending.push(ChildLink {
+            node,
+            binding: None,
+        });
+    }
+
+    /// Records a node whose children are the pending links above
+    /// `children_from`, removing them from the pending stack.
+    fn finish(
+        &mut self,
+        kind: RuleNodeKind<'g>,
+        start: usize,
+        end: usize,
+        children_from: usize,
+    ) -> NodeId {
+        let children = self.store_links(children_from);
+        self.pending.truncate(children_from);
+        self.record(kind, start, end, children)
+    }
+
+    /// Pushes a stored run of [`Self::links`] back as pending children.
+    fn push_stored_links(&mut self, links: Range<usize>) {
+        self.pending.extend_from_slice(&self.links[links]);
+    }
+
+    /// Copies the pending links above `from` into [`Self::links`].
+    fn store_links(&mut self, from: usize) -> Range<usize> {
+        let start = self.links.len();
+        self.links.extend_from_slice(&self.pending[from..]);
+        start..self.links.len()
+    }
+
+    fn record(
+        &mut self,
+        kind: RuleNodeKind<'g>,
+        start: usize,
+        end: usize,
+        children: Range<usize>,
+    ) -> NodeId {
+        let id = self.nodes.len();
+        self.nodes.push(MatchNode {
+            kind,
+            start,
+            end,
+            children,
+        });
+        id
+    }
+
+    fn materialize<'s>(
+        &self,
+        link: ChildLink<'g>,
+        source: &'s str,
+        source_offset: usize,
+    ) -> RuleNode<'g, 's> {
+        let node = &self.nodes[link.node];
+        RuleNode {
+            kind: node.kind,
+            span: Span::new(source_offset + node.start, source_offset + node.end),
+            text: &source[node.start..node.end],
+            children: self.links[node.children.clone()]
+                .iter()
+                .map(|child| self.materialize(*child, source, source_offset))
+                .collect(),
+            binding_name: link.binding,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1860,8 +2006,9 @@ struct ParseFailure<'g> {
 struct ParseContext<'g, 's> {
     source: &'s str,
     source_offset: usize,
-    memo: PositionMemo<MemoKey<'g>, Result<RuleNode<'g, 's>, ParseFailure<'g>>>,
-    apply_memo: PositionMemo<ApplyMemoKey<'g>, Result<ExpressionMatch<'g, 's>, ParseFailure<'g>>>,
+    arena: MatchArena<'g>,
+    memo: PositionMemo<MemoKey<'g>, Result<NodeId, ParseFailure<'g>>>,
+    apply_memo: PositionMemo<ApplyMemoKey<'g>, Result<ApplyMatch, ParseFailure<'g>>>,
     active_rules: Vec<(usize, MemoKey<'g>)>,
     metrics: ParseMetrics,
 }
@@ -1871,6 +2018,7 @@ impl<'g, 's> ParseContext<'g, 's> {
         Self {
             source,
             source_offset,
+            arena: MatchArena::new(),
             memo: PositionMemo::new(),
             apply_memo: PositionMemo::new(),
             active_rules: Vec::new(),
@@ -1878,9 +2026,25 @@ impl<'g, 's> ParseContext<'g, 's> {
         }
     }
 
+    /// Region-relative end of a recorded node.
+    fn node_end(&self, node: NodeId) -> usize {
+        self.arena.nodes[node].end
+    }
+
+    /// Builds the public tree for a recorded node.
+    fn rule_node(&self, node: NodeId) -> RuleNode<'g, 's> {
+        let link = ChildLink {
+            node,
+            binding: None,
+        };
+        self.arena
+            .materialize(link, self.source, self.source_offset)
+    }
+
     fn finish_metrics(&self) -> ParseMetrics {
         ParseMetrics {
             memo_entries: self.memo.len().saturating_add(self.apply_memo.len()),
+            nodes_recorded: self.arena.nodes.len(),
             ..self.metrics
         }
     }
@@ -3025,7 +3189,7 @@ pub fn interpret_region_recovering<'g, 's>(
         }
         match interpret_rule(&mut context, lookup, iteration_target, try_position) {
             Ok(node) => {
-                let advance = node.span.end.saturating_sub(source_offset);
+                let advance = context.node_end(node);
                 if advance <= position {
                     // Zero-width match — avoid an infinite loop by
                     // treating it as a failure and skipping forward.
@@ -3041,14 +3205,14 @@ pub fn interpret_region_recovering<'g, 's>(
                     position = next_char_boundary(source, try_position);
                     continue;
                 }
-                children.push(node);
+                children.push(context.rule_node(node));
                 position = advance;
             }
             Err(failure) => {
                 errors.push(failure.into_error(source_offset));
                 let recovery_start = try_position;
                 let mut scan = next_char_boundary(source, try_position);
-                let mut recovered: Option<RuleNode<'g, 's>> = None;
+                let mut recovered: Option<NodeId> = None;
                 while scan < source.len() {
                     let scan_position = if raw { scan } else { skip_trivia(source, scan) };
                     if scan_position >= source.len() {
@@ -3062,8 +3226,8 @@ pub fn interpret_region_recovering<'g, 's>(
                     }
                     scan = next_char_boundary(source, scan);
                 }
-                let recovery_end = match &recovered {
-                    Some(node) => node.span.start.saturating_sub(source_offset),
+                let recovery_end = match recovered {
+                    Some(node) => context.arena.nodes[node].start,
                     None => source.len(),
                 };
                 if recovery_end > recovery_start {
@@ -3079,9 +3243,8 @@ pub fn interpret_region_recovering<'g, 's>(
                     });
                 }
                 if let Some(node) = recovered {
-                    let advance = node.span.end.saturating_sub(source_offset);
-                    children.push(node);
-                    position = advance;
+                    position = context.node_end(node);
+                    children.push(context.rule_node(node));
                 } else {
                     position = source.len();
                 }
@@ -3134,7 +3297,8 @@ fn inspect_region_with<'g, 's>(
             };
         }
     };
-    let region_end = root.span.end.saturating_sub(source_offset);
+    let region_end = context.node_end(root);
+    let root = context.rule_node(root);
     // Raw root rules keep trailing trivia as unconsumed input; default
     // rules let trailing whitespace and `//` comments slide.
     let trailing = if root_raw {
@@ -3223,12 +3387,12 @@ fn interpret_rule_error_with<'g>(
         .into_error(source_offset)
 }
 
-fn interpret_rule<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_rule<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     name: &'g str,
     position: usize,
-) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
+) -> Result<NodeId, ParseFailure<'g>> {
     context.metrics.rule_attempts = context.metrics.rule_attempts.saturating_add(1);
     if let Some((rule, active)) = lookup.resolve_rule(name) {
         let key = MemoKey {
@@ -3298,13 +3462,13 @@ fn interpret_rule<'g, 's>(
 /// resolve against the grammar that actually authored the rule —
 /// not against an arbitrary descendant the rule was looked up
 /// through.
-fn interpret_rule_definition<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_rule_definition<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     rule: &SourceAuthoredRule<'g>,
     name: &'g str,
     position: usize,
-) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
+) -> Result<NodeId, ParseFailure<'g>> {
     let raw = matches!(rule.trivia, TriviaMode::Raw);
     let start = if raw {
         position
@@ -3329,6 +3493,7 @@ fn interpret_rule_definition<'g, 's>(
             &lr_tails,
         );
     }
+    let children_from = context.arena.pending.len();
     let matched = interpret_expression(context, lookup, &[], &rule.expression, start, raw)?;
     let end = matched.end;
     if rule
@@ -3336,6 +3501,7 @@ fn interpret_rule_definition<'g, 's>(
         .iter()
         .any(|excluded| *excluded == &context.source[start..end])
     {
+        context.arena.pending.truncate(children_from);
         return Err(ParseFailure::expected_at_source(
             context.source,
             start,
@@ -3343,13 +3509,9 @@ fn interpret_rule_definition<'g, 's>(
             raw,
         ));
     }
-    Ok(RuleNode {
-        kind: RuleNodeKind::Rule { name },
-        span: Span::new(context.source_offset + start, context.source_offset + end),
-        text: &context.source[start..end],
-        children: matched.children,
-        binding_name: None,
-    })
+    Ok(context
+        .arena
+        .finish(RuleNodeKind::Rule { name }, start, end, children_from))
 }
 
 /// Detects direct left recursion in a rule body.
@@ -3435,8 +3597,8 @@ fn peel_self_reference<'g>(expr: &RuleExpression<'g>, rule_name: &str) -> Option
 }
 
 #[allow(clippy::too_many_arguments)]
-fn interpret_left_recursive_rule<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_left_recursive_rule<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     rule: &SourceAuthoredRule<'g>,
     name: &'g str,
@@ -3444,10 +3606,11 @@ fn interpret_left_recursive_rule<'g, 's>(
     raw: bool,
     non_lr_alts: &[&RuleExpression<'g>],
     lr_tails: &[LrTail<'_, 'g>],
-) -> Result<RuleNode<'g, 's>, ParseFailure<'g>> {
+) -> Result<NodeId, ParseFailure<'g>> {
     // Seed: match the first successful non-LR alternative.
     let mut accumulated: Option<ParseFailure<'g>> = None;
-    let mut seed: Option<ExpressionMatch<'g, 's>> = None;
+    let mut seed: Option<ExpressionMatch> = None;
+    let children_from = context.arena.pending.len();
     for alt in non_lr_alts {
         match interpret_expression(context, lookup, &[], alt, start, raw) {
             Ok(matched) => {
@@ -3468,16 +3631,12 @@ fn interpret_left_recursive_rule<'g, 's>(
         })
     })?;
     let mut current_end = seed.end;
-    let mut current_node = RuleNode {
-        kind: RuleNodeKind::Rule { name },
-        span: Span::new(
-            context.source_offset + start,
-            context.source_offset + current_end,
-        ),
-        text: &context.source[start..current_end],
-        children: seed.children,
-        binding_name: None,
-    };
+    let mut current_node = context.arena.finish(
+        RuleNodeKind::Rule { name },
+        start,
+        current_end,
+        children_from,
+    );
     // Grow: at each iteration try each LR tail at the current end and
     // wrap the previous match into a new rule node when an LR tail
     // extends. The tail's `binding` (from `name:expr` on the leading
@@ -3486,15 +3645,18 @@ fn interpret_left_recursive_rule<'g, 's>(
     loop {
         let mut grew = false;
         for (binding, tail) in lr_tails {
+            // The grown node's first child is the previous match, bound
+            // by the leading self-reference's `name:expr` label if any.
+            let children_from = context.arena.pending.len();
+            context.arena.pending.push(ChildLink {
+                node: current_node,
+                binding: *binding,
+            });
             let mut tail_end = current_end;
-            let mut tail_children = Vec::new();
             let mut tail_ok = true;
             for item in tail {
                 match interpret_expression(context, lookup, &[], item, tail_end, raw) {
-                    Ok(matched) => {
-                        tail_end = matched.end;
-                        tail_children.extend(matched.children);
-                    }
+                    Ok(matched) => tail_end = matched.end,
                     Err(_) => {
                         tail_ok = false;
                         break;
@@ -3502,25 +3664,17 @@ fn interpret_left_recursive_rule<'g, 's>(
                 }
             }
             if tail_ok && tail_end > current_end {
-                let mut prior = current_node.clone();
-                prior.binding_name = *binding;
-                let mut combined = Vec::with_capacity(tail_children.len() + 1);
-                combined.push(prior);
-                combined.extend(tail_children);
                 current_end = tail_end;
-                current_node = RuleNode {
-                    kind: RuleNodeKind::Rule { name },
-                    span: Span::new(
-                        context.source_offset + start,
-                        context.source_offset + current_end,
-                    ),
-                    text: &context.source[start..current_end],
-                    children: combined,
-                    binding_name: None,
-                };
+                current_node = context.arena.finish(
+                    RuleNodeKind::Rule { name },
+                    start,
+                    current_end,
+                    children_from,
+                );
                 grew = true;
                 break;
             }
+            context.arena.pending.truncate(children_from);
         }
         if !grew {
             break;
@@ -3574,16 +3728,38 @@ fn params_memo_key<'g>(params: &[ParamBinding<'_, 'g>]) -> Vec<ParamBindingMemoK
         .collect()
 }
 
-// Keep recursive dispatch small: a single match containing every interpreter
-// operation reserves a large debug-build stack frame even for leaf rules.
-fn interpret_expression<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+/// Matches `expression` at `position`.
+///
+/// On success the match's children are left on top of
+/// [`MatchArena::pending`]; on failure the pending stack is restored to
+/// the length it had on entry, so callers never see a failed attempt's
+/// children.
+fn interpret_expression<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
+    let children_from = context.arena.pending.len();
+    let result = match_expression(context, lookup, params, expression, position, raw);
+    if result.is_err() {
+        context.arena.pending.truncate(children_from);
+    }
+    result
+}
+
+// Keep recursive dispatch small: a single match containing every interpreter
+// operation reserves a large debug-build stack frame even for leaf rules.
+fn match_expression<'g>(
+    context: &mut ParseContext<'g, '_>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    expression: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
     match expression {
         RuleExpression::Rule(_) | RuleExpression::Super(_) => {
             interpret_reference(context, lookup, params, expression, position, raw)
@@ -3617,14 +3793,14 @@ fn interpret_expression<'g, 's>(
     }
 }
 
-fn interpret_reference<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_reference<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
     match expression {
         RuleExpression::Rule(name) => {
             // Inside a parametric body, a rule name that matches a
@@ -3651,9 +3827,9 @@ fn interpret_reference<'g, 's>(
                 failure.committed = false;
                 failure
             })?;
+            context.arena.push_child(node);
             Ok(ExpressionMatch {
-                end: node.span.end.saturating_sub(context.source_offset),
-                children: vec![node],
+                end: context.node_end(node),
                 committed: false,
             })
         }
@@ -3677,9 +3853,9 @@ fn interpret_reference<'g, 's>(
                     failure.committed = false;
                     failure
                 })?;
+            context.arena.push_child(node);
             Ok(ExpressionMatch {
-                end: node.span.end.saturating_sub(context.source_offset),
-                children: vec![node],
+                end: context.node_end(node),
                 committed: false,
             })
         }
@@ -3687,14 +3863,14 @@ fn interpret_reference<'g, 's>(
     }
 }
 
-fn interpret_atom<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_atom<'g>(
+    context: &mut ParseContext<'g, '_>,
     _lookup: RuleLookup<'_, 'g>,
     _params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
     match expression {
         RuleExpression::Literal(value) => {
             let start = if raw {
@@ -3714,15 +3890,11 @@ fn interpret_atom<'g, 's>(
                         raw,
                     )
                 })?;
+            context
+                .arena
+                .push_leaf(RuleNodeKind::Literal { value }, start, end);
             Ok(ExpressionMatch {
                 end,
-                children: vec![RuleNode {
-                    kind: RuleNodeKind::Literal { value },
-                    span: Span::new(context.source_offset + start, context.source_offset + end),
-                    text: &context.source[start..end],
-                    children: Vec::new(),
-                    binding_name: None,
-                }],
                 committed: false,
             })
         }
@@ -3741,15 +3913,11 @@ fn interpret_atom<'g, 's>(
                     )
                 })?;
             let end = start + ch.len_utf8();
+            context
+                .arena
+                .push_leaf(RuleNodeKind::CharacterClass { value }, start, end);
             Ok(ExpressionMatch {
                 end,
-                children: vec![RuleNode {
-                    kind: RuleNodeKind::CharacterClass { value },
-                    span: Span::new(context.source_offset + start, context.source_offset + end),
-                    text: &context.source[start..end],
-                    children: Vec::new(),
-                    binding_name: None,
-                }],
                 committed: false,
             })
         }
@@ -3762,18 +3930,13 @@ fn interpret_atom<'g, 's>(
                     literal_boundary_ok(context.source, end, value).then_some(start + index)
                 })
                 .unwrap_or(context.source.len());
+            context.arena.push_leaf(
+                RuleNodeKind::OpaqueRegion { delimiter: value },
+                start,
+                relative_end,
+            );
             Ok(ExpressionMatch {
                 end: relative_end,
-                children: vec![RuleNode {
-                    kind: RuleNodeKind::OpaqueRegion { delimiter: value },
-                    span: Span::new(
-                        context.source_offset + start,
-                        context.source_offset + relative_end,
-                    ),
-                    text: &context.source[start..relative_end],
-                    children: Vec::new(),
-                    binding_name: None,
-                }],
                 committed: false,
             })
         }
@@ -3781,25 +3944,23 @@ fn interpret_atom<'g, 's>(
     }
 }
 
-fn interpret_sequence<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_sequence<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
     match expression {
         RuleExpression::Sequence(items) => {
             let mut end = position;
-            let mut children = Vec::new();
             let mut committed = false;
             for item in items {
                 match interpret_expression(context, lookup, params, item, end, raw) {
                     Ok(matched) => {
                         committed |= matched.committed;
                         end = matched.end;
-                        children.extend(matched.children);
                     }
                     Err(mut failure) => {
                         failure.committed |= committed;
@@ -3807,24 +3968,20 @@ fn interpret_sequence<'g, 's>(
                     }
                 }
             }
-            Ok(ExpressionMatch {
-                end,
-                children,
-                committed,
-            })
+            Ok(ExpressionMatch { end, committed })
         }
         _ => unreachable!("expression dispatched to the matching interpreter"),
     }
 }
 
-fn interpret_choice<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_choice<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
     match expression {
         RuleExpression::Choice(items) => {
             let mut failure = None;
@@ -3833,7 +3990,6 @@ fn interpret_choice<'g, 's>(
                     Ok(matched) => {
                         return Ok(ExpressionMatch {
                             end: matched.end,
-                            children: matched.children,
                             committed: false,
                         });
                     }
@@ -3861,14 +4017,14 @@ fn interpret_choice<'g, 's>(
     }
 }
 
-fn interpret_repetition<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_repetition<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
     match expression {
         RuleExpression::Optional(item) => {
             // Cut commits bounded by the innermost choice; an Optional
@@ -3880,7 +4036,6 @@ fn interpret_repetition<'g, 's>(
                 }
                 Err(_) => Ok(ExpressionMatch {
                     end: position,
-                    children: Vec::new(),
                     committed: false,
                 }),
             }
@@ -3894,18 +4049,9 @@ fn interpret_repetition<'g, 's>(
                     failure.committed = false;
                     failure
                 })?;
-            let mut end = first.end;
-            let mut children = first.children;
-            while let Ok(matched) = interpret_expression(context, lookup, params, item, end, raw) {
-                if matched.end == end {
-                    break;
-                }
-                end = matched.end;
-                children.extend(matched.children);
-            }
+            let end = repeat_expression(context, lookup, params, item, first.end, raw);
             Ok(ExpressionMatch {
                 end,
-                children,
                 committed: false,
             })
         }
@@ -3913,18 +4059,9 @@ fn interpret_repetition<'g, 's>(
             // Repetition boundary contains the cut commit; iteration
             // failures are silently swallowed by the loop, so only success
             // propagation needs the explicit clear.
-            let mut end = position;
-            let mut children = Vec::new();
-            while let Ok(matched) = interpret_expression(context, lookup, params, item, end, raw) {
-                if matched.end == end {
-                    break;
-                }
-                end = matched.end;
-                children.extend(matched.children);
-            }
+            let end = repeat_expression(context, lookup, params, item, position, raw);
             Ok(ExpressionMatch {
                 end,
-                children,
                 committed: false,
             })
         }
@@ -3932,14 +4069,15 @@ fn interpret_repetition<'g, 's>(
     }
 }
 
-fn interpret_modifier<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_modifier<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
+    let children_from = context.arena.pending.len();
     match expression {
         RuleExpression::Transform { input, .. } => {
             interpret_expression(context, lookup, params, input, position, raw)
@@ -3953,9 +4091,9 @@ fn interpret_modifier<'g, 's>(
                     failure
                 },
             )?;
+            context.arena.pending.truncate(children_from);
             Ok(ExpressionMatch {
                 end: position,
-                children: Vec::new(),
                 committed: false,
             })
         }
@@ -3969,7 +4107,6 @@ fn interpret_modifier<'g, 's>(
                 )),
                 Err(_) => Ok(ExpressionMatch {
                     end: position,
-                    children: Vec::new(),
                     committed: false,
                 }),
             }
@@ -3981,32 +4118,24 @@ fn interpret_modifier<'g, 's>(
         }
         RuleExpression::Named { name, inner } => {
             let matched = interpret_expression(context, lookup, params, inner, position, raw)?;
-            let children = matched
-                .children
-                .into_iter()
-                .map(|mut child| {
-                    child.binding_name = Some(name);
-                    child
-                })
-                .collect();
-            Ok(ExpressionMatch {
-                end: matched.end,
-                children,
-                committed: matched.committed,
-            })
+            for child in &mut context.arena.pending[children_from..] {
+                child.binding = Some(name);
+            }
+            Ok(matched)
         }
         _ => unreachable!("expression dispatched to the matching interpreter"),
     }
 }
 
-fn interpret_application<'g, 's>(
-    context: &mut ParseContext<'g, 's>,
+fn interpret_application<'g>(
+    context: &mut ParseContext<'g, '_>,
     lookup: RuleLookup<'_, 'g>,
     params: &[ParamBinding<'_, 'g>],
     expression: &RuleExpression<'g>,
     position: usize,
     raw: bool,
-) -> Result<ExpressionMatch<'g, 's>, ParseFailure<'g>> {
+) -> Result<ExpressionMatch, ParseFailure<'g>> {
+    let children_from = context.arena.pending.len();
     match expression {
         RuleExpression::Apply { rule, args } => {
             // Switch the active lookup to the parametric target's
@@ -4040,7 +4169,14 @@ fn interpret_application<'g, 's>(
                     .get(position, &key, &mut context.metrics.memo_probes)
             {
                 context.metrics.memo_hits = context.metrics.memo_hits.saturating_add(1);
-                return result.clone();
+                return match result {
+                    Ok(applied) => {
+                        let ApplyMatch { matched, children } = applied.clone();
+                        context.arena.push_stored_links(children);
+                        Ok(matched)
+                    }
+                    Err(failure) => Err(failure.clone()),
+                };
             }
             context.metrics.memo_misses = context.metrics.memo_misses.saturating_add(1);
             let bindings: Vec<ParamBinding<'_, 'g>> = target
@@ -4062,10 +4198,44 @@ fn interpret_application<'g, 's>(
                 position,
                 raw,
             );
-            context.apply_memo.insert(position, key, result.clone());
+            let memoized = match &result {
+                Ok(matched) => Ok(ApplyMatch {
+                    matched: *matched,
+                    children: context.arena.store_links(children_from),
+                }),
+                Err(failure) => Err(failure.clone()),
+            };
+            context.apply_memo.insert(position, key, memoized);
             result
         }
         _ => unreachable!("expression dispatched to the matching interpreter"),
+    }
+}
+
+/// Matches `item` repeatedly from `position` until it fails or stops
+/// consuming input, leaving each consuming iteration's children pending.
+/// Returns the end of the last consuming iteration.
+fn repeat_expression<'g>(
+    context: &mut ParseContext<'g, '_>,
+    lookup: RuleLookup<'_, 'g>,
+    params: &[ParamBinding<'_, 'g>],
+    item: &RuleExpression<'g>,
+    position: usize,
+    raw: bool,
+) -> usize {
+    let mut end = position;
+    loop {
+        let children_from = context.arena.pending.len();
+        match interpret_expression(context, lookup, params, item, end, raw) {
+            Ok(matched) if matched.end != end => end = matched.end,
+            Ok(_) => {
+                // A non-consuming iteration ends the repetition and
+                // contributes no children.
+                context.arena.pending.truncate(children_from);
+                return end;
+            }
+            Err(_) => return end,
+        }
     }
 }
 
@@ -4590,6 +4760,32 @@ mod tests {
         assert!(grows_linearly(|metrics| metrics.memo_entries));
         assert!(grows_linearly(|metrics| metrics.memo_hits));
         assert!(grows_linearly(|metrics| metrics.memo_probes));
+        assert!(grows_linearly(|metrics| metrics.nodes_recorded));
+    }
+
+    #[test]
+    fn packrat_memo_hit_shares_the_recorded_subtree() {
+        // The second alternative reuses the whole `list` match. The hit
+        // must hand back the recorded nodes rather than copy them, so the
+        // parse records exactly the nodes of the returned tree.
+        let rules = parse_grammar_source(
+            "grammar tiny\n\
+             rule root = list `x` | list `y`\n\
+             rule list = item+\n\
+             rule item = [a]\n\
+             end\n",
+        );
+        let source = alloc::format!("{}y", "a".repeat(64));
+        let report = inspect_region(&rules, "root", &source, 0);
+
+        assert!(report.is_success());
+        assert_eq!(report.metrics.memo_hits, 1);
+        let root = report.root.expect("root matched");
+        let list = root.find_rule("list").expect("list child");
+        assert_eq!(list.children.len(), 64);
+        // 64 class leaves, 64 `item` nodes, `list`, `y`, and `root`.
+        assert_eq!(root.walk().count(), 64 + 64 + 3);
+        assert_eq!(report.metrics.nodes_recorded, root.walk().count());
     }
 
     #[test]
