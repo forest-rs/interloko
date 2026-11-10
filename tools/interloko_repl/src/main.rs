@@ -387,7 +387,7 @@ impl Repl {
         self.pending_definition.clear();
 
         let artifacts = self.compile_source(candidate_source, stderr, false)?;
-        if artifacts.diagnostics.is_empty() {
+        if !artifacts.has_errors() {
             candidate_buffer
                 .rebuild_from_form_spans(&artifacts.syntax.source, &artifacts.top_level_forms());
             self.source_buffer = candidate_buffer;
@@ -439,7 +439,7 @@ impl Repl {
             }
         };
         let artifacts = self.compile_source(source.clone(), stderr, false)?;
-        if !artifacts.diagnostics.is_empty() {
+        if artifacts.has_errors() {
             self.restore_accepted_cache()?;
             return Ok(());
         }
@@ -510,7 +510,7 @@ impl Repl {
             }
         };
         let artifacts = self.compile_source(source.clone(), stderr, false)?;
-        if !artifacts.diagnostics.is_empty() {
+        if artifacts.has_errors() {
             self.restore_accepted_cache()?;
             return Ok(());
         }
@@ -555,7 +555,7 @@ impl Repl {
     {
         let source = self.source_with_scratch(expression);
         let artifacts = self.compile_source(source, stderr, true)?;
-        if !artifacts.diagnostics.is_empty() {
+        if artifacts.has_errors() {
             return Ok(());
         }
 
@@ -1238,7 +1238,7 @@ impl Repl {
         };
         let candidate_source = candidate_buffer.rendered_source();
         let artifacts = self.compile_source(candidate_source, stderr, false)?;
-        if !artifacts.diagnostics.is_empty() {
+        if artifacts.has_errors() {
             self.restore_accepted_cache()?;
             return Ok(());
         }
