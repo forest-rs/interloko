@@ -575,6 +575,161 @@ impl Module {
     ) -> MethodSelection {
         select_method_for_classes_in_methods(&self.classes, &self.methods, generic, actuals)
     }
+
+    /// Returns the class metaobject for a built-in value class, when this
+    /// module's environment defines it.
+    #[must_use]
+    pub fn builtin_value_class(&self, kind: BuiltinValueClass) -> Option<ClassId> {
+        self.classes
+            .iter()
+            .find(|class| class.origin == ClassOrigin::BuiltinValue { kind })
+            .map(|class| class.id)
+    }
+
+    /// Returns the value category used for values whose runtime class is the
+    /// built-in value class `class`.
+    ///
+    /// Returns `None` for `<object>`, source classes, and host-backed classes,
+    /// whose values are categorized as [`ValueKind::Object`] or
+    /// [`ValueKind::Any`] by context rather than by class.
+    #[must_use]
+    pub fn builtin_value_kind(&self, class: ClassId) -> Option<ValueKind> {
+        match self.classes.get(class.0 as usize)?.origin {
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::String,
+            } => Some(ValueKind::String(class)),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Symbol,
+            } => Some(ValueKind::Symbol(class)),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Integer,
+            } => Some(ValueKind::I64),
+            // `<double-float>` is the only concrete float class, so a value
+            // typed `<float>` is represented as an f64 until `<single-float>`
+            // gives `<float>` a second representation to choose from.
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Float | BuiltinValueClass::DoubleFloat,
+            } => Some(ValueKind::F64),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Number | BuiltinValueClass::Real,
+            } => None,
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Vector,
+            } => Some(ValueKind::Vector(class)),
+            ClassOrigin::BuiltinValue {
+                kind:
+                    BuiltinValueClass::Class
+                    | BuiltinValueClass::GenericFunction
+                    | BuiltinValueClass::Method
+                    | BuiltinValueClass::SlotDescriptor,
+            } => Some(ValueKind::Object(class)),
+            ClassOrigin::ObjectRoot | ClassOrigin::Native | ClassOrigin::HostBacked { .. } => None,
+        }
+    }
+
+    /// Returns the nominal class that bounds every runtime value of `kind`.
+    ///
+    /// Returns `None` for categories without a class-shaped runtime
+    /// representation in this slice: [`ValueKind::Any`] (unbounded),
+    /// [`ValueKind::Bool`], callables, and [`ValueKind::Error`].
+    #[must_use]
+    pub fn value_kind_class(&self, kind: ValueKind) -> Option<ClassId> {
+        match kind {
+            ValueKind::Object(class)
+            | ValueKind::String(class)
+            | ValueKind::Symbol(class)
+            | ValueKind::Vector(class) => Some(class),
+            ValueKind::I64 => self.builtin_value_class(BuiltinValueClass::Integer),
+            ValueKind::F64 => self.builtin_value_class(BuiltinValueClass::DoubleFloat),
+            ValueKind::ClassObject(_) => self.builtin_value_class(BuiltinValueClass::Class),
+            ValueKind::GenericFunctionObject(_) => {
+                self.builtin_value_class(BuiltinValueClass::GenericFunction)
+            }
+            ValueKind::MethodObject(_) => self.builtin_value_class(BuiltinValueClass::Method),
+            ValueKind::SlotDescriptorObject { .. } => {
+                self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
+            }
+            ValueKind::Any
+            | ValueKind::Bool
+            | ValueKind::Callable
+            | ValueKind::KnownCallable(_)
+            | ValueKind::Error => None,
+        }
+    }
+
+    /// Returns the scalar value category of `expr`.
+    ///
+    /// This reads the categories semantic lowering already recorded on the
+    /// expression tree (call result contracts, refined local kinds, cast
+    /// targets) and does not re-check anything. Expressions that produce zero
+    /// or several values, and `if` expressions whose branches disagree, report
+    /// [`ValueKind::Error`].
+    #[must_use]
+    pub fn expr_kind(&self, expr: &Expr) -> ValueKind {
+        match expr {
+            Expr::ConstI64 { .. } => ValueKind::I64,
+            Expr::ConstF64 { .. } => ValueKind::F64,
+            Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
+            Expr::Convert { to, .. } => to.value_kind(),
+            Expr::FloatCall { builtin, .. } => builtin.result_kind(),
+            Expr::ConstBool { .. }
+            | Expr::Compare { .. }
+            | Expr::ValueEqual { .. }
+            | Expr::InstanceOf { .. } => ValueKind::Bool,
+            Expr::StringLiteral { class, .. } => ValueKind::String(*class),
+            Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
+            Expr::VectorLiteral { class, .. } => ValueKind::Vector(*class),
+            Expr::Values { result_kinds, .. }
+            | Expr::CallableCall { result_kinds, .. }
+            | Expr::Signal { result_kinds, .. } => scalar_result_kind(result_kinds),
+            Expr::Local { result_kind, .. }
+            | Expr::Capture { result_kind, .. }
+            | Expr::ConstantRef { result_kind, .. }
+            | Expr::Closure { result_kind, .. }
+            | Expr::IntrinsicCall { result_kind, .. }
+            | Expr::HostCall { result_kind, .. }
+            | Expr::AccessorCall { result_kind, .. }
+            | Expr::SlotWrite { result_kind, .. } => *result_kind,
+            Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
+                ValueKind::ClassObject(*class)
+            }
+            Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
+            Expr::GenericFunctionObject { generic, .. } => {
+                ValueKind::GenericFunctionObject(*generic)
+            }
+            Expr::DirectCall { function, .. } => self
+                .functions
+                .get(function.0 as usize)
+                .map_or(ValueKind::Error, |function| {
+                    scalar_result_kind(&function.result_kinds)
+                }),
+            Expr::GenericCall { generic, .. } => self
+                .generics
+                .get(generic.0 as usize)
+                .map_or(ValueKind::Error, |generic| {
+                    scalar_result_kind(&generic.result_kinds)
+                }),
+            Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
+            Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
+            Expr::Cast { class, .. } => self
+                .builtin_value_kind(*class)
+                .unwrap_or(ValueKind::Object(*class)),
+            Expr::MakeObject { class_id, .. } => ValueKind::Object(*class_id),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_kind = self.expr_kind(then_branch);
+                if then_kind == self.expr_kind(else_branch) {
+                    then_kind
+                } else {
+                    ValueKind::Error
+                }
+            }
+            Expr::Error { .. } => ValueKind::Error,
+        }
+    }
 }
 
 /// Returns whether instances of `class` are unboxed scalars: `<integer>`,
@@ -6807,6 +6962,44 @@ mod tests {
         let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         lower(&ast)
+    }
+
+    #[test]
+    fn module_reports_recorded_expression_kinds() {
+        let module = lower_source(
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define function widen() => <shape>\n  as(<shape>, make(<circle>))\nend;\n\
+             define function main()\n  if 1 < 2 then 3 else 4 end\nend;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let shape = module
+            .classes
+            .iter()
+            .find(|class| class.name == "<shape>")
+            .map(|class| class.id)
+            .expect("shape class");
+        let integer = module
+            .builtin_value_class(BuiltinValueClass::Integer)
+            .expect("integer class");
+
+        assert_eq!(
+            module.expr_kind(&module.functions[0].body.result),
+            ValueKind::Object(shape)
+        );
+        assert_eq!(
+            module.expr_kind(&module.functions[1].body.result),
+            ValueKind::I64
+        );
+        assert_eq!(module.value_kind_class(ValueKind::I64), Some(integer));
+        assert_eq!(module.builtin_value_kind(integer), Some(ValueKind::I64));
+        assert_eq!(module.value_kind_class(ValueKind::Any), None);
+        assert_eq!(module.builtin_value_kind(shape), None);
+        let double_float = module
+            .builtin_value_class(BuiltinValueClass::DoubleFloat)
+            .expect("double-float class");
+        assert_eq!(module.value_kind_class(ValueKind::F64), Some(double_float));
+        assert_eq!(module.builtin_value_kind(double_float), Some(ValueKind::F64));
     }
 
     fn lower_source_with_host_registry(source: &str, registry: &HostMetaRegistry) -> Module {
