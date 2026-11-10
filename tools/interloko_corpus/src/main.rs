@@ -10,7 +10,7 @@ use interloko_compiler::diagnostic::DiagnosticCode;
 use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
-    CompilerSession, DumpStage, IncrementalCompilerSession, RuntimeMode, RuntimeResult,
+    CompilerSession, DumpStage, FunctionValue, IncrementalCompilerSession, RuntimeMode,
 };
 use interloko_diagnostics::DiagnosticRenderer;
 
@@ -282,11 +282,50 @@ fn parse_host_slot_kind(path: &Path, line: usize, input: &str) -> Result<ValueKi
     }
 }
 
+/// Parses the Loko literal text of an expected `main` result.
+///
+/// The accepted spellings are exactly the ones [`FunctionValue`]'s `Display`
+/// produces, so a run expectation always names the value's type as well as
+/// its contents: `42` is an integer, `#t` a boolean, and `"42"` a string.
+fn parse_run_value(text: &str) -> Option<FunctionValue> {
+    match text {
+        "#t" => return Some(FunctionValue::Boolean(true)),
+        "#f" => return Some(FunctionValue::Boolean(false)),
+        _ => {}
+    }
+    if let Some(body) = text
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        let mut decoded = String::new();
+        let mut chars = body.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                decoded.push(ch);
+                continue;
+            }
+            match chars.next()? {
+                'n' => decoded.push('\n'),
+                't' => decoded.push('\t'),
+                '"' => decoded.push('"'),
+                '\\' => decoded.push('\\'),
+                _ => return None,
+            }
+        }
+        return Some(FunctionValue::String(decoded));
+    }
+    text.parse().ok().map(FunctionValue::Integer)
+}
+
 fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectation> {
     if let Some(value) = input.strip_prefix("run ") {
-        let value = value
-            .parse()
-            .map_err(|_| invalid_header(path, line, "run expectation must be an integer"))?;
+        let value = parse_run_value(value).ok_or_else(|| {
+            invalid_header(
+                path,
+                line,
+                "run expectation must be an integer, #t, #f, or a string literal",
+            )
+        })?;
         return Ok(Expectation::Run(value));
     }
 
@@ -352,7 +391,7 @@ fn check_case(case: &Case) -> Vec<String> {
     for expectation in &case.expectations {
         match expectation {
             Expectation::Run(expected) => match &artifacts.runtime_result {
-                Some(RuntimeResult::ReturnedI64(actual)) if actual == expected => {}
+                Some(actual) if actual.value() == Some(expected) => {}
                 Some(actual) => {
                     failures.push(format!("expected run result {expected}, got {actual}"))
                 }
@@ -506,7 +545,7 @@ enum Outcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Expectation {
-    Run(i64),
+    Run(FunctionValue),
     Diagnostics(usize),
     DiagnosticContains(String),
     DiagnosticCode(DiagnosticCode),

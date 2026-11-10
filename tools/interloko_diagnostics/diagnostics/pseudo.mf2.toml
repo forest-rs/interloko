@@ -80,4 +80,6 @@
 "runtime.trap" = "[ps] runtime trapped"
 "runtime.main-returned-non-i64" = "[ps] main returned non-integer"
 "runtime.function-returned-non-i64" = "[ps] requested function returned non-integer"
+"runtime.host-function-failed" = "[ps] host function failed"
+"runtime.unsupported-result" = "[ps] main returned unsupported value"
 "session.unknown-source" = "[ps] source file id unknown"

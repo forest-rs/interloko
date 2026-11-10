@@ -12,7 +12,10 @@ Each program declares its expectations in leading comments:
 
 Supported expectations:
 
-- `run N`: compile and run zero-argument `main`, expecting integer `N`.
+- `run VALUE`: compile and run zero-argument `main`, expecting the scalar
+  `VALUE` written as Loko literal text: `42` (integer), `#t`/`#f` (boolean),
+  or `"text"` (string, with `\n`, `\t`, `\"`, and `\\` escapes). The literal
+  form names the type, so `run 42` does not match a string `"42"`.
 - `diagnostics N`: expect exactly `N` diagnostics.
 - `diagnostic contains TEXT`: expect at least one diagnostic whose message
   contains `TEXT`.

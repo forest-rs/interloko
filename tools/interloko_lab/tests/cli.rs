@@ -193,6 +193,14 @@ fn run_executes_main() {
 }
 
 #[test]
+fn run_prints_typed_scalar_results() {
+    let file = fixture("string_main.loko");
+    let out = run_lab(&["run", file.to_str().expect("fixture path should be utf8")]);
+
+    assert_eq!(out.trim(), "\"glasshouse\"");
+}
+
+#[test]
 fn run_and_trace_commands_expose_execution_trace() {
     let file = fixture("generic_area.loko");
     let path = file.to_str().expect("fixture path should be utf8");
