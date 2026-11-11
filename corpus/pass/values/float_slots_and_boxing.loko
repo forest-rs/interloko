@@ -1,0 +1,18 @@
+// expect: run #t
+// expect: diagnostics 0
+// expect: dump lowered contains box.any
+// expect: dump tape contains interloko.box_value
+
+define class <reading> (<object>)
+  slot celsius :: <float>;
+  slot raw;
+end;
+
+define function is-float?(x :: <object>) => <boolean>
+  instance?(x, <float>)
+end;
+
+define function main() => <boolean>
+  let reading = make(<reading>, celsius: 21.5, raw: 21.5);
+  if is-float?(reading.raw) then is-float?(reading.celsius) else #f end
+end;

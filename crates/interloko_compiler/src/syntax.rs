@@ -73,7 +73,8 @@ pub enum TokenKind {
     End,
     /// User identifier.
     Ident,
-    /// Base-10 integer literal.
+    /// Base-10 numeric literal: an integer such as `42`, or a float with a
+    /// fraction and/or exponent such as `1.5`, `2e10`, or `6.02e-23`.
     Number,
     /// Boolean literal, currently `#t` or `#f`.
     Bool,
@@ -836,10 +837,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                 TokenKind::Whitespace
             }
             b if b.is_ascii_digit() => {
-                pos += 1;
-                while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                    pos += 1;
-                }
+                pos = lex_number_end(bytes, pos);
                 TokenKind::Number
             }
             b if is_ident_start(b) => {
@@ -881,6 +879,35 @@ pub fn lex(source: &str) -> Vec<Token> {
     tokens
 }
 
+/// Returns the end of the numeric literal starting at `start`.
+///
+/// Mirrors the base grammar's `number` rule: digits, then an optional
+/// fraction that must have digits on both sides of the `.` (so `x.radius`
+/// style postfix access after a number never becomes part of the literal),
+/// then an optional exponent that must contain at least one digit.
+fn lex_number_end(bytes: &[u8], start: usize) -> usize {
+    let digits_end = |mut pos: usize| {
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        pos
+    };
+    let mut pos = digits_end(start);
+    if bytes.get(pos) == Some(&b'.') && bytes.get(pos + 1).is_some_and(u8::is_ascii_digit) {
+        pos = digits_end(pos + 1);
+    }
+    if matches!(bytes.get(pos), Some(b'e' | b'E')) {
+        let mut exponent = pos + 1;
+        if matches!(bytes.get(exponent), Some(b'+' | b'-')) {
+            exponent += 1;
+        }
+        if bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
+            pos = digits_end(exponent);
+        }
+    }
+    pos
+}
+
 fn is_ident_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$'
 }
@@ -915,6 +942,7 @@ fn is_ident_continue(bytes: &[u8], pos: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     #[test]
     fn lex_preserves_trivia_and_keywords() {
@@ -932,5 +960,24 @@ mod tests {
         );
         assert_eq!(tokens[0].kind, TokenKind::Define);
         assert_eq!(tokens[2].kind, TokenKind::Function);
+    }
+
+    #[test]
+    fn lex_numbers_take_fractions_and_exponents_only_when_complete() {
+        let numbers = |source: &str| {
+            lex(source)
+                .into_iter()
+                .filter(|token| token.kind == TokenKind::Number)
+                .map(|token| token.text(source).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            numbers("42 1.5 2e10 6.02E-23 7e+2"),
+            ["42", "1.5", "2e10", "6.02E-23", "7e+2"]
+        );
+        assert_eq!(numbers("1.x"), ["1"]);
+        assert_eq!(numbers("3.e4"), ["3"]);
+        assert_eq!(numbers("4e"), ["4"]);
+        assert_eq!(numbers("5e-x"), ["5"]);
     }
 }

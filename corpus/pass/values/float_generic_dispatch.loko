@@ -1,0 +1,14 @@
+// expect: run 2.5
+// expect: diagnostics 0
+// expect: dump sem contains <float>
+// expect: dump lowered contains scale#dispatch
+
+define generic scale(x :: <float>) => <float>;
+
+define method scale(x :: <float>) => <float>
+  x
+end;
+
+define function main() => <float>
+  scale(2.5)
+end;

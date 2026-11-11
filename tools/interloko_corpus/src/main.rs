@@ -286,7 +286,8 @@ fn parse_host_slot_kind(path: &Path, line: usize, input: &str) -> Result<ValueKi
 ///
 /// The accepted spellings are exactly the ones [`FunctionValue`]'s `Display`
 /// produces, so a run expectation always names the value's type as well as
-/// its contents: `42` is an integer, `#t` a boolean, and `"42"` a string.
+/// its contents: `42` is an integer, `42.0` a float, `#t` a boolean, and
+/// `"42"` a string. Floats also accept `inf`, `-inf`, and `nan`.
 fn parse_run_value(text: &str) -> Option<FunctionValue> {
     match text {
         "#t" => return Some(FunctionValue::Boolean(true)),
@@ -314,7 +315,25 @@ fn parse_run_value(text: &str) -> Option<FunctionValue> {
         }
         return Some(FunctionValue::String(decoded));
     }
+    match text {
+        "inf" => return Some(FunctionValue::Float(f64::INFINITY)),
+        "-inf" => return Some(FunctionValue::Float(f64::NEG_INFINITY)),
+        "nan" => return Some(FunctionValue::Float(f64::NAN)),
+        _ => {}
+    }
+    if text.contains(['.', 'e', 'E']) {
+        return text.parse().ok().map(FunctionValue::Float);
+    }
     text.parse().ok().map(FunctionValue::Integer)
+}
+
+/// Compares a run result with its expectation by literal identity.
+///
+/// Rendered literal text distinguishes value types and, for floats, compares
+/// exact values rather than IEEE equality: `nan` matches a NaN result and
+/// `-0.0` does not match `0.0`.
+fn run_value_matches(actual: &FunctionValue, expected: &FunctionValue) -> bool {
+    actual.kind() == expected.kind() && actual.to_string() == expected.to_string()
 }
 
 fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectation> {
@@ -323,7 +342,7 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
             invalid_header(
                 path,
                 line,
-                "run expectation must be an integer, #t, #f, or a string literal",
+                "run expectation must be an integer, float, #t, #f, or a string literal",
             )
         })?;
         return Ok(Expectation::Run(value));
@@ -391,7 +410,10 @@ fn check_case(case: &Case) -> Vec<String> {
     for expectation in &case.expectations {
         match expectation {
             Expectation::Run(expected) => match &artifacts.runtime_result {
-                Some(actual) if actual.value() == Some(expected) => {}
+                Some(actual)
+                    if actual
+                        .value()
+                        .is_some_and(|actual| run_value_matches(actual, expected)) => {}
                 Some(actual) => {
                     failures.push(format!("expected run result {expected}, got {actual}"))
                 }
@@ -543,7 +565,7 @@ enum Outcome {
     CheckFailed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Expectation {
     Run(FunctionValue),
     Diagnostics(usize),
@@ -552,7 +574,7 @@ enum Expectation {
     DumpContains { stage: DumpStage, text: String },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Case {
     display_path: String,
     source: String,

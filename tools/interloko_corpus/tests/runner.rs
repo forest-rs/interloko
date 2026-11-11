@@ -117,7 +117,9 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/syntax/comments_and_doc_comments.loko"));
     assert!(out.contains("pass/values/typed_run_results.loko"));
     assert!(out.contains("pass/values/boolean_run_result.loko"));
-    assert!(out.contains("corpus: 171 passed, 0 failed, 171 total"));
+    assert!(out.contains("pass/values/float_literals.loko"));
+    assert!(out.contains("fail/values/float_literal_out_of_range.loko"));
+    assert!(out.contains("corpus: 177 passed, 0 failed, 177 total"));
 }
 
 #[test]

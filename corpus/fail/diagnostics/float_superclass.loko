@@ -1,0 +1,9 @@
+// expect: diagnostics 1
+// expect: diagnostic contains class `<celsius>` cannot inherit from primitive `<float>`
+
+define class <celsius> (<float>)
+end;
+
+define function main()
+  0
+end;

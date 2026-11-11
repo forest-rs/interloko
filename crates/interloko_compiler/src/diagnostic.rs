@@ -26,6 +26,8 @@ pub enum DiagnosticCode {
     SyntaxExpectedToken,
     /// An integer literal does not fit in the supported integer range.
     AstIntegerLiteralOutOfRange,
+    /// A float literal is too large to be represented as a finite `f64`.
+    AstFloatLiteralOutOfRange,
     /// A string literal is unterminated or contains an unsupported escape.
     AstMalformedStringLiteral,
     /// A slot option is missing its keyword value.
@@ -195,6 +197,7 @@ impl DiagnosticCode {
         Self::SyntaxExpectedExpression,
         Self::SyntaxExpectedToken,
         Self::AstIntegerLiteralOutOfRange,
+        Self::AstFloatLiteralOutOfRange,
         Self::AstMalformedStringLiteral,
         Self::AstSlotOptionRequiresKeyword,
         Self::AstSlotInitValueRequiresExpression,
@@ -285,6 +288,7 @@ impl DiagnosticCode {
             Self::SyntaxExpectedExpression => "syntax.expected-expression",
             Self::SyntaxExpectedToken => "syntax.expected-token",
             Self::AstIntegerLiteralOutOfRange => "ast.integer-literal-out-of-range",
+            Self::AstFloatLiteralOutOfRange => "ast.float-literal-out-of-range",
             Self::AstMalformedStringLiteral => "ast.malformed-string-literal",
             Self::AstSlotOptionRequiresKeyword => "ast.slot-option-requires-keyword",
             Self::AstSlotInitValueRequiresExpression => "ast.slot-init-value-requires-expression",
@@ -378,6 +382,7 @@ impl DiagnosticCode {
             "syntax.expected-expression" => Self::SyntaxExpectedExpression,
             "syntax.expected-token" => Self::SyntaxExpectedToken,
             "ast.integer-literal-out-of-range" => Self::AstIntegerLiteralOutOfRange,
+            "ast.float-literal-out-of-range" => Self::AstFloatLiteralOutOfRange,
             "ast.malformed-string-literal" => Self::AstMalformedStringLiteral,
             "ast.slot-option-requires-keyword" => Self::AstSlotOptionRequiresKeyword,
             "ast.slot-init-value-requires-expression" => Self::AstSlotInitValueRequiresExpression,

@@ -13,9 +13,12 @@ Each program declares its expectations in leading comments:
 Supported expectations:
 
 - `run VALUE`: compile and run zero-argument `main`, expecting the scalar
-  `VALUE` written as Loko literal text: `42` (integer), `#t`/`#f` (boolean),
-  or `"text"` (string, with `\n`, `\t`, `\"`, and `\\` escapes). The literal
-  form names the type, so `run 42` does not match a string `"42"`.
+  `VALUE` written as Loko literal text: `42` (integer), `42.0` or `4.2e1`
+  (float; also `inf`, `-inf`, `nan`), `#t`/`#f` (boolean), or `"text"`
+  (string, with `\n`, `\t`, `\"`, and `\\` escapes). The literal form names
+  the type, so `run 42` does not match a string `"42"` or a float `42.0`.
+  Floats match by exact value: `run nan` matches any NaN and `run -0.0`
+  does not match `0.0`.
 - `diagnostics N`: expect exactly `N` diagnostics.
 - `diagnostic contains TEXT`: expect at least one diagnostic whose message
   contains `TEXT`.

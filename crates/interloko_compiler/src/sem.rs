@@ -12,7 +12,7 @@ use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::Span;
 
 pub use interloko_model::{
-    BuiltinValueClass, ClassId, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
+    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
 };
 
 /// Durable direct function identifier within a semantic module.
@@ -96,6 +96,8 @@ pub enum ValueKind {
     Any,
     /// Signed integer value.
     I64,
+    /// IEEE 754 binary64 float value corresponding to source `<float>`.
+    F64,
     /// Boolean value.
     Bool,
     /// Runtime string object.
@@ -343,6 +345,8 @@ impl HostFunction {
 pub enum HostValueKind {
     /// Signed 64-bit integer.
     Integer,
+    /// IEEE 754 binary64 float.
+    Float,
     /// Boolean value.
     Boolean,
     /// Owned UTF-8 string value.
@@ -1209,6 +1213,13 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Float constant.
+    ConstF64 {
+        /// Constant value, compared by bit pattern.
+        value: FloatBits,
+        /// Source span.
+        span: Span,
+    },
     /// Boolean constant.
     ConstBool {
         /// Constant value.
@@ -1527,6 +1538,7 @@ impl Expr {
     pub const fn span(&self) -> Span {
         match self {
             Self::ConstI64 { span, .. }
+            | Self::ConstF64 { span, .. }
             | Self::ConstBool { span, .. }
             | Self::StringLiteral { span, .. }
             | Self::SymbolLiteral { span, .. }
@@ -1905,6 +1917,7 @@ impl Lowering {
     fn resolve_host_value_kind(&self, kind: HostValueKind) -> ValueKind {
         match kind {
             HostValueKind::Integer => ValueKind::I64,
+            HostValueKind::Float => ValueKind::F64,
             HostValueKind::Boolean => ValueKind::Bool,
             HostValueKind::String => ValueKind::String(
                 self.builtin_value_class(BuiltinValueClass::String)
@@ -2466,6 +2479,7 @@ impl Lowering {
                             | ValueKind::String(_)
                             | ValueKind::Symbol(_)
                             | ValueKind::I64
+                            | ValueKind::F64
                             | ValueKind::Vector(_)
                             | ValueKind::Error
                     )
@@ -3747,6 +3761,10 @@ impl Lowering {
                 value: *value,
                 span: *span,
             },
+            ast::Expr::Float { value, span, .. } => Expr::ConstF64 {
+                value: *value,
+                span: *span,
+            },
             ast::Expr::Bool { value, span, .. } => Expr::ConstBool {
                 value: *value,
                 span: *span,
@@ -4521,6 +4539,7 @@ impl Lowering {
                 actual,
                 ValueKind::Any
                     | ValueKind::I64
+                    | ValueKind::F64
                     | ValueKind::String(_)
                     | ValueKind::Symbol(_)
                     | ValueKind::Vector(_)
@@ -5119,6 +5138,7 @@ impl Lowering {
             | ValueKind::Symbol(_)
             | ValueKind::Vector(_)
             | ValueKind::I64
+            | ValueKind::F64
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -5177,6 +5197,7 @@ impl Lowering {
             | ValueKind::Symbol(_)
             | ValueKind::Vector(_)
             | ValueKind::I64
+            | ValueKind::F64
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -5508,6 +5529,7 @@ impl Lowering {
     fn expr_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
             Expr::ConstI64 { .. } | Expr::Binary { .. } => ValueKind::I64,
+            Expr::ConstF64 { .. } => ValueKind::F64,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
             Expr::VectorLiteral { class, .. } => ValueKind::Vector(*class),
@@ -5708,6 +5730,9 @@ impl Lowering {
                 kind: BuiltinValueClass::Integer,
             } => Some(ValueKind::I64),
             ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Float,
+            } => Some(ValueKind::F64),
+            ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
             } => Some(ValueKind::Vector(class)),
             ClassOrigin::BuiltinValue {
@@ -5727,6 +5752,7 @@ impl Lowering {
                 Some(class)
             }
             ValueKind::I64 => self.builtin_value_class(BuiltinValueClass::Integer),
+            ValueKind::F64 => self.builtin_value_class(BuiltinValueClass::Float),
             ValueKind::Object(class) => Some(class),
             ValueKind::ClassObject(_) => self.builtin_value_class(BuiltinValueClass::Class),
             ValueKind::GenericFunctionObject(_) => {
@@ -5960,6 +5986,7 @@ impl Lowering {
                 .builtin_value_class(BuiltinValueClass::Symbol)
                 .map_or(ValueKind::Error, ValueKind::Symbol),
             "<integer>" => ValueKind::I64,
+            "<float>" => ValueKind::F64,
             "<callable>" => ValueKind::Callable,
             "<vector>" => self
                 .builtin_value_class(BuiltinValueClass::Vector)
@@ -6020,9 +6047,9 @@ impl Lowering {
             ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
                 self.is_same_or_subclass(specializer, class)
             }
-            ValueKind::I64 => self
+            ValueKind::I64 | ValueKind::F64 => self
                 .kind_for_builtin_class(specializer)
-                .is_some_and(|kind| kind == ValueKind::I64),
+                .is_some_and(|kind| kind == expected),
             ValueKind::Bool
             | ValueKind::Callable
             | ValueKind::ClassObject(_)
@@ -6065,6 +6092,7 @@ impl Lowering {
                 ValueKind::Callable | ValueKind::KnownCallable(_) | ValueKind::Error
             ),
             ValueKind::I64
+            | ValueKind::F64
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
@@ -6086,6 +6114,7 @@ impl Lowering {
         match kind {
             ValueKind::Any => "<object>".into(),
             ValueKind::I64 => "<integer>".into(),
+            ValueKind::F64 => "<float>".into(),
             ValueKind::Bool => "<boolean>".into(),
             ValueKind::Callable => "<callable>".into(),
             ValueKind::String(_) => "<string>".into(),
