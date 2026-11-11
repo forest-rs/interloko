@@ -669,6 +669,22 @@ pub enum Instr {
         dst: Register,
         /// Object register.
         object: Register,
+        /// Input kind: a runtime object or a boxed top `<object>` value.
+        input: ValueKind,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime checked unboxing of an integer or float from a boxed top
+    /// `<object>` value; traps unless the value is an instance of `class`.
+    UnboxValue {
+        /// Destination register.
+        dst: Register,
+        /// Boxed value register.
+        value: Register,
+        /// Class the boxed value must belong to.
+        class: sem::ClassId,
+        /// Unboxed result kind, `i64` or `f64`.
+        kind: ValueKind,
         /// Source span.
         span: Span,
     },
@@ -868,7 +884,7 @@ impl<'module> Lowering<'module> {
         }
         for generic in &module.generics {
             ids.generics.push(FunctionId(next));
-            let signature = generic_callable_signature(generic)?;
+            let signature = generic_callable_signature(module, generic)?;
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.generic_sigs.push(sig);
             next = next.saturating_add(1);
@@ -1180,7 +1196,7 @@ impl<'module> Lowering<'module> {
             .ok_or_else(|| invalid_semantic("generic closure thunk id is out of range"))?;
         let target = self.lower_generic_id(generic.id)?;
         let params = (0..generic.arity)
-            .map(|index| dispatcher_param_kind(generic, index))
+            .map(|index| dispatcher_param_kind(self.module, generic, index))
             .collect::<Vec<_>>();
         self.lower_known_callable_thunk(KnownCallableThunk {
             id,
@@ -1654,11 +1670,12 @@ fn accessor_callable_signature(
 }
 
 fn generic_callable_signature(
+    module: &sem::Module,
     generic: &sem::GenericFunction,
 ) -> Result<CallableSignature, LowerError> {
     Ok(CallableSignature {
         params: (0..generic.arity)
-            .map(|index| dispatcher_param_kind(generic, index))
+            .map(|index| dispatcher_param_kind(module, generic, index))
             .collect(),
         rets: generic
             .result_kinds
@@ -1797,7 +1814,7 @@ impl<'module> BodyLowering<'module> {
             .map(|(index, name)| Param {
                 source: None,
                 name: name.clone(),
-                kind: dispatcher_param_kind(generic, index),
+                kind: dispatcher_param_kind(module, generic, index),
                 reg: input_register(index),
             })
             .collect();
@@ -2000,7 +2017,7 @@ impl<'module> BodyLowering<'module> {
                     .ok_or_else(|| invalid_semantic("method parameter local id is out of range"))?;
                 let value = Value {
                     reg: input_register(index),
-                    kind: dispatcher_param_kind(generic, index),
+                    kind: dispatcher_param_kind(self.module, generic, index),
                     reachable: true,
                 };
                 let value = self.coerce_value(value, self.value_kind(local.kind)?, method.span)?;
@@ -2096,6 +2113,7 @@ impl<'module> BodyLowering<'module> {
         self.instructions.push(Instr::ClassOf {
             dst: class_reg.reg,
             object: input_register(index),
+            input: dispatcher_param_kind(self.module, generic, index),
             span,
         });
         for class in applicable {
@@ -2442,6 +2460,7 @@ impl<'module> BodyLowering<'module> {
                     self.instructions.push(Instr::ClassOf {
                         dst: class_id.reg,
                         object: object.reg,
+                        input: object.kind,
                         span: *span,
                     });
                     self.instructions.push(Instr::RuntimeCall {
@@ -2488,8 +2507,16 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::Cast { value, class, span } => {
                 let value = self.lower_expr(value)?;
+                if *class == sem::OBJECT_CLASS_ID {
+                    return self.box_any(value, *span);
+                }
                 if is_scalar_value_class(self.module, value.kind, *class) {
                     return Ok(value);
+                }
+                if value.kind == ValueKind::Any
+                    && let Some(kind) = scalar_kind_for_class(self.module, *class)
+                {
+                    return Ok(self.unbox(value, *class, kind, *span));
                 }
                 if let ValueKind::Object(Some(actual)) = value.kind
                     && self.module.is_same_or_subclass(actual, *class)
@@ -3499,24 +3526,24 @@ impl<'module> BodyLowering<'module> {
         let mut lowered = Vec::with_capacity(args.len());
         for (index, (arg, expected)) in args.iter().zip(&generic.param_kinds).enumerate() {
             let value = self.lower_expr(arg)?;
-            let value = if let Some(expected) = *expected {
-                let expected = if expected == sem::ValueKind::Any
-                    && generic.dispatch_params.contains(&index)
+            let target = dispatcher_param_kind(self.module, generic, index);
+            let dispatched = generic.dispatch_params.contains(&index);
+            let value = match *expected {
+                Some(sem::ValueKind::Any) if dispatched => {
+                    self.coerce_value(value, target, arg.span())?
+                }
+                Some(expected) => {
+                    let expected = self.value_kind(expected)?;
+                    self.coerce_value(value, expected, arg.span())?
+                }
+                // Unannotated parameters keep their legacy pass-through for
+                // non-object values unless the parameter carries boxed values.
+                None if target == ValueKind::Any
+                    || (dispatched && matches!(value.kind, ValueKind::Object(_))) =>
                 {
-                    ValueKind::Object(None)
-                } else {
-                    self.value_kind(expected)?
-                };
-                self.coerce_value(value, expected, arg.span())?
-            } else if generic.dispatch_params.contains(&index)
-                && matches!(
-                    value.kind,
-                    ValueKind::Object(Some(_)) | ValueKind::Object(None)
-                )
-            {
-                self.coerce_value(value, ValueKind::Object(None), arg.span())?
-            } else {
-                value
+                    self.coerce_value(value, target, arg.span())?
+                }
+                None => value,
             };
             lowered.push(value.reg);
         }
@@ -3591,6 +3618,11 @@ impl<'module> BodyLowering<'module> {
         if expected == ValueKind::Any {
             return self.box_any(value, span);
         }
+        if value.kind == ValueKind::Any
+            && let Some(class) = scalar_concrete_class(self.module, expected)
+        {
+            return Ok(self.unbox(value, class, expected, span));
+        }
         if matches!(value.kind, ValueKind::Any | ValueKind::Object(None))
             && let ValueKind::Object(Some(class)) = expected
         {
@@ -3607,6 +3639,18 @@ impl<'module> BodyLowering<'module> {
         Err(invalid_semantic(
             "semantic type checking allowed an invalid lowered coercion",
         ))
+    }
+
+    fn unbox(&mut self, value: Value, class: sem::ClassId, kind: ValueKind, span: Span) -> Value {
+        let result = self.alloc(kind);
+        self.instructions.push(Instr::UnboxValue {
+            dst: result.reg,
+            value: value.reg,
+            class,
+            kind,
+            span,
+        });
+        result
     }
 
     fn box_any(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
@@ -3886,11 +3930,19 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
     }
 }
 
-fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueKind {
+/// Returns the lowered kind of generic parameter `index` as dispatchers and
+/// callers see it. `<object>` and unannotated dispatch parameters carry raw
+/// object handles unless [`sem::Module::generic_param_boxes_scalars`] says
+/// integers or floats may apply, in which case they carry boxed values.
+fn dispatcher_param_kind(
+    module: &sem::Module,
+    generic: &sem::GenericFunction,
+    index: usize,
+) -> ValueKind {
+    let object_handle = generic.dispatch_params.contains(&index)
+        && !module.generic_param_boxes_scalars(generic.id, index);
     match generic.param_kinds.get(index).copied().flatten() {
-        Some(sem::ValueKind::Any) if generic.dispatch_params.contains(&index) => {
-            ValueKind::Object(None)
-        }
+        Some(sem::ValueKind::Any) if object_handle => ValueKind::Object(None),
         Some(sem::ValueKind::Any) => ValueKind::Any,
         Some(
             sem::ValueKind::Object(class)
@@ -3902,9 +3954,32 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueK
         Some(sem::ValueKind::F64) => ValueKind::F64,
         Some(sem::ValueKind::Bool) => ValueKind::Bool,
         Some(sem::ValueKind::Callable) => ValueKind::Closure(None),
-        None if generic.dispatch_params.contains(&index) => ValueKind::Object(None),
+        None if object_handle => ValueKind::Object(None),
         None => ValueKind::Any,
         Some(_) => ValueKind::Object(None),
+    }
+}
+
+/// Returns the unboxed scalar kind whose values `class` describes: `i64`
+/// for `<integer>`, `f64` for `<float>` and `<double-float>`.
+fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<ValueKind> {
+    match module.classes.get(class.0 as usize)?.origin {
+        sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::Integer,
+        } => Some(ValueKind::I64),
+        sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::Float | sem::BuiltinValueClass::DoubleFloat,
+        } => Some(ValueKind::F64),
+        _ => None,
+    }
+}
+
+/// Returns the concrete built-in class of the unboxed scalar kind `kind`.
+fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::ClassId> {
+    match kind {
+        ValueKind::I64 => builtin_class(module, sem::BuiltinValueClass::Integer),
+        ValueKind::F64 => builtin_class(module, sem::BuiltinValueClass::DoubleFloat),
+        _ => None,
     }
 }
 
@@ -4357,8 +4432,23 @@ impl Module {
                 self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
-            Instr::ClassOf { dst, object, span } => {
+            Instr::ClassOf {
+                dst, object, span, ..
+            } => {
                 write!(f, "  {dst} = class_of {object}")?;
+                fmt_span(f, *span)
+            }
+            Instr::UnboxValue {
+                dst,
+                value,
+                class,
+                kind,
+                span,
+            } => {
+                write!(f, "  {dst} = unbox ")?;
+                self.fmt_class(f, *class)?;
+                write!(f, ", {value}: ")?;
+                self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
             Instr::InstanceOf {

@@ -1,0 +1,13 @@
+// expect: run 2.5
+// expect: diagnostics 0
+// expect: dump lowered contains unbox <double-float>
+// expect: dump tape contains interloko.unbox_value
+
+// `as` unboxes a float from `<object>` after checking its class.
+define function unbox(x :: <object>) => <float>
+  as(<double-float>, x)
+end;
+
+define function main() => <float>
+  unbox(2.5)
+end;

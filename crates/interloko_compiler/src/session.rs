@@ -4674,6 +4674,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
         sem::Expr::CallableCall { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
         sem::Expr::Signal { result_kinds, .. } => sem_scalar_result_kind(result_kinds),
         sem::Expr::Handle { restart, .. } => sem_scalar_result_kind(&restart.result_kinds),
+        sem::Expr::Cast { class, .. } if *class == sem::OBJECT_CLASS_ID => sem::ValueKind::Any,
         sem::Expr::Cast { class, .. } => sem_builtin_value_kind_for_class(module, *class)
             .unwrap_or(sem::ValueKind::Object(*class)),
         sem::Expr::MakeObject {
@@ -13491,6 +13492,26 @@ mod tests {
                 "{input} should trap"
             );
         }
+    }
+
+    #[test]
+    fn unboxing_checks_the_boxed_class() {
+        let artifacts = CompilerSession::compile_source(
+            "unbox.loko",
+            "define function as-float(x :: <object>) => <float>\n  as(<float>, x)\nend;\n\
+             define function from-integer() => <float>\n  as-float(as(<object>, 7))\nend;\n\
+             define function from-float() => <float>\n  as-float(as(<object>, 7.5))\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        assert_eq!(
+            run_scalar(&artifacts, "from-float").ok(),
+            Some(FunctionValue::Float(7.5))
+        );
+        assert!(matches!(
+            run_scalar(&artifacts, "from-integer"),
+            Err(FunctionCallError::Trap { .. })
+        ));
     }
 
     struct CelsiusHandler;

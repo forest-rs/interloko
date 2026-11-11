@@ -130,7 +130,10 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/mop/staged_float_calculator.loko"));
     assert!(out.contains("pass/mop/numeric_class_hierarchy.loko"));
     assert!(out.contains("fail/diagnostics/abstract_numeric_annotation.loko"));
-    assert!(out.contains("corpus: 200 passed, 0 failed, 200 total"));
+    assert!(out.contains("pass/generics/scalar_unannotated_generic.loko"));
+    assert!(out.contains("pass/values/float_unbox_cast.loko"));
+    assert!(out.contains("pass/values/float_box_cast.loko"));
+    assert!(out.contains("corpus: 205 passed, 0 failed, 205 total"));
 }
 
 #[test]

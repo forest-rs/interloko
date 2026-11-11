@@ -543,6 +543,23 @@ impl Module {
         method_applies_to_classes_in_classes(&self.classes, method, actuals)
     }
 
+    /// Returns whether generic parameter `index` carries boxed `<object>`
+    /// values, so integer and float arguments are boxed at calls and the
+    /// dispatcher tests their classes. Otherwise an `<object>` or
+    /// unannotated parameter carries raw runtime-object handles.
+    #[must_use]
+    pub fn generic_param_boxes_scalars(&self, generic: GenericFunctionId, index: usize) -> bool {
+        self.generics
+            .get(generic.0 as usize)
+            .is_some_and(|generic| {
+                let methods = self
+                    .methods
+                    .iter()
+                    .map(|method| (method.generic, method.specializers.as_slice()));
+                generic_param_boxes_scalars_in(&self.classes, methods, generic, index)
+            })
+    }
+
     /// Returns true when `left` is strictly more specific than `right`.
     #[must_use]
     pub fn method_more_specific(&self, left: &Method, right: &Method) -> bool {
@@ -558,6 +575,46 @@ impl Module {
     ) -> MethodSelection {
         select_method_for_classes_in_methods(&self.classes, &self.methods, generic, actuals)
     }
+}
+
+/// Returns whether instances of `class` are unboxed scalars: `<integer>`,
+/// the floats, and the abstract numeric classes above them.
+fn is_scalar_value_class_in(classes: &[Class], class: ClassId) -> bool {
+    matches!(
+        classes.get(class.0 as usize).map(|class| class.origin),
+        Some(ClassOrigin::BuiltinValue {
+            kind: BuiltinValueClass::Integer
+                | BuiltinValueClass::Number
+                | BuiltinValueClass::Real
+                | BuiltinValueClass::Float
+                | BuiltinValueClass::DoubleFloat,
+        })
+    )
+}
+
+/// Returns whether generic parameter `index` carries boxed `<object>`
+/// values rather than raw runtime-object handles.
+///
+/// An `<object>` or unannotated parameter is a raw object handle, which
+/// keeps dispatch over object classes allocation-free. When some method
+/// specializes the parameter on `<object>` or on a scalar class such as
+/// `<integer>` or `<float>`, integers and floats can apply, so the
+/// parameter carries boxed values instead and scalar arguments are boxed
+/// at the call through the ordinary `<object>` boxing path.
+fn generic_param_boxes_scalars_in<'a>(
+    classes: &[Class],
+    methods: impl IntoIterator<Item = (GenericFunctionId, &'a [MethodSpecializer])>,
+    generic: &GenericFunction,
+    index: usize,
+) -> bool {
+    matches!(
+        generic.param_kinds.get(index).copied().flatten(),
+        None | Some(ValueKind::Any)
+    ) && methods
+        .into_iter()
+        .filter(|(method_generic, _)| *method_generic == generic.id)
+        .filter_map(|(_, specializers)| specializers.get(index).copied().flatten())
+        .any(|class| class == OBJECT_CLASS_ID || is_scalar_value_class_in(classes, class))
 }
 
 fn is_same_or_subclass_in_classes(classes: &[Class], actual: ClassId, expected: ClassId) -> bool {
@@ -2073,6 +2130,10 @@ struct Lowering {
     constants: Vec<Constant>,
     constant_symbols: Vec<ConstantSymbol>,
     generic_symbols: Vec<GenericSymbol>,
+    /// Method specializers from the latest complete lowering pass. Method
+    /// bodies are lowered one at a time, so `methods` is partial while they
+    /// lower; boxed-parameter decisions read this snapshot instead.
+    dispatch_specializers: Vec<(GenericFunctionId, Vec<MethodSpecializer>)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -2090,6 +2151,7 @@ impl Lowering {
             constants: Vec::new(),
             constant_symbols: Vec::new(),
             generic_symbols: Vec::new(),
+            dispatch_specializers: Vec::new(),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -3280,6 +3342,7 @@ impl Lowering {
         self.infer_open_result_signatures(module, diagnostic_len, closure_len);
         self.diagnostics.truncate(diagnostic_len);
         self.closures.truncate(closure_len);
+        self.snapshot_dispatch_specializers();
         self.methods.clear();
         for method in &module.methods {
             let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
@@ -3331,6 +3394,7 @@ impl Lowering {
             let before = self.result_signature_snapshot();
             self.diagnostics.truncate(diagnostic_len);
             self.closures.truncate(closure_len);
+            self.snapshot_dispatch_specializers();
             self.methods.clear();
 
             for method in &module.methods {
@@ -4240,11 +4304,15 @@ impl Lowering {
                         for (index, (arg, expected)) in
                             lowered_args.iter().zip(&symbol.param_kinds).enumerate()
                         {
-                            let Some(expected) = *expected else {
+                            let actual = self.expr_kind(arg);
+                            let boxed_scalar = NumericKind::of(actual).is_some()
+                                && self.generic_param_boxes_scalars(symbol.id, index);
+                            let Some(expected) = expected.or_else(|| {
+                                NumericKind::of(actual).is_some().then_some(ValueKind::Any)
+                            }) else {
                                 continue;
                             };
-                            let actual = self.expr_kind(arg);
-                            if !self.generic_argument_matches(expected, actual) {
+                            if !boxed_scalar && !self.generic_argument_matches(expected, actual) {
                                 ctx.diagnostics.push(
                                     Diagnostic::error(
                                         arg.span(),
@@ -5157,12 +5225,15 @@ impl Lowering {
         let Some(generic) = self.generics.get(generic.0 as usize) else {
             return ValueKind::Error;
         };
+        let boxed = self.generic_param_boxes_scalars(generic.id, index);
         match generic.param_kinds.get(index).copied().flatten() {
-            Some(ValueKind::Any) if generic.dispatch_params.contains(&index) => {
+            Some(ValueKind::Any) if generic.dispatch_params.contains(&index) && !boxed => {
                 ValueKind::Object(OBJECT_CLASS_ID)
             }
             Some(kind) => kind,
-            None if generic.dispatch_params.contains(&index) => ValueKind::Object(OBJECT_CLASS_ID),
+            None if generic.dispatch_params.contains(&index) && !boxed => {
+                ValueKind::Object(OBJECT_CLASS_ID)
+            }
             None => ValueKind::Any,
         }
     }
@@ -5922,6 +5993,7 @@ impl Lowering {
             Expr::Local { result_kind, .. } => *result_kind,
             Expr::Capture { result_kind, .. } => *result_kind,
             Expr::ConstantRef { result_kind, .. } => *result_kind,
+            Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
             Expr::Cast { class, .. } => self
                 .kind_for_builtin_class(*class)
                 .unwrap_or(ValueKind::Object(*class)),
@@ -6677,6 +6749,28 @@ impl Lowering {
         self.constant_symbols
             .iter()
             .find(|symbol| symbol.name == name)
+    }
+
+    fn generic_param_boxes_scalars(&self, generic: GenericFunctionId, index: usize) -> bool {
+        self.generics
+            .get(generic.0 as usize)
+            .is_some_and(|generic| {
+                let methods = self
+                    .dispatch_specializers
+                    .iter()
+                    .map(|(generic, specializers)| (*generic, specializers.as_slice()));
+                generic_param_boxes_scalars_in(&self.classes, methods, generic, index)
+            })
+    }
+
+    fn snapshot_dispatch_specializers(&mut self) {
+        if !self.methods.is_empty() {
+            self.dispatch_specializers = self
+                .methods
+                .iter()
+                .map(|method| (method.generic, method.specializers.clone()))
+                .collect();
+        }
     }
 
     fn resolve_generic(&self, name: &str) -> Option<&GenericSymbol> {

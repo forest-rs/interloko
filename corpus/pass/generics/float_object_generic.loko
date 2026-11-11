@@ -1,0 +1,12 @@
+// expect: run 2.5
+// expect: diagnostics 0
+
+define generic keep(x :: <object>) => <object>;
+
+define method keep(x :: <object>) => <object>
+  x
+end;
+
+define function main() => <float>
+  as(<double-float>, keep(2.5))
+end;
