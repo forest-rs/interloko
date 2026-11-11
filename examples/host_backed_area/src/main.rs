@@ -1,48 +1,58 @@
 //! Host-backed object Interloko example.
+//!
+//! Rust structs stand behind the Loko classes `<rust-circle>` and
+//! `<rust-square>`. The compiler session learns their shape from a
+//! [`HostMetaRegistry`]; at run time each object is installed in the
+//! `InterlokoHost` through a [`HostObjectAdapter`] that answers slot reads.
+//!
+//! `SessionArtifacts::call_function` only passes scalar values, so calling a
+//! function with host objects runs the session's verified tape directly.
 
+use std::error::Error;
+
+use execution_tape::trace::TraceMask;
 use execution_tape::value::Value;
-use interloko_compiler::driver::{CompileError, compile_with_host_registry};
+use execution_tape::vm::{Limits, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
+use interloko_compiler::session::{CompilerSession, DumpStage, RuntimeMode, SessionArtifacts};
 use interloko_runtime::{
     HostObjectAdapter, InterlokoHost, RuntimeError, ValueKind as RuntimeValueKind,
 };
 
-fn main() -> Result<(), CompileError> {
-    let source = include_str!("../programs/host_backed_area.loko");
-    let registry = host_registry();
-    let compiled = compile_with_host_registry(source, &registry)?;
+const NAME: &str = "host_backed_area.loko";
+const SOURCE: &str = include_str!("../programs/host_backed_area.loko");
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let artifacts = CompilerSession::compile_source_with_host_registry(
+        NAME,
+        SOURCE,
+        RuntimeMode::CompileOnly,
+        &host_registry(),
+    );
+    if artifacts.has_errors() {
+        let codes = artifacts
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .map(|diagnostic| diagnostic.code.to_string())
+            .collect::<Vec<_>>();
+        return Err(format!("{NAME} did not compile: {}", codes.join(", ")).into());
+    }
 
     match dump_mode().as_deref() {
         None => {
-            let mut host = InterlokoHost::new(compiled.tape.runtime.clone());
-            let circle = host_object(
-                &compiled,
-                &mut host,
-                "<rust-circle>",
-                RustCircle { radius: 7 },
-            );
-            let square = host_object(
-                &compiled,
-                &mut host,
-                "<rust-square>",
-                RustSquare { side: 5 },
-            );
-            let value = compiled.run_function_i64("sum-areas", &[circle, square], host)?;
+            let value = sum_areas(&artifacts, RustCircle { radius: 7 }, RustSquare { side: 5 })?;
             assert_eq!(value, 74);
             println!("{value}");
         }
-        Some("--dump-lowered") => {
-            print!("{}", compiled.dump_lowered());
-        }
-        Some("--dump-tape") => {
-            print!("{}", compiled.dump_tape());
-        }
+        Some("--dump-lowered") => print!("{}", artifacts.dump_stage(DumpStage::Lowered)),
+        Some("--dump-tape") => print!("{}", artifacts.dump_stage(DumpStage::Tape)),
         Some("--dump-all") => {
-            print!("{}", compiled.dump_lowered());
+            print!("{}", artifacts.dump_stage(DumpStage::Lowered));
             println!();
-            print!("{}", compiled.dump_tape());
+            print!("{}", artifacts.dump_stage(DumpStage::Tape));
         }
         Some(_) => {
             eprintln!(
@@ -70,19 +80,50 @@ fn host_registry() -> HostMetaRegistry {
     registry
 }
 
-fn host_object(
-    compiled: &interloko_compiler::driver::CompiledModule,
-    host: &mut InterlokoHost,
-    class_name: &str,
-    adapter: impl HostObjectAdapter + 'static,
-) -> Value {
-    let class = compiled
-        .tape
-        .runtime
-        .class_id(class_name)
-        .expect("host-backed class should be in runtime layout");
-    host.push_host_object(class, adapter)
-        .expect("host-backed object should install")
+/// Runs Loko `sum-areas` on two Rust-backed objects.
+fn sum_areas(
+    artifacts: &SessionArtifacts,
+    circle: RustCircle,
+    square: RustSquare,
+) -> Result<i64, Box<dyn Error>> {
+    let tape = artifacts.tape.as_ref().ok_or("tape unavailable")?;
+    let entry = artifacts
+        .sem
+        .functions
+        .iter()
+        .find(|function| function.name == "sum-areas")
+        .and_then(|function| tape.functions.get(function.id.0 as usize))
+        .ok_or("missing function `sum-areas`")?;
+
+    let layout = &tape.runtime;
+    let circle_class = layout
+        .class_id("<rust-circle>")
+        .ok_or("missing `<rust-circle>`")?;
+    let square_class = layout
+        .class_id("<rust-square>")
+        .ok_or("missing `<rust-square>`")?;
+    let mut host = InterlokoHost::new(layout.clone());
+    let circle = host
+        .push_host_object(circle_class, circle)
+        .map_err(|error| format!("cannot install `<rust-circle>`: {error:?}"))?;
+    let square = host
+        .push_host_object(square_class, square)
+        .map_err(|error| format!("cannot install `<rust-square>`: {error:?}"))?;
+
+    let mut vm = Vm::new(host, Limits::default());
+    match vm
+        .run(
+            &tape.program,
+            *entry,
+            &[circle, square],
+            TraceMask::NONE,
+            None,
+        )?
+        .as_slice()
+    {
+        [Value::I64(value)] => Ok(*value),
+        other => Err(format!("`sum-areas` returned {other:?}").into()),
+    }
 }
 
 #[derive(Debug)]
