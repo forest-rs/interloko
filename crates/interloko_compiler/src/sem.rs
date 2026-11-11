@@ -162,6 +162,9 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "method-specializers" => Intrinsic::MethodSpecializers,
         "vector-size" => Intrinsic::VectorSize,
         "vector-ref" => Intrinsic::VectorRef,
+        "float-to-string" => Intrinsic::FloatToString,
+        "integer-to-string" => Intrinsic::IntegerToString,
+        "concatenate" => Intrinsic::Concatenate,
         _ => return None,
     })
 }
@@ -184,7 +187,8 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         | Intrinsic::MethodGenericFunction
         | Intrinsic::MethodSpecializers
         | Intrinsic::VectorSize => 1,
-        Intrinsic::VectorRef => 2,
+        Intrinsic::VectorRef | Intrinsic::Concatenate => 2,
+        Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
 
@@ -212,7 +216,9 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
         }
         (Intrinsic::MethodGenericFunction | Intrinsic::MethodSpecializers, 0) => "<method>",
         (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => "<vector>",
-        (Intrinsic::VectorRef, 1) => "<integer>",
+        (Intrinsic::VectorRef, 1) | (Intrinsic::IntegerToString, 0) => "<integer>",
+        (Intrinsic::FloatToString, 0) => "<float>",
+        (Intrinsic::Concatenate, _) => "<string>",
         _ => "<object>",
     }
 }
@@ -1369,6 +1375,13 @@ pub enum Intrinsic {
     VectorSize,
     /// Returns one immutable vector element as `<object>`.
     VectorRef,
+    /// Renders a float as its shortest round-trip literal text, such as
+    /// `1.0`, `2.5e-7`, `inf`, or `nan`.
+    FloatToString,
+    /// Renders an integer in decimal.
+    IntegerToString,
+    /// Returns a new string holding two strings joined in order.
+    Concatenate,
 }
 
 /// Semantic expression.
@@ -4788,7 +4801,10 @@ impl Lowering {
             | Intrinsic::SlotType
             | Intrinsic::SlotInitKeyword
             | Intrinsic::SlotGetter
-            | Intrinsic::GenericFunctionName => self
+            | Intrinsic::GenericFunctionName
+            | Intrinsic::FloatToString
+            | Intrinsic::IntegerToString
+            | Intrinsic::Concatenate => self
                 .builtin_value_class(BuiltinValueClass::String)
                 .map_or(ValueKind::Error, ValueKind::String),
             Intrinsic::ClassDirectSlots
@@ -4854,7 +4870,9 @@ impl Lowering {
             (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => {
                 matches!(actual, ValueKind::Vector(_) | ValueKind::Any)
             }
-            (Intrinsic::VectorRef, 1) => actual == ValueKind::I64,
+            (Intrinsic::VectorRef, 1) | (Intrinsic::IntegerToString, 0) => actual == ValueKind::I64,
+            (Intrinsic::FloatToString, 0) => actual == ValueKind::F64,
+            (Intrinsic::Concatenate, 0 | 1) => matches!(actual, ValueKind::String(_)),
             _ => false,
         }
     }
