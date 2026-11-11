@@ -922,19 +922,7 @@ impl BaseLokoCstProjector<'_> {
 
     fn first_operator_token(&self, span: impl Into<Span>) -> usize {
         self.tokens_in(span.into())
-            .find(|(_, token)| {
-                matches!(
-                    token.kind,
-                    TokenKind::Plus
-                        | TokenKind::Minus
-                        | TokenKind::Star
-                        | TokenKind::Equal
-                        | TokenKind::Less
-                        | TokenKind::LessEqual
-                        | TokenKind::Greater
-                        | TokenKind::GreaterEqual
-                )
-            })
+            .find(|(_, token)| token.kind.is_infix_operator())
             .map(|(index, _)| index)
             .unwrap_or(0)
     }

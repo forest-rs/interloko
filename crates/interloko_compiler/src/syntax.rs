@@ -139,6 +139,64 @@ impl TokenKind {
     pub(crate) fn is_trivia(self) -> bool {
         matches!(self, Self::Whitespace | Self::Comment | Self::DocComment)
     }
+
+    /// Returns true when this token can appear as a binary infix operator
+    /// between two operands, such as `+` or `<=`.
+    ///
+    /// `-` is included even though it is also unary negation; callers
+    /// asking this question are looking between two operands. The match is
+    /// deliberately exhaustive so a new token kind must decide whether it
+    /// is an infix operator.
+    pub(crate) const fn is_infix_operator(self) -> bool {
+        match self {
+            Self::Plus
+            | Self::Minus
+            | Self::Star
+            | Self::Equal
+            | Self::Less
+            | Self::LessEqual
+            | Self::Greater
+            | Self::GreaterEqual => true,
+            Self::Define
+            | Self::Function
+            | Self::Class
+            | Self::Slot
+            | Self::Constant
+            | Self::Generic
+            | Self::Method
+            | Self::Let
+            | Self::If
+            | Self::Then
+            | Self::Else
+            | Self::Handle
+            | Self::With
+            | Self::Restart
+            | Self::End
+            | Self::Ident
+            | Self::Number
+            | Self::Bool
+            | Self::String
+            | Self::Symbol
+            | Self::Keyword
+            | Self::VectorStart
+            | Self::TypeName
+            | Self::LParen
+            | Self::RParen
+            | Self::LBracket
+            | Self::RBracket
+            | Self::Comma
+            | Self::Arrow
+            | Self::Colon
+            | Self::Assign
+            | Self::DoubleColon
+            | Self::Dot
+            | Self::Semicolon
+            | Self::Whitespace
+            | Self::Comment
+            | Self::DocComment
+            | Self::Error => false,
+        }
+    }
 }
 
 /// A lexical token with its source span.
