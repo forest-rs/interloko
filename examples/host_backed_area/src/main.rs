@@ -11,7 +11,7 @@
 use std::error::Error;
 
 use execution_tape::trace::TraceMask;
-use execution_tape::value::Value;
+use execution_tape::value::{FuncRef, Value};
 use execution_tape::vm::{Limits, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
@@ -111,10 +111,10 @@ fn sum_areas(
         .map_err(|error| format!("cannot install `<rust-square>`: {error:?}"))?;
 
     let mut vm = Vm::new(host, Limits::default());
+    let unit = vm.install(std::sync::Arc::clone(&tape.program))?;
     match vm
         .run(
-            &tape.program,
-            *entry,
+            FuncRef::new(unit, *entry),
             &[circle, square],
             TraceMask::NONE,
             None,

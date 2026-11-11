@@ -5,7 +5,7 @@
 //! the Rust objects, the same way an embedder passes host objects.
 
 use execution_tape::trace::TraceMask;
-use execution_tape::value::Value;
+use execution_tape::value::{FuncRef, Value};
 use execution_tape::vm::{Limits, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
@@ -107,8 +107,17 @@ fn call_with_host_object(
             .expect("host object should box as <object>");
     }
 
-    let output = Vm::new(host, Limits::default())
-        .run(&tape.program, entry, &[argument], TraceMask::NONE, None)
+    let mut vm = Vm::new(host, Limits::default());
+    let unit = vm
+        .install(std::sync::Arc::clone(&tape.program))
+        .expect("program should install");
+    let output = vm
+        .run(
+            FuncRef::new(unit, entry),
+            &[argument],
+            TraceMask::NONE,
+            None,
+        )
         .expect("function should run");
     match output.as_slice() {
         [Value::I64(value)] => *value,

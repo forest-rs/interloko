@@ -26,7 +26,7 @@ use execution_tape::recording::{
     RecordLimits, RecordedValue, Recorder, Recording,
 };
 use execution_tape::trace::{TraceLocation, TraceMask, TraceSink};
-use execution_tape::value::FuncId;
+use execution_tape::value::{FuncId, FuncRef, UnitId};
 use execution_tape::verifier::VerifiedProgram;
 
 use crate::session::EnvironmentObjectId;
@@ -151,14 +151,14 @@ impl fmt::Display for SourcePosition {
 /// A recorded tape function with its Interloko identity, when resolvable.
 #[derive(Copy, Clone, Debug)]
 pub struct TracedFunction<'a> {
-    id: FuncId,
+    id: FuncRef,
     lowered: Option<&'a lower::Function>,
 }
 
 impl<'a> TracedFunction<'a> {
-    /// Returns the `execution_tape` function id.
+    /// Returns the `execution_tape` function: its unit and program-local id.
     #[must_use]
-    pub fn id(&self) -> FuncId {
+    pub fn id(&self) -> FuncRef {
         self.id
     }
 
@@ -202,7 +202,7 @@ impl fmt::Display for TracedFunction<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.name() {
             Some(name) => formatter.write_str(name),
-            None => write!(formatter, "f{}", self.id.0),
+            None => write!(formatter, "u{}:f{}", self.id.unit.0, self.id.func.0),
         }
     }
 }
@@ -223,7 +223,8 @@ impl TracedLocation<'_> {
     #[must_use]
     pub fn raw(&self) -> TraceLocation {
         TraceLocation {
-            func: self.function.id,
+            unit: self.function.id.unit,
+            func: self.function.id.func,
             pc: self.pc,
         }
     }
@@ -321,6 +322,7 @@ pub struct TracedOutcome<'a> {
 
 #[derive(Copy, Clone, Debug)]
 struct ProgramMeaning<'a> {
+    unit: UnitId,
     lowered: &'a lower::Module,
     functions: &'a [FuncId],
     source: &'a str,
@@ -335,18 +337,24 @@ pub struct ExecutionTraceView<'a> {
 
 impl<'a> ExecutionTraceView<'a> {
     /// Resolves `trace` against artifacts; meaning is attached only when
-    /// `tape` is the exact program the trace recorded.
+    /// `tape` is the exact program of the unit the trace entered, and only
+    /// that unit's functions resolve.
     pub(crate) fn new(
         trace: &'a ExecutionTrace,
         lowered: Option<&'a lower::Module>,
         tape: Option<&'a tape::TapeModule>,
         source: &'a str,
     ) -> Self {
-        let meaning = match (lowered, tape) {
-            (Some(lowered), Some(tape))
+        let entry = trace
+            .recording
+            .invocation()
+            .map(|invocation| invocation.entry.unit);
+        let meaning = match (lowered, tape, entry) {
+            (Some(lowered), Some(tape), Some(unit))
                 if core::ptr::eq(trace.recording.program(), Arc::as_ptr(&tape.program)) =>
             {
                 Some(ProgramMeaning {
+                    unit,
                     lowered,
                     functions: &tape.functions,
                     source,
@@ -369,11 +377,14 @@ impl<'a> ExecutionTraceView<'a> {
         self.meaning.is_some()
     }
 
-    /// Resolves a tape function id.
+    /// Resolves a unit-qualified tape function.
     #[must_use]
-    pub fn function(&self, id: FuncId) -> TracedFunction<'a> {
+    pub fn function(&self, id: FuncRef) -> TracedFunction<'a> {
         let lowered = self.meaning.and_then(|meaning| {
-            let index = meaning.functions.iter().position(|func| *func == id)?;
+            if id.unit != meaning.unit {
+                return None;
+            }
+            let index = meaning.functions.iter().position(|func| *func == id.func)?;
             meaning.lowered.functions.get(index)
         });
         TracedFunction { id, lowered }
@@ -383,11 +394,14 @@ impl<'a> ExecutionTraceView<'a> {
     #[must_use]
     pub fn location(&self, location: TraceLocation) -> TracedLocation<'a> {
         let source = self.meaning.and_then(|meaning| {
+            if location.unit != meaning.unit {
+                return None;
+            }
             let offset = self.span_start(location)?;
             source_position(meaning.source, offset)
         });
         TracedLocation {
-            function: self.function(location.func),
+            function: self.function(FuncRef::new(location.unit, location.func)),
             pc: location.pc,
             source,
         }
@@ -424,11 +438,11 @@ impl<'a> ExecutionTraceView<'a> {
         recording.host_calls().map(move |call| TracedHostCall {
             sequence: call.sequence,
             location: view.location(call.location),
-            symbol: recording
-                .program()
-                .program()
-                .host_sig(call.import)
-                .and_then(|sig| recording.program().program().symbol_str(sig.symbol).ok()),
+            symbol: recording.unit(call.location.unit).and_then(|unit| {
+                let program = unit.program.program();
+                let sig = program.host_sig(call.import)?;
+                program.symbol_str(sig.symbol).ok()
+            }),
             arguments: call.args,
             outcome: call.outcome,
             stack: TracedStack {
@@ -522,6 +536,13 @@ impl<'a> ExecutionTraceView<'a> {
                     self.write_values(out, values)?;
                 }
                 HostOutcome::Failed(error) => write!(out, " failed: {error}")?,
+                HostOutcome::Threw { tag, payload } => {
+                    match recording.tag_name(*tag) {
+                        Some(name) => write!(out, " threw {name} ")?,
+                        None => write!(out, " threw tag#{} ", tag.0)?,
+                    }
+                    self.write_values(out, payload)?;
+                }
             }
             write!(out, " ")?;
             self.write_stack(out, call.location, &call.stack)?;
@@ -554,8 +575,8 @@ impl<'a> ExecutionTraceView<'a> {
                     InstructionOutcome::Completed => {}
                     InstructionOutcome::Pending => write!(out, " pending")?,
                     InstructionOutcome::Trapped => write!(out, " trapped")?,
-                    InstructionOutcome::Unwound { target } => {
-                        write!(out, " unwound to activation #{target}")?;
+                    InstructionOutcome::Caught { depth } => {
+                        write!(out, " caught at depth {depth}")?;
                     }
                 }
                 writeln!(out)?;
@@ -661,7 +682,8 @@ impl<'a> ExecutionTraceView<'a> {
 
     /// Finds the start offset of the source span covering `location`.
     fn span_start(&self, location: TraceLocation) -> Option<usize> {
-        let program = self.trace.recording.program().program();
+        let unit = self.trace.recording.unit(location.unit)?;
+        let program = unit.program.program();
         let function = program.functions.get(location.func.0 as usize)?;
         let mut pc = 0_u64;
         let mut current = None;

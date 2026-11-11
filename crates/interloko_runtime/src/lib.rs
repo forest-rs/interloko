@@ -2779,6 +2779,7 @@ mod tests {
     use alloc::format;
     use execution_tape::asm::{Asm, FunctionSig, ProgramBuilder};
     use execution_tape::trace::TraceMask;
+    use execution_tape::value::FuncRef;
     use execution_tape::vm::{ExecutionContext, Limits, Vm};
 
     #[test]
@@ -3363,12 +3364,12 @@ mod tests {
             .expect("test program should verify");
 
         let mut vm = Vm::new(host, Limits::default());
+        let unit = vm.install(program).expect("test program should install");
         let mut ctx = ExecutionContext::new();
         let mut outputs = Vec::new();
         vm.run_with_ctx(
             &mut ctx,
-            &program,
-            entry,
+            FuncRef::new(unit, entry),
             &[Value::Obj(object)],
             &mut outputs,
             TraceMask::NONE,

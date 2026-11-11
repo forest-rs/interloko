@@ -8,13 +8,14 @@
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::{self, Write as _};
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::trace::TraceMask;
-use execution_tape::value::Value;
+use execution_tape::value::{FuncRef, Value};
 use execution_tape::vm::{Limits, Trap, TrapInfo, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -5323,10 +5324,15 @@ fn run_turn_body<'a>(
     }
 
     let mut vm = Vm::new(host.clone(), Limits::default());
+    // A fresh VM has room for a unit, and the program imports no tags.
+    let unit = vm
+        .install(Arc::clone(&tape.program))
+        .expect("a fresh VM installs a program without tag imports");
     let mut capture = trace.map(|detail| TraceCapture::new(&tape.program, detail));
     let mask = capture.as_ref().map_or(TraceMask::NONE, TraceCapture::mask);
     let sink = capture.as_mut().map(TraceCapture::sink);
-    let output = match vm.run(&tape.program, entry, &runtime_arguments, mask, sink) {
+    let entry = FuncRef::new(unit, entry);
+    let output = match vm.run(entry, &runtime_arguments, mask, sink) {
         Ok(output) => output,
         Err(trap) => {
             if let Some((name, failure)) = host.failure() {
@@ -12436,6 +12442,7 @@ mod tests {
     fn runtime_result_display_preserves_trap_details() {
         let result = RuntimeResult::Trap {
             trap: TrapInfo {
+                unit: execution_tape::value::UnitId(0),
                 func: execution_tape::value::FuncId(3),
                 pc: 11,
                 span_id: Some(17),
@@ -12448,7 +12455,7 @@ mod tests {
         };
         let rendered = format!("{result}");
 
-        assert!(rendered.contains("trap at f3 pc=11 span=17"));
+        assert!(rendered.contains("trap at u0:f3 pc=11 span=17"));
         assert!(rendered.contains("host_call=interloko.slot_get"));
         assert!(rendered.contains("sig_hash=456"));
         assert!(rendered.contains("host call failed"));
@@ -12477,11 +12484,11 @@ mod tests {
         assert!(!foreign.is_resolved());
         let entry = foreign.entry().expect("entry was captured");
         assert!(entry.name().is_none());
-        assert!(
-            foreign
-                .render()
-                .contains(&format!("invocation: f{}", entry.id().0))
-        );
+        assert!(foreign.render().contains(&format!(
+            "invocation: u{}:f{}",
+            entry.id().unit.0,
+            entry.id().func.0
+        )));
     }
 
     #[test]
@@ -13402,12 +13409,15 @@ mod tests {
             let view = artifacts.execution_trace_view(trace);
             let tape = &artifacts.tape.as_ref().unwrap().program;
             let is_call_site = |location: TracedLocation<'_>| {
-                execution_tape::disasm::disassemble_function(tape.program(), location.function.id())
-                    .unwrap()
-                    .instruction(location.pc)
-                    .unwrap()
-                    .opcode()
-                    .is_call_like()
+                execution_tape::disasm::disassemble_function(
+                    tape.program(),
+                    location.function.id().func,
+                )
+                .unwrap()
+                .instruction(location.pc)
+                .unwrap()
+                .opcode()
+                .is_call_like()
             };
             assert_eq!(
                 trace.recording().instruction_status(),
