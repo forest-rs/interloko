@@ -1,0 +1,9 @@
+// expect: run 9007199254740992.0
+// expect: diagnostics 0
+// expect: dump sem contains convert to float
+// expect: dump lowered contains i64.to_f64
+
+// 2^53 + 1 is not a float; conversion rounds to nearest, ties to even.
+define function main() => <float>
+  as(<float>, 9007199254740993)
+end;

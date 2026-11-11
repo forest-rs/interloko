@@ -766,6 +766,14 @@ impl<'a> FunctionEmitter<'a> {
                     lower::F64UnaryOp::Neg => self.asm.f64_neg(dst.0, src.0),
                 };
             }
+            lower::Instr::I64ToF64 { dst, src, span } => {
+                self.set_span(*span);
+                self.asm.i64_to_f64(dst.0, src.0);
+            }
+            lower::Instr::F64ToI64 { dst, src, span } => {
+                self.set_span(*span);
+                self.asm.f64_to_i64(dst.0, src.0);
+            }
             lower::Instr::F64Compare {
                 dst,
                 op,

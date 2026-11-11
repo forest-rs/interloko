@@ -103,7 +103,8 @@ The current slices include:
 - `<float>` values (IEEE 754 binary64) with `1.5`/`2e10` literals, slots,
   boxing to `<object>`, `<float>` method dispatch, and IEEE `+ - * /`,
   negation, and comparisons (operands must both be integers or both be
-  floats; `/` is float-only);
+  floats; `/` is float-only), with explicit `as(<float>, n)` and exact
+  `as(<integer>, x)` conversions;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

@@ -1537,6 +1537,20 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Conversion between `<integer>` and `<float>`, from source
+    /// `as(<float>, n)` or `as(<integer>, x)`.
+    ///
+    /// Integer to float rounds to nearest, ties to even. Float to integer is
+    /// exact: it traps unless the operand is an integral value in the `i64`
+    /// range, so rounding is always an explicit `round`/`floor`/... choice.
+    Convert {
+        /// Numeric kind of the result; the operand has the other kind.
+        to: NumericKind,
+        /// Converted operand.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Arithmetic negation, from source unary `-`.
     ///
     /// Float negation flips the sign bit, so `-0.0` and `-(0.0)` are both
@@ -1622,6 +1636,7 @@ impl Expr {
             | Self::SlotWrite { span, .. }
             | Self::Binary { span, .. }
             | Self::Negate { span, .. }
+            | Self::Convert { span, .. }
             | Self::Compare { span, .. }
             | Self::ValueEqual { span, .. }
             | Self::If { span, .. }
@@ -5286,6 +5301,18 @@ impl Lowering {
         };
         let class_id = class.id;
         let value = self.lower_expr(ctx, value);
+        if let Some(from) = NumericKind::of(self.expr_kind(&value))
+            && let Some(to) = self
+                .kind_for_builtin_class(class_id)
+                .and_then(NumericKind::of)
+            && from != to
+        {
+            return Expr::Convert {
+                to,
+                value: Box::new(value),
+                span,
+            };
+        }
         match self.expr_kind(&value) {
             ValueKind::Any
             | ValueKind::Object(_)
@@ -5626,6 +5653,7 @@ impl Lowering {
         match expr {
             Expr::ConstI64 { .. } => ValueKind::I64,
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
+            Expr::Convert { to, .. } => to.value_kind(),
             Expr::ConstF64 { .. } => ValueKind::F64,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
