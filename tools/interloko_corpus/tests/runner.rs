@@ -119,7 +119,10 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/boolean_run_result.loko"));
     assert!(out.contains("pass/values/float_literals.loko"));
     assert!(out.contains("fail/values/float_literal_out_of_range.loko"));
-    assert!(out.contains("corpus: 177 passed, 0 failed, 177 total"));
+    assert!(out.contains("pass/arithmetic/float_arithmetic.loko"));
+    assert!(out.contains("fail/diagnostics/mixed_arithmetic.loko"));
+    assert!(out.contains("fail/diagnostics/integer_division.loko"));
+    assert!(out.contains("corpus: 185 passed, 0 failed, 185 total"));
 }
 
 #[test]

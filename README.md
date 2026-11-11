@@ -101,7 +101,9 @@ The current slices include:
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;
 - `<float>` values (IEEE 754 binary64) with `1.5`/`2e10` literals, slots,
-  boxing to `<object>`, and `<float>` method dispatch;
+  boxing to `<object>`, `<float>` method dispatch, and IEEE `+ - * /`,
+  negation, and comparisons (operands must both be integers or both be
+  floats; `/` is float-only);
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

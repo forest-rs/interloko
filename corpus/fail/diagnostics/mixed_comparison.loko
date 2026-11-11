@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic contains comparison operands must both be integers or both be floats, not <float> and <integer>
+
+define function main() => <boolean>
+  2.5 < 3
+end;

@@ -322,6 +322,8 @@ pub enum BinaryOp {
     Sub,
     /// Multiplication.
     Mul,
+    /// Division.
+    Div,
 }
 
 /// Integer comparison operator.
@@ -1960,6 +1962,13 @@ impl<'tree> Lowering<'tree> {
             Some(TokenKind::Star) => Expr::Binary {
                 id: self.ast_id(node),
                 op: BinaryOp::Mul,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::Slash) => Expr::Binary {
+                id: self.ast_id(node),
+                op: BinaryOp::Div,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
                 span: node.span,

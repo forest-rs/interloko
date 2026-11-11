@@ -1,0 +1,9 @@
+// expect: run 5.5
+// expect: diagnostics 0
+// expect: dump sem contains binary Div float
+// expect: dump lowered contains f64.div
+// expect: dump tape contains f64.mul
+
+define function main() => <float>
+  (1.5 + 2.25) * 2.0 - 0.5 / 0.25
+end;

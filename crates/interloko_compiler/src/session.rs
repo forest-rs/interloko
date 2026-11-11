@@ -4021,6 +4021,9 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), receiver, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
         }
+        sem::Expr::Negate { value, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
+        }
         sem::Expr::Binary { lhs, rhs, .. } | sem::Expr::Compare { lhs, rhs, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
@@ -4625,7 +4628,8 @@ fn sem_scalar_result_kind(kinds: &[sem::ValueKind]) -> sem::ValueKind {
 
 fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
     match expr {
-        sem::Expr::ConstI64 { .. } | sem::Expr::Binary { .. } => sem::ValueKind::I64,
+        sem::Expr::ConstI64 { .. } => sem::ValueKind::I64,
+        sem::Expr::Binary { kind, .. } | sem::Expr::Negate { kind, .. } => kind.value_kind(),
         sem::Expr::ConstF64 { .. } => sem::ValueKind::F64,
         sem::Expr::ConstBool { .. }
         | sem::Expr::Compare { .. }
@@ -10439,6 +10443,13 @@ fn runtime_kind_label(module: &sem::Module, kind: runtime::ValueKind) -> String 
     }
 }
 
+const fn numeric_kind_label(kind: sem::NumericKind) -> &'static str {
+    match kind {
+        sem::NumericKind::Integer => "integer",
+        sem::NumericKind::Float => "float",
+    }
+}
+
 fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
     match kind {
         sem::ValueKind::Any => "object-top".into(),
@@ -10996,13 +11007,21 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             dump_sem_expr(out, receiver, indent + 2);
             dump_sem_expr(out, value, indent + 2);
         }
-        sem::Expr::Binary { op, lhs, rhs, .. } => {
-            let _ = writeln!(out, "binary {op:?}");
+        sem::Expr::Binary {
+            op, kind, lhs, rhs, ..
+        } => {
+            let _ = writeln!(out, "binary {op:?} {}", numeric_kind_label(*kind));
             dump_sem_expr(out, lhs, indent + 2);
             dump_sem_expr(out, rhs, indent + 2);
         }
-        sem::Expr::Compare { op, lhs, rhs, .. } => {
-            let _ = writeln!(out, "compare {op:?}");
+        sem::Expr::Negate { kind, value, .. } => {
+            let _ = writeln!(out, "negate {}", numeric_kind_label(*kind));
+            dump_sem_expr(out, value, indent + 2);
+        }
+        sem::Expr::Compare {
+            op, kind, lhs, rhs, ..
+        } => {
+            let _ = writeln!(out, "compare {op:?} {}", numeric_kind_label(*kind));
             dump_sem_expr(out, lhs, indent + 2);
             dump_sem_expr(out, rhs, indent + 2);
         }
@@ -11935,15 +11954,24 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
-        sem::Expr::Binary { op, lhs, rhs, .. } => {
-            let _ = write!(out, "binary({op:?}:");
+        sem::Expr::Negate { kind, value, .. } => {
+            let _ = write!(out, "negate({}:", numeric_kind_label(*kind));
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::Binary {
+            op, kind, lhs, rhs, ..
+        } => {
+            let _ = write!(out, "binary({op:?}:{}:", numeric_kind_label(*kind));
             fingerprint_sem_expr(module, lhs, out);
             out.push(',');
             fingerprint_sem_expr(module, rhs, out);
             out.push(')');
         }
-        sem::Expr::Compare { op, lhs, rhs, .. } => {
-            let _ = write!(out, "compare({op:?}:");
+        sem::Expr::Compare {
+            op, kind, lhs, rhs, ..
+        } => {
+            let _ = write!(out, "compare({op:?}:{}:", numeric_kind_label(*kind));
             fingerprint_sem_expr(module, lhs, out);
             out.push(',');
             fingerprint_sem_expr(module, rhs, out);
