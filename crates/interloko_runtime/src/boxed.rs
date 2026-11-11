@@ -2,32 +2,43 @@
 //!
 //! A boxed value is an `execution_tape` [`Obj`] whose host type is always
 //! [`crate::INTERLOKO_VALUE_TYPE`], so every `<object>` register has one VM
-//! type. Its 64-bit [`ObjHandle`] carries either the value itself or an index
-//! into the host's boxed-value heap:
+//! type. Its 64-bit [`ObjHandle`] carries the value itself whenever it can:
 //!
 //! - Any bit pattern whose top 16 bits are not all set is an immediate
 //!   `<double-float>`: the handle is the float's IEEE 754 bits.
 //! - Top 16 bits set and bit 47 set: an immediate `<integer>`, the low 47
 //!   bits sign-extended ([`IMMEDIATE_INTEGER_MIN`]..=[`IMMEDIATE_INTEGER_MAX`]).
-//! - Top 16 bits set and bit 47 clear: the low 47 bits are a one-based heap
-//!   index.
+//! - Top 16 bits set and bit 47 clear: bits 46..45 select the kind of the
+//!   low 45 bits: a one-based boxed-value heap index (`00`), a runtime
+//!   object's own handle (`01`), or a boolean (`10`). `11` is unused.
 //!
 //! The tagged space is a sliver of NaN encodings (negative NaNs with the top
 //! payload bits set), which no IEEE arithmetic produces by default. Floats
-//! with those exact bits, integers outside the immediate range, and every
-//! non-numeric value are boxed on the heap, so boxing never changes a value's
-//! bits.
+//! with those exact bits, integers outside the immediate range, and other
+//! values (`u64`s, objects whose handle does not fit) are boxed on the heap,
+//! so boxing never changes a value's bits.
+//!
+//! [`Obj`]: execution_tape::value::Obj
 
 use execution_tape::value::ObjHandle;
 
-/// Top-16-bit tag shared by immediate integers and heap indices.
+/// Top-16-bit tag shared by every non-float encoding.
 const TAG: u64 = 0xFFFF_0000_0000_0000;
-/// Set for immediate integers, clear for heap indices.
+/// Set for immediate integers.
 const INTEGER_FLAG: u64 = 1 << 47;
-/// Payload bits below the tag and flag.
-const PAYLOAD: u64 = INTEGER_FLAG - 1;
+/// Integer payload bits below the tag and flag.
+const INTEGER_PAYLOAD: u64 = INTEGER_FLAG - 1;
 /// Bits that sign-extend a 47-bit payload to 64 bits.
 const SIGN_EXTEND_SHIFT: u32 = 64 - 47;
+/// Position of the two-bit kind selector for non-integer tagged handles.
+const KIND_SHIFT: u32 = 45;
+/// Mask of the two-bit kind selector.
+const KIND_MASK: u64 = 0b11 << KIND_SHIFT;
+/// Payload bits below the kind selector.
+const PAYLOAD: u64 = (1 << KIND_SHIFT) - 1;
+const KIND_HEAP: u64 = 0b00 << KIND_SHIFT;
+const KIND_OBJECT: u64 = 0b01 << KIND_SHIFT;
+const KIND_BOOL: u64 = 0b10 << KIND_SHIFT;
 
 /// Smallest `<integer>` boxed without heap allocation.
 pub const IMMEDIATE_INTEGER_MIN: i64 = -(1 << 46);
@@ -41,13 +52,19 @@ pub(crate) enum BoxedHandle {
     Float(f64),
     /// An immediate `<integer>`.
     Integer(i64),
+    /// An immediate boolean.
+    Bool(bool),
+    /// A runtime object, by its own [`crate::INTERLOKO_OBJECT_TYPE`] handle.
+    Object(ObjHandle),
     /// A zero-based index into the boxed-value heap.
     Heap(usize),
+    /// A tagged handle that names nothing.
+    Invalid,
 }
 
 impl BoxedHandle {
     /// A tagged heap handle with payload zero, which never resolves.
-    pub(crate) const INVALID: ObjHandle = ObjHandle(TAG);
+    pub(crate) const INVALID: ObjHandle = ObjHandle(TAG | KIND_HEAP);
 
     /// Decodes a boxed-value handle.
     pub(crate) fn decode(handle: ObjHandle) -> Self {
@@ -60,12 +77,17 @@ impl BoxedHandle {
             let shifted = (bits << SIGN_EXTEND_SHIFT).cast_signed();
             return Self::Integer(shifted >> SIGN_EXTEND_SHIFT);
         }
-        // Heap indices are one-based so that the zero payload is never valid.
-        Self::Heap(
-            usize::try_from(bits & PAYLOAD)
-                .unwrap_or(usize::MAX)
-                .wrapping_sub(1),
-        )
+        let payload = bits & PAYLOAD;
+        match bits & KIND_MASK {
+            // Heap indices are one-based so that the zero payload is invalid.
+            KIND_HEAP => usize::try_from(payload)
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .map_or(Self::Invalid, Self::Heap),
+            KIND_OBJECT => Self::Object(ObjHandle(payload)),
+            KIND_BOOL if payload <= 1 => Self::Bool(payload == 1),
+            _ => Self::Invalid,
+        }
     }
 
     /// Encodes `value` as an immediate handle, or `None` when it must be
@@ -78,22 +100,34 @@ impl BoxedHandle {
     /// Encodes `value` as an immediate handle, or `None` when it must be
     /// boxed on the heap.
     pub(crate) fn immediate_integer(value: i64) -> Option<ObjHandle> {
-        let payload = value.cast_unsigned() & PAYLOAD;
+        let payload = value.cast_unsigned() & INTEGER_PAYLOAD;
         (IMMEDIATE_INTEGER_MIN..=IMMEDIATE_INTEGER_MAX)
             .contains(&value)
             .then_some(ObjHandle(TAG | INTEGER_FLAG | payload))
     }
 
+    /// Encodes a boolean as an immediate handle.
+    pub(crate) const fn immediate_bool(value: bool) -> ObjHandle {
+        ObjHandle(TAG | KIND_BOOL | value as u64)
+    }
+
+    /// Encodes a runtime object's handle, or `None` when it is too large to
+    /// carry and must be boxed on the heap.
+    pub(crate) fn immediate_object(handle: ObjHandle) -> Option<ObjHandle> {
+        (handle.0 <= PAYLOAD).then_some(ObjHandle(TAG | KIND_OBJECT | handle.0))
+    }
+
     /// Encodes a zero-based heap index, or `None` when the heap is full.
     pub(crate) fn heap(index: usize) -> Option<ObjHandle> {
         let one_based = u64::try_from(index).ok()?.checked_add(1)?;
-        (one_based <= PAYLOAD).then_some(ObjHandle(TAG | one_based))
+        (one_based <= PAYLOAD).then_some(ObjHandle(TAG | KIND_HEAP | one_based))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{BoxedHandle, IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
+    use execution_tape::value::ObjHandle;
 
     #[test]
     fn floats_round_trip_by_bits_or_fall_back_to_the_heap() {
@@ -154,5 +188,27 @@ mod tests {
             assert_eq!(BoxedHandle::decode(handle), BoxedHandle::Heap(index));
         }
         assert_eq!(BoxedHandle::heap(usize::MAX), None);
+        assert_eq!(
+            BoxedHandle::decode(BoxedHandle::INVALID),
+            BoxedHandle::Invalid
+        );
+    }
+
+    #[test]
+    fn booleans_and_object_handles_are_immediate() {
+        for value in [false, true] {
+            assert_eq!(
+                BoxedHandle::decode(BoxedHandle::immediate_bool(value)),
+                BoxedHandle::Bool(value)
+            );
+        }
+        for raw in [1, 2, 1 << 40, (1 << 45) - 1] {
+            let handle = BoxedHandle::immediate_object(ObjHandle(raw)).expect("object handle");
+            assert_eq!(
+                BoxedHandle::decode(handle),
+                BoxedHandle::Object(ObjHandle(raw))
+            );
+        }
+        assert_eq!(BoxedHandle::immediate_object(ObjHandle(1 << 45)), None);
     }
 }

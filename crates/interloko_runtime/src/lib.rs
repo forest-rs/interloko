@@ -29,9 +29,10 @@ use interloko_model::{
 pub const INTERLOKO_OBJECT_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f4f_424a);
 /// Host object type used for boxed top `<object>` values.
 ///
-/// Integers in [`IMMEDIATE_INTEGER_MIN`]..=[`IMMEDIATE_INTEGER_MAX`] and
-/// floats are carried in the handle itself and never allocate; other boxed
-/// values live in the host's append-only boxed-value heap.
+/// Floats, booleans, integers in
+/// [`IMMEDIATE_INTEGER_MIN`]..=[`IMMEDIATE_INTEGER_MAX`], and runtime objects
+/// are carried in the handle itself and never allocate; other boxed values
+/// live in the host's append-only boxed-value heap.
 pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
 
 use boxed::BoxedHandle;
@@ -1369,8 +1370,8 @@ pub trait HostObjectAdapter {
 /// Entry counts of a runtime host's append-only heaps.
 ///
 /// Neither heap shrinks: every runtime object and every heap-boxed value stays
-/// allocated for the host's lifetime. Integers and floats boxed as immediates
-/// (see [`INTERLOKO_VALUE_TYPE`]) are not counted because they never allocate.
+/// allocated for the host's lifetime. Values boxed as immediates (see
+/// [`INTERLOKO_VALUE_TYPE`]) are not counted because they never allocate.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct HeapStats {
     /// Runtime objects: instances, strings, symbols, vectors, metaobjects,
@@ -1662,20 +1663,31 @@ impl InterlokoHost {
         match BoxedHandle::decode(obj.handle) {
             BoxedHandle::Float(value) => Ok(Value::F64(value)),
             BoxedHandle::Integer(value) => Ok(Value::I64(value)),
+            BoxedHandle::Bool(value) => Ok(Value::Bool(value)),
+            BoxedHandle::Object(handle) => Ok(Value::Obj(Obj {
+                host_type: INTERLOKO_OBJECT_TYPE,
+                handle,
+            })),
             BoxedHandle::Heap(index) => self
                 .values
                 .get(index)
                 .cloned()
                 .ok_or(RuntimeError::InvalidBoxedValueHandle { object: obj }),
+            BoxedHandle::Invalid => Err(RuntimeError::InvalidBoxedValueHandle { object: obj }),
         }
     }
 
-    /// Boxes `value` as a top `<object>` value, carrying integers and floats
-    /// in the handle when they fit and allocating a heap box otherwise.
+    /// Boxes `value` as a top `<object>` value, carrying integers, floats,
+    /// booleans, and runtime-object handles in the handle when they fit and
+    /// allocating a heap box otherwise.
     fn push_boxed_value(&mut self, value: Value) -> Value {
         let immediate = match value {
             Value::I64(value) => BoxedHandle::immediate_integer(value),
             Value::F64(value) => BoxedHandle::immediate_float(value),
+            Value::Bool(value) => Some(BoxedHandle::immediate_bool(value)),
+            Value::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
+                BoxedHandle::immediate_object(obj.handle)
+            }
             _ => None,
         };
         let handle = immediate.unwrap_or_else(|| {
