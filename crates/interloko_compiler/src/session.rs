@@ -30,7 +30,7 @@ use crate::identity::{
 use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInvalidation};
 use crate::runtime as runtime_bridge;
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
-use crate::{ast, lower, sem, tape};
+use crate::{ast, lower, sem, tape, typing};
 /// Execution trace event mask accepted by session run and call APIs.
 pub use execution_tape::trace::TraceMask;
 use interloko_runtime::{
@@ -574,6 +574,8 @@ pub enum DumpStage {
     Lowered,
     /// `execution_tape` disassembly.
     Tape,
+    /// Soft typing configuration and decisions.
+    Typing,
     /// All stage dumps.
     All,
 }
@@ -1164,8 +1166,12 @@ pub struct SessionArtifacts {
     pub tape: Option<tape::TapeModule>,
     /// Tape emission error, when emission failed.
     pub tape_error: Option<tape::TapeError>,
-    /// Aggregated diagnostics from the compiler pipeline.
+    /// Aggregated diagnostics from the compiler pipeline, including advisory
+    /// soft typing warnings.
     pub diagnostics: Vec<Diagnostic>,
+    /// Soft typing decisions and the configuration they were reported under.
+    /// Advisory: lowering, tape emission, and the runtime do not consult it.
+    pub typing: typing::TypingArtifact,
     /// Runtime result when [`RuntimeMode::RunMain`] or tracing was requested.
     pub runtime_result: Option<RuntimeResult>,
     /// Captured runtime trace when traced execution was requested.
@@ -1622,6 +1628,28 @@ impl SessionArtifacts {
             )
     }
 
+    /// Returns these artifacts with soft typing diagnostics re-derived under
+    /// `config`.
+    ///
+    /// Typing decisions do not depend on the configuration, so nothing is
+    /// re-checked or recompiled: only the typing artifact's diagnostics and the
+    /// aggregated diagnostic list change.
+    #[must_use]
+    pub fn with_typing_config(&self, config: typing::TypingConfig) -> Self {
+        let mut artifacts = self.clone();
+        let mut timings = ArtifactTimingCollector::default();
+        let (typing, elapsed_nanos) =
+            measure_elapsed(|| self.typing.with_config(&self.sem, config));
+        timings.record(QueryArtifact::Typing, elapsed_nanos);
+        let (diagnostics, elapsed_nanos) =
+            measure_elapsed(|| aggregate_diagnostics(&self.sem, &typing));
+        timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
+        artifacts.typing = typing;
+        artifacts.diagnostics = diagnostics;
+        artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
+        artifacts
+    }
+
     /// Returns true when any aggregated diagnostic is an error.
     ///
     /// Warnings are advisory: a compilation whose only diagnostics are
@@ -2074,6 +2102,7 @@ impl SessionArtifacts {
                     )
                 },
             ),
+            DumpStage::Typing => self.typing.dump(&self.sem),
             DumpStage::All => {
                 let mut out = String::new();
                 for stage in [
@@ -2084,6 +2113,7 @@ impl SessionArtifacts {
                     DumpStage::Eop,
                     DumpStage::Lowered,
                     DumpStage::Tape,
+                    DumpStage::Typing,
                 ] {
                     let _ = writeln!(out, "== {stage:?} ==");
                     out.push_str(&self.dump_stage(stage));
@@ -2263,6 +2293,7 @@ impl SessionArtifacts {
             RuntimeMode::CompileOnly,
             self.grammar_registry,
             &self.host_registry,
+            self.typing.config,
         );
 
         let new_diagnostics: Vec<Diagnostic> = candidate
@@ -2537,6 +2568,7 @@ impl SessionArtifacts {
             RuntimeMode::CompileOnly,
             self.grammar_registry,
             &self.host_registry,
+            self.typing.config,
         );
 
         let runtime_layout = runtime_bridge::runtime_layout_from_sem(&candidate.sem);
@@ -2599,6 +2631,7 @@ impl SessionArtifacts {
             RuntimeMode::CompileOnly,
             self.grammar_registry,
             &self.host_registry,
+            self.typing.config,
         );
 
         let mut applied: Vec<AppliedMutation> = Vec::new();
@@ -2733,6 +2766,7 @@ pub struct DefinitionChange {
 pub struct CompilerSession {
     files: Vec<SourceFile>,
     grammar_registry: GrammarFrontendRegistry,
+    typing_config: typing::TypingConfig,
 }
 
 impl CompilerSession {
@@ -2748,6 +2782,7 @@ impl CompilerSession {
         Self {
             files: Vec::new(),
             grammar_registry,
+            typing_config: typing::TypingConfig::soft(),
         }
     }
 
@@ -2755,6 +2790,17 @@ impl CompilerSession {
     #[must_use]
     pub const fn grammar_registry(&self) -> GrammarFrontendRegistry {
         self.grammar_registry
+    }
+
+    /// Returns the soft typing configuration used by this session's compiles.
+    #[must_use]
+    pub const fn typing_config(&self) -> typing::TypingConfig {
+        self.typing_config
+    }
+
+    /// Sets the soft typing configuration used by future compiles.
+    pub fn set_typing_config(&mut self, config: typing::TypingConfig) {
+        self.typing_config = config;
     }
 
     /// Adds a named source file and returns its id.
@@ -2819,8 +2865,14 @@ impl CompilerSession {
     /// Compiles one source by id.
     #[must_use]
     pub fn compile(&self, id: SourceFileId, mode: RuntimeMode) -> Option<SessionArtifacts> {
-        self.source(id)
-            .map(|file| compile_file_with_grammar_registry(file, mode, self.grammar_registry))
+        self.source(id).map(|file| {
+            compile_file_with_grammar_registry(
+                file,
+                mode,
+                self.grammar_registry,
+                self.typing_config,
+            )
+        })
     }
 
     /// Compiles one source by id with explicit host-backed metadata.
@@ -2831,8 +2883,15 @@ impl CompilerSession {
         mode: RuntimeMode,
         registry: &sem::HostMetaRegistry,
     ) -> Option<SessionArtifacts> {
-        self.source(id)
-            .map(|file| compile_file_with_registries(file, mode, self.grammar_registry, registry))
+        self.source(id).map(|file| {
+            compile_file_with_registries(
+                file,
+                mode,
+                self.grammar_registry,
+                registry,
+                self.typing_config,
+            )
+        })
     }
 
     /// Compiles a named source without storing it in the session.
@@ -2850,7 +2909,12 @@ impl CompilerSession {
         mode: RuntimeMode,
         grammar_registry: GrammarFrontendRegistry,
     ) -> SessionArtifacts {
-        compile_file_with_grammar_registry(&SourceFile::named(name, source), mode, grammar_registry)
+        compile_file_with_grammar_registry(
+            &SourceFile::named(name, source),
+            mode,
+            grammar_registry,
+            typing::TypingConfig::default(),
+        )
     }
 
     /// Compiles a named source with an explicit grammar environment without
@@ -2969,6 +3033,7 @@ impl CompilerSession {
 pub struct IncrementalCompilerSession {
     files: Vec<CachedSourceFile>,
     grammar_registry: GrammarFrontendRegistry,
+    typing_config: typing::TypingConfig,
 }
 
 impl IncrementalCompilerSession {
@@ -2984,6 +3049,7 @@ impl IncrementalCompilerSession {
         Self {
             files: Vec::new(),
             grammar_registry,
+            typing_config: typing::TypingConfig::soft(),
         }
     }
 
@@ -2991,6 +3057,20 @@ impl IncrementalCompilerSession {
     #[must_use]
     pub const fn grammar_registry(&self) -> GrammarFrontendRegistry {
         self.grammar_registry
+    }
+
+    /// Returns the soft typing configuration used by this session's compiles.
+    #[must_use]
+    pub const fn typing_config(&self) -> typing::TypingConfig {
+        self.typing_config
+    }
+
+    /// Sets the soft typing configuration used by future compiles.
+    ///
+    /// A later compile of an unchanged source re-derives typing diagnostics
+    /// from cached decisions; nothing else is recompiled.
+    pub fn set_typing_config(&mut self, config: typing::TypingConfig) {
+        self.typing_config = config;
     }
 
     /// Adds a named source file and returns its stable id.
@@ -3103,7 +3183,15 @@ impl IncrementalCompilerSession {
         let previous_source = previous_artifacts
             .as_ref()
             .map(|artifacts| artifacts.source.clone());
-        let artifacts = self.files[index].artifacts_for(&source, mode, self.grammar_registry);
+        let previous_typing_config = previous_artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.typing.config);
+        let artifacts = self.files[index].artifacts_for(
+            &source,
+            mode,
+            self.grammar_registry,
+            self.typing_config,
+        );
         let diff = previous_artifacts
             .as_ref()
             .map(|before| CompilerSession::diff(before, &artifacts));
@@ -3111,6 +3199,7 @@ impl IncrementalCompilerSession {
             previous_cache.as_ref(),
             diff.as_ref(),
             previous_source.as_ref(),
+            previous_typing_config,
             &artifacts,
         );
         let cache = ArtifactCache::from_update(&artifacts, &reports);
@@ -3154,14 +3243,20 @@ impl CachedSourceFile {
         source: &SourceFile,
         mode: RuntimeMode,
         grammar_registry: GrammarFrontendRegistry,
+        typing_config: typing::TypingConfig,
     ) -> SessionArtifacts {
         if let Some(previous) = &self.artifacts
             && previous.source == *source
             && previous.grammar_registry == grammar_registry
         {
-            return artifacts_for_mode(previous, mode);
+            if previous.typing.config == typing_config {
+                return artifacts_for_mode(previous, mode);
+            }
+            // Only the reporting policy changed: re-derive typing diagnostics
+            // from the recorded decisions instead of recompiling.
+            return artifacts_for_mode(&previous.with_typing_config(typing_config), mode);
         }
-        compile_file_with_grammar_registry(source, mode, grammar_registry)
+        compile_file_with_grammar_registry(source, mode, grammar_registry, typing_config)
     }
 }
 
@@ -3582,8 +3677,11 @@ fn cache_reports(
     previous: Option<&ArtifactCache>,
     diff: Option<&SessionDiff>,
     previous_source: Option<&SourceFile>,
+    previous_typing_config: Option<typing::TypingConfig>,
     artifacts: &SessionArtifacts,
 ) -> Vec<CacheArtifactReport> {
+    let typing_config_changed =
+        previous_typing_config.is_some_and(|config| config != artifacts.typing.config);
     let source_changed =
         previous_source.is_some_and(|source| source.source != artifacts.source.source);
     let grammar_changed = previous_source
@@ -3609,10 +3707,12 @@ fn cache_reports(
                 CacheAction::Recomputed
             };
             let sem_affected = affected.iter().any(|item| item.key == report.key);
-            let affected = sem_affected || forced_by_grammar;
+            let retyped =
+                typing_config_changed && artifact_depends_on_typing_config(report.artifact);
+            let affected = sem_affected || forced_by_grammar || retyped;
             let invalidated = previous.is_some()
                 && action == CacheAction::Recomputed
-                && (source_changed || grammar_changed || sem_affected);
+                && (source_changed || grammar_changed || sem_affected || retyped);
             let metrics = match action {
                 CacheAction::Reused => ArtifactMetrics::default(),
                 CacheAction::Recomputed => ArtifactMetrics {
@@ -3634,7 +3734,17 @@ fn cache_reports(
 }
 
 fn artifact_depends_on_grammar(artifact: QueryArtifact) -> bool {
-    !matches!(artifact, QueryArtifact::Source)
+    !matches!(
+        artifact,
+        QueryArtifact::Source | QueryArtifact::TypingConfig
+    )
+}
+
+fn artifact_depends_on_typing_config(artifact: QueryArtifact) -> bool {
+    matches!(
+        artifact,
+        QueryArtifact::TypingConfig | QueryArtifact::Typing | QueryArtifact::Diagnostics
+    )
 }
 
 fn artifact_fingerprint(
@@ -3687,6 +3797,49 @@ fn artifact_fingerprint(
         QueryArtifact::RuntimeResult => {
             builder.mix_str(&format!("{:?}", artifacts.runtime_result));
         }
+        QueryArtifact::TypingConfig => {
+            builder.mix_str(&format!("{:?}", artifacts.typing.config));
+        }
+        QueryArtifact::DefinitionTyping(definition) => {
+            // Spans are left out so edits elsewhere in the file that only
+            // shift offsets keep this definition's typing reusable.
+            if let Some(typed) = artifacts
+                .typing
+                .definitions
+                .iter()
+                .find(|typed| typed.definition == definition)
+            {
+                for decision in &typed.decisions {
+                    builder.mix_str(&format!(
+                        "{} {} {} {} {:?} {:?} {:?}",
+                        decision.index,
+                        decision.check.as_str(),
+                        decision.verdict.as_str(),
+                        decision.rule.as_str(),
+                        decision.expected,
+                        decision.actual,
+                        decision.selected_method
+                    ));
+                }
+            }
+        }
+        QueryArtifact::Typing => {
+            builder.mix_str(&format!(
+                "{:?} {:?}",
+                artifacts.typing.status, artifacts.typing.config
+            ));
+            for typed in &artifacts.typing.definitions {
+                builder.mix_u64(typed.definition.raw());
+                builder.mix_u64(
+                    artifact_fingerprint(
+                        QueryArtifact::DefinitionTyping(typed.definition),
+                        artifacts,
+                    )
+                    .0,
+                );
+            }
+            mix_diagnostics(&mut builder, &artifacts.typing.diagnostics);
+        }
     }
     ArtifactFingerprint(builder.finish())
 }
@@ -3695,6 +3848,7 @@ fn mix_diagnostics(builder: &mut StableIdBuilder, diagnostics: &[Diagnostic]) {
     builder.mix_u64(u64::try_from(diagnostics.len()).unwrap_or(u64::MAX));
     for diagnostic in diagnostics {
         builder.mix_str(diagnostic.code.as_str());
+        builder.mix_str(diagnostic.severity.as_str());
         builder.mix_u64(u64::try_from(diagnostic.span.start).unwrap_or(u64::MAX));
         builder.mix_u64(u64::try_from(diagnostic.span.end).unwrap_or(u64::MAX));
         builder.mix_u64(u64::try_from(diagnostic.args.len()).unwrap_or(u64::MAX));
@@ -3880,7 +4034,17 @@ fn artifact_work_units(artifact: QueryArtifact, artifacts: &SessionArtifacts) ->
             )
         }),
         QueryArtifact::TapeProgram => usize_to_u64(artifacts.dump_stage(DumpStage::Tape).len()),
-        QueryArtifact::RuntimeResult => 1,
+        QueryArtifact::RuntimeResult | QueryArtifact::TypingConfig => 1,
+        QueryArtifact::DefinitionTyping(definition) => artifacts
+            .typing
+            .definitions
+            .iter()
+            .find(|typed| typed.definition == definition)
+            .map_or(1, |typed| {
+                usize_to_u64(typed.decisions.len()).saturating_add(1)
+            }),
+        QueryArtifact::Typing => usize_to_u64(artifacts.typing.definitions.len())
+            .saturating_add(usize_to_u64(artifacts.typing.diagnostics.len())),
     }
 }
 
@@ -4727,15 +4891,27 @@ fn generic_contract_label(module: &sem::Module, generic_id: sem::GenericFunction
 }
 
 fn compile_file(file: &SourceFile, mode: RuntimeMode) -> SessionArtifacts {
-    compile_file_with_grammar_registry(file, mode, GrammarFrontendRegistry::builtin())
+    compile_file_with_grammar_registry(
+        file,
+        mode,
+        GrammarFrontendRegistry::builtin(),
+        typing::TypingConfig::default(),
+    )
 }
 
 fn compile_file_with_grammar_registry(
     file: &SourceFile,
     mode: RuntimeMode,
     grammar_registry: GrammarFrontendRegistry,
+    typing_config: typing::TypingConfig,
 ) -> SessionArtifacts {
-    compile_file_with_registries(file, mode, grammar_registry, &sem::HostMetaRegistry::new())
+    compile_file_with_registries(
+        file,
+        mode,
+        grammar_registry,
+        &sem::HostMetaRegistry::new(),
+        typing_config,
+    )
 }
 
 fn compile_file_with_host_registry(
@@ -4743,7 +4919,13 @@ fn compile_file_with_host_registry(
     mode: RuntimeMode,
     registry: &sem::HostMetaRegistry,
 ) -> SessionArtifacts {
-    compile_file_with_registries(file, mode, GrammarFrontendRegistry::builtin(), registry)
+    compile_file_with_registries(
+        file,
+        mode,
+        GrammarFrontendRegistry::builtin(),
+        registry,
+        typing::TypingConfig::default(),
+    )
 }
 
 pub(crate) fn compile_file_with_registries(
@@ -4751,6 +4933,7 @@ pub(crate) fn compile_file_with_registries(
     mode: RuntimeMode,
     grammar_registry: GrammarFrontendRegistry,
     registry: &sem::HostMetaRegistry,
+    typing_config: typing::TypingConfig,
 ) -> SessionArtifacts {
     let mut timings = ArtifactTimingCollector::default();
     let (source, elapsed_nanos) = measure_elapsed(|| file.clone());
@@ -4775,7 +4958,9 @@ pub(crate) fn compile_file_with_registries(
     timings.record(QueryArtifact::Ast, elapsed_nanos);
     let (sem, elapsed_nanos) = measure_elapsed(|| sem::lower_with_host_registry(&ast, registry));
     timings.record(QueryArtifact::Bind, elapsed_nanos);
-    let (diagnostics, elapsed_nanos) = measure_elapsed(|| sem.diagnostics.clone());
+    let (typing, elapsed_nanos) = measure_elapsed(|| typing::analyze(&sem, typing_config));
+    timings.record(QueryArtifact::Typing, elapsed_nanos);
+    let (diagnostics, elapsed_nanos) = measure_elapsed(|| aggregate_diagnostics(&sem, &typing));
     timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
     let invalidation = QueryInvalidation::for_module(&sem);
 
@@ -4819,6 +5004,7 @@ pub(crate) fn compile_file_with_registries(
         tape,
         tape_error,
         diagnostics,
+        typing,
         runtime_result,
         runtime_trace,
         mutations: Vec::new(),
@@ -4829,6 +5015,16 @@ pub(crate) fn compile_file_with_registries(
     };
     artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
     artifacts
+}
+
+/// Aggregates every compile stage's diagnostics into the session's single
+/// diagnostic list: semantic diagnostics first, then soft typing findings.
+fn aggregate_diagnostics(sem: &sem::Module, typing: &typing::TypingArtifact) -> Vec<Diagnostic> {
+    sem.diagnostics
+        .iter()
+        .chain(&typing.diagnostics)
+        .cloned()
+        .collect()
 }
 
 fn run_main(
@@ -7786,6 +7982,15 @@ fn dump_environment_object_stage(
         DumpStage::Tape => dump_tape_environment_object(artifacts, object),
         DumpStage::Mop => dump_mop_environment_object(artifacts, object),
         DumpStage::Eop => dump_environment_object_record(object),
+        DumpStage::Typing => object.source.definition.map_or_else(
+            || {
+                format!(
+                    "typing summary {}\nno typed definition\n",
+                    object.id.as_str()
+                )
+            },
+            |definition| artifacts.typing.dump_definition(&artifacts.sem, definition),
+        ),
         DumpStage::Syntax | DumpStage::Ast => {
             let mut out = String::new();
             let _ = writeln!(
@@ -7815,6 +8020,7 @@ fn dump_environment_object_stage(
                 DumpStage::Eop,
                 DumpStage::Lowered,
                 DumpStage::Tape,
+                DumpStage::Typing,
             ] {
                 out.push_str(&dump_environment_object_stage(artifacts, object, stage));
                 if !out.ends_with('\n') {
@@ -8459,6 +8665,7 @@ fn dump_stage_name(stage: DumpStage) -> &'static str {
         DumpStage::Eop => "eop",
         DumpStage::Lowered => "lowered",
         DumpStage::Tape => "tape",
+        DumpStage::Typing => "typing",
         DumpStage::All => "all",
     }
 }
@@ -13090,6 +13297,166 @@ mod tests {
                 eop_object(&after_objects, id).id
             );
         }
+    }
+
+    const SHAPES_WITH_UNTAKEN_REFUTED_CALL: &str = "define class <shape> (<object>)\nend;\n\
+        define class <circle> (<shape>)\nend;\n\
+        define generic area(x);\n\
+        define method area(c :: <circle>)\n  7\nend;\n\
+        define function measure(s :: <shape>)\n  area(s)\nend;\n\
+        define function main()\n  \
+        if 1 < 2 then area(make(<circle>)) else area(make(<shape>)) end\nend;";
+
+    #[test]
+    fn soft_typing_warnings_ride_the_diagnostic_list_without_blocking() {
+        let artifacts = CompilerSession::compile_source(
+            "typing.loko",
+            SHAPES_WITH_UNTAKEN_REFUTED_CALL,
+            RuntimeMode::RunMain,
+        );
+
+        assert_eq!(artifacts.diagnostics.len(), 1);
+        let warning = &artifacts.diagnostics[0];
+        assert_eq!(
+            warning.code,
+            DiagnosticCode::TypingDispatchNoApplicableMethod
+        );
+        assert_eq!(warning.severity, crate::diagnostic::Severity::Warning);
+        assert_eq!(artifacts.typing.diagnostics, artifacts.diagnostics);
+        assert!(!artifacts.has_errors());
+        assert!(artifacts.tape.is_some());
+        assert!(matches!(
+            artifacts.runtime_result,
+            Some(RuntimeResult::Returned(FunctionValue::Integer(7)))
+        ));
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Typing)
+                .contains("t1 dispatch refuted rule=dispatch-no-applicable-method")
+        );
+    }
+
+    #[test]
+    fn session_typing_config_sets_reporting_policy() {
+        let mut session = CompilerSession::new();
+        assert_eq!(session.typing_config(), typing::TypingConfig::soft());
+        session.set_typing_config(typing::TypingConfig::strict());
+        let id = session.add_source("typing.loko", SHAPES_WITH_UNTAKEN_REFUTED_CALL);
+        let artifacts = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+
+        let codes = artifacts
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code, diagnostic.severity))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [
+                (
+                    DiagnosticCode::TypingDispatchRuntimeChecked,
+                    crate::diagnostic::Severity::Warning
+                ),
+                (
+                    DiagnosticCode::TypingDispatchNoApplicableMethod,
+                    crate::diagnostic::Severity::Error
+                ),
+            ]
+        );
+        assert!(artifacts.has_errors());
+        // Typing errors are advisory for the pipeline: lowering still ran.
+        assert!(artifacts.tape.is_some());
+    }
+
+    #[test]
+    fn typing_config_change_rederives_diagnostics_without_recompiling() {
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("typing.loko", SHAPES_WITH_UNTAKEN_REFUTED_CALL);
+        let soft = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        session.set_typing_config(typing::TypingConfig::silent());
+        let silent = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+
+        assert_eq!(soft.artifacts.diagnostics.len(), 1);
+        assert!(silent.artifacts.diagnostics.is_empty());
+        assert_eq!(
+            silent.artifacts.typing.config,
+            typing::TypingConfig::silent()
+        );
+        assert_eq!(
+            silent.artifacts.typing.definitions,
+            soft.artifacts.typing.definitions
+        );
+
+        let main = silent.artifacts.sem.functions[1].definition;
+        for reused in [
+            QueryArtifact::Bind,
+            QueryArtifact::DefinitionTyping(main),
+            QueryArtifact::LoweredModule,
+            QueryArtifact::TapeProgram,
+        ] {
+            assert_eq!(
+                cache_action(&silent, reused),
+                Some(CacheAction::Reused),
+                "{reused:?}"
+            );
+        }
+        for recomputed in [
+            QueryArtifact::TypingConfig,
+            QueryArtifact::Typing,
+            QueryArtifact::Diagnostics,
+        ] {
+            assert_eq!(
+                cache_action(&silent, recomputed),
+                Some(CacheAction::Recomputed),
+                "{recomputed:?}"
+            );
+        }
+        let config_report =
+            cache_report(&silent, QueryArtifact::TypingConfig).expect("typing config report");
+        assert!(config_report.invalidated);
+        assert!(config_report.affected);
+    }
+
+    #[test]
+    fn editing_one_definition_keeps_other_definition_typing_reused() {
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("typing.loko", SHAPES_WITH_UNTAKEN_REFUTED_CALL);
+        let _ = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        let edited = SHAPES_WITH_UNTAKEN_REFUTED_CALL.replace(
+            "else area(make(<shape>)) end",
+            "else area(make(<circle>)) end",
+        );
+        let update = session
+            .edit_and_compile(id, &edited, RuntimeMode::CompileOnly)
+            .expect("source exists");
+
+        let measure = update.artifacts.sem.functions[0].definition;
+        let main = update.artifacts.sem.functions[1].definition;
+        assert!(update.artifacts.diagnostics.is_empty());
+        assert_eq!(
+            cache_action(&update, QueryArtifact::DefinitionTyping(measure)),
+            Some(CacheAction::Reused)
+        );
+        assert_eq!(
+            cache_action(&update, QueryArtifact::DefinitionTyping(main)),
+            Some(CacheAction::Recomputed)
+        );
+
+        // Shifting every span leaves per-definition typing reusable.
+        let shifted = session
+            .edit_and_compile(id, &format!("\n\n{edited}"), RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert_eq!(
+            cache_action(&shifted, QueryArtifact::DefinitionTyping(main)),
+            Some(CacheAction::Reused)
+        );
     }
 
     #[test]

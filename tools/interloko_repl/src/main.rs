@@ -1688,7 +1688,7 @@ where
             None => {
                 writeln!(
                     stderr,
-                    "stage must be one of syntax|ast|sem|mop|eop|lowered|tape|all"
+                    "stage must be one of syntax|ast|sem|mop|eop|lowered|tape|typing|all"
                 )?;
                 Ok(None)
             }
@@ -1696,7 +1696,7 @@ where
         _ => {
             writeln!(
                 stderr,
-                "usage: :dump [syntax|ast|sem|mop|eop|lowered|tape|all]"
+                "usage: :dump [syntax|ast|sem|mop|eop|lowered|tape|typing|all]"
             )?;
             Ok(None)
         }
@@ -1712,6 +1712,7 @@ fn parse_stage(stage: &str) -> Option<DumpStage> {
         "eop" => Some(DumpStage::Eop),
         "lowered" => Some(DumpStage::Lowered),
         "tape" => Some(DumpStage::Tape),
+        "typing" => Some(DumpStage::Typing),
         "all" => Some(DumpStage::All),
         _ => None,
     }
@@ -2825,7 +2826,7 @@ fn help_text() -> &'static str {
   :pending                      show pending multiline definition
 
 inspection:
-  :dump [syntax|ast|sem|mop|eop|lowered|tape|all]
+  :dump [syntax|ast|sem|mop|eop|lowered|tape|typing|all]
   :mop
   :eop
   :artifacts

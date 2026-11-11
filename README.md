@@ -202,7 +202,7 @@ continues to work through dereferencing.
 
 ```sh
 cargo run -p interloko_lab -- run <file.loko>
-cargo run -p interloko_lab -- dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|all
+cargo run -p interloko_lab -- dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|all
 cargo run -p interloko_lab -- artifacts <file.loko>
 cargo run -p interloko_lab -- report <file.loko> --output <report.html>
 cargo run -p interloko_lab -- dispatch <file.loko> [dispatch-site-id]

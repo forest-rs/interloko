@@ -57,6 +57,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, Severity};
 use crate::identity::{DefinitionId, DefinitionKind};
@@ -474,6 +475,85 @@ impl TypingArtifact {
         self.decisions()
             .filter(|decision| decision.verdict == verdict)
             .count()
+    }
+
+    /// Renders the artifact as a stable text dump: configuration, status,
+    /// then one line per decision grouped by definition.
+    #[must_use]
+    pub fn dump(&self, module: &sem::Module) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "typing config={} status={} decisions={} proved={} checked={} refuted={}",
+            config_label(self.config),
+            self.status.as_str(),
+            self.decisions().count(),
+            self.count(TypingVerdict::Proved),
+            self.count(TypingVerdict::Checked),
+            self.count(TypingVerdict::Refuted),
+        );
+        for check in TypingCheck::ALL {
+            let policy = self.config.policy(*check);
+            let _ = writeln!(
+                out,
+                "  policy {} checked={} refuted={}",
+                check.as_str(),
+                policy.checked.as_str(),
+                policy.refuted.as_str()
+            );
+        }
+        for definition in &self.definitions {
+            if !definition.decisions.is_empty() {
+                self.write_definition(&mut out, module, definition);
+            }
+        }
+        out
+    }
+
+    /// Renders one definition's decisions in the format of [`Self::dump`].
+    #[must_use]
+    pub fn dump_definition(&self, module: &sem::Module, definition: DefinitionId) -> String {
+        let mut out = String::new();
+        match self
+            .definitions
+            .iter()
+            .find(|typed| typed.definition == definition)
+        {
+            Some(typed) => self.write_definition(&mut out, module, typed),
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  definition {definition} {} untyped status={}",
+                    definition_label(module, definition),
+                    self.status.as_str()
+                );
+            }
+        }
+        out
+    }
+
+    fn write_definition(&self, out: &mut String, module: &sem::Module, typed: &DefinitionTyping) {
+        let _ = writeln!(
+            out,
+            "  definition {} {}",
+            typed.definition,
+            definition_label(module, typed.definition)
+        );
+        for decision in &typed.decisions {
+            let _ = writeln!(
+                out,
+                "    t{} {} {} rule={} span={}..{} expected={} actual={} severity={}",
+                decision.index,
+                decision.check.as_str(),
+                decision.verdict.as_str(),
+                decision.rule.as_str(),
+                decision.span.start,
+                decision.span.end,
+                expectation_label(module, &decision.expected),
+                static_type_list_name(module, &decision.actual),
+                self.severity(decision).as_str()
+            );
+        }
     }
 
     /// Re-derives diagnostics under `config` without re-checking.
@@ -1027,10 +1107,7 @@ fn decision_diagnostic(
         TypingExpectation::Dispatch { generic, .. } => diagnostic
             .with_arg(DiagnosticArg::text(
                 "generic",
-                module
-                    .generics
-                    .get(generic.0 as usize)
-                    .map_or_else(|| format!("g{}", generic.0), |generic| generic.name.clone()),
+                generic_name(module, *generic),
             ))
             .with_arg(DiagnosticArg::text(
                 "arguments",
@@ -1087,6 +1164,87 @@ fn static_type_list_name(module: &sem::Module, types: &[StaticType]) -> String {
         [name] => name.clone(),
         _ => format!("({})", names.join(", ")),
     }
+}
+
+/// Returns the preset name of `config`, or `custom`.
+#[must_use]
+pub fn config_label(config: TypingConfig) -> &'static str {
+    config.preset_name().unwrap_or("custom")
+}
+
+/// Returns a source-level label for an expectation, such as `<circle>` or
+/// `dispatch area`.
+#[must_use]
+pub fn expectation_label(module: &sem::Module, expected: &TypingExpectation) -> String {
+    match expected {
+        TypingExpectation::Class(class) => class_name(module, *class),
+        TypingExpectation::Dispatch {
+            generic,
+            methods,
+            boxed_params,
+        } => {
+            let mut label = format!(
+                "dispatch {} methods={}",
+                generic_name(module, *generic),
+                methods.len()
+            );
+            if !boxed_params.is_empty() {
+                let positions = boxed_params
+                    .iter()
+                    .map(|index| format!("{index}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _ = write!(label, " boxed-params={positions}");
+            }
+            label
+        }
+    }
+}
+
+/// Returns a source-level label for a typed definition, such as
+/// `function main` or `method area(<circle>)`.
+#[must_use]
+pub fn definition_label(module: &sem::Module, definition: DefinitionId) -> String {
+    if let Some(function) = module
+        .functions
+        .iter()
+        .find(|function| function.definition == definition)
+    {
+        return format!("function {}", function.name);
+    }
+    if let Some(method) = module
+        .methods
+        .iter()
+        .find(|method| method.definition == definition)
+    {
+        let specializers = method
+            .specializers
+            .iter()
+            .map(|specializer| {
+                specializer.map_or_else(|| "?".into(), |class| class_name(module, class))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "method {}({specializers})",
+            generic_name(module, method.generic)
+        );
+    }
+    if let Some(constant) = module
+        .constants
+        .iter()
+        .find(|constant| constant.definition == definition)
+    {
+        return format!("constant {}", constant.name);
+    }
+    format!("definition {definition}")
+}
+
+fn generic_name(module: &sem::Module, generic: GenericFunctionId) -> String {
+    module
+        .generics
+        .get(generic.0 as usize)
+        .map_or_else(|| format!("g{}", generic.0), |generic| generic.name.clone())
 }
 
 fn class_name(module: &sem::Module, class: ClassId) -> String {
@@ -1283,6 +1441,25 @@ mod tests {
         let decisions = main_decisions(&module, &artifact);
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].verdict, TypingVerdict::Refuted);
+    }
+
+    #[test]
+    fn dump_lists_policy_and_decisions_by_definition() {
+        let (module, artifact) = decisions_for(&format!(
+            "{SHAPES}define function main()\n  area(make(<shape>))\nend;"
+        ));
+        let dump = artifact.dump(&module);
+        assert!(dump.starts_with(
+            "typing config=soft status=checked decisions=1 proved=0 checked=0 refuted=1\n"
+        ));
+        assert!(dump.contains("  policy dispatch checked=silent refuted=warning\n"));
+        assert!(dump.contains(" function main\n"));
+        assert!(dump.contains("t0 dispatch refuted rule=dispatch-no-applicable-method span="));
+        assert!(
+            dump.contains(
+                "expected=dispatch area methods=2 actual=exactly <shape> severity=warning"
+            )
+        );
     }
 
     #[test]

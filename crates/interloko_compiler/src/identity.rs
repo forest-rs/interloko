@@ -237,6 +237,12 @@ pub enum ArtifactKind {
     TapeProgram,
     /// Runtime result for a requested `main` run.
     RuntimeResult,
+    /// Soft typing decisions for one function, method, or constant.
+    DefinitionTyping,
+    /// Soft typing result for the whole module.
+    Typing,
+    /// Session-owned soft typing configuration input.
+    TypingConfig,
 }
 
 impl ArtifactKind {
@@ -259,6 +265,9 @@ impl ArtifactKind {
             Self::LoweredModule => "lowered-module",
             Self::TapeProgram => "tape-program",
             Self::RuntimeResult => "runtime-result",
+            Self::DefinitionTyping => "definition-typing",
+            Self::Typing => "typing",
+            Self::TypingConfig => "typing-config",
         }
     }
 
@@ -279,6 +288,9 @@ impl ArtifactKind {
             Self::EnvironmentResolution => 13,
             Self::GrammarStack => 14,
             Self::GrammarParse => 15,
+            Self::Typing => 16,
+            Self::DefinitionTyping => 17,
+            Self::TypingConfig => 18,
         }
     }
 }

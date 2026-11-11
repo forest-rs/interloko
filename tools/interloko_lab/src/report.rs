@@ -2883,6 +2883,9 @@ fn artifact_stage_relation(artifact: QueryArtifact) -> &'static str {
         QueryArtifact::LoweredModule => "artifact-stage:lowered",
         QueryArtifact::TapeProgram => "artifact-stage:tape",
         QueryArtifact::RuntimeResult => "artifact-stage:runtime",
+        QueryArtifact::TypingConfig => "artifact-stage:typing-config",
+        QueryArtifact::DefinitionTyping(_) => "artifact-stage:definition-typing",
+        QueryArtifact::Typing => "artifact-stage:typing",
     }
 }
 
