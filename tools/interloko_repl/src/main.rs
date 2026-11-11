@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -1324,6 +1325,15 @@ impl ReplSourceBuffer {
         }
         let mut buffer = self.clone();
         buffer.entries.remove(index);
+        if index == 0 {
+            // The new first entry's leading blank lines separated it from the
+            // dropped form; don't leave them at the top of the buffer.
+            if let Some(first) = buffer.entries.first_mut() {
+                let content = first.source.len() - first.source.trim_start().len();
+                let blank_lines = first.source[..content].rfind('\n').map_or(0, |n| n + 1);
+                first.source.drain(..blank_lines);
+            }
+        }
         for (index, entry) in buffer.entries.iter_mut().enumerate() {
             entry.form.index = index;
         }
@@ -1334,30 +1344,35 @@ impl ReplSourceBuffer {
         self.push_definition_with_origin(source, SourceOrigin::Typed);
     }
 
-    fn push_definition_with_origin(&mut self, source: String, origin: SourceOrigin) {
-        let span_start = self.rendered_source().len();
-        let span_end = span_start + source.trim_end().len();
-        let line_start = self.next_source_line();
-        let line_end = line_start + source.lines().count().saturating_sub(1);
-        let form = FormRecord::from_definition(
-            self.entries.len(),
-            &source,
-            line_start,
-            line_end,
-            syntax::Span::new(span_start, span_end),
-            None,
-        );
-        self.entries.push(AcceptedDefinition {
-            source,
-            origin,
-            form,
-        });
+    /// Appends a definition after the current entries, one blank line below
+    /// the previous form. The separator belongs to the new entry, just as a
+    /// loaded entry owns the trivia above its form.
+    fn push_definition_with_origin(&mut self, definition: String, origin: SourceOrigin) {
+        let mut rendered = self.rendered_source();
+        let chunk_start = rendered.len();
+        let separator = match rendered.as_bytes() {
+            [] => "",
+            [.., b'\n'] => "\n",
+            _ => "\n\n",
+        };
+        let definition = definition.trim_end();
+        let form_start = chunk_start + separator.len();
+        let form_end = form_start + definition.len();
+        rendered.push_str(separator);
+        rendered.push_str(definition);
+        rendered.push('\n');
+        let entry = SourceBufferEntry {
+            chunk: chunk_start..rendered.len(),
+            span: syntax::Span::new(form_start, form_end),
+            kind: None,
+        };
+        self.push_entry(&rendered, entry, origin);
     }
 
     fn from_form_spans(source: &str, forms: &[TopLevelFormSpan], origin: SourceOrigin) -> Self {
         let mut buffer = Self::default();
         for entry in source_entries_from_form_spans(source, forms) {
-            buffer.push_span_backed_entry(entry, origin);
+            buffer.push_entry(source, entry, origin);
         }
         buffer
     }
@@ -1373,38 +1388,37 @@ impl ReplSourceBuffer {
         // Parser forms and buffer entries are both source-ordered; keep origins
         // paired by index when a successful typed edit refreshes span facts.
         for (entry, origin) in entries.into_iter().zip(origins) {
-            self.push_span_backed_entry(entry, origin);
+            self.push_entry(source, entry, origin);
         }
     }
 
-    fn push_span_backed_entry(&mut self, entry: SourceBufferEntry, origin: SourceOrigin) {
-        let next_line = self.next_source_line();
-        let form_start = entry.form_start.saturating_sub(entry.chunk_start);
-        let form_end = entry.form_end.saturating_sub(entry.chunk_start);
-        let line_start = next_line + line_number_for_offset(&entry.source, form_start) - 1;
-        let line_end = next_line + line_number_for_offset(&entry.source, form_end) - 1;
+    /// Records `entry`, whose chunk and span are byte offsets into `source`:
+    /// the full rendered buffer once this entry is appended. Line numbers are
+    /// therefore lines of that buffer, which is the loaded file after `:load`.
+    fn push_entry(&mut self, source: &str, entry: SourceBufferEntry, origin: SourceOrigin) {
         let form = FormRecord::from_definition(
             self.entries.len(),
-            &entry.source[form_start..form_end],
-            line_start,
-            line_end,
-            syntax::Span::new(entry.form_start, entry.form_end),
-            Some(entry.kind),
+            &source[entry.span.start..entry.span.end],
+            line_number_for_offset(source, entry.span.start),
+            line_number_for_offset(source, entry.span.end),
+            entry.span,
+            entry.kind,
         );
         self.entries.push(AcceptedDefinition {
-            source: entry.source,
+            source: source[entry.chunk.clone()].to_string(),
+            first_line: line_number_for_offset(source, entry.chunk.start),
             origin,
             form,
         });
     }
 
+    /// The buffer text: entries concatenated verbatim, so a loaded file
+    /// renders (and `:write`s) byte-for-byte as it was read.
     fn rendered_source(&self) -> String {
-        let mut source = String::new();
-        for entry in &self.entries {
-            source.push_str(entry.source.trim_end());
-            source.push_str("\n\n");
-        }
-        source
+        self.entries
+            .iter()
+            .map(|entry| entry.source.as_str())
+            .collect()
     }
 
     fn clear(&mut self) {
@@ -1417,62 +1431,48 @@ impl ReplSourceBuffer {
             .filter(|entry| entry.origin == origin)
             .count()
     }
-
-    fn next_source_line(&self) -> usize {
-        let source = self.rendered_source();
-        if source.trim().is_empty() {
-            1
-        } else {
-            source.lines().count() + 1
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SourceBufferEntry {
-    source: String,
-    chunk_start: usize,
-    form_start: usize,
-    form_end: usize,
-    kind: TopLevelFormKind,
+    /// Bytes of the source owned by this entry.
+    chunk: Range<usize>,
+    /// Bytes of the parsed form within `chunk`.
+    span: syntax::Span,
+    kind: Option<TopLevelFormKind>,
 }
 
+/// Splits `source` into one entry per form, covering every byte exactly once.
+///
+/// Each entry owns whole lines: the trivia above its form (blank lines,
+/// comments, doc comments) through the end of the form's last line, so a
+/// trailing `// comment` stays with the form it follows. The first entry also
+/// owns any leading text and the last entry any trailing text. Forms sharing
+/// a line split at the end of the earlier form.
 fn source_entries_from_form_spans(
     source: &str,
     forms: &[TopLevelFormSpan],
 ) -> Vec<SourceBufferEntry> {
-    // Preserve meaningful inter-form material without inventing syntax:
-    // comments/directives before a form attach to that following form, while
-    // trailing material after the last form remains with the previous entry.
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(forms.len());
     let mut chunk_start = 0;
-    for form in forms {
-        let chunk_end = form.span.end.min(source.len());
-        let entry_start = if source[chunk_start..form.span.start.min(source.len())]
-            .trim()
-            .is_empty()
-        {
-            form.span.start
-        } else {
-            chunk_start
+    for (index, form) in forms.iter().enumerate() {
+        let form_end = form.span.end.clamp(chunk_start, source.len());
+        let chunk_end = match forms.get(index + 1) {
+            Some(next) => {
+                let next_start = next.span.start.clamp(form_end, source.len());
+                source[form_end..next_start]
+                    .find('\n')
+                    .map_or(form_end, |newline| form_end + newline + 1)
+            }
+            None => source.len(),
         };
-        if entry_start <= chunk_end {
-            entries.push(SourceBufferEntry {
-                source: source[entry_start..chunk_end].trim_end().to_string(),
-                chunk_start: entry_start,
-                form_start: form.span.start,
-                form_end: form.span.end,
-                kind: form.kind,
-            });
-            chunk_start = chunk_end;
-        }
+        entries.push(SourceBufferEntry {
+            chunk: chunk_start..chunk_end,
+            span: syntax::Span::new(form.span.start.clamp(chunk_start, form_end), form_end),
+            kind: Some(form.kind),
+        });
+        chunk_start = chunk_end;
     }
-
-    if let Some(last) = entries.last_mut() {
-        last.source.push_str(&source[chunk_start..]);
-    }
-
-    debug_assert_eq!(entries.len(), forms.len());
     entries
 }
 
@@ -1486,7 +1486,10 @@ fn line_number_for_offset(source: &str, offset: usize) -> usize {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AcceptedDefinition {
+    /// The verbatim buffer text this entry owns, including trivia above the form.
     source: String,
+    /// Buffer line on which `source` begins.
+    first_line: usize,
     origin: SourceOrigin,
     form: FormRecord,
 }
@@ -2601,19 +2604,13 @@ where
         entry.form.kind,
         entry.form.name
     )?;
-    for (offset, line) in entry.source.lines().enumerate() {
-        writeln!(stdout, "{:>4} | {line}", entry_line_start(entry) + offset)?;
+    let lines = (entry.first_line..)
+        .zip(entry.source.lines())
+        .skip_while(|(_, line)| line.trim().is_empty());
+    for (line_number, line) in lines {
+        writeln!(stdout, "{line_number:>4} | {line}")?;
     }
     Ok(())
-}
-
-fn entry_line_start(entry: &AcceptedDefinition) -> usize {
-    let leading_lines = entry
-        .source
-        .lines()
-        .position(|line| line.trim_start().starts_with("define "))
-        .unwrap_or_default();
-    entry.form.line_start.saturating_sub(leading_lines)
 }
 
 fn form_defined_objects(
@@ -3395,7 +3392,7 @@ mod tests {
 
         assert_eq!(
             buffer.rendered_source(),
-            "define function first()\n  1\nend;\n\ndefine function second()\n  2\nend;\n\n"
+            "define function first()\n  1\nend;\n\ndefine function second()\n  2\nend;\n"
         );
         assert_eq!(buffer.entries()[0].form.line_start, 1);
         assert_eq!(buffer.entries()[0].form.line_end, 3);
