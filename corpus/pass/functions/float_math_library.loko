@@ -3,6 +3,8 @@
 // expect: dump sem contains float-call hypot
 // expect: dump lowered contains float.call interloko.float.hypot
 // expect: dump tape contains interloko.float.pow
+// expect: dump tape contains f64.nearest
+// expect: dump lowered contains f64.floor
 
 define function main() => <float>
   hypot(3.0, 4.0) + pow(2.0, 10.0) + floor(-2.5) + ceiling(2.1) + round(2.5)

@@ -243,7 +243,7 @@ assembler from the declared function ABI and appends backend temporaries.
 It does not recover declarations by scanning emitted instructions. Closure
 environments and indirect signatures use the VM's compositional contracts.
 
-Compiled tapes are regeneratable artifacts. The current wire version is 0.5;
+Compiled tapes are regeneratable artifacts. The current wire version is 0.6;
 recompile older tapes and regenerate any source sidecars with them. Runtime
 results use an explicit owned output vector and remain readable after their
 execution context is dropped.
