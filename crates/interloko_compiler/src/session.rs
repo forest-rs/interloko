@@ -13907,6 +13907,49 @@ mod tests {
     }
 
     #[test]
+    fn boxed_objects_and_booleans_keep_the_heap_flat() {
+        let artifacts = CompilerSession::compile_source(
+            "boxing.loko",
+            "define class <point> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define generic keep(x);\n\
+             define method keep(x :: <object>) => <object>\n  x\nend;\n\
+             define function score(p :: <point>, flag :: <boolean>) => <integer>\n  \
+             if instance?(keep(p), <point>) then\n    \
+             if instance?(keep(flag), <point>) then 0 else 1 end\n  \
+             else\n    0\n  end\nend;\n\
+             define function spin(n :: <integer>, p :: <point>, acc :: <integer>) => <integer>\n  \
+             if n = 0 then acc else spin(n - 1, p, acc + score(p, n < 5) + score(p, #t)) end\nend;\n\
+             define function main(n :: <integer>) => <integer>\n  spin(n, make(<point>), 0)\nend;\n\
+             define function is-class(x :: <object>) => <integer>\n  \
+             if instance?(x, <string>) then 0 else 1 end\nend;\n\
+             define function mop(n :: <integer>, acc :: <integer>) => <integer>\n  \
+             if n = 0 then acc else \
+             mop(n - 1, acc + is-class(class-direct-superclass(object-class(2.5)))) end\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let call = |name: &str, args: &[i64]| {
+            let args: Vec<_> = args.iter().copied().map(FunctionValue::Integer).collect();
+            artifacts
+                .call_function(name, &args, None)
+                .expect("call should run")
+        };
+
+        let few = call("main", &[10]);
+        let many = call("main", &[200]);
+        assert_eq!(few.value, FunctionValue::Integer(20));
+        assert_eq!(many.value, FunctionValue::Integer(400));
+        // 800 boxed objects and booleans: no boxes, and only the one point.
+        assert_eq!(many.heap, few.heap);
+        assert_eq!(many.heap.boxed_values, 0);
+
+        // MOP queries still allocate metaobjects, but no box wrappers.
+        let mop = call("mop", &[50, 0]);
+        assert_eq!(mop.value, FunctionValue::Integer(50));
+        assert_eq!(mop.heap.boxed_values, 0);
+    }
+
+    #[test]
     fn integer_overflow_is_a_distinct_runtime_outcome() {
         let artifacts = CompilerSession::compile_source(
             "overflow.loko",
