@@ -14,6 +14,7 @@ use crate::syntax::Span;
 pub use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
 };
+pub use interloko_runtime::FloatFunction;
 
 /// Durable direct function identifier within a semantic module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -1205,6 +1206,132 @@ impl From<ast::CompareOp> for CompareOp {
     }
 }
 
+/// Built-in function on `<float>` values.
+///
+/// Builtins resolve by name only after user functions, generics, host
+/// functions, and accessors, so a program may define its own `abs` or `max`
+/// without conflict. Every argument must be a `<float>`; integers are not
+/// converted implicitly. Operations with a tape instruction lower inline;
+/// [`FloatBuiltin::Library`] functions call the runtime host.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum FloatBuiltin {
+    /// `abs(x)`: magnitude, clearing the sign bit.
+    Abs,
+    /// `min(x, y)`: IEEE 754-2019 `minimum`; NaN-propagating, `-0.0 < 0.0`.
+    Min,
+    /// `max(x, y)`: IEEE 754-2019 `maximum`; NaN-propagating, `-0.0 < 0.0`.
+    Max,
+    /// `remainder(x, y)`: `x - y * truncate(x / y)`, with the sign of `x`
+    /// (Dylan `remainder`, C `fmod`).
+    Remainder,
+    /// `nan?(x)`: whether `x` is a NaN.
+    IsNan,
+    /// `finite?(x)`: whether `x` is neither infinite nor NaN.
+    IsFinite,
+    /// A runtime library function such as `sqrt` or `sin`.
+    Library(FloatFunction),
+}
+
+impl FloatBuiltin {
+    /// Every float builtin, inline operations first.
+    pub const ALL: &'static [Self] = &[
+        Self::Abs,
+        Self::Min,
+        Self::Max,
+        Self::Remainder,
+        Self::IsNan,
+        Self::IsFinite,
+        Self::Library(FloatFunction::Floor),
+        Self::Library(FloatFunction::Ceiling),
+        Self::Library(FloatFunction::Round),
+        Self::Library(FloatFunction::Truncate),
+        Self::Library(FloatFunction::Sqrt),
+        Self::Library(FloatFunction::Cbrt),
+        Self::Library(FloatFunction::Exp),
+        Self::Library(FloatFunction::Log),
+        Self::Library(FloatFunction::Log2),
+        Self::Library(FloatFunction::Log10),
+        Self::Library(FloatFunction::Sin),
+        Self::Library(FloatFunction::Cos),
+        Self::Library(FloatFunction::Tan),
+        Self::Library(FloatFunction::Asin),
+        Self::Library(FloatFunction::Acos),
+        Self::Library(FloatFunction::Atan),
+        Self::Library(FloatFunction::Atan2),
+        Self::Library(FloatFunction::Sinh),
+        Self::Library(FloatFunction::Cosh),
+        Self::Library(FloatFunction::Tanh),
+        Self::Library(FloatFunction::Pow),
+        Self::Library(FloatFunction::Hypot),
+    ];
+
+    /// Returns the Loko name that calls this builtin.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Abs => "abs",
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Remainder => "remainder",
+            Self::IsNan => "nan?",
+            Self::IsFinite => "finite?",
+            Self::Library(function) => match function {
+                FloatFunction::Floor => "floor",
+                FloatFunction::Ceiling => "ceiling",
+                FloatFunction::Round => "round",
+                FloatFunction::Truncate => "truncate",
+                FloatFunction::Sqrt => "sqrt",
+                FloatFunction::Cbrt => "cbrt",
+                FloatFunction::Exp => "exp",
+                FloatFunction::Log => "log",
+                FloatFunction::Log2 => "log2",
+                FloatFunction::Log10 => "log10",
+                FloatFunction::Sin => "sin",
+                FloatFunction::Cos => "cos",
+                FloatFunction::Tan => "tan",
+                FloatFunction::Asin => "asin",
+                FloatFunction::Acos => "acos",
+                FloatFunction::Atan => "atan",
+                FloatFunction::Atan2 => "atan2",
+                FloatFunction::Sinh => "sinh",
+                FloatFunction::Cosh => "cosh",
+                FloatFunction::Tanh => "tanh",
+                FloatFunction::Pow => "pow",
+                FloatFunction::Hypot => "hypot",
+            },
+        }
+    }
+
+    /// Returns the builtin called `name`, if any.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|builtin| builtin.name() == name)
+    }
+
+    /// Returns the number of `<float>` arguments.
+    #[must_use]
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::Min | Self::Max | Self::Remainder => 2,
+            Self::Abs | Self::IsNan | Self::IsFinite => 1,
+            Self::Library(function) => function.arity(),
+        }
+    }
+
+    /// Returns the result category: `<boolean>` for predicates, otherwise
+    /// `<float>`.
+    #[must_use]
+    pub const fn result_kind(self) -> ValueKind {
+        match self {
+            Self::IsNan | Self::IsFinite => ValueKind::Bool,
+            _ => ValueKind::F64,
+        }
+    }
+}
+
 /// Built-in read-only runtime operation exposed by the Interloko kernel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Intrinsic {
@@ -1551,6 +1678,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Call of a built-in float function.
+    FloatCall {
+        /// Called builtin.
+        builtin: FloatBuiltin,
+        /// `<float>` argument expressions.
+        args: Vec<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Arithmetic negation, from source unary `-`.
     ///
     /// Float negation flips the sign bit, so `-0.0` and `-(0.0)` are both
@@ -1637,6 +1773,7 @@ impl Expr {
             | Self::Binary { span, .. }
             | Self::Negate { span, .. }
             | Self::Convert { span, .. }
+            | Self::FloatCall { span, .. }
             | Self::Compare { span, .. }
             | Self::ValueEqual { span, .. }
             | Self::If { span, .. }
@@ -4142,6 +4279,9 @@ impl Lowering {
                     );
                     return Expr::Error { span: *span };
                 }
+                if let Some(builtin) = FloatBuiltin::from_name(callee) {
+                    return self.lower_float_call(ctx, builtin, lowered_args, *span);
+                }
                 ctx.diagnostics.push(
                     Diagnostic::error(*span, DiagnosticCode::UnresolvedFunctionOrGeneric)
                         .with_arg(DiagnosticArg::text("callee", callee.clone())),
@@ -4566,6 +4706,55 @@ impl Lowering {
             result_kind: self.intrinsic_result_kind(intrinsic),
             span,
         })
+    }
+
+    fn lower_float_call(
+        &self,
+        ctx: &mut FunctionContext,
+        builtin: FloatBuiltin,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        if args.len() != builtin.arity() {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                    .with_arg(DiagnosticArg::text("callee", builtin.name()))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "expected_count",
+                        u64::try_from(builtin.arity()).unwrap_or(u64::MAX),
+                    ))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
+            return Expr::Error { span };
+        }
+        let mut valid = true;
+        for (index, arg) in args.iter().enumerate() {
+            let actual = self.expr_kind(arg);
+            if !matches!(actual, ValueKind::F64 | ValueKind::Error) {
+                valid = false;
+                ctx.diagnostics.push(
+                    Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                        .with_arg(DiagnosticArg::text("function", builtin.name()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "argument_index",
+                            u64::try_from(index + 1).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::text("expected", "<float>"))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
+            }
+        }
+        if !valid {
+            return Expr::Error { span };
+        }
+        Expr::FloatCall {
+            builtin,
+            args,
+            span,
+        }
     }
 
     fn lower_intrinsic_arg(&self, intrinsic: Intrinsic, index: usize, arg: Expr) -> Expr {
@@ -5654,6 +5843,7 @@ impl Lowering {
             Expr::ConstI64 { .. } => ValueKind::I64,
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
             Expr::Convert { to, .. } => to.value_kind(),
+            Expr::FloatCall { builtin, .. } => builtin.result_kind(),
             Expr::ConstF64 { .. } => ValueKind::F64,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),

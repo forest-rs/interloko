@@ -234,6 +234,7 @@ struct AbiTables {
     value_eq: HostSigId,
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
     host_functions: Vec<HostSigId>,
+    float_functions: Vec<(sem::FloatFunction, HostSigId)>,
     box_i64: HostSigId,
     box_f64: HostSigId,
     box_bool: HostSigId,
@@ -334,6 +335,7 @@ impl AbiTables {
         let vector_literal = vector_literal_sig(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
+        let float_functions = float_function_sigs(builder, module);
         let host_functions = module
             .host_functions
             .iter()
@@ -361,6 +363,7 @@ impl AbiTables {
             value_eq,
             runtime_calls,
             host_functions,
+            float_functions,
             box_i64,
             box_f64,
             box_bool,
@@ -407,12 +410,43 @@ impl AbiTables {
             .ok_or_else(|| invalid_lowered("runtime call signature is missing"))
     }
 
+    fn float_function(&self, function: sem::FloatFunction) -> Result<HostSigId, TapeError> {
+        self.float_functions
+            .iter()
+            .find(|(candidate, _)| *candidate == function)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("float function signature is missing"))
+    }
+
     fn host_function(&self, id: sem::HostFunctionId) -> Result<HostSigId, TapeError> {
         self.host_functions
             .get(id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_lowered("host function signature is missing"))
     }
+}
+
+/// Declares host signatures for exactly the float library functions the
+/// module calls, so programs without float math carry no extra host table
+/// entries.
+fn float_function_sigs(
+    builder: &mut ProgramBuilder,
+    module: &lower::Module,
+) -> Vec<(sem::FloatFunction, HostSigId)> {
+    let mut sigs: Vec<(sem::FloatFunction, HostSigId)> = Vec::new();
+    for instr in module
+        .functions
+        .iter()
+        .flat_map(|function| &function.instructions)
+    {
+        if let lower::Instr::FloatCall { function, .. } = instr
+            && !sigs.iter().any(|(candidate, _)| candidate == function)
+        {
+            let sig = builder.host_sig_for(function.symbol(), function.signature());
+            sigs.push((*function, sig));
+        }
+    }
+    sigs
 }
 
 fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, HostSigId)> {
@@ -758,13 +792,32 @@ impl<'a> FunctionEmitter<'a> {
                     lower::F64BinaryOp::Sub => self.asm.f64_sub(dst, a, b),
                     lower::F64BinaryOp::Mul => self.asm.f64_mul(dst, a, b),
                     lower::F64BinaryOp::Div => self.asm.f64_div(dst, a, b),
+                    lower::F64BinaryOp::Rem => self.asm.f64_rem(dst, a, b),
+                    lower::F64BinaryOp::Min => self.asm.f64_min(dst, a, b),
+                    lower::F64BinaryOp::Max => self.asm.f64_max(dst, a, b),
                 };
             }
             lower::Instr::F64Unary { dst, op, src, span } => {
                 self.set_span(*span);
                 match op {
                     lower::F64UnaryOp::Neg => self.asm.f64_neg(dst.0, src.0),
+                    lower::F64UnaryOp::Abs => self.asm.f64_abs(dst.0, src.0),
                 };
+            }
+            lower::Instr::FloatCall {
+                dst,
+                function,
+                args,
+                span,
+            } => {
+                let sig = self.abi.float_function(*function)?;
+                let args = reg_slice(args);
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &args, &[dst.0]);
+            }
+            lower::Instr::BoolNot { dst, src, span } => {
+                self.set_span(*span);
+                self.asm.bool_not(dst.0, src.0);
             }
             lower::Instr::I64ToF64 { dst, src, span } => {
                 self.set_span(*span);

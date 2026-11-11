@@ -93,6 +93,178 @@ pub const VECTOR_SIZE: &str = "interloko.vector_size";
 /// Host-call symbol for immutable vector indexing.
 pub const VECTOR_REF: &str = "interloko.vector_ref";
 
+/// Float library function served by the runtime host.
+///
+/// These are the float operations `execution_tape` has no instruction for.
+/// Each is a host call named [`FloatFunction::symbol`] taking
+/// [`FloatFunction::arity`] `f64` arguments and returning one `f64`.
+/// Implementations come from the pure-Rust `libm` crate rather than the
+/// platform C library, so results are identical on every host, which keeps
+/// recorded runs replayable. Rounding functions follow IEEE 754 and keep
+/// the sign of zero; `round` rounds half-way cases to even.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum FloatFunction {
+    /// Largest integral value not greater than the argument.
+    Floor,
+    /// Smallest integral value not less than the argument.
+    Ceiling,
+    /// Nearest integral value, ties to even.
+    Round,
+    /// Integral part, rounding toward zero.
+    Truncate,
+    /// Correctly rounded square root; NaN for negative arguments.
+    Sqrt,
+    /// Cube root.
+    Cbrt,
+    /// `e` raised to the argument.
+    Exp,
+    /// Natural logarithm.
+    Log,
+    /// Base-2 logarithm.
+    Log2,
+    /// Base-10 logarithm.
+    Log10,
+    /// Sine of an angle in radians.
+    Sin,
+    /// Cosine of an angle in radians.
+    Cos,
+    /// Tangent of an angle in radians.
+    Tan,
+    /// Arcsine, in radians.
+    Asin,
+    /// Arccosine, in radians.
+    Acos,
+    /// Arctangent, in radians.
+    Atan,
+    /// Two-argument arctangent `atan2(y, x)`, in radians.
+    Atan2,
+    /// Hyperbolic sine.
+    Sinh,
+    /// Hyperbolic cosine.
+    Cosh,
+    /// Hyperbolic tangent.
+    Tanh,
+    /// `pow(base, exponent)` with C99 special cases.
+    Pow,
+    /// `hypot(x, y)`, the Euclidean norm without undue overflow.
+    Hypot,
+}
+
+impl FloatFunction {
+    /// Every float library function in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::Floor,
+        Self::Ceiling,
+        Self::Round,
+        Self::Truncate,
+        Self::Sqrt,
+        Self::Cbrt,
+        Self::Exp,
+        Self::Log,
+        Self::Log2,
+        Self::Log10,
+        Self::Sin,
+        Self::Cos,
+        Self::Tan,
+        Self::Asin,
+        Self::Acos,
+        Self::Atan,
+        Self::Atan2,
+        Self::Sinh,
+        Self::Cosh,
+        Self::Tanh,
+        Self::Pow,
+        Self::Hypot,
+    ];
+
+    /// Returns the host-call symbol that serves this function.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Floor => "interloko.float.floor",
+            Self::Ceiling => "interloko.float.ceiling",
+            Self::Round => "interloko.float.round",
+            Self::Truncate => "interloko.float.truncate",
+            Self::Sqrt => "interloko.float.sqrt",
+            Self::Cbrt => "interloko.float.cbrt",
+            Self::Exp => "interloko.float.exp",
+            Self::Log => "interloko.float.log",
+            Self::Log2 => "interloko.float.log2",
+            Self::Log10 => "interloko.float.log10",
+            Self::Sin => "interloko.float.sin",
+            Self::Cos => "interloko.float.cos",
+            Self::Tan => "interloko.float.tan",
+            Self::Asin => "interloko.float.asin",
+            Self::Acos => "interloko.float.acos",
+            Self::Atan => "interloko.float.atan",
+            Self::Atan2 => "interloko.float.atan2",
+            Self::Sinh => "interloko.float.sinh",
+            Self::Cosh => "interloko.float.cosh",
+            Self::Tanh => "interloko.float.tanh",
+            Self::Pow => "interloko.float.pow",
+            Self::Hypot => "interloko.float.hypot",
+        }
+    }
+
+    /// Returns the function served by host-call `symbol`, if any.
+    #[must_use]
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|function| function.symbol() == symbol)
+    }
+
+    /// Returns the number of `f64` arguments.
+    #[must_use]
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::Atan2 | Self::Pow | Self::Hypot => 2,
+            _ => 1,
+        }
+    }
+
+    /// Returns the host-call signature: `arity` floats in, one float out.
+    #[must_use]
+    pub fn signature(self) -> HostSig {
+        HostSig {
+            args: vec![ValueType::F64; self.arity()],
+            rets: vec![ValueType::F64],
+        }
+    }
+
+    /// Applies the function. Missing arguments read as NaN.
+    #[must_use]
+    pub fn apply(self, args: &[f64]) -> f64 {
+        let x = args.first().copied().unwrap_or(f64::NAN);
+        let y = args.get(1).copied().unwrap_or(f64::NAN);
+        match self {
+            Self::Floor => libm::floor(x),
+            Self::Ceiling => libm::ceil(x),
+            Self::Round => libm::roundeven(x),
+            Self::Truncate => libm::trunc(x),
+            Self::Sqrt => libm::sqrt(x),
+            Self::Cbrt => libm::cbrt(x),
+            Self::Exp => libm::exp(x),
+            Self::Log => libm::log(x),
+            Self::Log2 => libm::log2(x),
+            Self::Log10 => libm::log10(x),
+            Self::Sin => libm::sin(x),
+            Self::Cos => libm::cos(x),
+            Self::Tan => libm::tan(x),
+            Self::Asin => libm::asin(x),
+            Self::Acos => libm::acos(x),
+            Self::Atan => libm::atan(x),
+            Self::Atan2 => libm::atan2(x, y),
+            Self::Sinh => libm::sinh(x),
+            Self::Cosh => libm::cosh(x),
+            Self::Tanh => libm::tanh(x),
+            Self::Pow => libm::pow(x, y),
+            Self::Hypot => libm::hypot(x, y),
+        }
+    }
+}
+
 /// Returns the `execution_tape` value type for Interloko objects.
 #[must_use]
 pub const fn object_type() -> ValueType {
@@ -1481,6 +1653,20 @@ impl Host for InterlokoHost {
         rets: &mut [Value],
         mut ctx: HostContext<'_, '_>,
     ) -> Result<u64, HostError> {
+        if let Some(function) = FloatFunction::from_symbol(symbol) {
+            let mut operands = [0.0; 2];
+            if args.len() != function.arity() {
+                return Err(HostError::Failed);
+            }
+            for (operand, arg) in operands.iter_mut().zip(args) {
+                let ValueRef::F64(value) = arg else {
+                    return Err(HostError::Failed);
+                };
+                *operand = *value;
+            }
+            rets[0] = Value::F64(function.apply(&operands[..args.len()]));
+            return Ok(0);
+        }
         match symbol {
             STRING_LITERAL => {
                 let [ValueRef::Str(value)] = args else {
@@ -2413,6 +2599,64 @@ mod tests {
     use execution_tape::asm::{Asm, FunctionSig, ProgramBuilder};
     use execution_tape::trace::TraceMask;
     use execution_tape::vm::{ExecutionContext, Limits, Vm};
+
+    #[test]
+    fn float_functions_are_exact_where_ieee_defines_them() {
+        extern crate std;
+        let samples = [
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.5,
+            2.5,
+            -2.5,
+            3.5,
+            0.49999999999999994,
+            4503599627370497.0,
+            1e300,
+            -1e-300,
+            5e-324,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            2.0,
+            10.0,
+        ];
+        for x in samples {
+            let check = |function: FloatFunction, expected: f64| {
+                let actual = function.apply(&[x]);
+                assert_eq!(actual.to_bits(), expected.to_bits(), "{function:?}({x})");
+            };
+            check(FloatFunction::Floor, std::primitive::f64::floor(x));
+            check(FloatFunction::Ceiling, std::primitive::f64::ceil(x));
+            check(FloatFunction::Truncate, std::primitive::f64::trunc(x));
+            check(
+                FloatFunction::Round,
+                std::primitive::f64::round_ties_even(x),
+            );
+            check(FloatFunction::Sqrt, std::primitive::f64::sqrt(x));
+        }
+        assert!(FloatFunction::Sqrt.apply(&[-1.0]).is_nan());
+        assert!(FloatFunction::Floor.apply(&[f64::NAN]).is_nan());
+        assert_eq!(FloatFunction::Pow.apply(&[2.0, 10.0]), 1024.0);
+        assert_eq!(FloatFunction::Hypot.apply(&[3.0, 4.0]), 5.0);
+        assert_eq!(
+            FloatFunction::Atan2.apply(&[1.0, 1.0]),
+            core::f64::consts::FRAC_PI_4
+        );
+    }
+
+    #[test]
+    fn float_functions_round_trip_their_host_symbols() {
+        for function in FloatFunction::ALL {
+            assert_eq!(
+                FloatFunction::from_symbol(function.symbol()),
+                Some(*function)
+            );
+            assert_eq!(function.signature().args.len(), function.arity());
+        }
+        assert_eq!(FloatFunction::from_symbol("interloko.float.nope"), None);
+    }
 
     fn slot(
         name: &str,

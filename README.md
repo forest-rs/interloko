@@ -104,7 +104,11 @@ The current slices include:
   boxing to `<object>`, `<float>` method dispatch, and IEEE `+ - * /`,
   negation, and comparisons (operands must both be integers or both be
   floats; `/` is float-only), with explicit `as(<float>, n)` and exact
-  `as(<integer>, x)` conversions;
+  `as(<integer>, x)` conversions, and a float library (`abs`, `min`, `max`,
+  `remainder`, `nan?`, `finite?`, `floor`, `ceiling`, `round`, `truncate`,
+  `sqrt`, `cbrt`, `exp`, `log`, `log2`, `log10`, trigonometric and
+  hyperbolic functions, `atan2`, `pow`, `hypot`) whose names user
+  definitions may shadow;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

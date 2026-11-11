@@ -4024,6 +4024,11 @@ fn collect_dispatch_sites_in_expr(
         sem::Expr::Negate { value, .. } | sem::Expr::Convert { value, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
         }
+        sem::Expr::FloatCall { args, .. } => {
+            for arg in args {
+                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+            }
+        }
         sem::Expr::Binary { lhs, rhs, .. } | sem::Expr::Compare { lhs, rhs, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
@@ -4631,6 +4636,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
         sem::Expr::ConstI64 { .. } => sem::ValueKind::I64,
         sem::Expr::Binary { kind, .. } | sem::Expr::Negate { kind, .. } => kind.value_kind(),
         sem::Expr::Convert { to, .. } => to.value_kind(),
+        sem::Expr::FloatCall { builtin, .. } => builtin.result_kind(),
         sem::Expr::ConstF64 { .. } => sem::ValueKind::F64,
         sem::Expr::ConstBool { .. }
         | sem::Expr::Compare { .. }
@@ -11023,6 +11029,12 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "convert to {}", numeric_kind_label(*to));
             dump_sem_expr(out, value, indent + 2);
         }
+        sem::Expr::FloatCall { builtin, args, .. } => {
+            let _ = writeln!(out, "float-call {}", builtin.name());
+            for arg in args {
+                dump_sem_expr(out, arg, indent + 2);
+            }
+        }
         sem::Expr::Compare {
             op, kind, lhs, rhs, ..
         } => {
@@ -11967,6 +11979,14 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::Convert { to, value, .. } => {
             let _ = write!(out, "convert({}:", numeric_kind_label(*to));
             fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::FloatCall { builtin, args, .. } => {
+            let _ = write!(out, "float-call({}:", builtin.name());
+            for arg in args {
+                fingerprint_sem_expr(module, arg, out);
+                out.push(',');
+            }
             out.push(')');
         }
         sem::Expr::Binary {
