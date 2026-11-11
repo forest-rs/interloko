@@ -669,6 +669,10 @@ pub enum EnvironmentKind {
     HostObject,
     /// One entry in the session's in-memory mutation log.
     Mutation,
+    /// The session's soft typing configuration.
+    TypingConfig,
+    /// One soft typing decision about a residual runtime check.
+    TypingDecision,
 }
 
 impl EnvironmentKind {
@@ -707,6 +711,8 @@ impl EnvironmentKind {
             Self::HostFunction => "host-function",
             Self::HostObject => "host-object",
             Self::Mutation => "mutation",
+            Self::TypingConfig => "typing-config",
+            Self::TypingDecision => "typing-decision",
         }
     }
 }
@@ -851,6 +857,8 @@ pub enum EnvironmentAffordance {
     ShowGrammarRegistry,
     /// Show staged grammar extension descriptors and concrete emissions.
     ShowGrammarExtension,
+    /// Show soft typing policy or one typing decision with its provenance.
+    ShowTyping,
 }
 
 impl EnvironmentAffordance {
@@ -894,6 +902,7 @@ impl EnvironmentAffordance {
             Self::ShowParserShadow,
             Self::ShowGrammarRegistry,
             Self::ShowGrammarExtension,
+            Self::ShowTyping,
         ]
     }
 
@@ -946,6 +955,7 @@ impl EnvironmentAffordance {
             Self::ShowParserShadow => "show-parser-shadow",
             Self::ShowGrammarRegistry => "show-grammar-registry",
             Self::ShowGrammarExtension => "show-grammar-extension",
+            Self::ShowTyping => "show-typing",
         }
     }
 }
@@ -1090,6 +1100,27 @@ impl InspectionFacet {
     }
 }
 
+/// Typed soft typing data carried by typing environment objects.
+///
+/// Consumers read these values directly instead of parsing inspection text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypingFacet {
+    /// The session's typing configuration and pass status.
+    Config {
+        /// Reporting policy in effect.
+        config: typing::TypingConfig,
+        /// Whether the pass ran.
+        status: typing::TypingStatus,
+    },
+    /// One classified runtime check with the severity its policy assigns.
+    Decision {
+        /// The decision, keyed by owner definition and index.
+        decision: typing::TypingDecision,
+        /// Severity the configuration assigns to the decision.
+        severity: typing::TypingSeverity,
+    },
+}
+
 /// Typed EOP record projected by the session or an explicit host adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnvironmentObject {
@@ -1118,6 +1149,8 @@ pub struct EnvironmentObject {
     pub execution: Option<ExecutionFacet>,
     /// Inspection details.
     pub inspection: InspectionFacet,
+    /// Soft typing data for typing objects; `None` for every other kind.
+    pub typing: Option<TypingFacet>,
 }
 
 /// Sink for structured environment object projection.
@@ -1648,6 +1681,39 @@ impl SessionArtifacts {
         artifacts.diagnostics = diagnostics;
         artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
         artifacts
+    }
+
+    /// Explains a typing environment object.
+    ///
+    /// `typing-config:session` renders the policy and every decision; a
+    /// `typing:<definition>:t<n>` id renders one decision with its rule,
+    /// operand types, and the policy that set its severity. Function, method,
+    /// and constant ids render that definition's decisions.
+    #[must_use]
+    pub fn explain_typing(&self, id: &str) -> Option<String> {
+        if id == TYPING_CONFIG_OBJECT_ID {
+            return Some(self.typing.dump(&self.sem));
+        }
+        if let Some(decision) = self
+            .typing
+            .decisions()
+            .find(|decision| typing_decision_object_id(decision) == id)
+        {
+            return Some(explain_typing_decision(self, decision));
+        }
+        let definition = self
+            .environment_objects()
+            .into_iter()
+            .find(|object| object.id.as_str() == id)
+            .filter(|object| {
+                matches!(
+                    object.kind,
+                    EnvironmentKind::Function | EnvironmentKind::Method | EnvironmentKind::Constant
+                )
+            })?
+            .source
+            .definition?;
+        Some(self.typing.dump_definition(&self.sem, definition))
     }
 
     /// Returns true when any aggregated diagnostic is an error.
@@ -8601,6 +8667,30 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
     }
     let _ = writeln!(out, "inspection:");
     let _ = writeln!(out, "  {}", object.inspection.detail);
+    if let Some(facet) = &object.typing {
+        let _ = writeln!(out, "typing:");
+        match facet {
+            TypingFacet::Config { config, status } => {
+                let _ = writeln!(
+                    out,
+                    "  config={} status={} {}",
+                    typing::config_label(*config),
+                    status.as_str(),
+                    typing_policy_label(*config)
+                );
+            }
+            TypingFacet::Decision { decision, severity } => {
+                let _ = writeln!(
+                    out,
+                    "  check={} verdict={} rule={} severity={}",
+                    decision.check.as_str(),
+                    decision.verdict.as_str(),
+                    decision.rule.as_str(),
+                    severity.as_str()
+                );
+            }
+        }
+    }
     out
 }
 
@@ -8740,6 +8830,7 @@ fn environment_object(parts: EnvironmentObjectParts) -> EnvironmentObject {
         affordances: AffordanceFacet::new(parts.affordances),
         execution: parts.execution.map(ExecutionFacet::new),
         inspection: InspectionFacet::new(parts.inspection),
+        typing: None,
     }
 }
 
@@ -8803,9 +8894,11 @@ fn project_session_environment(
     for constant in &module.constants {
         project_environment_constant(module, sink, constant);
     }
-    for site in artifacts.dispatch_sites() {
-        project_environment_dispatch_site(module, sink, &site);
+    let dispatch_sites = artifacts.dispatch_sites();
+    for site in &dispatch_sites {
+        project_environment_dispatch_site(module, sink, site);
     }
+    project_typing(artifacts, &dispatch_sites, sink);
     for entry in artifacts.mutations() {
         project_environment_mutation(module, sink, entry);
     }
@@ -8999,6 +9092,25 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
                         .iter()
                         .map(|report| report.key)
                         .collect(),
+                );
+            }
+        }
+        EnvironmentKind::TypingConfig => {
+            object.artifacts = artifact_facet(
+                source_file,
+                &[QueryArtifact::TypingConfig, QueryArtifact::Typing],
+            );
+        }
+        EnvironmentKind::TypingDecision => {
+            if let Some(TypingFacet::Decision { decision, .. }) = &object.typing {
+                object.source =
+                    SourceFacet::new(Some(source_file), Some(decision.owner), Some(decision.span));
+                object.artifacts = artifact_facet(
+                    source_file,
+                    &[
+                        QueryArtifact::DefinitionTyping(decision.owner),
+                        QueryArtifact::Typing,
+                    ],
                 );
             }
         }
@@ -10315,6 +10427,187 @@ fn project_environment_dispatch_site(
             site.rejected.len()
         ),
     }));
+}
+
+/// Stable EOP id of the session typing configuration object.
+const TYPING_CONFIG_OBJECT_ID: &str = "typing-config:session";
+
+/// Stable EOP id of one typing decision: owner definition plus ordinal.
+fn typing_decision_object_id(decision: &typing::TypingDecision) -> String {
+    format!("typing:{}:t{}", decision.owner, decision.index)
+}
+
+fn typing_policy_label(config: typing::TypingConfig) -> String {
+    typing::TypingCheck::ALL
+        .iter()
+        .map(|check| {
+            let policy = config.policy(*check);
+            format!(
+                "{}=checked:{},refuted:{}",
+                check.as_str(),
+                policy.checked.as_str(),
+                policy.refuted.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn typing_dispatch_site<'a>(
+    decision: &typing::TypingDecision,
+    sites: &'a [DispatchSiteRecord],
+) -> Option<&'a DispatchSiteRecord> {
+    let typing::TypingExpectation::Dispatch { generic, .. } = &decision.expected else {
+        return None;
+    };
+    sites
+        .iter()
+        .find(|site| site.span == decision.span && site.generic == *generic)
+}
+
+fn project_typing(
+    artifacts: &SessionArtifacts,
+    dispatch_sites: &[DispatchSiteRecord],
+    sink: &mut dyn EnvironmentObjectSink,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let module = &artifacts.sem;
+    let typed = &artifacts.typing;
+    let mut config = environment_object(EnvironmentObjectParts {
+        id: TYPING_CONFIG_OBJECT_ID.into(),
+        kind: EnvironmentKind::TypingConfig,
+        meta_class: "<typing-config>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: format!("typing {}", typing::config_label(typed.config)),
+        affordances: Vec::from([
+            Aff::Inspect,
+            Aff::ShowTyping,
+            Aff::ShowDependencies,
+            Aff::DumpEop,
+        ]),
+        execution: None,
+        inspection: format!(
+            "config={} status={} decisions={} proved={} checked={} refuted={} {}",
+            typing::config_label(typed.config),
+            typed.status.as_str(),
+            typed.decisions().count(),
+            typed.count(typing::TypingVerdict::Proved),
+            typed.count(typing::TypingVerdict::Checked),
+            typed.count(typing::TypingVerdict::Refuted),
+            typing_policy_label(typed.config)
+        ),
+    });
+    config.typing = Some(TypingFacet::Config {
+        config: typed.config,
+        status: typed.status,
+    });
+    sink.emit(config);
+
+    for decision in typed.decisions() {
+        let owner = typing::definition_label(module, decision.owner);
+        let expected = typing::expectation_label(module, &decision.expected);
+        let title = match &decision.expected {
+            typing::TypingExpectation::Dispatch { generic, .. } => {
+                format!("dispatch {} in {owner}", generic_label(module, *generic))
+            }
+            typing::TypingExpectation::Class(_) => format!("cast to {expected} in {owner}"),
+        };
+        let severity = typed.severity(decision);
+        let dispatch_site = typing_dispatch_site(decision, dispatch_sites)
+            .map_or_else(|| "none".into(), |site| site.id.clone());
+        let mut object = environment_object(EnvironmentObjectParts {
+            id: typing_decision_object_id(decision),
+            kind: EnvironmentKind::TypingDecision,
+            meta_class: "<typing-decision>",
+            origin: EnvironmentOrigin::CompilerGenerated,
+            storage: EnvironmentStorage::CachedArtifact,
+            title,
+            affordances: Vec::from([Aff::Inspect, Aff::ShowTyping, Aff::OpenSource, Aff::DumpEop]),
+            execution: None,
+            inspection: format!(
+                "check={} verdict={} rule={} owner={} span={}..{} expected={expected} actual={} severity={} dispatch-site={dispatch_site}",
+                decision.check.as_str(),
+                decision.verdict.as_str(),
+                decision.rule.as_str(),
+                decision.owner,
+                decision.span.start,
+                decision.span.end,
+                typing::static_type_name_list(module, &decision.actual),
+                severity.as_str(),
+            ),
+        });
+        object.typing = Some(TypingFacet::Decision {
+            decision: decision.clone(),
+            severity,
+        });
+        sink.emit(object);
+    }
+}
+
+fn explain_typing_decision(
+    artifacts: &SessionArtifacts,
+    decision: &typing::TypingDecision,
+) -> String {
+    let module = &artifacts.sem;
+    let typed = &artifacts.typing;
+    let policy = typed.config.policy(decision.check);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "typing decision {}",
+        typing_decision_object_id(decision)
+    );
+    let _ = writeln!(
+        out,
+        "owner: {} {}",
+        typing::definition_label(module, decision.owner),
+        decision.owner
+    );
+    let _ = writeln!(out, "check: {}", decision.check.as_str());
+    let _ = writeln!(out, "verdict: {}", decision.verdict.as_str());
+    let _ = writeln!(out, "rule: {}", decision.rule.as_str());
+    let _ = writeln!(out, "span: {}..{}", decision.span.start, decision.span.end);
+    let _ = writeln!(
+        out,
+        "expected: {}",
+        typing::expectation_label(module, &decision.expected)
+    );
+    let _ = writeln!(
+        out,
+        "actual: {}",
+        typing::static_type_name_list(module, &decision.actual)
+    );
+    if let typing::TypingExpectation::Dispatch { methods, .. } = &decision.expected {
+        for method in methods {
+            let _ = writeln!(out, "  method {}", method_label(module, *method));
+        }
+        let _ = writeln!(
+            out,
+            "selected-method: {}",
+            decision
+                .selected_method
+                .map_or_else(|| "runtime".into(), |method| method_label(module, method))
+        );
+        if let Some(site) = typing_dispatch_site(decision, &artifacts.dispatch_sites()) {
+            let _ = writeln!(out, "dispatch-site: {}", site.id);
+        }
+    }
+    let _ = writeln!(
+        out,
+        "severity: {} (config {} {} checked={} refuted={})",
+        typed.severity(decision).as_str(),
+        typing::config_label(typed.config),
+        decision.check.as_str(),
+        policy.checked.as_str(),
+        policy.refuted.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "contract: advisory; the runtime still performs this check"
+    );
+    out
 }
 
 fn project_environment_mutation(
@@ -12341,6 +12634,7 @@ mod tests {
                 EnvironmentAffordance::ShowGrammarExtension,
                 "show-grammar-extension",
             ),
+            (EnvironmentAffordance::ShowTyping, "show-typing"),
         ];
 
         let all = EnvironmentAffordance::all();
@@ -13457,6 +13751,83 @@ mod tests {
             cache_action(&shifted, QueryArtifact::DefinitionTyping(main)),
             Some(CacheAction::Reused)
         );
+    }
+
+    #[test]
+    fn typing_config_and_decisions_project_as_typed_eop_objects() {
+        let artifacts = CompilerSession::compile_source(
+            "typing.loko",
+            SHAPES_WITH_UNTAKEN_REFUTED_CALL,
+            RuntimeMode::CompileOnly,
+        );
+        let objects = artifacts.environment_objects();
+
+        let config = eop_object(&objects, "typing-config:session");
+        assert_eq!(config.kind, EnvironmentKind::TypingConfig);
+        assert!(
+            config
+                .affordances
+                .contains(EnvironmentAffordance::ShowTyping)
+        );
+        assert_eq!(
+            config.typing,
+            Some(TypingFacet::Config {
+                config: typing::TypingConfig::soft(),
+                status: typing::TypingStatus::Checked,
+            })
+        );
+
+        let decisions = objects
+            .iter()
+            .filter(|object| object.kind == EnvironmentKind::TypingDecision)
+            .collect::<Vec<_>>();
+        assert_eq!(decisions.len(), artifacts.typing.decisions().count());
+        let refuted = decisions
+            .iter()
+            .find_map(|object| match &object.typing {
+                Some(TypingFacet::Decision { decision, severity })
+                    if decision.verdict == typing::TypingVerdict::Refuted =>
+                {
+                    Some((*object, decision, *severity))
+                }
+                _ => None,
+            })
+            .expect("refuted decision object");
+        let (object, decision, severity) = refuted;
+        let main = artifacts.sem.functions[1].definition;
+        assert_eq!(decision.owner, main);
+        assert_eq!(severity, typing::TypingSeverity::Warning);
+        assert_eq!(object.source.definition, Some(main));
+        assert_eq!(object.source.span, Some(decision.span));
+        assert!(
+            object
+                .artifacts
+                .keys
+                .contains(&QueryArtifact::DefinitionTyping(main).key(artifacts.source.id))
+        );
+
+        let explanation = artifacts
+            .explain_typing(object.id.as_str())
+            .expect("decision explanation");
+        assert!(explanation.contains("rule: dispatch-no-applicable-method"));
+        assert!(explanation.contains("actual: exactly <shape>"));
+        assert_eq!(
+            artifacts.explain_typing("typing-config:session"),
+            Some(artifacts.dump_stage(DumpStage::Typing))
+        );
+        let main_object = objects
+            .iter()
+            .find(|object| {
+                object.kind == EnvironmentKind::Function && object.source.definition == Some(main)
+            })
+            .expect("main function object");
+        assert!(
+            artifacts
+                .explain_typing(main_object.id.as_str())
+                .expect("definition typing")
+                .contains("function main")
+        );
+        assert_eq!(artifacts.explain_typing("typing:missing"), None);
     }
 
     #[test]
@@ -14762,6 +15133,7 @@ mod tests {
                 ])),
                 execution: None,
                 inspection: InspectionFacet::new("provider=example type=RustCircle"),
+                typing: None,
             });
         }
     }

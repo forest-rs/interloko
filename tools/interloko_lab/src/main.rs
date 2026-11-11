@@ -855,6 +855,18 @@ fn invoke_affordance(
             );
             Ok(())
         }
+        EnvironmentAffordance::ShowTyping => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .explain_typing(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
         EnvironmentAffordance::Run => unreachable!("run handled before compile-only path"),
         _ => Err(LabError::UnsupportedAffordance {
             name: affordance.as_str().into(),
@@ -1235,6 +1247,7 @@ fn host_environment_object(
         ]),
         execution: None,
         inspection: InspectionFacet::new(inspection),
+        typing: None,
     }
 }
 

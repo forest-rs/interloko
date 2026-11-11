@@ -550,7 +550,7 @@ impl TypingArtifact {
                 decision.span.start,
                 decision.span.end,
                 expectation_label(module, &decision.expected),
-                static_type_list_name(module, &decision.actual),
+                static_type_name_list(module, &decision.actual),
                 self.severity(decision).as_str()
             );
         }
@@ -1111,13 +1111,13 @@ fn decision_diagnostic(
             ))
             .with_arg(DiagnosticArg::text(
                 "arguments",
-                static_type_list_name(module, &decision.actual),
+                static_type_name_list(module, &decision.actual),
             )),
         TypingExpectation::Class(class) => diagnostic
             .with_arg(DiagnosticArg::text("expected", class_name(module, *class)))
             .with_arg(DiagnosticArg::text(
                 "actual",
-                static_type_list_name(module, &decision.actual),
+                static_type_name_list(module, &decision.actual),
             )),
     };
     Some(diagnostic.with_arg(DiagnosticArg::text("rule", decision.rule.as_str())))
@@ -1155,7 +1155,10 @@ pub fn static_type_name(module: &sem::Module, ty: StaticType) -> String {
     }
 }
 
-fn static_type_list_name(module: &sem::Module, types: &[StaticType]) -> String {
+/// Returns a source-level name for a list of synthesized types: the single
+/// name for one type, a parenthesized list otherwise.
+#[must_use]
+pub fn static_type_name_list(module: &sem::Module, types: &[StaticType]) -> String {
     let names = types
         .iter()
         .map(|ty| static_type_name(module, *ty))

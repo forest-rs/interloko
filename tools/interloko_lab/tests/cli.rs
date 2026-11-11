@@ -1272,3 +1272,39 @@ fn invoke_affordance_add_method_requires_source_flag() {
         "stderr should explain that --source is required: {stderr}"
     );
 }
+
+#[test]
+fn soft_typing_warns_runs_and_explains_decisions() {
+    let source = fixture("soft_typing.loko");
+    let path = source.to_str().expect("fixture path should be utf8");
+
+    let (stdout, stderr) = run_lab_success(&["run", path]);
+    assert_eq!(stdout.trim(), "7");
+    assert!(stderr.contains(
+        "Warning typing.dispatch-no-applicable-method 259..292 no method of `area` can apply to exactly <shape>"
+    ));
+    assert!(stderr.contains("Warning typing.cast-always-fails"));
+
+    let typing = run_lab(&["dump", path, "--stage", "typing"]);
+    assert!(typing.starts_with(
+        "typing config=soft status=checked decisions=4 proved=1 checked=1 refuted=2\n"
+    ));
+
+    let eop = run_lab(&["eop", path]);
+    assert!(eop.contains("object typing-config:session"));
+    let config = run_lab(&[
+        "invoke-affordance",
+        path,
+        "typing-config:session",
+        "show-typing",
+    ]);
+    assert_eq!(config, typing);
+
+    let decision = object_id_with_prefix(&eop, "typing:");
+    let explanation = run_lab(&["invoke-affordance", path, &decision, "show-typing"]);
+    assert!(explanation.starts_with(&format!("typing decision {decision}\n")));
+    assert!(explanation.contains("owner: function measure"));
+    assert!(explanation.contains("verdict: checked"));
+    assert!(explanation.contains("dispatch-site: dispatch:d0"));
+    assert!(explanation.contains("contract: advisory; the runtime still performs this check"));
+}
