@@ -1,0 +1,29 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// The restart to the inner handler is in flight when the cleanup signals
+// <second>. That signal's search still sees both handlers, selects the
+// outer one, and its restart replaces the first transfer: the inner
+// handler sees a foreign token and lets it pass.
+
+define class <first> (<object>)
+end;
+
+define class <second> (<object>)
+end;
+
+define function work() => <integer>
+  block ()
+    signal(make(<first>))
+  cleanup
+    signal(make(<second>))
+  end
+end;
+
+define function main() => <integer>
+  handle
+    handle work() with restart <first> 1 end
+  with restart <second>
+    2
+  end
+end;

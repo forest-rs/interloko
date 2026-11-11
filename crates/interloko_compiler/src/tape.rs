@@ -255,7 +255,7 @@ struct AbiTables {
 }
 
 /// Host signatures and tags for dynamic control, declared only when a module
-/// establishes handlers or signals.
+/// establishes handlers or signals. Cleanup-only regions need neither.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ControlAbi {
     push_handler: HostSigId,
@@ -276,8 +276,8 @@ impl ControlAbi {
                 matches!(
                     instr,
                     lower::Instr::PushHandler { .. }
+                        | lower::Instr::PopBinding { .. }
                         | lower::Instr::Signal { .. }
-                        | lower::Instr::EnterRegion { .. }
                 )
             });
         if !uses_control {
@@ -1262,13 +1262,12 @@ impl<'a> FunctionEmitter<'a> {
                     .host_call(0, sig, 0, &[condition.0], &reg_slice(dsts));
             }
             lower::Instr::EnterRegion { catches } => {
-                let control = self.abi.control()?;
                 let clauses = catches
                     .iter()
                     .map(|catch| {
                         Ok(match catch {
                             lower::Catch::Tag { tag, target } => {
-                                Catch::TagRef(control.tag(*tag), self.label(*target)?)
+                                Catch::TagRef(self.abi.control()?.tag(*tag), self.label(*target)?)
                             }
                             lower::Catch::All { target } => Catch::AllRef(self.label(*target)?),
                         })

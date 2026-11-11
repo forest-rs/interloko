@@ -1,0 +1,40 @@
+// expect: run 1243
+// expect: diagnostics 0
+
+// A restart selected in `main` unwinds `inner` and `outer`. Each crossed
+// block runs its cleanup on the way out, innermost first, before the
+// recovery expression runs in `main`.
+
+define class <log> (<object>)
+  slot trail :: <integer>, init-value: 0;
+end;
+
+define class <stop> (<object>)
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.trail := log.trail * 10 + digit
+end;
+
+define function inner(log :: <log>) => <integer>
+  block ()
+    let started = note(log, 1);
+    signal(make(<stop>))
+  cleanup
+    note(log, 2)
+  end
+end;
+
+define function outer(log :: <log>) => <integer>
+  block ()
+    inner(log) + 1000
+  cleanup
+    note(log, 4)
+  end
+end;
+
+define function main() => <integer>
+  let log = make(<log>);
+  let recovered = handle outer(log) with restart <stop> note(log, 3) end;
+  recovered
+end;

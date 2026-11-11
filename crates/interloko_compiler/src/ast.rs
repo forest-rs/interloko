@@ -565,6 +565,21 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Dylan-style `block () body cleanup cleanup-body end`.
+    ///
+    /// The body's value is the block's value. The cleanup body runs whenever
+    /// control leaves the body, normally or by a non-local transfer, and its
+    /// value is discarded.
+    Block {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Protected body.
+        body: Box<Block>,
+        /// Cleanup body, when present.
+        cleanup: Option<Box<Block>>,
+        /// Source span.
+        span: Span,
+    },
     /// Placeholder for malformed syntax.
     Error {
         /// Stable-ish AST node identity.
@@ -600,6 +615,7 @@ impl Expr {
             | Self::Compare { id, .. }
             | Self::If { id, .. }
             | Self::Handle { id, .. }
+            | Self::Block { id, .. }
             | Self::Error { id, .. } => *id,
         }
     }
@@ -629,6 +645,7 @@ impl Expr {
             | Self::Compare { span, .. }
             | Self::If { span, .. }
             | Self::Handle { span, .. }
+            | Self::Block { span, .. }
             | Self::Error { span, .. } => *span,
         }
     }
@@ -1367,6 +1384,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::BinaryExpr => self.lower_binary(node),
             CstKind::IfExpr => self.lower_if(node),
             CstKind::HandleExpr => self.lower_handle(node),
+            CstKind::BlockExpr => self.lower_block_expr(node),
             _ => Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -2074,6 +2092,41 @@ impl<'tree> Lowering<'tree> {
                 }),
                 span: node.span,
             }),
+            span: node.span,
+        }
+    }
+
+    fn lower_block_expr(&mut self, node: &CstNode) -> Expr {
+        let mut body = None;
+        let mut cleanup = None;
+        for child in &node.children {
+            let CstElement::Node(child_node) = child else {
+                continue;
+            };
+            match child_node.kind {
+                CstKind::Body => body = Some(self.lower_block(child_node)),
+                CstKind::CleanupClause => {
+                    cleanup = child_node
+                        .child_nodes(CstKind::Body)
+                        .next()
+                        .map(|cleanup| self.lower_block(cleanup));
+                }
+                _ => {}
+            }
+        }
+        let body = body.unwrap_or_else(|| Block {
+            id: self.ast_id(node),
+            lets: Vec::new(),
+            result: Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            },
+            span: node.span,
+        });
+        Expr::Block {
+            id: self.ast_id(node),
+            body: Box::new(body),
+            cleanup: cleanup.map(Box::new),
             span: node.span,
         }
     }
