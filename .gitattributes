@@ -1,0 +1,3 @@
+# Interloko sources keep LF on every platform: diagnostics, spans and tests
+# address them by byte offset.
+*.loko text eol=lf

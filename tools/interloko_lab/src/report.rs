@@ -1701,6 +1701,10 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
         }
         EnvironmentKind::HostObject => "Object supplied by a host projection adapter.",
         EnvironmentKind::Mutation => "Entry in the session's in-memory mutation log.",
+        EnvironmentKind::TypingConfig => "Soft typing policy applied to this session's compiles.",
+        EnvironmentKind::TypingDecision => {
+            "Advisory classification of one runtime check by the soft typing pass."
+        }
     }
 }
 

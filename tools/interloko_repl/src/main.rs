@@ -1121,6 +1121,13 @@ impl Repl {
                 affordance,
                 object.id.as_str(),
             )?,
+            EnvironmentAffordance::ShowTyping => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_typing(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
             EnvironmentAffordance::Run => {
                 self.run_environment_object(artifacts, object, stdout, stderr)?
             }
