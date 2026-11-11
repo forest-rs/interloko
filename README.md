@@ -256,6 +256,11 @@ recompile older tapes and regenerate any source sidecars with them. Runtime
 results use an explicit owned output vector and remain readable after their
 execution context is dropped.
 
+Boxed `<object>` values are VM objects of one host type. Floats and integers
+within 47 bits travel inside the object handle and never allocate; wider
+integers and every other boxed value live in the runtime host's append-only
+heap, whose size `FunctionCallOutcome::heap` reports.
+
 Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
 `Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed
 host error. Match the error variant or inspect its cause instead of comparing

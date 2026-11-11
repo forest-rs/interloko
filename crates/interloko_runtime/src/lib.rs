@@ -8,6 +8,8 @@
 
 extern crate alloc;
 
+mod boxed;
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -26,7 +28,14 @@ use interloko_model::{
 /// Host object type used for Interloko runtime objects.
 pub const INTERLOKO_OBJECT_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f4f_424a);
 /// Host object type used for boxed top `<object>` values.
+///
+/// Integers in [`IMMEDIATE_INTEGER_MIN`]..=[`IMMEDIATE_INTEGER_MAX`] and
+/// floats are carried in the handle itself and never allocate; other boxed
+/// values live in the host's append-only boxed-value heap.
 pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
+
+use boxed::BoxedHandle;
+pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 
 /// Host-call symbol for object construction.
 pub const MAKE_OBJECT: &str = "interloko.make_object";
@@ -1357,6 +1366,20 @@ pub trait HostObjectAdapter {
     fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, RuntimeError>;
 }
 
+/// Entry counts of a runtime host's append-only heaps.
+///
+/// Neither heap shrinks: every runtime object and every heap-boxed value stays
+/// allocated for the host's lifetime. Integers and floats boxed as immediates
+/// (see [`INTERLOKO_VALUE_TYPE`]) are not counted because they never allocate.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct HeapStats {
+    /// Runtime objects: instances, strings, symbols, vectors, metaobjects,
+    /// and host-backed objects.
+    pub objects: usize,
+    /// Boxed `<object>` values stored on the heap rather than in a handle.
+    pub boxed_values: usize,
+}
+
 /// Host implementation for Interloko runtime object operations.
 pub struct InterlokoHost {
     layout: RuntimeLayout,
@@ -1375,6 +1398,15 @@ impl InterlokoHost {
             objects: Vec::new(),
             values: Vec::new(),
             symbols: Vec::new(),
+        }
+    }
+
+    /// Returns the current entry counts of this host's heaps.
+    #[must_use]
+    pub fn heap_stats(&self) -> HeapStats {
+        HeapStats {
+            objects: self.objects.len(),
+            boxed_values: self.values.len(),
         }
     }
 
@@ -1620,25 +1652,39 @@ impl InterlokoHost {
             .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
     }
 
-    fn boxed_value(&self, obj: Obj) -> Result<&Value, RuntimeError> {
+    fn boxed_value(&self, obj: Obj) -> Result<Value, RuntimeError> {
         if obj.host_type != INTERLOKO_VALUE_TYPE {
             return Err(RuntimeError::ValueHostTypeMismatch {
                 object: obj,
                 expected: INTERLOKO_VALUE_TYPE,
             });
         }
-        let index = usize::try_from(obj.handle.0)
-            .ok()
-            .and_then(|raw| raw.checked_sub(1))
-            .ok_or(RuntimeError::InvalidBoxedValueHandle { object: obj })?;
-        self.values
-            .get(index)
-            .ok_or(RuntimeError::InvalidBoxedValueHandle { object: obj })
+        match BoxedHandle::decode(obj.handle) {
+            BoxedHandle::Float(value) => Ok(Value::F64(value)),
+            BoxedHandle::Integer(value) => Ok(Value::I64(value)),
+            BoxedHandle::Heap(index) => self
+                .values
+                .get(index)
+                .cloned()
+                .ok_or(RuntimeError::InvalidBoxedValueHandle { object: obj }),
+        }
     }
 
+    /// Boxes `value` as a top `<object>` value, carrying integers and floats
+    /// in the handle when they fit and allocating a heap box otherwise.
     fn push_boxed_value(&mut self, value: Value) -> Value {
-        let handle = ObjHandle(u64::try_from(self.values.len() + 1).unwrap_or(u64::MAX));
-        self.values.push(value);
+        let immediate = match value {
+            Value::I64(value) => BoxedHandle::immediate_integer(value),
+            Value::F64(value) => BoxedHandle::immediate_float(value),
+            _ => None,
+        };
+        let handle = immediate.unwrap_or_else(|| {
+            let index = self.values.len();
+            self.values.push(value);
+            // A heap too large to index yields a handle that never resolves,
+            // so it fails on use instead of aliasing another value.
+            BoxedHandle::heap(index).unwrap_or(BoxedHandle::INVALID)
+        });
         Value::Obj(Obj {
             host_type: INTERLOKO_VALUE_TYPE,
             handle,
@@ -2014,7 +2060,7 @@ impl Host for InterlokoHost {
                     return Err(HostError::Failed);
                 }
                 rets[0] = match self.boxed_value(*obj)? {
-                    value @ (Value::I64(_) | Value::F64(_)) => value.clone(),
+                    value @ (Value::I64(_) | Value::F64(_)) => value,
                     _ => return Err(HostError::Failed),
                 };
                 Ok(0)
@@ -2202,7 +2248,7 @@ impl InterlokoHost {
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => obj,
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj)? {
-                    Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => *boxed,
+                    Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => boxed,
                     _ => return Err(HostError::Failed),
                 }
             }
@@ -2225,7 +2271,7 @@ impl InterlokoHost {
                     Value::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),
                     Value::Bool(_) | Value::U64(_) => Ok(OBJECT_CLASS_ID),
                     Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
-                        Ok(self.object(*boxed)?.class)
+                        Ok(self.object(boxed)?.class)
                     }
                     _ => Err(HostError::Failed),
                 }
@@ -2344,7 +2390,7 @@ impl InterlokoHost {
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => Some(obj),
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj).ok()? {
-                    Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => Some(*boxed),
+                    Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => Some(boxed),
                     _ => None,
                 }
             }

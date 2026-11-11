@@ -39,6 +39,8 @@ use crate::{ast, lower, sem, tape, typing};
 /// Upstream execution evidence carried by [`ExecutionTrace`]: recorded
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
+/// Runtime heap entry counts reported by [`FunctionCallOutcome::heap`].
+pub use interloko_runtime::HeapStats;
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
@@ -318,6 +320,9 @@ pub struct FunctionCallOutcome {
     pub value: FunctionValue,
     /// Recorded trace when tracing was requested.
     pub trace: Option<ExecutionTrace>,
+    /// Runtime heap sizes when the call returned. Each call starts from an
+    /// empty heap, so this is what the call allocated.
+    pub heap: HeapStats,
 }
 
 /// Embedding callback for scalar functions declared through
@@ -5194,6 +5199,7 @@ fn call_function<'a>(
     Ok(FunctionCallOutcome {
         value,
         trace: capture.map(TraceCapture::finish),
+        heap: host.heap_stats(),
     })
 }
 
@@ -5228,6 +5234,10 @@ impl<'a> SharedFunctionCallHost<'a> {
 
     fn failure(&self) -> Option<(String, HostFunctionFailure)> {
         self.0.borrow().failure.clone()
+    }
+
+    fn heap_stats(&self) -> HeapStats {
+        self.0.borrow().runtime.heap_stats()
     }
 }
 
@@ -13855,6 +13865,45 @@ mod tests {
             };
             assert_eq!(loko_trap(&trap), Some(lower::LokoTrap::IntegerOverflow));
         }
+    }
+
+    #[test]
+    fn boxed_scalar_dispatch_keeps_the_heap_flat() {
+        let artifacts = CompilerSession::compile_source(
+            "boxing.loko",
+            "define generic weigh(x);\n\
+             define method weigh(x :: <integer>) => <integer>\n  x\nend;\n\
+             define method weigh(x :: <double-float>) => <integer>\n  1\nend;\n\
+             define function spin(n :: <integer>, acc :: <integer>) => <integer>\n  \
+             if n = 0 then acc else spin(n - 1, acc + weigh(n) + weigh(0.5) + weigh(n * 2) + weigh(-1.5)) end\nend;\n\
+             define function wide(n :: <integer>) => <integer>\n  weigh(n)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let spin = |n: i64| {
+            artifacts
+                .call_function(
+                    "spin",
+                    &[FunctionValue::Integer(n), FunctionValue::Integer(0)],
+                    None,
+                )
+                .expect("spin should run")
+        };
+
+        let few = spin(10);
+        let many = spin(200);
+        assert_eq!(few.value, FunctionValue::Integer(3 * 55 + 2 * 10));
+        assert_eq!(many.value, FunctionValue::Integer(3 * 20_100 + 2 * 200));
+        // 800 boxed arguments, and not one heap box.
+        assert_eq!(many.heap, few.heap);
+        assert_eq!(many.heap.boxed_values, 0);
+
+        // Integers outside the immediate range still box exactly, on the heap.
+        let wide = artifacts
+            .call_function("wide", &[FunctionValue::Integer(i64::MAX)], None)
+            .expect("wide should run");
+        assert_eq!(wide.value, FunctionValue::Integer(i64::MAX));
+        assert_eq!(wide.heap.boxed_values, 1);
     }
 
     #[test]
