@@ -105,6 +105,15 @@ pub(super) fn evaluate_rule_action(
         "emit-integer" => {
             evaluate_emit_integer(node, &action).map(GrammarActionValue::FrontendExpression)
         }
+        "emit-float" => {
+            evaluate_emit_float(node, &action).map(GrammarActionValue::FrontendExpression)
+        }
+        "emit-negate" => action_expression_arg(rules, node, &action, "value").map(|value| {
+            GrammarActionValue::FrontendExpression(FrontendExpression::Negate {
+                value: alloc::boxed::Box::new(value),
+                source_span: node.span.into(),
+            })
+        }),
         "emit-name" => {
             evaluate_emit_name(node, &action).map(GrammarActionValue::FrontendExpression)
         }
@@ -231,6 +240,25 @@ fn evaluate_emit_integer(
         value: value.value.parse().map_err(|_| {
             GrammarActionError::new(value.span, "integer literal").with_arg("value")
         })?,
+        source_span: node.span.into(),
+    })
+}
+
+fn evaluate_emit_float(
+    node: &InterpretedRuleNode<'_>,
+    action: &GrammarAction<'_>,
+) -> Result<FrontendExpression, GrammarActionError> {
+    let value = action_text_arg(node, action, "value")?;
+    let parsed = value
+        .value
+        .parse::<f64>()
+        .ok()
+        .filter(|parsed| parsed.is_finite())
+        .ok_or_else(|| {
+            GrammarActionError::new(value.span, "finite float literal").with_arg("value")
+        })?;
+    Ok(FrontendExpression::Float {
+        value: interloko_model::FloatBits::from_f64(parsed),
         source_span: node.span.into(),
     })
 }
@@ -501,6 +529,7 @@ fn binary_op_from_text(text: &str) -> Option<FrontendBinaryOp> {
         "+" => Some(FrontendBinaryOp::Add),
         "-" => Some(FrontendBinaryOp::Sub),
         "*" => Some(FrontendBinaryOp::Mul),
+        "/" => Some(FrontendBinaryOp::Div),
         _ => None,
     }
 }
@@ -508,6 +537,8 @@ fn binary_op_from_text(text: &str) -> Option<FrontendBinaryOp> {
 fn expr_span(expression: &FrontendExpression) -> Span {
     match expression {
         FrontendExpression::Integer { source_span, .. }
+        | FrontendExpression::Float { source_span, .. }
+        | FrontendExpression::Negate { source_span, .. }
         | FrontendExpression::Name { source_span, .. }
         | FrontendExpression::Call { source_span, .. }
         | FrontendExpression::Binary { source_span, .. } => *source_span,

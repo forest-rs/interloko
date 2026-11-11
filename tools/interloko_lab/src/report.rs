@@ -2800,6 +2800,8 @@ fn short_source_name(path: &str) -> &str {
 fn frontend_expression_label(expression: &FrontendExpression) -> String {
     match expression {
         FrontendExpression::Integer { value, .. } => format!("integer {value}"),
+        FrontendExpression::Float { value, .. } => format!("float {value}"),
+        FrontendExpression::Negate { .. } => "negate".into(),
         FrontendExpression::Name { name, .. } => format!("name {name}"),
         FrontendExpression::Call { callee, args, .. } => {
             format!("call {callee}/{}", args.len())

@@ -1,0 +1,13 @@
+// expect: run 1.414213562373095
+// expect: diagnostics 0
+// expect: dump eop contains staged-region:calculator/r0
+// expect: dump ast contains float 0.5
+// expect: dump lowered contains f64.div
+
+// grammar-activate: calculator
+
+// staged-loko: calculator
+half = 1.0 / 2.0
+diagonal = sqrt(pow(1.5, 2.0) + pow(-half() * 3.0, 2.0)) / 1.5
+main = diagonal() * 0.5e0 * 2.0 - (1.0 - 1.0)
+// end-staged-loko

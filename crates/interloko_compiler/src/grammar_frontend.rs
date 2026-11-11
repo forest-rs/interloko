@@ -807,6 +807,20 @@ pub enum FrontendExpression {
         /// Original staged source span.
         source_span: Span,
     },
+    /// Finite float literal.
+    Float {
+        /// Literal value, compared by bit pattern.
+        value: interloko_model::FloatBits,
+        /// Original staged source span.
+        source_span: Span,
+    },
+    /// Arithmetic negation.
+    Negate {
+        /// Negated operand.
+        value: alloc::boxed::Box<FrontendExpression>,
+        /// Original staged source span.
+        source_span: Span,
+    },
     /// Name reference.
     Name {
         /// Referenced name.
@@ -845,6 +859,8 @@ pub enum FrontendBinaryOp {
     Sub,
     /// Multiplication.
     Mul,
+    /// Division.
+    Div,
 }
 
 impl FrontendBinaryOp {
@@ -855,6 +871,7 @@ impl FrontendBinaryOp {
             Self::Add => "+",
             Self::Sub => "-",
             Self::Mul => "*",
+            Self::Div => "/",
         }
     }
 }
@@ -1852,6 +1869,11 @@ fn materialize_frontend_expression_with_precedence(
     }
     match expression {
         FrontendExpression::Integer { value, .. } => source.push_str(&value.to_string()),
+        FrontendExpression::Float { value, .. } => source.push_str(&value.to_string()),
+        FrontendExpression::Negate { value, .. } => {
+            source.push('-');
+            materialize_frontend_expression_with_precedence(value, source, precedence);
+        }
         FrontendExpression::Name { name, .. } => source.push_str(name),
         FrontendExpression::Call { callee, args, .. } => {
             source.push_str(callee);
@@ -1870,7 +1892,7 @@ fn materialize_frontend_expression_with_precedence(
             source.push_str(op.as_str());
             source.push(' ');
             let rhs_precedence = match op {
-                FrontendBinaryOp::Sub => precedence + 1,
+                FrontendBinaryOp::Sub | FrontendBinaryOp::Div => precedence + 1,
                 FrontendBinaryOp::Add | FrontendBinaryOp::Mul => precedence,
             };
             materialize_frontend_expression_with_precedence(rhs, source, rhs_precedence);
@@ -1888,10 +1910,12 @@ const fn frontend_expression_precedence(expression: &FrontendExpression) -> u8 {
             ..
         } => 1,
         FrontendExpression::Binary {
-            op: FrontendBinaryOp::Mul,
+            op: FrontendBinaryOp::Mul | FrontendBinaryOp::Div,
             ..
         } => 2,
+        FrontendExpression::Negate { .. } => 3,
         FrontendExpression::Integer { .. }
+        | FrontendExpression::Float { .. }
         | FrontendExpression::Name { .. }
         | FrontendExpression::Call { .. } => 3,
     }
@@ -1943,6 +1967,20 @@ pub(super) fn frontend_expression_source_data(expression: &FrontendExpression) -
             "frontend-integer",
             vec![
                 source_data::field("value", SourceData::integer(*value)),
+                source_span_data(*source_span),
+            ],
+        ),
+        FrontendExpression::Float { value, source_span } => SourceData::record(
+            "frontend-float",
+            vec![
+                source_data::field("value", SourceData::symbol(value.to_string())),
+                source_span_data(*source_span),
+            ],
+        ),
+        FrontendExpression::Negate { value, source_span } => SourceData::record(
+            "frontend-negate",
+            vec![
+                source_data::field("value", frontend_expression_source_data(value)),
                 source_span_data(*source_span),
             ],
         ),
@@ -3915,6 +3953,36 @@ fn stable_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontend_float_expressions_materialize_as_loko_source() {
+        let span = Span::new(0, 0);
+        let float = |value: f64| FrontendExpression::Float {
+            value: interloko_model::FloatBits::from_f64(value),
+            source_span: span,
+        };
+        let name = |name: &str| FrontendExpression::Name {
+            name: name.into(),
+            source_span: span,
+        };
+        let binary = |op, lhs, rhs| FrontendExpression::Binary {
+            op,
+            lhs: alloc::boxed::Box::new(lhs),
+            rhs: alloc::boxed::Box::new(rhs),
+            source_span: span,
+        };
+        let expression = binary(
+            FrontendBinaryOp::Div,
+            FrontendExpression::Negate {
+                value: alloc::boxed::Box::new(name("a")),
+                source_span: span,
+            },
+            binary(FrontendBinaryOp::Div, name("b"), float(2.5e-7)),
+        );
+        let mut source = String::new();
+        materialize_frontend_expression(&expression, &mut source);
+        assert_eq!(source, "-a / (b / 2.5e-7)");
+    }
     use interloko_grammar::Span as GrammarSpan;
 
     #[test]

@@ -2511,6 +2511,16 @@ impl FrontendFormLowering {
                 value: *value,
                 span: *source_span,
             },
+            FrontendExpression::Float { value, source_span } => Expr::Float {
+                id: self.expr_id("frontend-float", *source_span),
+                value: *value,
+                span: *source_span,
+            },
+            FrontendExpression::Negate { value, source_span } => Expr::UnaryMinus {
+                id: self.expr_id("frontend-negate", *source_span),
+                expr: Box::new(self.lower_frontend_expression(value)),
+                span: *source_span,
+            },
             FrontendExpression::Name { name, source_span } => Expr::Name {
                 id: self.expr_id("frontend-name", *source_span),
                 name: name.clone(),
@@ -2540,6 +2550,7 @@ impl FrontendFormLowering {
                     FrontendBinaryOp::Add => BinaryOp::Add,
                     FrontendBinaryOp::Sub => BinaryOp::Sub,
                     FrontendBinaryOp::Mul => BinaryOp::Mul,
+                    FrontendBinaryOp::Div => BinaryOp::Div,
                 },
                 lhs: Box::new(self.lower_frontend_expression(lhs)),
                 rhs: Box::new(self.lower_frontend_expression(rhs)),
