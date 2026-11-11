@@ -45,6 +45,14 @@ pub enum QueryArtifact {
     TapeProgram,
     /// Runtime result artifact for an optional `main` run.
     RuntimeResult,
+    /// Soft typing decisions for one function, method, or constant.
+    DefinitionTyping(DefinitionId),
+    /// Soft typing result for the module: per-definition decisions under the
+    /// session's typing configuration.
+    Typing,
+    /// Session-owned soft typing configuration input. Changing it re-derives
+    /// typing diagnostics without re-checking any definition.
+    TypingConfig,
 }
 
 /// A query artifact and its stable external key.
@@ -87,6 +95,11 @@ impl QueryArtifact {
             Self::LoweredModule => ArtifactKind::LoweredModule.as_str().into(),
             Self::TapeProgram => ArtifactKind::TapeProgram.as_str().into(),
             Self::RuntimeResult => ArtifactKind::RuntimeResult.as_str().into(),
+            Self::DefinitionTyping(id) => {
+                format!("{} {id}", ArtifactKind::DefinitionTyping.as_str())
+            }
+            Self::Typing => ArtifactKind::Typing.as_str().into(),
+            Self::TypingConfig => ArtifactKind::TypingConfig.as_str().into(),
         }
     }
 
@@ -119,6 +132,11 @@ impl QueryArtifact {
             Self::LoweredModule => ArtifactKey::new(source_file, ArtifactKind::LoweredModule, None),
             Self::TapeProgram => ArtifactKey::new(source_file, ArtifactKind::TapeProgram, None),
             Self::RuntimeResult => ArtifactKey::new(source_file, ArtifactKind::RuntimeResult, None),
+            Self::DefinitionTyping(id) => {
+                ArtifactKey::new(source_file, ArtifactKind::DefinitionTyping, Some(id))
+            }
+            Self::Typing => ArtifactKey::new(source_file, ArtifactKind::Typing, None),
+            Self::TypingConfig => ArtifactKey::new(source_file, ArtifactKind::TypingConfig, None),
         }
     }
 }
@@ -158,6 +176,9 @@ impl QueryInvalidation {
         this.add(QueryArtifact::Ast, QueryArtifact::Parse);
         this.add(QueryArtifact::Bind, QueryArtifact::Ast);
         this.add(QueryArtifact::Diagnostics, QueryArtifact::Bind);
+        this.add(QueryArtifact::Typing, QueryArtifact::Bind);
+        this.add(QueryArtifact::Typing, QueryArtifact::TypingConfig);
+        this.add(QueryArtifact::Diagnostics, QueryArtifact::Typing);
         this.add(QueryArtifact::LoweredModule, QueryArtifact::Bind);
         this.add(QueryArtifact::TapeProgram, QueryArtifact::Bind);
         this.add(QueryArtifact::TapeProgram, QueryArtifact::LoweredModule);
@@ -181,6 +202,29 @@ impl QueryInvalidation {
             this.add(
                 QueryArtifact::TapeProgram,
                 QueryArtifact::MethodTape(method),
+            );
+        }
+
+        let typed_definitions = module
+            .functions
+            .iter()
+            .map(|function| function.definition)
+            .chain(module.methods.iter().map(|method| method.definition))
+            .chain(module.constants.iter().map(|constant| constant.definition));
+        for definition in typed_definitions {
+            this.add(
+                QueryArtifact::DefinitionTyping(definition),
+                QueryArtifact::Bind,
+            );
+            this.add(
+                QueryArtifact::Typing,
+                QueryArtifact::DefinitionTyping(definition),
+            );
+        }
+        for method in &module.methods {
+            this.add(
+                QueryArtifact::DefinitionTyping(method.definition),
+                QueryArtifact::MethodLookup(method.definition),
             );
         }
 
@@ -257,6 +301,15 @@ impl QueryInvalidation {
     /// Marks one method definition changed and drains affected artifacts.
     pub fn method_definition_changed(&mut self, method: DefinitionId) -> Vec<QueryArtifact> {
         self.mark_and_drain(QueryArtifact::MethodLookup(method))
+    }
+
+    /// Marks the typing configuration changed and drains affected artifacts.
+    ///
+    /// Per-definition typing decisions do not depend on the configuration, so
+    /// only the module typing result and the aggregated diagnostics are
+    /// affected.
+    pub fn typing_config_changed(&mut self) -> Vec<QueryArtifact> {
+        self.mark_and_drain(QueryArtifact::TypingConfig)
     }
 
     fn mark_and_drain(&mut self, artifact: QueryArtifact) -> Vec<QueryArtifact> {
@@ -344,6 +397,50 @@ mod tests {
         assert!(!affected.contains(&QueryArtifact::MethodLookup(square)));
         assert!(!affected.contains(&QueryArtifact::MethodLowering(square)));
         assert!(!affected.contains(&QueryArtifact::MethodTape(square)));
+    }
+
+    #[test]
+    fn method_change_retypes_only_that_definition() {
+        let module = lower_source(
+            "define class <circle> (<object>)\nend;\n\
+             define class <square> (<object>)\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  1\nend;\n\
+             define method area(s :: <square>)\n  2\nend;\n\
+             define function main()\n  area(make(<circle>))\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let circle = module.methods[0].definition;
+        let square = module.methods[1].definition;
+        let main = module.functions[0].definition;
+
+        let mut invalidation = QueryInvalidation::for_module(&module);
+        let affected = invalidation.method_changed(MethodId(0));
+
+        assert!(affected.contains(&QueryArtifact::DefinitionTyping(circle)));
+        assert!(affected.contains(&QueryArtifact::Typing));
+        assert!(affected.contains(&QueryArtifact::Diagnostics));
+        assert!(!affected.contains(&QueryArtifact::DefinitionTyping(square)));
+        assert!(!affected.contains(&QueryArtifact::DefinitionTyping(main)));
+    }
+
+    #[test]
+    fn typing_config_change_skips_definition_checks_and_lowering() {
+        let module = lower_source("define function main()\n  1\nend;");
+        let main = module.functions[0].definition;
+        let mut invalidation = QueryInvalidation::for_module(&module);
+        let affected = invalidation.typing_config_changed();
+
+        assert_eq!(
+            affected,
+            [
+                QueryArtifact::TypingConfig,
+                QueryArtifact::Typing,
+                QueryArtifact::Diagnostics
+            ]
+        );
+        assert!(!affected.contains(&QueryArtifact::DefinitionTyping(main)));
+        assert!(!affected.contains(&QueryArtifact::LoweredModule));
     }
 
     #[test]

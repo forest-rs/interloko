@@ -442,6 +442,9 @@ impl SessionTranscript {
     /// standard replay failure for that case (`GenericNameMismatch` or
     /// `UnknownGeneric`) rather than guessing which generic the
     /// original mutation meant.
+    ///
+    /// The restored session uses the default soft typing configuration;
+    /// transcripts do not record typing configuration.
     #[must_use]
     pub fn restore(
         &self,
@@ -454,6 +457,7 @@ impl SessionTranscript {
             RuntimeMode::CompileOnly,
             grammar_registry,
             host_registry,
+            crate::typing::TypingConfig::default(),
         );
 
         let mut applied: Vec<AppliedMutation> = Vec::new();

@@ -23,7 +23,7 @@ Supported expectations:
 - `diagnostic contains TEXT`: expect at least one diagnostic whose message
   contains `TEXT`.
 - `dump STAGE contains TEXT`: render `STAGE` and expect it to contain `TEXT`.
-  Stages are `syntax`, `ast`, `sem`, `mop`, `eop`, `lowered`, `tape`, and
+  Stages are `syntax`, `ast`, `sem`, `mop`, `eop`, `lowered`, `tape`, `typing`, and
   `all`.
 - `// host-class: <name> slot:<type>`: declare host-backed metadata for
   compile/dump corpus cases. This is a corpus runner header, not Loko syntax.
