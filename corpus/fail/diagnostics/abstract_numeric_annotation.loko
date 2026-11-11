@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.abstract-numeric-type-unsupported
+// expect: diagnostic contains <real> is abstract
+
+define function twice(x :: <real>)
+  x
+end;
+
+define function main()
+  0
+end;

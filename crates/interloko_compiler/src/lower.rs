@@ -3908,18 +3908,16 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueK
     }
 }
 
-/// Returns whether `class` is the built-in class of the unboxed scalar
-/// category `kind` (`<integer>` for `i64`, `<float>` for `f64`).
+/// Returns whether every value of the unboxed scalar category `kind` is an
+/// instance of `class`: `<integer>` for `i64`; `<double-float>` or one of its
+/// superclasses (`<float>`, `<real>`, `<number>`, `<object>`) for `f64`.
 fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::ClassId) -> bool {
-    let expected = match kind {
+    let concrete = match kind {
         ValueKind::I64 => sem::BuiltinValueClass::Integer,
-        ValueKind::F64 => sem::BuiltinValueClass::Float,
+        ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
         _ => return false,
     };
-    module
-        .classes
-        .get(class.0 as usize)
-        .is_some_and(|class| class.origin == sem::ClassOrigin::BuiltinValue { kind: expected })
+    builtin_class(module, concrete).is_some_and(|actual| module.is_same_or_subclass(actual, class))
 }
 
 fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::ClassId> {

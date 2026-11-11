@@ -4701,7 +4701,9 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
 fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::ClassId> {
     match expr {
         sem::Expr::ConstI64 { .. } => sem_builtin_class(module, sem::BuiltinValueClass::Integer),
-        sem::Expr::ConstF64 { .. } => sem_builtin_class(module, sem::BuiltinValueClass::Float),
+        sem::Expr::ConstF64 { .. } => {
+            sem_builtin_class(module, sem::BuiltinValueClass::DoubleFloat)
+        }
         sem::Expr::MakeObject { class_id, .. } => Some(*class_id),
         sem::Expr::StringLiteral { class, .. }
         | sem::Expr::SymbolLiteral { class, .. }
@@ -4734,7 +4736,7 @@ fn sem_value_kind_class(module: &sem::Module, kind: sem::ValueKind) -> Option<se
         | sem::ValueKind::Symbol(class)
         | sem::ValueKind::Vector(class) => Some(class),
         sem::ValueKind::I64 => sem_builtin_class(module, sem::BuiltinValueClass::Integer),
-        sem::ValueKind::F64 => sem_builtin_class(module, sem::BuiltinValueClass::Float),
+        sem::ValueKind::F64 => sem_builtin_class(module, sem::BuiltinValueClass::DoubleFloat),
         sem::ValueKind::ClassObject(_) => sem_builtin_class(module, sem::BuiltinValueClass::Class),
         sem::ValueKind::GenericFunctionObject(_) => {
             sem_builtin_class(module, sem::BuiltinValueClass::GenericFunction)
@@ -4776,8 +4778,11 @@ fn sem_builtin_value_kind_for_class(
             kind: sem::BuiltinValueClass::Integer,
         } => Some(sem::ValueKind::I64),
         sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Float,
+            kind: sem::BuiltinValueClass::Float | sem::BuiltinValueClass::DoubleFloat,
         } => Some(sem::ValueKind::F64),
+        sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::Number | sem::BuiltinValueClass::Real,
+        } => None,
         sem::ClassOrigin::BuiltinValue {
             kind: sem::BuiltinValueClass::Vector,
         } => Some(sem::ValueKind::Vector(class)),
