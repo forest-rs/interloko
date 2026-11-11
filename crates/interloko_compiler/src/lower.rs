@@ -4143,8 +4143,9 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
 }
 
 /// Returns whether every value of the unboxed scalar category `kind` is an
-/// instance of `class`: `<integer>` for `i64`; `<double-float>` or one of its
-/// superclasses (`<float>`, `<real>`, `<number>`, `<object>`) for `f64`.
+/// instance of `class`: the scalar's concrete class (`<integer>` for `i64`,
+/// `<double-float>` for `f64`) or one of its superclasses, such as
+/// `<rational>` or `<float>`, `<real>`, `<number>`, and `<object>`.
 fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::ClassId) -> bool {
     let concrete = match kind {
         ValueKind::I64 => sem::BuiltinValueClass::Integer,

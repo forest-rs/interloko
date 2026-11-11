@@ -47,7 +47,7 @@ pub enum BuiltinValueClass {
     String,
     /// The built-in `<symbol>` class.
     Symbol,
-    /// The built-in `<integer>` class.
+    /// The concrete built-in `<integer>` class of exact integers.
     Integer,
     /// The built-in `<vector>` class.
     Vector,
@@ -68,6 +68,8 @@ pub enum BuiltinValueClass {
     /// The concrete built-in `<double-float>` class of IEEE 754 binary64
     /// values. Float literals are `<double-float>` instances.
     DoubleFloat,
+    /// The abstract built-in `<rational>` class of exact real numbers.
+    Rational,
 }
 
 impl BuiltinValueClass {
@@ -85,6 +87,7 @@ impl BuiltinValueClass {
         (Self::Real, "<real>"),
         (Self::Float, "<float>"),
         (Self::DoubleFloat, "<double-float>"),
+        (Self::Rational, "<rational>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -103,6 +106,7 @@ impl BuiltinValueClass {
             Self::Real => "<real>",
             Self::Float => "<float>",
             Self::DoubleFloat => "<double-float>",
+            Self::Rational => "<rational>",
         }
     }
 
@@ -122,6 +126,7 @@ impl BuiltinValueClass {
             b"<real>" => Some(Self::Real),
             b"<float>" => Some(Self::Float),
             b"<double-float>" => Some(Self::DoubleFloat),
+            b"<rational>" => Some(Self::Rational),
             _ => None,
         }
     }
@@ -142,20 +147,23 @@ impl BuiltinValueClass {
             Self::Real => 9,
             Self::Float => 10,
             Self::DoubleFloat => 11,
+            Self::Rational => 12,
         }
     }
 
     /// Returns this class's built-in direct superclass, or `None` when its
     /// direct superclass is `<object>`.
     ///
-    /// The numeric classes form the start of a numeric tower:
-    /// `<number>` > `<real>` > `<float>` > `<double-float>`. `<integer>`
-    /// still sits directly under `<object>`.
+    /// The numeric classes form a numeric tower: `<number>` > `<real>`,
+    /// then `<real>` > `<rational>` > `<integer>` for exact numbers and
+    /// `<real>` > `<float>` > `<double-float>` for floats. [`Self::ALL`] is
+    /// in declaration order, not superclass order.
     #[must_use]
     pub const fn builtin_superclass(self) -> Option<Self> {
         match self {
             Self::Real => Some(Self::Number),
-            Self::Float => Some(Self::Real),
+            Self::Rational | Self::Float => Some(Self::Real),
+            Self::Integer => Some(Self::Rational),
             Self::DoubleFloat => Some(Self::Float),
             _ => None,
         }
@@ -165,7 +173,28 @@ impl BuiltinValueClass {
     /// no direct instances of its own.
     #[must_use]
     pub const fn is_abstract(self) -> bool {
-        matches!(self, Self::Number | Self::Real | Self::Float)
+        matches!(
+            self,
+            Self::Number | Self::Real | Self::Rational | Self::Float
+        )
+    }
+
+    /// Returns whether this class is `<number>` or one of its subclasses.
+    ///
+    /// Numeric values are unboxed scalars, so they are boxed rather than
+    /// referenced when they travel as `<object>`.
+    #[must_use]
+    pub const fn is_numeric(self) -> bool {
+        let mut class = self;
+        loop {
+            if matches!(class, Self::Number) {
+                return true;
+            }
+            match class.builtin_superclass() {
+                Some(superclass) => class = superclass,
+                None => return false,
+            }
+        }
     }
 }
 
@@ -238,7 +267,40 @@ mod tests {
 
     use std::string::ToString;
 
-    use super::FloatBits;
+    use super::{BuiltinValueClass, FloatBits};
+
+    #[test]
+    fn numeric_tower_has_exact_and_float_branches() {
+        let chain = |mut class: BuiltinValueClass| {
+            let mut names = std::vec![class.name()];
+            while let Some(superclass) = class.builtin_superclass() {
+                names.push(superclass.name());
+                class = superclass;
+            }
+            names
+        };
+        assert_eq!(
+            chain(BuiltinValueClass::Integer),
+            ["<integer>", "<rational>", "<real>", "<number>"]
+        );
+        assert_eq!(
+            chain(BuiltinValueClass::DoubleFloat),
+            ["<double-float>", "<float>", "<real>", "<number>"]
+        );
+        for (index, (class, name)) in BuiltinValueClass::ALL.iter().enumerate() {
+            assert_eq!(class.index(), index);
+            assert_eq!(class.name(), *name);
+            assert_eq!(BuiltinValueClass::from_name(name), Some(*class));
+            assert_eq!(
+                class.is_numeric(),
+                chain(*class).contains(&"<number>"),
+                "{name}"
+            );
+        }
+        assert!(BuiltinValueClass::Rational.is_abstract());
+        assert!(!BuiltinValueClass::Integer.is_abstract());
+        assert!(!BuiltinValueClass::String.is_numeric());
+    }
 
     #[test]
     fn float_bits_render_as_round_trip_literals() {

@@ -1,0 +1,48 @@
+// expect: run 4321
+// expect: diagnostics 0
+// expect: dump lowered contains rank#dispatch
+
+// Methods may specialize on the abstract numeric classes. An unannotated
+// generic boxes its argument, so integers and floats dispatch by class:
+// `<integer>` and `<double-float>` are more specific than `<rational>` and
+// `<float>`, which are more specific than `<real>` and `<number>`.
+define generic rank(x);
+
+define method rank(x :: <number>) => <integer>
+  1
+end;
+
+define method rank(x :: <real>) => <integer>
+  2
+end;
+
+define method rank(x :: <rational>) => <integer>
+  3
+end;
+
+define method rank(x :: <integer>) => <integer>
+  4
+end;
+
+define method rank(x :: <object>) => <integer>
+  0
+end;
+
+define generic exactness(x);
+
+define method exactness(x :: <rational>) => <integer>
+  // `x` is the boxed value dispatch classified; unboxing it is checked.
+  as(<integer>, x) * 100
+end;
+
+define method exactness(x :: <float>) => <integer>
+  20
+end;
+
+define method exactness(x :: <number>) => <integer>
+  0
+end;
+
+define function main() => <integer>
+  rank(7) * 1000 + exactness(3) + exactness(2.5) + rank(2.5) - rank("seven") - 1
+end;

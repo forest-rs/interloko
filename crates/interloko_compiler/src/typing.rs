@@ -46,7 +46,7 @@
 //! classes: [`ValueKind::F64`] is bounded by `<double-float>` via
 //! [`sem::Module::value_kind_class`], and that class is exact because nothing
 //! inherits from it. Abstract numeric classes (`<number>`, `<real>`,
-//! `<float>`) have built-in subclasses, so they are only ever upper bounds.
+//! `<rational>`, `<float>`) have built-in subclasses, so they are only ever upper bounds.
 //! A new scalar kind needs the same class mapping in
 //! [`sem::Module::value_kind_class`] and [`sem::Module::builtin_value_kind`];
 //! a kind without a runtime class must also be placed in the class-less arm
@@ -989,7 +989,7 @@ fn same_exact_class(module: &sem::Module, left: &sem::Expr, right: &sem::Expr) -
 /// from it either; a value bounded by a sealed class has exactly that class.
 ///
 /// The check is structural rather than a list of names: abstract built-ins
-/// such as `<number>`, `<real>`, and `<float>` have built-in subclasses and
+/// such as `<number>`, `<real>`, `<rational>`, and `<float>` have built-in subclasses and
 /// so are never treated as exact, while concrete leaves such as `<integer>`
 /// and `<double-float>` are.
 fn class_is_sealed(module: &sem::Module, class: ClassId) -> bool {
@@ -1511,6 +1511,15 @@ mod tests {
             .expect("float");
         assert!(class_is_sealed(&module, double_float));
         assert!(!class_is_sealed(&module, float));
+        let integer = module
+            .builtin_value_class(sem::BuiltinValueClass::Integer)
+            .expect("integer");
+        let rational = module
+            .builtin_value_class(sem::BuiltinValueClass::Rational)
+            .expect("rational");
+        assert!(class_is_sealed(&module, integer));
+        assert!(!class_is_sealed(&module, rational));
+        assert!(module.is_same_or_subclass(integer, rational));
 
         assert_eq!(
             verdicts_of(&module, &artifact, "main"),

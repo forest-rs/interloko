@@ -1,0 +1,16 @@
+// expect: run "<integer> <rational> <real> <number> <object>"
+// expect: diagnostics 0
+
+define function name-and-superclasses(c :: <object>, depth :: <integer>) => <string>
+  if depth = 0 then
+    class-name(c)
+  else
+    concatenate(
+      concatenate(class-name(c), " "),
+      name-and-superclasses(class-direct-superclass(c), depth - 1))
+  end
+end;
+
+define function main() => <string>
+  name-and-superclasses(object-class(1), 4)
+end;

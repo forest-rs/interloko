@@ -1,0 +1,7 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.instance-of-impossible
+// expect: diagnostic contains <double-float> is not <rational>
+
+define function main()
+  instance?(2.5, <rational>)
+end;

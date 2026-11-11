@@ -1,0 +1,20 @@
+// expect: run 7.5
+// expect: diagnostics 0
+
+// A method on an abstract numeric class under a generic with a scalar
+// parameter receives that scalar unboxed, so its body can do arithmetic.
+define generic weight(x :: <float>) => <float>;
+
+define method weight(x :: <real>) => <float>
+  x + 1.0
+end;
+
+define generic successor(n :: <integer>) => <integer>;
+
+define method successor(n :: <rational>) => <integer>
+  n + 1
+end;
+
+define function main() => <float>
+  weight(2.5) + as(<float>, successor(3))
+end;
