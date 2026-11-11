@@ -1,0 +1,20 @@
+// expect: run 1103
+// expect: diagnostics 0
+
+// Every activation of `nest` pushes its own exit point, and all of them
+// share one exit tag. The innermost activation calls the exit of the
+// activation above it, so its own block catches the exit, sees a foreign
+// token and lets it pass; `nest(1)` returns 3 and the outer additions
+// still run.
+
+define function nest(depth :: <integer>, outer :: <callable>) => <integer>
+  block (here)
+    if depth = 0 then outer(3) else nest(depth - 1, here) + 100 end
+  end
+end;
+
+define function main() => <integer>
+  block (top)
+    nest(2, top) + 1000
+  end
+end;

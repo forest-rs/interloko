@@ -1,0 +1,32 @@
+// expect: run 4207
+// expect: diagnostics 0
+
+// An exit called from a callee runs the cleanups it crosses, innermost
+// first, then the exited block's own cleanup, before the block returns
+// the exit's value.
+
+define class <log> (<object>)
+  slot trail :: <integer>, init-value: 0;
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.trail := log.trail * 10 + digit
+end;
+
+define function leave(log :: <log>, out :: <callable>) => <integer>
+  block ()
+    out(7)
+  cleanup
+    note(log, 1)
+  end
+end;
+
+define function main() => <integer>
+  let log = make(<log>);
+  let value = block (out)
+    leave(log, out) + 100
+  cleanup
+    note(log, 2)
+  end;
+  log.trail * 100 + value + 3000
+end;

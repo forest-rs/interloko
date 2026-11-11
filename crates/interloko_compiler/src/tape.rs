@@ -171,7 +171,10 @@ fn closure_env_contract(
     function: &lower::Function,
     builder: &mut ProgramBuilder,
 ) -> Result<Option<ContractId>, TapeError> {
-    if !matches!(function.kind, lower::FunctionKind::Closure(_)) {
+    if !matches!(
+        function.kind,
+        lower::FunctionKind::Closure(_) | lower::FunctionKind::ExitThunk { .. }
+    ) {
         return Ok(None);
     }
 
@@ -255,12 +258,16 @@ struct AbiTables {
 }
 
 /// Host signatures and tags for dynamic control, declared only when a module
-/// establishes handlers or signals. Cleanup-only regions need neither.
+/// establishes handlers, signals or exit points. Cleanup-only regions need
+/// neither.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ControlAbi {
     push_handler: HostSigId,
     pop: HostSigId,
+    push_exit: HostSigId,
+    check_exit: HostSigId,
     restart: TagId,
+    exits: Vec<(lower::CallableSigId, TagId)>,
 }
 
 impl ControlAbi {
@@ -268,18 +275,41 @@ impl ControlAbi {
         builder: &mut ProgramBuilder,
         module: &lower::Module,
     ) -> Result<Option<Self>, TapeError> {
-        let uses_control = module
+        let mut uses_control = false;
+        let mut exit_sigs = Vec::new();
+        let mut note_tag = |tag: lower::ControlTag| {
+            if let lower::ControlTag::Exit(signature) = tag
+                && !exit_sigs.contains(&signature)
+            {
+                exit_sigs.push(signature);
+            }
+        };
+        for instr in module
             .functions
             .iter()
             .flat_map(|function| &function.instructions)
-            .any(|instr| {
-                matches!(
-                    instr,
-                    lower::Instr::PushHandler { .. }
-                        | lower::Instr::PopBinding { .. }
-                        | lower::Instr::Signal { .. }
-                )
-            });
+        {
+            match instr {
+                lower::Instr::PushHandler { .. }
+                | lower::Instr::PopBinding { .. }
+                | lower::Instr::Signal { .. }
+                | lower::Instr::PushExit { .. }
+                | lower::Instr::CheckExit { .. } => uses_control = true,
+                lower::Instr::Throw { tag, .. } => {
+                    uses_control = true;
+                    note_tag(*tag);
+                }
+                lower::Instr::EnterRegion { catches } => {
+                    for catch in catches {
+                        if let lower::Catch::Tag { tag, .. } = catch {
+                            uses_control = true;
+                            note_tag(*tag);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         if !uses_control {
             return Ok(None);
         }
@@ -289,6 +319,24 @@ impl ControlAbi {
                 &runtime::control::restart_payload().map(Into::into),
             )
             .map_err(build_error)?;
+        let exits = exit_sigs
+            .into_iter()
+            .map(|signature| {
+                let params = module
+                    .callable_signature(signature)
+                    .ok_or_else(|| invalid_lowered("exit signature is missing"))?
+                    .params
+                    .iter()
+                    .map(|kind| value_type(*kind).into());
+                let payload = core::iter::once(ValueType::U64.into())
+                    .chain(params)
+                    .collect::<Vec<_>>();
+                let tag = builder
+                    .declare_tag(&format!("interloko.exit#{}", signature.0), &payload)
+                    .map_err(build_error)?;
+                Ok((signature, tag))
+            })
+            .collect::<Result<Vec<_>, TapeError>>()?;
         Ok(Some(Self {
             push_handler: builder.host_sig_for(
                 runtime::control::CONDITION_PUSH_HANDLER,
@@ -298,13 +346,28 @@ impl ControlAbi {
                 runtime::control::CONTROL_POP,
                 runtime::control::pop_signature(),
             ),
+            push_exit: builder.host_sig_for(
+                runtime::control::CONTROL_PUSH_EXIT,
+                runtime::control::push_exit_signature(),
+            ),
+            check_exit: builder.host_sig_for(
+                runtime::control::CONTROL_CHECK_EXIT,
+                runtime::control::check_exit_signature(),
+            ),
             restart,
+            exits,
         }))
     }
 
-    fn tag(&self, tag: lower::ControlTag) -> TagId {
+    fn tag(&self, tag: lower::ControlTag) -> Result<TagId, TapeError> {
         match tag {
-            lower::ControlTag::Restart => self.restart,
+            lower::ControlTag::Restart => Ok(self.restart),
+            lower::ControlTag::Exit(signature) => self
+                .exits
+                .iter()
+                .find(|(candidate, _)| *candidate == signature)
+                .map(|(_, tag)| *tag)
+                .ok_or_else(|| invalid_lowered("exit tag is missing")),
         }
     }
 }
@@ -1267,7 +1330,7 @@ impl<'a> FunctionEmitter<'a> {
                     .map(|catch| {
                         Ok(match catch {
                             lower::Catch::Tag { tag, target } => {
-                                Catch::TagRef(self.abi.control()?.tag(*tag), self.label(*target)?)
+                                Catch::TagRef(self.abi.control()?.tag(*tag)?, self.label(*target)?)
                             }
                             lower::Catch::All { target } => Catch::AllRef(self.label(*target)?),
                         })
@@ -1287,6 +1350,23 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::Rethrow { exception, span } => {
                 self.set_span(*span);
                 self.asm.throw_ref(0, exception.0);
+            }
+            lower::Instr::PushExit { dst, span } => {
+                let sig = self.abi.control()?.push_exit;
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
+            }
+            lower::Instr::CheckExit { token, span } => {
+                let sig = self.abi.control()?.check_exit;
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[token.0], &[]);
+            }
+            lower::Instr::Throw { tag, payload, span } => {
+                let tag = self.abi.control()?.tag(*tag)?;
+                self.set_span(*span);
+                self.builder
+                    .emit_throw(&mut self.asm, tag, &reg_slice(payload))
+                    .map_err(build_error)?;
             }
         }
         Ok(())

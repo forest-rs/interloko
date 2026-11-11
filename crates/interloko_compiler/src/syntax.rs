@@ -311,6 +311,8 @@ pub enum CstKind {
     BlockExpr,
     /// `cleanup` clause of a `block` expression.
     CleanupClause,
+    /// Exit procedure name bound by a `block` expression.
+    BlockExitName,
     /// Superclass type name in a class definition.
     SuperclassType,
     /// Nominal type name in an annotation.
@@ -340,6 +342,7 @@ impl CstKind {
                 | Self::ParameterName
                 | Self::LetName
                 | Self::RestartName
+                | Self::BlockExitName
                 | Self::CallName
                 | Self::MemberName
                 | Self::ArgumentKeyword
@@ -467,6 +470,7 @@ fn syntax_node_id(
         | CstKind::ParameterName
         | CstKind::LetName
         | CstKind::RestartName
+        | CstKind::BlockExitName
         | CstKind::CallName
         | CstKind::MemberName
         | CstKind::KeywordArg
@@ -625,6 +629,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::ExpressionTypeName => 46,
         CstKind::BlockExpr => 47,
         CstKind::CleanupClause => 48,
+        CstKind::BlockExitName => 49,
     }
 }
 

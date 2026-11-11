@@ -48,7 +48,8 @@ rule restart-condition = restart-parameter | restart-condition-type
 rule restart-parameter = restart-name type-annotation
 rule restart-name = name
 rule restart-condition-type = type-name
-rule block-expression = `block` `(` `)` body cleanup-clause? `end`
+rule block-expression = `block` `(` block-exit-name? `)` body cleanup-clause? `end`
+rule block-exit-name = name
 rule cleanup-clause = `cleanup` body
 rule if-expression = `if` expression `then` expression `else` expression `end`
 rule assignment-expression = assignment-target `:=` expression | comparison-expression

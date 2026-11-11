@@ -160,6 +160,14 @@ pub enum FunctionKind {
     },
     /// A source anonymous function expression.
     Closure(sem::ClosureId),
+    /// The closure body behind block exit procedures with one signature.
+    ///
+    /// Its environment holds the exit point's token. It checks the exit point
+    /// is still live and throws the values to the block.
+    ExitThunk {
+        /// Exit procedure signature; parameters are the block's results.
+        signature: CallableSigId,
+    },
 }
 
 /// Runtime host operation emitted by lowered IR.
@@ -307,6 +315,9 @@ pub enum ControlTag {
     /// Transfer to the activation that established a selected handler.
     /// The payload is the binding token and the condition object.
     Restart,
+    /// Transfer to a `block` through its exit procedure. The payload is the
+    /// exit point's token, then the block's result values.
+    Exit(CallableSigId),
 }
 
 /// One clause of a protected region.
@@ -945,6 +956,29 @@ pub enum Instr {
         /// Registers receiving the tag payload and the exception reference.
         params: Vec<Register>,
     },
+    /// Pushes a block exit point binding and writes its token.
+    PushExit {
+        /// Destination `u64` token register.
+        dst: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Fails the run as an expired exit unless the exit point `token` is live.
+    CheckExit {
+        /// Exit point token register.
+        token: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Raises a control tag with a payload.
+    Throw {
+        /// Raised tag.
+        tag: ControlTag,
+        /// Payload registers in tag order.
+        payload: Vec<Register>,
+        /// Source span.
+        span: Span,
+    },
     /// Rethrows a caught exception with its original tag, payload and origin.
     Rethrow {
         /// Exception reference register.
@@ -1003,7 +1037,16 @@ struct LowerIds {
     accessors: Vec<AccessorFunction>,
     closures: Vec<FunctionId>,
     closure_sigs: Vec<CallableSigId>,
+    exit_thunks: Vec<ExitThunk>,
     call_sigs: Vec<CallableSignature>,
+}
+
+/// One exit thunk function, shared by every block exit with its signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExitThunk {
+    kinds: Vec<sem::ValueKind>,
+    signature: CallableSigId,
+    function: FunctionId,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1038,6 +1081,7 @@ struct CallableUses {
     functions: Vec<sem::FunctionId>,
     generics: Vec<sem::GenericFunctionId>,
     accessors: Vec<AccessorTarget>,
+    exits: Vec<Vec<sem::ValueKind>>,
 }
 
 struct Lowering<'module> {
@@ -1129,6 +1173,18 @@ impl<'module> Lowering<'module> {
             ids.closure_sigs.push(sig);
             next = next.saturating_add(1);
         }
+        for kinds in callable_uses.exits {
+            let none = vec![None; kinds.len()];
+            let signature =
+                callable_signature_from_sem(&mut ids.call_sigs, &kinds, &none, &kinds, &none)?;
+            let signature = intern_callable_signature(&mut ids.call_sigs, signature);
+            ids.exit_thunks.push(ExitThunk {
+                kinds,
+                signature,
+                function: FunctionId(next),
+            });
+            next = next.saturating_add(1);
+        }
 
         Ok(Self { module, ids })
     }
@@ -1199,6 +1255,9 @@ impl<'module> Lowering<'module> {
         for closure in &self.module.closures {
             functions.push(self.lower_closure(closure)?);
         }
+        for thunk in &self.ids.exit_thunks {
+            functions.push(self.lower_exit_thunk(thunk)?);
+        }
 
         let host_functions = self
             .module
@@ -1220,6 +1279,69 @@ impl<'module> Lowering<'module> {
             host_functions,
             functions,
             main,
+        })
+    }
+
+    /// Lowers the closure body shared by exit procedures of one signature:
+    /// check the exit point is live, then throw the values to its block.
+    fn lower_exit_thunk(&self, thunk: &ExitThunk) -> Result<Function, LowerError> {
+        let kinds = self.value_kinds(&thunk.kinds)?;
+        let env = input_register(0);
+        let values = (0..kinds.len())
+            .map(|index| input_register(index + 1))
+            .collect::<Vec<_>>();
+        let token = Register(next_after_inputs(kinds.len() + 1));
+        let mut params = vec![Param {
+            source: None,
+            name: "$env".into(),
+            kind: ValueKind::Aggregate,
+            reg: env,
+        }];
+        params.extend(
+            kinds
+                .iter()
+                .zip(&values)
+                .enumerate()
+                .map(|(index, (kind, reg))| Param {
+                    source: None,
+                    name: format!("value{index}"),
+                    kind: *kind,
+                    reg: *reg,
+                }),
+        );
+        let mut register_kinds = vec![ValueKind::Aggregate];
+        register_kinds.extend(kinds.iter().copied());
+        register_kinds.push(ValueKind::U64);
+        let mut payload = vec![token];
+        payload.extend(values.iter().copied());
+        let span = Span::new(0, 0);
+        Ok(Function {
+            id: thunk.function,
+            name: format!("exit#{}", thunk.signature.0),
+            kind: FunctionKind::ExitThunk {
+                signature: thunk.signature,
+            },
+            params,
+            ret: kinds.first().copied().unwrap_or(ValueKind::Any),
+            rets: kinds,
+            register_kinds,
+            locals: Vec::new(),
+            instructions: vec![
+                Instr::CaptureGet {
+                    dst: token,
+                    env,
+                    index: 0,
+                    kind: ValueKind::U64,
+                    span,
+                },
+                Instr::CheckExit { token, span },
+                Instr::Throw {
+                    tag: ControlTag::Exit(thunk.signature),
+                    payload,
+                    span,
+                },
+            ],
+            span,
         })
     }
 
@@ -1697,7 +1819,17 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(body, uses);
             collect_known_callable_uses_in_expr(&restart.body, uses);
         }
-        sem::Expr::Block { body, cleanup, .. } => {
+        sem::Expr::Block {
+            exit,
+            body,
+            cleanup,
+            ..
+        } => {
+            if let Some(exit) = exit
+                && !uses.exits.contains(&exit.result_kinds)
+            {
+                uses.exits.push(exit.result_kinds.clone());
+            }
             collect_known_callable_uses_in_block(body, uses);
             if let Some(cleanup) = cleanup {
                 collect_known_callable_uses_in_block(cleanup, uses);
@@ -1899,6 +2031,13 @@ struct Value {
     reg: Register,
     kind: ValueKind,
     reachable: bool,
+}
+
+/// An exit point pushed by a `block` in the current body.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct BoundExit {
+    token: Value,
+    signature: CallableSigId,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -2155,27 +2294,41 @@ impl<'module> BodyLowering<'module> {
 
     /// Lowers a `block` expression.
     ///
-    /// Without a cleanup the body is lowered inline. With one, the body runs
-    /// in a region whose catch-all clause runs the cleanup and rethrows; the
-    /// normal exit runs the same cleanup inline. Cleanup code is therefore
-    /// emitted twice, and an exception it raises replaces the one in flight.
+    /// Without an exit or cleanup the body is lowered inline. Otherwise the
+    /// body runs in a region. An exit pushes an exit point, binds a closure
+    /// over its token, and catches its signature's exit tag: a payload with
+    /// this activation's token becomes the block's values, any other exit
+    /// continues outward. A catch-all clause handles every other exception.
+    /// Each abnormal path pops the exit point, runs the cleanup and only then
+    /// continues; the normal exit does the same inline. Cleanup code is
+    /// therefore emitted once per path, and an exception it raises replaces
+    /// the one in flight.
     fn lower_block_expr_results(
         &mut self,
+        exit: Option<&sem::BlockExit>,
         body: &sem::Block,
         cleanup: Option<&sem::Block>,
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
-        let Some(cleanup) = cleanup else {
+        if exit.is_none() && cleanup.is_none() {
             self.lower_lets(&body.lets)?;
             return self.lower_results_expr(&body.result);
-        };
+        }
+        let exit = exit.map(|exit| self.bind_exit(exit, span)).transpose()?;
         let unwind_label = self.alloc_label();
+        let exit_label = self.alloc_label();
         let join_label = self.alloc_label();
-        self.instructions.push(Instr::EnterRegion {
-            catches: vec![Catch::All {
-                target: unwind_label,
-            }],
+        let mut catches = Vec::with_capacity(2);
+        if let Some(exit) = &exit {
+            catches.push(Catch::Tag {
+                tag: ControlTag::Exit(exit.signature),
+                target: exit_label,
+            });
+        }
+        catches.push(Catch::All {
+            target: unwind_label,
         });
+        self.instructions.push(Instr::EnterRegion { catches });
         self.lower_lets(&body.lets)?;
         let body_values = self.lower_results_expr(&body.result)?;
         self.instructions.push(Instr::LeaveRegion);
@@ -2183,18 +2336,13 @@ impl<'module> BodyLowering<'module> {
             .iter()
             .map(|value| self.alloc(value.kind))
             .collect::<Vec<_>>();
+
         let mut reachable = body_values.iter().all(|value| value.reachable);
         if reachable {
-            reachable = self.lower_cleanup(cleanup)?;
+            reachable = self.leave_block(exit.as_ref(), cleanup, span)?;
         }
         if reachable {
-            for (result, value) in results.iter().zip(&body_values) {
-                self.instructions.push(Instr::Move {
-                    dst: result.reg,
-                    src: value.reg,
-                    span: body.result.span(),
-                });
-            }
+            self.move_results(&results, &body_values, body.result.span());
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -2206,11 +2354,58 @@ impl<'module> BodyLowering<'module> {
             label: unwind_label,
             params: vec![unwound.reg],
         });
-        if self.lower_cleanup(cleanup)? {
+        if self.leave_block(exit.as_ref(), cleanup, span)? {
             self.instructions.push(Instr::Rethrow {
                 exception: unwound.reg,
-                span: cleanup.span,
+                span,
             });
+        }
+
+        if let Some(exit) = &exit {
+            let target = self.alloc(ValueKind::U64);
+            let exited = results
+                .iter()
+                .map(|result| self.alloc(result.kind))
+                .collect::<Vec<_>>();
+            let thrown = self.alloc(ValueKind::Exn);
+            let mut params = vec![target.reg];
+            params.extend(exited.iter().map(|value| value.reg));
+            params.push(thrown.reg);
+            self.instructions.push(Instr::CatchTarget {
+                label: exit_label,
+                params,
+            });
+            if self.leave_block(Some(exit), cleanup, span)? {
+                let mine = self.alloc(ValueKind::Bool);
+                let mine_label = self.alloc_label();
+                let onward_label = self.alloc_label();
+                self.instructions.push(Instr::EqU64 {
+                    dst: mine.reg,
+                    lhs: target.reg,
+                    rhs: exit.token.reg,
+                    span,
+                });
+                self.instructions.push(Instr::Branch {
+                    cond: mine.reg,
+                    then_label: mine_label,
+                    else_label: onward_label,
+                    span,
+                });
+                self.instructions.push(Instr::Label {
+                    label: onward_label,
+                });
+                self.instructions.push(Instr::Rethrow {
+                    exception: thrown.reg,
+                    span,
+                });
+                self.instructions.push(Instr::Label { label: mine_label });
+                self.move_results(&results, &exited, span);
+                self.instructions.push(Instr::Jump {
+                    label: join_label,
+                    span,
+                });
+                reachable = true;
+            }
         }
 
         self.instructions.push(Instr::Label { label: join_label });
@@ -2221,6 +2416,71 @@ impl<'module> BodyLowering<'module> {
                 ..result
             })
             .collect())
+    }
+
+    /// Pushes an exit point and binds the block's exit local to a closure
+    /// over its token.
+    fn bind_exit(&mut self, exit: &sem::BlockExit, span: Span) -> Result<BoundExit, LowerError> {
+        let thunk = self
+            .ids
+            .exit_thunks
+            .iter()
+            .find(|thunk| thunk.kinds == exit.result_kinds)
+            .ok_or_else(|| invalid_semantic("block exit signature has no thunk"))?;
+        let (signature, function) = (thunk.signature, thunk.function);
+        let token = self.alloc(ValueKind::U64);
+        self.instructions.push(Instr::PushExit {
+            dst: token.reg,
+            span,
+        });
+        let procedure = self.alloc(ValueKind::Closure(Some(signature)));
+        self.instructions.push(Instr::ClosureNew {
+            dst: procedure.reg,
+            function,
+            captures: vec![token.reg],
+            span,
+        });
+        self.set_local(exit.local, procedure)?;
+        let local = self
+            .current_local(exit.local)
+            .ok_or_else(|| invalid_semantic("block exit local id is out of range"))?;
+        self.locals.push(Local {
+            source: exit.local,
+            name: local.name.clone(),
+            kind: procedure.kind,
+            reg: procedure.reg,
+        });
+        Ok(BoundExit { token, signature })
+    }
+
+    /// Ends a block's extent on one path: pops its exit point, then runs its
+    /// cleanup. Returns whether control continues afterwards.
+    fn leave_block(
+        &mut self,
+        exit: Option<&BoundExit>,
+        cleanup: Option<&sem::Block>,
+        span: Span,
+    ) -> Result<bool, LowerError> {
+        if let Some(exit) = exit {
+            self.instructions.push(Instr::PopBinding {
+                token: exit.token.reg,
+                span,
+            });
+        }
+        match cleanup {
+            Some(cleanup) => self.lower_cleanup(cleanup),
+            None => Ok(true),
+        }
+    }
+
+    fn move_results(&mut self, results: &[Value], values: &[Value], span: Span) {
+        for (result, value) in results.iter().zip(values) {
+            self.instructions.push(Instr::Move {
+                dst: result.reg,
+                src: value.reg,
+                span,
+            });
+        }
     }
 
     /// Lowers a cleanup body for effect, returning whether control can
@@ -3049,11 +3309,13 @@ impl<'module> BodyLowering<'module> {
                 span,
             } => self.lower_handle(body, restart, *span),
             sem::Expr::Block {
+                exit,
                 body,
                 cleanup,
                 span,
             } => {
-                let mut results = self.lower_block_expr_results(body, cleanup.as_deref(), *span)?;
+                let mut results =
+                    self.lower_block_expr_results(exit.as_ref(), body, cleanup.as_deref(), *span)?;
                 if results.len() != 1 {
                     return Err(invalid_semantic(
                         "multiple-value block used in a scalar expression",
@@ -3168,10 +3430,11 @@ impl<'module> BodyLowering<'module> {
                 span,
             } => self.lower_handle_results(body, restart, *span),
             sem::Expr::Block {
+                exit,
                 body,
                 cleanup,
                 span,
-            } => self.lower_block_expr_results(body, cleanup.as_deref(), *span),
+            } => self.lower_block_expr_results(exit.as_ref(), body, cleanup.as_deref(), *span),
             _ => Ok(vec![self.lower_expr(expr)?]),
         }
     }
@@ -4628,9 +4891,10 @@ fn invalid_semantic(message: &str) -> LowerError {
 
 /// Stable dump name for a control tag.
 #[must_use]
-pub const fn control_tag_name(tag: ControlTag) -> &'static str {
+pub fn control_tag_name(tag: ControlTag) -> String {
     match tag {
-        ControlTag::Restart => "restart",
+        ControlTag::Restart => "restart".into(),
+        ControlTag::Exit(signature) => format!("exit#{}", signature.0),
     }
 }
 
@@ -4732,6 +4996,9 @@ impl Module {
                 writeln!(f, " ; callable thunk {callable:?}")
             }
             FunctionKind::Closure(id) => writeln!(f, " ; closure {}", id.0),
+            FunctionKind::ExitThunk { signature } => {
+                writeln!(f, " ; exit thunk for signature {}", signature.0)
+            }
         }
     }
 
@@ -5156,6 +5423,19 @@ impl Module {
             }
             Instr::Rethrow { exception, span } => {
                 write!(f, "  rethrow {exception}")?;
+                fmt_span(f, *span)
+            }
+            Instr::PushExit { dst, span } => {
+                write!(f, "  {dst} = control.push-exit")?;
+                fmt_span(f, *span)
+            }
+            Instr::CheckExit { token, span } => {
+                write!(f, "  control.check-exit {token}")?;
+                fmt_span(f, *span)
+            }
+            Instr::Throw { tag, payload, span } => {
+                write!(f, "  throw {} ", control_tag_name(*tag))?;
+                self.fmt_result_list(f, payload)?;
                 fmt_span(f, *span)
             }
         }
