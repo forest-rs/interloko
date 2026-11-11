@@ -41,13 +41,15 @@ rule let-binding = let-name-binding | let-values-binding
 rule let-name-binding = let-name type-annotation?
 rule let-name = name
 rule let-values-binding = `(` trailing-list-of<let-name-binding, `,`> `)`
-rule expression = handle-expression | if-expression | assignment-expression
+rule expression = handle-expression | block-expression | if-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
 rule restart-clause = `restart` restart-condition expression
 rule restart-condition = restart-parameter | restart-condition-type
 rule restart-parameter = restart-name type-annotation
 rule restart-name = name
 rule restart-condition-type = type-name
+rule block-expression = `block` `(` `)` body cleanup-clause? `end`
+rule cleanup-clause = `cleanup` body
 rule if-expression = `if` expression `then` expression `else` expression `end`
 rule assignment-expression = assignment-target `:=` expression | comparison-expression
 rule assignment-target = postfix-expression

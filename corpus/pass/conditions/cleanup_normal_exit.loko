@@ -1,0 +1,28 @@
+// expect: run 1242
+// expect: diagnostics 0
+// expect: dump ast contains block-expr
+// expect: dump sem contains block-expr cleanup=true
+// expect: dump lowered contains region.enter [all -> 
+// expect: dump lowered contains rethrow
+
+// The cleanup runs after the body completes normally, and the block's
+// value is the body's value.
+
+define class <log> (<object>)
+  slot trail :: <integer>, init-value: 0;
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.trail := log.trail * 10 + digit
+end;
+
+define function main() => <integer>
+  let log = make(<log>);
+  let value = block ()
+    let started = note(log, 1);
+    40 + 2
+  cleanup
+    note(log, 2)
+  end;
+  log.trail * 100 + value
+end;

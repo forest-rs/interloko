@@ -1697,6 +1697,12 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(body, uses);
             collect_known_callable_uses_in_expr(&restart.body, uses);
         }
+        sem::Expr::Block { body, cleanup, .. } => {
+            collect_known_callable_uses_in_block(body, uses);
+            if let Some(cleanup) = cleanup {
+                collect_known_callable_uses_in_block(cleanup, uses);
+            }
+        }
         sem::Expr::ConstI64 { .. }
         | sem::Expr::ConstF64 { .. }
         | sem::Expr::ConstBool { .. }
@@ -2074,7 +2080,29 @@ impl<'module> BodyLowering<'module> {
         block: &sem::Block,
         expected: &[ValueKind],
     ) -> Result<(), LowerError> {
-        for let_binding in &block.lets {
+        self.lower_lets(&block.lets)?;
+        let results = self.lower_results_expr(&block.result)?;
+        if results.len() != expected.len() {
+            return Err(invalid_semantic(
+                "return arity does not match function signature",
+            ));
+        }
+        let mut values = Vec::with_capacity(results.len());
+        for (result, expected) in results.into_iter().zip(expected.iter().copied()) {
+            values.push(
+                self.coerce_value(result, expected, block.result.span())?
+                    .reg,
+            );
+        }
+        self.instructions.push(Instr::Return {
+            values,
+            span: block.result.span(),
+        });
+        Ok(())
+    }
+
+    fn lower_lets(&mut self, lets: &[sem::Let]) -> Result<(), LowerError> {
+        for let_binding in lets {
             if let [local] = let_binding.locals.as_slice() {
                 let (local_name, local_kind) = {
                     let local_info = self
@@ -2122,25 +2150,85 @@ impl<'module> BodyLowering<'module> {
                 });
             }
         }
-
-        let results = self.lower_results_expr(&block.result)?;
-        if results.len() != expected.len() {
-            return Err(invalid_semantic(
-                "return arity does not match function signature",
-            ));
-        }
-        let mut values = Vec::with_capacity(results.len());
-        for (result, expected) in results.into_iter().zip(expected.iter().copied()) {
-            values.push(
-                self.coerce_value(result, expected, block.result.span())?
-                    .reg,
-            );
-        }
-        self.instructions.push(Instr::Return {
-            values,
-            span: block.result.span(),
-        });
         Ok(())
+    }
+
+    /// Lowers a `block` expression.
+    ///
+    /// Without a cleanup the body is lowered inline. With one, the body runs
+    /// in a region whose catch-all clause runs the cleanup and rethrows; the
+    /// normal exit runs the same cleanup inline. Cleanup code is therefore
+    /// emitted twice, and an exception it raises replaces the one in flight.
+    fn lower_block_expr_results(
+        &mut self,
+        body: &sem::Block,
+        cleanup: Option<&sem::Block>,
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let Some(cleanup) = cleanup else {
+            self.lower_lets(&body.lets)?;
+            return self.lower_results_expr(&body.result);
+        };
+        let unwind_label = self.alloc_label();
+        let join_label = self.alloc_label();
+        self.instructions.push(Instr::EnterRegion {
+            catches: vec![Catch::All {
+                target: unwind_label,
+            }],
+        });
+        self.lower_lets(&body.lets)?;
+        let body_values = self.lower_results_expr(&body.result)?;
+        self.instructions.push(Instr::LeaveRegion);
+        let results = body_values
+            .iter()
+            .map(|value| self.alloc(value.kind))
+            .collect::<Vec<_>>();
+        let mut reachable = body_values.iter().all(|value| value.reachable);
+        if reachable {
+            reachable = self.lower_cleanup(cleanup)?;
+        }
+        if reachable {
+            for (result, value) in results.iter().zip(&body_values) {
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: value.reg,
+                    span: body.result.span(),
+                });
+            }
+            self.instructions.push(Instr::Jump {
+                label: join_label,
+                span,
+            });
+        }
+
+        let unwound = self.alloc(ValueKind::Exn);
+        self.instructions.push(Instr::CatchTarget {
+            label: unwind_label,
+            params: vec![unwound.reg],
+        });
+        if self.lower_cleanup(cleanup)? {
+            self.instructions.push(Instr::Rethrow {
+                exception: unwound.reg,
+                span: cleanup.span,
+            });
+        }
+
+        self.instructions.push(Instr::Label { label: join_label });
+        Ok(results
+            .into_iter()
+            .map(|result| Value {
+                reachable,
+                ..result
+            })
+            .collect())
+    }
+
+    /// Lowers a cleanup body for effect, returning whether control can
+    /// continue after it.
+    fn lower_cleanup(&mut self, cleanup: &sem::Block) -> Result<bool, LowerError> {
+        self.lower_lets(&cleanup.lets)?;
+        let values = self.lower_results_expr(&cleanup.result)?;
+        Ok(values.iter().all(|value| value.reachable))
     }
 
     fn lower_dispatcher(&mut self, generic: &sem::GenericFunction) -> Result<(), LowerError> {
@@ -2960,6 +3048,19 @@ impl<'module> BodyLowering<'module> {
                 restart,
                 span,
             } => self.lower_handle(body, restart, *span),
+            sem::Expr::Block {
+                body,
+                cleanup,
+                span,
+            } => {
+                let mut results = self.lower_block_expr_results(body, cleanup.as_deref(), *span)?;
+                if results.len() != 1 {
+                    return Err(invalid_semantic(
+                        "multiple-value block used in a scalar expression",
+                    ));
+                }
+                Ok(results.remove(0))
+            }
             sem::Expr::Error { .. } => Err(invalid_semantic("semantic expression is invalid")),
         }
     }
@@ -3066,6 +3167,11 @@ impl<'module> BodyLowering<'module> {
                 restart,
                 span,
             } => self.lower_handle_results(body, restart, *span),
+            sem::Expr::Block {
+                body,
+                cleanup,
+                span,
+            } => self.lower_block_expr_results(body, cleanup.as_deref(), *span),
             _ => Ok(vec![self.lower_expr(expr)?]),
         }
     }

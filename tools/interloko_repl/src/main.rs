@@ -3013,6 +3013,8 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Handle
         | TokenKind::With
         | TokenKind::Restart
+        | TokenKind::Block
+        | TokenKind::Cleanup
         | TokenKind::End => keyword_highlight_style(),
         TokenKind::TypeName => type_highlight_style(),
         TokenKind::Number

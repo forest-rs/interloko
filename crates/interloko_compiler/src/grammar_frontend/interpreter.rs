@@ -18,7 +18,7 @@ pub(super) const DERIVED_HOST_GRAMMAR_SOURCE: &str =
 
 const LOKO_RESERVED_WORDS: &[&str] = &[
     "define", "function", "class", "slot", "constant", "generic", "method", "let", "if", "then",
-    "else", "handle", "with", "restart", "end",
+    "else", "handle", "with", "restart", "block", "cleanup", "end",
 ];
 
 fn apply_loko_reserved_words(rules: Vec<SourceAuthoredRule>) -> Vec<SourceAuthoredRule> {

@@ -405,6 +405,7 @@ impl BaseLokoCstProjector<'_> {
         match node.name().unwrap_or("") {
             "expression" => self.unwrap_first_expr(node),
             "handle-expression" => self.build_handle(node),
+            "block-expression" => self.build_block(node),
             "restart-clause" => self.build_restart(node),
             "if-expression" => self.build_if(node),
             "assignment-expression" => self.build_assignment(node),
@@ -472,6 +473,24 @@ impl BaseLokoCstProjector<'_> {
             .map(|child| self.build_expr(child))
             .collect::<Vec<_>>();
         self.node_with_nested(CstKind::HandleExpr, node, nested)
+    }
+
+    fn build_block(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut nested = Vec::new();
+        for child in &node.children {
+            if child.is_rule("body") {
+                nested.push(self.build_body(child));
+            } else if child.is_rule("cleanup-clause") {
+                let body = child
+                    .children
+                    .iter()
+                    .find(|body| body.is_rule("body"))
+                    .map(|body| vec![self.build_body(body)])
+                    .unwrap_or_default();
+                nested.push(self.node_with_nested(CstKind::CleanupClause, child, body));
+            }
+        }
+        self.node_with_nested(CstKind::BlockExpr, node, nested)
     }
 
     fn build_restart(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -942,6 +961,7 @@ impl BaseLokoCstProjector<'_> {
         matches!(
             rule,
             "handle-expression"
+                | "block-expression"
                 | "if-expression"
                 | "assignment-expression"
                 | "assignment-target"

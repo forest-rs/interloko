@@ -4392,6 +4392,12 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), body, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, &restart.body, owner_index, sites);
         }
+        sem::Expr::Block { body, cleanup, .. } => {
+            collect_dispatch_sites_in_block(artifacts, owner.clone(), body, owner_index, sites);
+            if let Some(cleanup) = cleanup {
+                collect_dispatch_sites_in_block(artifacts, owner, cleanup, owner_index, sites);
+            }
+        }
         sem::Expr::ConstI64 { .. }
         | sem::Expr::ConstF64 { .. }
         | sem::Expr::ConstBool { .. }
@@ -4957,6 +4963,7 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
             let else_class = exact_static_class(module, else_branch)?;
             (then_class == else_class).then_some(then_class)
         }
+        sem::Expr::Block { body, .. } => exact_static_class(module, &body.result),
         _ => None,
     }
 }
@@ -6259,6 +6266,19 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
                 let _ = writeln!(out, "restart {} {}", restart.id, restart.class_name);
             }
             dump_ast_expr(out, &restart.body, indent + 4);
+        }
+        ast::Expr::Block {
+            id, body, cleanup, ..
+        } => {
+            let _ = writeln!(out, "{id} block-expr");
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "body");
+            dump_ast_block(out, body, indent + 4);
+            if let Some(cleanup) = cleanup {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "cleanup");
+                dump_ast_block(out, cleanup, indent + 4);
+            }
         }
         ast::Expr::Error { id, .. } => {
             let _ = writeln!(out, "{id} error");
@@ -11415,6 +11435,17 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "restart");
             dump_sem_expr(out, &restart.body, indent + 4);
         }
+        sem::Expr::Block { body, cleanup, .. } => {
+            let _ = writeln!(out, "block-expr cleanup={}", cleanup.is_some());
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "body");
+            dump_sem_block(out, body, indent + 4);
+            if let Some(cleanup) = cleanup {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "cleanup");
+                dump_sem_block(out, cleanup, indent + 4);
+            }
+        }
         sem::Expr::Error { .. } => {
             let _ = writeln!(out, "error");
         }
@@ -12393,6 +12424,15 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, body, out);
             out.push_str(":restart=");
             fingerprint_sem_expr(module, &restart.body, out);
+            out.push(')');
+        }
+        sem::Expr::Block { body, cleanup, .. } => {
+            out.push_str("block(body=");
+            out.push_str(&fingerprint_sem_block(module, body));
+            if let Some(cleanup) = cleanup {
+                out.push_str(":cleanup=");
+                out.push_str(&fingerprint_sem_block(module, cleanup));
+            }
             out.push(')');
         }
         sem::Expr::Error { .. } => {

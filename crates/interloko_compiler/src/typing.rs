@@ -931,6 +931,7 @@ fn collect_alternatives(module: &sem::Module, expr: &sem::Expr, out: &mut Vec<St
             collect_alternatives(module, body, out);
             collect_alternatives(module, &restart.body, out);
         }
+        sem::Expr::Block { body, .. } => collect_alternatives(module, &body.result, out),
         _ => out.push(synthesize(module, expr)),
     }
 }
@@ -969,6 +970,7 @@ fn exact_class(module: &sem::Module, expr: &sem::Expr, kind: ValueKind) -> Optio
             ..
         } => same_exact_class(module, then_branch, else_branch),
         sem::Expr::Handle { body, restart, .. } => same_exact_class(module, body, &restart.body),
+        sem::Expr::Block { body, .. } => synthesize(module, &body.result).exact_class,
         _ => None,
     };
     structural.or_else(|| {
@@ -1064,6 +1066,14 @@ fn for_each_child(expr: &sem::Expr, mut visit: impl FnMut(&sem::Expr)) {
         sem::Expr::Handle { body, restart, .. } => {
             visit(body);
             visit(&restart.body);
+        }
+        sem::Expr::Block { body, cleanup, .. } => {
+            for block in core::iter::once(body).chain(cleanup) {
+                for binding in &block.lets {
+                    visit(&binding.value);
+                }
+                visit(&block.result);
+            }
         }
         sem::Expr::ConstI64 { .. }
         | sem::Expr::ConstF64 { .. }

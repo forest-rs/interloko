@@ -3103,7 +3103,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "expression",
-            "handle-expression | if-expression | assignment-expression",
+            "handle-expression | block-expression | if-expression | assignment-expression",
             "syntax.rs:Parser::parse_expr",
         ),
         (
@@ -3125,6 +3125,16 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "restart-condition-type",
             "type-name",
             "base_loko_primary::BaseLokoCstBuilder::build_restart",
+        ),
+        (
+            "block-expression",
+            "`block` `(` `)` body cleanup-clause? `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_block",
+        ),
+        (
+            "cleanup-clause",
+            "`cleanup` body",
+            "base_loko_primary::BaseLokoCstBuilder::build_block",
         ),
         (
             "if-expression",
@@ -3829,6 +3839,8 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::IfExpr => Some("if-expression"),
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
+        CstKind::BlockExpr => Some("block-expression"),
+        CstKind::CleanupClause => Some("cleanup-clause"),
         CstKind::SuperclassType => Some("superclass-type"),
         CstKind::AnnotationType => Some("annotation-type"),
         CstKind::ClassObjectAnnotationType => Some("class-object-annotation-type"),
@@ -4266,7 +4278,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 49);
+        assert_eq!(grammar.effective_rules.len(), 51);
 
         assert!(
             !records

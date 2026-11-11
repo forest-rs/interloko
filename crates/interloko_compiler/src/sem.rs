@@ -743,6 +743,7 @@ impl Module {
                     scalar_result_kind(&generic.result_kinds)
                 }),
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
+            Expr::Block { body, .. } => self.expr_kind(&body.result),
             Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
             Expr::Cast { class, .. } => self
                 .builtin_value_kind(*class)
@@ -2102,6 +2103,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Dylan-style `block` expression whose value is its body's.
+    ///
+    /// The cleanup body runs on every exit from the body, normal or not.
+    Block {
+        /// Protected body; its locals are scoped to the block.
+        body: Box<Block>,
+        /// Cleanup body, evaluated for effect.
+        cleanup: Option<Box<Block>>,
+        /// Source span.
+        span: Span,
+    },
     /// Placeholder for semantically invalid code.
     Error {
         /// Source span.
@@ -2149,6 +2161,7 @@ impl Expr {
             | Self::ValueEqual { span, .. }
             | Self::If { span, .. }
             | Self::Handle { span, .. }
+            | Self::Block { span, .. }
             | Self::Error { span } => *span,
         }
     }
@@ -5021,6 +5034,12 @@ impl Lowering {
                 span,
                 ..
             } => self.lower_handle(ctx, body, restart, *span, expected_results),
+            ast::Expr::Block {
+                body,
+                cleanup,
+                span,
+                ..
+            } => self.lower_block_expr(ctx, body, cleanup.as_deref(), *span, expected_results),
             ast::Expr::Error { span, .. } => Expr::Error { span: *span },
         }
     }
@@ -5887,6 +5906,32 @@ impl Lowering {
         }
     }
 
+    /// Lowers a `block` expression. Locals of the body and of the cleanup
+    /// are scoped to their own bodies.
+    fn lower_block_expr(
+        &mut self,
+        ctx: &mut FunctionContext,
+        body: &ast::Block,
+        cleanup: Option<&ast::Block>,
+        span: Span,
+        expected_results: Option<&[ValueKind]>,
+    ) -> Expr {
+        let scope_start = ctx.scope_start();
+        let body = self.lower_block(ctx, body, expected_results);
+        ctx.hide_locals_from(scope_start);
+        let cleanup = cleanup.map(|cleanup| {
+            let scope_start = ctx.scope_start();
+            let cleanup = self.lower_block(ctx, cleanup, None);
+            ctx.hide_locals_from(scope_start);
+            Box::new(cleanup)
+        });
+        Expr::Block {
+            body: Box::new(body),
+            cleanup,
+            span,
+        }
+    }
+
     /// Lowers the operands of a numeric operator.
     ///
     /// The left operand keeps the legacy integer result hint used by
@@ -6534,6 +6579,7 @@ impl Lowering {
                 }
             }
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
+            Expr::Block { body, .. } => self.expr_kind(&body.result),
             Expr::Error { .. } => ValueKind::Error,
         }
     }
@@ -6569,6 +6615,7 @@ impl Lowering {
             }
             Expr::Signal { result_kinds, .. } => result_kinds.clone(),
             Expr::Handle { restart, .. } => restart.result_kinds.clone(),
+            Expr::Block { body, .. } => self.expr_kinds(&body.result),
             _ => vec![self.expr_kind(expr)],
         }
     }
@@ -6588,6 +6635,7 @@ impl Lowering {
                 callable_signature, ..
             } => Some(callable_signature.clone()),
             Expr::KnownCallable { callable, .. } => self.known_callable_signature(*callable),
+            Expr::Block { body, .. } => self.expr_callable_signature(&body.result),
             _ => None,
         }
     }
@@ -6627,6 +6675,7 @@ impl Lowering {
                 }
             }
             Expr::Handle { restart, .. } => restart.result_callable_sigs.clone(),
+            Expr::Block { body, .. } => self.expr_result_callable_signatures(&body.result),
             _ => vec![self.expr_callable_signature(expr)],
         }
     }
