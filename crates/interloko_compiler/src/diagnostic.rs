@@ -805,6 +805,7 @@ mod tests {
         );
         let trap = |trap| crate::session::RuntimeResult::Trap {
             trap: execution_tape::vm::TrapInfo {
+                unit: execution_tape::value::UnitId(0),
                 func: execution_tape::value::FuncId(0),
                 pc: 0,
                 span_id: None,

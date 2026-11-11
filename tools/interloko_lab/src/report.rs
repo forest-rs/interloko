@@ -2030,6 +2030,7 @@ fn trace_rows(view: &ExecutionTraceView<'_>) -> Vec<TraceRow> {
         let status = match call.outcome {
             HostOutcome::Returned { .. } => "returned".to_string(),
             HostOutcome::Failed(error) => format!("failed: {error}"),
+            HostOutcome::Threw { tag, .. } => format!("threw tag#{}", tag.0),
         };
         rows.push(TraceRow {
             class: "trace-event--host",
