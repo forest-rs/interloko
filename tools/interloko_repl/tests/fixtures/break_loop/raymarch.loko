@@ -1,0 +1,61 @@
+// A one-row shader for the break-loop acceptance transcript
+// (`break_loop.transcript` next to this file). It does not compile yet:
+// `signal` with no lexically enclosing `handle`, and `block ... cleanup`,
+// are part of that target.
+
+define class <bad-sample> (<object>)
+  slot value :: <float>;
+  slot distance :: <float>;
+end;
+
+define class <skip-pixel> (<object>)
+end;
+
+define class <sphere> (<object>)
+  slot radius :: <float>;
+end;
+
+define class <film> (<object>)
+  slot busy :: <boolean>, init-value: #f;
+end;
+
+define function check-sample(value :: <float>, distance :: <float>) => <float>
+  // A shaded sample is a brightness in [0, 1]. Anything else is a shader
+  // bug, so it is signalled rather than silently clamped.
+  if value < 0.0 then
+    signal(make(<bad-sample>, value: value, distance: distance))
+  else
+    value
+  end
+end;
+
+define generic shade(s :: <sphere>, distance :: <float>) => <float>;
+
+define method shade(s :: <sphere>, distance :: <float>) => <float>
+  // Brightness falls off linearly with distance from the sphere's axis.
+  // Bug: a ray that misses the sphere gets a negative brightness.
+  check-sample(1.0 - distance / s.radius, distance)
+end;
+
+define function pixel(s :: <sphere>, x :: <float>) => <float>
+  // Offers `<skip-pixel>` as a program-defined restart: whoever handles
+  // a failure below may give up on this pixel and paint it black.
+  handle
+    shade(s, abs(x))
+  with restart <skip-pixel>
+    0.0
+  end
+end;
+
+define function render(s :: <sphere>, film :: <film>) => <float>
+  let claimed = film.busy := #t;
+  block ()
+    pixel(s, 0.0) + pixel(s, -0.5) + pixel(s, 1.5)
+  cleanup
+    film.busy := #f
+  end
+end;
+
+define function main() => <float>
+  render(make(<sphere>, radius: 1.0), make(<film>))
+end;

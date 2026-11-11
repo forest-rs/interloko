@@ -1,0 +1,240 @@
+// Break loop: fix it while it's running.
+//
+// Acceptance target, written before the features exist. The scenarios run
+// `raymarch.loko`, a one-row shader whose `shade` method produces a negative
+// brightness for rays that miss the sphere; `check-sample`, two calls deeper,
+// signals `<bad-sample>`. Nothing in the program handles `<bad-sample>`.
+//
+// What each step proves, and what it depends on:
+//
+// 1. `:run main` does not unwind. The signal searches for a handler while
+//    every frame is still live, finds none (the `handle` in `pixel` is for
+//    `<skip-pixel>` only), and the REPL acts as the default handler for
+//    unhandled conditions. Depends on cross-call conditions with handler
+//    search before unwinding (branch `conditions`, in progress): `signal`
+//    with no lexically enclosing `handle`, dynamic handler search, and the
+//    built-in `use-value`, `retry` and `abort` restarts.
+// 2. The break loop shows the condition, the live stack innermost first
+//    with source locations and the code unit each frame runs (`@N`), and
+//    the restarts on offer. `skip-pixel` is program-defined: an enclosing
+//    `with restart` clause whose class does not match the condition is
+//    offered as a restart rather than taken as a handler.
+// 3. The suspended frames, locals and the condition are EOP objects
+//    (`frame:N`, `condition:N`, `restart:N`), inspected with the existing
+//    `:inspect` and `:affordances` commands. Depends on EOP.
+// 4. `:edit method:m0` (the direct spelling of the `edit-body` affordance)
+//    replaces the method in place. A broken edit is rejected and leaves both
+//    the definition and the suspended computation untouched; the corrected
+//    edit is checked by soft typing, which rechecks the dispatch site in
+//    `pixel`, before it is installed. `frame:1` keeps running the
+//    superseded code unit `method:m0@1`. Depends on execution "code units"
+//    (planned): a frame pins the unit it entered, and redefinition installs
+//    a new unit instead of patching code under a live frame.
+// 5. `retry frame:1` unwinds to the call that created `frame:1` and makes
+//    it again; dispatch now picks `method:m0@2`, and `main` returns 1.5.
+// 6. After `:reload` brings the bug back, `use-value` resumes the signal in
+//    `frame:0` with a supplied value (typed: a string is refused), and the
+//    run completes with 1.75. A third run is aborted through the structured
+//    affordance rather than a REPL command: everything unwinds, the
+//    `block ... cleanup` in `render` runs, and the REPL is back at top level.
+// 7. Choosing a restart is one structured affordance, `choose-restart` on
+//    the condition, with arguments typed by the chosen restart's signature.
+//    The REPL break loop is only the human chooser. The second scenario
+//    drives the same program through `interloko_lab` with a scripted
+//    chooser (`choices.toml`) and no REPL at all. A future oracle chooser,
+//    a model picking the restart with its choice recorded as host evidence
+//    for replay, plugs into the same seam and records the same choice shape;
+//    nothing here should need rework for it.
+//
+// Invented surface (none of it exists yet): `:frames`, `:restart <n|name>
+// [args...]`, `:edit <object-id>`, `:invoke condition:N choose-restart
+// <restart> [name: value...]`, the `frame:`, `condition:` and `restart:`
+// object ids (scoped to the active break level), `@N` code-unit suffixes,
+// and `interloko_lab run --chooser <choices.toml>`.
+//
+// Format: `=== repl` and `=== lab` start a scenario. In a repl scenario,
+// `> ` lines are stdin. In a lab scenario, each `$ interloko_lab ...` line
+// is one invocation. `! ` lines are expected stderr, other lines expected
+// stdout. Commands run from the `interloko_repl` package root. Blank lines
+// and `//` lines are ignored.
+
+=== repl: human chooser in the REPL break loop
+
+// Steps 1 and 2: load the program and run it into the signal.
+> :load tests/fixtures/break_loop/raymarch.loko
+loaded tests/fixtures/break_loop/raymarch.loko (10 forms)
+> :run main
+break [1]: no handler for <bad-sample>; 5 frames suspended, nothing unwound
+condition:0 <bad-sample> value: -0.5, distance: 1.5
+frames (innermost first):
+  frame:0 check-sample(value: -0.5, distance: 1.5)  function:f0@1  repl.loko:26
+  frame:1 shade(s: <sphere>, distance: 1.5)          method:m0@1    repl.loko:37
+  frame:2 pixel(s: <sphere>, x: 1.5)                 function:f1@1  repl.loko:44
+  frame:3 render(s: <sphere>, film: <film>)          function:f2@1  repl.loko:53
+  frame:4 main()                                     function:f3@1  repl.loko:60
+restarts:
+  restart:0 use-value(value :: <float>)  the signal in frame:0 returns value
+  restart:1 skip-pixel()                 the handle in frame:2 (repl.loko:45) returns 0.0
+  restart:2 retry(frame :: <frame>)      call a frame's function again, with current definitions
+  restart:3 abort()                      unwind to top level, running cleanups
+choose with :restart <n|name> [args...] or :invoke condition:0 choose-restart
+
+// Step 3: the condition, a suspended frame and a restart are EOP objects.
+> :inspect condition:0
+object condition:0
+kind: condition
+class: <bad-sample>
+origin: runtime
+presentation:
+  title: <bad-sample> value: -0.5, distance: 1.5
+slots:
+  value :: <float> = -0.5
+  distance :: <float> = 1.5
+signalled:
+  frame:0 check-sample at repl.loko:26
+handler search:
+  frame:2 handle <skip-pixel> at repl.loko:45: does not apply
+  no applicable handler; entered break [1]
+affordances:
+  inspect
+  show-frames
+  show-restarts
+  choose-restart
+> :inspect frame:1
+object frame:1
+kind: frame
+origin: runtime
+presentation:
+  title: shade(s: <sphere>, distance: 1.5)
+source:
+  location: repl.loko:37
+  defined by: form:f6 method definition
+code:
+  method:m0 shade(c3:<sphere>, c15:<float>) -> float
+  unit: method:m0@1 (current)
+locals:
+  s :: <sphere> = <sphere> radius: 1.0
+  distance :: <float> = 1.5
+called from:
+  frame:2 pixel at repl.loko:44
+affordances:
+  inspect
+  show-source
+  show-locals
+> :inspect restart:0
+object restart:0
+kind: restart
+origin: built-in
+presentation:
+  title: use-value(value :: <float>) => <float>
+parameters:
+  value :: <float>
+resumes:
+  frame:0 check-sample at repl.loko:26: the signal returns value
+choose:
+  :invoke condition:0 choose-restart restart:0 value: <float>
+affordances:
+  inspect
+
+// Step 4: redefine the faulty method in place. The first attempt is
+// rejected; the corrected one is soft-typed and installed as a new code
+// unit while frame:1 keeps the old one.
+> :edit method:m0
+editing form:f6 method shade (method:m0); enter a replacement definition, or :cancel
+  34 | define method shade(s :: <sphere>, distance :: <float>) => <float>
+  35 |   // Brightness falls off linearly with distance from the sphere's axis.
+  36 |   // Bug: a ray that misses the sphere gets a negative brightness.
+  37 |   check-sample(1.0 - distance / s.radius, distance)
+  38 | end;
+> define method shade(s :: <sphere>, distance :: <float>) => <float>
+>   // A ray that misses the sphere is black, not negatively bright.
+>   check-sample(max(0, 1.0 - distance / s.radius), distance)
+> end;
+! diagnostics:
+!   Error sem.function-argument-type-mismatch 1072..1073 function `max` argument 1 expects <float> but got <integer>
+! edit rejected: form:f6 and method:m0@1 are unchanged; still editing form:f6
+> define method shade(s :: <sphere>, distance :: <float>) => <float>
+>   // A ray that misses the sphere is black, not negatively bright.
+>   check-sample(max(0.0, 1.0 - distance / s.radius), distance)
+> end;
+typing config=soft status=checked decisions=2 proved=2 checked=0 refuted=0
+  rechecked dispatch shade in pixel at repl.loko:44: proved rule=dispatch-covered
+replaced form:f6; method:m0 now runs method:m0@2
+still running superseded code:
+  frame:1 shade  method:m0@1
+> :frames
+break [1] condition:0 <bad-sample>
+  frame:0 check-sample(value: -0.5, distance: 1.5)  function:f0@1  repl.loko:26
+  frame:1 shade(s: <sphere>, distance: 1.5)          method:m0@1    repl.loko:37  superseded by method:m0@2
+  frame:2 pixel(s: <sphere>, x: 1.5)                 function:f1@1  repl.loko:44
+  frame:3 render(s: <sphere>, film: <film>)          function:f2@1  repl.loko:53
+  frame:4 main()                                     function:f3@1  repl.loko:60
+
+// Step 5: retry the shade call; it now dispatches to the new method and
+// main completes: 1.0 + 0.5 + 0.0.
+> :restart retry frame:1
+restart:2 retry frame:1: unwound frame:0..frame:1; shade(s: <sphere>, distance: 1.5) dispatches to method:m0@2
+1.5
+
+// Step 6: bring the bug back, then resume with use-value: 1.0 + 0.5 + 0.25.
+> :reload
+reloaded tests/fixtures/break_loop/raymarch.loko (10 forms); discarded 1 typed definitions
+> :run main
+break [1]: no handler for <bad-sample>; 5 frames suspended, nothing unwound
+condition:0 <bad-sample> value: -0.5, distance: 1.5
+frames (innermost first):
+  frame:0 check-sample(value: -0.5, distance: 1.5)  function:f0@1  repl.loko:26
+  frame:1 shade(s: <sphere>, distance: 1.5)          method:m0@3    repl.loko:37
+  frame:2 pixel(s: <sphere>, x: 1.5)                 function:f1@1  repl.loko:44
+  frame:3 render(s: <sphere>, film: <film>)          function:f2@1  repl.loko:53
+  frame:4 main()                                     function:f3@1  repl.loko:60
+restarts:
+  restart:0 use-value(value :: <float>)  the signal in frame:0 returns value
+  restart:1 skip-pixel()                 the handle in frame:2 (repl.loko:45) returns 0.0
+  restart:2 retry(frame :: <frame>)      call a frame's function again, with current definitions
+  restart:3 abort()                      unwind to top level, running cleanups
+choose with :restart <n|name> [args...] or :invoke condition:0 choose-restart
+> :restart use-value "dark"
+! error: restart:0 use-value expects value :: <float>, got "dark" :: <string>; break [1] is still waiting
+> :restart use-value 0.25
+restart:0 use-value: the signal in frame:0 returns 0.25
+1.75
+
+// Step 6, continued: abort, chosen through the structured affordance an
+// agent would use. The cleanup in render runs on the way out.
+> :run main
+break [1]: no handler for <bad-sample>; 5 frames suspended, nothing unwound
+condition:0 <bad-sample> value: -0.5, distance: 1.5
+frames (innermost first):
+  frame:0 check-sample(value: -0.5, distance: 1.5)  function:f0@1  repl.loko:26
+  frame:1 shade(s: <sphere>, distance: 1.5)          method:m0@3    repl.loko:37
+  frame:2 pixel(s: <sphere>, x: 1.5)                 function:f1@1  repl.loko:44
+  frame:3 render(s: <sphere>, film: <film>)          function:f2@1  repl.loko:53
+  frame:4 main()                                     function:f3@1  repl.loko:60
+restarts:
+  restart:0 use-value(value :: <float>)  the signal in frame:0 returns value
+  restart:1 skip-pixel()                 the handle in frame:2 (repl.loko:45) returns 0.0
+  restart:2 retry(frame :: <frame>)      call a frame's function again, with current definitions
+  restart:3 abort()                      unwind to top level, running cleanups
+choose with :restart <n|name> [args...] or :invoke condition:0 choose-restart
+> :invoke condition:0 choose-restart restart:3
+restart:3 abort: unwound frame:0..frame:4
+  ran cleanup of frame:3 render at repl.loko:55
+aborted to top level
+> :frames
+no suspended computation
+> :quit
+
+=== lab: scripted chooser through the structured affordance
+
+// Step 7: no REPL. The same signal is answered by a scripted chooser that
+// supplies one typed choice-restart record: 1.0 + 0.5 + 0.0.
+$ interloko_lab run --chooser tests/fixtures/break_loop/choices.toml tests/fixtures/break_loop/raymarch.loko
+signal condition:0 <bad-sample> value: -0.5, distance: 1.5 at tests/fixtures/break_loop/raymarch.loko:26
+  no applicable handler; asking chooser scripted (tests/fixtures/break_loop/choices.toml)
+  offered restart:0 use-value(value :: <float>)
+  offered restart:1 skip-pixel()
+  offered restart:2 retry(frame :: <frame>)
+  offered restart:3 abort()
+  chose restart:0 use-value(value: 0.0) by choice 1
+1.5
