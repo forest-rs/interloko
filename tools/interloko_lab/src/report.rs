@@ -13,10 +13,11 @@ use interloko_compiler::incremental::{ArtifactReport, QueryArtifact};
 use interloko_compiler::sem::{
     self, ClassOrigin, GenericFunctionOrigin, MethodOrigin, SlotMutability, SlotOrigin, ValueKind,
 };
+use interloko_compiler::session::recording::{HostOutcome, Outcome};
 use interloko_compiler::session::{
     DumpStage, EnvironmentKind, EnvironmentObject, EnvironmentOrigin, EnvironmentStorage,
-    ExecutionTraceEvent, ExecutionTraceOutcome, ExecutionTraceScope, RuntimeResult,
-    SessionArtifacts, SourceFormOrigin, SourceFormProvenance,
+    ExecutionTraceView, RuntimeResult, SessionArtifacts, SourceFormOrigin, SourceFormProvenance,
+    TracedLocation, TracedStack,
 };
 use interloko_compiler::syntax::Span;
 
@@ -1954,34 +1955,36 @@ fn render_trace_section(artifacts: &SessionArtifacts) -> String {
     out.push_str(&render_section_heading(
         "Runtime trace",
         "Execution Timeline",
-        "This is the observed run of main through execution_tape. It records call frames, runtime host calls, and the final outcome so generated behavior can be inspected after compilation.",
+        "This is the recorded run of main through execution_tape. It shows every runtime host call with its Interloko call stack and the final outcome, so generated behavior can be inspected after compilation.",
     ));
     let Some(trace) = &artifacts.runtime_trace else {
         out.push_str("        <div class=\"empty-state\">Runtime tracing was not requested for this report.</div>\n");
         out.push_str("      </section>\n");
         return out;
     };
+    let view = artifacts.execution_trace_view(trace);
+    let rows = trace_rows(&view);
     out.push_str("        <div class=\"trace-summary\">\n");
-    trace_metric(&mut out, "events", trace.events.len());
-    trace_metric(&mut out, "calls", trace_call_count(trace));
-    trace_metric(&mut out, "host calls", trace_host_count(trace));
-    trace_metric(&mut out, "instructions", trace_instruction_count(trace));
+    trace_metric(&mut out, "activations", view.activation_count());
+    trace_metric(&mut out, "host calls", view.host_calls().len());
+    trace_metric(&mut out, "instructions", view.instructions().len());
+    trace_metric(&mut out, "events", rows.len());
     out.push_str("        </div>\n");
     out.push_str("        <ol class=\"trace-timeline\">\n");
-    for (index, event) in trace.events.iter().take(80).enumerate() {
+    for (index, row) in rows.iter().take(80).enumerate() {
         let _ = writeln!(
             out,
             "          <li class=\"trace-event {}\"><span>{index:04}</span><strong>{}</strong><small>{}</small></li>",
-            trace_event_class(event),
-            escape_html(&trace_event_summary(event)),
-            escape_html(&trace_event_detail(event))
+            row.class,
+            escape_html(&row.summary),
+            escape_html(&row.detail)
         );
     }
-    if trace.events.len() > 80 {
+    if rows.len() > 80 {
         let _ = writeln!(
             out,
-            "          <li class=\"trace-event trace-event--more\"><span>...</span><strong>{} more events</strong><small>Open the raw trace for the complete stream.</small></li>",
-            trace.events.len() - 80
+            "          <li class=\"trace-event trace-event--more\"><span>...</span><strong>{} more events</strong><small>Open the raw trace for the complete record.</small></li>",
+            rows.len() - 80
         );
     }
     out.push_str("        </ol>\n");
@@ -2004,147 +2007,68 @@ fn trace_metric(out: &mut String, label: &str, value: usize) {
     );
 }
 
-fn trace_call_count(trace: &interloko_compiler::session::ExecutionTrace) -> usize {
-    trace
-        .events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                ExecutionTraceEvent::ScopeEnter {
-                    scope: ExecutionTraceScope::CallFrame { .. },
-                    ..
-                }
-            )
-        })
-        .count()
+/// One report timeline row derived from a recorded trace.
+struct TraceRow {
+    class: &'static str,
+    summary: String,
+    detail: String,
 }
 
-fn trace_host_count(trace: &interloko_compiler::session::ExecutionTrace) -> usize {
-    trace
-        .events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                ExecutionTraceEvent::ScopeEnter {
-                    scope: ExecutionTraceScope::HostCall { .. },
-                    ..
-                }
-            )
-        })
-        .count()
-}
-
-fn trace_instruction_count(trace: &interloko_compiler::session::ExecutionTrace) -> usize {
-    trace
-        .events
-        .iter()
-        .filter(|event| matches!(event, ExecutionTraceEvent::Instruction { .. }))
-        .count()
-}
-
-fn trace_event_class(event: &ExecutionTraceEvent) -> &'static str {
-    match event {
-        ExecutionTraceEvent::RunStart { .. } | ExecutionTraceEvent::RunEnd { .. } => {
-            "trace-event--run"
-        }
-        ExecutionTraceEvent::ScopeEnter {
-            scope: ExecutionTraceScope::CallFrame { .. },
-            ..
-        }
-        | ExecutionTraceEvent::ScopeExit {
-            scope: ExecutionTraceScope::CallFrame { .. },
-            ..
-        } => "trace-event--call",
-        ExecutionTraceEvent::ScopeEnter {
-            scope: ExecutionTraceScope::HostCall { .. },
-            ..
-        }
-        | ExecutionTraceEvent::ScopeExit {
-            scope: ExecutionTraceScope::HostCall { .. },
-            ..
-        } => "trace-event--host",
-        ExecutionTraceEvent::Instruction { .. } => "trace-event--instr",
+fn trace_rows(view: &ExecutionTraceView<'_>) -> Vec<TraceRow> {
+    let mut rows = Vec::new();
+    if let Some(entry) = view.entry() {
+        rows.push(TraceRow {
+            class: "trace-event--run",
+            summary: format!("run starts at {entry}"),
+            detail: format!("args={}", view.arguments().len()),
+        });
     }
-}
-
-fn trace_event_summary(event: &ExecutionTraceEvent) -> String {
-    match event {
-        ExecutionTraceEvent::RunStart { entry, .. } => format!("run starts at f{entry}"),
-        ExecutionTraceEvent::RunEnd { outcome } => match outcome {
-            ExecutionTraceOutcome::Ok => "run ends ok".into(),
-            ExecutionTraceOutcome::Cancelled => "run cancelled".into(),
-            ExecutionTraceOutcome::Unwound { .. } => "run unwound".into(),
-            ExecutionTraceOutcome::Trap { .. } => "run traps".into(),
-        },
-        ExecutionTraceEvent::ScopeEnter { scope, .. } => {
-            format!("enter {}", trace_scope_summary(scope))
-        }
-        ExecutionTraceEvent::ScopeExit { scope, outcome, .. } => {
-            let status = match outcome {
-                ExecutionTraceOutcome::Ok => "returned",
-                ExecutionTraceOutcome::Cancelled => "cancelled",
-                ExecutionTraceOutcome::Unwound { .. } => "unwound",
-                ExecutionTraceOutcome::Trap { .. } => "trapped",
-            };
-            format!("exit {} · {status}", trace_scope_summary(scope))
-        }
-        ExecutionTraceEvent::Instruction { opcode, .. } => format!("instruction 0x{opcode:02x}"),
+    for call in view.host_calls() {
+        let status = match call.outcome {
+            HostOutcome::Returned { .. } => "returned".to_string(),
+            HostOutcome::Failed(error) => format!("failed: {error}"),
+        };
+        rows.push(TraceRow {
+            class: "trace-event--host",
+            summary: format!("host {} · {status}", call.symbol.unwrap_or("<unnamed>")),
+            detail: trace_stack_detail(call.location, &call.stack),
+        });
     }
-}
-
-fn trace_event_detail(event: &ExecutionTraceEvent) -> String {
-    match event {
-        ExecutionTraceEvent::RunStart { arg_count, .. } => format!("args={arg_count}"),
-        ExecutionTraceEvent::RunEnd { outcome } => match outcome {
-            ExecutionTraceOutcome::Ok => "outcome=ok".into(),
-            ExecutionTraceOutcome::Cancelled => "outcome=cancelled".into(),
-            ExecutionTraceOutcome::Unwound { target } => format!("unwound-to=#{target}"),
-            ExecutionTraceOutcome::Trap { trap } => format!("trap={trap}"),
-        },
-        ExecutionTraceEvent::ScopeEnter {
-            depth,
-            func,
-            pc,
-            span_id,
-            ..
-        }
-        | ExecutionTraceEvent::ScopeExit {
-            depth,
-            func,
-            pc,
-            span_id,
-            ..
-        } => format!(
-            "depth={depth} func=f{func} pc={pc}{}",
-            report_span_suffix(*span_id)
-        ),
-        ExecutionTraceEvent::Instruction {
-            func,
-            pc,
-            next_pc,
-            span_id,
-            ..
-        } => format!(
-            "func=f{func} pc={pc}->{next_pc}{}",
-            report_span_suffix(*span_id)
-        ),
+    for step in view.instructions() {
+        rows.push(TraceRow {
+            class: "trace-event--instr",
+            summary: format!("instruction {}", step.mnemonic()),
+            detail: match step.next {
+                Some(next) => format!("{} -> {next}", step.location),
+                None => step.location.to_string(),
+            },
+        });
     }
-}
-
-fn trace_scope_summary(scope: &ExecutionTraceScope) -> String {
-    match scope {
-        ExecutionTraceScope::CallFrame { func, caller } => match caller {
-            Some(caller) => format!("call frame f{func} from f{}:{}", caller.func.0, caller.pc),
-            None => format!("call frame f{func} root"),
-        },
-        ExecutionTraceScope::HostCall { symbol_name, .. } => format!("host {symbol_name}"),
+    if let Some(outcome) = view.outcome() {
+        let summary = match outcome.result {
+            Outcome::Returned(_) => "run returns".to_string(),
+            Outcome::Trapped(trap) => format!("run traps: {}", trap.trap),
+        };
+        rows.push(TraceRow {
+            class: "trace-event--run",
+            summary,
+            detail: outcome.location.map_or_else(String::new, |location| {
+                trace_stack_detail(location, &outcome.stack)
+            }),
+        });
     }
+    rows
 }
 
-fn report_span_suffix(span_id: Option<u64>) -> String {
-    span_id.map_or_else(String::new, |span_id| format!(" span={span_id}"))
+fn trace_stack_detail(location: TracedLocation<'_>, stack: &TracedStack<'_>) -> String {
+    let mut detail = format!("at {location}");
+    if let Some(depth) = stack.depth() {
+        let _ = write!(detail, " · depth={depth}");
+    }
+    if let Some(caller) = stack.locations().nth(1) {
+        let _ = write!(detail, " · from {caller}");
+    }
+    detail
 }
 
 fn format_duration_nanos(nanos: u64) -> String {
@@ -2333,7 +2257,8 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
     out.push(']');
     out.push_str(",\"executionTrace\":[");
     if let Some(trace) = &artifacts.runtime_trace {
-        for (index, event) in trace.events.iter().enumerate() {
+        let rows = trace_rows(&artifacts.execution_trace_view(trace));
+        for (index, row) in rows.iter().enumerate() {
             if index > 0 {
                 out.push(',');
             }
@@ -2341,9 +2266,9 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
                 out,
                 "{{\"index\":{},\"kind\":{},\"summary\":{},\"detail\":{}}}",
                 index,
-                json_string(trace_event_class(event)),
-                json_string(&trace_event_summary(event)),
-                json_string(&trace_event_detail(event))
+                json_string(row.class),
+                json_string(&row.summary),
+                json_string(&row.detail)
             );
         }
     }

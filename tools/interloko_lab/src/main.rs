@@ -14,10 +14,10 @@ use interloko_compiler::sem::{
 use interloko_compiler::session::{
     AffordanceFacet, ArtifactFacet, CompilerSession, DocumentationFacet, DumpStage,
     EnvironmentAffordance, EnvironmentKind, EnvironmentObject, EnvironmentObjectId,
-    EnvironmentObjectSink, EnvironmentOrigin, EnvironmentStorage, HostEnvironmentProvider,
-    IncrementalCompilerSession, InspectionFacet, MutationError, MutationOutcome, PresentationFacet,
-    RecomputeStrategy, RuntimeMode, RuntimeResult, SessionArtifacts, SessionMutation, SourceFacet,
-    execution_trace_mask,
+    EnvironmentObjectSink, EnvironmentOrigin, EnvironmentStorage, ExecutionTraceDetail,
+    HostEnvironmentProvider, IncrementalCompilerSession, InspectionFacet, MutationError,
+    MutationOutcome, PresentationFacet, RecomputeStrategy, RuntimeMode, RuntimeResult,
+    SessionArtifacts, SessionMutation, SourceFacet,
 };
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 
@@ -35,7 +35,11 @@ impl TraceOptions {
     fn runtime_mode(self) -> RuntimeMode {
         if self.enabled {
             RuntimeMode::RunMainTraced {
-                mask: execution_trace_mask(self.include_instructions),
+                detail: if self.include_instructions {
+                    ExecutionTraceDetail::Instructions
+                } else {
+                    ExecutionTraceDetail::Boundaries
+                },
             }
         } else {
             RuntimeMode::RunMain
@@ -186,7 +190,7 @@ fn command_report(args: &[String]) -> Result<()> {
     let workbench = compile_workbench_path(
         file,
         RuntimeMode::RunMainTraced {
-            mask: execution_trace_mask(false),
+            detail: ExecutionTraceDetail::Boundaries,
         },
     )?;
     report::write_report(Path::new(output), &workbench).map_err(|error| LabError::Io {

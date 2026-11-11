@@ -15,13 +15,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use execution_tape::trace::TraceMask;
 use interloko_compiler::diagnostic::Diagnostic;
 use interloko_compiler::sem::HostMetaRegistry;
 use interloko_compiler::session::{
-    CompilerSession, DumpStage, EnvironmentObject, FunctionCallError, FunctionCallOutcome,
-    FunctionValue, HostFunctionHandler, MutationError, MutationOutcome, RewindError, RewindOutcome,
-    RuntimeMode, SessionArtifacts, SessionMutation,
+    CompilerSession, DumpStage, EnvironmentObject, ExecutionTraceDetail, FunctionCallError,
+    FunctionCallOutcome, FunctionValue, HostFunctionHandler, MutationError, MutationOutcome,
+    RewindError, RewindOutcome, RuntimeMode, SessionArtifacts, SessionMutation,
 };
 
 /// Failure to create or change an accepted session.
@@ -181,7 +180,7 @@ impl Session {
         &self,
         function: &str,
         arguments: &[FunctionValue],
-        trace: TraceMask,
+        trace: Option<ExecutionTraceDetail>,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
         self.artifacts.call_function(function, arguments, trace)
     }
@@ -191,7 +190,7 @@ impl Session {
         &self,
         function: &str,
         arguments: &[FunctionValue],
-        trace: TraceMask,
+        trace: Option<ExecutionTraceDetail>,
         handler: &mut dyn HostFunctionHandler,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
         self.artifacts
@@ -245,7 +244,7 @@ mod tests {
         );
         assert_eq!(session.revision(), 0);
         assert_eq!(
-            session.call("answer", &[], TraceMask::NONE).unwrap().value,
+            session.call("answer", &[], None).unwrap().value,
             FunctionValue::Integer(42)
         );
         session
@@ -256,7 +255,7 @@ mod tests {
             Err(SessionError::StaleRevision { actual: 1, .. })
         ));
         assert_eq!(
-            session.call("answer", &[], TraceMask::NONE).unwrap().value,
+            session.call("answer", &[], None).unwrap().value,
             FunctionValue::Integer(43)
         );
         let object = session

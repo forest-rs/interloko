@@ -1,9 +1,9 @@
 //! Embedding contracts across accepted edits and explicit host behavior.
 
-use execution_tape::trace::TraceMask;
 use interloko_compiler::sem::{HostFunction, HostMetaRegistry, HostValueKind};
 use interloko_compiler::session::{
-    FunctionCallError, FunctionValue, HostFunctionFailure, HostFunctionHandler, SessionMutation,
+    ExecutionTraceDetail, FunctionCallError, FunctionValue, HostFunctionFailure,
+    HostFunctionHandler, SessionMutation,
 };
 use interloko_session::{Session, SessionError};
 
@@ -32,7 +32,7 @@ fn add_method(session: &Session, source: &str) -> SessionMutation {
 }
 
 fn answer(session: &Session) -> FunctionValue {
-    session.call("answer", &[], TraceMask::NONE).unwrap().value
+    session.call("answer", &[], None).unwrap().value
 }
 
 #[test]
@@ -134,21 +134,28 @@ fn source_replacement_keeps_host_declarations_and_requires_an_explicit_handler()
     .unwrap();
     assert!(session.inspect("host-function:increment").is_some());
     assert!(matches!(
-        session.call("answer", &[], TraceMask::NONE),
+        session.call("answer", &[], None),
         Err(FunctionCallError::HostFunctionFailed { .. })
     ));
     let result = session
-        .call_with_host("answer", &[], TraceMask::HOST, &mut Increment)
+        .call_with_host(
+            "answer",
+            &[],
+            Some(ExecutionTraceDetail::Boundaries),
+            &mut Increment,
+        )
         .unwrap();
     assert_eq!(result.value, FunctionValue::Integer(42));
-    assert!(!result.trace.unwrap().events.is_empty());
+    let trace = result.trace.expect("traced call records a trace");
+    let view = session.artifacts().execution_trace_view(&trace);
+    assert_eq!(view.host_calls().len(), 1);
     assert_eq!(session.revision(), 0);
 
     session
         .replace_source(0, "define function answer() increment(99) end;")
         .unwrap();
     let result = session
-        .call_with_host("answer", &[], TraceMask::NONE, &mut Increment)
+        .call_with_host("answer", &[], None, &mut Increment)
         .unwrap();
     assert_eq!(result.value, FunctionValue::Integer(100));
     assert_eq!(session.revision(), 1);

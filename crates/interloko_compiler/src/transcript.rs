@@ -573,14 +573,13 @@ mod tests {
         CompilerSession, FunctionCallError, FunctionValue, RuntimeMode, SessionArtifacts,
         SessionMutation,
     };
-    use execution_tape::trace::TraceMask;
 
     fn run_scalar(
         artifacts: &SessionArtifacts,
         name: &str,
     ) -> Result<FunctionValue, FunctionCallError> {
         artifacts
-            .call_function(name, &[], TraceMask::NONE)
+            .call_function(name, &[], None)
             .map(|outcome| outcome.value)
     }
     use tempfile::tempdir;

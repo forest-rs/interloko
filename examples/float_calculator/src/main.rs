@@ -9,7 +9,7 @@
 //! ```
 
 use interloko_compiler::session::{
-    CompilerSession, DumpStage, FunctionValue, RuntimeMode, SessionArtifacts, TraceMask,
+    CompilerSession, DumpStage, FunctionValue, RuntimeMode, SessionArtifacts,
 };
 use interloko_diagnostics::DiagnosticRenderer;
 
@@ -100,7 +100,7 @@ fn call(
     arguments: &[FunctionValue],
 ) -> Result<FunctionValue, String> {
     artifacts
-        .call_function(name, arguments, TraceMask::NONE)
+        .call_function(name, arguments, None)
         .map(|outcome| outcome.value)
         .map_err(|error| format!("{name}: {error}"))
 }

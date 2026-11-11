@@ -524,7 +524,6 @@ dependencies = [
 name = "interloko_session"
 version = "0.1.0"
 dependencies = [
- "execution_tape",
  "interloko_compiler",
 ]
 

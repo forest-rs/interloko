@@ -6,14 +6,13 @@ compilation and revision. It exposes environment-object discovery, compiler
 inspection, typed scalar calls, domain mutation and rewind.
 
 ```rust
-use execution_tape::trace::TraceMask;
 use interloko_compiler::session::FunctionValue;
 use interloko_session::Session;
 
 let mut session = Session::new("answer.loko", "define function answer() 42 end;")?;
 assert_eq!(session.revision(), 0);
 assert_eq!(
-    session.call("answer", &[], TraceMask::NONE).expect("accepted function").value,
+    session.call("answer", &[], None).expect("accepted function").value,
     FunctionValue::Integer(42),
 );
 

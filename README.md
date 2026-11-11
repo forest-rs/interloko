@@ -255,10 +255,18 @@ whole errors. `FunctionCallError::Trap` owns its trap in a box to keep normal
 error results compact. `lower::Function::register_kinds` contains declarations
 for registers r1 onward; r0 remains the effect token.
 
-Requested execution traces retain the caller instruction on every guest frame
-and the return/trap outcome on every scope exit. Text dumps and HTML reports
-show this evidence. `ExecutionTraceOutcome::Trap` owns a boxed `TrapInfo`,
-keeping normal trace rows compact while preserving the full typed failure.
+Traced runs record with `execution_tape::recording::Recorder`; cairn has no
+trace sink of its own. `ExecutionTrace` shares the owned upstream `Recording`
+(invocation values, host calls with guest call stacks, the final return or
+trap with its stack pinned before unwinding, optional instruction history,
+capture completeness, and checked replay). `ExecutionTraceDetail::Boundaries`
+counts every entered activation but lists only those visible at a host call
+or the outcome; `ExecutionTraceDetail::Instructions` adds up to
+`TRACE_INSTRUCTION_LIMIT` attempted instructions with their stacks.
+`SessionArtifacts::execution_trace_view` adds Interloko meaning: tape function
+ids resolve to lowered functions, their roles and environment object ids, and
+instruction spans resolve to source line and column. Text dumps and HTML
+reports render that view.
 
 ## Glossary
 
