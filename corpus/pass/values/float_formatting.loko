@@ -1,0 +1,12 @@
+// expect: run "sqrt(2) = 1.4142135623730951, 2^70 = 1.1805916207174113e21, 7"
+// expect: diagnostics 0
+// expect: dump lowered contains float-to-string
+// expect: dump tape contains interloko.string_concatenate
+
+define function main() => <string>
+  concatenate(
+    concatenate("sqrt(2) = ", float-to-string(sqrt(2.0))),
+    concatenate(
+      concatenate(", 2^70 = ", float-to-string(pow(2.0, 70.0))),
+      concatenate(", ", integer-to-string(7))))
+end;

@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic contains function `float-to-string` argument 1 expects <float> but got <integer>
+
+define function main() => <string>
+  float-to-string(1)
+end;

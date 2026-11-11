@@ -20,7 +20,7 @@ use execution_tape::host::{
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 use interloko_model::{
-    BuiltinValueClass, ClassId, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
+    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
 };
 
 /// Host object type used for Interloko runtime objects.
@@ -92,6 +92,12 @@ pub const MOP_METHOD_SPECIALIZERS: &str = "interloko.mop.method_specializers";
 pub const VECTOR_SIZE: &str = "interloko.vector_size";
 /// Host-call symbol for immutable vector indexing.
 pub const VECTOR_REF: &str = "interloko.vector_ref";
+/// Host-call symbol for rendering a float as its shortest round-trip literal.
+pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
+/// Host-call symbol for rendering an integer in decimal.
+pub const INTEGER_TO_STRING: &str = "interloko.integer_to_string";
+/// Host-call symbol for concatenating two strings into a new string.
+pub const STRING_CONCATENATE: &str = "interloko.string_concatenate";
 
 /// Float library function served by the runtime host.
 ///
@@ -262,6 +268,33 @@ impl FloatFunction {
             Self::Pow => libm::pow(x, y),
             Self::Hypot => libm::hypot(x, y),
         }
+    }
+}
+
+/// Returns the host signature for [`FLOAT_TO_STRING`].
+#[must_use]
+pub fn float_to_string_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::F64],
+        rets: vec![object_type()],
+    }
+}
+
+/// Returns the host signature for [`INTEGER_TO_STRING`].
+#[must_use]
+pub fn integer_to_string_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::I64],
+        rets: vec![object_type()],
+    }
+}
+
+/// Returns the host signature for [`STRING_CONCATENATE`].
+#[must_use]
+pub fn string_concatenate_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), object_type()],
+        rets: vec![object_type()],
     }
 }
 
@@ -1929,6 +1962,29 @@ impl Host for InterlokoHost {
                     elements.push(self.box_top_value(value)?);
                 }
                 rets[0] = self.push_vector(elements)?;
+                Ok(0)
+            }
+            FLOAT_TO_STRING => {
+                let [ValueRef::F64(value)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.push_string(alloc::format!("{}", FloatBits::from_f64(*value)))?;
+                Ok(0)
+            }
+            INTEGER_TO_STRING => {
+                let [ValueRef::I64(value)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.push_string(alloc::format!("{value}"))?;
+                Ok(0)
+            }
+            STRING_CONCATENATE => {
+                let [ValueRef::Obj(lhs), ValueRef::Obj(rhs)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let mut text = String::from(self.string_text(&Value::Obj(*lhs))?);
+                text.push_str(self.string_text(&Value::Obj(*rhs))?);
+                rets[0] = self.push_string(text)?;
                 Ok(0)
             }
             VECTOR_SIZE => {

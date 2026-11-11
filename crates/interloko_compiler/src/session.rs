@@ -10639,6 +10639,9 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
         sem::Intrinsic::MethodSpecializers => "method-specializers",
         sem::Intrinsic::VectorSize => "vector-size",
         sem::Intrinsic::VectorRef => "vector-ref",
+        sem::Intrinsic::FloatToString => "float-to-string",
+        sem::Intrinsic::IntegerToString => "integer-to-string",
+        sem::Intrinsic::Concatenate => "concatenate",
     }
 }
 

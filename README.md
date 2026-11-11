@@ -108,7 +108,8 @@ The current slices include:
   `remainder`, `nan?`, `finite?`, `floor`, `ceiling`, `round`, `truncate`,
   `sqrt`, `cbrt`, `exp`, `log`, `log2`, `log10`, trigonometric and
   hyperbolic functions, `atan2`, `pow`, `hypot`) whose names user
-  definitions may shadow;
+  definitions may shadow; `float-to-string`, `integer-to-string`, and
+  `concatenate` build result text;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

@@ -543,6 +543,21 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::meta_query_any_signature(),
         ),
         (
+            RuntimeOp::FloatToString,
+            runtime::FLOAT_TO_STRING,
+            runtime::float_to_string_signature(),
+        ),
+        (
+            RuntimeOp::IntegerToString,
+            runtime::INTEGER_TO_STRING,
+            runtime::integer_to_string_signature(),
+        ),
+        (
+            RuntimeOp::Concatenate,
+            runtime::STRING_CONCATENATE,
+            runtime::string_concatenate_signature(),
+        ),
+        (
             RuntimeOp::MethodSpecializers,
             runtime::MOP_METHOD_SPECIALIZERS,
             runtime::meta_query_object_signature(),

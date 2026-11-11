@@ -205,6 +205,12 @@ pub enum RuntimeOp {
     VectorSize,
     /// Returns a vector element as `<object>`.
     VectorRef,
+    /// Renders a float as literal text.
+    FloatToString,
+    /// Renders an integer in decimal.
+    IntegerToString,
+    /// Joins two strings into a new string.
+    Concatenate,
 }
 
 /// Trap code raised by `as(<integer>, x)` when `x` has a fractional part.
@@ -3845,6 +3851,9 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
         sem::Intrinsic::MethodSpecializers => RuntimeOp::MethodSpecializers,
         sem::Intrinsic::VectorSize => RuntimeOp::VectorSize,
         sem::Intrinsic::VectorRef => RuntimeOp::VectorRef,
+        sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
+        sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
+        sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
     }
 }
 
@@ -3870,7 +3879,10 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         RuntimeOp::ClassMetaObject
         | RuntimeOp::GenericMetaObject
         | RuntimeOp::MethodMetaObject
-        | RuntimeOp::SlotDescriptorObject => false,
+        | RuntimeOp::SlotDescriptorObject
+        | RuntimeOp::FloatToString
+        | RuntimeOp::IntegerToString
+        | RuntimeOp::Concatenate => false,
     }
 }
 
@@ -3978,6 +3990,9 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::MethodSpecializers => "method-specializers",
         RuntimeOp::VectorSize => "vector-size",
         RuntimeOp::VectorRef => "vector-ref",
+        RuntimeOp::FloatToString => "float-to-string",
+        RuntimeOp::IntegerToString => "integer-to-string",
+        RuntimeOp::Concatenate => "concatenate",
     }
 }
 

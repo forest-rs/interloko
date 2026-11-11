@@ -1,0 +1,11 @@
+// expect: run "inf -inf nan -0.0 1.0 "
+// expect: diagnostics 0
+
+// Non-finite floats have no literal syntax and render as `inf`, `-inf`, `nan`.
+define function show(x :: <float>, rest :: <string>) => <string>
+  concatenate(concatenate(float-to-string(x), " "), rest)
+end;
+
+define function main() => <string>
+  show(1.0 / 0.0, show(-1.0 / 0.0, show(0.0 / 0.0, show(-0.0, show(1.0, "")))))
+end;
