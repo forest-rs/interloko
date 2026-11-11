@@ -221,6 +221,12 @@ pub enum F64BinaryOp {
     Mul,
     /// `a / b`; division by zero yields an infinity or NaN, never a trap.
     Div,
+    /// Truncated remainder with the sign of `a`.
+    Rem,
+    /// NaN-propagating minimum.
+    Min,
+    /// NaN-propagating maximum.
+    Max,
 }
 
 impl F64BinaryOp {
@@ -232,6 +238,9 @@ impl F64BinaryOp {
             Self::Sub => "f64.sub",
             Self::Mul => "f64.mul",
             Self::Div => "f64.div",
+            Self::Rem => "f64.rem",
+            Self::Min => "f64.min",
+            Self::Max => "f64.max",
         }
     }
 }
@@ -241,6 +250,8 @@ impl F64BinaryOp {
 pub enum F64UnaryOp {
     /// Sign-bit negation.
     Neg,
+    /// Sign-bit clear.
+    Abs,
 }
 
 impl F64UnaryOp {
@@ -249,6 +260,7 @@ impl F64UnaryOp {
     pub const fn mnemonic(self) -> &'static str {
         match self {
             Self::Neg => "f64.neg",
+            Self::Abs => "f64.abs",
         }
     }
 }
@@ -470,6 +482,26 @@ pub enum Instr {
         lhs: Register,
         /// Right operand register.
         rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Calls a runtime float library function.
+    FloatCall {
+        /// Destination register.
+        dst: Register,
+        /// Called function.
+        function: sem::FloatFunction,
+        /// `f64` argument registers.
+        args: Vec<Register>,
+        /// Source span.
+        span: Span,
+    },
+    /// Boolean negation.
+    BoolNot {
+        /// Destination register.
+        dst: Register,
+        /// Operand register.
+        src: Register,
         /// Source span.
         span: Span,
     },
@@ -1430,6 +1462,11 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         }
         sem::Expr::Negate { value, .. } | sem::Expr::Convert { value, .. } => {
             collect_known_callable_uses_in_expr(value, uses);
+        }
+        sem::Expr::FloatCall { args, .. } => {
+            for arg in args {
+                collect_known_callable_uses_in_expr(arg, uses);
+            }
         }
         sem::Expr::Binary { lhs, rhs, .. }
         | sem::Expr::Compare { lhs, rhs, .. }
@@ -2585,6 +2622,11 @@ impl<'module> BodyLowering<'module> {
                 self.instructions.push(instr);
                 Ok(result)
             }
+            sem::Expr::FloatCall {
+                builtin,
+                args,
+                span,
+            } => self.lower_float_call(*builtin, args, *span),
             sem::Expr::Convert { to, value, span } => {
                 let value = self.lower_expr(value)?;
                 match to {
@@ -3595,6 +3637,105 @@ impl<'module> BodyLowering<'module> {
         value
     }
 
+    fn lower_float_call(
+        &mut self,
+        builtin: sem::FloatBuiltin,
+        args: &[sem::Expr],
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let mut regs = Vec::with_capacity(args.len());
+        for arg in args {
+            regs.push(self.lower_expr(arg)?.reg);
+        }
+        let operand = |index: usize| {
+            regs.get(index)
+                .copied()
+                .ok_or_else(|| invalid_semantic("float builtin argument is missing"))
+        };
+        let binary = |op| -> Result<(F64BinaryOp, Register, Register), LowerError> {
+            Ok((op, operand(0)?, operand(1)?))
+        };
+        let instr = match builtin {
+            sem::FloatBuiltin::Abs => {
+                let result = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::F64Unary {
+                    dst: result.reg,
+                    op: F64UnaryOp::Abs,
+                    src: operand(0)?,
+                    span,
+                });
+                return Ok(result);
+            }
+            sem::FloatBuiltin::Min => binary(F64BinaryOp::Min)?,
+            sem::FloatBuiltin::Max => binary(F64BinaryOp::Max)?,
+            sem::FloatBuiltin::Remainder => binary(F64BinaryOp::Rem)?,
+            sem::FloatBuiltin::IsNan => {
+                // NaN is the only value unequal to itself.
+                let x = operand(0)?;
+                let equal = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::F64Compare {
+                    dst: equal.reg,
+                    op: sem::CompareOp::Eq,
+                    lhs: x,
+                    rhs: x,
+                    span,
+                });
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::BoolNot {
+                    dst: result.reg,
+                    src: equal.reg,
+                    span,
+                });
+                return Ok(result);
+            }
+            sem::FloatBuiltin::IsFinite => {
+                // `abs(x) < inf` is false exactly for infinities and NaN.
+                let magnitude = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::F64Unary {
+                    dst: magnitude.reg,
+                    op: F64UnaryOp::Abs,
+                    src: operand(0)?,
+                    span,
+                });
+                let infinity = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::ConstF64 {
+                    dst: infinity.reg,
+                    value: sem::FloatBits::from_f64(f64::INFINITY),
+                    span,
+                });
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::F64Compare {
+                    dst: result.reg,
+                    op: sem::CompareOp::Lt,
+                    lhs: magnitude.reg,
+                    rhs: infinity.reg,
+                    span,
+                });
+                return Ok(result);
+            }
+            sem::FloatBuiltin::Library(function) => {
+                let result = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::FloatCall {
+                    dst: result.reg,
+                    function,
+                    args: regs,
+                    span,
+                });
+                return Ok(result);
+            }
+        };
+        let (op, lhs, rhs) = instr;
+        let result = self.alloc(ValueKind::F64);
+        self.instructions.push(Instr::F64Binary {
+            dst: result.reg,
+            op,
+            lhs,
+            rhs,
+            span,
+        });
+        Ok(result)
+    }
+
     /// Lowers `as(<integer>, x)`: `f64.to_i64` truncates and traps on NaN,
     /// infinities, and out-of-range values; converting back and comparing
     /// then traps on any fractional part, so only integral floats convert.
@@ -4029,6 +4170,20 @@ impl Module {
             }
             Instr::I64ToF64 { dst, src, span } => {
                 write!(f, "  {dst} = i64.to_f64 {src}")?;
+                fmt_span(f, *span)
+            }
+            Instr::FloatCall {
+                dst,
+                function,
+                args,
+                span,
+            } => {
+                write!(f, "  {dst} = float.call {}", function.symbol())?;
+                self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
+            Instr::BoolNot { dst, src, span } => {
+                write!(f, "  {dst} = bool.not {src}")?;
                 fmt_span(f, *span)
             }
             Instr::F64ToI64 { dst, src, span } => {

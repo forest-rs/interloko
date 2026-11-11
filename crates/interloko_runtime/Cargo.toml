@@ -8,6 +8,7 @@ description = "Interloko runtime layout, host-call signatures, and execution_tap
 [dependencies]
 execution_tape = { workspace = true }
 interloko_model = { path = "../interloko_model" }
+libm = "0.2"
 
 [lints]
 workspace = true

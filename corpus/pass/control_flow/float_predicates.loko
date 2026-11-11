@@ -1,0 +1,11 @@
+// expect: run #t
+// expect: diagnostics 0
+// expect: dump lowered contains bool.not
+
+define function main() => <boolean>
+  if nan?(0.0 / 0.0) then
+    if finite?(1.0 / 0.0) then #f else finite?(1e308) end
+  else
+    #f
+  end
+end;
