@@ -155,7 +155,7 @@ fn session_commands_list_forms_run_functions_and_reset() {
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("accepted forms"));
     assert!(stdout.contains("form:f0 typed function answer lines 1..3"));
-    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, unsaved)"));
+    assert!(stdout.contains("source repl.loko (1 forms, 3 lines, unsaved)"));
     assert!(stdout.contains("   1 | define function answer()"));
     assert!(stdout.lines().any(|line| line == "42"));
     assert!(stdout.contains("reset"));
@@ -506,7 +506,7 @@ fn drop_form_affordance_removes_an_unused_form() {
     assert!(stdout.contains("dropped form:f0"));
     assert!(stdout.contains("form:f0 typed function answer lines 1..3"));
     assert!(!stdout.contains("define function unused()"));
-    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, unsaved)"));
+    assert!(stdout.contains("source repl.loko (1 forms, 3 lines, unsaved)"));
     assert!(stdout.lines().any(|line| line == "42"));
 }
 
@@ -615,7 +615,7 @@ fn load_replaces_the_source_buffer_with_loaded_forms() {
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("loaded "));
     assert!(stdout.contains("form:f0 loaded function loaded-answer lines 1..3"));
-    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
+    assert!(stdout.contains("source repl.loko (1 forms, 3 lines, clean)"));
     assert!(stdout.contains("define function loaded-answer()"));
     assert!(!stdout.contains("define function typed-answer()"));
     assert!(stdout.lines().any(|line| line == "42"));
@@ -666,9 +666,81 @@ fn load_preserves_inter_form_comments_with_parser_line_ranges() {
     let _ = fs::remove_file(&path);
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("form:f0 loaded function first lines 1..3"));
-    assert!(stdout.contains("form:f1 loaded function second lines 8..10"));
-    assert!(stdout.contains("// explain second"));
-    assert!(stdout.contains("   8 | define function second()"));
+    assert!(stdout.contains("form:f1 loaded function second lines 6..8"));
+    assert!(stdout.contains("   5 | // explain second"));
+    assert!(stdout.contains("   6 | define function second()"));
+}
+
+#[test]
+fn loaded_buffer_keeps_file_layout_and_line_numbers() {
+    // Several blank lines, a doc comment, a trailing line comment, and no
+    // final newline: every reported line must match the file itself.
+    let source = "define function first()\n  1\nend; // trailing\n\
+                  \n\n\n\
+                  /// Second's doc.\n\
+                  define function second()\n  2\nend;\n\
+                  define function third()\n  3\nend;";
+    let path = temp_loko_path("layout_load.loko");
+    let written = temp_loko_path("layout_write.loko");
+    fs::write(&path, source).expect("write source");
+
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {path}\n\
+         :forms\n\
+         :source\n\
+         :show-form f1\n\
+         :write {written}\n\
+         :reload\n\
+         :forms\n\
+         define function fourth()\n  4\nend;\n\
+         :forms\n\
+         :quit\n",
+        path = path.display(),
+        written = written.display(),
+    ));
+
+    let round_trip = fs::read_to_string(&written).expect("read written source");
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&written);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(round_trip, source);
+    assert_eq!(
+        stdout
+            .matches("form:f0 loaded function first lines 1..3")
+            .count(),
+        3,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .matches("form:f1 loaded function second lines 8..10")
+            .count(),
+        3,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .matches("form:f2 loaded function third lines 11..13")
+            .count(),
+        3,
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("form:f3 typed function fourth lines 15..17"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("source repl.loko (3 forms, 13 lines, clean)"),
+        "{stdout}"
+    );
+    for (index, line) in source.lines().enumerate() {
+        let numbered = format!("{:>4} | {line}", index + 1);
+        assert!(
+            stdout.lines().any(|out| out == numbered),
+            "missing `{numbered}`\n{stdout}"
+        );
+    }
+    assert!(stdout.contains("source form:f1 function second\n   7 | /// Second's doc.\n   8 | define function second()"), "{stdout}");
 }
 
 #[test]
@@ -692,7 +764,7 @@ fn load_records_semicolon_terminated_generic_forms() {
     let _ = fs::remove_file(&path);
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("form:f0 loaded generic score lines 1..1"));
-    assert!(stdout.contains("form:f1 loaded function main lines 3..5"));
+    assert!(stdout.contains("form:f1 loaded function main lines 2..4"));
     assert!(stdout.lines().any(|line| line == "1"));
 }
 
@@ -728,8 +800,8 @@ fn write_emits_the_rendered_source_buffer() {
     let _ = fs::remove_file(&path);
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("wrote "));
-    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
-    assert_eq!(written, "define function answer()\n  42\nend;\n\n");
+    assert!(stdout.contains("source repl.loko (1 forms, 3 lines, clean)"));
+    assert_eq!(written, "define function answer()\n  42\nend;\n");
 }
 
 #[test]
@@ -750,7 +822,7 @@ fn failed_write_preserves_dirty_state() {
 
     let _ = fs::remove_file(&path);
     assert!(stderr.contains("error:"), "{stderr}");
-    assert!(stdout.contains("source repl.loko (2 forms, 8 lines, dirty since load)"));
+    assert!(stdout.contains("source repl.loko (2 forms, 7 lines, dirty since load)"));
     assert!(stdout.contains("define function loaded-answer()"));
     assert!(stdout.contains("define function typed-answer()"));
 }
@@ -774,10 +846,10 @@ fn reload_discards_typed_definitions_after_the_last_load() {
 
     let _ = fs::remove_file(&path);
     assert!(stderr.is_empty(), "{stderr}");
-    assert!(stdout.contains("source repl.loko (2 forms, 8 lines, dirty since load)"));
+    assert!(stdout.contains("source repl.loko (2 forms, 7 lines, dirty since load)"));
     assert!(stdout.contains("reloaded "));
     assert!(stdout.contains("discarded 1 typed definitions"));
     assert!(stdout.contains("form:f0 loaded function loaded-answer lines 1..3"));
-    assert!(stdout.contains("source repl.loko (1 forms, 4 lines, clean)"));
+    assert!(stdout.contains("source repl.loko (1 forms, 3 lines, clean)"));
     assert!(stdout.lines().any(|line| line == "10"));
 }
