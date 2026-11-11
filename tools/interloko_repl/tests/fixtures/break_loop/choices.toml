@@ -1,0 +1,11 @@
+# Restart choices for `interloko_lab run --chooser`, used by the scripted
+# scenario in `break_loop.transcript`. Choices are consumed in signal
+# order; each names a restart offered for that condition and supplies
+# arguments that must match the restart's typed parameters. A future
+# oracle chooser records its picks in this same shape, as host evidence,
+# so a replay re-applies them without asking the model again.
+
+[[choice]]
+condition = "<bad-sample>"
+restart = "use-value"
+arguments = { value = 0.0 }
