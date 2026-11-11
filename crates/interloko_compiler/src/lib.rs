@@ -15,8 +15,6 @@ extern crate std;
 pub mod ast;
 /// Shared diagnostic types.
 pub mod diagnostic;
-/// End-to-end compile and run helpers.
-pub mod driver;
 mod execution_trace;
 /// Read-only grammar frontend projection for the base Loko parser.
 pub mod grammar_frontend;

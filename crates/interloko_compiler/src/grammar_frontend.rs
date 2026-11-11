@@ -4644,6 +4644,39 @@ mod tests {
         assert_eq!(fact.unexpected_fragment, None);
     }
 
+    /// Pins the failure the kernel reports when a body form fails: it
+    /// backtracks past the form and reports the enclosing definition's
+    /// required `end` where the form starts, rather than diving into the
+    /// failed rule. Guards against silent changes to that strategy.
+    #[test]
+    fn base_loko_failed_body_form_reports_enclosing_end() {
+        // The `"` and the `let` keyword both start at byte 25.
+        for (source, span) in [
+            (
+                "define function main()\n  \"unterminated\nend;",
+                Span::new(25, 26),
+            ),
+            (
+                "define function main()\n  let x = ;\nend;",
+                Span::new(25, 28),
+            ),
+        ] {
+            let report = parse_file(SourceFileId::from_path("bad-body.loko"), source);
+            let diagnostic = report
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.code == DiagnosticCode::SyntaxExpectedToken)
+                .expect("syntax diagnostic");
+
+            assert_eq!(diagnostic.span, span, "{source:?}");
+            assert_eq!(
+                diagnostic_arg(diagnostic, "expected").as_deref(),
+                Some("`end`"),
+                "{source:?}"
+            );
+        }
+    }
+
     #[test]
     fn staged_calculator_region_emits_structural_frontend_forms() {
         let source = "// grammar-activate: calculator\n\n\
