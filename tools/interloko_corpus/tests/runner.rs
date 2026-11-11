@@ -39,6 +39,9 @@ fn check_validates_all_corpus_cases() {
     let out = run_corpus(&["check", root.to_str().expect("corpus path should be utf8")]);
 
     assert!(out.contains("pass/arithmetic/add.loko"));
+    assert!(out.contains("ok pass/typing/untaken_refuted_dispatch.loko"));
+    assert!(out.contains("ok pass/typing/strict_runtime_checked_cast.loko"));
+    assert!(out.contains("ok pass/typing/silent_policy_records_refuted_cast.loko"));
     assert!(out.contains("pass/control_flow/generic_guarded.loko"));
     assert!(out.contains("pass/generics/two_class_dispatch.loko"));
     assert!(out.contains("pass/restarts/recover_invalid_radius.loko"));
@@ -133,7 +136,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/generics/scalar_unannotated_generic.loko"));
     assert!(out.contains("pass/values/float_unbox_cast.loko"));
     assert!(out.contains("pass/values/float_box_cast.loko"));
-    assert!(out.contains("corpus: 205 passed, 0 failed, 205 total"));
+    assert!(out.contains("corpus: 209 passed, 0 failed, 209 total"));
 }
 
 #[test]

@@ -1,0 +1,20 @@
+// typing: silent
+// expect: run 1
+// expect: diagnostics 0
+// expect: dump typing contains config=silent
+// expect: dump typing contains cast refuted rule=cast-disjoint
+// expect: dump typing contains severity=silent
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main()
+  if 1 < 2 then
+    1
+  else
+    if instance?(as(<circle>, make(<shape>)), <circle>) then 2 else 3 end
+  end
+end;
