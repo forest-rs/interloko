@@ -1465,6 +1465,113 @@ mod tests {
         );
     }
 
+    const FLOATS: &str = "define generic size-of(x);\n\
+         define method size-of(x :: <double-float>)\n  1\nend;\n\
+         define method size-of(x :: <integer>)\n  2\nend;\n\
+         define generic magnitude(x);\n\
+         define method magnitude(x :: <float>)\n  5\nend;\n\
+         define generic whole(x);\n\
+         define method whole(x :: <integer>)\n  x\nend;\n";
+
+    fn verdicts_of(
+        module: &sem::Module,
+        artifact: &TypingArtifact,
+        name: &str,
+    ) -> Vec<TypingVerdict> {
+        let function = module
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .expect("function");
+        artifact
+            .definitions
+            .iter()
+            .find(|definition| definition.definition == function.definition)
+            .map(|definition| {
+                definition
+                    .decisions
+                    .iter()
+                    .map(|decision| decision.verdict)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn float_values_have_exact_double_float_class_under_abstract_float() {
+        let (module, artifact) = decisions_for(&format!(
+            "{FLOATS}define function main()\n  \
+             if 1 < 2 then size-of(2.5) + magnitude(2.5) else whole(2.5) end\nend;"
+        ));
+        let double_float = module
+            .builtin_value_class(sem::BuiltinValueClass::DoubleFloat)
+            .expect("double-float");
+        let float = module
+            .builtin_value_class(sem::BuiltinValueClass::Float)
+            .expect("float");
+        assert!(class_is_sealed(&module, double_float));
+        assert!(!class_is_sealed(&module, float));
+
+        assert_eq!(
+            verdicts_of(&module, &artifact, "main"),
+            [
+                TypingVerdict::Proved,
+                TypingVerdict::Proved,
+                TypingVerdict::Refuted
+            ]
+        );
+        let refuted = artifact
+            .decisions()
+            .find(|decision| decision.verdict == TypingVerdict::Refuted)
+            .expect("refuted dispatch");
+        assert_eq!(refuted.actual[0].exact_class, Some(double_float));
+        // `whole` specializes on `<integer>`, so its parameter carries boxed
+        // scalars; the decision records sem's boxing choice.
+        assert!(matches!(
+            &refuted.expected,
+            TypingExpectation::Dispatch { boxed_params, .. } if boxed_params == &[0]
+        ));
+        assert_eq!(
+            static_type_name(&module, refuted.actual[0]),
+            "<double-float>"
+        );
+    }
+
+    #[test]
+    fn float_casts_are_proved_checked_or_refuted() {
+        let (module, artifact) = decisions_for(&format!(
+            "{FLOATS}define function to-float(x :: <object>) => <double-float>\n  \
+             as(<double-float>, x)\nend;\n\
+             define function up(x :: <double-float>) => <float>\n  as(<float>, x)\nend;\n\
+             define function never() => <double-float>\n  \
+             as(<double-float>, as(<object>, \"text\"))\nend;\n\
+             define function on-object(x :: <object>)\n  size-of(x)\nend;\n\
+             define function main()\n  0\nend;"
+        ));
+        assert_eq!(
+            verdicts_of(&module, &artifact, "to-float"),
+            [TypingVerdict::Checked]
+        );
+        assert_eq!(
+            verdicts_of(&module, &artifact, "up"),
+            [TypingVerdict::Proved]
+        );
+        assert_eq!(
+            verdicts_of(&module, &artifact, "never"),
+            [TypingVerdict::Proved, TypingVerdict::Refuted]
+        );
+        assert_eq!(
+            verdicts_of(&module, &artifact, "on-object"),
+            [TypingVerdict::Checked]
+        );
+        let codes = artifact
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(codes, [DiagnosticCode::TypingCastAlwaysFails]);
+    }
+
     #[test]
     fn semantic_errors_block_the_pass() {
         let module = module("define function main() => <integer>\n  #t\nend;");
