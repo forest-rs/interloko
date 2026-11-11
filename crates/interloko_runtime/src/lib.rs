@@ -20,7 +20,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use control::{
-    BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONTROL_POP, ControlState,
+    BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONTROL_CHECK_EXIT,
+    CONTROL_POP, CONTROL_PUSH_EXIT, ControlState,
 };
 #[cfg(test)]
 use execution_tape::host::AccessSink;
@@ -2202,6 +2203,20 @@ impl Host for InterlokoHost {
                 let restart = ctx.tag(restart).ok_or(HostError::Failed)?;
                 let token = self.control.push(BindingKind::Handler { class, restart });
                 rets[0] = Value::U64(token.0);
+                Ok(0)
+            }
+            CONTROL_PUSH_EXIT => {
+                let [] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::U64(self.control.push(BindingKind::Exit).0);
+                Ok(0)
+            }
+            CONTROL_CHECK_EXIT => {
+                let [ValueRef::U64(token)] = args else {
+                    return Err(HostError::Failed);
+                };
+                self.control.check_exit(BindingToken(*token))?;
                 Ok(0)
             }
             CONTROL_POP => {

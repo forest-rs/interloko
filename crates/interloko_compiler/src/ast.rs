@@ -573,6 +573,8 @@ pub enum Expr {
     Block {
         /// Stable-ish AST node identity.
         id: AstNodeId,
+        /// Exit procedure bound for the body, as in `block (exit) … end`.
+        exit: Option<BlockExit>,
         /// Protected body.
         body: Box<Block>,
         /// Cleanup body, when present.
@@ -665,6 +667,17 @@ pub struct Restart {
     /// Handler expression evaluated when a matching condition is signaled.
     pub body: Box<Expr>,
     /// Source span.
+    pub span: Span,
+}
+
+/// Exit procedure binding of a `block` expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockExit {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Bound local name.
+    pub name: String,
+    /// Source span of the name.
     pub span: Span,
 }
 
@@ -2099,11 +2112,20 @@ impl<'tree> Lowering<'tree> {
     fn lower_block_expr(&mut self, node: &CstNode) -> Expr {
         let mut body = None;
         let mut cleanup = None;
+        let mut exit = None;
         for child in &node.children {
             let CstElement::Node(child_node) = child else {
                 continue;
             };
             match child_node.kind {
+                CstKind::BlockExitName => {
+                    exit = Some(BlockExit {
+                        id: self.ast_id(child_node),
+                        name: self.tree.source[child_node.span.start..child_node.span.end]
+                            .to_string(),
+                        span: child_node.span,
+                    });
+                }
                 CstKind::Body => body = Some(self.lower_block(child_node)),
                 CstKind::CleanupClause => {
                     cleanup = child_node
@@ -2125,6 +2147,7 @@ impl<'tree> Lowering<'tree> {
         });
         Expr::Block {
             id: self.ast_id(node),
+            exit,
             body: Box::new(body),
             cleanup: cleanup.map(Box::new),
             span: node.span,

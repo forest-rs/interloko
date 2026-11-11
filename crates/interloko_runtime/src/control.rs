@@ -1,4 +1,5 @@
-//! Dynamic control bindings for one run: condition handlers and their search.
+//! Dynamic control bindings for one run: condition handlers, block exit
+//! points, and handler search.
 //!
 //! Compiled code pushes a binding when it enters a dynamic extent and pops it
 //! on every exit, normal or abnormal; protected regions in the emitted tape
@@ -29,6 +30,10 @@ pub const CONDITION_PUSH_HANDLER: &str = "interloko.condition.push_handler";
 pub const CONDITION_SIGNAL: &str = "interloko.condition.signal";
 /// Host symbol that pops the innermost dynamic binding by token.
 pub const CONTROL_POP: &str = "interloko.control.pop";
+/// Host symbol that pushes a block exit point and returns its token.
+pub const CONTROL_PUSH_EXIT: &str = "interloko.control.push_exit";
+/// Host symbol that checks an exit point is still live before exiting to it.
+pub const CONTROL_CHECK_EXIT: &str = "interloko.control.check_exit";
 
 /// Opaque identity of one dynamic binding.
 ///
@@ -51,6 +56,8 @@ pub enum BindingKind {
         /// activation, bound from the establishing program's local tag.
         restart: TagRef,
     },
+    /// A `block` exit point, live until its block's extent ends.
+    Exit,
 }
 
 /// One live dynamic binding.
@@ -72,6 +79,11 @@ pub enum ControlFault {
     UnhandledCondition {
         /// Exact runtime class of the signalled condition.
         class: ClassId,
+    },
+    /// A block exit was invoked after its block's extent ended.
+    ExpiredExit {
+        /// Token of the expired exit point.
+        token: BindingToken,
     },
     /// Compiled code popped a binding that is not the innermost one.
     UnbalancedPop {
@@ -155,6 +167,7 @@ impl ControlState {
             .rev()
             .find(|binding| match binding.kind {
                 BindingKind::Handler { class, .. } => applies(class),
+                BindingKind::Exit => false,
             })
             .copied()
     }
@@ -190,7 +203,28 @@ impl ControlState {
                 token,
                 kind: BindingKind::Handler { restart, .. },
             }) => HostError::throw(restart, alloc::vec![Value::U64(token.0), condition]),
-            None => self.fail(ControlFault::UnhandledCondition { class }),
+            Some(DynamicBinding {
+                kind: BindingKind::Exit,
+                ..
+            })
+            | None => self.fail(ControlFault::UnhandledCondition { class }),
+        }
+    }
+
+    /// Whether the exit point `token` is still live.
+    #[must_use]
+    pub fn exit_is_live(&self, token: BindingToken) -> bool {
+        self.bindings
+            .iter()
+            .any(|binding| binding.token == token && binding.kind == BindingKind::Exit)
+    }
+
+    /// Fails the run with [`ControlFault::ExpiredExit`] unless `token` is live.
+    pub(crate) fn check_exit(&mut self, token: BindingToken) -> Result<(), HostError> {
+        if self.exit_is_live(token) {
+            Ok(())
+        } else {
+            Err(self.fail(ControlFault::ExpiredExit { token }))
         }
     }
 
@@ -224,6 +258,24 @@ pub fn signal_signature(rets: Vec<ValueType>) -> HostSig {
 /// Host signature for [`CONTROL_POP`]: `(token) -> ()`.
 #[must_use]
 pub fn pop_signature() -> HostSig {
+    HostSig {
+        args: alloc::vec![ValueType::U64],
+        rets: alloc::vec![],
+    }
+}
+
+/// Host signature for [`CONTROL_PUSH_EXIT`]: `() -> token`.
+#[must_use]
+pub fn push_exit_signature() -> HostSig {
+    HostSig {
+        args: alloc::vec![],
+        rets: alloc::vec![ValueType::U64],
+    }
+}
+
+/// Host signature for [`CONTROL_CHECK_EXIT`]: `(token) -> ()`.
+#[must_use]
+pub fn check_exit_signature() -> HostSig {
     HostSig {
         args: alloc::vec![ValueType::U64],
         rets: alloc::vec![],
@@ -279,6 +331,26 @@ mod tests {
             Some(ControlFault::UnhandledCondition { class: ClassId(9) })
         );
         assert_eq!(control.stats().signals, 2);
+    }
+
+    #[test]
+    fn exits_expire_when_their_binding_pops() {
+        let mut control = ControlState::default();
+        let exit = control.push(BindingKind::Exit);
+        let handler = control.push(handler(1));
+        assert!(control.check_exit(exit).is_ok());
+        assert!(
+            control
+                .find_handler(|_| true)
+                .is_some_and(|b| b.token == handler)
+        );
+        assert!(control.pop(handler).is_ok());
+        assert!(control.pop(exit).is_ok());
+        assert!(control.check_exit(exit).is_err());
+        assert_eq!(
+            control.fault(),
+            Some(ControlFault::ExpiredExit { token: exit })
+        );
     }
 
     #[test]

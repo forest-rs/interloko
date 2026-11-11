@@ -193,7 +193,8 @@ impl<'a> TracedFunction<'a> {
             ))),
             lower::FunctionKind::SlotAccessor { .. }
             | lower::FunctionKind::CallableThunk { .. }
-            | lower::FunctionKind::Closure(_) => None,
+            | lower::FunctionKind::Closure(_)
+            | lower::FunctionKind::ExitThunk { .. } => None,
         }
     }
 }

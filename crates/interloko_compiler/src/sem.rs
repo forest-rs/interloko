@@ -2107,6 +2107,8 @@ pub enum Expr {
     ///
     /// The cleanup body runs on every exit from the body, normal or not.
     Block {
+        /// Exit procedure bound for the body, when present.
+        exit: Option<BlockExit>,
         /// Protected body; its locals are scoped to the block.
         body: Box<Block>,
         /// Cleanup body, evaluated for effect.
@@ -2165,6 +2167,19 @@ impl Expr {
             | Self::Error { span } => *span,
         }
     }
+}
+
+/// Exit procedure bound by a `block` expression.
+///
+/// The local holds a first-class `<callable>` taking the block's result
+/// values. Calling it transfers them to the block, running crossed cleanups;
+/// calling it after the block's extent has ended is a runtime error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockExit {
+    /// Local bound to the exit procedure.
+    pub local: LocalId,
+    /// Block result categories, which are also the exit's parameters.
+    pub result_kinds: Vec<ValueKind>,
 }
 
 /// Semantic restart clause for a lexical handler.
@@ -2355,6 +2370,21 @@ impl FunctionContext {
             .filter(|(index, _)| self.visible_locals.get(*index).copied().unwrap_or(false))
             .map(|(_, local)| local.clone())
             .collect()
+    }
+
+    /// Whether `name` would capture a visible enclosing `<callable>` local.
+    fn capture_source_is_callable(&self, name: &str) -> bool {
+        self.captures
+            .iter()
+            .find(|capture| capture.name == name)
+            .map(|capture| capture.kind)
+            .or_else(|| {
+                self.capture_sources
+                    .iter()
+                    .find(|source| source.name == name)
+                    .map(|source| source.kind)
+            })
+            == Some(ValueKind::Callable)
     }
 
     fn find_capture_or_add(&mut self, name: &str) -> Option<CaptureId> {
@@ -4640,6 +4670,16 @@ impl Lowering {
                         span: *span,
                     };
                 }
+                if let Some(target) = self.local_callable_target(ctx, callee, *span) {
+                    let lowered_args = args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
+                    return self.lower_applied_dynamic_callable_call(
+                        ctx,
+                        target,
+                        lowered_args,
+                        expected_results,
+                        *span,
+                    );
+                }
                 let lowered_args: Vec<_> =
                     args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
                 if callee == "class-of" {
@@ -5035,13 +5075,52 @@ impl Lowering {
                 ..
             } => self.lower_handle(ctx, body, restart, *span, expected_results),
             ast::Expr::Block {
+                exit,
                 body,
                 cleanup,
                 span,
                 ..
-            } => self.lower_block_expr(ctx, body, cleanup.as_deref(), *span, expected_results),
+            } => self.lower_block_expr(
+                ctx,
+                exit.as_ref(),
+                body,
+                cleanup.as_deref(),
+                *span,
+                expected_results,
+            ),
             ast::Expr::Error { span, .. } => Expr::Error { span: *span },
         }
+    }
+
+    /// Resolves a call's callee to a lexical `<callable>` local or capture.
+    ///
+    /// Lexical bindings shadow module definitions, so `exit(42)` calls a
+    /// block's exit procedure and `f(x)` calls a local closure. Locals of any
+    /// other kind leave the name to module resolution.
+    fn local_callable_target(
+        &self,
+        ctx: &mut FunctionContext,
+        name: &str,
+        span: Span,
+    ) -> Option<Expr> {
+        if let Some(local) = ctx.find_local(name) {
+            return (ctx.local_kind(local) == ValueKind::Callable).then(|| Expr::Local {
+                local,
+                result_kind: ValueKind::Callable,
+                callable_signature: ctx.local_callable_signature(local),
+                span,
+            });
+        }
+        if !ctx.capture_source_is_callable(name) {
+            return None;
+        }
+        let capture = ctx.find_capture_or_add(name)?;
+        Some(Expr::Capture {
+            capture,
+            result_kind: ctx.capture_kind(capture),
+            callable_signature: ctx.capture_callable_signature(capture),
+            span,
+        })
     }
 
     fn lower_known_name(&self, ctx: &mut FunctionContext, name: &str, span: Span) -> Expr {
@@ -5907,18 +5986,75 @@ impl Lowering {
     }
 
     /// Lowers a `block` expression. Locals of the body and of the cleanup
-    /// are scoped to their own bodies.
+    /// are scoped to their own bodies; the exit procedure is visible in the
+    /// body only, because its binding has ended before the cleanup runs.
+    ///
+    /// The exit's parameter kinds are the block's result kinds. They come
+    /// from the context, else the provisional open-result kinds, so a block
+    /// producing other values needs a typed context, such as an annotated
+    /// `let`.
     fn lower_block_expr(
         &mut self,
         ctx: &mut FunctionContext,
+        exit: Option<&ast::BlockExit>,
         body: &ast::Block,
         cleanup: Option<&ast::Block>,
         span: Span,
         expected_results: Option<&[ValueKind]>,
     ) -> Expr {
         let scope_start = ctx.scope_start();
-        let body = self.lower_block(ctx, body, expected_results);
+        let exit = exit.map(|exit| {
+            let result_kinds =
+                expected_results.map_or_else(provisional_open_result_kinds, <[ValueKind]>::to_vec);
+            if ctx.find_local(&exit.name).is_some() {
+                ctx.diagnostics.push(
+                    Diagnostic::error(exit.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("local", exit.name.clone())),
+                );
+            }
+            let local = ctx.add_local(
+                DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Local,
+                    &exit.name,
+                    &exit.id.raw().to_string(),
+                ),
+                exit.name.clone(),
+                ValueKind::Callable,
+                Some(CallableSignature {
+                    params: result_kinds.clone(),
+                    results: result_kinds.clone(),
+                }),
+                exit.span,
+            );
+            BlockExit {
+                local,
+                result_kinds,
+            }
+        });
+        let body_expected = exit
+            .as_ref()
+            .map_or(expected_results, |exit| Some(exit.result_kinds.as_slice()));
+        let body = self.lower_block(ctx, body, body_expected);
         ctx.hide_locals_from(scope_start);
+        if let Some(exit) = &exit {
+            let body_kinds = self.expr_kinds(&body.result);
+            if !self.result_kinds_match(&body_kinds, &exit.result_kinds)
+                && !result_kinds_contain_error(&body_kinds)
+            {
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::BlockExitResultMismatch)
+                        .with_arg(DiagnosticArg::text(
+                            "body",
+                            self.result_kinds_name(&body_kinds),
+                        ))
+                        .with_arg(DiagnosticArg::text(
+                            "exit",
+                            self.result_kinds_name(&exit.result_kinds),
+                        )),
+                );
+            }
+        }
         let cleanup = cleanup.map(|cleanup| {
             let scope_start = ctx.scope_start();
             let cleanup = self.lower_block(ctx, cleanup, None);
@@ -5926,6 +6062,7 @@ impl Lowering {
             Box::new(cleanup)
         });
         Expr::Block {
+            exit,
             body: Box::new(body),
             cleanup,
             span,

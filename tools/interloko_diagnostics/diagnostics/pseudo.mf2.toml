@@ -52,6 +52,7 @@
 "sem.apply-target-type-mismatch" = "[ps] apply target got { $actual }, need { $expected }"
 "sem.signal-condition-type-mismatch" = "[ps] signal condition got { $actual }, need object condition"
 "sem.handle-restart-result-mismatch" = "[ps] handle body { $body } differs from restart { $restart }"
+"sem.block-exit-result-mismatch" = "[ps] block body { $body } differs from exit { $exit }"
 "sem.class-of-type-mismatch" = "[ps] class-of got { $actual }, need object"
 "sem.instance-of-type-mismatch" = "[ps] instance? got { $actual }, need { $expected }"
 "sem.instance-of-impossible" = "[ps] instance? cannot match { $actual } as { $expected }"
@@ -86,4 +87,5 @@
 "runtime.host-function-failed" = "[ps] host function failed"
 "runtime.unsupported-result" = "[ps] main returned unsupported value"
 "runtime.unhandled-condition" = "[ps] unhandled condition"
+"runtime.expired-exit" = "[ps] expired block exit"
 "session.unknown-source" = "[ps] source file id unknown"

@@ -1,0 +1,25 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump ast contains block-expr exit
+// expect: dump sem contains block-expr cleanup=false exit=
+// expect: dump lowered contains control.push-exit
+// expect: dump lowered contains control.check-exit
+// expect: dump tape contains interloko.exit#
+
+// `return` is a first-class exit procedure. `find-first` hands it to
+// `scan`, which calls it two activations below the block; the values go
+// straight to the block, skipping the rest of the scan.
+
+define function scan(limit :: <integer>, found :: <callable>) => <integer>
+  if limit > 40 then found(limit + 1) else scan(limit + 1, found) end
+end;
+
+define function find-first() => <integer>
+  block (return)
+    scan(0, return) * 1000
+  end
+end;
+
+define function main() => <integer>
+  find-first()
+end;

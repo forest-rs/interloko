@@ -3128,7 +3128,12 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "block-expression",
-            "`block` `(` `)` body cleanup-clause? `end`",
+            "`block` `(` block-exit-name? `)` body cleanup-clause? `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_block",
+        ),
+        (
+            "block-exit-name",
+            "name",
             "base_loko_primary::BaseLokoCstBuilder::build_block",
         ),
         (
@@ -3840,6 +3845,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
         CstKind::BlockExpr => Some("block-expression"),
+        CstKind::BlockExitName => Some("block-exit-name"),
         CstKind::CleanupClause => Some("cleanup-clause"),
         CstKind::SuperclassType => Some("superclass-type"),
         CstKind::AnnotationType => Some("annotation-type"),
@@ -4278,7 +4284,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 51);
+        assert_eq!(grammar.effective_rules.len(), 52);
 
         assert!(
             !records

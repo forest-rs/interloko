@@ -1,0 +1,12 @@
+// expect: diagnostics 2
+// expect: diagnostic code sem.block-exit-result-mismatch
+// expect: diagnostic contains block body and exit must have matching result kinds
+
+// The exit takes the block's result values, which come from the context:
+// here `<integer>`, so a body producing a boolean disagrees with its exit.
+
+define function main() => <integer>
+  block (out)
+    #t
+  end
+end;

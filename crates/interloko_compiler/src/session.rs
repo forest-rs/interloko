@@ -160,6 +160,8 @@ pub enum RuntimeResult {
         /// Source name of the condition's class.
         class: String,
     },
+    /// A block exit procedure was called after its block had returned.
+    ExpiredExit,
 }
 
 impl RuntimeResult {
@@ -174,6 +176,7 @@ impl RuntimeResult {
             Self::HostFunctionFailed { .. } => Some(DiagnosticCode::RuntimeHostFunctionFailed),
             Self::UnsupportedResult { .. } => Some(DiagnosticCode::RuntimeUnsupportedResult),
             Self::UnhandledCondition { .. } => Some(DiagnosticCode::RuntimeUnhandledCondition),
+            Self::ExpiredExit => Some(DiagnosticCode::RuntimeExpiredExit),
         }
     }
 
@@ -206,6 +209,7 @@ impl fmt::Display for RuntimeResult {
             Self::UnhandledCondition { class } => {
                 write!(formatter, "unhandled condition {class}")
             }
+            Self::ExpiredExit => formatter.write_str("block exit called after its block returned"),
         }
     }
 }
@@ -514,6 +518,11 @@ pub enum FunctionCallError {
         /// Partial trace captured up to the signal, when requested.
         trace: Option<ExecutionTrace>,
     },
+    /// A block exit procedure was called after its block had returned.
+    ExpiredExit {
+        /// Partial trace captured up to the call, when requested.
+        trace: Option<ExecutionTrace>,
+    },
 }
 
 impl fmt::Display for FunctionCallError {
@@ -560,6 +569,9 @@ impl fmt::Display for FunctionCallError {
             }
             Self::UnhandledCondition { class, .. } => {
                 write!(formatter, "unhandled condition {class}")
+            }
+            Self::ExpiredExit { .. } => {
+                formatter.write_str("block exit called after its block returned")
             }
         }
     }
@@ -5207,6 +5219,7 @@ fn runtime_result_for_main_error(
         FunctionCallError::UnhandledCondition { class, trace } => {
             (RuntimeResult::UnhandledCondition { class }, trace)
         }
+        FunctionCallError::ExpiredExit { trace } => (RuntimeResult::ExpiredExit, trace),
         FunctionCallError::HostFunctionFailed {
             name,
             failure,
@@ -5373,15 +5386,23 @@ fn run_turn_body<'a>(
                     trace: capture.map(TraceCapture::finish),
                 });
             }
-            if let Some(ControlFault::UnhandledCondition { class }) = host.control_fault() {
-                let class = tape
-                    .runtime
-                    .class(class)
-                    .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone());
-                return Err(FunctionCallError::UnhandledCondition {
-                    class,
-                    trace: capture.map(TraceCapture::finish),
-                });
+            match host.control_fault() {
+                Some(ControlFault::UnhandledCondition { class }) => {
+                    let class = tape
+                        .runtime
+                        .class(class)
+                        .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone());
+                    return Err(FunctionCallError::UnhandledCondition {
+                        class,
+                        trace: capture.map(TraceCapture::finish),
+                    });
+                }
+                Some(ControlFault::ExpiredExit { .. }) => {
+                    return Err(FunctionCallError::ExpiredExit {
+                        trace: capture.map(TraceCapture::finish),
+                    });
+                }
+                Some(ControlFault::UnbalancedPop { .. }) | None => {}
             }
             return Err(FunctionCallError::Trap {
                 trap: alloc::boxed::Box::new(trap),
@@ -6268,9 +6289,20 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_expr(out, &restart.body, indent + 4);
         }
         ast::Expr::Block {
-            id, body, cleanup, ..
+            id,
+            exit,
+            body,
+            cleanup,
+            ..
         } => {
-            let _ = writeln!(out, "{id} block-expr");
+            match exit {
+                Some(exit) => {
+                    let _ = writeln!(out, "{id} block-expr exit {} {}", exit.id, exit.name);
+                }
+                None => {
+                    let _ = writeln!(out, "{id} block-expr");
+                }
+            }
             indent_line(out, indent + 2);
             let _ = writeln!(out, "body");
             dump_ast_block(out, body, indent + 4);
@@ -8692,6 +8724,7 @@ fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
             format!("callable-thunk {callable:?}")
         }
         lower::FunctionKind::Closure(id) => format!("closure:{}", id.0),
+        lower::FunctionKind::ExitThunk { signature } => format!("exit-thunk sig{}", signature.0),
     }
 }
 
@@ -11435,8 +11468,22 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "restart");
             dump_sem_expr(out, &restart.body, indent + 4);
         }
-        sem::Expr::Block { body, cleanup, .. } => {
-            let _ = writeln!(out, "block-expr cleanup={}", cleanup.is_some());
+        sem::Expr::Block {
+            exit,
+            body,
+            cleanup,
+            ..
+        } => {
+            let _ = write!(out, "block-expr cleanup={}", cleanup.is_some());
+            if let Some(exit) = exit {
+                let _ = write!(
+                    out,
+                    " exit=l{} result={}",
+                    exit.local.0,
+                    sem_kind_list_label_for_expr(&exit.result_kinds)
+                );
+            }
+            out.push('\n');
             indent_line(out, indent + 2);
             let _ = writeln!(out, "body");
             dump_sem_block(out, body, indent + 4);
@@ -12426,8 +12473,17 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, &restart.body, out);
             out.push(')');
         }
-        sem::Expr::Block { body, cleanup, .. } => {
-            out.push_str("block(body=");
+        sem::Expr::Block {
+            exit,
+            body,
+            cleanup,
+            ..
+        } => {
+            out.push_str("block(");
+            if let Some(exit) = exit {
+                let _ = write!(out, "exit={}:{:?}:", exit.local.0, exit.result_kinds);
+            }
+            out.push_str("body=");
             out.push_str(&fingerprint_sem_block(module, body));
             if let Some(cleanup) = cleanup {
                 out.push_str(":cleanup=");

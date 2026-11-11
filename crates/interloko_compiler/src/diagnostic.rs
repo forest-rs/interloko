@@ -144,6 +144,8 @@ pub enum DiagnosticCode {
     SignalConditionTypeMismatch,
     /// A handle body and restart handler have incompatible result kinds.
     HandleRestartResultMismatch,
+    /// A block body and its exit procedure have incompatible result kinds.
+    BlockExitResultMismatch,
     /// `class-of` received an invalid value.
     ClassOfTypeMismatch,
     /// `instance?` received an invalid value.
@@ -212,6 +214,8 @@ pub enum DiagnosticCode {
     RuntimeUnsupportedResult,
     /// A signalled condition found no applicable live handler.
     RuntimeUnhandledCondition,
+    /// A block exit procedure was called after its block returned.
+    RuntimeExpiredExit,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -272,6 +276,7 @@ impl DiagnosticCode {
         Self::ApplyTargetTypeMismatch,
         Self::SignalConditionTypeMismatch,
         Self::HandleRestartResultMismatch,
+        Self::BlockExitResultMismatch,
         Self::ClassOfTypeMismatch,
         Self::InstanceOfTypeMismatch,
         Self::InstanceOfImpossible,
@@ -306,6 +311,7 @@ impl DiagnosticCode {
         Self::RuntimeHostFunctionFailed,
         Self::RuntimeUnsupportedResult,
         Self::RuntimeUnhandledCondition,
+        Self::RuntimeExpiredExit,
         Self::SessionUnknownSource,
     ];
 
@@ -368,6 +374,7 @@ impl DiagnosticCode {
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
             Self::SignalConditionTypeMismatch => "sem.signal-condition-type-mismatch",
             Self::HandleRestartResultMismatch => "sem.handle-restart-result-mismatch",
+            Self::BlockExitResultMismatch => "sem.block-exit-result-mismatch",
             Self::ClassOfTypeMismatch => "sem.class-of-type-mismatch",
             Self::InstanceOfTypeMismatch => "sem.instance-of-type-mismatch",
             Self::InstanceOfImpossible => "sem.instance-of-impossible",
@@ -402,6 +409,7 @@ impl DiagnosticCode {
             Self::RuntimeHostFunctionFailed => "runtime.host-function-failed",
             Self::RuntimeUnsupportedResult => "runtime.unsupported-result",
             Self::RuntimeUnhandledCondition => "runtime.unhandled-condition",
+            Self::RuntimeExpiredExit => "runtime.expired-exit",
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -465,6 +473,7 @@ impl DiagnosticCode {
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,
             "sem.signal-condition-type-mismatch" => Self::SignalConditionTypeMismatch,
             "sem.handle-restart-result-mismatch" => Self::HandleRestartResultMismatch,
+            "sem.block-exit-result-mismatch" => Self::BlockExitResultMismatch,
             "sem.class-of-type-mismatch" => Self::ClassOfTypeMismatch,
             "sem.instance-of-type-mismatch" => Self::InstanceOfTypeMismatch,
             "sem.instance-of-impossible" => Self::InstanceOfImpossible,
@@ -499,6 +508,7 @@ impl DiagnosticCode {
             "runtime.host-function-failed" => Self::RuntimeHostFunctionFailed,
             "runtime.unsupported-result" => Self::RuntimeUnsupportedResult,
             "runtime.unhandled-condition" => Self::RuntimeUnhandledCondition,
+            "runtime.expired-exit" => Self::RuntimeExpiredExit,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })

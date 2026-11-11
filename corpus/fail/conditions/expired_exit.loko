@@ -1,0 +1,19 @@
+// expect: runtime code runtime.expired-exit
+// expect: run reports block exit called after its block returned
+// expect: diagnostics 0
+
+// `make-exit` returns its block's own exit procedure. By the time `main`
+// calls it the block has returned, so the exit point has expired and the
+// run reports that instead of an uncaught VM exception.
+
+define function make-exit() => <callable>
+  block (out)
+    out
+  end
+end;
+
+define function main() => <integer>
+  let stale :: <callable> = make-exit();
+  let again :: <callable> = apply(stale, stale);
+  42
+end;

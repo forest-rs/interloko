@@ -490,7 +490,9 @@ impl BaseLokoCstProjector<'_> {
                 nested.push(self.node_with_nested(CstKind::CleanupClause, child, body));
             }
         }
-        self.node_with_nested(CstKind::BlockExpr, node, nested)
+        let mut roles = Vec::new();
+        self.collect_role_nodes(node, "block-exit-name", CstKind::BlockExitName, &mut roles);
+        self.node_with_nested_and_roles(CstKind::BlockExpr, node, nested, roles)
     }
 
     fn build_restart(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
