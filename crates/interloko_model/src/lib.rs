@@ -59,8 +59,15 @@ pub enum BuiltinValueClass {
     Method,
     /// The built-in `<slot-descriptor>` metaobject class.
     SlotDescriptor,
-    /// The built-in `<float>` class of IEEE 754 binary64 values.
+    /// The abstract built-in `<number>` class, root of the numeric classes.
+    Number,
+    /// The abstract built-in `<real>` class of real numbers.
+    Real,
+    /// The abstract built-in `<float>` class of floating-point numbers.
     Float,
+    /// The concrete built-in `<double-float>` class of IEEE 754 binary64
+    /// values. Float literals are `<double-float>` instances.
+    DoubleFloat,
 }
 
 impl BuiltinValueClass {
@@ -74,7 +81,10 @@ impl BuiltinValueClass {
         (Self::GenericFunction, "<generic-function>"),
         (Self::Method, "<method>"),
         (Self::SlotDescriptor, "<slot-descriptor>"),
+        (Self::Number, "<number>"),
+        (Self::Real, "<real>"),
         (Self::Float, "<float>"),
+        (Self::DoubleFloat, "<double-float>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -89,7 +99,10 @@ impl BuiltinValueClass {
             Self::GenericFunction => "<generic-function>",
             Self::Method => "<method>",
             Self::SlotDescriptor => "<slot-descriptor>",
+            Self::Number => "<number>",
+            Self::Real => "<real>",
             Self::Float => "<float>",
+            Self::DoubleFloat => "<double-float>",
         }
     }
 
@@ -105,7 +118,10 @@ impl BuiltinValueClass {
             b"<generic-function>" => Some(Self::GenericFunction),
             b"<method>" => Some(Self::Method),
             b"<slot-descriptor>" => Some(Self::SlotDescriptor),
+            b"<number>" => Some(Self::Number),
+            b"<real>" => Some(Self::Real),
             b"<float>" => Some(Self::Float),
+            b"<double-float>" => Some(Self::DoubleFloat),
             _ => None,
         }
     }
@@ -122,8 +138,34 @@ impl BuiltinValueClass {
             Self::GenericFunction => 5,
             Self::Method => 6,
             Self::SlotDescriptor => 7,
-            Self::Float => 8,
+            Self::Number => 8,
+            Self::Real => 9,
+            Self::Float => 10,
+            Self::DoubleFloat => 11,
         }
+    }
+
+    /// Returns this class's built-in direct superclass, or `None` when its
+    /// direct superclass is `<object>`.
+    ///
+    /// The numeric classes form the start of a numeric tower:
+    /// `<number>` > `<real>` > `<float>` > `<double-float>`. `<integer>`
+    /// still sits directly under `<object>`.
+    #[must_use]
+    pub const fn builtin_superclass(self) -> Option<Self> {
+        match self {
+            Self::Real => Some(Self::Number),
+            Self::Float => Some(Self::Real),
+            Self::DoubleFloat => Some(Self::Float),
+            _ => None,
+        }
+    }
+
+    /// Returns whether this class is abstract: it classifies values but has
+    /// no direct instances of its own.
+    #[must_use]
+    pub const fn is_abstract(self) -> bool {
+        matches!(self, Self::Number | Self::Real | Self::Float)
     }
 }
 

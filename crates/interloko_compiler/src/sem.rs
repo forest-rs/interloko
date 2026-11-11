@@ -2379,6 +2379,15 @@ impl Lowering {
                 );
             }
             let class_id = ClassId(u32::try_from(self.classes.len()).unwrap_or(u32::MAX));
+            // `ALL` lists every built-in superclass before its subclasses.
+            let superclass = kind
+                .builtin_superclass()
+                .and_then(|parent| {
+                    self.classes
+                        .iter()
+                        .find(|class| class.origin == ClassOrigin::BuiltinValue { kind: parent })
+                })
+                .map_or(OBJECT_CLASS_ID, |class| class.id);
             self.classes.push(Class {
                 id: class_id,
                 definition: DefinitionId::new(
@@ -2389,7 +2398,7 @@ impl Lowering {
                 ),
                 name: (*name).to_string(),
                 origin: ClassOrigin::BuiltinValue { kind: *kind },
-                superclass: Some(OBJECT_CLASS_ID),
+                superclass: Some(superclass),
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
@@ -5837,6 +5846,20 @@ impl Lowering {
         let Expr::InstanceOf { value, class, .. } = condition else {
             return None;
         };
+        // Instances of numeric classes are boxed scalars, not runtime
+        // objects, so `<object>` cannot be narrowed to them by an object cast.
+        if matches!(
+            self.classes.get(class.0 as usize).map(|class| class.origin),
+            Some(ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Integer
+                    | BuiltinValueClass::Number
+                    | BuiltinValueClass::Real
+                    | BuiltinValueClass::Float
+                    | BuiltinValueClass::DoubleFloat,
+            })
+        ) {
+            return None;
+        }
         let Expr::Local {
             local, result_kind, ..
         } = value.as_ref()
@@ -6062,9 +6085,15 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Integer,
             } => Some(ValueKind::I64),
+            // `<double-float>` is the only concrete float class, so a value
+            // typed `<float>` is represented as an f64 until `<single-float>`
+            // gives `<float>` a second representation to choose from.
             ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Float,
+                kind: BuiltinValueClass::Float | BuiltinValueClass::DoubleFloat,
             } => Some(ValueKind::F64),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Number | BuiltinValueClass::Real,
+            } => None,
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
             } => Some(ValueKind::Vector(class)),
@@ -6085,7 +6114,7 @@ impl Lowering {
                 Some(class)
             }
             ValueKind::I64 => self.builtin_value_class(BuiltinValueClass::Integer),
-            ValueKind::F64 => self.builtin_value_class(BuiltinValueClass::Float),
+            ValueKind::F64 => self.builtin_value_class(BuiltinValueClass::DoubleFloat),
             ValueKind::Object(class) => Some(class),
             ValueKind::ClassObject(_) => self.builtin_value_class(BuiltinValueClass::Class),
             ValueKind::GenericFunctionObject(_) => {
@@ -6276,10 +6305,23 @@ impl Lowering {
             );
             return (Some(ClassId(u32::MAX)), ValueKind::Error);
         };
+        let (class_id, origin) = (class.id, class.origin);
+        if let ClassOrigin::BuiltinValue {
+            kind: BuiltinValueClass::Number | BuiltinValueClass::Real,
+        } = origin
+        {
+            // Integers and floats have different unboxed representations, so
+            // a method cannot yet receive "any real" as one parameter kind.
+            self.diagnostics.push(
+                Diagnostic::error(param.span, DiagnosticCode::AbstractNumericTypeUnsupported)
+                    .with_arg(DiagnosticArg::text("class", param.class_name.clone())),
+            );
+            return (Some(class_id), ValueKind::Error);
+        }
         let kind = self
-            .kind_for_builtin_class(class.id)
-            .unwrap_or(ValueKind::Object(class.id));
-        (Some(class.id), kind)
+            .kind_for_builtin_class(class_id)
+            .unwrap_or(ValueKind::Object(class_id));
+        (Some(class_id), kind)
     }
 
     fn resolve_type_name(&mut self, type_name: &str, class_object: bool, span: Span) -> ValueKind {
@@ -6319,7 +6361,16 @@ impl Lowering {
                 .builtin_value_class(BuiltinValueClass::Symbol)
                 .map_or(ValueKind::Error, ValueKind::Symbol),
             "<integer>" => ValueKind::I64,
-            "<float>" => ValueKind::F64,
+            // See `kind_for_builtin_class`: `<float>` is f64 while
+            // `<double-float>` is its only concrete subclass.
+            "<float>" | "<double-float>" => ValueKind::F64,
+            "<number>" | "<real>" => {
+                diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::AbstractNumericTypeUnsupported)
+                        .with_arg(DiagnosticArg::text("class", type_name)),
+                );
+                ValueKind::Error
+            }
             "<callable>" => ValueKind::Callable,
             "<vector>" => self
                 .builtin_value_class(BuiltinValueClass::Vector)
@@ -6380,9 +6431,12 @@ impl Lowering {
             ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
                 self.is_same_or_subclass(specializer, class)
             }
+            // A scalar argument reaches every method specialized on its
+            // class or a superclass, such as `<float>` or `<real>` for an
+            // f64.
             ValueKind::I64 | ValueKind::F64 => self
-                .kind_for_builtin_class(specializer)
-                .is_some_and(|kind| kind == expected),
+                .value_kind_class(expected)
+                .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
             ValueKind::Bool
             | ValueKind::Callable
             | ValueKind::ClassObject(_)
@@ -6447,7 +6501,7 @@ impl Lowering {
         match kind {
             ValueKind::Any => "<object>".into(),
             ValueKind::I64 => "<integer>".into(),
-            ValueKind::F64 => "<float>".into(),
+            ValueKind::F64 => "<double-float>".into(),
             ValueKind::Bool => "<boolean>".into(),
             ValueKind::Callable => "<callable>".into(),
             ValueKind::String(_) => "<string>".into(),

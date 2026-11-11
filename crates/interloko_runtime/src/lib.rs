@@ -2223,7 +2223,7 @@ impl InterlokoHost {
     fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
         match value {
             ValueRef::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
-            ValueRef::F64(_) => self.builtin_class(BuiltinValueClass::Float),
+            ValueRef::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),
             ValueRef::Bool(_) | ValueRef::U64(_) => Ok(OBJECT_CLASS_ID),
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.object(obj)?.class)
@@ -2231,7 +2231,7 @@ impl InterlokoHost {
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj)? {
                     Value::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
-                    Value::F64(_) => self.builtin_class(BuiltinValueClass::Float),
+                    Value::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),
                     Value::Bool(_) | Value::U64(_) => Ok(OBJECT_CLASS_ID),
                     Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
                         Ok(self.object(*boxed)?.class)

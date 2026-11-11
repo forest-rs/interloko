@@ -47,6 +47,7 @@
 "sem.arithmetic-operand-type-mismatch" = "[ps] arithmetic operands are { $lhs } and { $rhs }, need matching numbers"
 "sem.comparison-operand-type-mismatch" = "[ps] comparison operands are { $lhs } and { $rhs }, need matching numbers"
 "sem.integer-division-unsupported" = "[ps] integer division needs floats"
+"sem.abstract-numeric-type-unsupported" = "[ps] { $class } abstract, no value type"
 "sem.apply-arity-mismatch" = "[ps] apply needs callable first"
 "sem.apply-target-type-mismatch" = "[ps] apply target got { $actual }, need { $expected }"
 "sem.signal-condition-type-mismatch" = "[ps] signal condition got { $actual }, need object condition"

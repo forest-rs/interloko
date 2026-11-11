@@ -108,8 +108,10 @@ The current slices include:
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;
-- `<float>` values (IEEE 754 binary64) with `1.5`/`2e10` literals, slots,
-  boxing to `<object>`, `<float>` method dispatch, and IEEE `+ - * /`,
+- floats: literals such as `1.5`/`2e10` are `<double-float>` (IEEE 754
+  binary64) instances under the abstract `<number>` > `<real>` > `<float>`
+  classes, with slots, boxing to `<object>`, `<float>`/`<double-float>`
+  annotations and method dispatch, and IEEE `+ - * /`,
   negation, and comparisons (operands must both be integers or both be
   floats; `/` is float-only), with explicit `as(<float>, n)` and exact
   `as(<integer>, x)` conversions, and a float library (`abs`, `min`, `max`,
