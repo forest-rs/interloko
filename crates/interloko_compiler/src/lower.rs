@@ -52,6 +52,8 @@ pub enum ValueKind {
     Any,
     /// Signed integer value.
     I64,
+    /// IEEE 754 binary64 float value.
+    F64,
     /// Unsigned integer value used by runtime metadata.
     U64,
     /// Boolean value used by control-flow conditions.
@@ -270,6 +272,15 @@ pub enum Instr {
         dst: Register,
         /// Constant value.
         value: i64,
+        /// Source span.
+        span: Span,
+    },
+    /// Float constant.
+    ConstF64 {
+        /// Destination register.
+        dst: Register,
+        /// Constant value, compared by bit pattern.
+        value: sem::FloatBits,
         /// Source span.
         span: Span,
     },
@@ -1336,6 +1347,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(&restart.body, uses);
         }
         sem::Expr::ConstI64 { .. }
+        | sem::Expr::ConstF64 { .. }
         | sem::Expr::ConstBool { .. }
         | sem::Expr::StringLiteral { .. }
         | sem::Expr::SymbolLiteral { .. }
@@ -1905,11 +1917,10 @@ impl<'module> BodyLowering<'module> {
             return Ok(());
         }
 
-        if matches!(
-            generic.param_kinds.get(index).copied().flatten(),
-            Some(sem::ValueKind::I64)
-        ) {
-            let label = if is_integer_value_class(self.module, specializer) {
+        if let Some(scalar @ (sem::ValueKind::I64 | sem::ValueKind::F64)) =
+            generic.param_kinds.get(index).copied().flatten()
+        {
+            let label = if is_scalar_value_class(self.module, value_kind(scalar)?, specializer) {
                 labels.success
             } else {
                 labels.failure
@@ -1991,6 +2002,15 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::ConstI64 { value, span } => {
                 let result = self.alloc(ValueKind::I64);
                 self.instructions.push(Instr::ConstI64 {
+                    dst: result.reg,
+                    value: *value,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::ConstF64 { value, span } => {
+                let result = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::ConstF64 {
                     dst: result.reg,
                     value: *value,
                     span: *span,
@@ -2267,7 +2287,7 @@ impl<'module> BodyLowering<'module> {
             } => {
                 let object = self.lower_expr(object)?;
                 let result = self.alloc(ValueKind::ClassObject(Some(*class)));
-                if object.kind == ValueKind::I64 {
+                if matches!(object.kind, ValueKind::I64 | ValueKind::F64) {
                     self.emit_class_meta_object(result.reg, *class, *span);
                 } else {
                     let class_id = self.alloc(ValueKind::U64);
@@ -2288,11 +2308,11 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::InstanceOf { value, class, span } => {
                 let value = self.lower_expr(value)?;
-                if value.kind == ValueKind::I64 {
+                if matches!(value.kind, ValueKind::I64 | ValueKind::F64) {
                     let result = self.alloc(ValueKind::Bool);
                     self.instructions.push(Instr::ConstBool {
                         dst: result.reg,
-                        value: is_integer_value_class(self.module, *class),
+                        value: is_scalar_value_class(self.module, value.kind, *class),
                         span: *span,
                     });
                     return Ok(result);
@@ -2320,7 +2340,7 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::Cast { value, class, span } => {
                 let value = self.lower_expr(value)?;
-                if value.kind == ValueKind::I64 && is_integer_value_class(self.module, *class) {
+                if is_scalar_value_class(self.module, value.kind, *class) {
                     return Ok(value);
                 }
                 if let ValueKind::Object(Some(actual)) = value.kind
@@ -3405,6 +3425,7 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
     match kind {
         sem::ValueKind::Any => Ok(ValueKind::Any),
         sem::ValueKind::I64 => Ok(ValueKind::I64),
+        sem::ValueKind::F64 => Ok(ValueKind::F64),
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::String(class)
         | sem::ValueKind::Symbol(class)
@@ -3487,6 +3508,7 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueK
             | sem::ValueKind::Vector(class),
         ) => ValueKind::Object(Some(class)),
         Some(sem::ValueKind::I64) => ValueKind::I64,
+        Some(sem::ValueKind::F64) => ValueKind::F64,
         Some(sem::ValueKind::Bool) => ValueKind::Bool,
         Some(sem::ValueKind::Callable) => ValueKind::Closure(None),
         None if generic.dispatch_params.contains(&index) => ValueKind::Object(None),
@@ -3495,16 +3517,18 @@ fn dispatcher_param_kind(generic: &sem::GenericFunction, index: usize) -> ValueK
     }
 }
 
-fn is_integer_value_class(module: &sem::Module, class: sem::ClassId) -> bool {
-    matches!(
-        module
-            .classes
-            .get(class.0 as usize)
-            .map(|class| class.origin),
-        Some(sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Integer,
-        })
-    )
+/// Returns whether `class` is the built-in class of the unboxed scalar
+/// category `kind` (`<integer>` for `i64`, `<float>` for `f64`).
+fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::ClassId) -> bool {
+    let expected = match kind {
+        ValueKind::I64 => sem::BuiltinValueClass::Integer,
+        ValueKind::F64 => sem::BuiltinValueClass::Float,
+        _ => return false,
+    };
+    module
+        .classes
+        .get(class.0 as usize)
+        .is_some_and(|class| class.origin == sem::ClassOrigin::BuiltinValue { kind: expected })
 }
 
 fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::ClassId> {
@@ -3520,6 +3544,7 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         }
         ValueKind::Any
         | ValueKind::I64
+        | ValueKind::F64
         | ValueKind::U64
         | ValueKind::Bool
         | ValueKind::Function(_)
@@ -3654,6 +3679,10 @@ impl Module {
             Instr::Label { label } => writeln!(f, "{label}:"),
             Instr::ConstI64 { dst, value, span } => {
                 write!(f, "  {dst} = const.i64 {value}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ConstF64 { dst, value, span } => {
+                write!(f, "  {dst} = const.f64 {value}")?;
                 fmt_span(f, *span)
             }
             Instr::ConstBool { dst, value, span } => {
@@ -3954,6 +3983,7 @@ impl Module {
         match kind {
             ValueKind::Any => write!(f, "any"),
             ValueKind::I64 => write!(f, "i64"),
+            ValueKind::F64 => write!(f, "f64"),
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
             ValueKind::Aggregate => write!(f, "agg"),

@@ -12,6 +12,7 @@ use crate::grammar_frontend::{
 };
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
+use interloko_model::FloatBits;
 
 /// AST module containing function definitions.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -350,6 +351,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Float literal, parsed to the nearest IEEE 754 binary64 value.
+    Float {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Parsed value, compared by bit pattern.
+        value: FloatBits,
+        /// Source span.
+        span: Span,
+    },
     /// Boolean literal.
     Bool {
         /// Stable-ish AST node identity.
@@ -568,6 +578,7 @@ impl Expr {
     pub const fn id(&self) -> AstNodeId {
         match self {
             Self::Number { id, .. }
+            | Self::Float { id, .. }
             | Self::Bool { id, .. }
             | Self::String { id, .. }
             | Self::Symbol { id, .. }
@@ -596,6 +607,7 @@ impl Expr {
     pub const fn span(&self) -> Span {
         match self {
             Self::Number { span, .. }
+            | Self::Float { span, .. }
             | Self::Bool { span, .. }
             | Self::String { span, .. }
             | Self::Symbol { span, .. }
@@ -1426,6 +1438,9 @@ impl<'tree> Lowering<'tree> {
                 span: unary.span,
             };
         };
+        if is_float_literal_text(text) {
+            return self.lower_float_literal(unary, unary.span, text, true);
+        }
         const I64_MIN_MAGNITUDE: u64 = 1_u64 << 63;
         let value = match text.parse::<u64>() {
             Ok(I64_MIN_MAGNITUDE) => i64::MIN,
@@ -1469,6 +1484,9 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             };
         };
+        if is_float_literal_text(text) {
+            return self.lower_float_literal(node, span, text, false);
+        }
         match text.parse::<i64>() {
             Ok(value) => Expr::Number {
                 id: self.ast_id(node),
@@ -1479,6 +1497,32 @@ impl<'tree> Lowering<'tree> {
                 self.diagnostics.push(Diagnostic::error(
                     span,
                     DiagnosticCode::AstIntegerLiteralOutOfRange,
+                ));
+                Expr::Error {
+                    id: self.ast_id(node),
+                    span,
+                }
+            }
+        }
+    }
+
+    fn lower_float_literal(
+        &mut self,
+        node: &CstNode,
+        span: Span,
+        text: &str,
+        negate: bool,
+    ) -> Expr {
+        match text.parse::<f64>() {
+            Ok(value) if value.is_finite() => Expr::Float {
+                id: self.ast_id(node),
+                value: FloatBits::from_f64(if negate { -value } else { value }),
+                span,
+            },
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    DiagnosticCode::AstFloatLiteralOutOfRange,
                 ));
                 Expr::Error {
                     id: self.ast_id(node),
@@ -2506,6 +2550,12 @@ impl FrontendFormLowering {
     fn definition(&self, kind: DefinitionKind, name: &str, discriminator: &str) -> DefinitionId {
         DefinitionId::new(self.source_file, kind, name, discriminator)
     }
+}
+
+/// Returns whether a lexed `Number` token spells a float rather than an
+/// integer: floats are exactly the numbers with a fraction or an exponent.
+fn is_float_literal_text(text: &str) -> bool {
+    text.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'))
 }
 
 fn decode_string_literal(text: &str) -> Option<String> {

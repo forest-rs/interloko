@@ -148,6 +148,7 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
     match kind {
         lower::ValueKind::Any => runtime::any_type(),
         lower::ValueKind::I64 => ValueType::I64,
+        lower::ValueKind::F64 => ValueType::F64,
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
         lower::ValueKind::Function(_) => ValueType::Func,
@@ -234,6 +235,7 @@ struct AbiTables {
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
     host_functions: Vec<HostSigId>,
     box_i64: HostSigId,
+    box_f64: HostSigId,
     box_bool: HostSigId,
     box_object: HostSigId,
     instance_any: HostSigId,
@@ -286,6 +288,10 @@ impl AbiTables {
         let box_i64 = builder.host_sig_for(
             runtime::BOX_VALUE,
             runtime::box_value_signature(ValueType::I64),
+        );
+        let box_f64 = builder.host_sig_for(
+            runtime::BOX_VALUE,
+            runtime::box_value_signature(ValueType::F64),
         );
         let box_bool = builder.host_sig_for(
             runtime::BOX_VALUE,
@@ -356,6 +362,7 @@ impl AbiTables {
             runtime_calls,
             host_functions,
             box_i64,
+            box_f64,
             box_bool,
             box_object,
             instance_any,
@@ -610,6 +617,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_i64(dst.0, *value);
             }
+            lower::Instr::ConstF64 { dst, value, span } => {
+                self.set_span(*span);
+                self.asm.const_f64(dst.0, value.to_f64());
+            }
             lower::Instr::ConstBool { dst, value, span } => {
                 self.set_span(*span);
                 self.asm.const_bool(dst.0, *value);
@@ -692,6 +703,7 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 let sig = match from {
                     lower::ValueKind::I64 => self.abi.box_i64,
+                    lower::ValueKind::F64 => self.abi.box_f64,
                     lower::ValueKind::Bool => self.abi.box_bool,
                     lower::ValueKind::Object(_)
                     | lower::ValueKind::ClassObject(_)

@@ -1,0 +1,16 @@
+// expect: run 6.02214076e23
+// expect: diagnostics 0
+// expect: dump ast contains float 2.5e-7
+// expect: dump sem contains const.f64 6.02214076e23
+// expect: dump lowered contains const.f64 2.5e-7
+// expect: dump tape contains const.f64
+
+define constant $avogadro :: <float> = 6.02214076e23;
+
+define function tiny() => <float>
+  0.00000025
+end;
+
+define function main() => <float>
+  $avogadro
+end;

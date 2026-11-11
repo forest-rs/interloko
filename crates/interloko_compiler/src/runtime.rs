@@ -83,6 +83,7 @@ pub const fn runtime_value_kind(kind: sem::ValueKind) -> Option<RuntimeValueKind
     match kind {
         sem::ValueKind::Any => Some(RuntimeValueKind::Any),
         sem::ValueKind::I64 => Some(RuntimeValueKind::I64),
+        sem::ValueKind::F64 => Some(RuntimeValueKind::F64),
         sem::ValueKind::Bool => Some(RuntimeValueKind::Bool),
         sem::ValueKind::String(class) => Some(RuntimeValueKind::String(class)),
         sem::ValueKind::Symbol(class) => Some(RuntimeValueKind::Symbol(class)),

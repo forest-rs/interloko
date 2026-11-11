@@ -112,6 +112,8 @@ pub enum ValueKind {
     Any,
     /// Signed integer value.
     I64,
+    /// IEEE 754 binary64 float value.
+    F64,
     /// Boolean value.
     Bool,
     /// String object value.
@@ -1392,7 +1394,9 @@ impl InterlokoHost {
     /// Boxes a value into the top `<object>` runtime representation.
     pub fn box_top_value(&mut self, value: Value) -> Result<Value, RuntimeError> {
         match value {
-            Value::I64(_) | Value::Bool(_) | Value::U64(_) => Ok(self.push_boxed_value(value)),
+            Value::I64(_) | Value::F64(_) | Value::Bool(_) | Value::U64(_) => {
+                Ok(self.push_boxed_value(value))
+            }
             Value::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.push_boxed_value(Value::Obj(obj)))
             }
@@ -1801,6 +1805,7 @@ impl Host for InterlokoHost {
             BOX_VALUE => {
                 let value = match args {
                     [ValueRef::I64(value)] => Value::I64(*value),
+                    [ValueRef::F64(value)] => Value::F64(*value),
                     [ValueRef::Bool(value)] => Value::Bool(*value),
                     [ValueRef::U64(value)] => Value::U64(*value),
                     [ValueRef::Obj(obj)] if obj.host_type == INTERLOKO_OBJECT_TYPE => {
@@ -1976,6 +1981,7 @@ impl InterlokoHost {
     fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
         match value {
             ValueRef::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
+            ValueRef::F64(_) => self.builtin_class(BuiltinValueClass::Float),
             ValueRef::Bool(_) | ValueRef::U64(_) => Ok(OBJECT_CLASS_ID),
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.object(obj)?.class)
@@ -1983,6 +1989,7 @@ impl InterlokoHost {
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj)? {
                     Value::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
+                    Value::F64(_) => self.builtin_class(BuiltinValueClass::Float),
                     Value::Bool(_) | Value::U64(_) => Ok(OBJECT_CLASS_ID),
                     Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
                         Ok(self.object(*boxed)?.class)
@@ -2124,6 +2131,7 @@ impl InterlokoHost {
                 Ok(Value::Obj(obj))
             }
             (ValueKind::I64, ValueRef::I64(value)) => Ok(Value::I64(value)),
+            (ValueKind::F64, ValueRef::F64(value)) => Ok(Value::F64(value)),
             (ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
             (
                 ValueKind::Object(expected_class)
@@ -2368,6 +2376,7 @@ fn value_type(kind: ValueKind) -> Option<ValueType> {
     match kind {
         ValueKind::Any => Some(any_type()),
         ValueKind::I64 => Some(ValueType::I64),
+        ValueKind::F64 => Some(ValueType::F64),
         ValueKind::Bool => Some(ValueType::Bool),
         ValueKind::String(_)
         | ValueKind::Symbol(_)

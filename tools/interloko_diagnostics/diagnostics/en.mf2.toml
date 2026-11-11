@@ -3,6 +3,7 @@
 "syntax.expected-expression" = "expected expression"
 "syntax.expected-token" = "expected { $expected }"
 "ast.integer-literal-out-of-range" = "integer literal is out of range"
+"ast.float-literal-out-of-range" = "float literal is too large to be a finite float"
 "ast.malformed-string-literal" = "malformed string literal"
 "ast.slot-option-requires-keyword" = "slot option `{ $option }` requires a keyword value"
 "ast.slot-init-value-requires-expression" = "slot option `{ $option }` requires an expression"

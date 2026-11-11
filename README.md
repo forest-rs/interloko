@@ -100,11 +100,13 @@ The current slices include:
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;
+- `<float>` values (IEEE 754 binary64) with `1.5`/`2e10` literals, slots,
+  boxing to `<object>`, and `<float>` method dispatch;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
-- embedding-declared scalar host functions with typed integer, boolean, and
-  string arguments/results, EOP discovery, and a handler-aware call surface;
+- embedding-declared scalar host functions with typed integer, float,
+  boolean, and string arguments/results, EOP discovery, and a handler-aware call surface;
 - read-only grammar MOP inspection plus trusted staged grammar adapters;
 - structured EOP records for environment/workbench objects and affordances;
 - explicit host-backed class/slot metadata for Rust interop experiments;

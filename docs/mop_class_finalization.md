@@ -73,7 +73,7 @@ was redefined in the child.
 Finalization diagnoses:
 
 - unknown superclasses;
-- primitive superclasses such as `<integer>` and `<boolean>`;
+- primitive superclasses such as `<integer>`, `<float>`, and `<boolean>`;
 - host-backed classes used as superclasses;
 - duplicate effective slot names;
 - duplicate effective init keywords;
