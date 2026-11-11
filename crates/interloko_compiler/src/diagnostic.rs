@@ -208,6 +208,8 @@ pub enum DiagnosticCode {
     RuntimeMainHasParameters,
     /// Runtime execution trapped.
     RuntimeTrap,
+    /// `<integer>` arithmetic overflowed the 64-bit fixnum range at runtime.
+    RuntimeIntegerOverflow,
     /// A declared host function failed during a session-driven run.
     RuntimeHostFunctionFailed,
     /// `main` does not return exactly one supported scalar value.
@@ -304,6 +306,7 @@ impl DiagnosticCode {
         Self::RuntimeMissingMain,
         Self::RuntimeMainHasParameters,
         Self::RuntimeTrap,
+        Self::RuntimeIntegerOverflow,
         Self::RuntimeHostFunctionFailed,
         Self::RuntimeUnsupportedResult,
         Self::SessionUnknownSource,
@@ -400,6 +403,7 @@ impl DiagnosticCode {
             Self::RuntimeMissingMain => "runtime.missing-main",
             Self::RuntimeMainHasParameters => "runtime.main-has-parameters",
             Self::RuntimeTrap => "runtime.trap",
+            Self::RuntimeIntegerOverflow => "runtime.integer-overflow",
             Self::RuntimeHostFunctionFailed => "runtime.host-function-failed",
             Self::RuntimeUnsupportedResult => "runtime.unsupported-result",
             Self::SessionUnknownSource => "session.unknown-source",
@@ -497,6 +501,7 @@ impl DiagnosticCode {
             "runtime.missing-main" => Self::RuntimeMissingMain,
             "runtime.main-has-parameters" => Self::RuntimeMainHasParameters,
             "runtime.trap" => Self::RuntimeTrap,
+            "runtime.integer-overflow" => Self::RuntimeIntegerOverflow,
             "runtime.host-function-failed" => Self::RuntimeHostFunctionFailed,
             "runtime.unsupported-result" => Self::RuntimeUnsupportedResult,
             "session.unknown-source" => Self::SessionUnknownSource,
@@ -797,6 +802,32 @@ mod tests {
         assert_eq!(
             crate::session::RuntimeResult::MainHasParameters.code(),
             Some(DiagnosticCode::RuntimeMainHasParameters)
+        );
+        let trap = |trap| crate::session::RuntimeResult::Trap {
+            trap: execution_tape::vm::TrapInfo {
+                func: execution_tape::value::FuncId(0),
+                pc: 0,
+                span_id: None,
+                trap,
+            },
+        };
+        assert_eq!(
+            trap(execution_tape::vm::Trap::TrapCode(
+                crate::lower::LokoTrap::IntegerOverflow.code()
+            ))
+            .code(),
+            Some(DiagnosticCode::RuntimeIntegerOverflow)
+        );
+        assert_eq!(
+            trap(execution_tape::vm::Trap::TrapCode(
+                crate::lower::LokoTrap::InexactFloatToInteger.code()
+            ))
+            .code(),
+            Some(DiagnosticCode::RuntimeTrap)
+        );
+        assert_eq!(
+            trap(execution_tape::vm::Trap::TrapCode(99)).code(),
+            Some(DiagnosticCode::RuntimeTrap)
         );
     }
 }

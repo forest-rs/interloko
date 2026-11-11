@@ -84,6 +84,7 @@
 "runtime.missing-main" = "[ps] main function missing"
 "runtime.main-has-parameters" = "[ps] main has parameters"
 "runtime.trap" = "[ps] runtime trapped"
+"runtime.integer-overflow" = "[ps] integer overflow"
 "runtime.host-function-failed" = "[ps] host function failed"
 "runtime.unsupported-result" = "[ps] main returned unsupported value"
 "session.unknown-source" = "[ps] source file id unknown"

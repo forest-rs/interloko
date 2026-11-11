@@ -1,0 +1,7 @@
+// expect: runtime code runtime.integer-overflow
+// expect: diagnostics 0
+// expect: dump lowered contains i64.mul_ovf
+
+define function main()
+  -9223372036854775808 * -1
+end;

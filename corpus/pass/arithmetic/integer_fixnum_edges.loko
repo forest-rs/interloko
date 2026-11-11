@@ -1,0 +1,13 @@
+// expect: run -1
+// expect: diagnostics 0
+
+// Arithmetic that reaches but never leaves the 64-bit fixnum range.
+define function main()
+  let max = 9223372036854775807;
+  let min = -9223372036854775808;
+  let a = max - 1 + 1;
+  let b = (min + 1 - 1) * 1;
+  let c = -(min + 1);
+  let d = 4611686018427387904 * -2;
+  a + b + c + d + 1
+end;

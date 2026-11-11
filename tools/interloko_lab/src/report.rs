@@ -2654,8 +2654,8 @@ fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
             text: "main has parameters".into(),
             class: "metric--warn",
         },
-        Some(RuntimeResult::Trap { trap }) => RuntimeSummary {
-            text: format!("runtime trap: {trap}"),
+        Some(result @ RuntimeResult::Trap { .. }) => RuntimeSummary {
+            text: result.to_string(),
             class: "metric--warn",
         },
         Some(RuntimeResult::HostFunctionFailed { name, failure }) => RuntimeSummary {

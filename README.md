@@ -103,6 +103,9 @@ than special generic-dispatch bytecode.
 The current slices include:
 
 - function definitions, locals, arithmetic, booleans, conditionals, and calls;
+- `<integer>` arithmetic on 64-bit fixnums that traps with
+  `runtime.integer-overflow` instead of wrapping when `+`, `-`, `*`, or
+  negation leaves the 64-bit range (bignum promotion is planned);
 - immutable top-level constants named in the Dylan style, such as
   `define constant $answer :: <integer> = 42;`;
 - nominal classes with typed slots, init keywords, inherited slots, and slot

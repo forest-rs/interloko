@@ -19,6 +19,9 @@ Supported expectations:
   the type, so `run 42` does not match a string `"42"` or a float `42.0`.
   Floats match by exact value: `run nan` matches any NaN and `run -0.0`
   does not match `0.0`.
+- `runtime code CODE`: compile and run zero-argument `main`, expecting it to
+  end in the runtime outcome with stable code `CODE`, such as
+  `runtime.integer-overflow`.
 - `diagnostics N`: expect exactly `N` diagnostics.
 - `diagnostic contains TEXT`: expect at least one diagnostic whose message
   contains `TEXT`.
@@ -34,5 +37,6 @@ Supported expectations:
   the session. `derived-host` is a trusted fixture that extends the base grammar
   for MOP/trace inspection while delegating parsing to the base parser.
 
-Use `corpus/pass` for programs that should compile and run cleanly. Use
-`corpus/fail` for programs that intentionally exercise diagnostics.
+Use `corpus/pass` for programs that should compile cleanly and then run to
+their expected value or runtime outcome. Use `corpus/fail` for programs that
+intentionally exercise diagnostics.

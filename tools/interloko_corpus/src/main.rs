@@ -382,6 +382,12 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
         return Ok(Expectation::Run(value));
     }
 
+    if let Some(code) = input.strip_prefix("runtime code ") {
+        let code = DiagnosticCode::parse(code)
+            .ok_or_else(|| invalid_header(path, line, "unknown diagnostic code"))?;
+        return Ok(Expectation::RuntimeCode(code));
+    }
+
     if let Some(value) = input.strip_prefix("diagnostics ") {
         let value = value
             .parse()
@@ -428,11 +434,12 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
 }
 
 fn check_case(case: &Case) -> Vec<String> {
-    let mode = if case
-        .expectations
-        .iter()
-        .any(|expectation| matches!(expectation, Expectation::Run(_)))
-    {
+    let mode = if case.expectations.iter().any(|expectation| {
+        matches!(
+            expectation,
+            Expectation::Run(_) | Expectation::RuntimeCode(_)
+        )
+    }) {
         RuntimeMode::RunMain
     } else {
         RuntimeMode::CompileOnly
@@ -453,6 +460,15 @@ fn check_case(case: &Case) -> Vec<String> {
                 }
                 None => failures.push(format!(
                     "expected run result {expected}, but main did not run"
+                )),
+            },
+            Expectation::RuntimeCode(expected) => match &artifacts.runtime_result {
+                Some(actual) if actual.code() == Some(*expected) => {}
+                Some(actual) => failures.push(format!(
+                    "expected runtime outcome `{expected}`, got {actual}"
+                )),
+                None => failures.push(format!(
+                    "expected runtime outcome `{expected}`, but main did not run"
                 )),
             },
             Expectation::Diagnostics(expected) => {
@@ -605,6 +621,7 @@ enum Outcome {
 #[derive(Clone, Debug, PartialEq)]
 enum Expectation {
     Run(FunctionValue),
+    RuntimeCode(DiagnosticCode),
     Diagnostics(usize),
     DiagnosticContains(String),
     DiagnosticCode(DiagnosticCode),

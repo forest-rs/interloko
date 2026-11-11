@@ -15,7 +15,7 @@ use core::fmt::{self, Write as _};
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::trace::TraceMask;
 use execution_tape::value::Value;
-use execution_tape::vm::{Limits, TrapInfo, Vm};
+use execution_tape::vm::{Limits, Trap, TrapInfo, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::execution_trace::TraceCapture;
@@ -160,7 +160,7 @@ impl RuntimeResult {
             Self::Returned(_) => None,
             Self::MissingMain => Some(DiagnosticCode::RuntimeMissingMain),
             Self::MainHasParameters => Some(DiagnosticCode::RuntimeMainHasParameters),
-            Self::Trap { .. } => Some(DiagnosticCode::RuntimeTrap),
+            Self::Trap { trap } => Some(trap_code(trap)),
             Self::HostFunctionFailed { .. } => Some(DiagnosticCode::RuntimeHostFunctionFailed),
             Self::UnsupportedResult { .. } => Some(DiagnosticCode::RuntimeUnsupportedResult),
         }
@@ -182,7 +182,7 @@ impl fmt::Display for RuntimeResult {
             Self::Returned(value) => write!(formatter, "returned {value}"),
             Self::MissingMain => formatter.write_str("missing main"),
             Self::MainHasParameters => formatter.write_str("main has parameters"),
-            Self::Trap { trap } => write!(formatter, "runtime trap: {trap}"),
+            Self::Trap { trap } => fmt_trap(formatter, trap),
             Self::HostFunctionFailed { name, failure } => {
                 write!(formatter, "host function `{name}` failed: {failure}")
             }
@@ -193,6 +193,38 @@ impl fmt::Display for RuntimeResult {
                 )
             }
         }
+    }
+}
+
+/// Returns the Loko condition an explicit tape trap signals, if any.
+///
+/// Traps raised by the VM itself (resource limits, failed host calls, ...)
+/// are not Loko conditions and yield `None`.
+#[must_use]
+pub const fn loko_trap(trap: &TrapInfo) -> Option<lower::LokoTrap> {
+    match trap.trap {
+        Trap::TrapCode(code) => lower::LokoTrap::from_code(code),
+        _ => None,
+    }
+}
+
+/// Stable diagnostic code for a runtime trap: the Loko condition's own code
+/// when it has one, otherwise [`DiagnosticCode::RuntimeTrap`].
+const fn trap_code(trap: &TrapInfo) -> DiagnosticCode {
+    match loko_trap(trap) {
+        Some(condition) => condition.diagnostic_code(),
+        None => DiagnosticCode::RuntimeTrap,
+    }
+}
+
+fn fmt_trap(formatter: &mut fmt::Formatter<'_>, trap: &TrapInfo) -> fmt::Result {
+    match loko_trap(trap) {
+        Some(condition) => write!(
+            formatter,
+            "runtime trap: {} ({trap})",
+            condition.description()
+        ),
+        None => write!(formatter, "runtime trap: {trap}"),
     }
 }
 
@@ -426,7 +458,7 @@ impl fmt::Display for FunctionCallError {
                 formatter,
                 "function argument {index} of kind {kind} could not enter the runtime"
             ),
-            Self::Trap { trap, .. } => write!(formatter, "runtime trap: {trap}"),
+            Self::Trap { trap, .. } => fmt_trap(formatter, trap),
             Self::HostFunctionFailed { name, failure, .. } => {
                 write!(formatter, "host function `{name}` failed: {failure}")
             }
@@ -13776,6 +13808,69 @@ mod tests {
                 "{input} should trap"
             );
         }
+    }
+
+    #[test]
+    fn integer_arithmetic_traps_on_overflow_at_the_fixnum_edges() {
+        let artifacts = CompilerSession::compile_source(
+            "overflow.loko",
+            "define function add(a :: <integer>, b :: <integer>) => <integer>\n  a + b\nend;\n\
+             define function sub(a :: <integer>, b :: <integer>) => <integer>\n  a - b\nend;\n\
+             define function mul(a :: <integer>, b :: <integer>) => <integer>\n  a * b\nend;\n\
+             define function neg(a :: <integer>) => <integer>\n  -a\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let call = |name: &str, args: &[i64]| {
+            let args: Vec<_> = args.iter().copied().map(FunctionValue::Integer).collect();
+            artifacts.call_function(name, &args, None)
+        };
+
+        for (name, args, expected) in [
+            ("add", &[i64::MAX - 1, 1][..], i64::MAX),
+            ("add", &[i64::MIN, 0][..], i64::MIN),
+            ("sub", &[i64::MIN + 1, 1][..], i64::MIN),
+            ("sub", &[-1, i64::MAX][..], i64::MIN),
+            ("mul", &[i64::MIN, 1][..], i64::MIN),
+            ("mul", &[i64::MAX, -1][..], i64::MIN + 1),
+            ("neg", &[i64::MAX][..], i64::MIN + 1),
+            ("neg", &[0][..], 0),
+        ] {
+            assert!(
+                matches!(call(name, args), Ok(outcome) if outcome.value == FunctionValue::Integer(expected)),
+                "{name}{args:?} should return {expected}"
+            );
+        }
+        for (name, args) in [
+            ("add", &[i64::MAX, 1][..]),
+            ("add", &[i64::MIN, -1][..]),
+            ("sub", &[i64::MIN, 1][..]),
+            ("sub", &[0, i64::MIN][..]),
+            ("mul", &[i64::MIN, -1][..]),
+            ("mul", &[1 << 32, 1 << 31][..]),
+            ("neg", &[i64::MIN][..]),
+        ] {
+            let Err(FunctionCallError::Trap { trap, .. }) = call(name, args) else {
+                panic!("{name}{args:?} should trap");
+            };
+            assert_eq!(loko_trap(&trap), Some(lower::LokoTrap::IntegerOverflow));
+        }
+    }
+
+    #[test]
+    fn integer_overflow_is_a_distinct_runtime_outcome() {
+        let artifacts = CompilerSession::compile_source(
+            "overflow.loko",
+            "define function main()\n  9223372036854775807 + 1\nend;",
+            RuntimeMode::RunMain,
+        );
+        let result = artifacts.runtime_result.expect("main should run");
+        assert_eq!(result.code(), Some(DiagnosticCode::RuntimeIntegerOverflow));
+        let rendered = result.to_string();
+        assert!(
+            rendered.starts_with("runtime trap: integer overflow (trap at "),
+            "{rendered}"
+        );
     }
 
     #[test]

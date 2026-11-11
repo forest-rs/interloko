@@ -792,26 +792,19 @@ impl<'a> FunctionEmitter<'a> {
             }
             lower::Instr::I64Binary {
                 dst,
+                overflow,
                 op,
                 lhs,
                 rhs,
                 span,
             } => {
                 self.set_span(*span);
+                let (dst, overflow, a, b) = (dst.0, overflow.0, lhs.0, rhs.0);
                 match op {
-                    sem::BinaryOp::Add => {
-                        self.asm.i64_add(dst.0, lhs.0, rhs.0);
-                    }
-                    sem::BinaryOp::Sub => {
-                        self.asm.i64_sub(dst.0, lhs.0, rhs.0);
-                    }
-                    sem::BinaryOp::Mul => {
-                        self.asm.i64_mul(dst.0, lhs.0, rhs.0);
-                    }
-                    sem::BinaryOp::Div => {
-                        return Err(invalid_lowered("integer division has no tape lowering"));
-                    }
-                }
+                    lower::I64ArithOp::Add => self.asm.i64_add_ovf(dst, overflow, a, b),
+                    lower::I64ArithOp::Sub => self.asm.i64_sub_ovf(dst, overflow, a, b),
+                    lower::I64ArithOp::Mul => self.asm.i64_mul_ovf(dst, overflow, a, b),
+                };
             }
             lower::Instr::F64Binary {
                 dst,
@@ -1164,9 +1157,9 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.ret(0, &values);
             }
-            lower::Instr::Trap { code, span } => {
+            lower::Instr::Trap { trap, span } => {
                 self.set_span(*span);
-                self.asm.trap(*code);
+                self.asm.trap(trap.code());
             }
         }
         Ok(())
