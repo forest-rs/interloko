@@ -7,6 +7,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -27,7 +28,10 @@ use interloko_runtime::{self as runtime, RuntimeLayout};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TapeModule {
     /// Verified executable tape program.
-    pub program: VerifiedProgram,
+    ///
+    /// Shared so artifact snapshots and execution recordings refer to one
+    /// prepared program instead of copying it.
+    pub program: Arc<VerifiedProgram>,
     /// Runtime layout required by the Interloko host.
     pub runtime: RuntimeLayout,
     /// `execution_tape` function ids in lowered function order.
@@ -137,7 +141,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
 
     let program = builder.build_verified().map_err(build_error)?;
     Ok(TapeModule {
-        program,
+        program: Arc::new(program),
         runtime: module.runtime.clone(),
         functions: ids.functions,
         main,
