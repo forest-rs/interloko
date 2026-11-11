@@ -1230,9 +1230,15 @@ fn invalid_lowered(message: &str) -> TapeError {
     }
 }
 
+/// Encodes a source span as its start offset plus one; span ids are non-zero.
 fn span_id(span: Span) -> Option<SpanId> {
     let start = u64::try_from(span.start).unwrap_or(u64::MAX - 1);
     SpanId::try_from(start.saturating_add(1)).ok()
+}
+
+/// Recovers the source start offset encoded by [`span_id`].
+pub(crate) fn span_start(span_id: SpanId) -> Option<usize> {
+    usize::try_from(span_id.get() - 1).ok()
 }
 
 #[cfg(test)]

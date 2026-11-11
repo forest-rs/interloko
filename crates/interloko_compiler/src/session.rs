@@ -13,12 +13,17 @@ use core::cell::RefCell;
 use core::fmt::{self, Write as _};
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
-use execution_tape::program::Program;
-use execution_tape::trace::{ScopeKind, TraceLocation, TraceOutcome, TraceSink};
+use execution_tape::trace::TraceMask;
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, TrapInfo, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::execution_trace::TraceCapture;
+pub use crate::execution_trace::{
+    ExecutionTrace, ExecutionTraceDetail, ExecutionTraceView, SourcePosition,
+    TRACE_INSTRUCTION_LIMIT, TracedFunction, TracedHostCall, TracedInstruction, TracedLocation,
+    TracedOutcome, TracedStack,
+};
 use crate::grammar_frontend::{
     self, FrontendForm, FrontendFormKind, FrontendParseArtifact, GrammarActivation,
     GrammarDiagnosticFact, GrammarEnvironmentSelection, GrammarFrontendRegistry,
@@ -31,8 +36,9 @@ use crate::incremental::{ArtifactEdge, ArtifactReport, QueryArtifact, QueryInval
 use crate::runtime as runtime_bridge;
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
 use crate::{ast, lower, sem, tape, typing};
-/// Execution trace event mask accepted by session run and call APIs.
-pub use execution_tape::trace::TraceMask;
+/// Upstream execution evidence carried by [`ExecutionTrace`]: recorded
+/// values, host and final outcomes, instruction outcomes and replay.
+pub use execution_tape::recording;
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
@@ -103,24 +109,12 @@ pub enum RuntimeMode {
     CompileOnly,
     /// Compile and run zero-argument `main` when possible.
     RunMain,
-    /// Compile and run zero-argument `main` with execution tracing enabled.
+    /// Compile and run zero-argument `main` while recording an execution
+    /// trace.
     RunMainTraced {
-        /// Events requested from `execution_tape`.
-        mask: TraceMask,
+        /// Evidence retained by the recording.
+        detail: ExecutionTraceDetail,
     },
-}
-
-/// Returns Interloko's default runtime trace mask.
-///
-/// The default captures run boundaries, call frames, and host calls while
-/// leaving per-instruction tracing off.
-#[must_use]
-pub fn execution_trace_mask(include_instructions: bool) -> TraceMask {
-    let mut mask = TraceMask::RUN | TraceMask::CALL | TraceMask::HOST;
-    if include_instructions {
-        mask |= TraceMask::INSTR;
-    }
-    mask
 }
 
 /// Result of running `main` through the session API.
@@ -290,7 +284,7 @@ impl fmt::Display for FunctionValueKind {
 pub struct FunctionCallOutcome {
     /// Scalar value returned by the function.
     pub value: FunctionValue,
-    /// Captured trace when a non-empty trace mask was requested.
+    /// Recorded trace when tracing was requested.
     pub trace: Option<ExecutionTrace>,
 }
 
@@ -446,115 +440,6 @@ impl fmt::Display for FunctionCallError {
             ),
         }
     }
-}
-
-/// Captured `execution_tape` trace for one runtime run.
-#[derive(Clone, Debug, Default)]
-pub struct ExecutionTrace {
-    /// Events in the order emitted by the VM.
-    pub events: Vec<ExecutionTraceEvent>,
-}
-
-/// One captured runtime trace event.
-#[derive(Clone, Debug)]
-pub enum ExecutionTraceEvent {
-    /// VM run started.
-    RunStart {
-        /// Entry function id.
-        entry: u32,
-        /// Number of arguments passed to the entry function.
-        arg_count: usize,
-    },
-    /// VM run ended.
-    RunEnd {
-        /// Runtime outcome.
-        outcome: ExecutionTraceOutcome,
-    },
-    /// A call-frame or host-call scope was entered.
-    ScopeEnter {
-        /// Scope kind.
-        scope: ExecutionTraceScope,
-        /// VM frame depth at the boundary.
-        depth: usize,
-        /// Current function id at the boundary.
-        func: u32,
-        /// Program counter at the boundary.
-        pc: u32,
-        /// Optional source span id carried by `execution_tape`.
-        span_id: Option<u64>,
-    },
-    /// A call-frame or host-call scope was exited.
-    ScopeExit {
-        /// Successful return or terminal trap observed at this boundary.
-        outcome: ExecutionTraceOutcome,
-        /// Scope kind.
-        scope: ExecutionTraceScope,
-        /// VM frame depth at the boundary.
-        depth: usize,
-        /// Current function id at the boundary.
-        func: u32,
-        /// Program counter at the boundary.
-        pc: u32,
-        /// Optional source span id carried by `execution_tape`.
-        span_id: Option<u64>,
-    },
-    /// One executed instruction.
-    Instruction {
-        /// Current function id.
-        func: u32,
-        /// Program counter before the instruction.
-        pc: u32,
-        /// Program counter after the instruction.
-        next_pc: u32,
-        /// Optional source span id carried by `execution_tape`.
-        span_id: Option<u64>,
-        /// Raw opcode byte.
-        opcode: u8,
-    },
-}
-
-/// Captured runtime trace outcome.
-#[derive(Clone, Debug)]
-pub enum ExecutionTraceOutcome {
-    /// Runtime completed successfully.
-    Ok,
-    /// The invocation or an admitted host delivery was cancelled before guest
-    /// completion.
-    Cancelled,
-    /// The scope was abandoned by a typed non-local return.
-    Unwound {
-        /// Invocation-scoped activation ordinal receiving the transferred
-        /// values; this is not a function id.
-        target: u64,
-    },
-    /// Runtime trapped.
-    Trap {
-        /// Owned trap details, boxed to keep ordinary trace events compact.
-        trap: alloc::boxed::Box<TrapInfo>,
-    },
-}
-
-/// Scope kind captured from `execution_tape`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExecutionTraceScope {
-    /// VM call frame.
-    CallFrame {
-        /// Function id.
-        func: u32,
-        /// Exact instruction that entered this frame; `None` for a root invocation.
-        caller: Option<TraceLocation>,
-    },
-    /// Host call.
-    HostCall {
-        /// Host signature id.
-        host_sig: u32,
-        /// Host symbol id.
-        symbol: u32,
-        /// Host symbol name, when resolvable from the program.
-        symbol_name: String,
-        /// Stable host signature hash carried by bytecode.
-        sig_hash: u64,
-    },
 }
 
 /// Stage that can be rendered as a text dump.
@@ -2042,8 +1927,8 @@ impl SessionArtifacts {
             .map(|site| explain_dispatch_site(self, &site))
     }
 
-    /// Calls a direct function with typed scalar arguments and captures an
-    /// optional execution trace.
+    /// Calls a direct function with typed scalar arguments and records an
+    /// execution trace when `trace` requests one.
     ///
     /// This calm embedding surface currently supports integer, boolean, and
     /// string arguments and exactly one result of one of those categories.
@@ -2052,7 +1937,7 @@ impl SessionArtifacts {
         &self,
         function_name: &str,
         arguments: &[FunctionValue],
-        trace_mask: TraceMask,
+        trace: Option<ExecutionTraceDetail>,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
         let tape = self
             .tape
@@ -2064,7 +1949,7 @@ impl SessionArtifacts {
             tape,
             function_name,
             arguments,
-            trace_mask,
+            trace,
             None,
         )
     }
@@ -2079,7 +1964,7 @@ impl SessionArtifacts {
         &self,
         function_name: &str,
         arguments: &[FunctionValue],
-        trace_mask: TraceMask,
+        trace: Option<ExecutionTraceDetail>,
         handler: &mut dyn HostFunctionHandler,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
         let tape = self
@@ -2092,17 +1977,32 @@ impl SessionArtifacts {
             tape,
             function_name,
             arguments,
-            trace_mask,
+            trace,
             Some(handler),
         )
     }
 
-    /// Dumps the captured runtime trace, when present.
+    /// Dumps the recorded runtime trace of `main`, when present.
     #[must_use]
     pub fn dump_execution_trace(&self) -> String {
         self.runtime_trace.as_ref().map_or_else(
             || "execution trace unavailable: traced execution was not requested\n".into(),
-            dump_execution_trace,
+            |trace| self.execution_trace_view(trace).render(),
+        )
+    }
+
+    /// Reads `trace` through these artifacts, resolving tape functions to
+    /// Interloko definitions and instruction spans to source positions.
+    ///
+    /// Meaning is attached only when these artifacts emitted the exact
+    /// program the trace recorded; otherwise the view reports raw ids.
+    #[must_use]
+    pub fn execution_trace_view<'a>(&'a self, trace: &'a ExecutionTrace) -> ExecutionTraceView<'a> {
+        ExecutionTraceView::new(
+            trace,
+            self.lowered.as_ref(),
+            self.tape.as_ref(),
+            &self.source.source,
         )
     }
 
@@ -3344,11 +3244,15 @@ fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> Session
             }),
             None,
         ),
-        RuntimeMode::RunMainTraced { mask } => {
+        RuntimeMode::RunMainTraced { detail } => {
             let ((result, trace), elapsed_nanos) = measure_elapsed(|| {
                 previous.tape.as_ref().map_or((None, None), |tape| {
-                    let (result, trace) =
-                        run_main_with_trace(&previous.sem, &previous.host_registry, tape, mask);
+                    let (result, trace) = run_main_with_trace(
+                        &previous.sem,
+                        &previous.host_registry,
+                        tape,
+                        Some(detail),
+                    );
                     (Some(result), trace)
                 })
             });
@@ -5049,8 +4953,8 @@ pub(crate) fn compile_file_with_registries(
             tape.as_ref().map(|tape| run_main(&sem, registry, tape)),
             None,
         ),
-        RuntimeMode::RunMainTraced { mask } => tape.as_ref().map_or((None, None), |tape| {
-            let (result, trace) = run_main_with_trace(&sem, registry, tape, mask);
+        RuntimeMode::RunMainTraced { detail } => tape.as_ref().map_or((None, None), |tape| {
+            let (result, trace) = run_main_with_trace(&sem, registry, tape, Some(detail));
             (Some(result), trace)
         }),
     });
@@ -5098,16 +5002,16 @@ fn run_main(
     host_registry: &sem::HostMetaRegistry,
     tape: &tape::TapeModule,
 ) -> RuntimeResult {
-    run_main_with_trace(module, host_registry, tape, TraceMask::NONE).0
+    run_main_with_trace(module, host_registry, tape, None).0
 }
 
 fn run_main_with_trace(
     module: &sem::Module,
     host_registry: &sem::HostMetaRegistry,
     tape: &tape::TapeModule,
-    trace_mask: TraceMask,
+    trace: Option<ExecutionTraceDetail>,
 ) -> (RuntimeResult, Option<ExecutionTrace>) {
-    match call_function(module, host_registry, tape, "main", &[], trace_mask, None) {
+    match call_function(module, host_registry, tape, "main", &[], trace, None) {
         Ok(outcome) => (RuntimeResult::Returned(outcome.value), outcome.trace),
         Err(error) => runtime_result_for_main_error(module, error),
     }
@@ -5155,7 +5059,7 @@ fn call_function<'a>(
     tape: &tape::TapeModule,
     function_name: &str,
     arguments: &[FunctionValue],
-    trace_mask: TraceMask,
+    trace: Option<ExecutionTraceDetail>,
     handler: Option<&'a mut dyn HostFunctionHandler>,
 ) -> Result<FunctionCallOutcome, FunctionCallError> {
     let function = module
@@ -5214,21 +5118,22 @@ fn call_function<'a>(
     }
 
     let mut vm = Vm::new(host.clone(), Limits::default());
-    let mut trace = (trace_mask != TraceMask::NONE).then(|| ExecutionTraceSink::new(trace_mask));
-    let sink = trace.as_mut().map(|trace| trace as &mut dyn TraceSink);
-    let output = match vm.run(&tape.program, entry, &runtime_arguments, trace_mask, sink) {
+    let mut capture = trace.map(|detail| TraceCapture::new(&tape.program, detail));
+    let mask = capture.as_ref().map_or(TraceMask::NONE, TraceCapture::mask);
+    let sink = capture.as_mut().map(TraceCapture::sink);
+    let output = match vm.run(&tape.program, entry, &runtime_arguments, mask, sink) {
         Ok(output) => output,
         Err(trap) => {
             if let Some((name, failure)) = host.failure() {
                 return Err(FunctionCallError::HostFunctionFailed {
                     name,
                     failure,
-                    trace: trace.map(ExecutionTraceSink::finish),
+                    trace: capture.map(TraceCapture::finish),
                 });
             }
             return Err(FunctionCallError::Trap {
                 trap: alloc::boxed::Box::new(trap),
-                trace: trace.map(ExecutionTraceSink::finish),
+                trace: capture.map(TraceCapture::finish),
             });
         }
     };
@@ -5254,7 +5159,7 @@ fn call_function<'a>(
 
     Ok(FunctionCallOutcome {
         value,
-        trace: trace.map(ExecutionTraceSink::finish),
+        trace: capture.map(TraceCapture::finish),
     })
 }
 
@@ -5437,229 +5342,6 @@ const fn host_value_kind_label(kind: sem::HostValueKind) -> &'static str {
         sem::HostValueKind::Boolean => "boolean",
         sem::HostValueKind::String => "string",
     }
-}
-
-#[derive(Clone, Debug)]
-struct ExecutionTraceSink {
-    mask: TraceMask,
-    trace: ExecutionTrace,
-}
-
-impl ExecutionTraceSink {
-    fn new(mask: TraceMask) -> Self {
-        Self {
-            mask,
-            trace: ExecutionTrace::default(),
-        }
-    }
-
-    fn finish(self) -> ExecutionTrace {
-        self.trace
-    }
-}
-
-impl TraceSink for ExecutionTraceSink {
-    fn mask(&self) -> TraceMask {
-        self.mask
-    }
-
-    fn run_start(
-        &mut self,
-        _program: &Program,
-        entry: execution_tape::value::FuncId,
-        arg_count: usize,
-    ) {
-        self.trace.events.push(ExecutionTraceEvent::RunStart {
-            entry: entry.0,
-            arg_count,
-        });
-    }
-
-    fn instr(
-        &mut self,
-        _program: &Program,
-        func: execution_tape::value::FuncId,
-        pc: u32,
-        next_pc: u32,
-        span_id: Option<u64>,
-        opcode: u8,
-    ) {
-        self.trace.events.push(ExecutionTraceEvent::Instruction {
-            func: func.0,
-            pc,
-            next_pc,
-            span_id,
-            opcode,
-        });
-    }
-
-    fn scope_enter(
-        &mut self,
-        program: &Program,
-        kind: ScopeKind,
-        depth: usize,
-        func: execution_tape::value::FuncId,
-        pc: u32,
-        span_id: Option<u64>,
-    ) {
-        self.trace.events.push(ExecutionTraceEvent::ScopeEnter {
-            scope: trace_scope(program, kind),
-            depth,
-            func: func.0,
-            pc,
-            span_id,
-        });
-    }
-
-    fn scope_exit(
-        &mut self,
-        program: &Program,
-        kind: ScopeKind,
-        depth: usize,
-        func: execution_tape::value::FuncId,
-        pc: u32,
-        span_id: Option<u64>,
-        outcome: TraceOutcome<'_>,
-    ) {
-        self.trace.events.push(ExecutionTraceEvent::ScopeExit {
-            outcome: owned_trace_outcome(outcome),
-            scope: trace_scope(program, kind),
-            depth,
-            func: func.0,
-            pc,
-            span_id,
-        });
-    }
-
-    fn run_end(&mut self, _program: &Program, outcome: TraceOutcome<'_>) {
-        let outcome = owned_trace_outcome(outcome);
-        self.trace
-            .events
-            .push(ExecutionTraceEvent::RunEnd { outcome });
-    }
-}
-
-fn owned_trace_outcome(outcome: TraceOutcome<'_>) -> ExecutionTraceOutcome {
-    match outcome {
-        TraceOutcome::Ok => ExecutionTraceOutcome::Ok,
-        TraceOutcome::Cancelled => ExecutionTraceOutcome::Cancelled,
-        TraceOutcome::Unwound { target } => ExecutionTraceOutcome::Unwound { target },
-        TraceOutcome::Trap(trap) => ExecutionTraceOutcome::Trap {
-            trap: alloc::boxed::Box::new(trap.clone()),
-        },
-    }
-}
-
-fn trace_scope(program: &Program, kind: ScopeKind) -> ExecutionTraceScope {
-    match kind {
-        ScopeKind::CallFrame { func, caller } => ExecutionTraceScope::CallFrame {
-            func: func.0,
-            caller,
-        },
-        ScopeKind::HostCall {
-            host_sig,
-            symbol,
-            sig_hash,
-        } => ExecutionTraceScope::HostCall {
-            host_sig: host_sig.0,
-            symbol: symbol.index(),
-            symbol_name: program
-                .symbol_str(symbol)
-                .unwrap_or("<invalid-symbol>")
-                .to_string(),
-            sig_hash: sig_hash.0,
-        },
-    }
-}
-
-fn dump_execution_trace(trace: &ExecutionTrace) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "execution trace:");
-    if trace.events.is_empty() {
-        out.push_str("  none\n");
-        return out;
-    }
-    for (index, event) in trace.events.iter().enumerate() {
-        let _ = writeln!(out, "  {index:04} {}", execution_trace_event_label(event));
-    }
-    out
-}
-
-fn execution_trace_event_label(event: &ExecutionTraceEvent) -> String {
-    match event {
-        ExecutionTraceEvent::RunStart { entry, arg_count } => {
-            format!("run-start entry=f{entry} args={arg_count}")
-        }
-        ExecutionTraceEvent::RunEnd { outcome } => match outcome {
-            ExecutionTraceOutcome::Ok => "run-end ok".into(),
-            ExecutionTraceOutcome::Cancelled => "run-end cancelled".into(),
-            ExecutionTraceOutcome::Unwound { target } => {
-                format!("run-end unwound to activation #{target}")
-            }
-            ExecutionTraceOutcome::Trap { trap } => format!("run-end trap {trap}"),
-        },
-        ExecutionTraceEvent::ScopeEnter {
-            scope,
-            depth,
-            func,
-            pc,
-            span_id,
-        } => format!(
-            "enter {} depth={depth} func=f{func} pc={pc}{}",
-            trace_scope_label(scope),
-            span_label(*span_id)
-        ),
-        ExecutionTraceEvent::ScopeExit {
-            scope,
-            outcome,
-            depth,
-            func,
-            pc,
-            span_id,
-        } => format!(
-            "exit {} depth={depth} func=f{func} pc={pc}{} outcome={}",
-            trace_scope_label(scope),
-            span_label(*span_id),
-            match outcome {
-                ExecutionTraceOutcome::Ok => "ok".into(),
-                ExecutionTraceOutcome::Cancelled => "cancelled".into(),
-                ExecutionTraceOutcome::Unwound { target } =>
-                    format!("unwound to activation #{target}"),
-                ExecutionTraceOutcome::Trap { trap } => format!("trap {trap}"),
-            }
-        ),
-        ExecutionTraceEvent::Instruction {
-            func,
-            pc,
-            next_pc,
-            span_id,
-            opcode,
-        } => format!(
-            "instr func=f{func} pc={pc}->{next_pc} opcode=0x{opcode:02x}{}",
-            span_label(*span_id)
-        ),
-    }
-}
-
-fn trace_scope_label(scope: &ExecutionTraceScope) -> String {
-    match scope {
-        ExecutionTraceScope::CallFrame { func, caller } => match caller {
-            Some(caller) => format!("call-frame f{func} from f{}:{}", caller.func.0, caller.pc),
-            None => format!("call-frame f{func} root"),
-        },
-        ExecutionTraceScope::HostCall {
-            host_sig,
-            symbol,
-            symbol_name,
-            sig_hash,
-        } => {
-            format!("host-call {symbol_name} symbol={symbol} sig=h{host_sig} hash={sig_hash:016x}")
-        }
-    }
-}
-
-fn span_label(span_id: Option<u64>) -> String {
-    span_id.map_or_else(String::new, |span_id| format!(" span={span_id}"))
 }
 
 fn dump_syntax(tree: &SyntaxTree) -> String {
@@ -12469,7 +12151,7 @@ mod tests {
         name: &str,
     ) -> Result<FunctionValue, FunctionCallError> {
         artifacts
-            .call_function(name, &[], TraceMask::NONE)
+            .call_function(name, &[], None)
             .map(|outcome| outcome.value)
     }
 
@@ -12534,41 +12216,33 @@ mod tests {
     }
 
     #[test]
-    fn execution_trace_preserves_cancelled_and_unwound_outcomes() {
-        assert!(matches!(
-            owned_trace_outcome(TraceOutcome::Cancelled),
-            ExecutionTraceOutcome::Cancelled
-        ));
-        let unwound = owned_trace_outcome(TraceOutcome::Unwound { target: 4 });
-        assert!(matches!(
-            unwound,
-            ExecutionTraceOutcome::Unwound { target: 4 }
-        ));
+    fn execution_trace_view_only_resolves_the_recorded_program() {
+        let traced = CompilerSession::compile_source(
+            "area.loko",
+            AREA,
+            RuntimeMode::RunMainTraced {
+                detail: ExecutionTraceDetail::Boundaries,
+            },
+        );
+        let trace = traced.runtime_trace.as_ref().expect("trace was requested");
+        let shared = artifacts_for_mode(
+            &traced,
+            RuntimeMode::RunMainTraced {
+                detail: ExecutionTraceDetail::Boundaries,
+            },
+        );
+        assert!(shared.execution_trace_view(trace).is_resolved());
 
-        let trace = ExecutionTrace {
-            events: alloc::vec![
-                ExecutionTraceEvent::ScopeExit {
-                    outcome: unwound.clone(),
-                    scope: ExecutionTraceScope::CallFrame {
-                        func: 1,
-                        caller: None,
-                    },
-                    depth: 1,
-                    func: 1,
-                    pc: 2,
-                    span_id: None,
-                },
-                ExecutionTraceEvent::RunEnd { outcome: unwound },
-                ExecutionTraceEvent::RunEnd {
-                    outcome: ExecutionTraceOutcome::Cancelled,
-                },
-            ],
-        };
-        let dump = dump_execution_trace(&trace);
-
-        assert!(dump.contains("outcome=unwound to activation #4"));
-        assert!(dump.contains("run-end unwound to activation #4"));
-        assert!(dump.contains("run-end cancelled"));
+        let recompiled = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::RunMain);
+        let foreign = recompiled.execution_trace_view(trace);
+        assert!(!foreign.is_resolved());
+        let entry = foreign.entry().expect("entry was captured");
+        assert!(entry.name().is_none());
+        assert!(
+            foreign
+                .render()
+                .contains(&format!("invocation: f{}", entry.id().0))
+        );
     }
 
     #[test]
@@ -13393,7 +13067,7 @@ mod tests {
             "area.loko",
             AREA,
             RuntimeMode::RunMainTraced {
-                mask: TraceMask::RUN | TraceMask::CALL | TraceMask::HOST,
+                detail: ExecutionTraceDetail::Boundaries,
             },
         );
         assert!(matches!(
@@ -13404,41 +13078,47 @@ mod tests {
             .runtime_trace
             .as_ref()
             .expect("trace should be captured");
-        assert!(
-            trace
-                .events
-                .iter()
-                .any(|event| matches!(event, ExecutionTraceEvent::RunStart { .. }))
+        assert_eq!(trace.detail(), ExecutionTraceDetail::Boundaries);
+        assert_eq!(trace.recording().status(), Ok(()));
+        assert!(trace.recording().instruction_status().is_none());
+        trace
+            .recording()
+            .replay()
+            .expect("a complete recording replays without the live host");
+
+        let view = artifacts.execution_trace_view(trace);
+        assert!(view.is_resolved());
+        let entry = view.entry().expect("entry should be captured");
+        assert_eq!(entry.name(), Some("main"));
+        assert_eq!(
+            entry.object_id(),
+            Some(EnvironmentObjectId::new("function:f0"))
         );
-        assert!(
-            trace
-                .events
-                .iter()
-                .any(|event| matches!(event, ExecutionTraceEvent::RunEnd { .. }))
-        );
-        assert!(trace.events.iter().any(|event| {
-            matches!(
-                event,
-                ExecutionTraceEvent::ScopeEnter {
-                    scope: ExecutionTraceScope::CallFrame { .. },
-                    ..
-                }
-            )
-        }));
-        assert!(trace.events.iter().any(|event| {
-            matches!(
-                event,
-                ExecutionTraceEvent::ScopeEnter {
-                    scope: ExecutionTraceScope::HostCall { .. },
-                    ..
-                }
-            )
-        }));
+        assert!(view.activation_count() >= 3);
+        let slot_read = view
+            .host_calls()
+            .find(|call| call.symbol == Some("interloko.slot_get"))
+            .expect("the method reads a slot through the host");
+        assert!(matches!(
+            slot_read.location.function.kind(),
+            Some(lower::FunctionKind::Method(_))
+        ));
+        let source = slot_read.location.source.expect("slot read has a span");
+        assert_eq!(&AREA[source.offset..source.offset + 1], "c");
+        assert!(slot_read.stack.depth() >= Some(3));
+        let outcome = view.outcome().expect("outcome should be captured");
+        assert!(matches!(
+            outcome.result,
+            recording::Outcome::Returned([recording::RecordedValue::I64(100)])
+        ));
 
         let dump = artifacts.dump_execution_trace();
-        assert!(dump.contains("execution trace:"));
-        assert!(dump.contains("run-start"));
-        assert!(dump.contains("host-call"));
+        assert!(dump.starts_with("execution trace: boundaries\n  capture: complete\n"));
+        assert!(dump.contains("invocation: main [function:f0] args=()"));
+        assert!(dump.contains("host-call interloko.slot_get"));
+        assert!(dump.contains(" from main@"));
+        assert!(dump.contains("outcome: returned (100) at main@"));
+        assert!(!dump.contains("instructions:"));
 
         let plain = CompilerSession::compile_source("area.loko", AREA, RuntimeMode::RunMain);
         assert!(plain.runtime_trace.is_none());
@@ -13450,7 +13130,7 @@ mod tests {
     }
 
     #[test]
-    fn traced_nested_calls_keep_exact_callers_and_scope_completion() {
+    fn traced_nested_calls_keep_exact_callers_and_outcome_stacks() {
         for should_trap in [false, true] {
             let expression = if should_trap { "helper(x)" } else { "x + 1" };
             let source = format!(
@@ -13460,7 +13140,7 @@ mod tests {
                 "nested.loko",
                 &source,
                 RuntimeMode::RunMainTraced {
-                    mask: execution_trace_mask(false),
+                    detail: ExecutionTraceDetail::Instructions,
                 },
             );
             assert!(
@@ -13480,64 +13160,66 @@ mod tests {
                 ));
             }
             let trace = artifacts.runtime_trace.as_ref().unwrap();
+            let view = artifacts.execution_trace_view(trace);
             let tape = &artifacts.tape.as_ref().unwrap().program;
-            let mut scopes = Vec::new();
+            let is_call_site = |location: TracedLocation<'_>| {
+                execution_tape::disasm::disassemble_function(tape.program(), location.function.id())
+                    .unwrap()
+                    .instruction(location.pc)
+                    .unwrap()
+                    .opcode()
+                    .is_call_like()
+            };
+            assert_eq!(
+                trace.recording().instruction_status(),
+                Some(recording::InstructionStatus::Complete)
+            );
+
             let mut nested = 0;
-            let mut exits = 0;
-            for event in &trace.events {
-                match event {
-                    ExecutionTraceEvent::ScopeEnter { scope, .. } => {
-                        if let ExecutionTraceScope::CallFrame {
-                            caller: Some(caller),
-                            ..
-                        } = scope
-                        {
-                            let source = execution_tape::disasm::disassemble_function(
-                                tape.program(),
-                                caller.func,
-                            )
-                            .unwrap();
-                            assert!(
-                                source
-                                    .instruction(caller.pc)
-                                    .unwrap()
-                                    .opcode()
-                                    .is_call_like()
-                            );
-                            nested += 1;
-                        }
-                        scopes.push(scope.clone());
-                    }
-                    ExecutionTraceEvent::ScopeExit { scope, outcome, .. } => {
-                        assert_eq!(scopes.pop().as_ref(), Some(scope));
-                        exits += 1;
-                        match outcome {
-                            ExecutionTraceOutcome::Ok => assert!(!should_trap),
-                            ExecutionTraceOutcome::Cancelled
-                            | ExecutionTraceOutcome::Unwound { .. } => {
-                                panic!("unexpected scope outcome {outcome:?}")
-                            }
-                            ExecutionTraceOutcome::Trap { trap } => {
-                                assert!(should_trap);
-                                assert!(matches!(
-                                    trap.trap,
-                                    execution_tape::vm::Trap::CallDepthExceeded
-                                ));
-                            }
-                        }
-                    }
-                    _ => {}
+            for step in view.instructions() {
+                let depth = step.stack.depth().expect("call frames are recorded");
+                let callers: Vec<_> = step.stack.locations().skip(1).collect();
+                assert_eq!(callers.len(), depth - 1);
+                for caller in callers {
+                    assert!(is_call_site(caller));
+                    nested += 1;
+                }
+                if depth > 1 {
+                    assert_eq!(step.location.function.name(), Some("helper"));
                 }
             }
-            assert!(scopes.is_empty());
             assert!(nested > 0);
-            assert!(exits >= 2);
-            let dump = artifacts.dump_execution_trace();
-            assert!(dump.contains(" from f"));
-            assert!(dump.contains(if should_trap {
-                "outcome=trap"
+
+            let outcome = view.outcome().expect("outcome should be captured");
+            let stack: Vec<_> = outcome.stack.locations().collect();
+            if should_trap {
+                let recording::Outcome::Trapped(trap) = outcome.result else {
+                    panic!("expected a trap, found {:?}", outcome.result);
+                };
+                assert!(matches!(
+                    trap.trap,
+                    execution_tape::vm::Trap::CallDepthExceeded
+                ));
+                // The trap stack is pinned before unwinding: every activation
+                // is still present, each suspended at its call instruction.
+                assert_eq!(stack.len(), view.activation_count());
+                assert!(stack.iter().skip(1).all(|caller| is_call_site(*caller)));
+                assert_eq!(stack.last().unwrap().function.name(), Some("main"));
             } else {
-                "outcome=ok"
+                assert!(matches!(
+                    outcome.result,
+                    recording::Outcome::Returned([recording::RecordedValue::I64(42)])
+                ));
+                assert_eq!(view.activation_count(), 2);
+                assert_eq!(stack.len(), 1);
+            }
+            let dump = artifacts.dump_execution_trace();
+            assert!(dump.contains(" call -> helper@0 "));
+            assert!(dump.contains(" instr helper@0 (2:") && dump.contains(") depth=2 "));
+            assert!(dump.contains(if should_trap {
+                "outcome: trapped: call depth limit exceeded at helper@"
+            } else {
+                "outcome: returned (42) at main@"
             }));
         }
     }
@@ -13547,15 +13229,21 @@ mod tests {
         let artifacts =
             CompilerSession::compile_source("area.loko", AREA, RuntimeMode::CompileOnly);
         let traced = artifacts
-            .call_function("main", &[], TraceMask::RUN | TraceMask::INSTR)
+            .call_function("main", &[], Some(ExecutionTraceDetail::Instructions))
             .expect("main should run");
         assert_eq!(traced.value, FunctionValue::Integer(100));
         let trace = traced.trace.expect("trace should be captured");
+        let view = artifacts.execution_trace_view(&trace);
+        assert!(view.instructions().len() > 0);
         assert!(
-            trace
-                .events
-                .iter()
-                .any(|event| matches!(event, ExecutionTraceEvent::Instruction { .. }))
+            view.instructions()
+                .any(|step| step.mnemonic() == "call" && step.next.is_some())
+        );
+        assert!(
+            artifacts
+                .execution_trace_view(&trace)
+                .render()
+                .contains(" instr main@0 ")
         );
     }
 
@@ -14030,32 +13718,21 @@ mod tests {
             .call_function(
                 "dispatch",
                 &[FunctionValue::String("look".into())],
-                TraceMask::RUN | TraceMask::CALL | TraceMask::HOST,
+                Some(ExecutionTraceDetail::Boundaries),
             )
             .expect("string command should execute");
         assert_eq!(look.value, FunctionValue::String("a glasshouse".into()));
         let trace = look.trace.expect("requested trace should be present");
-        assert!(
-            trace.events.iter().any(|event| {
-                matches!(event, ExecutionTraceEvent::RunStart { arg_count: 1, .. })
-            })
+        let view = artifacts.execution_trace_view(&trace);
+        assert_eq!(
+            view.entry().and_then(|entry| entry.name()),
+            Some("dispatch")
         );
-        assert!(trace.events.iter().any(|event| {
-            matches!(
-                event,
-                ExecutionTraceEvent::ScopeEnter {
-                    scope: ExecutionTraceScope::CallFrame { .. },
-                    ..
-                }
-            )
-        }));
+        assert_eq!(view.arguments().len(), 1);
+        assert!(view.activation_count() >= 1);
 
         let unknown = artifacts
-            .call_function(
-                "dispatch",
-                &[FunctionValue::String("dance".into())],
-                TraceMask::NONE,
-            )
+            .call_function("dispatch", &[FunctionValue::String("dance".into())], None)
             .expect("fallback should execute");
         assert_eq!(
             unknown.value,
@@ -14064,7 +13741,7 @@ mod tests {
         assert!(unknown.trace.is_none());
 
         assert!(matches!(
-            artifacts.call_function("dispatch", &[FunctionValue::Integer(1)], TraceMask::NONE,),
+            artifacts.call_function("dispatch", &[FunctionValue::Integer(1)], None),
             Err(FunctionCallError::ArgumentTypeMismatch {
                 index: 0,
                 actual: FunctionValueKind::Integer,
@@ -14082,11 +13759,7 @@ mod tests {
         );
         assert_eq!(artifacts.diagnostics, Vec::new());
         let convert = |value: f64| {
-            artifacts.call_function(
-                "to-integer",
-                &[FunctionValue::Float(value)],
-                TraceMask::NONE,
-            )
+            artifacts.call_function("to-integer", &[FunctionValue::Float(value)], None)
         };
 
         for (input, expected) in [(-0.0, 0), (3.0, 3), (-9.223372036854776e18, i64::MIN)] {
@@ -14156,7 +13829,7 @@ mod tests {
         assert_eq!(artifacts.diagnostics, Vec::new());
 
         let negative_zero = artifacts
-            .call_function("identity", &[FunctionValue::Float(-0.0)], TraceMask::NONE)
+            .call_function("identity", &[FunctionValue::Float(-0.0)], None)
             .expect("identity should run")
             .value;
         assert!(
@@ -14165,17 +13838,13 @@ mod tests {
         assert_eq!(negative_zero.to_string(), "-0.0");
         assert_eq!(negative_zero.kind(), FunctionValueKind::Float);
         let nan = artifacts
-            .call_function(
-                "identity",
-                &[FunctionValue::Float(f64::NAN)],
-                TraceMask::NONE,
-            )
+            .call_function("identity", &[FunctionValue::Float(f64::NAN)], None)
             .expect("identity should run")
             .value;
         assert_ne!(nan, nan, "float results use IEEE equality");
         assert_eq!(nan.to_string(), "nan");
         assert!(matches!(
-            artifacts.call_function("identity", &[FunctionValue::Integer(1)], TraceMask::NONE),
+            artifacts.call_function("identity", &[FunctionValue::Integer(1)], None),
             Err(FunctionCallError::ArgumentTypeMismatch {
                 actual: FunctionValueKind::Integer,
                 ..
@@ -14183,12 +13852,7 @@ mod tests {
         ));
 
         let celsius = artifacts
-            .call_function_with_host(
-                "body-temperature",
-                &[],
-                TraceMask::NONE,
-                &mut CelsiusHandler,
-            )
+            .call_function_with_host("body-temperature", &[], None, &mut CelsiusHandler)
             .expect("host call should run")
             .value;
         assert_eq!(celsius, FunctionValue::Float((98.6 - 32.0) * 5.0 / 9.0));
@@ -14264,36 +13928,48 @@ mod tests {
             .call_function_with_host(
                 "dispatch",
                 &[FunctionValue::String("describe".into())],
-                TraceMask::HOST,
+                Some(ExecutionTraceDetail::Boundaries),
                 &mut handler,
             )
             .expect("declared host function should execute");
         assert_eq!(outcome.value, FunctionValue::String("accepted".into()));
         assert_eq!(handler.descriptions, ["a luminous glasshouse"]);
-        assert!(
-            outcome
-                .trace
-                .expect("trace was requested")
-                .events
-                .iter()
-                .any(|event| matches!(
-                    event,
-                    ExecutionTraceEvent::ScopeEnter {
-                        scope: ExecutionTraceScope::HostCall { symbol_name, .. },
-                        ..
-                    } if symbol_name == "propose-description"
-                ))
-        );
-
+        let trace = outcome.trace.expect("trace was requested");
+        let proposal = artifacts
+            .execution_trace_view(&trace)
+            .host_calls()
+            .find(|call| call.symbol == Some("propose-description"))
+            .expect("the declared host call is recorded");
         assert!(matches!(
-            artifacts.call_function(
-                "dispatch",
-                &[FunctionValue::String("describe".into())],
-                TraceMask::NONE,
-            ),
-            Err(FunctionCallError::HostFunctionFailed { name, failure, .. })
-                if name == "propose-description"
-                    && failure.message() == "no host-function handler was provided"
+            proposal.outcome,
+            recording::HostOutcome::Returned {
+                values: [recording::RecordedValue::Bool(true)],
+                ..
+            }
+        ));
+        assert_eq!(proposal.location.function.name(), Some("dispatch"));
+
+        let Err(FunctionCallError::HostFunctionFailed {
+            name,
+            failure,
+            trace: Some(trace),
+        }) = artifacts.call_function(
+            "dispatch",
+            &[FunctionValue::String("describe".into())],
+            Some(ExecutionTraceDetail::Boundaries),
+        )
+        else {
+            panic!("an unhandled host function should fail with a trace");
+        };
+        assert_eq!(name, "propose-description");
+        assert_eq!(failure.message(), "no host-function handler was provided");
+        let view = artifacts.execution_trace_view(&trace);
+        let failed = view.host_calls().last().expect("failed call is recorded");
+        assert_eq!(failed.symbol, Some("propose-description"));
+        assert!(matches!(failed.outcome, recording::HostOutcome::Failed(_)));
+        assert!(matches!(
+            view.outcome().map(|outcome| outcome.result),
+            Some(recording::Outcome::Trapped(_))
         ));
 
         let conflict = CompilerSession::compile_source_with_host_registry(

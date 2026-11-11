@@ -15,7 +15,7 @@ use interloko_compiler::sem;
 use interloko_compiler::session::{
     DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, EnvironmentOrigin,
     FunctionValue, IncrementalCompilerSession, RuntimeMode, SessionArtifacts, TopLevelFormKind,
-    TopLevelFormSpan, TraceMask,
+    TopLevelFormSpan,
 };
 use interloko_compiler::syntax::{self, TokenKind};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -410,7 +410,7 @@ impl Repl {
             return Ok(());
         };
         let artifacts = self.ensure_artifacts(stderr)?;
-        match artifacts.call_function(name, &[], TraceMask::NONE) {
+        match artifacts.call_function(name, &[], None) {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
             Err(error) => writeln!(
                 stderr,
@@ -559,7 +559,7 @@ impl Repl {
             return Ok(());
         }
 
-        match artifacts.call_function(SCRATCH_FUNCTION, &[], TraceMask::NONE) {
+        match artifacts.call_function(SCRATCH_FUNCTION, &[], None) {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
             Err(error) => writeln!(
                 stderr,
@@ -1201,7 +1201,7 @@ impl Repl {
             )?;
             return Ok(());
         };
-        match artifacts.call_function(name, &[], TraceMask::NONE) {
+        match artifacts.call_function(name, &[], None) {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
             Err(error) => writeln!(
                 stderr,

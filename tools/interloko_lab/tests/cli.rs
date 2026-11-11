@@ -206,22 +206,25 @@ fn run_and_trace_commands_expose_execution_trace() {
     let path = file.to_str().expect("fixture path should be utf8");
 
     let run = run_lab(&["run", "--trace", path]);
-    assert!(run.starts_with("100\nexecution trace:"));
-    assert!(run.contains("run-start"));
-    assert!(run.contains("run-end ok"));
-    assert!(run.contains("call-frame"));
-    assert!(run.contains(" from f"));
-    assert!(run.contains("outcome=ok"));
-    assert!(run.contains("host-call"));
+    assert!(run.starts_with("100\nexecution trace: boundaries\n"));
+    assert!(run.contains("capture: complete"));
+    assert!(run.contains("invocation: main [function:f0]"));
+    assert!(run.contains("activations: 3 entered"));
+    assert!(run.contains("host-call interloko.slot_get"));
+    assert!(run.contains("at area#method0@"));
+    assert!(run.contains(" from main@"));
+    assert!(run.contains("outcome: returned (100) at main@"));
 
     let trace = run_lab(&["trace", path]);
-    assert!(trace.starts_with("execution trace:"));
-    assert!(trace.contains("run-start"));
+    assert!(trace.starts_with("execution trace: boundaries\n"));
     assert!(trace.contains("host-call"));
-    assert!(!trace.contains("instr func="));
+    assert!(!trace.contains(" instr "));
 
     let instruction_trace = run_lab(&["trace", "--instructions", path]);
-    assert!(instruction_trace.contains("instr func="));
+    assert!(instruction_trace.starts_with("execution trace: instructions\n"));
+    assert!(instruction_trace.contains("instructions: "));
+    assert!(instruction_trace.contains(" instr main@0 "));
+    assert!(instruction_trace.contains(" call -> area#dispatch@0"));
 }
 
 #[test]
@@ -641,8 +644,10 @@ fn report_handles_plain_loko_sources() {
         .split("</ol>")
         .next()
         .unwrap();
-    assert!(timeline.contains(" from f"));
-    assert!(timeline.contains(" · returned</strong>"));
+    assert!(timeline.contains("<strong>run starts at main</strong>"));
+    assert!(timeline.contains("<strong>host interloko.slot_get · returned</strong>"));
+    assert!(timeline.contains(" · from area#dispatch@"));
+    assert!(timeline.contains("<strong>run returns</strong>"));
 }
 
 #[test]
