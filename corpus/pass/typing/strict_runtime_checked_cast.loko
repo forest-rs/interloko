@@ -1,0 +1,24 @@
+// typing: strict
+// expect: run 3
+// expect: diagnostics 1
+// expect: diagnostic code typing.cast-runtime-checked
+// expect: dump typing contains config=strict
+// expect: dump typing contains t0 cast checked rule=cast-narrowing
+
+// Under the strict preset, casts the runtime must check are reported as
+// warnings; the cast still runs and succeeds.
+
+define class <shape> (<object>)
+  slot sides :: <integer>, init-value: 0;
+end;
+
+define class <triangle> (<shape>)
+end;
+
+define function sides-of(s :: <shape>) => <integer>
+  as(<triangle>, s).sides + 3
+end;
+
+define function main()
+  sides-of(make(<triangle>))
+end;

@@ -12,6 +12,7 @@ use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
     CompilerSession, DumpStage, FunctionValue, IncrementalCompilerSession, RuntimeMode,
 };
+use interloko_compiler::typing::TypingConfig;
 use interloko_diagnostics::DiagnosticRenderer;
 
 type Result<T> = std::result::Result<T, CorpusError>;
@@ -97,6 +98,7 @@ fn dump_command(args: &[String]) -> Result<Outcome> {
     let grammar_environment =
         parse_grammar_environment(Path::new(&args[1]), &source, &grammar_registry)?;
     let mut session = CompilerSession::with_grammar_registry(grammar_registry);
+    session.set_typing_config(parse_typing_config(Path::new(&args[1]), &source)?);
     let source_file = session.add_source_with_grammar(&args[1], &source, grammar_environment);
     let artifacts = session
         .compile_with_host_registry(source_file, RuntimeMode::CompileOnly, &host_registry)
@@ -114,6 +116,7 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
     for path in paths {
         let source = read_to_string(&path)?;
         let (expectations, host_registry, grammar_environment) = parse_header(&path, &source)?;
+        let typing_config = parse_typing_config(&path, &source)?;
         let display_path = display_path(root, &path);
         cases.push(Case {
             display_path,
@@ -121,6 +124,7 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
             expectations,
             host_registry,
             grammar_environment,
+            typing_config,
         });
     }
     Ok(cases)
@@ -219,6 +223,34 @@ fn parse_grammar_environment(
         break;
     }
     Ok(selection)
+}
+
+fn parse_typing_config(path: &Path, source: &str) -> Result<TypingConfig> {
+    let mut config = TypingConfig::default();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// typing:") {
+                config = TypingConfig::preset(rest.trim()).ok_or_else(|| {
+                    invalid_header(
+                        path,
+                        index + 1,
+                        &format!(
+                            "typing must be one of {}",
+                            TypingConfig::PRESETS
+                                .iter()
+                                .map(|name| format!("`{name}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    )
+                })?;
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(config)
 }
 
 fn parse_grammar_selection(
@@ -479,6 +511,7 @@ fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::
     let grammar_registry = GrammarFrontendRegistry::builtin();
     if has_host_registry(&case.host_registry) {
         let mut session = CompilerSession::with_grammar_registry(grammar_registry);
+        session.set_typing_config(case.typing_config);
         let source_file = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
@@ -489,6 +522,7 @@ fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::
             .expect("source was just added")
     } else {
         let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
+        session.set_typing_config(case.typing_config);
         let source = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
@@ -584,6 +618,7 @@ struct Case {
     expectations: Vec<Expectation>,
     host_registry: HostMetaRegistry,
     grammar_environment: GrammarEnvironmentSelection,
+    typing_config: TypingConfig,
 }
 
 #[derive(Debug)]

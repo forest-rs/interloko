@@ -1,0 +1,25 @@
+// expect: run 7
+// expect: diagnostics 1
+// expect: diagnostic code typing.dispatch-no-applicable-method
+// expect: diagnostic contains no method of `area` can apply to exactly <shape>
+// expect: dump typing contains t1 dispatch refuted rule=dispatch-no-applicable-method
+// expect: dump eop contains object typing-config:session
+
+// The soft typing pass warns that the else branch always fails dispatch,
+// but the program still compiles and runs: the branch is never taken.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  7
+end;
+
+define function main()
+  if 1 < 2 then area(make(<circle>)) else area(make(<shape>)) end
+end;

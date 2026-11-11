@@ -1,0 +1,21 @@
+// expect: run 2
+// expect: diagnostics 0
+// expect: dump typing contains decisions=2 proved=2 checked=0 refuted=0
+// expect: dump typing contains rule=cast-upcast
+// expect: dump typing contains rule=dispatch-covered
+
+define class <shape> (<object>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define generic corners(s);
+
+define method corners(s :: <shape>)
+  2
+end;
+
+define function main()
+  corners(as(<shape>, make(<square>)))
+end;

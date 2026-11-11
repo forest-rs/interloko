@@ -27,6 +27,9 @@ Supported expectations:
   `all`.
 - `// host-class: <name> slot:<type>`: declare host-backed metadata for
   compile/dump corpus cases. This is a corpus runner header, not Loko syntax.
+- `// typing: soft|silent|strict`: select the soft typing preset used by the
+  session (default `soft`). Typing findings are advisory diagnostics and are
+  counted by `diagnostics N`.
 - `// grammar: base-loko|derived-host`: select the grammar environment used by
   the session. `derived-host` is a trusted fixture that extends the base grammar
   for MOP/trace inspection while delegating parsing to the base parser.
