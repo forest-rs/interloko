@@ -54,6 +54,14 @@ Start the REPL:
 cargo run -p interloko_repl
 ```
 
+Run the float calculator example, either over its built-in formulas or on an
+expression in the staged calculator grammar:
+
+```sh
+cargo run -p interloko_float_calculator_example
+cargo run -p interloko_float_calculator_example -- "(1.0 + sqrt(5.0)) / 2.0"
+```
+
 ## A Small Loko Program
 
 ```loko

@@ -1,0 +1,88 @@
+// A float calculator written in Loko.
+//
+// Base Loko supplies constants, an expression tree evaluated through generic
+// dispatch, and text formatting. The staged `calculator` grammar below adds
+// one-line formulas; it is also where the Rust driver puts expressions typed
+// on the command line.
+
+define constant pi :: <float> = 3.141592653589793;
+define constant e :: <float> = 2.718281828459045;
+
+/// An arithmetic expression tree node.
+define class <node> (<object>)
+end;
+
+define class <number-node> (<node>)
+  slot value :: <float>;
+end;
+
+define class <binary-node> (<node>)
+  slot operator :: <symbol>;
+  slot left :: <node>;
+  slot right :: <node>;
+end;
+
+define generic evaluate(node :: <node>) => <float>;
+
+define method evaluate(node :: <number-node>) => <float>
+  node.value
+end;
+
+define method evaluate(node :: <binary-node>) => <float>
+  let a = evaluate(node.left);
+  let b = evaluate(node.right);
+  if node.operator = #add then
+    a + b
+  else
+    if node.operator = #subtract then
+      a - b
+    else
+      if node.operator = #multiply then a * b else a / b end
+    end
+  end
+end;
+
+define function number(value :: <float>) => <node>
+  make(<number-node>, value: value)
+end;
+
+define function binary(operator :: <symbol>, left :: <node>, right :: <node>) => <node>
+  make(<binary-node>, operator: operator, left: left, right: right)
+end;
+
+/// Fahrenheit for 37 degrees Celsius, built as a tree: 37 * 9 / 5 + 32.
+define function body-temperature() => <float>
+  evaluate(
+    binary(#add,
+           binary(#divide, binary(#multiply, number(37.0), number(9.0)), number(5.0)),
+           number(32.0)))
+end;
+
+/// Renders `label = value` for display.
+define function describe(label :: <string>, value :: <float>) => <string>
+  concatenate(concatenate(label, " = "), float-to-string(value))
+end;
+
+/// A one-line report built in Loko from tree and formula results.
+define function summary() => <string>
+  concatenate(
+    describe("body temperature (F)", body-temperature()),
+    concatenate(", ", describe("golden ratio", golden-ratio())))
+end;
+
+/// Integer inputs convert explicitly; the result converts back only if exact.
+define function whole-days(hours :: <integer>) => <integer>
+  as(<integer>, floor(as(<float>, hours) / 24.0))
+end;
+
+// grammar-activate: calculator
+
+// staged-loko: calculator
+hypotenuse = hypot(3.0, 4.0)
+golden-ratio = (1.0 + sqrt(5.0)) / 2.0
+circle-area = pi * pow(2.5, 2.0)
+monthly-growth = 1000.0 * pow(1.0 + 0.05 / 12.0, 12.0 * 10.0)
+half-life = log(2.0) / 0.1
+overflow = -1.0 / 0.0
+undefined = sqrt(-1.0)
+// end-staged-loko
