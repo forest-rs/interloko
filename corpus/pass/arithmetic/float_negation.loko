@@ -1,0 +1,10 @@
+// expect: run -0.0
+// expect: diagnostics 0
+// expect: dump sem contains negate float
+// expect: dump lowered contains f64.neg
+
+// Negation flips the sign bit; `0.0 - z` would give +0.0 here.
+define function main() => <float>
+  let z = 0.0;
+  -z
+end;

@@ -104,6 +104,8 @@ pub enum TokenKind {
     Minus,
     /// `*`.
     Star,
+    /// `/` (a lone slash; `//` starts a comment).
+    Slash,
     /// `=`.
     Equal,
     /// `=>`.
@@ -153,6 +155,7 @@ impl TokenKind {
             Self::Plus
             | Self::Minus
             | Self::Star
+            | Self::Slash
             | Self::Equal
             | Self::Less
             | Self::LessEqual
@@ -642,6 +645,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Whitespace => 24,
         TokenKind::Comment => 25,
         TokenKind::DocComment => 46,
+        TokenKind::Slash => 47,
         TokenKind::Error => 26,
         TokenKind::If => 27,
         TokenKind::Then => 28,
@@ -721,6 +725,10 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'*' => {
                 pos += 1;
                 TokenKind::Star
+            }
+            b'/' if bytes.get(pos + 1) != Some(&b'/') => {
+                pos += 1;
+                TokenKind::Slash
             }
             b'=' if bytes.get(pos + 1) == Some(&b'>') => {
                 pos += 2;

@@ -739,7 +739,49 @@ impl<'a> FunctionEmitter<'a> {
                     sem::BinaryOp::Mul => {
                         self.asm.i64_mul(dst.0, lhs.0, rhs.0);
                     }
+                    sem::BinaryOp::Div => {
+                        return Err(invalid_lowered("integer division has no tape lowering"));
+                    }
                 }
+            }
+            lower::Instr::F64Binary {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                match op {
+                    lower::F64BinaryOp::Add => self.asm.f64_add(dst, a, b),
+                    lower::F64BinaryOp::Sub => self.asm.f64_sub(dst, a, b),
+                    lower::F64BinaryOp::Mul => self.asm.f64_mul(dst, a, b),
+                    lower::F64BinaryOp::Div => self.asm.f64_div(dst, a, b),
+                };
+            }
+            lower::Instr::F64Unary { dst, op, src, span } => {
+                self.set_span(*span);
+                match op {
+                    lower::F64UnaryOp::Neg => self.asm.f64_neg(dst.0, src.0),
+                };
+            }
+            lower::Instr::F64Compare {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                match op {
+                    sem::CompareOp::Eq => self.asm.f64_eq(dst, a, b),
+                    sem::CompareOp::Lt => self.asm.f64_lt(dst, a, b),
+                    sem::CompareOp::Le => self.asm.f64_le(dst, a, b),
+                    sem::CompareOp::Gt => self.asm.f64_gt(dst, a, b),
+                    sem::CompareOp::Ge => self.asm.f64_ge(dst, a, b),
+                };
             }
             lower::Instr::I64Compare {
                 dst,

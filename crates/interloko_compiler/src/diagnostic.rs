@@ -110,6 +110,8 @@ pub enum DiagnosticCode {
     IfBranchTypeMismatch,
     /// Arithmetic operands are not integers.
     ArithmeticOperandTypeMismatch,
+    /// `/` was applied to integers; division is defined for floats only.
+    IntegerDivisionUnsupported,
     /// Comparison operands are not integers.
     ComparisonOperandTypeMismatch,
     /// `apply` is missing its callable target.
@@ -239,6 +241,7 @@ impl DiagnosticCode {
         Self::IfConditionTypeMismatch,
         Self::IfBranchTypeMismatch,
         Self::ArithmeticOperandTypeMismatch,
+        Self::IntegerDivisionUnsupported,
         Self::ComparisonOperandTypeMismatch,
         Self::ApplyArityMismatch,
         Self::ApplyTargetTypeMismatch,
@@ -332,6 +335,7 @@ impl DiagnosticCode {
             Self::IfConditionTypeMismatch => "sem.if-condition-type-mismatch",
             Self::IfBranchTypeMismatch => "sem.if-branch-type-mismatch",
             Self::ArithmeticOperandTypeMismatch => "sem.arithmetic-operand-type-mismatch",
+            Self::IntegerDivisionUnsupported => "sem.integer-division-unsupported",
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
@@ -426,6 +430,7 @@ impl DiagnosticCode {
             "sem.if-condition-type-mismatch" => Self::IfConditionTypeMismatch,
             "sem.if-branch-type-mismatch" => Self::IfBranchTypeMismatch,
             "sem.arithmetic-operand-type-mismatch" => Self::ArithmeticOperandTypeMismatch,
+            "sem.integer-division-unsupported" => Self::IntegerDivisionUnsupported,
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,

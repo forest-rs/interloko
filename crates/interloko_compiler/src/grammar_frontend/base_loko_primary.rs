@@ -629,8 +629,7 @@ impl BaseLokoCstProjector<'_> {
         let mut folded = self.build_expr(first);
         for rhs_node in operands.into_iter().skip(1) {
             let rhs = self.build_expr(rhs_node);
-            let op =
-                self.first_token_index(Span::new(folded.span.end, rhs.span.start), TokenKind::Star);
+            let op = self.first_operator_token(Span::new(folded.span.end, rhs.span.start));
             let span = folded.span.cover(rhs.span);
             folded = self.node(
                 CstKind::BinaryExpr,

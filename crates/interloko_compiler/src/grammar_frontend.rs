@@ -3115,7 +3115,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "multiplicative-expression",
-            "unary-expression (`*` unary-expression)*",
+            "unary-expression ((`*` | `/`) unary-expression)*",
             "syntax.rs:Parser::parse_mul",
         ),
         (

@@ -1,0 +1,17 @@
+// expect: run #t
+// expect: diagnostics 0
+// expect: dump sem contains compare Lt float
+// expect: dump lowered contains f64.eq
+
+define function main() => <boolean>
+  let nan = 0.0 / 0.0;
+  if nan = nan then
+    #f
+  else
+    if nan < 1.0 then
+      #f
+    else
+      if 0.0 = -0.0 then 1.5 <= 1.5 else #f end
+    end
+  end
+end;

@@ -207,6 +207,49 @@ pub enum RuntimeOp {
     VectorRef,
 }
 
+/// Two-operand IEEE 754 float operation emitted as one tape instruction.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum F64BinaryOp {
+    /// `a + b`.
+    Add,
+    /// `a - b`.
+    Sub,
+    /// `a * b`.
+    Mul,
+    /// `a / b`; division by zero yields an infinity or NaN, never a trap.
+    Div,
+}
+
+impl F64BinaryOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::Add => "f64.add",
+            Self::Sub => "f64.sub",
+            Self::Mul => "f64.mul",
+            Self::Div => "f64.div",
+        }
+    }
+}
+
+/// One-operand IEEE 754 float operation emitted as one tape instruction.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum F64UnaryOp {
+    /// Sign-bit negation.
+    Neg,
+}
+
+impl F64UnaryOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::Neg => "f64.neg",
+        }
+    }
+}
+
 /// A lowered function signature and body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
@@ -383,6 +426,43 @@ pub enum Instr {
         dst: Register,
         /// Binary operator.
         op: sem::BinaryOp,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// IEEE 754 float arithmetic on two operands.
+    F64Binary {
+        /// Destination register.
+        dst: Register,
+        /// Binary operator.
+        op: F64BinaryOp,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// IEEE 754 float operation on one operand.
+    F64Unary {
+        /// Destination register.
+        dst: Register,
+        /// Unary operator.
+        op: F64UnaryOp,
+        /// Operand register.
+        src: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// IEEE 754 float comparison; every comparison with NaN is false.
+    F64Compare {
+        /// Destination register.
+        dst: Register,
+        /// Comparison operator.
+        op: sem::CompareOp,
         /// Left operand register.
         lhs: Register,
         /// Right operand register.
@@ -1326,6 +1406,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(receiver, uses);
             collect_known_callable_uses_in_expr(value, uses);
         }
+        sem::Expr::Negate { value, .. } => collect_known_callable_uses_in_expr(value, uses),
         sem::Expr::Binary { lhs, rhs, .. }
         | sem::Expr::Compare { lhs, rhs, .. }
         | sem::Expr::ValueEqual { lhs, rhs, .. } => {
@@ -2443,29 +2524,102 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
-            sem::Expr::Binary { op, lhs, rhs, span } => {
+            sem::Expr::Binary {
+                op,
+                kind,
+                lhs,
+                rhs,
+                span,
+            } => {
                 let lhs = self.lower_expr(lhs)?;
                 let rhs = self.lower_expr(rhs)?;
-                let result = self.alloc(ValueKind::I64);
-                self.instructions.push(Instr::I64Binary {
-                    dst: result.reg,
-                    op: *op,
-                    lhs: lhs.reg,
-                    rhs: rhs.reg,
-                    span: *span,
-                });
+                let result = self.alloc(value_kind(kind.value_kind())?);
+                let instr = match (kind, op) {
+                    (sem::NumericKind::Integer, sem::BinaryOp::Div) => {
+                        return Err(invalid_semantic("integer division has no lowering"));
+                    }
+                    (sem::NumericKind::Integer, op) => Instr::I64Binary {
+                        dst: result.reg,
+                        op: *op,
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                        span: *span,
+                    },
+                    (sem::NumericKind::Float, op) => Instr::F64Binary {
+                        dst: result.reg,
+                        op: match op {
+                            sem::BinaryOp::Add => F64BinaryOp::Add,
+                            sem::BinaryOp::Sub => F64BinaryOp::Sub,
+                            sem::BinaryOp::Mul => F64BinaryOp::Mul,
+                            sem::BinaryOp::Div => F64BinaryOp::Div,
+                        },
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                        span: *span,
+                    },
+                };
+                self.instructions.push(instr);
                 Ok(result)
             }
-            sem::Expr::Compare { op, lhs, rhs, span } => {
+            sem::Expr::Negate { kind, value, span } => {
+                let value = self.lower_expr(value)?;
+                match kind {
+                    sem::NumericKind::Integer => {
+                        // `execution_tape` has no `i64.neg`; wrapping `0 - x`
+                        // is exact for every operand.
+                        let zero = self.alloc(ValueKind::I64);
+                        self.instructions.push(Instr::ConstI64 {
+                            dst: zero.reg,
+                            value: 0,
+                            span: *span,
+                        });
+                        let result = self.alloc(ValueKind::I64);
+                        self.instructions.push(Instr::I64Binary {
+                            dst: result.reg,
+                            op: sem::BinaryOp::Sub,
+                            lhs: zero.reg,
+                            rhs: value.reg,
+                            span: *span,
+                        });
+                        Ok(result)
+                    }
+                    sem::NumericKind::Float => {
+                        let result = self.alloc(ValueKind::F64);
+                        self.instructions.push(Instr::F64Unary {
+                            dst: result.reg,
+                            op: F64UnaryOp::Neg,
+                            src: value.reg,
+                            span: *span,
+                        });
+                        Ok(result)
+                    }
+                }
+            }
+            sem::Expr::Compare {
+                op,
+                kind,
+                lhs,
+                rhs,
+                span,
+            } => {
                 let lhs = self.lower_expr(lhs)?;
                 let rhs = self.lower_expr(rhs)?;
                 let result = self.alloc(ValueKind::Bool);
-                self.instructions.push(Instr::I64Compare {
-                    dst: result.reg,
-                    op: *op,
-                    lhs: lhs.reg,
-                    rhs: rhs.reg,
-                    span: *span,
+                self.instructions.push(match kind {
+                    sem::NumericKind::Integer => Instr::I64Compare {
+                        dst: result.reg,
+                        op: *op,
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                        span: *span,
+                    },
+                    sem::NumericKind::Float => Instr::F64Compare {
+                        dst: result.reg,
+                        op: *op,
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                        span: *span,
+                    },
                 });
                 Ok(result)
             }
@@ -3770,6 +3924,38 @@ impl Module {
                     sem::BinaryOp::Add => "i64.add",
                     sem::BinaryOp::Sub => "i64.sub",
                     sem::BinaryOp::Mul => "i64.mul",
+                    sem::BinaryOp::Div => "i64.div",
+                };
+                write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
+                fmt_span(f, *span)
+            }
+            Instr::F64Binary {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  {dst} = {} {lhs}, {rhs}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
+            Instr::F64Unary { dst, op, src, span } => {
+                write!(f, "  {dst} = {} {src}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
+            Instr::F64Compare {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                let op = match op {
+                    sem::CompareOp::Eq => "f64.eq",
+                    sem::CompareOp::Lt => "f64.lt",
+                    sem::CompareOp::Le => "f64.le",
+                    sem::CompareOp::Gt => "f64.gt",
+                    sem::CompareOp::Ge => "f64.ge",
                 };
                 write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
                 fmt_span(f, *span)

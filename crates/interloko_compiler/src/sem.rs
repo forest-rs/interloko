@@ -1125,6 +1125,8 @@ pub enum BinaryOp {
     Sub,
     /// Multiplication.
     Mul,
+    /// Division. Defined for floats only; integer division has no `/`.
+    Div,
 }
 
 impl From<ast::BinaryOp> for BinaryOp {
@@ -1133,11 +1135,50 @@ impl From<ast::BinaryOp> for BinaryOp {
             ast::BinaryOp::Add => Self::Add,
             ast::BinaryOp::Sub => Self::Sub,
             ast::BinaryOp::Mul => Self::Mul,
+            ast::BinaryOp::Div => Self::Div,
         }
     }
 }
 
-/// Semantic integer comparison operator.
+/// Unboxed numeric category of a primitive arithmetic or ordering operation.
+///
+/// Loko operators are statically typed primitives, not generic functions:
+/// both operands must have the same numeric kind, and there is no implicit
+/// integer-to-float contagion. Mixed operands are a diagnostic; convert with
+/// `as(<float>, n)` instead.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NumericKind {
+    /// Signed 64-bit integers, source `<integer>`.
+    Integer,
+    /// IEEE 754 binary64 floats, source `<float>`.
+    Float,
+}
+
+impl NumericKind {
+    /// Returns the semantic value category of this numeric kind.
+    #[must_use]
+    pub const fn value_kind(self) -> ValueKind {
+        match self {
+            Self::Integer => ValueKind::I64,
+            Self::Float => ValueKind::F64,
+        }
+    }
+
+    /// Returns the numeric kind of `kind`, when it is numeric.
+    #[must_use]
+    pub const fn of(kind: ValueKind) -> Option<Self> {
+        match kind {
+            ValueKind::I64 => Some(Self::Integer),
+            ValueKind::F64 => Some(Self::Float),
+            _ => None,
+        }
+    }
+}
+
+/// Semantic comparison operator.
+///
+/// On floats every operator follows IEEE 754: comparisons involving NaN are
+/// false and `0.0 = -0.0` is true.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CompareOp {
     /// Equality.
@@ -1470,10 +1511,12 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Binary expression.
+    /// Binary arithmetic expression.
     Binary {
         /// Operator.
         op: BinaryOp,
+        /// Numeric kind shared by both operands and the result.
+        kind: NumericKind,
         /// Left operand.
         lhs: Box<Expr>,
         /// Right operand.
@@ -1481,14 +1524,28 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Integer comparison.
+    /// Numeric comparison.
     Compare {
         /// Operator.
         op: CompareOp,
+        /// Numeric kind shared by both operands.
+        kind: NumericKind,
         /// Left operand.
         lhs: Box<Expr>,
         /// Right operand.
         rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Arithmetic negation, from source unary `-`.
+    ///
+    /// Float negation flips the sign bit, so `-0.0` and `-(0.0)` are both
+    /// negative zero; it is not `0.0 - x`.
+    Negate {
+        /// Numeric kind of the operand and result.
+        kind: NumericKind,
+        /// Negated operand.
+        value: Box<Expr>,
         /// Source span.
         span: Span,
     },
@@ -1564,6 +1621,7 @@ impl Expr {
             | Self::AccessorCall { span, .. }
             | Self::SlotWrite { span, .. }
             | Self::Binary { span, .. }
+            | Self::Negate { span, .. }
             | Self::Compare { span, .. }
             | Self::ValueEqual { span, .. }
             | Self::If { span, .. }
@@ -4100,48 +4158,63 @@ impl Lowering {
             ast::Expr::Binary {
                 op, lhs, rhs, span, ..
             } => {
-                let lhs = self.lower_expr_expected(ctx, lhs, Some(ValueKind::I64));
-                let rhs = self.lower_expr_expected(ctx, rhs, Some(ValueKind::I64));
-                self.expect_i64_operands(
+                let (lhs, rhs) = self.lower_numeric_operands(ctx, lhs, rhs);
+                let op = BinaryOp::from(*op);
+                let Some(kind) = self.numeric_operand_kind(
                     ctx,
                     *span,
                     &lhs,
                     &rhs,
                     DiagnosticCode::ArithmeticOperandTypeMismatch,
-                );
+                ) else {
+                    return Expr::Error { span: *span };
+                };
+                if op == BinaryOp::Div
+                    && kind == NumericKind::Integer
+                    && self.expr_kind(&lhs) == ValueKind::I64
+                    && self.expr_kind(&rhs) == ValueKind::I64
+                {
+                    ctx.diagnostics.push(Diagnostic::error(
+                        *span,
+                        DiagnosticCode::IntegerDivisionUnsupported,
+                    ));
+                }
                 Expr::Binary {
-                    op: (*op).into(),
+                    op,
+                    kind,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                     span: *span,
                 }
             }
             ast::Expr::UnaryMinus { expr, span, .. } => {
-                let lhs = Expr::ConstI64 {
-                    value: 0,
-                    span: *span,
+                let value = self.lower_expr_expected(ctx, expr, Some(ValueKind::I64));
+                let value_kind = self.expr_kind(&value);
+                let Some(kind) = NumericKind::of(value_kind) else {
+                    if value_kind != ValueKind::Error {
+                        let name = self.kind_name(value_kind);
+                        ctx.diagnostics.push(
+                            Diagnostic::error(*span, DiagnosticCode::ArithmeticOperandTypeMismatch)
+                                .with_arg(DiagnosticArg::text("lhs", name.clone()))
+                                .with_arg(DiagnosticArg::text("rhs", name)),
+                        );
+                    }
+                    return Expr::Error { span: *span };
                 };
-                let rhs = self.lower_expr_expected(ctx, expr, Some(ValueKind::I64));
-                self.expect_i64_operands(
-                    ctx,
-                    *span,
-                    &lhs,
-                    &rhs,
-                    DiagnosticCode::ArithmeticOperandTypeMismatch,
-                );
-                Expr::Binary {
-                    op: BinaryOp::Sub,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
+                Expr::Negate {
+                    kind,
+                    value: Box::new(value),
                     span: *span,
                 }
             }
             ast::Expr::Compare {
                 op, lhs, rhs, span, ..
             } => {
-                let expected = (*op != ast::CompareOp::Eq).then_some(ValueKind::I64);
-                let lhs = self.lower_expr_expected(ctx, lhs, expected);
-                let rhs = self.lower_expr_expected(ctx, rhs, expected);
+                let (lhs, rhs) = if *op == ast::CompareOp::Eq {
+                    (self.lower_expr(ctx, lhs), self.lower_expr(ctx, rhs))
+                } else {
+                    self.lower_numeric_operands(ctx, lhs, rhs)
+                };
                 self.lower_compare(ctx, *op, lhs, rhs, *span)
             }
             ast::Expr::If {
@@ -5006,26 +5079,55 @@ impl Lowering {
         }
     }
 
-    fn expect_i64_operands(
+    /// Lowers the operands of a numeric operator.
+    ///
+    /// The left operand keeps the legacy integer result hint used by
+    /// open-result forms such as `apply` and `signal`; the right operand is
+    /// hinted with the left operand's numeric kind, so `x * apply(f)` with a
+    /// float `x` expects a float result.
+    fn lower_numeric_operands(
+        &mut self,
+        ctx: &mut FunctionContext,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+    ) -> (Expr, Expr) {
+        let lhs = self.lower_expr_expected(ctx, lhs, Some(ValueKind::I64));
+        let hint =
+            NumericKind::of(self.expr_kind(&lhs)).map_or(ValueKind::I64, NumericKind::value_kind);
+        let rhs = self.lower_expr_expected(ctx, rhs, Some(hint));
+        (lhs, rhs)
+    }
+
+    /// Returns the shared numeric kind of two operands.
+    ///
+    /// Reports `code` and returns `None` when they are not both integers or
+    /// both floats; callers then produce an error expression so the mismatch
+    /// is reported once rather than cascading into result-type diagnostics.
+    fn numeric_operand_kind(
         &self,
         ctx: &mut FunctionContext,
         span: Span,
         lhs: &Expr,
         rhs: &Expr,
         code: DiagnosticCode,
-    ) {
+    ) -> Option<NumericKind> {
         let lhs_kind = self.expr_kind(lhs);
         let rhs_kind = self.expr_kind(rhs);
-        if matches!(lhs_kind, ValueKind::I64 | ValueKind::Error)
-            && matches!(rhs_kind, ValueKind::I64 | ValueKind::Error)
-        {
-            return;
+        match (NumericKind::of(lhs_kind), NumericKind::of(rhs_kind)) {
+            (Some(lhs), Some(rhs)) if lhs == rhs => return Some(lhs),
+            (Some(kind), None) if rhs_kind == ValueKind::Error => return Some(kind),
+            (None, Some(kind)) if lhs_kind == ValueKind::Error => return Some(kind),
+            (None, None) if lhs_kind == ValueKind::Error && rhs_kind == ValueKind::Error => {
+                return Some(NumericKind::Integer);
+            }
+            _ => {}
         }
         ctx.diagnostics.push(
             Diagnostic::error(span, code)
                 .with_arg(DiagnosticArg::text("lhs", self.kind_name(lhs_kind)))
                 .with_arg(DiagnosticArg::text("rhs", self.kind_name(rhs_kind))),
         );
+        None
     }
 
     fn lower_compare(
@@ -5036,34 +5138,28 @@ impl Lowering {
         rhs: Expr,
         span: Span,
     ) -> Expr {
-        if op != ast::CompareOp::Eq {
-            self.expect_i64_operands(
+        let lhs_kind = self.expr_kind(&lhs);
+        let rhs_kind = self.expr_kind(&rhs);
+        let numeric = |kind: ValueKind| NumericKind::of(kind).is_some() || kind == ValueKind::Error;
+        if op != ast::CompareOp::Eq || (numeric(lhs_kind) && numeric(rhs_kind)) {
+            let Some(kind) = self.numeric_operand_kind(
                 ctx,
                 span,
                 &lhs,
                 &rhs,
                 DiagnosticCode::ComparisonOperandTypeMismatch,
-            );
+            ) else {
+                return Expr::Error { span };
+            };
             return Expr::Compare {
                 op: op.into(),
+                kind,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
                 span,
             };
         }
 
-        let lhs_kind = self.expr_kind(&lhs);
-        let rhs_kind = self.expr_kind(&rhs);
-        if matches!(lhs_kind, ValueKind::I64 | ValueKind::Error)
-            && matches!(rhs_kind, ValueKind::I64 | ValueKind::Error)
-        {
-            return Expr::Compare {
-                op: CompareOp::Eq,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-                span,
-            };
-        }
         if lhs_kind == rhs_kind && matches!(lhs_kind, ValueKind::String(_) | ValueKind::Symbol(_)) {
             return Expr::ValueEqual {
                 lhs: Box::new(lhs),
@@ -5528,7 +5624,8 @@ impl Lowering {
 
     fn expr_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
-            Expr::ConstI64 { .. } | Expr::Binary { .. } => ValueKind::I64,
+            Expr::ConstI64 { .. } => ValueKind::I64,
+            Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
             Expr::ConstF64 { .. } => ValueKind::F64,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
