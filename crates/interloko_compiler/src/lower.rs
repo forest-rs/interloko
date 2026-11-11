@@ -213,8 +213,91 @@ pub enum RuntimeOp {
     Concatenate,
 }
 
-/// Trap code raised by `as(<integer>, x)` when `x` has a fractional part.
-pub const INEXACT_FLOAT_TO_INTEGER_TRAP: u32 = 2;
+/// Condition that compiled Loko code signals with an explicit tape `trap`.
+///
+/// The tape carries [`LokoTrap::code`] as its trap code; runtime reporting
+/// recovers the condition with [`LokoTrap::from_code`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum LokoTrap {
+    /// A generic function call matched no applicable method.
+    NoApplicableMethod,
+    /// `as(<integer>, x)` received a float with a fractional part.
+    InexactFloatToInteger,
+    /// `<integer>` arithmetic overflowed the 64-bit fixnum range.
+    IntegerOverflow,
+}
+
+impl LokoTrap {
+    /// Every Loko trap in code order.
+    pub const ALL: &'static [Self] = &[
+        Self::NoApplicableMethod,
+        Self::InexactFloatToInteger,
+        Self::IntegerOverflow,
+    ];
+
+    /// Returns the tape trap code for this condition.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::NoApplicableMethod => 1,
+            Self::InexactFloatToInteger => 2,
+            Self::IntegerOverflow => 3,
+        }
+    }
+
+    /// Returns the condition a tape trap code stands for, if any.
+    #[must_use]
+    pub const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::NoApplicableMethod),
+            2 => Some(Self::InexactFloatToInteger),
+            3 => Some(Self::IntegerOverflow),
+            _ => None,
+        }
+    }
+
+    /// Returns a short human-readable name for this condition.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::NoApplicableMethod => "no applicable method",
+            Self::InexactFloatToInteger => "inexact float to integer conversion",
+            Self::IntegerOverflow => "integer overflow",
+        }
+    }
+
+    /// Returns the stable diagnostic code that reports this condition.
+    #[must_use]
+    pub const fn diagnostic_code(self) -> DiagnosticCode {
+        match self {
+            Self::IntegerOverflow => DiagnosticCode::RuntimeIntegerOverflow,
+            Self::NoApplicableMethod | Self::InexactFloatToInteger => DiagnosticCode::RuntimeTrap,
+        }
+    }
+}
+
+/// Signed 64-bit integer arithmetic that reports overflow instead of wrapping.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum I64ArithOp {
+    /// `a + b`.
+    Add,
+    /// `a - b`.
+    Sub,
+    /// `a * b`.
+    Mul,
+}
+
+impl I64ArithOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::Add => "i64.add_ovf",
+            Self::Sub => "i64.sub_ovf",
+            Self::Mul => "i64.mul_ovf",
+        }
+    }
+}
 
 /// Two-operand IEEE 754 float operation emitted as one tape instruction.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -456,12 +539,15 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
-    /// Signed integer arithmetic.
+    /// Signed integer arithmetic writing the wrapped result and whether the
+    /// exact result overflowed `i64`.
     I64Binary {
-        /// Destination register.
+        /// Destination register for the wrapped result.
         dst: Register,
-        /// Binary operator.
-        op: sem::BinaryOp,
+        /// Destination `bool` register set when the result overflowed.
+        overflow: Register,
+        /// Arithmetic operator.
+        op: I64ArithOp,
         /// Left operand register.
         lhs: Register,
         /// Right operand register.
@@ -778,8 +864,8 @@ pub enum Instr {
     },
     /// Runtime trap.
     Trap {
-        /// Trap code.
-        code: u32,
+        /// Condition being signalled.
+        trap: LokoTrap,
         /// Source span.
         span: Span,
     },
@@ -2076,7 +2162,7 @@ impl<'module> BodyLowering<'module> {
         }
 
         self.instructions.push(Instr::Trap {
-            code: 1,
+            trap: LokoTrap::NoApplicableMethod,
             span: generic.span,
         });
         Ok(())
@@ -2644,33 +2730,35 @@ impl<'module> BodyLowering<'module> {
             } => {
                 let lhs = self.lower_expr(lhs)?;
                 let rhs = self.lower_expr(rhs)?;
-                let result = self.alloc(value_kind(kind.value_kind())?);
-                let instr = match (kind, op) {
-                    (sem::NumericKind::Integer, sem::BinaryOp::Div) => {
-                        return Err(invalid_semantic("integer division has no lowering"));
+                match kind {
+                    sem::NumericKind::Integer => {
+                        let op = match op {
+                            sem::BinaryOp::Add => I64ArithOp::Add,
+                            sem::BinaryOp::Sub => I64ArithOp::Sub,
+                            sem::BinaryOp::Mul => I64ArithOp::Mul,
+                            sem::BinaryOp::Div => {
+                                return Err(invalid_semantic("integer division has no lowering"));
+                            }
+                        };
+                        Ok(self.lower_checked_integer_arith(op, lhs.reg, rhs.reg, *span))
                     }
-                    (sem::NumericKind::Integer, op) => Instr::I64Binary {
-                        dst: result.reg,
-                        op: *op,
-                        lhs: lhs.reg,
-                        rhs: rhs.reg,
-                        span: *span,
-                    },
-                    (sem::NumericKind::Float, op) => Instr::F64Binary {
-                        dst: result.reg,
-                        op: match op {
-                            sem::BinaryOp::Add => F64BinaryOp::Add,
-                            sem::BinaryOp::Sub => F64BinaryOp::Sub,
-                            sem::BinaryOp::Mul => F64BinaryOp::Mul,
-                            sem::BinaryOp::Div => F64BinaryOp::Div,
-                        },
-                        lhs: lhs.reg,
-                        rhs: rhs.reg,
-                        span: *span,
-                    },
-                };
-                self.instructions.push(instr);
-                Ok(result)
+                    sem::NumericKind::Float => {
+                        let result = self.alloc(ValueKind::F64);
+                        self.instructions.push(Instr::F64Binary {
+                            dst: result.reg,
+                            op: match op {
+                                sem::BinaryOp::Add => F64BinaryOp::Add,
+                                sem::BinaryOp::Sub => F64BinaryOp::Sub,
+                                sem::BinaryOp::Mul => F64BinaryOp::Mul,
+                                sem::BinaryOp::Div => F64BinaryOp::Div,
+                            },
+                            lhs: lhs.reg,
+                            rhs: rhs.reg,
+                            span: *span,
+                        });
+                        Ok(result)
+                    }
+                }
             }
             sem::Expr::FloatCall {
                 builtin,
@@ -2696,23 +2784,20 @@ impl<'module> BodyLowering<'module> {
                 let value = self.lower_expr(value)?;
                 match kind {
                     sem::NumericKind::Integer => {
-                        // `execution_tape` has no `i64.neg`; wrapping `0 - x`
-                        // is exact for every operand.
+                        // `execution_tape` has no `i64.neg`; `0 - x` is exact
+                        // except for `i64::MIN`, which overflows.
                         let zero = self.alloc(ValueKind::I64);
                         self.instructions.push(Instr::ConstI64 {
                             dst: zero.reg,
                             value: 0,
                             span: *span,
                         });
-                        let result = self.alloc(ValueKind::I64);
-                        self.instructions.push(Instr::I64Binary {
-                            dst: result.reg,
-                            op: sem::BinaryOp::Sub,
-                            lhs: zero.reg,
-                            rhs: value.reg,
-                            span: *span,
-                        });
-                        Ok(result)
+                        Ok(self.lower_checked_integer_arith(
+                            I64ArithOp::Sub,
+                            zero.reg,
+                            value.reg,
+                            *span,
+                        ))
                     }
                     sem::NumericKind::Float => {
                         let result = self.alloc(ValueKind::F64);
@@ -3853,11 +3938,56 @@ impl<'module> BodyLowering<'module> {
         });
         self.instructions.push(Instr::Label { label: inexact });
         self.instructions.push(Instr::Trap {
-            code: INEXACT_FLOAT_TO_INTEGER_TRAP,
+            trap: LokoTrap::InexactFloatToInteger,
             span,
         });
         self.instructions.push(Instr::Label { label: done });
         Ok(result)
+    }
+
+    /// Lowers fixnum `lhs op rhs`: the overflow-reporting tape instruction,
+    /// then a branch to [`Self::lower_integer_overflow`] when it overflowed.
+    fn lower_checked_integer_arith(
+        &mut self,
+        op: I64ArithOp,
+        lhs: Register,
+        rhs: Register,
+        span: Span,
+    ) -> Value {
+        let result = self.alloc(ValueKind::I64);
+        let overflow = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::I64Binary {
+            dst: result.reg,
+            overflow: overflow.reg,
+            op,
+            lhs,
+            rhs,
+            span,
+        });
+        let overflowed = self.alloc_label();
+        let done = self.alloc_label();
+        self.instructions.push(Instr::Branch {
+            cond: overflow.reg,
+            then_label: overflowed,
+            else_label: done,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: overflowed });
+        self.lower_integer_overflow(span);
+        self.instructions.push(Instr::Label { label: done });
+        result
+    }
+
+    /// Emits what happens when fixnum arithmetic overflows `i64`.
+    ///
+    /// This is the single overflow target for `<integer>` arithmetic. It
+    /// traps with [`LokoTrap::IntegerOverflow`] until `<integer>` gains
+    /// bignum promotion, which replaces this trap.
+    fn lower_integer_overflow(&mut self, span: Span) {
+        self.instructions.push(Instr::Trap {
+            trap: LokoTrap::IntegerOverflow,
+            span,
+        });
     }
 
     fn alloc_label(&mut self) -> LabelId {
@@ -4257,18 +4387,13 @@ impl Module {
             }
             Instr::I64Binary {
                 dst,
+                overflow,
                 op,
                 lhs,
                 rhs,
                 span,
             } => {
-                let op = match op {
-                    sem::BinaryOp::Add => "i64.add",
-                    sem::BinaryOp::Sub => "i64.sub",
-                    sem::BinaryOp::Mul => "i64.mul",
-                    sem::BinaryOp::Div => "i64.div",
-                };
-                write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
+                write!(f, "  {dst}, {overflow} = {} {lhs}, {rhs}", op.mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::F64Binary {
@@ -4542,8 +4667,8 @@ impl Module {
                 self.fmt_result_list(f, values)?;
                 fmt_span(f, *span)
             }
-            Instr::Trap { code, span } => {
-                write!(f, "  trap {code}")?;
+            Instr::Trap { trap, span } => {
+                write!(f, "  trap {} ({})", trap.code(), trap.description())?;
                 fmt_span(f, *span)
             }
         }
@@ -4728,6 +4853,19 @@ mod tests {
     }
 
     #[test]
+    fn loko_trap_codes_round_trip_and_are_distinct() {
+        for (index, trap) in LokoTrap::ALL.iter().copied().enumerate() {
+            assert_eq!(LokoTrap::from_code(trap.code()), Some(trap));
+            assert!(
+                LokoTrap::ALL[..index]
+                    .iter()
+                    .all(|earlier| earlier.code() != trap.code())
+            );
+        }
+        assert_eq!(LokoTrap::from_code(0), None);
+    }
+
+    #[test]
     fn lowers_direct_calls_arithmetic_and_locals() {
         let module = lower_source(
             "define function add(a, b)\n  let c = a + b;\n  c\nend;\n\
@@ -4737,7 +4875,9 @@ mod tests {
         assert_eq!(module.main, Some(FunctionId(1)));
         let dump = module.dump();
         assert!(dump.contains("local l2 c = %r3: i64"));
-        assert!(dump.contains("%r3 = i64.add %r1, %r2"));
+        assert!(dump.contains("%r3, %r4 = i64.add_ovf %r1, %r2"));
+        assert!(dump.contains("br %r4, bb0, bb1"));
+        assert!(dump.contains("trap 3 (integer overflow)"));
         assert!(dump.contains("call l0(%r1, %r2)"));
     }
 

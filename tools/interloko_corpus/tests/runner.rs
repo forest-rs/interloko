@@ -123,6 +123,8 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/float_literals.loko"));
     assert!(out.contains("fail/values/float_literal_out_of_range.loko"));
     assert!(out.contains("pass/arithmetic/float_arithmetic.loko"));
+    assert!(out.contains("ok pass/arithmetic/integer_overflow_negate.loko"));
+    assert!(out.contains("ok pass/arithmetic/integer_fixnum_edges.loko"));
     assert!(out.contains("fail/diagnostics/mixed_arithmetic.loko"));
     assert!(out.contains("fail/diagnostics/integer_division.loko"));
     assert!(out.contains("pass/values/integer_to_float.loko"));
@@ -138,7 +140,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/float_box_cast.loko"));
     assert!(out.contains("ok pass/typing/float_dispatch.loko"));
     assert!(out.contains("ok pass/typing/float_casts.loko"));
-    assert!(out.contains("corpus: 211 passed, 0 failed, 211 total"));
+    assert!(out.contains("corpus: 216 passed, 0 failed, 216 total"));
 }
 
 #[test]

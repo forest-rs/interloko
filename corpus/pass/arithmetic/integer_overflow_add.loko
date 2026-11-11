@@ -1,0 +1,8 @@
+// expect: runtime code runtime.integer-overflow
+// expect: diagnostics 0
+// expect: dump lowered contains i64.add_ovf
+// expect: dump lowered contains trap 3 (integer overflow)
+
+define function main()
+  9223372036854775807 + 1
+end;

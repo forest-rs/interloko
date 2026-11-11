@@ -1,0 +1,8 @@
+// expect: runtime code runtime.integer-overflow
+// expect: diagnostics 0
+// expect: dump lowered contains i64.sub_ovf
+
+define function main()
+  let min = -9223372036854775808;
+  -min
+end;
