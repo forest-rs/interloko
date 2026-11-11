@@ -120,8 +120,10 @@ The current slices include:
   binary64) instances under the abstract `<number>` > `<real>` > `<float>`
   classes, with slots, boxing to `<object>`, `<float>`/`<double-float>`
   annotations and method dispatch, and IEEE `+ - * /`,
-  negation, and comparisons (operands must both be integers or both be
-  floats; `/` is float-only), with explicit `as(<float>, n)` and exact
+  negation, and comparisons; an integer meeting a float is converted to a
+  float for arithmetic and compared exactly (`2^53 + 1 > 2.0^53`), by the
+  rules in `promotion.rs`, and `/` on two integers is rejected; explicit
+  `as(<float>, n)` and exact
   `as(<integer>, x)` conversions, and a float library (`abs`, `min`, `max`,
   `remainder`, `nan?`, `finite?`, `floor`, `ceiling`, `round`, `truncate`,
   `sqrt`, `cbrt`, `exp`, `log`, `log2`, `log10`, trigonometric and

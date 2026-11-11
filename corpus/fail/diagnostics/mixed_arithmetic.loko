@@ -1,6 +1,0 @@
-// expect: diagnostics 1
-// expect: diagnostic contains arithmetic operands must both be integers or both be floats, not <integer> and <double-float>
-
-define function main() => <float>
-  1 + 2.0
-end;

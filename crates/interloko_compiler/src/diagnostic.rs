@@ -128,13 +128,13 @@ pub enum DiagnosticCode {
     IfConditionTypeMismatch,
     /// `if` branch result kinds differ.
     IfBranchTypeMismatch,
-    /// Arithmetic operands are not integers.
+    /// An arithmetic operand is not a number.
     ArithmeticOperandTypeMismatch,
     /// `/` was applied to integers; division is defined for floats only.
     IntegerDivisionUnsupported,
     /// An abstract numeric class such as `<real>` was used as a value type.
     AbstractNumericTypeUnsupported,
-    /// Comparison operands are not integers.
+    /// A comparison operand is not a number.
     ComparisonOperandTypeMismatch,
     /// `apply` is missing its callable target.
     ApplyArityMismatch,

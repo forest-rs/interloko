@@ -24,6 +24,8 @@ pub mod identity;
 pub mod incremental;
 /// Backend-neutral executable IR lowered from semantic IR.
 pub mod lower;
+/// Numeric promotion rules for mixed numeric operands.
+pub mod promotion;
 /// Runtime host support for generated `execution_tape` programs.
 pub mod runtime;
 /// Semantic IR with resolved direct calls and locals.

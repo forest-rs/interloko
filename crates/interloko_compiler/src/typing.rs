@@ -1046,6 +1046,7 @@ fn for_each_child(expr: &sem::Expr, mut visit: impl FnMut(&sem::Expr)) {
         }
         sem::Expr::Binary { lhs, rhs, .. }
         | sem::Expr::Compare { lhs, rhs, .. }
+        | sem::Expr::MixedCompare { lhs, rhs, .. }
         | sem::Expr::ValueEqual { lhs, rhs, .. } => {
             visit(lhs);
             visit(rhs);
