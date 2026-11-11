@@ -204,16 +204,10 @@ pub enum DiagnosticCode {
     TapeBuildError,
     /// No zero-argument `main` function is available.
     RuntimeMissingMain,
-    /// A requested function is missing.
-    RuntimeMissingFunction,
     /// `main` has parameters.
     RuntimeMainHasParameters,
     /// Runtime execution trapped.
     RuntimeTrap,
-    /// `main` returned a non-integer result.
-    RuntimeMainReturnedNonI64,
-    /// A requested function returned a non-integer result.
-    RuntimeFunctionReturnedNonI64,
     /// A declared host function failed during a session-driven run.
     RuntimeHostFunctionFailed,
     /// `main` does not return exactly one supported scalar value.
@@ -308,11 +302,8 @@ impl DiagnosticCode {
         Self::TapeBlockedByDiagnostics,
         Self::TapeBuildError,
         Self::RuntimeMissingMain,
-        Self::RuntimeMissingFunction,
         Self::RuntimeMainHasParameters,
         Self::RuntimeTrap,
-        Self::RuntimeMainReturnedNonI64,
-        Self::RuntimeFunctionReturnedNonI64,
         Self::RuntimeHostFunctionFailed,
         Self::RuntimeUnsupportedResult,
         Self::SessionUnknownSource,
@@ -407,11 +398,8 @@ impl DiagnosticCode {
             Self::TapeBlockedByDiagnostics => "tape.blocked-by-diagnostics",
             Self::TapeBuildError => "tape.build-error",
             Self::RuntimeMissingMain => "runtime.missing-main",
-            Self::RuntimeMissingFunction => "runtime.missing-function",
             Self::RuntimeMainHasParameters => "runtime.main-has-parameters",
             Self::RuntimeTrap => "runtime.trap",
-            Self::RuntimeMainReturnedNonI64 => "runtime.main-returned-non-i64",
-            Self::RuntimeFunctionReturnedNonI64 => "runtime.function-returned-non-i64",
             Self::RuntimeHostFunctionFailed => "runtime.host-function-failed",
             Self::RuntimeUnsupportedResult => "runtime.unsupported-result",
             Self::SessionUnknownSource => "session.unknown-source",
@@ -507,11 +495,8 @@ impl DiagnosticCode {
             "tape.blocked-by-diagnostics" => Self::TapeBlockedByDiagnostics,
             "tape.build-error" => Self::TapeBuildError,
             "runtime.missing-main" => Self::RuntimeMissingMain,
-            "runtime.missing-function" => Self::RuntimeMissingFunction,
             "runtime.main-has-parameters" => Self::RuntimeMainHasParameters,
             "runtime.trap" => Self::RuntimeTrap,
-            "runtime.main-returned-non-i64" => Self::RuntimeMainReturnedNonI64,
-            "runtime.function-returned-non-i64" => Self::RuntimeFunctionReturnedNonI64,
             "runtime.host-function-failed" => Self::RuntimeHostFunctionFailed,
             "runtime.unsupported-result" => Self::RuntimeUnsupportedResult,
             "session.unknown-source" => Self::SessionUnknownSource,
@@ -806,8 +791,8 @@ mod tests {
             DiagnosticCode::TapeBuildError
         );
         assert_eq!(
-            crate::driver::CompileError::MissingMain.code(),
-            DiagnosticCode::RuntimeMissingMain
+            crate::session::RuntimeResult::MissingMain.code(),
+            Some(DiagnosticCode::RuntimeMissingMain)
         );
         assert_eq!(
             crate::session::RuntimeResult::MainHasParameters.code(),
