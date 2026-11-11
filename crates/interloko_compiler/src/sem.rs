@@ -465,6 +465,36 @@ pub enum GenericFunctionOrigin {
         /// Effective slot written by the setter method.
         slot: SlotId,
     },
+    /// Built-in numeric operator dispatched on operands that are not
+    /// statically numbers. Its methods come from [`crate::promotion`] and it
+    /// is sealed: no method can be added on `<real>` operands.
+    Numeric {
+        /// Operator the generic implements.
+        operator: promotion::NumericOperator,
+    },
+}
+
+impl GenericFunctionOrigin {
+    /// Returns whether methods can be added to the generic for `specializers`.
+    ///
+    /// A numeric generic is sealed over `<real>`: its methods for numbers
+    /// are fixed by the promotion rules, so a method whose specializers all
+    /// lie within `<real>` would override them and is refused.
+    #[must_use]
+    pub fn admits_method(self, module: &Module, specializers: &[MethodSpecializer]) -> bool {
+        match self {
+            Self::Source => true,
+            Self::SlotSetter { .. } => false,
+            Self::Numeric { .. } => {
+                let Some(real) = module.builtin_value_class(BuiltinValueClass::Real) else {
+                    return false;
+                };
+                !specializers.iter().all(|specializer| {
+                    specializer.is_some_and(|class| module.is_same_or_subclass(class, real))
+                })
+            }
+        }
+    }
 }
 
 /// Semantic module with resolved nominal IDs and calls.
@@ -767,6 +797,59 @@ fn generic_param_boxes_scalars_in<'a>(
         .filter(|(method_generic, _)| *method_generic == generic.id)
         .filter_map(|(_, specializers)| specializers.get(index).copied().flatten())
         .any(|class| class == OBJECT_CLASS_ID || is_scalar_value_class_in(classes, class))
+}
+
+/// Builds the body of a numeric generic's method from the promotion rules,
+/// so dispatched and statically typed operators compute the same thing.
+fn numeric_method_body(
+    operator: promotion::NumericOperator,
+    operands: Vec<(NumericKind, Expr)>,
+) -> Expr {
+    let span = Span::default();
+    let mut operands = operands.into_iter();
+    let Some((lhs_kind, lhs)) = operands.next() else {
+        return Expr::Error { span };
+    };
+    let Some((rhs_kind, rhs)) = operands.next() else {
+        return Expr::Negate {
+            kind: lhs_kind,
+            value: Box::new(lhs),
+            span,
+        };
+    };
+    match operator {
+        promotion::NumericOperator::Arithmetic(op) => {
+            match promotion::arithmetic(op, lhs_kind, rhs_kind) {
+                promotion::ArithmeticRule::Promote { kind } => Expr::Binary {
+                    op,
+                    kind,
+                    lhs: Box::new(promote_operand(lhs, lhs_kind, kind)),
+                    rhs: Box::new(promote_operand(rhs, rhs_kind, kind)),
+                    span,
+                },
+                promotion::ArithmeticRule::Undefined => Expr::Error { span },
+            }
+        }
+        promotion::NumericOperator::Compare(op) => {
+            match promotion::comparison(lhs_kind, rhs_kind) {
+                promotion::ComparisonRule::Same { kind } => Expr::Compare {
+                    op,
+                    kind,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span,
+                },
+                promotion::ComparisonRule::ExactMixed => Expr::MixedCompare {
+                    op,
+                    lhs_kind,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span,
+                },
+            }
+        }
+        promotion::NumericOperator::Negate => Expr::Error { span },
+    }
 }
 
 /// Converts an operand of numeric kind `from` to the promoted kind `to`.
@@ -1115,6 +1198,12 @@ pub enum MethodOrigin {
         class: ClassId,
         /// Effective slot written by the setter method.
         slot: SlotId,
+    },
+    /// Compiler-generated method of a built-in numeric generic, from the
+    /// rules in [`crate::promotion`].
+    Numeric {
+        /// Operator the method implements.
+        operator: promotion::NumericOperator,
     },
     /// Method inserted into the running session by an EOP mutation, identified
     /// by a per-session monotonic mutation sequence number. The sequence is
@@ -2346,6 +2435,11 @@ struct Lowering {
     /// bodies are lowered one at a time, so `methods` is partial while they
     /// lower; boxed-parameter decisions read this snapshot instead.
     dispatch_specializers: Vec<(GenericFunctionId, Vec<MethodSpecializer>)>,
+    /// Built-in numeric generics created so far, in creation order. A
+    /// generic is created the first time an operator needs dispatch and
+    /// persists across lowering passes; its methods are regenerated with
+    /// every pass.
+    numeric_generics: Vec<(promotion::NumericOperator, GenericFunctionId)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -2364,6 +2458,7 @@ impl Lowering {
             constant_symbols: Vec::new(),
             generic_symbols: Vec::new(),
             dispatch_specializers: Vec::new(),
+            numeric_generics: Vec::new(),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -3126,6 +3221,163 @@ impl Lowering {
         }
     }
 
+    /// Returns the built-in generic for `operator`, creating it on first use.
+    fn numeric_generic(&mut self, operator: promotion::NumericOperator) -> GenericFunctionId {
+        if let Some((_, id)) = self
+            .numeric_generics
+            .iter()
+            .find(|(existing, _)| *existing == operator)
+        {
+            return *id;
+        }
+        let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
+        let name = operator.name();
+        let arity = operator.arity();
+        let result_kinds = vec![match operator {
+            promotion::NumericOperator::Compare(_) => ValueKind::Bool,
+            promotion::NumericOperator::Arithmetic(_) | promotion::NumericOperator::Negate => {
+                ValueKind::Any
+            }
+        }];
+        self.generic_symbols.push(GenericSymbol {
+            name: name.into(),
+            id,
+            param_kinds: vec![None; arity],
+            return_kinds: result_kinds.clone(),
+            return_callable_sigs: vec![None],
+            return_annotation: Some(result_kinds.clone()),
+            dispatch_param: 0,
+            span: Span::default(),
+        });
+        self.generics.push(GenericFunction {
+            id,
+            definition: DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Generic,
+                name,
+                "numeric",
+            ),
+            name: name.into(),
+            params: ["x", "y"]
+                .iter()
+                .take(arity)
+                .map(|name| (*name).into())
+                .collect(),
+            param_kinds: vec![None; arity],
+            arity,
+            dispatch_param: 0,
+            dispatch_params: (0..arity).collect(),
+            result_kinds: result_kinds.clone(),
+            return_annotation: Some(result_kinds),
+            span: Span::default(),
+            origin: GenericFunctionOrigin::Numeric { operator },
+        });
+        self.numeric_generics.push((operator, id));
+        id
+    }
+
+    /// Lowers an operator whose operands are not all statically numbers to
+    /// a call of its built-in numeric generic.
+    fn numeric_dispatch(
+        &mut self,
+        operator: promotion::NumericOperator,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        Expr::GenericCall {
+            generic: self.numeric_generic(operator),
+            args,
+            span,
+        }
+    }
+
+    /// Returns whether an operator on operands of these kinds dispatches
+    /// through a numeric generic: every operand is a number, `<object>`, or
+    /// an instance of a non-built-in class, and at least one is not a
+    /// number.
+    fn dispatches_numerically(kinds: &[ValueKind]) -> bool {
+        kinds.iter().all(|kind| {
+            matches!(
+                kind,
+                ValueKind::I64 | ValueKind::F64 | ValueKind::Any | ValueKind::Object(_)
+            )
+        }) && kinds.iter().any(|kind| NumericKind::of(*kind).is_none())
+    }
+
+    /// Generates the methods of every numeric generic created so far, one
+    /// per operand-kind combination the promotion rules define.
+    fn collect_numeric_methods(&mut self) {
+        for (operator, generic) in self.numeric_generics.clone() {
+            for operand_kinds in operator.method_operands() {
+                let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+                let signature = operand_kinds
+                    .iter()
+                    .map(|kind| match kind {
+                        NumericKind::Integer => "integer",
+                        NumericKind::Float => "float",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let definition = DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Method,
+                    operator.name(),
+                    &format!("numeric:{signature}"),
+                );
+                let mut ctx = FunctionContext::new();
+                let mut params = Vec::new();
+                let mut specializers = Vec::new();
+                let mut operands = Vec::new();
+                for (index, kind) in operand_kinds.iter().copied().enumerate() {
+                    let name = if index == 0 { "x" } else { "y" };
+                    let local = ctx.add_local(
+                        self.local_definition(definition, name),
+                        name.into(),
+                        kind.value_kind(),
+                        None,
+                        Span::default(),
+                    );
+                    params.push(local);
+                    specializers.push(self.value_kind_class(kind.value_kind()));
+                    operands.push((
+                        kind,
+                        Expr::Local {
+                            local,
+                            result_kind: kind.value_kind(),
+                            callable_signature: None,
+                            span: Span::default(),
+                        },
+                    ));
+                }
+                let result = numeric_method_body(operator, operands);
+                let result_kinds = vec![self.expr_kind(&result)];
+                self.methods.push(Method {
+                    id,
+                    definition,
+                    generic,
+                    specializer: specializers
+                        .first()
+                        .copied()
+                        .flatten()
+                        .unwrap_or(OBJECT_CLASS_ID),
+                    specializers,
+                    param: params.first().copied().unwrap_or(LocalId(u32::MAX)),
+                    params,
+                    locals: ctx.locals,
+                    body: Block {
+                        lets: Vec::new(),
+                        result,
+                        span: Span::default(),
+                    },
+                    result_kinds: result_kinds.clone(),
+                    return_annotation: Some(result_kinds),
+                    span: Span::default(),
+                    origin: MethodOrigin::Numeric { operator },
+                });
+            }
+        }
+    }
+
     fn method_specializer_for_kind(&self, kind: ValueKind) -> MethodSpecializer {
         Some(self.value_kind_class(kind).unwrap_or(OBJECT_CLASS_ID))
     }
@@ -3567,6 +3819,7 @@ impl Lowering {
             self.methods.push(method);
         }
         self.collect_slot_setter_methods();
+        self.collect_numeric_methods();
         self.refresh_inferred_generic_results();
         self.check_ambiguous_generic_methods();
 
@@ -3620,6 +3873,7 @@ impl Lowering {
                 self.methods.push(method);
             }
             self.collect_slot_setter_methods();
+            self.collect_numeric_methods();
             self.refresh_inferred_generic_results();
             for (index, function) in module.functions.iter().enumerate() {
                 let _ = self.lower_function(
@@ -4624,6 +4878,13 @@ impl Lowering {
             } => {
                 let (lhs, rhs) = self.lower_numeric_operands(ctx, lhs, rhs);
                 let op = BinaryOp::from(*op);
+                if Self::dispatches_numerically(&[self.expr_kind(&lhs), self.expr_kind(&rhs)]) {
+                    return self.numeric_dispatch(
+                        promotion::NumericOperator::Arithmetic(op),
+                        vec![lhs, rhs],
+                        *span,
+                    );
+                }
                 let Some((lhs_kind, rhs_kind)) = self.numeric_operand_kinds(
                     ctx,
                     *span,
@@ -4658,6 +4919,13 @@ impl Lowering {
             ast::Expr::UnaryMinus { expr, span, .. } => {
                 let value = self.lower_expr_expected(ctx, expr, Some(ValueKind::I64));
                 let value_kind = self.expr_kind(&value);
+                if Self::dispatches_numerically(&[value_kind]) {
+                    return self.numeric_dispatch(
+                        promotion::NumericOperator::Negate,
+                        vec![value],
+                        *span,
+                    );
+                }
                 let Some(kind) = NumericKind::of(value_kind) else {
                     if value_kind != ValueKind::Error {
                         let name = self.kind_name(value_kind);
@@ -5657,7 +5925,7 @@ impl Lowering {
     }
 
     fn lower_compare(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         op: ast::CompareOp,
         lhs: Expr,
@@ -5666,6 +5934,13 @@ impl Lowering {
     ) -> Expr {
         let lhs_kind = self.expr_kind(&lhs);
         let rhs_kind = self.expr_kind(&rhs);
+        if Self::dispatches_numerically(&[lhs_kind, rhs_kind]) {
+            return self.numeric_dispatch(
+                promotion::NumericOperator::Compare(op.into()),
+                vec![lhs, rhs],
+                span,
+            );
+        }
         let numeric = |kind: ValueKind| NumericKind::of(kind).is_some() || kind == ValueKind::Error;
         if op != ast::CompareOp::Eq || (numeric(lhs_kind) && numeric(rhs_kind)) {
             let Some((lhs_kind, rhs_kind)) = self.numeric_operand_kinds(
@@ -7006,10 +7281,12 @@ impl Lowering {
         }
     }
 
+    /// Resolves a source-visible generic by name. Built-in numeric generics
+    /// are reached only through operators, never by name.
     fn resolve_generic(&self, name: &str) -> Option<&GenericSymbol> {
-        self.generic_symbols
-            .iter()
-            .find(|symbol| symbol.name == name)
+        self.generic_symbols.iter().find(|symbol| {
+            symbol.name == name && !self.numeric_generics.iter().any(|(_, id)| *id == symbol.id)
+        })
     }
 
     fn local_definition(&self, owner: DefinitionId, name: &str) -> DefinitionId {

@@ -1290,6 +1290,13 @@ pub enum MutationError {
         /// Underlying runtime layout error.
         error: RuntimeLayoutError,
     },
+    /// The target is a built-in numeric generic. Its methods on numbers are
+    /// sealed (see [`sem::GenericFunctionOrigin::admits_method`]), and Loko
+    /// method source cannot name it yet, so no method can be added.
+    SealedGeneric {
+        /// Target generic id supplied by the caller.
+        generic: sem::GenericFunctionId,
+    },
 }
 
 /// Successful outcome of [`SessionArtifacts::rewind_to`].
@@ -2262,6 +2269,12 @@ impl SessionArtifacts {
             .get(generic.0 as usize)
             .ok_or(MutationError::UnknownGeneric { generic })?
             .clone();
+        if matches!(
+            target_generic.origin,
+            sem::GenericFunctionOrigin::Numeric { .. }
+        ) {
+            return Err(MutationError::SealedGeneric { generic });
+        }
 
         let original_class_count = self.ast.classes.len();
         let original_generic_count = self.ast.generics.len();
@@ -11237,6 +11250,9 @@ fn sem_generic_origin_label(origin: sem::GenericFunctionOrigin) -> String {
         sem::GenericFunctionOrigin::SlotSetter { class, slot } => {
             format!("slot-setter(c{}.s{})", class.0, slot.0)
         }
+        sem::GenericFunctionOrigin::Numeric { operator } => {
+            format!("numeric({}) sealed=<real>", operator.name())
+        }
     }
 }
 
@@ -11247,6 +11263,7 @@ fn sem_method_origin_label(origin: sem::MethodOrigin) -> String {
             format!("slot-setter(c{}.s{})", class.0, slot.0)
         }
         sem::MethodOrigin::Session { sequence } => format!("session(#{sequence})"),
+        sem::MethodOrigin::Numeric { operator } => format!("numeric({})", operator.name()),
     }
 }
 
@@ -16212,6 +16229,50 @@ end;
         assert!(matches!(square_after, Ok(FunctionValue::Integer(49))));
 
         assert_eq!(artifacts.mutations().len(), 1);
+    }
+
+    #[test]
+    fn numeric_generics_are_sealed_over_real() {
+        let mut artifacts = CompilerSession::compile_source(
+            "sealed.loko",
+            "define class <point> (<object>)\n  slot x :: <integer>, init-value: 1;\nend;\n\
+             define function bump(x :: <object>) => <object>\n  x + 1\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let plus = artifacts
+            .sem
+            .generics
+            .iter()
+            .find(|generic| generic.name == "+")
+            .expect("`+` generic is created by the dispatching operator");
+        let (plus_id, origin) = (plus.id, plus.origin);
+        let class = |name: &str| {
+            artifacts
+                .sem
+                .classes
+                .iter()
+                .find(|class| class.name == name)
+                .map(|class| class.id)
+        };
+        let (integer, float, point) = (
+            class("<integer>"),
+            class("<double-float>"),
+            class("<point>"),
+        );
+        assert!(!origin.admits_method(&artifacts.sem, &[integer, integer]));
+        assert!(!origin.admits_method(&artifacts.sem, &[float, integer]));
+        assert!(origin.admits_method(&artifacts.sem, &[point, integer]));
+
+        let result = artifacts.apply_mutation(SessionMutation::AddMethod {
+            generic: plus_id,
+            method_source: "define method plus(x :: <integer>, y :: <integer>)\n  0\nend;".into(),
+        });
+        assert!(matches!(
+            result,
+            Err(MutationError::SealedGeneric { generic }) if generic == plus_id
+        ));
+        assert_eq!(artifacts.mutations().len(), 0);
     }
 
     #[test]

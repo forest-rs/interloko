@@ -1,0 +1,17 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.dispatch-no-applicable-method
+// expect: diagnostic contains no method of `+` can apply to (<point>, <integer>)
+
+// A user class is not a number: `+` dispatches, and soft typing reports that
+// no numeric method can apply.
+define class <point> (<object>)
+  slot x :: <integer>, init-value: 1;
+end;
+
+define function shift(p :: <point>) => <object>
+  p + 1
+end;
+
+define function main() => <integer>
+  0
+end;

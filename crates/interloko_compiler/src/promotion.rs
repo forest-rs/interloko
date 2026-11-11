@@ -19,7 +19,9 @@
 //!   exact, not only `=`, so `<`, `=` and `>` stay a trichotomy on non-NaN
 //!   operands.
 
-use crate::sem::{BinaryOp, NumericKind};
+use alloc::vec::Vec;
+
+use crate::sem::{BinaryOp, CompareOp, NumericKind};
 
 /// How an arithmetic operator applies to two concrete numeric kinds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -43,6 +45,74 @@ pub enum ComparisonRule {
     },
     /// One integer and one float, compared exactly as mathematical values.
     ExactMixed,
+}
+
+/// Operator of a built-in numeric generic function.
+///
+/// When an operand's static type is `<object>` (or a class that is not a
+/// number), the operator dispatches through a compiler-provided generic
+/// function whose methods are generated from these rules, one per pair of
+/// concrete numeric classes. The generics are sealed over `<real>`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NumericOperator {
+    /// `+`, `-`, `*` or `/`.
+    Arithmetic(BinaryOp),
+    /// `=`, `<`, `<=`, `>` or `>=`.
+    Compare(CompareOp),
+    /// Unary `-`.
+    Negate,
+}
+
+impl NumericOperator {
+    /// Returns the generic function's name. Binary operators use their
+    /// source spelling, which no Loko definition can name; unary `-` is
+    /// Dylan's `negative`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Arithmetic(BinaryOp::Add) => "+",
+            Self::Arithmetic(BinaryOp::Sub) => "-",
+            Self::Arithmetic(BinaryOp::Mul) => "*",
+            Self::Arithmetic(BinaryOp::Div) => "/",
+            Self::Compare(CompareOp::Eq) => "=",
+            Self::Compare(CompareOp::Lt) => "<",
+            Self::Compare(CompareOp::Le) => "<=",
+            Self::Compare(CompareOp::Gt) => ">",
+            Self::Compare(CompareOp::Ge) => ">=",
+            Self::Negate => "negative",
+        }
+    }
+
+    /// Returns the number of operands.
+    #[must_use]
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::Negate => 1,
+            Self::Arithmetic(_) | Self::Compare(_) => 2,
+        }
+    }
+
+    /// Returns the operand kinds of every method the generic has: each
+    /// combination of concrete numeric kinds the rules define.
+    #[must_use]
+    pub fn method_operands(self) -> Vec<Vec<NumericKind>> {
+        match self {
+            Self::Negate => NUMERIC_KINDS
+                .iter()
+                .map(|kind| alloc::vec![*kind])
+                .collect(),
+            Self::Arithmetic(op) => NUMERIC_KINDS
+                .iter()
+                .flat_map(|lhs| NUMERIC_KINDS.iter().map(move |rhs| (*lhs, *rhs)))
+                .filter(|(lhs, rhs)| arithmetic(op, *lhs, *rhs) != ArithmeticRule::Undefined)
+                .map(|(lhs, rhs)| alloc::vec![lhs, rhs])
+                .collect(),
+            Self::Compare(_) => NUMERIC_KINDS
+                .iter()
+                .flat_map(|lhs| NUMERIC_KINDS.iter().map(move |rhs| alloc::vec![*lhs, *rhs]))
+                .collect(),
+        }
+    }
 }
 
 /// Concrete numeric kinds the rules cover, in method declaration order.
@@ -82,8 +152,8 @@ pub const fn comparison(lhs: NumericKind, rhs: NumericKind) -> ComparisonRule {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArithmeticRule, ComparisonRule, arithmetic, comparison, promote};
-    use crate::sem::{BinaryOp, NumericKind};
+    use super::{ArithmeticRule, ComparisonRule, NumericOperator, arithmetic, comparison, promote};
+    use crate::sem::{BinaryOp, CompareOp, NumericKind};
 
     #[test]
     fn floats_are_contagious_and_integer_division_is_undefined() {
@@ -108,5 +178,29 @@ mod tests {
             comparison(Float, Float),
             ComparisonRule::Same { kind: Float }
         );
+    }
+
+    #[test]
+    fn numeric_generics_cover_every_defined_operand_pair() {
+        assert_eq!(
+            NumericOperator::Arithmetic(BinaryOp::Add)
+                .method_operands()
+                .len(),
+            4
+        );
+        // `<integer> / <integer>` has no method.
+        assert_eq!(
+            NumericOperator::Arithmetic(BinaryOp::Div)
+                .method_operands()
+                .len(),
+            3
+        );
+        assert_eq!(
+            NumericOperator::Compare(CompareOp::Lt)
+                .method_operands()
+                .len(),
+            4
+        );
+        assert_eq!(NumericOperator::Negate.method_operands().len(), 2);
     }
 }

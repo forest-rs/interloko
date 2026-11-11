@@ -1,0 +1,10 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 1
+// expect: diagnostic code typing.dispatch-no-applicable-method
+
+// Integer `/` has no method, so dispatching it on boxed integers finds no
+// applicable method: soft typing warns, and the run traps. (Integer
+// division becomes exact rational division later.)
+define function main() => <integer>
+  as(<integer>, as(<object>, 6) / 3)
+end;

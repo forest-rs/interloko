@@ -1,0 +1,17 @@
+// expect: run 1110
+// expect: diagnostics 0
+
+// Dispatched comparisons are exact across integers and floats, like the
+// statically typed ones: 2^53 + 1 is greater than 2.0^53.
+define function bit(flag :: <boolean>, weight :: <integer>) => <integer>
+  if flag then weight else 0 end
+end;
+
+define function main() => <integer>
+  let big = as(<object>, 9007199254740993);
+  let float = as(<object>, 9007199254740992.0);
+  bit(big = float, 1)
+    + bit(big > float, 10)
+    + bit(float < big, 100)
+    + bit(as(<object>, 3) = 3.0, 1000)
+end;
