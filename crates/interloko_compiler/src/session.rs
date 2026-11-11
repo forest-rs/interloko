@@ -14314,7 +14314,7 @@ mod tests {
             "grammar-resource:calculator/grammars/calculator.grammar",
         );
         assert_eq!(resource.kind, EnvironmentKind::GrammarResource);
-        assert!(resource.inspection.detail.contains("rules=16"));
+        assert!(resource.inspection.detail.contains("rules=20"));
 
         let action = eop_object(&objects, "grammar-action:calculator/calculator-function");
         assert_eq!(action.kind, EnvironmentKind::GrammarAction);

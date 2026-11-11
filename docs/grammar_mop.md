@@ -153,10 +153,14 @@ rule additive-tail = add-op term => emit-binary-tail(op: add-op, rhs: term)
 rule add-op = `+` | `-`
 rule term = factor multiplicative-tail*
   => fold-binary(lhs: factor, tails: multiplicative-tail*)
-rule multiplicative-tail = `*` factor
-  => emit-binary-tail(op: "*", rhs: factor)
-rule factor = parenthesized | call | number-literal | name-ref
+rule multiplicative-tail = mul-op factor
+  => emit-binary-tail(op: mul-op, rhs: factor)
+rule mul-op = `*` | `/`
+rule factor = negative | parenthesized | call | float-literal | number-literal
+  | name-ref
+rule negative = `-` factor => emit-negate(value: factor)
 rule parenthesized = `(` expression `)`
+rule float-literal = float => emit-float(value: float)
 rule number-literal = number => emit-integer(value: number)
 rule name-ref = name => emit-name(name: name)
 rule call = name `(` argument-list? `)` => emit-call(callee: name, args: argument-list*)
@@ -164,6 +168,8 @@ rule argument-list = expression argument-tail*
   => emit-argument-list(first: expression, rest: argument-tail*)
 rule argument-tail = `,` expression => emit-argument-tail(value: expression)
 rule name = [A-Za-z_] [A-Za-z0-9_?-]*
+rule float raw = [0-9]+ `.` [0-9]+ ([eE] [+-]? [0-9]+)?
+  | [0-9]+ [eE] [+-]? [0-9]+
 rule number = [0-9]+
 end
 ```
@@ -172,7 +178,10 @@ A frontend metadata directive selects it by name:
 `// grammar-activate: calculator`. Later comment-delimited regions are
 recognized by the interpreted grammar and converted into structural function
 forms through the `emit-function`, expression, call, and left-fold binary
-actions. Rust still implements those safe action primitives and
+actions. Calculator literals mean what Loko literals mean: `2` is an
+`<integer>` and `2.0` or `2e0` is a `<float>`, so the same operand-kind
+rules apply, and calls reach Loko functions and the float library
+(`sqrt(2.0)`). Rust still implements those safe action primitives and
 calculator-specific validation, but it is no longer a duplicate recognizer, a
 hidden token parser, or a bespoke expression-tree walker.
 
