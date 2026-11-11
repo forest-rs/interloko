@@ -1,0 +1,13 @@
+[package]
+name = "interloko_float_calculator_example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+interloko_compiler = { path = "../../crates/interloko_compiler" }
+interloko_diagnostics = { path = "../../tools/interloko_diagnostics" }
+
+[lints]
+workspace = true

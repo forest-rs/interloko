@@ -6,6 +6,7 @@ members = [
     "crates/interloko_runtime",
     "crates/interloko_session",
     "examples/forty_two",
+    "examples/float_calculator",
     "examples/generic_area",
     "examples/host_backed_area",
     "examples/rich_values",

@@ -448,6 +448,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "interloko_float_calculator_example"
+version = "0.1.0"
+dependencies = [
+ "interloko_compiler",
+ "interloko_diagnostics",
+]
+
+[[package]]
 name = "interloko_forty_two_example"
 version = "0.1.0"
 dependencies = [
