@@ -1446,7 +1446,17 @@ pub enum FloatBuiltin {
     IsNan,
     /// `finite?(x)`: whether `x` is neither infinite nor NaN.
     IsFinite,
-    /// A runtime library function such as `sqrt` or `sin`.
+    /// `floor(x)`: largest integral float not greater than `x`.
+    Floor,
+    /// `ceiling(x)`: smallest integral float not less than `x`.
+    Ceiling,
+    /// `round(x)`: nearest integral float, ties to even (Dylan `round`).
+    Round,
+    /// `truncate(x)`: integral part, rounding toward zero.
+    Truncate,
+    /// `sqrt(x)`: correctly rounded square root; NaN for negative `x`.
+    Sqrt,
+    /// A runtime library function such as `exp` or `sin`.
     Library(FloatFunction),
 }
 
@@ -1459,11 +1469,11 @@ impl FloatBuiltin {
         Self::Remainder,
         Self::IsNan,
         Self::IsFinite,
-        Self::Library(FloatFunction::Floor),
-        Self::Library(FloatFunction::Ceiling),
-        Self::Library(FloatFunction::Round),
-        Self::Library(FloatFunction::Truncate),
-        Self::Library(FloatFunction::Sqrt),
+        Self::Floor,
+        Self::Ceiling,
+        Self::Round,
+        Self::Truncate,
+        Self::Sqrt,
         Self::Library(FloatFunction::Cbrt),
         Self::Library(FloatFunction::Exp),
         Self::Library(FloatFunction::Log),
@@ -1493,12 +1503,12 @@ impl FloatBuiltin {
             Self::Remainder => "remainder",
             Self::IsNan => "nan?",
             Self::IsFinite => "finite?",
+            Self::Floor => "floor",
+            Self::Ceiling => "ceiling",
+            Self::Round => "round",
+            Self::Truncate => "truncate",
+            Self::Sqrt => "sqrt",
             Self::Library(function) => match function {
-                FloatFunction::Floor => "floor",
-                FloatFunction::Ceiling => "ceiling",
-                FloatFunction::Round => "round",
-                FloatFunction::Truncate => "truncate",
-                FloatFunction::Sqrt => "sqrt",
                 FloatFunction::Cbrt => "cbrt",
                 FloatFunction::Exp => "exp",
                 FloatFunction::Log => "log",
@@ -1534,7 +1544,14 @@ impl FloatBuiltin {
     pub const fn arity(self) -> usize {
         match self {
             Self::Min | Self::Max | Self::Remainder => 2,
-            Self::Abs | Self::IsNan | Self::IsFinite => 1,
+            Self::Abs
+            | Self::IsNan
+            | Self::IsFinite
+            | Self::Floor
+            | Self::Ceiling
+            | Self::Round
+            | Self::Truncate
+            | Self::Sqrt => 1,
             Self::Library(function) => function.arity(),
         }
     }

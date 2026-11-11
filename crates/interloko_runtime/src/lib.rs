@@ -104,25 +104,15 @@ pub const STRING_CONCATENATE: &str = "interloko.string_concatenate";
 
 /// Float library function served by the runtime host.
 ///
-/// These are the float operations `execution_tape` has no instruction for.
+/// These are the float operations `execution_tape` has no instruction for;
+/// rounding and `sqrt` are tape instructions (`f64.floor`, `f64.sqrt`, ...).
 /// Each is a host call named [`FloatFunction::symbol`] taking
 /// [`FloatFunction::arity`] `f64` arguments and returning one `f64`.
 /// Implementations come from the pure-Rust `libm` crate rather than the
 /// platform C library, so results are identical on every host, which keeps
-/// recorded runs replayable. Rounding functions follow IEEE 754 and keep
-/// the sign of zero; `round` rounds half-way cases to even.
+/// recorded runs replayable.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FloatFunction {
-    /// Largest integral value not greater than the argument.
-    Floor,
-    /// Smallest integral value not less than the argument.
-    Ceiling,
-    /// Nearest integral value, ties to even.
-    Round,
-    /// Integral part, rounding toward zero.
-    Truncate,
-    /// Correctly rounded square root; NaN for negative arguments.
-    Sqrt,
     /// Cube root.
     Cbrt,
     /// `e` raised to the argument.
@@ -162,11 +152,6 @@ pub enum FloatFunction {
 impl FloatFunction {
     /// Every float library function in declaration order.
     pub const ALL: &'static [Self] = &[
-        Self::Floor,
-        Self::Ceiling,
-        Self::Round,
-        Self::Truncate,
-        Self::Sqrt,
         Self::Cbrt,
         Self::Exp,
         Self::Log,
@@ -190,11 +175,6 @@ impl FloatFunction {
     #[must_use]
     pub const fn symbol(self) -> &'static str {
         match self {
-            Self::Floor => "interloko.float.floor",
-            Self::Ceiling => "interloko.float.ceiling",
-            Self::Round => "interloko.float.round",
-            Self::Truncate => "interloko.float.truncate",
-            Self::Sqrt => "interloko.float.sqrt",
             Self::Cbrt => "interloko.float.cbrt",
             Self::Exp => "interloko.float.exp",
             Self::Log => "interloko.float.log",
@@ -248,11 +228,6 @@ impl FloatFunction {
         let x = args.first().copied().unwrap_or(f64::NAN);
         let y = args.get(1).copied().unwrap_or(f64::NAN);
         match self {
-            Self::Floor => libm::floor(x),
-            Self::Ceiling => libm::ceil(x),
-            Self::Round => libm::roundeven(x),
-            Self::Truncate => libm::trunc(x),
-            Self::Sqrt => libm::sqrt(x),
             Self::Cbrt => libm::cbrt(x),
             Self::Exp => libm::exp(x),
             Self::Log => libm::log(x),
@@ -2695,44 +2670,12 @@ mod tests {
     use execution_tape::vm::{ExecutionContext, Limits, Vm};
 
     #[test]
-    fn float_functions_are_exact_where_ieee_defines_them() {
-        extern crate std;
-        let samples = [
-            0.0,
-            -0.0,
-            0.5,
-            -0.5,
-            1.5,
-            2.5,
-            -2.5,
-            3.5,
-            0.49999999999999994,
-            4503599627370497.0,
-            1e300,
-            -1e-300,
-            5e-324,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            2.0,
-            10.0,
-        ];
-        for x in samples {
-            let check = |function: FloatFunction, expected: f64| {
-                let actual = function.apply(&[x]);
-                assert_eq!(actual.to_bits(), expected.to_bits(), "{function:?}({x})");
-            };
-            check(FloatFunction::Floor, std::primitive::f64::floor(x));
-            check(FloatFunction::Ceiling, std::primitive::f64::ceil(x));
-            check(FloatFunction::Truncate, std::primitive::f64::trunc(x));
-            check(
-                FloatFunction::Round,
-                std::primitive::f64::round_ties_even(x),
-            );
-            check(FloatFunction::Sqrt, std::primitive::f64::sqrt(x));
-        }
-        assert!(FloatFunction::Sqrt.apply(&[-1.0]).is_nan());
-        assert!(FloatFunction::Floor.apply(&[f64::NAN]).is_nan());
+    fn float_functions_follow_their_special_cases() {
+        assert!(FloatFunction::Log.apply(&[-1.0]).is_nan());
+        assert_eq!(FloatFunction::Exp.apply(&[0.0]), 1.0);
+        assert_eq!(FloatFunction::Cbrt.apply(&[-27.0]), -3.0);
         assert_eq!(FloatFunction::Pow.apply(&[2.0, 10.0]), 1024.0);
+        assert_eq!(FloatFunction::Pow.apply(&[f64::NAN, 0.0]), 1.0);
         assert_eq!(FloatFunction::Hypot.apply(&[3.0, 4.0]), 5.0);
         assert_eq!(
             FloatFunction::Atan2.apply(&[1.0, 1.0]),

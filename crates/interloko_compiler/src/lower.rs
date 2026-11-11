@@ -258,6 +258,16 @@ pub enum F64UnaryOp {
     Neg,
     /// Sign-bit clear.
     Abs,
+    /// Round toward negative infinity.
+    Floor,
+    /// Round toward positive infinity.
+    Ceil,
+    /// Round toward zero.
+    Trunc,
+    /// Round to nearest, ties to even.
+    Nearest,
+    /// Correctly rounded square root.
+    Sqrt,
 }
 
 impl F64UnaryOp {
@@ -267,6 +277,11 @@ impl F64UnaryOp {
         match self {
             Self::Neg => "f64.neg",
             Self::Abs => "f64.abs",
+            Self::Floor => "f64.floor",
+            Self::Ceil => "f64.ceil",
+            Self::Trunc => "f64.trunc",
+            Self::Nearest => "f64.nearest",
+            Self::Sqrt => "f64.sqrt",
         }
     }
 }
@@ -502,12 +517,14 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
-    /// Boolean negation.
-    BoolNot {
+    /// IEEE 754 inequality; true when either operand is NaN.
+    F64NotEqual {
         /// Destination register.
         dst: Register,
-        /// Operand register.
-        src: Register,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
         /// Source span.
         span: Span,
     },
@@ -3705,16 +3722,35 @@ impl<'module> BodyLowering<'module> {
         let binary = |op| -> Result<(F64BinaryOp, Register, Register), LowerError> {
             Ok((op, operand(0)?, operand(1)?))
         };
+        let unary = match builtin {
+            sem::FloatBuiltin::Abs => Some(F64UnaryOp::Abs),
+            sem::FloatBuiltin::Floor => Some(F64UnaryOp::Floor),
+            sem::FloatBuiltin::Ceiling => Some(F64UnaryOp::Ceil),
+            sem::FloatBuiltin::Round => Some(F64UnaryOp::Nearest),
+            sem::FloatBuiltin::Truncate => Some(F64UnaryOp::Trunc),
+            sem::FloatBuiltin::Sqrt => Some(F64UnaryOp::Sqrt),
+            _ => None,
+        };
+        if let Some(op) = unary {
+            let result = self.alloc(ValueKind::F64);
+            self.instructions.push(Instr::F64Unary {
+                dst: result.reg,
+                op,
+                src: operand(0)?,
+                span,
+            });
+            return Ok(result);
+        }
         let instr = match builtin {
-            sem::FloatBuiltin::Abs => {
-                let result = self.alloc(ValueKind::F64);
-                self.instructions.push(Instr::F64Unary {
-                    dst: result.reg,
-                    op: F64UnaryOp::Abs,
-                    src: operand(0)?,
-                    span,
-                });
-                return Ok(result);
+            sem::FloatBuiltin::Abs
+            | sem::FloatBuiltin::Floor
+            | sem::FloatBuiltin::Ceiling
+            | sem::FloatBuiltin::Round
+            | sem::FloatBuiltin::Truncate
+            | sem::FloatBuiltin::Sqrt => {
+                return Err(invalid_semantic(
+                    "unary float builtin was not lowered inline",
+                ));
             }
             sem::FloatBuiltin::Min => binary(F64BinaryOp::Min)?,
             sem::FloatBuiltin::Max => binary(F64BinaryOp::Max)?,
@@ -3722,18 +3758,11 @@ impl<'module> BodyLowering<'module> {
             sem::FloatBuiltin::IsNan => {
                 // NaN is the only value unequal to itself.
                 let x = operand(0)?;
-                let equal = self.alloc(ValueKind::Bool);
-                self.instructions.push(Instr::F64Compare {
-                    dst: equal.reg,
-                    op: sem::CompareOp::Eq,
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::F64NotEqual {
+                    dst: result.reg,
                     lhs: x,
                     rhs: x,
-                    span,
-                });
-                let result = self.alloc(ValueKind::Bool);
-                self.instructions.push(Instr::BoolNot {
-                    dst: result.reg,
-                    src: equal.reg,
                     span,
                 });
                 return Ok(result);
@@ -4270,8 +4299,13 @@ impl Module {
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
-            Instr::BoolNot { dst, src, span } => {
-                write!(f, "  {dst} = bool.not {src}")?;
+            Instr::F64NotEqual {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  {dst} = f64.ne {lhs}, {rhs}")?;
                 fmt_span(f, *span)
             }
             Instr::F64ToI64 { dst, src, span } => {

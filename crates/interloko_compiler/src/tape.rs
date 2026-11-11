@@ -837,6 +837,11 @@ impl<'a> FunctionEmitter<'a> {
                 match op {
                     lower::F64UnaryOp::Neg => self.asm.f64_neg(dst.0, src.0),
                     lower::F64UnaryOp::Abs => self.asm.f64_abs(dst.0, src.0),
+                    lower::F64UnaryOp::Floor => self.asm.f64_floor(dst.0, src.0),
+                    lower::F64UnaryOp::Ceil => self.asm.f64_ceil(dst.0, src.0),
+                    lower::F64UnaryOp::Trunc => self.asm.f64_trunc(dst.0, src.0),
+                    lower::F64UnaryOp::Nearest => self.asm.f64_nearest(dst.0, src.0),
+                    lower::F64UnaryOp::Sqrt => self.asm.f64_sqrt(dst.0, src.0),
                 };
             }
             lower::Instr::FloatCall {
@@ -850,9 +855,14 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.host_call(0, sig, 0, &args, &[dst.0]);
             }
-            lower::Instr::BoolNot { dst, src, span } => {
+            lower::Instr::F64NotEqual {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
                 self.set_span(*span);
-                self.asm.bool_not(dst.0, src.0);
+                self.asm.f64_ne(dst.0, lhs.0, rhs.0);
             }
             lower::Instr::I64ToF64 { dst, src, span } => {
                 self.set_span(*span);

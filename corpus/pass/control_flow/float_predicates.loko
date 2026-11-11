@@ -1,6 +1,6 @@
 // expect: run #t
 // expect: diagnostics 0
-// expect: dump lowered contains bool.not
+// expect: dump lowered contains f64.ne
 
 define function main() => <boolean>
   if nan?(0.0 / 0.0) then
