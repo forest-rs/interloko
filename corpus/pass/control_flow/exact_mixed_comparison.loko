@@ -1,0 +1,22 @@
+// expect: run 110111110
+// expect: diagnostics 0
+// expect: dump sem contains exact-compare
+
+// Integers and floats compare as mathematical values, never by rounding the
+// integer to a float: 2^53 + 1 is greater than 2.0^53, not equal to it.
+define function bit(flag :: <boolean>, weight :: <integer>) => <integer>
+  if flag then weight else 0 end
+end;
+
+define function main() => <integer>
+  bit(9007199254740993 = 9007199254740992.0, 1)
+    + bit(9007199254740993 > 9007199254740992.0, 10)
+    + bit(9007199254740992.0 < 9007199254740993, 100)
+    + bit(3 = 3.0, 1000)
+    + bit(2 < 2.5, 10000)
+    + bit(-2 > -2.5, 100000)
+    + bit(0.0 / 0.0 = 0, 1000000)
+    + bit(9223372036854775807 < 9223372036854775808.0, 10000000)
+    + bit(-9223372036854775808 = -9223372036854775808.0, 100000000)
+    + bit(9223372036854775807 = 9223372036854775807.0, 1000000000)
+end;

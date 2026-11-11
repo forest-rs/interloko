@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
+use crate::promotion;
 use crate::syntax::Span;
 
 pub use interloko_model::{
@@ -675,6 +676,7 @@ impl Module {
             Expr::FloatCall { builtin, .. } => builtin.result_kind(),
             Expr::ConstBool { .. }
             | Expr::Compare { .. }
+            | Expr::MixedCompare { .. }
             | Expr::ValueEqual { .. }
             | Expr::InstanceOf { .. } => ValueKind::Bool,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
@@ -765,6 +767,19 @@ fn generic_param_boxes_scalars_in<'a>(
         .filter(|(method_generic, _)| *method_generic == generic.id)
         .filter_map(|(_, specializers)| specializers.get(index).copied().flatten())
         .any(|class| class == OBJECT_CLASS_ID || is_scalar_value_class_in(classes, class))
+}
+
+/// Converts an operand of numeric kind `from` to the promoted kind `to`.
+fn promote_operand(operand: Expr, from: NumericKind, to: NumericKind) -> Expr {
+    if from == to || matches!(operand, Expr::Error { .. }) {
+        return operand;
+    }
+    let span = operand.span();
+    Expr::Convert {
+        to,
+        value: Box::new(operand),
+        span,
+    }
 }
 
 fn is_same_or_subclass_in_classes(classes: &[Class], actual: ClassId, expected: ClassId) -> bool {
@@ -1356,10 +1371,9 @@ impl From<ast::BinaryOp> for BinaryOp {
 
 /// Unboxed numeric category of a primitive arithmetic or ordering operation.
 ///
-/// Loko operators are statically typed primitives, not generic functions:
-/// both operands must have the same numeric kind, and there is no implicit
-/// integer-to-float contagion. Mixed operands are a diagnostic; convert with
-/// `as(<float>, n)` instead.
+/// Mixed operands are promoted by the rules in [`crate::promotion`] before
+/// they reach a primitive operation, so both operands of an [`Expr::Binary`]
+/// or [`Expr::Compare`] share one kind.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NumericKind {
     /// Signed 64-bit integers, source `<integer>`.
@@ -1405,6 +1419,21 @@ pub enum CompareOp {
     Gt,
     /// Greater than or equal.
     Ge,
+}
+
+impl CompareOp {
+    /// Returns the operator that gives the same answer with the operands
+    /// swapped: `a < b` is `b > a`.
+    #[must_use]
+    pub const fn reversed(self) -> Self {
+        match self {
+            Self::Eq => Self::Eq,
+            Self::Lt => Self::Gt,
+            Self::Le => Self::Ge,
+            Self::Gt => Self::Lt,
+            Self::Ge => Self::Le,
+        }
+    }
 }
 
 impl From<ast::CompareOp> for CompareOp {
@@ -1901,6 +1930,21 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Exact comparison of one integer with one float, as mathematical
+    /// values; see [`crate::promotion`].
+    MixedCompare {
+        /// Operator.
+        op: CompareOp,
+        /// Numeric kind of the left operand; the right operand has the other
+        /// kind.
+        lhs_kind: NumericKind,
+        /// Left operand.
+        lhs: Box<Expr>,
+        /// Right operand.
+        rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Conversion between `<integer>` and `<float>`, from source
     /// `as(<float>, n)` or `as(<integer>, x)`.
     ///
@@ -2012,6 +2056,7 @@ impl Expr {
             | Self::Convert { span, .. }
             | Self::FloatCall { span, .. }
             | Self::Compare { span, .. }
+            | Self::MixedCompare { span, .. }
             | Self::ValueEqual { span, .. }
             | Self::If { span, .. }
             | Self::Handle { span, .. }
@@ -4579,7 +4624,7 @@ impl Lowering {
             } => {
                 let (lhs, rhs) = self.lower_numeric_operands(ctx, lhs, rhs);
                 let op = BinaryOp::from(*op);
-                let Some(kind) = self.numeric_operand_kind(
+                let Some((lhs_kind, rhs_kind)) = self.numeric_operand_kinds(
                     ctx,
                     *span,
                     &lhs,
@@ -4588,21 +4633,25 @@ impl Lowering {
                 ) else {
                     return Expr::Error { span: *span };
                 };
-                if op == BinaryOp::Div
-                    && kind == NumericKind::Integer
-                    && self.expr_kind(&lhs) == ValueKind::I64
-                    && self.expr_kind(&rhs) == ValueKind::I64
-                {
-                    ctx.diagnostics.push(Diagnostic::error(
-                        *span,
-                        DiagnosticCode::IntegerDivisionUnsupported,
-                    ));
-                }
+                let kind = match promotion::arithmetic(op, lhs_kind, rhs_kind) {
+                    promotion::ArithmeticRule::Promote { kind } => kind,
+                    promotion::ArithmeticRule::Undefined => {
+                        if self.expr_kind(&lhs) == ValueKind::I64
+                            && self.expr_kind(&rhs) == ValueKind::I64
+                        {
+                            ctx.diagnostics.push(Diagnostic::error(
+                                *span,
+                                DiagnosticCode::IntegerDivisionUnsupported,
+                            ));
+                        }
+                        return Expr::Error { span: *span };
+                    }
+                };
                 Expr::Binary {
                     op,
                     kind,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
+                    lhs: Box::new(promote_operand(lhs, lhs_kind, kind)),
+                    rhs: Box::new(promote_operand(rhs, rhs_kind, kind)),
                     span: *span,
                 }
             }
@@ -5574,27 +5623,28 @@ impl Lowering {
         (lhs, rhs)
     }
 
-    /// Returns the shared numeric kind of two operands.
+    /// Returns the numeric kinds of two operands.
     ///
-    /// Reports `code` and returns `None` when they are not both integers or
-    /// both floats; callers then produce an error expression so the mismatch
-    /// is reported once rather than cascading into result-type diagnostics.
-    fn numeric_operand_kind(
+    /// Reports `code` and returns `None` when either is not a number; callers
+    /// then produce an error expression so the mismatch is reported once
+    /// rather than cascading into result-type diagnostics. An erroneous
+    /// operand takes the other operand's kind.
+    fn numeric_operand_kinds(
         &self,
         ctx: &mut FunctionContext,
         span: Span,
         lhs: &Expr,
         rhs: &Expr,
         code: DiagnosticCode,
-    ) -> Option<NumericKind> {
+    ) -> Option<(NumericKind, NumericKind)> {
         let lhs_kind = self.expr_kind(lhs);
         let rhs_kind = self.expr_kind(rhs);
         match (NumericKind::of(lhs_kind), NumericKind::of(rhs_kind)) {
-            (Some(lhs), Some(rhs)) if lhs == rhs => return Some(lhs),
-            (Some(kind), None) if rhs_kind == ValueKind::Error => return Some(kind),
-            (None, Some(kind)) if lhs_kind == ValueKind::Error => return Some(kind),
+            (Some(lhs), Some(rhs)) => return Some((lhs, rhs)),
+            (Some(kind), None) if rhs_kind == ValueKind::Error => return Some((kind, kind)),
+            (None, Some(kind)) if lhs_kind == ValueKind::Error => return Some((kind, kind)),
             (None, None) if lhs_kind == ValueKind::Error && rhs_kind == ValueKind::Error => {
-                return Some(NumericKind::Integer);
+                return Some((NumericKind::Integer, NumericKind::Integer));
             }
             _ => {}
         }
@@ -5618,7 +5668,7 @@ impl Lowering {
         let rhs_kind = self.expr_kind(&rhs);
         let numeric = |kind: ValueKind| NumericKind::of(kind).is_some() || kind == ValueKind::Error;
         if op != ast::CompareOp::Eq || (numeric(lhs_kind) && numeric(rhs_kind)) {
-            let Some(kind) = self.numeric_operand_kind(
+            let Some((lhs_kind, rhs_kind)) = self.numeric_operand_kinds(
                 ctx,
                 span,
                 &lhs,
@@ -5627,12 +5677,21 @@ impl Lowering {
             ) else {
                 return Expr::Error { span };
             };
-            return Expr::Compare {
-                op: op.into(),
-                kind,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-                span,
+            return match promotion::comparison(lhs_kind, rhs_kind) {
+                promotion::ComparisonRule::Same { kind } => Expr::Compare {
+                    op: op.into(),
+                    kind,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span,
+                },
+                promotion::ComparisonRule::ExactMixed => Expr::MixedCompare {
+                    op: op.into(),
+                    lhs_kind,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span,
+                },
             };
         }
 
@@ -6153,6 +6212,7 @@ impl Lowering {
             Expr::SlotWrite { result_kind, .. } => *result_kind,
             Expr::ConstBool { .. }
             | Expr::Compare { .. }
+            | Expr::MixedCompare { .. }
             | Expr::ValueEqual { .. }
             | Expr::InstanceOf { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,

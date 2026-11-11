@@ -1595,6 +1595,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         }
         sem::Expr::Binary { lhs, rhs, .. }
         | sem::Expr::Compare { lhs, rhs, .. }
+        | sem::Expr::MixedCompare { lhs, rhs, .. }
         | sem::Expr::ValueEqual { lhs, rhs, .. } => {
             collect_known_callable_uses_in_expr(lhs, uses);
             collect_known_callable_uses_in_expr(rhs, uses);
@@ -2811,6 +2812,23 @@ impl<'module> BodyLowering<'module> {
                     }
                 }
             }
+            sem::Expr::MixedCompare {
+                op,
+                lhs_kind,
+                lhs,
+                rhs,
+                span,
+            } => {
+                let lhs = self.lower_expr(lhs)?;
+                let rhs = self.lower_expr(rhs)?;
+                // Operands are evaluated in source order; the comparison is
+                // then phrased with the integer on the left.
+                let (integer, float, op) = match lhs_kind {
+                    sem::NumericKind::Integer => (lhs.reg, rhs.reg, *op),
+                    sem::NumericKind::Float => (rhs.reg, lhs.reg, op.reversed()),
+                };
+                Ok(self.lower_exact_integer_float_compare(op, integer, float, *span))
+            }
             sem::Expr::Compare {
                 op,
                 kind,
@@ -3943,6 +3961,176 @@ impl<'module> BodyLowering<'module> {
         });
         self.instructions.push(Instr::Label { label: done });
         Ok(result)
+    }
+
+    /// Lowers `integer op float` exactly, comparing mathematical values
+    /// rather than the integer rounded to a float.
+    ///
+    /// NaN compares false. A float at or beyond `±2^63` lies outside every
+    /// `i64`, so its sign decides. Otherwise the float's integral part `t`
+    /// converts exactly; the integer is compared with `t`, and on a tie the
+    /// sign of the exact fraction `x - t` decides. Each path leaves
+    /// `sign(integer - float)` in one register, which `op` then tests
+    /// against zero.
+    fn lower_exact_integer_float_compare(
+        &mut self,
+        op: sem::CompareOp,
+        integer: Register,
+        float: Register,
+        span: Span,
+    ) -> Value {
+        let result = self.alloc(ValueKind::Bool);
+        let sign = self.alloc(ValueKind::I64);
+        let flag = self.alloc(ValueKind::Bool);
+        let bound = self.alloc(ValueKind::F64);
+        let [
+            ordered,
+            unordered,
+            check_low,
+            in_range,
+            not_less,
+            tie,
+            not_above,
+            less,
+            greater,
+            equal,
+            decide,
+            done,
+        ] = core::array::from_fn(|_| self.alloc_label());
+
+        let float_compare = |dst, op, lhs, rhs| Instr::F64Compare {
+            dst,
+            op,
+            lhs,
+            rhs,
+            span,
+        };
+        let branch = |cond, then_label, else_label| Instr::Branch {
+            cond,
+            then_label,
+            else_label,
+            span,
+        };
+        let set_sign = |value| Instr::ConstI64 {
+            dst: sign.reg,
+            value,
+            span,
+        };
+        let jump = |label| Instr::Jump { label, span };
+
+        // NaN is the only float unequal to itself.
+        self.instructions.extend([
+            float_compare(flag.reg, sem::CompareOp::Eq, float, float),
+            branch(flag.reg, ordered, unordered),
+            Instr::Label { label: unordered },
+            Instr::ConstBool {
+                dst: result.reg,
+                value: false,
+                span,
+            },
+            jump(done),
+            // At or above 2^63 the float exceeds every i64.
+            Instr::Label { label: ordered },
+            Instr::ConstF64 {
+                dst: bound.reg,
+                value: sem::FloatBits::from_f64(9_223_372_036_854_775_808.0),
+                span,
+            },
+            float_compare(flag.reg, sem::CompareOp::Ge, float, bound.reg),
+            branch(flag.reg, less, check_low),
+            // Below -2^63 the float is less than every i64.
+            Instr::Label { label: check_low },
+            Instr::ConstF64 {
+                dst: bound.reg,
+                value: sem::FloatBits::from_f64(-9_223_372_036_854_775_808.0),
+                span,
+            },
+            float_compare(flag.reg, sem::CompareOp::Lt, float, bound.reg),
+            branch(flag.reg, greater, in_range),
+        ]);
+
+        // In range: compare with the integral part, then the fraction.
+        let truncated = self.alloc(ValueKind::F64);
+        let whole = self.alloc(ValueKind::I64);
+        let fraction = self.alloc(ValueKind::F64);
+        self.instructions.extend([
+            Instr::Label { label: in_range },
+            Instr::F64Unary {
+                dst: truncated.reg,
+                op: F64UnaryOp::Trunc,
+                src: float,
+                span,
+            },
+            Instr::F64ToI64 {
+                dst: whole.reg,
+                src: truncated.reg,
+                span,
+            },
+            Instr::I64Compare {
+                dst: flag.reg,
+                op: sem::CompareOp::Lt,
+                lhs: integer,
+                rhs: whole.reg,
+                span,
+            },
+            branch(flag.reg, less, not_less),
+            Instr::Label { label: not_less },
+            Instr::I64Compare {
+                dst: flag.reg,
+                op: sem::CompareOp::Gt,
+                lhs: integer,
+                rhs: whole.reg,
+                span,
+            },
+            branch(flag.reg, greater, tie),
+            Instr::Label { label: tie },
+            Instr::F64Binary {
+                dst: fraction.reg,
+                op: F64BinaryOp::Sub,
+                lhs: float,
+                rhs: truncated.reg,
+                span,
+            },
+            Instr::ConstF64 {
+                dst: bound.reg,
+                value: sem::FloatBits::from_f64(0.0),
+                span,
+            },
+            float_compare(flag.reg, sem::CompareOp::Gt, fraction.reg, bound.reg),
+            branch(flag.reg, less, not_above),
+            Instr::Label { label: not_above },
+            float_compare(flag.reg, sem::CompareOp::Lt, fraction.reg, bound.reg),
+            branch(flag.reg, greater, equal),
+            Instr::Label { label: less },
+            set_sign(-1),
+            jump(decide),
+            Instr::Label { label: greater },
+            set_sign(1),
+            jump(decide),
+            Instr::Label { label: equal },
+            set_sign(0),
+            jump(decide),
+        ]);
+
+        let zero = self.alloc(ValueKind::I64);
+        self.instructions.extend([
+            Instr::Label { label: decide },
+            Instr::ConstI64 {
+                dst: zero.reg,
+                value: 0,
+                span,
+            },
+            Instr::I64Compare {
+                dst: result.reg,
+                op,
+                lhs: sign.reg,
+                rhs: zero.reg,
+                span,
+            },
+            jump(done),
+            Instr::Label { label: done },
+        ]);
+        result
     }
 
     /// Lowers fixnum `lhs op rhs`: the overflow-reporting tape instruction,

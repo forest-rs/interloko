@@ -1,0 +1,9 @@
+// expect: run 6.5
+// expect: diagnostics 0
+// expect: dump lowered contains i64.to_f64
+
+// An integer operand meets a float by converting to a float first, so
+// statically typed mixed arithmetic needs no dispatch.
+define function main() => <float>
+  1 + 2.0 * 2 + 3 / 2.0 - 0
+end;

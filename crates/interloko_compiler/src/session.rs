@@ -4217,7 +4217,9 @@ fn collect_dispatch_sites_in_expr(
                 collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
             }
         }
-        sem::Expr::Binary { lhs, rhs, .. } | sem::Expr::Compare { lhs, rhs, .. } => {
+        sem::Expr::Binary { lhs, rhs, .. }
+        | sem::Expr::Compare { lhs, rhs, .. }
+        | sem::Expr::MixedCompare { lhs, rhs, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
         }
@@ -11148,6 +11150,21 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             dump_sem_expr(out, lhs, indent + 2);
             dump_sem_expr(out, rhs, indent + 2);
         }
+        sem::Expr::MixedCompare {
+            op,
+            lhs_kind,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "exact-compare {op:?} {}",
+                numeric_kind_label(*lhs_kind)
+            );
+            dump_sem_expr(out, lhs, indent + 2);
+            dump_sem_expr(out, rhs, indent + 2);
+        }
         sem::Expr::ValueEqual { lhs, rhs, kind, .. } => {
             let _ = writeln!(out, "value-eq {}", sem_kind_label_for_expr(*kind));
             dump_sem_expr(out, lhs, indent + 2);
@@ -12108,6 +12125,23 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             op, kind, lhs, rhs, ..
         } => {
             let _ = write!(out, "compare({op:?}:{}:", numeric_kind_label(*kind));
+            fingerprint_sem_expr(module, lhs, out);
+            out.push(',');
+            fingerprint_sem_expr(module, rhs, out);
+            out.push(')');
+        }
+        sem::Expr::MixedCompare {
+            op,
+            lhs_kind,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let _ = write!(
+                out,
+                "exact-compare({op:?}:{}:",
+                numeric_kind_label(*lhs_kind)
+            );
             fingerprint_sem_expr(module, lhs, out);
             out.push(',');
             fingerprint_sem_expr(module, rhs, out);
@@ -13864,6 +13898,101 @@ mod tests {
                 panic!("{name}{args:?} should trap");
             };
             assert_eq!(loko_trap(&trap), Some(lower::LokoTrap::IntegerOverflow));
+        }
+    }
+
+    #[test]
+    fn integer_float_comparisons_are_exact() {
+        extern crate std;
+        use core::cmp::Ordering;
+
+        let artifacts = CompilerSession::compile_source(
+            "compare.loko",
+            "define function lt(n :: <integer>, x :: <float>) => <boolean>\n  n < x\nend;\n\
+             define function eq(n :: <integer>, x :: <float>) => <boolean>\n  n = x\nend;\n\
+             define function ge(x :: <float>, n :: <integer>) => <boolean>\n  x >= n\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        // Independent reference: integral floats in range compare as i128;
+        // fractional ones fall strictly between their floor and floor + 1.
+        let reference = |n: i64, x: f64| -> Option<Ordering> {
+            if x.is_nan() {
+                return None;
+            }
+            if x >= 9_223_372_036_854_775_808.0 {
+                return Some(Ordering::Less);
+            }
+            if x < -9_223_372_036_854_775_808.0 {
+                return Some(Ordering::Greater);
+            }
+            let n = i128::from(n);
+            let floor = std::primitive::f64::floor(x) as i128;
+            if std::primitive::f64::fract(x) == 0.0 {
+                Some(n.cmp(&floor))
+            } else if n <= floor {
+                Some(Ordering::Less)
+            } else {
+                Some(Ordering::Greater)
+            }
+        };
+        let call = |name: &str, args: [FunctionValue; 2]| match artifacts
+            .call_function(name, &args, None)
+        {
+            Ok(outcome) => outcome.value,
+            Err(error) => panic!("{name}: {error}"),
+        };
+        let integers = [
+            0,
+            1,
+            -1,
+            3,
+            (1 << 53) + 1,
+            1 << 53,
+            i64::MAX,
+            i64::MAX - 1,
+            i64::MIN,
+            i64::MIN + 1,
+        ];
+        let floats = [
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            2.5,
+            3.0,
+            9_007_199_254_740_992.0,
+            9_007_199_254_740_994.0,
+            9_223_372_036_854_775_808.0,
+            -9_223_372_036_854_775_808.0,
+            9_223_372_036_854_774_784.0,
+            -9_223_372_036_854_777_856.0,
+            1e300,
+            -1e-300,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        for n in integers {
+            for x in floats {
+                let expected = reference(n, x);
+                let (int, float) = (FunctionValue::Integer(n), FunctionValue::Float(x));
+                assert_eq!(
+                    call("lt", [int.clone(), float.clone()]),
+                    FunctionValue::Boolean(expected == Some(Ordering::Less)),
+                    "{n} < {x}"
+                );
+                assert_eq!(
+                    call("eq", [int.clone(), float.clone()]),
+                    FunctionValue::Boolean(expected == Some(Ordering::Equal)),
+                    "{n} = {x}"
+                );
+                assert_eq!(
+                    call("ge", [float, int]),
+                    FunctionValue::Boolean(expected.is_some_and(Ordering::is_le)),
+                    "{x} >= {n}"
+                );
+            }
         }
     }
 
