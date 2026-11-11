@@ -1,0 +1,20 @@
+// expect: run 5.5
+// expect: diagnostics 0
+// expect: dump lowered contains box.any
+// expect: dump lowered contains unbox <double-float>
+
+// An unannotated parameter with integer or float methods carries boxed
+// values, so scalars dispatch by class like objects do.
+define generic bump(x);
+
+define method bump(x :: <double-float>) => <float>
+  x + 1.0
+end;
+
+define method bump(x :: <integer>) => <float>
+  as(<float>, x + 1)
+end;
+
+define function main() => <float>
+  bump(2.5) + bump(1)
+end;

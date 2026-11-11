@@ -224,6 +224,9 @@ struct AbiTables {
     make_object: HostSigId,
     class_count: usize,
     class_of: HostSigId,
+    class_of_any: HostSigId,
+    unbox_i64: HostSigId,
+    unbox_f64: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
     slot_set: Vec<Vec<HostSigId>>,
     string_literal: Option<HostSigId>,
@@ -286,6 +289,16 @@ impl AbiTables {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let class_of = builder.host_sig_for(runtime::CLASS_OF, runtime::class_of_signature());
+        let class_of_any =
+            builder.host_sig_for(runtime::CLASS_OF, runtime::class_of_any_signature());
+        let unbox_i64 = builder.host_sig_for(
+            runtime::UNBOX_VALUE,
+            runtime::unbox_value_signature(ValueType::I64),
+        );
+        let unbox_f64 = builder.host_sig_for(
+            runtime::UNBOX_VALUE,
+            runtime::unbox_value_signature(ValueType::F64),
+        );
         let box_i64 = builder.host_sig_for(
             runtime::BOX_VALUE,
             runtime::box_value_signature(ValueType::I64),
@@ -353,6 +366,9 @@ impl AbiTables {
             make_object,
             class_count: module.runtime.classes.len(),
             class_of,
+            class_of_any,
+            unbox_i64,
+            unbox_f64,
             slot_get,
             slot_set,
             string_literal,
@@ -1040,10 +1056,37 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .host_call(0, sig, 0, &[receiver.0, slot_reg, value.0], &[dst.0]);
             }
-            lower::Instr::ClassOf { dst, object, span } => {
+            lower::Instr::ClassOf {
+                dst,
+                object,
+                input,
+                span,
+            } => {
+                let sig = if *input == lower::ValueKind::Any {
+                    self.abi.class_of_any
+                } else {
+                    self.abi.class_of
+                };
                 self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[object.0], &[dst.0]);
+            }
+            lower::Instr::UnboxValue {
+                dst,
+                value,
+                class,
+                kind,
+                span,
+            } => {
+                let sig = match kind {
+                    lower::ValueKind::I64 => self.abi.unbox_i64,
+                    lower::ValueKind::F64 => self.abi.unbox_f64,
+                    _ => return Err(invalid_lowered("unbox result kind is not a scalar")),
+                };
+                let class_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm
-                    .host_call(0, self.abi.class_of, 0, &[object.0], &[dst.0]);
+                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
             }
             lower::Instr::InstanceOf {
                 dst,

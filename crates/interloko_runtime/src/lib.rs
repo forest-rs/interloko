@@ -38,6 +38,9 @@ pub const SLOT_GET: &str = "interloko.slot_get";
 pub const SLOT_SET: &str = "interloko.slot_set";
 /// Host-call symbol for boxing a concrete value as the top `<object>` value.
 pub const BOX_VALUE: &str = "interloko.box_value";
+/// Host-call symbol for unboxing an integer or float from a boxed top
+/// `<object>` value after checking its class.
+pub const UNBOX_VALUE: &str = "interloko.unbox_value";
 /// Host-call symbol for testing whether a value is an instance of a class.
 pub const INSTANCE_OF: &str = "interloko.instance_of";
 /// Host-call symbol for casting a value to a known runtime object class.
@@ -2021,11 +2024,24 @@ impl Host for InterlokoHost {
                 Ok(0)
             }
             CLASS_OF => {
-                let [ValueRef::Obj(obj)] = args else {
+                let [value @ ValueRef::Obj(_)] = args else {
                     return Err(HostError::Failed);
                 };
-                let object = self.object(*obj)?;
-                rets[0] = Value::U64(u64::from(object.class.0));
+                rets[0] = Value::U64(u64::from(self.class_of_any(*value)?.0));
+                Ok(0)
+            }
+            UNBOX_VALUE => {
+                let [ValueRef::Obj(obj), ValueRef::U64(class_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let class = runtime_class_id(*class_raw)?;
+                if !self.value_is_instance(ValueRef::Obj(*obj), class) {
+                    return Err(HostError::Failed);
+                }
+                rets[0] = match self.boxed_value(*obj)? {
+                    value @ (Value::I64(_) | Value::F64(_)) => value.clone(),
+                    _ => return Err(HostError::Failed),
+                };
                 Ok(0)
             }
             SLOT_GET => {
@@ -2449,6 +2465,28 @@ pub fn class_of_signature() -> HostSig {
     HostSig {
         args: vec![object_type()],
         rets: vec![ValueType::U64],
+    }
+}
+
+/// Returns the `class_of` host signature for a boxed top `<object>` input.
+///
+/// [`CLASS_OF`] accepts runtime objects and boxed values alike; this is the
+/// signature for the boxed form.
+#[must_use]
+pub fn class_of_any_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type()],
+        rets: vec![ValueType::U64],
+    }
+}
+
+/// Returns the [`UNBOX_VALUE`] host signature producing `output`
+/// (`ValueType::I64` or `ValueType::F64`).
+#[must_use]
+pub fn unbox_value_signature(output: ValueType) -> HostSig {
+    HostSig {
+        args: vec![any_type(), ValueType::U64],
+        rets: vec![output],
     }
 }
 
