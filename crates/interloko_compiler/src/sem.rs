@@ -2414,8 +2414,13 @@ impl FunctionContext {
         self.active_restarts.pop();
     }
 
-    fn active_restart(&self) -> Option<ActiveRestart> {
-        self.active_restarts.last().cloned()
+    /// Innermost lexically enclosing restart that accepts `class`.
+    fn matching_restart(&self, class: ClassId, module: &Lowering) -> Option<ActiveRestart> {
+        self.active_restarts
+            .iter()
+            .rev()
+            .find(|restart| module.is_same_or_subclass(class, restart.specializer))
+            .cloned()
     }
 }
 
@@ -4853,7 +4858,7 @@ impl Lowering {
             }
             ast::Expr::Signal {
                 condition, span, ..
-            } => self.lower_signal(ctx, condition, *span),
+            } => self.lower_signal(ctx, condition, expected_results, *span),
             ast::Expr::MakeObject {
                 class,
                 fields,
@@ -4964,13 +4969,15 @@ impl Lowering {
                 let refinement = self.true_branch_refinement(&condition);
                 let previous_kind = refinement
                     .and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
-                let then_branch =
+                let mut then_branch =
                     self.lower_expr_expected_results(ctx, then_branch, expected_results);
                 if let (Some(refinement), Some(previous_kind)) = (refinement, previous_kind) {
                     let _ = ctx.refine_local(refinement.local, previous_kind);
                 }
-                let else_branch =
+                let mut else_branch =
                     self.lower_expr_expected_results(ctx, else_branch, expected_results);
+                self.adopt_divergent_kinds(&mut then_branch, &else_branch);
+                self.adopt_divergent_kinds(&mut else_branch, &then_branch);
                 let condition_kind = self.expr_kind(&condition);
                 if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
                     ctx.diagnostics.push(
@@ -5729,10 +5736,18 @@ impl Lowering {
         }
     }
 
+    /// Lowers `signal(condition)`.
+    ///
+    /// Handlers are found dynamically, so any statically known object may be
+    /// signalled anywhere. A signal never returns: its result kinds are only a
+    /// placeholder that lets it sit in any expression position. They come from
+    /// the innermost lexical restart accepting the condition, then from the
+    /// context, and are adopted from a sibling branch where one exists.
     fn lower_signal(
         &mut self,
         ctx: &mut FunctionContext,
         condition: &ast::Expr,
+        expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
         let condition = self.lower_expr(ctx, condition);
@@ -5748,47 +5763,46 @@ impl Lowering {
                 ClassId(u32::MAX)
             }
         };
-        let Some(active) = ctx.active_restart() else {
-            ctx.diagnostics.push(Diagnostic::error(
-                span,
-                DiagnosticCode::SignalRequiresRestart,
-            ));
-            return Expr::Signal {
-                condition: Box::new(condition),
-                condition_class,
-                result_kinds: vec![ValueKind::Error],
-                result_callable_sigs: vec![None],
-                span,
-            };
-        };
-        if condition_class != ClassId(u32::MAX)
-            && !self.is_same_or_subclass(condition_class, active.specializer)
-        {
-            ctx.diagnostics.push(
-                Diagnostic::error(span, DiagnosticCode::SignalRestartMismatch)
-                    .with_arg(DiagnosticArg::text(
-                        "condition_class",
-                        self.kind_name(ValueKind::Object(condition_class)),
-                    ))
-                    .with_arg(DiagnosticArg::text(
-                        "restart_class",
-                        self.kind_name(ValueKind::Object(active.specializer)),
-                    )),
-            );
-            return Expr::Signal {
-                condition: Box::new(condition),
-                condition_class,
-                result_kinds: vec![ValueKind::Error],
-                result_callable_sigs: vec![None],
-                span,
-            };
-        }
+        let (result_kinds, result_callable_sigs) = ctx
+            .matching_restart(condition_class, self)
+            .map(|restart| (restart.result_kinds, restart.result_callable_sigs))
+            .or_else(|| expected_results.map(|kinds| (kinds.to_vec(), vec![None; kinds.len()])))
+            .unwrap_or_else(|| {
+                let kinds = provisional_open_result_kinds();
+                let sigs = vec![None; kinds.len()];
+                (kinds, sigs)
+            });
         Expr::Signal {
             condition: Box::new(condition),
             condition_class,
-            result_kinds: active.result_kinds,
-            result_callable_sigs: active.result_callable_sigs,
+            result_kinds,
+            result_callable_sigs,
             span,
+        }
+    }
+
+    /// Lets a diverging `signal` take the result kinds of its sibling.
+    ///
+    /// A signal never produces a value, so this only removes a spurious
+    /// mismatch between, say, an `if` branch that signals and one that
+    /// returns a float.
+    fn adopt_divergent_kinds(&self, expr: &mut Expr, sibling: &Expr) {
+        if matches!(sibling, Expr::Signal { .. }) {
+            return;
+        }
+        let kinds = self.expr_kinds(sibling);
+        if result_kinds_contain_error(&kinds) {
+            return;
+        }
+        let sigs = self.expr_result_callable_signatures(sibling);
+        if let Expr::Signal {
+            result_kinds,
+            result_callable_sigs,
+            ..
+        } = expr
+        {
+            *result_kinds = kinds;
+            *result_callable_sigs = sigs;
         }
     }
 
@@ -5837,8 +5851,9 @@ impl Lowering {
             result_kinds: restart_kinds.clone(),
             result_callable_sigs: restart_callable_sigs.clone(),
         });
-        let body = self.lower_expr_expected_results(ctx, body, expected_results);
+        let mut body = self.lower_expr_expected_results(ctx, body, expected_results);
         ctx.pop_restart();
+        self.adopt_divergent_kinds(&mut body, &restart_body);
 
         let body_kinds = self.expr_kinds(&body);
         if !self.result_kinds_match(&body_kinds, &restart_kinds)
@@ -8611,15 +8626,24 @@ mod tests {
 
     #[test]
     fn reports_invalid_signal_and_restart_uses() {
-        let uncaught = lower_source(
+        let dynamic = lower_source(
             "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  signal(make(<bad>, fallback: 0))\nend;",
         );
-        assert!(has_diagnostic(
-            &uncaught,
-            DiagnosticCode::SignalRequiresRestart,
-            &[]
-        ));
+        assert!(
+            dynamic.diagnostics.is_empty(),
+            "a signal outside any lexical handler is searched for at run time"
+        );
+
+        let float_branch = lower_source(
+            "define class <bad> (<object>)\nend;\n\
+             define function pick(x :: <float>)\n  if x < 0.0 then signal(make(<bad>)) else x end\nend;",
+        );
+        assert!(
+            float_branch.diagnostics.is_empty(),
+            "a diverging signal adopts its sibling branch's kinds: {:?}",
+            float_branch.diagnostics
+        );
 
         let mismatched_restart = lower_source(
             "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\

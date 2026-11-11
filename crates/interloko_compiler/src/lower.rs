@@ -64,6 +64,8 @@ pub enum ValueKind {
     Closure(Option<CallableSigId>),
     /// Execution aggregate value, used for closure environments.
     Aggregate,
+    /// Caught exception reference, bound by a catch target and rethrown.
+    Exn,
     /// Runtime object, optionally tied to a statically known nominal class.
     Object(Option<sem::ClassId>),
     /// Class metaobject, optionally tied to the class it represents.
@@ -297,6 +299,35 @@ impl I64ArithOp {
             Self::Mul => "i64.mul_ovf",
         }
     }
+}
+
+/// Exception tag used by a language control transfer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ControlTag {
+    /// Transfer to the activation that established a selected handler.
+    /// The payload is the binding token and the condition object.
+    Restart,
+}
+
+/// One clause of a protected region.
+///
+/// Every clause binds the caught exception reference as its target's final
+/// parameter, so the target can rethrow it unchanged.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Catch {
+    /// Catches one control tag; the target receives its payload, then the
+    /// exception.
+    Tag {
+        /// Caught tag.
+        tag: ControlTag,
+        /// Catch target.
+        target: LabelId,
+    },
+    /// Catches every exception; the target receives only the exception.
+    All {
+        /// Catch target.
+        target: LabelId,
+    },
 }
 
 /// Two-operand IEEE 754 float operation emitted as one tape instruction.
@@ -866,6 +897,58 @@ pub enum Instr {
     Trap {
         /// Condition being signalled.
         trap: LokoTrap,
+        /// Source span.
+        span: Span,
+    },
+    /// Pushes a dynamic condition handler binding for `class` and writes its
+    /// token. Selecting the handler raises [`ControlTag::Restart`] with that
+    /// token.
+    PushHandler {
+        /// Destination `u64` token register.
+        dst: Register,
+        /// Handled condition class.
+        class: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
+    /// Pops the innermost dynamic binding, which must be `token`.
+    PopBinding {
+        /// Token register returned by the matching push.
+        token: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Searches live handlers for `condition` on the signalling stack.
+    ///
+    /// A selected handler's restart is raised at this instruction. The
+    /// results are the values a resuming choice (such as a future
+    /// `use-value`) supplies; the run fails as unhandled when nothing applies.
+    Signal {
+        /// Registers receiving resumption values.
+        dsts: Vec<Register>,
+        /// Condition object register.
+        condition: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Opens a protected region nested in the innermost open one.
+    EnterRegion {
+        /// Clauses tried in order before the enclosing region's.
+        catches: Vec<Catch>,
+    },
+    /// Closes the innermost open protected region.
+    LeaveRegion,
+    /// Catch target reached only through a protected region clause.
+    CatchTarget {
+        /// Target label.
+        label: LabelId,
+        /// Registers receiving the tag payload and the exception reference.
+        params: Vec<Register>,
+    },
+    /// Rethrows a caught exception with its original tag, payload and origin.
+    Rethrow {
+        /// Exception reference register.
+        exception: Register,
         /// Source span.
         span: Span,
     },
@@ -1812,14 +1895,6 @@ struct Value {
     reachable: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ActiveRestart {
-    specializer: sem::ClassId,
-    signal_label: LabelId,
-    results: Vec<Value>,
-    condition: Option<Value>,
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct MatchScratch {
     class_const: Register,
@@ -1842,7 +1917,6 @@ struct BodyLowering<'module> {
     locals: Vec<Local>,
     instructions: Vec<Instr>,
     local_regs: Vec<Option<Value>>,
-    active_restarts: Vec<ActiveRestart>,
     active_constants: Vec<sem::ConstantId>,
     register_kinds: Vec<ValueKind>,
     next_reg: u32,
@@ -1933,7 +2007,6 @@ impl<'module> BodyLowering<'module> {
             locals: Vec::new(),
             instructions: Vec::new(),
             local_regs: Vec::new(),
-            active_restarts: Vec::new(),
             active_constants: Vec::new(),
             next_reg: next_after_inputs(generic.arity),
             next_label: 0,
@@ -1955,7 +2028,6 @@ impl<'module> BodyLowering<'module> {
             locals: Vec::new(),
             instructions: Vec::new(),
             local_regs: vec![None; source_locals.len()],
-            active_restarts: Vec::new(),
             active_constants: Vec::new(),
             register_kinds: Vec::new(),
             next_reg: 1,
@@ -2547,9 +2619,10 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::Signal {
                 condition,
                 condition_class,
+                result_kinds,
                 span,
                 ..
-            } => self.lower_signal(condition, *condition_class, *span),
+            } => self.lower_signal(condition, *condition_class, result_kinds, *span),
             sem::Expr::ClassOf {
                 object,
                 class,
@@ -2977,9 +3050,10 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::Signal {
                 condition,
                 condition_class,
+                result_kinds,
                 span,
                 ..
-            } => self.lower_signal_results(condition, *condition_class, *span),
+            } => self.lower_signal_results(condition, *condition_class, result_kinds, *span),
             sem::Expr::If {
                 condition,
                 refinement: _,
@@ -3365,9 +3439,11 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         condition: &sem::Expr,
         condition_class: sem::ClassId,
+        result_kinds: &[sem::ValueKind],
         span: Span,
     ) -> Result<Value, LowerError> {
-        let mut results = self.lower_signal_results(condition, condition_class, span)?;
+        let mut results =
+            self.lower_signal_results(condition, condition_class, result_kinds, span)?;
         if results.len() != 1 {
             return Err(invalid_semantic(
                 "multiple-value signal used in a scalar expression",
@@ -3380,45 +3456,32 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         condition: &sem::Expr,
         condition_class: sem::ClassId,
+        result_kinds: &[sem::ValueKind],
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
         let condition = self.lower_expr(condition)?;
         let ValueKind::Object(Some(lowered_class)) = condition.kind else {
             return Err(invalid_semantic("signal condition is not an object"));
         };
-        let Some(active) = self.active_restarts.last().cloned() else {
-            return Err(invalid_semantic("signal has no active restart"));
-        };
         if !self
             .module
             .is_same_or_subclass(lowered_class, condition_class)
-            || !self
-                .module
-                .is_same_or_subclass(condition_class, active.specializer)
         {
             return Err(invalid_semantic(
-                "signal condition class does not match restart",
+                "signal condition class does not match its semantic class",
             ));
         }
-        if let Some(condition_slot) = active.condition {
-            self.instructions.push(Instr::Move {
-                dst: condition_slot.reg,
-                src: condition.reg,
-                span,
-            });
-        }
-        self.instructions.push(Instr::Jump {
-            label: active.signal_label,
+        let results = self
+            .value_kinds(result_kinds)?
+            .into_iter()
+            .map(|kind| self.alloc(kind))
+            .collect::<Vec<_>>();
+        self.instructions.push(Instr::Signal {
+            dsts: results.iter().map(|result| result.reg).collect(),
+            condition: condition.reg,
             span,
         });
-        Ok(active
-            .results
-            .into_iter()
-            .map(|result| Value {
-                reachable: false,
-                ..result
-            })
-            .collect())
+        Ok(results)
     }
 
     fn lower_if(
@@ -3498,6 +3561,11 @@ impl<'module> BodyLowering<'module> {
         Ok(results.remove(0))
     }
 
+    /// Lowers `handle` as a dynamic handler binding around a protected body.
+    ///
+    /// The body runs in a region whose clauses pop the binding on every
+    /// abnormal exit. A restart addressed to this activation's token runs the
+    /// recovery expression here; any other exception continues outward.
     fn lower_handle_results(
         &mut self,
         body: &sem::Expr,
@@ -3510,19 +3578,29 @@ impl<'module> BodyLowering<'module> {
             .copied()
             .map(|kind| self.alloc(kind))
             .collect::<Vec<_>>();
-        let condition = restart
-            .condition_local
-            .map(|_| self.alloc(ValueKind::Object(Some(restart.specializer))));
-        let signal_label = self.alloc_label();
+        let token = self.alloc(ValueKind::U64);
+        self.instructions.push(Instr::PushHandler {
+            dst: token.reg,
+            class: restart.specializer,
+            span,
+        });
+
+        let restart_label = self.alloc_label();
+        let unwind_label = self.alloc_label();
         let join_label = self.alloc_label();
-        self.active_restarts.push(ActiveRestart {
-            specializer: restart.specializer,
-            signal_label,
-            results: results.clone(),
-            condition,
+        self.instructions.push(Instr::EnterRegion {
+            catches: vec![
+                Catch::Tag {
+                    tag: ControlTag::Restart,
+                    target: restart_label,
+                },
+                Catch::All {
+                    target: unwind_label,
+                },
+            ],
         });
         let body_values = self.lower_results_expr(body)?;
-        self.active_restarts.pop();
+        self.instructions.push(Instr::LeaveRegion);
         if body_values.len() != results.len() {
             return Err(invalid_semantic("handle body arity does not match restart"));
         }
@@ -3533,6 +3611,10 @@ impl<'module> BodyLowering<'module> {
         }
         let body_reachable = body_values.iter().all(|value| value.reachable);
         if body_reachable {
+            self.instructions.push(Instr::PopBinding {
+                token: token.reg,
+                span,
+            });
             for (result, body_value) in results.iter().zip(&body_values) {
                 self.instructions.push(Instr::Move {
                     dst: result.reg,
@@ -3546,13 +3628,62 @@ impl<'module> BodyLowering<'module> {
             });
         }
 
-        self.instructions.push(Instr::Label {
-            label: signal_label,
+        let unwound = self.alloc(ValueKind::Exn);
+        self.instructions.push(Instr::CatchTarget {
+            label: unwind_label,
+            params: vec![unwound.reg],
         });
+        self.instructions.push(Instr::PopBinding {
+            token: token.reg,
+            span,
+        });
+        self.instructions.push(Instr::Rethrow {
+            exception: unwound.reg,
+            span,
+        });
+
+        let target = self.alloc(ValueKind::U64);
+        let caught = self.alloc(ValueKind::Object(None));
+        let restarted = self.alloc(ValueKind::Exn);
+        self.instructions.push(Instr::CatchTarget {
+            label: restart_label,
+            params: vec![target.reg, caught.reg, restarted.reg],
+        });
+        self.instructions.push(Instr::PopBinding {
+            token: token.reg,
+            span,
+        });
+        let mine = self.alloc(ValueKind::Bool);
+        let mine_label = self.alloc_label();
+        let onward_label = self.alloc_label();
+        self.instructions.push(Instr::EqU64 {
+            dst: mine.reg,
+            lhs: target.reg,
+            rhs: token.reg,
+            span,
+        });
+        self.instructions.push(Instr::Branch {
+            cond: mine.reg,
+            then_label: mine_label,
+            else_label: onward_label,
+            span,
+        });
+        self.instructions.push(Instr::Label {
+            label: onward_label,
+        });
+        self.instructions.push(Instr::Rethrow {
+            exception: restarted.reg,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: mine_label });
         if let Some(local_id) = restart.condition_local {
-            let Some(condition) = condition else {
-                return Err(invalid_semantic("restart condition local has no register"));
-            };
+            let condition = self.alloc(ValueKind::Object(Some(restart.specializer)));
+            self.instructions.push(Instr::Move {
+                dst: condition.reg,
+                src: caught.reg,
+                span: restart.span,
+            });
             self.set_local(local_id, condition)?;
             let local = self
                 .current_local(local_id)
@@ -4362,6 +4493,7 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         | ValueKind::Function(_)
         | ValueKind::Closure(_)
         | ValueKind::Aggregate
+        | ValueKind::Exn
         | ValueKind::Object(None) => None,
     }
 }
@@ -4385,6 +4517,14 @@ fn next_after_inputs(input_count: usize) -> u32 {
 fn invalid_semantic(message: &str) -> LowerError {
     LowerError::InvalidSemantic {
         message: message.into(),
+    }
+}
+
+/// Stable dump name for a control tag.
+#[must_use]
+pub const fn control_tag_name(tag: ControlTag) -> &'static str {
+    match tag {
+        ControlTag::Restart => "restart",
     }
 }
 
@@ -4860,6 +5000,58 @@ impl Module {
                 write!(f, "  trap {} ({})", trap.code(), trap.description())?;
                 fmt_span(f, *span)
             }
+            Instr::PushHandler { dst, class, span } => {
+                write!(f, "  {dst} = condition.push-handler ")?;
+                self.fmt_class(f, *class)?;
+                fmt_span(f, *span)
+            }
+            Instr::PopBinding { token, span } => {
+                write!(f, "  control.pop {token}")?;
+                fmt_span(f, *span)
+            }
+            Instr::Signal {
+                dsts,
+                condition,
+                span,
+            } => {
+                write!(f, "  ")?;
+                if !dsts.is_empty() {
+                    self.fmt_result_list(f, dsts)?;
+                    write!(f, " = ")?;
+                }
+                write!(f, "condition.signal {condition}")?;
+                fmt_span(f, *span)
+            }
+            Instr::EnterRegion { catches } => {
+                write!(f, "  region.enter [")?;
+                for (index, catch) in catches.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, ", ")?;
+                    }
+                    match catch {
+                        Catch::Tag { tag, target } => {
+                            write!(f, "{} -> {target}", control_tag_name(*tag))?;
+                        }
+                        Catch::All { target } => write!(f, "all -> {target}")?,
+                    }
+                }
+                writeln!(f, "]")
+            }
+            Instr::LeaveRegion => writeln!(f, "  region.leave"),
+            Instr::CatchTarget { label, params } => {
+                write!(f, "{label}(")?;
+                for (index, param) in params.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{param}")?;
+                }
+                writeln!(f, "):")
+            }
+            Instr::Rethrow { exception, span } => {
+                write!(f, "  rethrow {exception}")?;
+                fmt_span(f, *span)
+            }
         }
     }
 
@@ -4871,6 +5063,7 @@ impl Module {
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
             ValueKind::Aggregate => write!(f, "agg"),
+            ValueKind::Exn => write!(f, "exn"),
             ValueKind::Function(Some(sig)) => {
                 if let Some(signature) = self.callable_signature(sig) {
                     write!(f, "function(")?;

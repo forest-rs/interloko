@@ -21,7 +21,8 @@ Supported expectations:
   does not match `0.0`.
 - `runtime code CODE`: compile and run zero-argument `main`, expecting it to
   end in the runtime outcome with stable code `CODE`, such as
-  `runtime.integer-overflow`.
+  `runtime.integer-overflow` or `runtime.unhandled-condition`.
+- `run reports TEXT`: expect the rendered run result to contain `TEXT`.
 - `diagnostics N`: expect exactly `N` diagnostics.
 - `diagnostic contains TEXT`: expect at least one diagnostic whose message
   contains `TEXT`.

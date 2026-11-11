@@ -142,10 +142,6 @@ pub enum DiagnosticCode {
     ApplyTargetTypeMismatch,
     /// A signal expression is not a known condition object.
     SignalConditionTypeMismatch,
-    /// A signal has no active restart.
-    SignalRequiresRestart,
-    /// A signal condition is not handled by the active restart.
-    SignalRestartMismatch,
     /// A handle body and restart handler have incompatible result kinds.
     HandleRestartResultMismatch,
     /// `class-of` received an invalid value.
@@ -214,6 +210,8 @@ pub enum DiagnosticCode {
     RuntimeHostFunctionFailed,
     /// `main` does not return exactly one supported scalar value.
     RuntimeUnsupportedResult,
+    /// A signalled condition found no applicable live handler.
+    RuntimeUnhandledCondition,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -273,8 +271,6 @@ impl DiagnosticCode {
         Self::ApplyArityMismatch,
         Self::ApplyTargetTypeMismatch,
         Self::SignalConditionTypeMismatch,
-        Self::SignalRequiresRestart,
-        Self::SignalRestartMismatch,
         Self::HandleRestartResultMismatch,
         Self::ClassOfTypeMismatch,
         Self::InstanceOfTypeMismatch,
@@ -309,6 +305,7 @@ impl DiagnosticCode {
         Self::RuntimeIntegerOverflow,
         Self::RuntimeHostFunctionFailed,
         Self::RuntimeUnsupportedResult,
+        Self::RuntimeUnhandledCondition,
         Self::SessionUnknownSource,
     ];
 
@@ -370,8 +367,6 @@ impl DiagnosticCode {
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
             Self::SignalConditionTypeMismatch => "sem.signal-condition-type-mismatch",
-            Self::SignalRequiresRestart => "sem.signal-requires-restart",
-            Self::SignalRestartMismatch => "sem.signal-restart-mismatch",
             Self::HandleRestartResultMismatch => "sem.handle-restart-result-mismatch",
             Self::ClassOfTypeMismatch => "sem.class-of-type-mismatch",
             Self::InstanceOfTypeMismatch => "sem.instance-of-type-mismatch",
@@ -406,6 +401,7 @@ impl DiagnosticCode {
             Self::RuntimeIntegerOverflow => "runtime.integer-overflow",
             Self::RuntimeHostFunctionFailed => "runtime.host-function-failed",
             Self::RuntimeUnsupportedResult => "runtime.unsupported-result",
+            Self::RuntimeUnhandledCondition => "runtime.unhandled-condition",
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -468,8 +464,6 @@ impl DiagnosticCode {
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,
             "sem.signal-condition-type-mismatch" => Self::SignalConditionTypeMismatch,
-            "sem.signal-requires-restart" => Self::SignalRequiresRestart,
-            "sem.signal-restart-mismatch" => Self::SignalRestartMismatch,
             "sem.handle-restart-result-mismatch" => Self::HandleRestartResultMismatch,
             "sem.class-of-type-mismatch" => Self::ClassOfTypeMismatch,
             "sem.instance-of-type-mismatch" => Self::InstanceOfTypeMismatch,
@@ -504,6 +498,7 @@ impl DiagnosticCode {
             "runtime.integer-overflow" => Self::RuntimeIntegerOverflow,
             "runtime.host-function-failed" => Self::RuntimeHostFunctionFailed,
             "runtime.unsupported-result" => Self::RuntimeUnsupportedResult,
+            "runtime.unhandled-condition" => Self::RuntimeUnhandledCondition,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })
