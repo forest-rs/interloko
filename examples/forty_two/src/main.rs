@@ -1,27 +1,36 @@
-//! Milestone-0 end-to-end Interloko example.
+//! Smallest Interloko embedding: compile a Loko program and call its `main`.
 
-use interloko_compiler::driver::{CompileError, compile, compile_and_run_main};
+use std::error::Error;
 
-fn main() -> Result<(), CompileError> {
-    let source = include_str!("../programs/forty_two.loko");
+use interloko_compiler::session::{CompilerSession, DumpStage, FunctionValue, RuntimeMode};
+
+const NAME: &str = "forty_two.loko";
+const SOURCE: &str = include_str!("../programs/forty_two.loko");
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let artifacts = CompilerSession::compile_source(NAME, SOURCE, RuntimeMode::CompileOnly);
+    if artifacts.has_errors() {
+        let codes = artifacts
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .map(|diagnostic| diagnostic.code.to_string())
+            .collect::<Vec<_>>();
+        return Err(format!("{NAME} did not compile: {}", codes.join(", ")).into());
+    }
 
     match dump_mode().as_deref() {
         None => {
-            let value = compile_and_run_main(source)?;
-            assert_eq!(value, 42);
+            let value = artifacts.call_function("main", &[], None)?.value;
+            assert_eq!(value, FunctionValue::Integer(42));
             println!("{value}");
         }
-        Some("--dump-lowered") => {
-            print!("{}", compile(source)?.dump_lowered());
-        }
-        Some("--dump-tape") => {
-            print!("{}", compile(source)?.dump_tape());
-        }
+        Some("--dump-lowered") => print!("{}", artifacts.dump_stage(DumpStage::Lowered)),
+        Some("--dump-tape") => print!("{}", artifacts.dump_stage(DumpStage::Tape)),
         Some("--dump-all") => {
-            let compiled = compile(source)?;
-            print!("{}", compiled.dump_lowered());
+            print!("{}", artifacts.dump_stage(DumpStage::Lowered));
             println!();
-            print!("{}", compiled.dump_tape());
+            print!("{}", artifacts.dump_stage(DumpStage::Tape));
         }
         Some(_) => {
             eprintln!(

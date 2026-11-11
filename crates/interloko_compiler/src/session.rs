@@ -442,6 +442,8 @@ impl fmt::Display for FunctionCallError {
     }
 }
 
+impl core::error::Error for FunctionCallError {}
+
 /// Stage that can be rendered as a text dump.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DumpStage {
