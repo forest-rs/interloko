@@ -1789,6 +1789,9 @@ fn method_origin_label(origin: MethodOrigin) -> String {
         MethodOrigin::Session { sequence } => {
             format!("session-inserted method (mutation #{sequence})")
         }
+        MethodOrigin::Numeric { operator } => {
+            format!("built-in numeric method for `{}`", operator.name())
+        }
     }
 }
 

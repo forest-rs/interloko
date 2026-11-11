@@ -1,0 +1,10 @@
+// expect: run 1
+// expect: diagnostics 0
+// expect: dump eop contains origin=numeric(negative) sealed=<real>
+
+// Boxed `<object>` operands dispatch on their runtime classes, including
+// unary negation (Dylan's `negative`).
+define function main() => <integer>
+  let n = as(<object>, 20);
+  as(<integer>, n + 1) + as(<integer>, -n)
+end;

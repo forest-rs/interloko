@@ -1,0 +1,17 @@
+// expect: run 8.5
+// expect: diagnostics 0
+// expect: dump sem contains generic-call
+// expect: dump eop contains origin=numeric(+) sealed=<real>
+
+// Operands typed `<real>` have no single unboxed representation, so `+`
+// dispatches through the built-in `+` generic, whose methods follow the
+// same promotion rules as statically typed operands.
+define generic total(x, y);
+
+define method total(x :: <real>, y :: <real>) => <object>
+  x + y
+end;
+
+define function main() => <float>
+  as(<float>, total(1, 2.5)) + as(<float>, as(<integer>, total(2, 3)))
+end;

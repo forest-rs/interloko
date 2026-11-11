@@ -1017,6 +1017,12 @@ fn format_mutation_error(error: &MutationError) -> String {
         MutationError::RuntimeValidationFailed { error } => {
             format!("runtime layout validation failed: {error:?}")
         }
+        MutationError::SealedGeneric { generic } => {
+            format!(
+                "generic g{} is a sealed built-in numeric generic",
+                generic.0
+            )
+        }
         _ => "unknown mutation failure".into(),
     }
 }

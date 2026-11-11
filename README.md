@@ -122,7 +122,11 @@ The current slices include:
   annotations and method dispatch, and IEEE `+ - * /`,
   negation, and comparisons; an integer meeting a float is converted to a
   float for arithmetic and compared exactly (`2^53 + 1 > 2.0^53`), by the
-  rules in `promotion.rs`, and `/` on two integers is rejected; explicit
+  rules in `promotion.rs`, and `/` on two integers is rejected. When an
+  operand is `<object>`, abstract numeric or a user class, the operator
+  dispatches through a built-in generic (`+`, `<`, `negative`, ...) whose
+  methods come from the same rules; these generics show up in EOP and soft
+  typing like any other and are sealed over `<real>`; explicit
   `as(<float>, n)` and exact
   `as(<integer>, x)` conversions, and a float library (`abs`, `min`, `max`,
   `remainder`, `nan?`, `finite?`, `floor`, `ceiling`, `round`, `truncate`,
