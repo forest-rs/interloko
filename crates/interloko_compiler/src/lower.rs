@@ -207,6 +207,9 @@ pub enum RuntimeOp {
     VectorRef,
 }
 
+/// Trap code raised by `as(<integer>, x)` when `x` has a fractional part.
+pub const INEXACT_FLOAT_TO_INTEGER_TRAP: u32 = 2;
+
 /// Two-operand IEEE 754 float operation emitted as one tape instruction.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum F64BinaryOp {
@@ -467,6 +470,25 @@ pub enum Instr {
         lhs: Register,
         /// Right operand register.
         rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Converts an integer to the nearest float, ties to even.
+    I64ToF64 {
+        /// Destination register.
+        dst: Register,
+        /// Integer operand register.
+        src: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Truncates a float toward zero to an integer; traps on NaN, infinities,
+    /// and values outside the `i64` range.
+    F64ToI64 {
+        /// Destination register.
+        dst: Register,
+        /// Float operand register.
+        src: Register,
         /// Source span.
         span: Span,
     },
@@ -1406,7 +1428,9 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(receiver, uses);
             collect_known_callable_uses_in_expr(value, uses);
         }
-        sem::Expr::Negate { value, .. } => collect_known_callable_uses_in_expr(value, uses),
+        sem::Expr::Negate { value, .. } | sem::Expr::Convert { value, .. } => {
+            collect_known_callable_uses_in_expr(value, uses);
+        }
         sem::Expr::Binary { lhs, rhs, .. }
         | sem::Expr::Compare { lhs, rhs, .. }
         | sem::Expr::ValueEqual { lhs, rhs, .. } => {
@@ -2561,6 +2585,21 @@ impl<'module> BodyLowering<'module> {
                 self.instructions.push(instr);
                 Ok(result)
             }
+            sem::Expr::Convert { to, value, span } => {
+                let value = self.lower_expr(value)?;
+                match to {
+                    sem::NumericKind::Float => {
+                        let result = self.alloc(ValueKind::F64);
+                        self.instructions.push(Instr::I64ToF64 {
+                            dst: result.reg,
+                            src: value.reg,
+                            span: *span,
+                        });
+                        Ok(result)
+                    }
+                    sem::NumericKind::Integer => self.lower_exact_float_to_integer(value, *span),
+                }
+            }
             sem::Expr::Negate { kind, value, span } => {
                 let value = self.lower_expr(value)?;
                 match kind {
@@ -3556,6 +3595,51 @@ impl<'module> BodyLowering<'module> {
         value
     }
 
+    /// Lowers `as(<integer>, x)`: `f64.to_i64` truncates and traps on NaN,
+    /// infinities, and out-of-range values; converting back and comparing
+    /// then traps on any fractional part, so only integral floats convert.
+    fn lower_exact_float_to_integer(
+        &mut self,
+        value: Value,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let result = self.alloc(ValueKind::I64);
+        self.instructions.push(Instr::F64ToI64 {
+            dst: result.reg,
+            src: value.reg,
+            span,
+        });
+        let round_trip = self.alloc(ValueKind::F64);
+        self.instructions.push(Instr::I64ToF64 {
+            dst: round_trip.reg,
+            src: result.reg,
+            span,
+        });
+        let exact = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::F64Compare {
+            dst: exact.reg,
+            op: sem::CompareOp::Eq,
+            lhs: round_trip.reg,
+            rhs: value.reg,
+            span,
+        });
+        let done = self.alloc_label();
+        let inexact = self.alloc_label();
+        self.instructions.push(Instr::Branch {
+            cond: exact.reg,
+            then_label: done,
+            else_label: inexact,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: inexact });
+        self.instructions.push(Instr::Trap {
+            code: INEXACT_FLOAT_TO_INTEGER_TRAP,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: done });
+        Ok(result)
+    }
+
     fn alloc_label(&mut self) -> LabelId {
         let label = LabelId(self.next_label);
         self.next_label = self.next_label.saturating_add(1);
@@ -3941,6 +4025,14 @@ impl Module {
             }
             Instr::F64Unary { dst, op, src, span } => {
                 write!(f, "  {dst} = {} {src}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
+            Instr::I64ToF64 { dst, src, span } => {
+                write!(f, "  {dst} = i64.to_f64 {src}")?;
+                fmt_span(f, *span)
+            }
+            Instr::F64ToI64 { dst, src, span } => {
+                write!(f, "  {dst} = f64.to_i64 {src}")?;
                 fmt_span(f, *span)
             }
             Instr::F64Compare {

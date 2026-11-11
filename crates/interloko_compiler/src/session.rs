@@ -4021,7 +4021,7 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), receiver, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
         }
-        sem::Expr::Negate { value, .. } => {
+        sem::Expr::Negate { value, .. } | sem::Expr::Convert { value, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
         }
         sem::Expr::Binary { lhs, rhs, .. } | sem::Expr::Compare { lhs, rhs, .. } => {
@@ -4630,6 +4630,7 @@ fn sem_expr_kind(module: &sem::Module, expr: &sem::Expr) -> sem::ValueKind {
     match expr {
         sem::Expr::ConstI64 { .. } => sem::ValueKind::I64,
         sem::Expr::Binary { kind, .. } | sem::Expr::Negate { kind, .. } => kind.value_kind(),
+        sem::Expr::Convert { to, .. } => to.value_kind(),
         sem::Expr::ConstF64 { .. } => sem::ValueKind::F64,
         sem::Expr::ConstBool { .. }
         | sem::Expr::Compare { .. }
@@ -11018,6 +11019,10 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "negate {}", numeric_kind_label(*kind));
             dump_sem_expr(out, value, indent + 2);
         }
+        sem::Expr::Convert { to, value, .. } => {
+            let _ = writeln!(out, "convert to {}", numeric_kind_label(*to));
+            dump_sem_expr(out, value, indent + 2);
+        }
         sem::Expr::Compare {
             op, kind, lhs, rhs, ..
         } => {
@@ -11956,6 +11961,11 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         }
         sem::Expr::Negate { kind, value, .. } => {
             let _ = write!(out, "negate({}:", numeric_kind_label(*kind));
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::Convert { to, value, .. } => {
+            let _ = write!(out, "convert({}:", numeric_kind_label(*to));
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
@@ -13423,6 +13433,36 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn float_to_integer_conversion_is_exact_or_traps() {
+        let artifacts = CompilerSession::compile_source(
+            "convert.loko",
+            "define function to-integer(x :: <float>) => <integer>\n  as(<integer>, x)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let convert = |value: f64| {
+            artifacts.call_function(
+                "to-integer",
+                &[FunctionValue::Float(value)],
+                TraceMask::NONE,
+            )
+        };
+
+        for (input, expected) in [(-0.0, 0), (3.0, 3), (-9.223372036854776e18, i64::MIN)] {
+            assert!(
+                matches!(convert(input), Ok(outcome) if outcome.value == FunctionValue::Integer(expected)),
+                "{input} should convert to {expected}"
+            );
+        }
+        for input in [2.5, -0.5, f64::NAN, f64::INFINITY, 9.223372036854776e18] {
+            assert!(
+                matches!(convert(input), Err(FunctionCallError::Trap { .. })),
+                "{input} should trap"
+            );
+        }
     }
 
     struct CelsiusHandler;

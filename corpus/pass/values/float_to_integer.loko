@@ -1,0 +1,9 @@
+// expect: run -42
+// expect: diagnostics 0
+// expect: dump sem contains convert to integer
+// expect: dump lowered contains f64.to_i64
+
+// Float-to-integer conversion is exact; only integral floats convert.
+define function main() => <integer>
+  as(<integer>, -42.0) + as(<integer>, as(<float>, 0))
+end;
