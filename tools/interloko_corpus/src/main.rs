@@ -456,6 +456,10 @@ fn run_value_matches(actual: &FunctionValue, expected: &FunctionValue) -> bool {
 }
 
 fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectation> {
+    if let Some(text) = input.strip_prefix("run reports ") {
+        return Ok(Expectation::RunReports(text.into()));
+    }
+
     if let Some(value) = input.strip_prefix("run ") {
         let value = parse_run_value(value).ok_or_else(|| {
             invalid_header(
@@ -522,7 +526,7 @@ fn check_case(case: &Case) -> Vec<String> {
     let mode = if case.expectations.iter().any(|expectation| {
         matches!(
             expectation,
-            Expectation::Run(_) | Expectation::RuntimeCode(_)
+            Expectation::Run(_) | Expectation::RuntimeCode(_) | Expectation::RunReports(_)
         )
     }) {
         RuntimeMode::RunMain
@@ -554,6 +558,17 @@ fn check_case(case: &Case) -> Vec<String> {
                 )),
                 None => failures.push(format!(
                     "expected runtime outcome `{expected}`, but main did not run"
+                )),
+            },
+            Expectation::RunReports(text) => match &artifacts.runtime_result {
+                Some(actual) if actual.to_string().contains(text.as_str()) => {}
+                Some(actual) => {
+                    failures.push(format!(
+                        "expected run result containing `{text}`, got {actual}"
+                    ));
+                }
+                None => failures.push(format!(
+                    "expected run result containing `{text}`, but main did not run"
                 )),
             },
             Expectation::Diagnostics(expected) => {
@@ -707,6 +722,7 @@ enum Outcome {
 enum Expectation {
     Run(FunctionValue),
     RuntimeCode(DiagnosticCode),
+    RunReports(String),
     Diagnostics(usize),
     DiagnosticContains(String),
     DiagnosticCode(DiagnosticCode),

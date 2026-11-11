@@ -39,6 +39,8 @@ impl InterlokoHost {
             return Err(RuntimeError::TurnAlreadyOpen);
         }
         debug_assert!(self.nursery.objects.is_empty() && self.nursery.values.is_empty());
+        // Dynamic bindings belong to one run; a trapped run may leave some.
+        self.control = crate::control::ControlState::default();
         self.turn = Some(OpenTurn {
             image: self.image.mark(),
             symbols: self.symbols.len(),

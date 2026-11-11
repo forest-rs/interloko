@@ -1,0 +1,34 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump lowered contains condition.push-handler <missing-entry>
+// expect: dump lowered contains region.enter [restart -> 
+// expect: dump lowered contains control.pop
+// expect: dump tape contains throw_ref
+
+// The signal happens two calls below the handler. The runtime finds the
+// handler on the signalling stack, then the restart unwinds `lookup` and
+// `checked-lookup` and runs the recovery in `main`'s activation.
+
+define class <missing-entry> (<object>)
+  slot fallback :: <integer>;
+end;
+
+define function lookup(key :: <integer>) => <integer>
+  if key = 7 then
+    signal(make(<missing-entry>, fallback: 41))
+  else
+    key * 2
+  end
+end;
+
+define function checked-lookup(key :: <integer>) => <integer>
+  lookup(key) + 1000
+end;
+
+define function main() => <integer>
+  handle
+    checked-lookup(7)
+  with restart e :: <missing-entry>
+    e.fallback + 1
+  end
+end;

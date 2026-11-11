@@ -1,0 +1,21 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// Every activation of `descend` establishes its own handler for the same
+// class. Tokens are per activation, so the innermost handler wins even
+// though the outer ones share its code.
+
+define class <bottom> (<object>)
+end;
+
+define function guarded(depth :: <integer>) => <integer>
+  handle descend(depth - 1) with restart <bottom> depth end
+end;
+
+define function descend(depth :: <integer>) => <integer>
+  if depth = 0 then signal(make(<bottom>)) else guarded(depth) + 1 end
+end;
+
+define function main() => <integer>
+  descend(2)
+end;

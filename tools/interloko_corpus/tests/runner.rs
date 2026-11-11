@@ -62,7 +62,8 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("fail/diagnostics/invalid_constant_initializer.loko"));
     assert!(out.contains("fail/diagnostics/local_type_annotation.loko"));
     assert!(out.contains("fail/diagnostics/unresolved_constant.loko"));
-    assert!(out.contains("fail/restarts/signal_without_restart.loko"));
+    assert!(out.contains("ok fail/conditions/unhandled_signal.loko"));
+    assert!(out.contains("ok pass/conditions/cross_call_restart.loko"));
     assert!(out.contains("pass/objects/init_keywords.loko"));
     assert!(out.contains("pass/objects/accessor_call.loko"));
     assert!(out.contains("pass/objects/class_object_make.loko"));
@@ -145,7 +146,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/float_box_cast.loko"));
     assert!(out.contains("ok pass/typing/float_dispatch.loko"));
     assert!(out.contains("ok pass/typing/float_casts.loko"));
-    assert!(out.contains("corpus: 228 passed, 0 failed, 228 total"));
+    assert!(out.contains("corpus: 231 passed, 0 failed, 231 total"));
 }
 
 #[test]

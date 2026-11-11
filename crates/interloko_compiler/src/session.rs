@@ -40,6 +40,7 @@ use crate::{ast, lower, sem, tape, typing};
 /// Upstream execution evidence carried by [`ExecutionTrace`]: recorded
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
+use interloko_runtime::control::ControlFault;
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
@@ -153,6 +154,12 @@ pub enum RuntimeResult {
         /// Declared result categories.
         declared: String,
     },
+    /// A signalled condition found no applicable live handler. Handler search
+    /// runs before any frame unwinds, so no cleanup ran on its behalf.
+    UnhandledCondition {
+        /// Source name of the condition's class.
+        class: String,
+    },
 }
 
 impl RuntimeResult {
@@ -166,6 +173,7 @@ impl RuntimeResult {
             Self::Trap { trap } => Some(trap_code(trap)),
             Self::HostFunctionFailed { .. } => Some(DiagnosticCode::RuntimeHostFunctionFailed),
             Self::UnsupportedResult { .. } => Some(DiagnosticCode::RuntimeUnsupportedResult),
+            Self::UnhandledCondition { .. } => Some(DiagnosticCode::RuntimeUnhandledCondition),
         }
     }
 
@@ -194,6 +202,9 @@ impl fmt::Display for RuntimeResult {
                     formatter,
                     "main result {declared} is not one supported scalar"
                 )
+            }
+            Self::UnhandledCondition { class } => {
+                write!(formatter, "unhandled condition {class}")
             }
         }
     }
@@ -496,6 +507,13 @@ pub enum FunctionCallError {
     /// A [`SessionRuntime`] was asked to run artifacts whose runtime layout
     /// differs from the one its image was built for.
     RuntimeLayoutChanged,
+    /// A signalled condition found no applicable live handler.
+    UnhandledCondition {
+        /// Source name of the condition's class.
+        class: String,
+        /// Partial trace captured up to the signal, when requested.
+        trace: Option<ExecutionTrace>,
+    },
 }
 
 impl fmt::Display for FunctionCallError {
@@ -539,6 +557,9 @@ impl fmt::Display for FunctionCallError {
             Self::TurnFailed { error } => write!(formatter, "runtime turn failed: {error:?}"),
             Self::RuntimeLayoutChanged => {
                 formatter.write_str("the runtime image was built for a different runtime layout")
+            }
+            Self::UnhandledCondition { class, .. } => {
+                write!(formatter, "unhandled condition {class}")
             }
         }
     }
@@ -5176,6 +5197,9 @@ fn runtime_result_for_main_error(
             (RuntimeResult::MainHasParameters, None)
         }
         FunctionCallError::Trap { trap, trace } => (RuntimeResult::Trap { trap: *trap }, trace),
+        FunctionCallError::UnhandledCondition { class, trace } => {
+            (RuntimeResult::UnhandledCondition { class }, trace)
+        }
         FunctionCallError::HostFunctionFailed {
             name,
             failure,
@@ -5342,6 +5366,16 @@ fn run_turn_body<'a>(
                     trace: capture.map(TraceCapture::finish),
                 });
             }
+            if let Some(ControlFault::UnhandledCondition { class }) = host.control_fault() {
+                let class = tape
+                    .runtime
+                    .class(class)
+                    .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone());
+                return Err(FunctionCallError::UnhandledCondition {
+                    class,
+                    trace: capture.map(TraceCapture::finish),
+                });
+            }
             return Err(FunctionCallError::Trap {
                 trap: alloc::boxed::Box::new(trap),
                 trace: capture.map(TraceCapture::finish),
@@ -5403,6 +5437,10 @@ impl<'a> SharedFunctionCallHost<'a> {
 
     fn failure(&self) -> Option<(String, HostFunctionFailure)> {
         self.0.borrow().failure.clone()
+    }
+
+    fn control_fault(&self) -> Option<ControlFault> {
+        self.0.borrow().runtime.control().fault()
     }
 }
 

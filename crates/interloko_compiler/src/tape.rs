@@ -11,10 +11,10 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use execution_tape::asm::{Asm, FunctionAbi, FunctionSig, Label, ProgramBuilder};
+use execution_tape::asm::{Asm, Catch, FunctionAbi, FunctionSig, Label, ProgramBuilder};
 use execution_tape::contract::{Contract, ContractId};
 use execution_tape::host::HostSig;
-use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, ValueType};
+use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, TagId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -158,6 +158,7 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::Function(_) => ValueType::Func,
         lower::ValueKind::Closure(_) => ValueType::Closure,
         lower::ValueKind::Aggregate => ValueType::Agg,
+        lower::ValueKind::Exn => ValueType::Exn,
         lower::ValueKind::Object(_) => runtime::object_type(),
         lower::ValueKind::ClassObject(_)
         | lower::ValueKind::GenericFunctionObject(_)
@@ -250,6 +251,62 @@ struct AbiTables {
     instance_object: HostSigId,
     cast_any: HostSigId,
     cast_object: HostSigId,
+    control: Option<ControlAbi>,
+}
+
+/// Host signatures and tags for dynamic control, declared only when a module
+/// establishes handlers or signals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControlAbi {
+    push_handler: HostSigId,
+    pop: HostSigId,
+    restart: TagId,
+}
+
+impl ControlAbi {
+    fn declare(
+        builder: &mut ProgramBuilder,
+        module: &lower::Module,
+    ) -> Result<Option<Self>, TapeError> {
+        let uses_control = module
+            .functions
+            .iter()
+            .flat_map(|function| &function.instructions)
+            .any(|instr| {
+                matches!(
+                    instr,
+                    lower::Instr::PushHandler { .. }
+                        | lower::Instr::Signal { .. }
+                        | lower::Instr::EnterRegion { .. }
+                )
+            });
+        if !uses_control {
+            return Ok(None);
+        }
+        let restart = builder
+            .declare_tag(
+                "interloko.restart",
+                &runtime::control::restart_payload().map(Into::into),
+            )
+            .map_err(build_error)?;
+        Ok(Some(Self {
+            push_handler: builder.host_sig_for(
+                runtime::control::CONDITION_PUSH_HANDLER,
+                runtime::control::push_handler_signature(),
+            ),
+            pop: builder.host_sig_for(
+                runtime::control::CONTROL_POP,
+                runtime::control::pop_signature(),
+            ),
+            restart,
+        }))
+    }
+
+    fn tag(&self, tag: lower::ControlTag) -> TagId {
+        match tag {
+            lower::ControlTag::Restart => self.restart,
+        }
+    }
 }
 
 impl AbiTables {
@@ -353,6 +410,7 @@ impl AbiTables {
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
         let float_functions = float_function_sigs(builder, module);
+        let control = ControlAbi::declare(builder, module)?;
         let host_functions = module
             .host_functions
             .iter()
@@ -392,7 +450,14 @@ impl AbiTables {
             instance_object,
             cast_any,
             cast_object,
+            control,
         })
+    }
+
+    fn control(&self) -> Result<&ControlAbi, TapeError> {
+        self.control
+            .as_ref()
+            .ok_or_else(|| invalid_lowered("control signatures are missing"))
     }
 
     fn string_literal(&self, value: &str) -> Result<(HostSigId, ConstId), TapeError> {
@@ -783,7 +848,8 @@ impl<'a> FunctionEmitter<'a> {
                     | lower::ValueKind::U64
                     | lower::ValueKind::Function(_)
                     | lower::ValueKind::Closure(_)
-                    | lower::ValueKind::Aggregate => {
+                    | lower::ValueKind::Aggregate
+                    | lower::ValueKind::Exn => {
                         return Err(invalid_lowered("invalid boxed value input kind"));
                     }
                 };
@@ -1161,6 +1227,68 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.trap(trap.code());
             }
+            lower::Instr::PushHandler { dst, class, span } => {
+                let control = self.abi.control()?;
+                let (sig, restart) = (control.push_handler, control.restart);
+                let class_reg = self.alloc_temp(ValueType::U64);
+                let tag_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(class_reg, u64::from(class.0));
+                self.asm.const_u64(tag_reg, u64::from(restart.0));
+                self.asm
+                    .host_call(0, sig, 0, &[class_reg, tag_reg], &[dst.0]);
+            }
+            lower::Instr::PopBinding { token, span } => {
+                let sig = self.abi.control()?.pop;
+                self.set_span(*span);
+                self.asm.host_call(0, sig, 0, &[token.0], &[]);
+            }
+            lower::Instr::Signal {
+                dsts,
+                condition,
+                span,
+            } => {
+                self.abi.control()?;
+                let rets = dsts
+                    .iter()
+                    .map(|dst| self.register_type(*dst))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let sig = self.builder.host_sig_for(
+                    runtime::control::CONDITION_SIGNAL,
+                    runtime::control::signal_signature(rets),
+                );
+                self.set_span(*span);
+                self.asm
+                    .host_call(0, sig, 0, &[condition.0], &reg_slice(dsts));
+            }
+            lower::Instr::EnterRegion { catches } => {
+                let control = self.abi.control()?;
+                let clauses = catches
+                    .iter()
+                    .map(|catch| {
+                        Ok(match catch {
+                            lower::Catch::Tag { tag, target } => {
+                                Catch::TagRef(control.tag(*tag), self.label(*target)?)
+                            }
+                            lower::Catch::All { target } => Catch::AllRef(self.label(*target)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, TapeError>>()?;
+                self.asm.begin_region(&clauses);
+            }
+            lower::Instr::LeaveRegion => {
+                self.asm
+                    .end_region()
+                    .ok_or_else(|| invalid_lowered("region.leave has no open region"))?;
+            }
+            lower::Instr::CatchTarget { label, .. } => {
+                let label = self.label(*label)?;
+                self.asm.place(label).map_err(build_error)?;
+            }
+            lower::Instr::Rethrow { exception, span } => {
+                self.set_span(*span);
+                self.asm.throw_ref(0, exception.0);
+            }
         }
         Ok(())
     }
@@ -1170,6 +1298,16 @@ impl<'a> FunctionEmitter<'a> {
             .get(label.0 as usize)
             .copied()
             .ok_or_else(|| invalid_lowered("label id is out of range"))
+    }
+
+    fn register_type(&self, register: lower::Register) -> Result<ValueType, TapeError> {
+        register
+            .0
+            .checked_sub(1)
+            .and_then(|index| self.function.register_kinds.get(index as usize))
+            .copied()
+            .map(value_type)
+            .ok_or_else(|| invalid_lowered("register is out of range"))
     }
 
     fn alloc_temp(&mut self, kind: ValueType) -> u32 {
@@ -1201,10 +1339,15 @@ impl<'a> FunctionEmitter<'a> {
 
 fn labels_for(function: &lower::Function, asm: &mut Asm) -> Vec<Label> {
     let mut count = 0_usize;
+    let mut catch_params: Vec<(usize, &[lower::Register])> = Vec::new();
     for instr in &function.instructions {
         match instr {
             lower::Instr::Label { label } => {
                 count = count.max(label.0 as usize + 1);
+            }
+            lower::Instr::CatchTarget { label, params } => {
+                count = count.max(label.0 as usize + 1);
+                catch_params.push((label.0 as usize, params));
             }
             lower::Instr::Branch {
                 then_label,
@@ -1217,10 +1360,23 @@ fn labels_for(function: &lower::Function, asm: &mut Asm) -> Vec<Label> {
             lower::Instr::Jump { label, .. } => {
                 count = count.max(label.0 as usize + 1);
             }
+            lower::Instr::EnterRegion { catches } => {
+                for catch in catches {
+                    let (lower::Catch::Tag { target, .. } | lower::Catch::All { target }) = catch;
+                    count = count.max(target.0 as usize + 1);
+                }
+            }
             _ => {}
         }
     }
-    (0..count).map(|_| asm.label()).collect()
+    (0..count)
+        .map(
+            |index| match catch_params.iter().find(|(label, _)| *label == index) {
+                Some((_, params)) => asm.block(&reg_slice(params)),
+                None => asm.label(),
+            },
+        )
+        .collect()
 }
 
 fn reg_slice(regs: &[lower::Register]) -> Vec<u32> {

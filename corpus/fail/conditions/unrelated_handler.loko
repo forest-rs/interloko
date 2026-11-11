@@ -1,6 +1,9 @@
-// expect: diagnostics 1
-// expect: diagnostic code sem.signal-restart-mismatch
-// expect: diagnostic contains signal condition is not handled by the active restart
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports unhandled condition <bad-input>
+// expect: diagnostics 0
+
+// A handler for an unrelated class does not apply, so the search runs off
+// the end of the dynamic handler stack.
 
 define class <bad-input> (<object>)
   slot fallback :: <integer>;

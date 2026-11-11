@@ -1,0 +1,13 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports unhandled condition <bad-input>
+// expect: diagnostics 0
+// expect: dump lowered contains condition.signal
+// expect: dump tape contains interloko.condition.signal
+
+define class <bad-input> (<object>)
+  slot fallback :: <integer>;
+end;
+
+define function main()
+  signal(make(<bad-input>, fallback: 0))
+end;

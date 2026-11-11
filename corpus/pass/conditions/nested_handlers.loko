@@ -1,0 +1,37 @@
+// expect: run 321
+// expect: diagnostics 0
+
+// The inner handler only accepts <parse-error>. A <range-error> signalled
+// below it passes the inner binding during the search; the restart then
+// crosses the inner handler's activation, which sees a foreign token, pops
+// its binding and rethrows to the outer one.
+
+define class <problem> (<object>)
+  slot code :: <integer>;
+end;
+
+define class <parse-error> (<problem>)
+end;
+
+define class <range-error> (<problem>)
+end;
+
+define function check(x :: <integer>) => <integer>
+  if x > 100 then
+    signal(make(<range-error>, code: 300))
+  else
+    if x < 0 then signal(make(<parse-error>, code: 20)) else x end
+  end
+end;
+
+define function parse-guarded(x :: <integer>) => <integer>
+  handle check(x) with restart e :: <parse-error> e.code end
+end;
+
+define function range-guarded(x :: <integer>) => <integer>
+  handle parse-guarded(x) with restart e :: <range-error> e.code end
+end;
+
+define function main() => <integer>
+  range-guarded(500) + range-guarded(0 - 1) + range-guarded(1)
+end;
