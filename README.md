@@ -111,6 +111,11 @@ The current slices include:
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;
+- a numeric class tower: `<number>` > `<real>`, then `<rational>` >
+  `<integer>` and `<float>` > `<double-float>`, where only `<integer>` and
+  `<double-float>` are concrete; methods may specialize on any of them, and
+  an abstract specializer such as `<real>` receives the boxed value unless
+  the generic fixes a scalar parameter type;
 - floats: literals such as `1.5`/`2e10` are `<double-float>` (IEEE 754
   binary64) instances under the abstract `<number>` > `<real>` > `<float>`
   classes, with slots, boxing to `<object>`, `<float>`/`<double-float>`

@@ -611,7 +611,8 @@ impl Module {
                 kind: BuiltinValueClass::Float | BuiltinValueClass::DoubleFloat,
             } => Some(ValueKind::F64),
             ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Number | BuiltinValueClass::Real,
+                kind:
+                    BuiltinValueClass::Number | BuiltinValueClass::Real | BuiltinValueClass::Rational,
             } => None,
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
@@ -732,18 +733,12 @@ impl Module {
     }
 }
 
-/// Returns whether instances of `class` are unboxed scalars: `<integer>`,
-/// the floats, and the abstract numeric classes above them.
+/// Returns whether instances of `class` are unboxed scalars: `<number>` and
+/// every numeric class below it.
 fn is_scalar_value_class_in(classes: &[Class], class: ClassId) -> bool {
     matches!(
         classes.get(class.0 as usize).map(|class| class.origin),
-        Some(ClassOrigin::BuiltinValue {
-            kind: BuiltinValueClass::Integer
-                | BuiltinValueClass::Number
-                | BuiltinValueClass::Real
-                | BuiltinValueClass::Float
-                | BuiltinValueClass::DoubleFloat,
-        })
+        Some(ClassOrigin::BuiltinValue { kind }) if kind.is_numeric()
     )
 }
 
@@ -2613,15 +2608,6 @@ impl Lowering {
                 );
             }
             let class_id = ClassId(u32::try_from(self.classes.len()).unwrap_or(u32::MAX));
-            // `ALL` lists every built-in superclass before its subclasses.
-            let superclass = kind
-                .builtin_superclass()
-                .and_then(|parent| {
-                    self.classes
-                        .iter()
-                        .find(|class| class.origin == ClassOrigin::BuiltinValue { kind: parent })
-                })
-                .map_or(OBJECT_CLASS_ID, |class| class.id);
             self.classes.push(Class {
                 id: class_id,
                 definition: DefinitionId::new(
@@ -2632,13 +2618,27 @@ impl Lowering {
                 ),
                 name: (*name).to_string(),
                 origin: ClassOrigin::BuiltinValue { kind: *kind },
-                superclass: Some(superclass),
+                superclass: Some(OBJECT_CLASS_ID),
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
                 initialization_plan: InitializationPlan::default(),
                 span: Span::default(),
             });
+        }
+        // `ALL` is in declaration order, not superclass order, so built-in
+        // superclasses are linked once every built-in class exists.
+        for (kind, _) in BuiltinValueClass::ALL {
+            let (Some(class), Some(superclass)) = (
+                self.builtin_value_class(*kind),
+                kind.builtin_superclass()
+                    .and_then(|parent| self.builtin_value_class(parent)),
+            ) else {
+                continue;
+            };
+            if let Some(class) = self.classes.get_mut(class.0 as usize) {
+                class.superclass = Some(superclass);
+            }
         }
     }
 
@@ -3731,9 +3731,11 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("name", param.name.clone())),
                 );
             }
-            let (specializer, kind) = self.resolve_method_specializer(param);
-            if let Some(symbol) = &generic_symbol
-                && let Some(expected) = symbol.param_kinds.get(index).copied().flatten()
+            let generic_kind = generic_symbol
+                .as_ref()
+                .and_then(|symbol| symbol.param_kinds.get(index).copied().flatten());
+            let (specializer, kind) = self.resolve_method_specializer(param, generic_kind);
+            if let Some(expected) = generic_kind
                 && !self.generic_specializer_matches(expected, specializer)
             {
                 ctx.diagnostics.push(
@@ -6091,16 +6093,7 @@ impl Lowering {
         };
         // Instances of numeric classes are boxed scalars, not runtime
         // objects, so `<object>` cannot be narrowed to them by an object cast.
-        if matches!(
-            self.classes.get(class.0 as usize).map(|class| class.origin),
-            Some(ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Integer
-                    | BuiltinValueClass::Number
-                    | BuiltinValueClass::Real
-                    | BuiltinValueClass::Float
-                    | BuiltinValueClass::DoubleFloat,
-            })
-        ) {
+        if is_scalar_value_class_in(&self.classes, *class) {
             return None;
         }
         let Expr::Local {
@@ -6336,7 +6329,8 @@ impl Lowering {
                 kind: BuiltinValueClass::Float | BuiltinValueClass::DoubleFloat,
             } => Some(ValueKind::F64),
             ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Number | BuiltinValueClass::Real,
+                kind:
+                    BuiltinValueClass::Number | BuiltinValueClass::Real | BuiltinValueClass::Rational,
             } => None,
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
@@ -6535,9 +6529,18 @@ impl Lowering {
         CallableSignature { params, results }
     }
 
+    /// Resolves a method parameter's specializer and the value kind the
+    /// method body sees for it.
+    ///
+    /// An abstract numeric specializer such as `<real>` covers integers and
+    /// floats, which have different unboxed representations. The parameter
+    /// keeps the generic's scalar kind when the generic fixes one (a `<real>`
+    /// method on a `<float>` generic receives an f64); otherwise it receives
+    /// the boxed `<object>` value that dispatch already classified.
     fn resolve_method_specializer(
         &mut self,
         param: &ast::MethodParam,
+        generic_kind: Option<ValueKind>,
     ) -> (MethodSpecializer, ValueKind) {
         if param.class_name == "<object>" {
             return (Some(OBJECT_CLASS_ID), ValueKind::Any);
@@ -6550,17 +6553,15 @@ impl Lowering {
             return (Some(ClassId(u32::MAX)), ValueKind::Error);
         };
         let (class_id, origin) = (class.id, class.origin);
-        if let ClassOrigin::BuiltinValue {
-            kind: BuiltinValueClass::Number | BuiltinValueClass::Real,
-        } = origin
+        if let ClassOrigin::BuiltinValue { kind } = origin
+            && kind.is_numeric()
+            && self.kind_for_builtin_class(class_id).is_none()
         {
-            // Integers and floats have different unboxed representations, so
-            // a method cannot yet receive "any real" as one parameter kind.
-            self.diagnostics.push(
-                Diagnostic::error(param.span, DiagnosticCode::AbstractNumericTypeUnsupported)
-                    .with_arg(DiagnosticArg::text("class", param.class_name.clone())),
-            );
-            return (Some(class_id), ValueKind::Error);
+            let kind = match generic_kind {
+                Some(scalar @ (ValueKind::I64 | ValueKind::F64)) => scalar,
+                _ => ValueKind::Any,
+            };
+            return (Some(class_id), kind);
         }
         let kind = self
             .kind_for_builtin_class(class_id)
@@ -6608,7 +6609,7 @@ impl Lowering {
             // See `kind_for_builtin_class`: `<float>` is f64 while
             // `<double-float>` is its only concrete subclass.
             "<float>" | "<double-float>" => ValueKind::F64,
-            "<number>" | "<real>" => {
+            "<number>" | "<real>" | "<rational>" => {
                 diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::AbstractNumericTypeUnsupported)
                         .with_arg(DiagnosticArg::text("class", type_name)),

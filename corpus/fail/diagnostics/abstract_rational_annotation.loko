@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.abstract-numeric-type-unsupported
+// expect: diagnostic contains <rational> is abstract
+
+define function main()
+  let n :: <rational> = 3;
+  0
+end;

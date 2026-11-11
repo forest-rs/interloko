@@ -1,0 +1,15 @@
+// expect: run 111
+// expect: diagnostics 0
+
+// Integers are `<rational>`; floats are `<real>` but not `<rational>`.
+// (`instance?(2.5, <rational>)` is rejected statically as impossible.)
+define function bit(flag :: <boolean>, weight :: <integer>) => <integer>
+  if flag then weight else 0 end
+end;
+
+define function main() => <integer>
+  bit(instance?(3, <rational>), 1)
+    + bit(instance?(3, <real>), 10)
+    + bit(instance?(2.5, <real>), 100)
+    + bit(instance?(as(<object>, 2.5), <rational>), 10000)
+end;
