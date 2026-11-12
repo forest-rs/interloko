@@ -1,21 +1,22 @@
 //! Dynamic control bindings for one run: condition handlers, block exit
-//! points, and handler search.
+//! points, and the restart descriptors that make them enumerable.
 //!
 //! Compiled code pushes a binding when it enters a dynamic extent and pops it
 //! on every exit, normal or abnormal; protected regions in the emitted tape
 //! guarantee the pop. The stack therefore mirrors the live guest extents
-//! exactly, and handler search walks it on the signalling stack before any
-//! frame unwinds. Selecting a handler becomes a guest exception raised at the
-//! `signal` host call and addressed to the establishing activation by token.
+//! exactly. Each binding records the VM activation that established it, so
+//! restarts can be attributed to frames.
 //!
-//! The VM owns frames, regions and unwinding. This module owns only the
-//! language policy: which binding applies, and which faults end the run.
+//! The VM owns frames, regions and unwinding. This module owns the language
+//! data; [`crate::driver`] services the host requests that change it.
 
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
-use execution_tape::host::{HostError, HostSig};
-use execution_tape::program::ValueType;
-use execution_tape::value::{TagRef, Value};
+use execution_tape::host::HostSig;
+use execution_tape::program::{TagId, ValueType};
+use execution_tape::vm::ActivationId;
 use interloko_model::ClassId;
 
 use crate::object_type;
@@ -25,8 +26,7 @@ pub const CONDITION_PUSH_HANDLER: &str = "interloko.condition.push_handler";
 /// Host symbol that signals a condition.
 ///
 /// A selected handler's restart is raised at the call. Its results are the
-/// values a resuming restart supplies; the synchronous host never resumes, so
-/// an unhandled signal fails the run.
+/// values a resuming choice supplies.
 pub const CONDITION_SIGNAL: &str = "interloko.condition.signal";
 /// Host symbol that pops the innermost dynamic binding by token.
 pub const CONTROL_POP: &str = "interloko.control.pop";
@@ -34,6 +34,20 @@ pub const CONTROL_POP: &str = "interloko.control.pop";
 pub const CONTROL_PUSH_EXIT: &str = "interloko.control.push_exit";
 /// Host symbol that checks an exit point is still live before exiting to it.
 pub const CONTROL_CHECK_EXIT: &str = "interloko.control.check_exit";
+
+/// Whether `symbol` is a control request serviced by [`crate::driver`]
+/// rather than by a [`execution_tape::host::Host`].
+#[must_use]
+pub fn is_control_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        CONDITION_PUSH_HANDLER
+            | CONDITION_SIGNAL
+            | CONTROL_POP
+            | CONTROL_PUSH_EXIT
+            | CONTROL_CHECK_EXIT
+    )
+}
 
 /// Opaque identity of one dynamic binding.
 ///
@@ -45,34 +59,76 @@ pub struct BindingToken(
     pub u64,
 );
 
-/// What a dynamic binding establishes.
+/// One typed parameter of a restart.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestartParameter {
+    /// Source name of the parameter.
+    pub name: String,
+    /// The parameter is a condition object of this class or a subclass.
+    pub class: ClassId,
+}
+
+/// Static description of one `handle … with restart` site.
+///
+/// The site is both a handler, for conditions of [`Self::class`], and a
+/// program-defined restart that a chooser may invoke for any condition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestartDescriptor {
+    /// Restart name: the handled class name without angle brackets.
+    pub name: String,
+    /// Handled condition class.
+    pub class: ClassId,
+    /// Parameters the recovery expression binds: empty, or the condition.
+    pub parameters: Vec<RestartParameter>,
+    /// Source byte range of the `handle` expression.
+    pub span: Range<usize>,
+}
+
+/// Tags the runtime raises to transfer control.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ControlTags {
+    /// Raised at a signal to reach the selected handler's activation, with
+    /// payload `(token, condition)`.
+    pub restart: TagId,
+}
+
+/// Control metadata of one emitted program.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ControlLayout {
+    /// Control tags, present when the program uses dynamic control.
+    pub tags: Option<ControlTags>,
+    /// Restart sites, indexed by the descriptor operand of
+    /// [`CONDITION_PUSH_HANDLER`].
+    pub restarts: Vec<RestartDescriptor>,
+}
+
+/// What a dynamic binding establishes.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BindingKind {
-    /// A condition handler that, when selected, transfers to its restart.
+    /// A `handle` site's handler and restart.
     Handler {
-        /// Conditions of this class or a subclass are handled.
-        class: ClassId,
-        /// VM tag raised at the signal site to reach the establishing
-        /// activation, bound from the establishing program's local tag.
-        restart: TagRef,
+        /// Index into [`ControlLayout::restarts`].
+        descriptor: usize,
     },
     /// A `block` exit point, live until its block's extent ends.
     Exit,
 }
 
 /// One live dynamic binding.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DynamicBinding {
     /// Identity of this binding's extent.
     pub token: BindingToken,
     /// What this binding establishes.
     pub kind: BindingKind,
+    /// VM activation whose code pushed the binding.
+    pub activation: ActivationId,
 }
 
 /// Language-level failure that ended a run.
 ///
-/// The host records the fault before failing the host call, so the embedding
-/// can report it precisely instead of as a raw trap.
+/// The driver records the fault before failing the pending request, so the
+/// embedding can report it precisely instead of as a raw trap.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ControlFault {
     /// No live handler applies to a signalled condition.
@@ -92,6 +148,8 @@ pub enum ControlFault {
         /// Innermost live binding, if any.
         innermost: Option<BindingToken>,
     },
+    /// A control request did not match its protocol.
+    MalformedRequest,
 }
 
 /// Cumulative control work performed in one run.
@@ -112,7 +170,6 @@ pub struct ControlStats {
 pub struct ControlState {
     bindings: Vec<DynamicBinding>,
     next_token: u64,
-    fault: Option<ControlFault>,
     stats: ControlStats,
 }
 
@@ -123,92 +180,40 @@ impl ControlState {
         &self.bindings
     }
 
-    /// The fault that ended the run, if any.
-    #[must_use]
-    pub const fn fault(&self) -> Option<ControlFault> {
-        self.fault
-    }
-
     /// Cumulative control work.
     #[must_use]
     pub const fn stats(&self) -> ControlStats {
         self.stats
     }
 
-    pub(crate) fn push(&mut self, kind: BindingKind) -> BindingToken {
+    /// Index of the live binding named by `token`.
+    #[must_use]
+    pub fn position(&self, token: BindingToken) -> Option<usize> {
+        self.bindings
+            .iter()
+            .position(|binding| binding.token == token)
+    }
+
+    pub(crate) fn push(&mut self, kind: BindingKind, activation: ActivationId) -> BindingToken {
         self.next_token = self.next_token.saturating_add(1);
         let token = BindingToken(self.next_token);
-        self.bindings.push(DynamicBinding { token, kind });
+        self.bindings.push(DynamicBinding {
+            token,
+            kind,
+            activation,
+        });
         self.stats.bindings_pushed = self.stats.bindings_pushed.saturating_add(1);
         self.stats.max_depth = self.stats.max_depth.max(self.bindings.len());
         token
     }
 
-    pub(crate) fn pop(&mut self, token: BindingToken) -> Result<(), HostError> {
+    pub(crate) fn pop(&mut self, token: BindingToken) -> Result<(), ControlFault> {
         let innermost = self.bindings.last().map(|binding| binding.token);
         if innermost != Some(token) {
-            return Err(self.fail(ControlFault::UnbalancedPop { token, innermost }));
+            return Err(ControlFault::UnbalancedPop { token, innermost });
         }
         self.bindings.pop();
         Ok(())
-    }
-
-    /// Searches live bindings innermost-first for a handler accepting
-    /// `class`, without changing any state.
-    ///
-    /// `applies(handled)` decides class applicability. Embeddings that drive
-    /// the VM with yielded host calls can use this at a pending signal to
-    /// decide between raising a restart and consulting a chooser while every
-    /// frame is still live.
-    #[must_use]
-    pub fn find_handler(&self, applies: impl Fn(ClassId) -> bool) -> Option<DynamicBinding> {
-        self.bindings
-            .iter()
-            .rev()
-            .find(|binding| match binding.kind {
-                BindingKind::Handler { class, .. } => applies(class),
-                BindingKind::Exit => false,
-            })
-            .copied()
-    }
-
-    /// Handles one synchronous signal of a condition whose class is `class`.
-    ///
-    /// The returned error raises the selected handler's restart tag with its
-    /// token and the condition. With no applicable handler the run fails with
-    /// [`ControlFault::UnhandledCondition`].
-    pub(crate) fn signal(
-        &mut self,
-        class: ClassId,
-        condition: Value,
-        applies: impl Fn(ClassId) -> bool,
-    ) -> HostError {
-        self.stats.signals = self.stats.signals.saturating_add(1);
-        let selected = self.find_handler(applies);
-        let searched = match selected {
-            Some(binding) => self
-                .bindings
-                .iter()
-                .rev()
-                .position(|candidate| candidate.token == binding.token)
-                .map_or(0, |index| index + 1),
-            None => self.bindings.len(),
-        };
-        self.stats.bindings_searched = self
-            .stats
-            .bindings_searched
-            .saturating_add(u64::try_from(searched).unwrap_or(u64::MAX));
-        match selected {
-            Some(DynamicBinding {
-                token,
-                kind: BindingKind::Handler { restart, .. },
-            }) => HostError::throw(restart, alloc::vec![Value::U64(token.0), condition]),
-            Some(DynamicBinding {
-                kind: BindingKind::Exit,
-                ..
-            })
-            | None => self.fail(ControlFault::UnhandledCondition { class }),
-        }
     }
 
     /// Whether the exit point `token` is still live.
@@ -219,26 +224,20 @@ impl ControlState {
             .any(|binding| binding.token == token && binding.kind == BindingKind::Exit)
     }
 
-    /// Fails the run with [`ControlFault::ExpiredExit`] unless `token` is live.
-    pub(crate) fn check_exit(&mut self, token: BindingToken) -> Result<(), HostError> {
-        if self.exit_is_live(token) {
-            Ok(())
-        } else {
-            Err(self.fail(ControlFault::ExpiredExit { token }))
-        }
+    pub(crate) fn note_signal(&mut self) {
+        self.stats.signals = self.stats.signals.saturating_add(1);
     }
 
-    fn fail(&mut self, fault: ControlFault) -> HostError {
-        self.fault.get_or_insert(fault);
-        HostError::Failed
+    pub(crate) fn note_searched(&mut self) {
+        self.stats.bindings_searched = self.stats.bindings_searched.saturating_add(1);
     }
 }
 
-/// Host signature for [`CONDITION_PUSH_HANDLER`]: `(class, restart tag) -> token`.
+/// Host signature for [`CONDITION_PUSH_HANDLER`]: `(descriptor) -> token`.
 #[must_use]
 pub fn push_handler_signature() -> HostSig {
     HostSig {
-        args: alloc::vec![ValueType::U64, ValueType::U64],
+        args: alloc::vec![ValueType::U64],
         rets: alloc::vec![ValueType::U64],
     }
 }
@@ -246,7 +245,7 @@ pub fn push_handler_signature() -> HostSig {
 /// Host signature for [`CONDITION_SIGNAL`]: `(condition) -> resumption values`.
 ///
 /// `rets` are the signal expression's result types, which is also the
-/// signature a resuming restart must supply.
+/// signature a resuming choice must supply.
 #[must_use]
 pub fn signal_signature(rets: Vec<ValueType>) -> HostSig {
     HostSig {
@@ -286,88 +285,4 @@ pub fn check_exit_signature() -> HostSig {
 #[must_use]
 pub fn restart_payload() -> [ValueType; 2] {
     [ValueType::U64, object_type()]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn handler(class: u32) -> BindingKind {
-        BindingKind::Handler {
-            class: ClassId(class),
-            restart: TagRef(0),
-        }
-    }
-
-    #[test]
-    fn search_is_innermost_first_and_leaves_state_unchanged() {
-        let mut control = ControlState::default();
-        let outer = control.push(handler(1));
-        let inner = control.push(handler(2));
-        assert_ne!(outer, inner);
-        let found = control.find_handler(|class| class == ClassId(1));
-        assert_eq!(found.map(|binding| binding.token), Some(outer));
-        let found = control.find_handler(|_| true);
-        assert_eq!(found.map(|binding| binding.token), Some(inner));
-        assert_eq!(control.bindings().len(), 2);
-        assert_eq!(control.stats().max_depth, 2);
-    }
-
-    #[test]
-    fn signal_raises_the_selected_restart_or_records_unhandled() {
-        let mut control = ControlState::default();
-        let token = control.push(handler(1));
-        let raised = control.signal(ClassId(1), Value::Bool(true), |class| class == ClassId(1));
-        let HostError::Throw(thrown) = raised else {
-            panic!("expected a restart to be raised, got {raised:?}");
-        };
-        assert_eq!(thrown.payload[0], Value::U64(token.0));
-        assert_eq!(control.fault(), None);
-
-        let failed = control.signal(ClassId(9), Value::Bool(true), |_| false);
-        assert!(matches!(failed, HostError::Failed));
-        assert_eq!(
-            control.fault(),
-            Some(ControlFault::UnhandledCondition { class: ClassId(9) })
-        );
-        assert_eq!(control.stats().signals, 2);
-    }
-
-    #[test]
-    fn exits_expire_when_their_binding_pops() {
-        let mut control = ControlState::default();
-        let exit = control.push(BindingKind::Exit);
-        let handler = control.push(handler(1));
-        assert!(control.check_exit(exit).is_ok());
-        assert!(
-            control
-                .find_handler(|_| true)
-                .is_some_and(|b| b.token == handler)
-        );
-        assert!(control.pop(handler).is_ok());
-        assert!(control.pop(exit).is_ok());
-        assert!(control.check_exit(exit).is_err());
-        assert_eq!(
-            control.fault(),
-            Some(ControlFault::ExpiredExit { token: exit })
-        );
-    }
-
-    #[test]
-    fn pops_must_match_the_innermost_binding() {
-        let mut control = ControlState::default();
-        let outer = control.push(handler(1));
-        let inner = control.push(handler(1));
-        assert!(control.pop(outer).is_err());
-        assert_eq!(
-            control.fault(),
-            Some(ControlFault::UnbalancedPop {
-                token: outer,
-                innermost: Some(inner),
-            })
-        );
-        assert!(control.pop(inner).is_ok());
-        assert!(control.pop(outer).is_ok());
-        assert!(control.bindings().is_empty());
-    }
 }

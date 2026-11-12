@@ -4,9 +4,8 @@
 //! tests run the session's verified tape with an `InterlokoHost` that holds
 //! the Rust objects, the same way an embedder passes host objects.
 
-use execution_tape::trace::TraceMask;
 use execution_tape::value::{FuncRef, Value};
-use execution_tape::vm::{Limits, Vm};
+use execution_tape::vm::{InvocationOptions, Limits, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
@@ -111,15 +110,16 @@ fn call_with_host_object(
     let unit = vm
         .install(std::sync::Arc::clone(&tape.program))
         .expect("program should install");
-    let output = vm
-        .run(
-            FuncRef::new(unit, entry),
-            &[argument],
-            TraceMask::NONE,
-            None,
-        )
-        .expect("function should run");
-    match output.as_slice() {
+    let args = [argument];
+    let outcome = interloko_runtime::driver::run(
+        &mut vm,
+        &tape.control,
+        FuncRef::new(unit, entry),
+        &args,
+        InvocationOptions::default(),
+    )
+    .expect("function should run");
+    match outcome.outputs.as_slice() {
         [Value::I64(value)] => *value,
         other => panic!("expected one integer result, got {other:?}"),
     }
