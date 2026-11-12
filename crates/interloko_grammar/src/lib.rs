@@ -1712,7 +1712,7 @@ impl<'g, 's> ParseReport<'g, 's> {
 /// Result of a recovering parse over a top-level repetition.
 ///
 /// Returned by [`interpret_region_recovering`]. The root node always
-/// covers the requested region; unparseable spans are represented as
+/// covers the requested region; unparsable spans are represented as
 /// [`RuleNodeKind::RecoveryError`] children inline in the root's
 /// `children`. The `errors` vector lists every parse failure the
 /// recovery had to skip past, in source order — editor

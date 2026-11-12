@@ -1,0 +1,11 @@
+[default.extend-words]
+# Common Lisp Object System, named in the design notes.
+CLOS = "CLOS"
+# Deliberate misspelling of `class` in parser error-recovery tests.
+classs = "classs"
+# REPL completion prefix in tests.
+fo = "fo"
+# The `mis-` prefix, as in "mis-invokes".
+mis = "mis"
+# Accepted spelling in affordance identifiers.
+invokable = "invokable"
