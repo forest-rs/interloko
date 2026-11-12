@@ -14,9 +14,8 @@ use core::cell::RefCell;
 use core::fmt::{self, Write as _};
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
-use execution_tape::trace::TraceMask;
 use execution_tape::value::{FuncRef, Value};
-use execution_tape::vm::{Limits, Trap, TrapInfo, Vm};
+use execution_tape::vm::{InvocationOptions, Limits, Trap, TrapInfo, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::execution_trace::TraceCapture;
@@ -41,6 +40,7 @@ use crate::{ast, lower, sem, tape, typing};
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
 use interloko_runtime::control::ControlFault;
+use interloko_runtime::driver::{self, RunFailure, RuntimeHost};
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
@@ -5373,40 +5373,46 @@ fn run_turn_body<'a>(
         .install(Arc::clone(&tape.program))
         .expect("a fresh VM installs a program without tag imports");
     let mut capture = trace.map(|detail| TraceCapture::new(&tape.program, detail));
-    let mask = capture.as_ref().map_or(TraceMask::NONE, TraceCapture::mask);
-    let sink = capture.as_mut().map(TraceCapture::sink);
-    let entry = FuncRef::new(unit, entry);
-    let output = match vm.run(entry, &runtime_arguments, mask, sink) {
-        Ok(output) => output,
-        Err(trap) => {
+    let mut options = InvocationOptions::default();
+    if let Some(capture) = capture.as_mut() {
+        options = options.trace(capture.mask(), capture.sink());
+    }
+    let run = driver::run(
+        &mut vm,
+        &tape.control,
+        FuncRef::new(unit, entry),
+        &runtime_arguments,
+        options,
+    );
+    let output = match run {
+        Ok(outcome) => outcome.outputs,
+        Err(failure) => {
+            let trace = capture.map(TraceCapture::finish);
             if let Some((name, failure)) = host.failure() {
                 return Err(FunctionCallError::HostFunctionFailed {
                     name,
                     failure,
-                    trace: capture.map(TraceCapture::finish),
+                    trace,
                 });
             }
-            match host.control_fault() {
-                Some(ControlFault::UnhandledCondition { class }) => {
-                    let class = tape
+            return Err(match failure {
+                RunFailure::Control {
+                    fault: ControlFault::UnhandledCondition { class },
+                    ..
+                } => FunctionCallError::UnhandledCondition {
+                    class: tape
                         .runtime
                         .class(class)
-                        .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone());
-                    return Err(FunctionCallError::UnhandledCondition {
-                        class,
-                        trace: capture.map(TraceCapture::finish),
-                    });
+                        .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
+                    trace,
+                },
+                RunFailure::Control {
+                    fault: ControlFault::ExpiredExit { .. },
+                    ..
+                } => FunctionCallError::ExpiredExit { trace },
+                RunFailure::Control { trap, .. } | RunFailure::Trap(trap) => {
+                    FunctionCallError::Trap { trap, trace }
                 }
-                Some(ControlFault::ExpiredExit { .. }) => {
-                    return Err(FunctionCallError::ExpiredExit {
-                        trace: capture.map(TraceCapture::finish),
-                    });
-                }
-                Some(ControlFault::UnbalancedPop { .. }) | None => {}
-            }
-            return Err(FunctionCallError::Trap {
-                trap: alloc::boxed::Box::new(trap),
-                trace: capture.map(TraceCapture::finish),
             });
         }
     };
@@ -5466,9 +5472,11 @@ impl<'a> SharedFunctionCallHost<'a> {
     fn failure(&self) -> Option<(String, HostFunctionFailure)> {
         self.0.borrow().failure.clone()
     }
+}
 
-    fn control_fault(&self) -> Option<ControlFault> {
-        self.0.borrow().runtime.control().fault()
+impl RuntimeHost for SharedFunctionCallHost<'_> {
+    fn with_runtime<R>(&mut self, f: impl FnOnce(&mut InterlokoHost) -> R) -> R {
+        f(self.0.borrow_mut().runtime)
     }
 }
 

@@ -11,6 +11,7 @@ extern crate alloc;
 mod boxed;
 mod census;
 pub mod control;
+pub mod driver;
 mod evacuate;
 mod region;
 mod turn;
@@ -19,16 +20,12 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use control::{
-    BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONTROL_CHECK_EXIT,
-    CONTROL_POP, CONTROL_PUSH_EXIT, ControlState,
-};
 #[cfg(test)]
 use execution_tape::host::AccessSink;
 use execution_tape::host::{
     Host, HostContext, HostError, HostSig, ResourceKeyRef, SigHash, ValueRef,
 };
-use execution_tape::program::{HostTypeId, TagId, ValueType};
+use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
@@ -1410,7 +1407,6 @@ pub struct InterlokoHost {
     turn: Option<OpenTurn>,
     /// Most evacuation work a turn may need to finish.
     evacuation_budget: u64,
-    control: ControlState,
 }
 
 impl InterlokoHost {
@@ -1426,7 +1422,6 @@ impl InterlokoHost {
             roots: Vec::new(),
             turn: None,
             evacuation_budget: u64::MAX,
-            control: ControlState::default(),
         }
     }
 
@@ -1434,12 +1429,6 @@ impl InterlokoHost {
     #[must_use]
     pub const fn layout(&self) -> &RuntimeLayout {
         &self.layout
-    }
-
-    /// Dynamic handler bindings, control faults and control work for this run.
-    #[must_use]
-    pub const fn control(&self) -> &ControlState {
-        &self.control
     }
 
     /// Creates a new runtime host after validating its layout.
@@ -2191,52 +2180,6 @@ impl Host for InterlokoHost {
                     .ok_or(HostError::Failed)?;
                 rets[0] = Value::Obj(obj);
                 Ok(0)
-            }
-            CONDITION_PUSH_HANDLER => {
-                let [ValueRef::U64(class_raw), ValueRef::U64(tag_raw)] = args else {
-                    return Err(HostError::Failed);
-                };
-                let class = runtime_class_id(*class_raw)?;
-                // The guest names its restart tag locally; the binding keeps
-                // the VM tag so any unit's signal raises the same exception.
-                let restart = TagId(u32::try_from(*tag_raw).map_err(|_| HostError::Failed)?);
-                let restart = ctx.tag(restart).ok_or(HostError::Failed)?;
-                let token = self.control.push(BindingKind::Handler { class, restart });
-                rets[0] = Value::U64(token.0);
-                Ok(0)
-            }
-            CONTROL_PUSH_EXIT => {
-                let [] = args else {
-                    return Err(HostError::Failed);
-                };
-                rets[0] = Value::U64(self.control.push(BindingKind::Exit).0);
-                Ok(0)
-            }
-            CONTROL_CHECK_EXIT => {
-                let [ValueRef::U64(token)] = args else {
-                    return Err(HostError::Failed);
-                };
-                self.control.check_exit(BindingToken(*token))?;
-                Ok(0)
-            }
-            CONTROL_POP => {
-                let [ValueRef::U64(token)] = args else {
-                    return Err(HostError::Failed);
-                };
-                self.control.pop(BindingToken(*token))?;
-                Ok(0)
-            }
-            CONDITION_SIGNAL => {
-                let [ValueRef::Obj(condition)] = args else {
-                    return Err(HostError::Failed);
-                };
-                let class = self.object(*condition)?.class;
-                let layout = &self.layout;
-                Err(self
-                    .control
-                    .signal(class, Value::Obj(*condition), |handled| {
-                        layout.is_same_or_subclass(class, handled)
-                    }))
             }
             _ => Err(HostError::UnknownSymbol),
         }

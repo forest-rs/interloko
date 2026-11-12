@@ -6,13 +6,13 @@
 //! `InterlokoHost` through a [`HostObjectAdapter`] that answers slot reads.
 //!
 //! `SessionArtifacts::call_function` only passes scalar values, so calling a
-//! function with host objects runs the session's verified tape directly.
+//! function with host objects runs the session's verified tape through
+//! `interloko_runtime::driver::run`, the same driver the session uses.
 
 use std::error::Error;
 
-use execution_tape::trace::TraceMask;
 use execution_tape::value::{FuncRef, Value};
-use execution_tape::vm::{Limits, Vm};
+use execution_tape::vm::{InvocationOptions, Limits, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
@@ -112,15 +112,16 @@ fn sum_areas(
 
     let mut vm = Vm::new(host, Limits::default());
     let unit = vm.install(std::sync::Arc::clone(&tape.program))?;
-    match vm
-        .run(
-            FuncRef::new(unit, *entry),
-            &[circle, square],
-            TraceMask::NONE,
-            None,
-        )?
-        .as_slice()
-    {
+    let args = [circle, square];
+    let outcome = interloko_runtime::driver::run(
+        &mut vm,
+        &tape.control,
+        FuncRef::new(unit, *entry),
+        &args,
+        InvocationOptions::default(),
+    )
+    .map_err(|failure| format!("`sum-areas` failed: {}", failure.trap()))?;
+    match outcome.outputs.as_slice() {
         [Value::I64(value)] => Ok(*value),
         other => Err(format!("`sum-areas` returned {other:?}").into()),
     }

@@ -22,6 +22,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::lower;
 use crate::sem;
 use crate::syntax::Span;
+use interloko_runtime::control::{ControlLayout, ControlTags};
 use interloko_runtime::{self as runtime, RuntimeLayout};
 
 /// A verified tape program emitted from lowered Interloko IR.
@@ -38,6 +39,8 @@ pub struct TapeModule {
     pub functions: Vec<FuncId>,
     /// `execution_tape` function id for `main`, if present.
     pub main: Option<FuncId>,
+    /// Control tags and restart sites the runtime driver needs.
+    pub control: ControlLayout,
 }
 
 /// Tape emission error.
@@ -140,11 +143,18 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     }
 
     let program = builder.build_verified().map_err(build_error)?;
+    let control = ControlLayout {
+        tags: abi.control.as_ref().map(|control| ControlTags {
+            restart: control.restart,
+        }),
+        restarts: module.restarts.clone(),
+    };
     Ok(TapeModule {
         program: Arc::new(program),
         runtime: module.runtime.clone(),
         functions: ids.functions,
         main,
+        control,
     })
 }
 
@@ -1290,16 +1300,19 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.trap(trap.code());
             }
-            lower::Instr::PushHandler { dst, class, span } => {
-                let control = self.abi.control()?;
-                let (sig, restart) = (control.push_handler, control.restart);
-                let class_reg = self.alloc_temp(ValueType::U64);
-                let tag_reg = self.alloc_temp(ValueType::U64);
+            lower::Instr::PushHandler {
+                dst,
+                descriptor,
+                span,
+            } => {
+                let sig = self.abi.control()?.push_handler;
+                let descriptor_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
-                self.asm.const_u64(class_reg, u64::from(class.0));
-                self.asm.const_u64(tag_reg, u64::from(restart.0));
-                self.asm
-                    .host_call(0, sig, 0, &[class_reg, tag_reg], &[dst.0]);
+                self.asm.const_u64(
+                    descriptor_reg,
+                    u64::try_from(*descriptor).unwrap_or(u64::MAX),
+                );
+                self.asm.host_call(0, sig, 0, &[descriptor_reg], &[dst.0]);
             }
             lower::Instr::PopBinding { token, span } => {
                 let sig = self.abi.control()?.pop;

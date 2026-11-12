@@ -16,6 +16,7 @@ use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
 use interloko_runtime::RuntimeLayout;
+use interloko_runtime::control::{RestartDescriptor, RestartParameter};
 
 /// Durable function identifier within a lowered module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -92,6 +93,8 @@ pub struct CallableSignature {
 pub struct Module {
     /// Runtime layout required by object host calls.
     pub runtime: RuntimeLayout,
+    /// `handle` restart sites, indexed by [`Instr::PushHandler`] descriptors.
+    pub restarts: Vec<RestartDescriptor>,
     /// Interned callable signatures used by first-class function values.
     pub call_sigs: Vec<CallableSignature>,
     /// Host-backed functions visible to emitted calls.
@@ -917,8 +920,8 @@ pub enum Instr {
     PushHandler {
         /// Destination `u64` token register.
         dst: Register,
-        /// Handled condition class.
-        class: sem::ClassId,
+        /// Index into [`Module::restarts`].
+        descriptor: usize,
         /// Source span.
         span: Span,
     },
@@ -1038,6 +1041,7 @@ struct LowerIds {
     closures: Vec<FunctionId>,
     closure_sigs: Vec<CallableSigId>,
     exit_thunks: Vec<ExitThunk>,
+    restarts: Vec<RestartDescriptor>,
     call_sigs: Vec<CallableSignature>,
 }
 
@@ -1077,11 +1081,16 @@ struct KnownCallableThunk<'a> {
 }
 
 #[derive(Default)]
-struct CallableUses {
+struct CallableUses<'module> {
     functions: Vec<sem::FunctionId>,
     generics: Vec<sem::GenericFunctionId>,
     accessors: Vec<AccessorTarget>,
     exits: Vec<Vec<sem::ValueKind>>,
+    restarts: Vec<RestartDescriptor>,
+    /// Classes and locals of the module and of the body being walked, for
+    /// naming restart sites.
+    classes: &'module [sem::Class],
+    locals: &'module [sem::Local],
 }
 
 struct Lowering<'module> {
@@ -1186,6 +1195,8 @@ impl<'module> Lowering<'module> {
             next = next.saturating_add(1);
         }
 
+        ids.restarts = callable_uses.restarts;
+
         Ok(Self { module, ids })
     }
 
@@ -1275,6 +1286,7 @@ impl<'module> Lowering<'module> {
 
         Ok(Module {
             runtime: runtime_bridge::runtime_layout_from_sem(self.module),
+            restarts: self.ids.restarts.clone(),
             call_sigs: self.ids.call_sigs.clone(),
             host_functions,
             functions,
@@ -1709,21 +1721,58 @@ fn known_callable_sig(
     }
 }
 
-fn collect_known_callable_uses(module: &sem::Module) -> CallableUses {
-    let mut uses = CallableUses::default();
+fn collect_known_callable_uses(module: &sem::Module) -> CallableUses<'_> {
+    let mut uses = CallableUses {
+        classes: &module.classes,
+        ..CallableUses::default()
+    };
     for constant in &module.constants {
         collect_known_callable_uses_in_expr(&constant.value, &mut uses);
     }
     for function in &module.functions {
+        uses.locals = &function.locals;
         collect_known_callable_uses_in_block(&function.body, &mut uses);
     }
     for closure in &module.closures {
+        uses.locals = &closure.locals;
         collect_known_callable_uses_in_block(&closure.body, &mut uses);
     }
     for method in &module.methods {
+        uses.locals = &method.locals;
         collect_known_callable_uses_in_block(&method.body, &mut uses);
     }
     uses
+}
+
+/// Describes one `handle` site as a restart: named after its class, with the
+/// condition as its parameter when the recovery binds it.
+fn restart_descriptor(
+    uses: &CallableUses<'_>,
+    restart: &sem::Restart,
+    span: Span,
+) -> RestartDescriptor {
+    let class_name = uses
+        .classes
+        .get(restart.specializer.0 as usize)
+        .map_or("condition", |class| class.name.as_str());
+    let parameters = restart
+        .condition_local
+        .and_then(|local| uses.locals.get(local.0 as usize))
+        .map(|local| RestartParameter {
+            name: local.name.clone(),
+            class: restart.specializer,
+        })
+        .into_iter()
+        .collect();
+    RestartDescriptor {
+        name: class_name
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .into(),
+        class: restart.specializer,
+        parameters,
+        span: span.start..span.end,
+    }
 }
 
 fn collect_known_callable_uses_in_block(block: &sem::Block, uses: &mut CallableUses) {
@@ -1815,7 +1864,15 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(then_branch, uses);
             collect_known_callable_uses_in_expr(else_branch, uses);
         }
-        sem::Expr::Handle { body, restart, .. } => {
+        sem::Expr::Handle {
+            body,
+            restart,
+            span,
+        } => {
+            let descriptor = restart_descriptor(uses, restart, *span);
+            if !uses.restarts.contains(&descriptor) {
+                uses.restarts.push(descriptor);
+            }
             collect_known_callable_uses_in_expr(body, uses);
             collect_known_callable_uses_in_expr(&restart.body, uses);
         }
@@ -3948,9 +4005,17 @@ impl<'module> BodyLowering<'module> {
             .map(|kind| self.alloc(kind))
             .collect::<Vec<_>>();
         let token = self.alloc(ValueKind::U64);
+        let descriptor = self
+            .ids
+            .restarts
+            .iter()
+            .position(|site| {
+                site.span == (span.start..span.end) && site.class == restart.specializer
+            })
+            .ok_or_else(|| invalid_semantic("handle site has no restart descriptor"))?;
         self.instructions.push(Instr::PushHandler {
             dst: token.reg,
-            class: restart.specializer,
+            descriptor,
             span,
         });
 
@@ -5373,9 +5438,16 @@ impl Module {
                 write!(f, "  trap {} ({})", trap.code(), trap.description())?;
                 fmt_span(f, *span)
             }
-            Instr::PushHandler { dst, class, span } => {
-                write!(f, "  {dst} = condition.push-handler ")?;
-                self.fmt_class(f, *class)?;
+            Instr::PushHandler {
+                dst,
+                descriptor,
+                span,
+            } => {
+                write!(f, "  {dst} = condition.push-handler restart#{descriptor}")?;
+                if let Some(site) = self.restarts.get(*descriptor) {
+                    write!(f, " ")?;
+                    self.fmt_class(f, site.class)?;
+                }
                 fmt_span(f, *span)
             }
             Instr::PopBinding { token, span } => {
