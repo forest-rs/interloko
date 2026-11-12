@@ -276,12 +276,15 @@ whose image persists across calls (the REPL uses one; `:heap` shows it),
 while `SessionArtifacts::call_function` uses a fresh one per call.
 Turns are transactional: a turn's stores into image objects are recorded
 in a write log, and a trapped turn replays it backwards, so the image is
-left as the turn found it. `FunctionCallOutcome::turn` reports what a call
-allocated, what was still reachable from its result at the end, and how
-many image stores it logged; `interloko_corpus heap
-[root...]` prints that survival for every program with a `main`. Until
-survivors are evacuated into the image, a turn may not store a value it
-allocated into an image object.
+left as the turn found it. When a turn returns, the nursery entries
+reachable from its roots (values the caller keeps, image roots registered with
+`InterlokoHost::register_root`, and the image slots its write log names)
+are evacuated into the image in increasing nursery order, charged in work
+units against an evacuation budget; everything else is dropped.
+`FunctionCallOutcome::turn` reports what a call allocated (the nursery
+high-water mark), what was reachable at the end, what was promoted, the
+evacuation work and the number of logged stores; `interloko_corpus heap
+[root...]` prints survival for every program with a `main`.
 
 Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
 `Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed

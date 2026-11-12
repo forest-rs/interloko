@@ -2,7 +2,7 @@
 //!
 //! The **image** holds long-lived runtime state: objects created outside a
 //! turn (an embedding's setup, host-backed objects), interned symbols, and
-//! (once evacuation lands) turn survivors. The **nursery** holds everything
+//! the survivors evacuated from finished turns. The **nursery** holds everything
 //! a turn allocates: instances, strings, vectors, metaobjects and heap
 //! boxes. A turn is one bounded call into the runtime; when it ends the
 //! nursery is emptied in one step, so a turn's garbage costs nothing to
@@ -106,6 +106,11 @@ pub(crate) struct OpenTurn {
     pub(crate) symbols: usize,
     /// Every store the turn made into an image object, in order.
     pub(crate) write_log: Vec<LoggedStore>,
+    /// Registered-root count when the turn began; roots at or past it were
+    /// registered by the turn.
+    pub(crate) roots: usize,
+    /// Roots the turn released, with the value each held, in order.
+    pub(crate) released_roots: Vec<(usize, Value)>,
 }
 
 /// One store into an image object during a turn.

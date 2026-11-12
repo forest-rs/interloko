@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod boxed;
 mod census;
+mod evacuate;
 mod region;
 mod turn;
 
@@ -42,6 +43,7 @@ use boxed::BoxedHandle;
 pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
 use region::{ObjectRef, OpenTurn, Region, Space};
+pub use turn::ImageRootId;
 
 /// Host-call symbol for object construction.
 pub const MAKE_OBJECT: &str = "interloko.make_object";
@@ -601,14 +603,18 @@ pub enum RuntimeError {
     TurnAlreadyOpen,
     /// A turn operation was called with no turn open.
     NoOpenTurn,
-    /// A turn tried to store a value it allocated into an image object.
-    /// Until survivors are evacuated at turn end, the image may not point
-    /// into the nursery.
-    NurseryReferenceInImage {
-        /// Image object being written.
-        object: Obj,
-        /// Effective slot being written.
-        slot: SlotId,
+    /// Evacuating a turn's survivors would exceed the evacuation budget.
+    /// The turn stays open; abort it.
+    EvacuationBudgetExceeded {
+        /// Work the evacuation needs.
+        work: u64,
+        /// Configured budget.
+        budget: u64,
+    },
+    /// An image root id was never registered or was already released.
+    InvalidImageRoot {
+        /// Offending root id.
+        root: ImageRootId,
     },
 }
 
@@ -1394,7 +1400,11 @@ pub struct InterlokoHost {
     image: Region,
     nursery: Region,
     symbols: Vec<InternedObject>,
+    /// Values registered as image roots; released roots leave `None`.
+    roots: Vec<Option<Value>>,
     turn: Option<OpenTurn>,
+    /// Most evacuation work a turn may need to finish.
+    evacuation_budget: u64,
 }
 
 impl InterlokoHost {
@@ -1407,7 +1417,9 @@ impl InterlokoHost {
             image: Region::default(),
             nursery: Region::default(),
             symbols: Vec::new(),
+            roots: Vec::new(),
             turn: None,
+            evacuation_budget: u64::MAX,
         }
     }
 
@@ -1573,9 +1585,6 @@ impl InterlokoHost {
         let value = self.value_for_slot(value, slot_info.kind)?;
         let location = Self::object_ref(object)?;
         let in_image_turn = self.turn.is_some() && location.space == Space::Image;
-        if in_image_turn && self.references_nursery(&value) {
-            return Err(RuntimeError::NurseryReferenceInImage { object, slot });
-        }
         if in_image_turn
             && let RuntimeObjectStorage::Native { slots } = &self.object(object)?.storage
             && let Some(old) = slots.get(slot.0 as usize)
@@ -2767,6 +2776,7 @@ fn runtime_slot_id(raw: u64) -> Result<SlotId, HostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use execution_tape::asm::{Asm, FunctionSig, ProgramBuilder};
     use execution_tape::trace::TraceMask;
     use execution_tape::vm::{ExecutionContext, Limits, Vm};
@@ -2890,7 +2900,8 @@ mod tests {
         }
     }
 
-    /// `<object>`, `<string>`, and `<cell>` with one `<object>` slot.
+    /// `<object>`, `<string>`, `<cell>` with one `<object>` slot, and
+    /// `<symbol>`.
     fn cell_layout() -> RuntimeLayout {
         RuntimeLayout {
             classes: vec![
@@ -2901,6 +2912,7 @@ mod tests {
                     Some(OBJECT_CLASS_ID),
                     vec![slot("value", ValueKind::Any, ClassId(2), SlotId(0))],
                 ),
+                class("<symbol>", Some(OBJECT_CLASS_ID), Vec::new()),
             ],
             generics: Vec::new(),
             methods: Vec::new(),
@@ -2918,8 +2930,7 @@ mod tests {
     fn turn_allocations_live_in_the_nursery() {
         let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
         let boxed_none = host.box_top_value(Value::Bool(false)).expect("box");
-        let cell = host
-            .make_object(ClassId(2), &[ValueRef::Obj(object_of(&boxed_none))])
+        host.make_object(ClassId(2), &[ValueRef::Obj(object_of(&boxed_none))])
             .expect("image cell");
         let image = host.heap_stats();
         assert_eq!(image.objects, 1);
@@ -2927,28 +2938,84 @@ mod tests {
         host.begin_turn().expect("turn opens");
         assert_eq!(host.begin_turn(), Err(RuntimeError::TurnAlreadyOpen));
         let text = host.make_string("transient").expect("string");
-        let boxed_text = host.box_top_value(text.clone()).expect("box");
-        assert_eq!(host.heap_stats().objects, 2);
+        host.make_string("garbage").expect("string");
+        assert_eq!(host.heap_stats().objects, 3);
         assert_eq!(host.string_text(&text), Ok("transient"));
-        // The image may not point into the nursery until survivors can be
-        // evacuated.
-        assert_eq!(
-            host.write_slot(
-                object_of(&cell),
-                SlotId(0),
-                ValueRef::Obj(object_of(&boxed_text))
-            ),
-            Err(RuntimeError::NurseryReferenceInImage {
-                object: object_of(&cell),
-                slot: SlotId(0)
-            })
-        );
-        let stats = host.finish_turn(&[text]).expect("turn closes");
-        assert_eq!(stats.allocated.objects, 1);
+        let stats = host.finish_turn(&[text], &mut []).expect("turn closes");
+        assert_eq!(stats.allocated.objects, 2);
+        // The result was reachable, but the caller did not keep it.
         assert_eq!(stats.reachable.objects, 1);
+        assert_eq!(stats.promoted, HeapStats::default());
         assert_eq!(stats.image, image);
         assert_eq!(host.heap_stats(), image);
-        assert_eq!(host.finish_turn(&[]), Err(RuntimeError::NoOpenTurn));
+        assert_eq!(
+            host.finish_turn(&[], &mut []),
+            Err(RuntimeError::NoOpenTurn)
+        );
+    }
+
+    #[test]
+    fn finished_turns_evacuate_survivors_in_nursery_order() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        let empty = host.box_top_value(Value::Bool(false)).expect("box");
+        let cell = object_of(
+            &host
+                .make_object(ClassId(2), &[ValueRef::Obj(object_of(&empty))])
+                .expect("image cell"),
+        );
+
+        host.begin_turn().expect("turn opens");
+        host.make_string("garbage").expect("string");
+        let stored = host.make_string("stored").expect("string");
+        let kept = host.make_string("kept").expect("string");
+        let rooted = host.make_string("rooted").expect("string");
+        let wide = host.box_top_value(Value::I64(i64::MAX)).expect("heap box");
+        host.make_string("more garbage").expect("string");
+        // An image slot now refers to the nursery; the write log remembers it.
+        let boxed_stored = host.box_top_value(stored).expect("box");
+        host.write_slot(cell, SlotId(0), ValueRef::Obj(object_of(&boxed_stored)))
+            .expect("image store");
+        let root = host.register_root(rooted);
+        let wide_root = host.register_root(wide);
+        let mut keep = [kept];
+        let stats = host.finish_turn(&[], &mut keep).expect("turn finishes");
+
+        assert_eq!(stats.allocated.objects, 5);
+        assert_eq!(stats.promoted.objects, 3);
+        assert_eq!(stats.promoted.boxed_values, 1);
+        assert_eq!(stats.reachable, stats.promoted);
+        assert_eq!(stats.logged_stores, 1);
+        assert!(stats.evacuation_work > 0);
+        assert_eq!(host.heap_stats().objects, 4);
+        // Survivors keep nursery order: "stored", "kept", "rooted".
+        let text = |host: &InterlokoHost, value: &Value| {
+            String::from(host.string_text(value).expect("string"))
+        };
+        assert_eq!(text(&host, &keep[0]), "kept");
+        assert_eq!(object_of(&keep[0]).handle.0, 3);
+        let rooted = host.image_root(root).expect("root").clone();
+        assert_eq!(text(&host, &rooted), "rooted");
+        assert_eq!(object_of(&rooted).handle.0, 4);
+        let stored = host.boxed_value(object_of(&host.read_slot(cell, SlotId(0)).expect("slot")));
+        assert_eq!(text(&host, &stored.expect("unboxes")), "stored");
+        let wide = host.image_root(wide_root).expect("root").clone();
+        assert_eq!(host.boxed_value(object_of(&wide)), Ok(Value::I64(i64::MAX)));
+
+        // A budget too small for the survivors leaves the turn open.
+        host.set_evacuation_budget(1);
+        host.begin_turn().expect("turn opens");
+        let survivor = host.make_string("survivor").expect("string");
+        host.register_root(survivor);
+        let before = host.heap_stats();
+        assert!(matches!(
+            host.finish_turn(&[], &mut []),
+            Err(RuntimeError::EvacuationBudgetExceeded { budget: 1, .. })
+        ));
+        assert!(host.turn_open());
+        assert_eq!(host.heap_stats(), before);
+        host.abort_turn().expect("turn aborts");
+        assert_eq!(host.heap_stats().objects, 4);
+        assert!(host.image_root(ImageRootId(2)).is_err());
     }
 
     #[test]
@@ -2980,7 +3047,7 @@ mod tests {
         let seven = boxed(&mut host, 7);
         host.write_slot(cell, SlotId(0), ValueRef::Obj(seven))
             .expect("image store");
-        let stats = host.finish_turn(&[]).expect("turn finishes");
+        let stats = host.finish_turn(&[], &mut []).expect("turn finishes");
         assert_eq!(stats.logged_stores, 1);
         assert_eq!(host.read_slot(cell, SlotId(0)), Ok(Value::Obj(seven)));
 
@@ -2988,6 +3055,155 @@ mod tests {
         host.write_slot(cell, SlotId(0), ValueRef::Obj(object_of(&original)))
             .expect("setup store");
         assert_eq!(host.read_slot(cell, SlotId(0)), Ok(original));
+    }
+
+    /// The image's objects and heap boxes, rendered for exact comparison.
+    fn heap_snapshot(host: &InterlokoHost) -> String {
+        let objects = host
+            .image
+            .objects
+            .iter()
+            .map(|object| {
+                let storage = match &object.storage {
+                    RuntimeObjectStorage::Native { slots } => format!("native {slots:?}"),
+                    RuntimeObjectStorage::String { value } => format!("string {value:?}"),
+                    RuntimeObjectStorage::Symbol { name } => format!("symbol {name:?}"),
+                    RuntimeObjectStorage::Vector { elements } => format!("vector {elements:?}"),
+                    _ => String::from("other"),
+                };
+                format!("{:?} {storage}", object.class)
+            })
+            .collect::<Vec<_>>();
+        format!("objects {objects:?}\nvalues {:?}", host.image.values)
+    }
+
+    /// Everything the image holds: its heap, roots and interned symbols.
+    fn image_snapshot(host: &InterlokoHost) -> String {
+        let symbols = host
+            .symbols
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.object))
+            .collect::<Vec<_>>();
+        format!(
+            "{}\nroots {:?}\nsymbols {symbols:?}",
+            heap_snapshot(host),
+            host.roots
+        )
+    }
+
+    #[test]
+    fn aborted_turns_restore_the_image_exactly() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        let wide = host.box_top_value(Value::I64(i64::MAX)).expect("image box");
+        let cell = object_of(
+            &host
+                .make_object(ClassId(2), &[ValueRef::Obj(object_of(&wide))])
+                .expect("image cell"),
+        );
+        let held = host.make_string("held").expect("string");
+        let held_root = host.register_root(held);
+        host.intern_symbol("setup".into()).expect("symbol");
+        let before = image_snapshot(&host);
+
+        host.begin_turn().expect("turn opens");
+        // Point the image cell into the nursery, twice.
+        let text = host.make_string("nursery").expect("string");
+        let boxed_text = host.box_top_value(text).expect("box");
+        host.write_slot(cell, SlotId(0), ValueRef::Obj(object_of(&boxed_text)))
+            .expect("image store");
+        let narrow = host.box_top_value(Value::I64(i64::MIN)).expect("box");
+        host.write_slot(cell, SlotId(0), ValueRef::Obj(object_of(&narrow)))
+            .expect("image store");
+        // Release a root from before the turn and register a new one.
+        host.release_root(held_root).expect("root releases");
+        let rooted = host.make_string("rooted").expect("string");
+        host.register_root(rooted);
+        // Intern a new symbol and look up an existing one.
+        host.intern_symbol("fresh".into()).expect("symbol");
+        host.intern_symbol("setup".into()).expect("symbol");
+        assert_ne!(image_snapshot(&host), before);
+
+        let stats = host.abort_turn().expect("turn aborts");
+        assert_eq!(stats.logged_stores, 2);
+        assert_eq!(image_snapshot(&host), before);
+        assert_eq!(host.read_slot(cell, SlotId(0)), Ok(wide.clone()));
+        assert_eq!(host.boxed_value(object_of(&wide)), Ok(Value::I64(i64::MAX)));
+        let held = host.image_root(held_root).expect("root restored").clone();
+        assert_eq!(host.string_text(&held), Ok("held"));
+
+        // The dropped symbol interns afresh, at the end of the image.
+        let fresh = host.intern_symbol("fresh".into()).expect("symbol");
+        assert_eq!(
+            object_of(&fresh).handle.0,
+            u64::try_from(host.image.objects.len()).expect("small")
+        );
+    }
+
+    #[test]
+    fn evacuation_is_independent_of_root_order() {
+        let run = |reverse: bool| {
+            let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+            host.begin_turn().expect("turn opens");
+            let a = host.make_string("a").expect("string");
+            host.make_string("garbage").expect("string");
+            let b = host.make_string("b").expect("string");
+            let boxed_a = host.box_top_value(a.clone()).expect("box");
+            let cell = host
+                .make_object(ClassId(2), &[ValueRef::Obj(object_of(&boxed_a))])
+                .expect("cell");
+            let wide = host.box_top_value(Value::I64(i64::MAX)).expect("heap box");
+            let (mut roots, mut keep) = (vec![b, wide], vec![cell, a]);
+            if reverse {
+                roots.reverse();
+                keep.reverse();
+            }
+            let ids = roots
+                .into_iter()
+                .map(|root| host.register_root(root))
+                .collect::<Vec<_>>();
+            let stats = host.finish_turn(&[], &mut keep).expect("turn finishes");
+            if reverse {
+                keep.reverse();
+            }
+            let mut roots = ids
+                .into_iter()
+                .map(|id| host.image_root(id).expect("root").clone())
+                .collect::<Vec<_>>();
+            if reverse {
+                roots.reverse();
+            }
+            (host, keep, roots, stats)
+        };
+        let (host, keep, roots, stats) = run(false);
+        let (other, other_keep, other_roots, other_stats) = run(true);
+        assert_eq!(heap_snapshot(&other), heap_snapshot(&host));
+        assert_eq!(
+            (other_keep, other_roots, other_stats),
+            (keep.clone(), roots.clone(), stats)
+        );
+
+        // Survivors take nursery order, not traversal order: "a", "b", the
+        // cell, then the wide box; "a" is reached twice but moved once.
+        let handles = [&keep[1], &roots[0], &keep[0]].map(|value| object_of(value).handle.0);
+        assert_eq!(handles, [1, 2, 3]);
+        let slot = host
+            .read_slot(object_of(&keep[0]), SlotId(0))
+            .expect("slot");
+        let a = host.boxed_value(object_of(&slot)).expect("unboxes");
+        assert_eq!(a, keep[1]);
+        assert_eq!(
+            host.boxed_value(object_of(&roots[1])),
+            Ok(Value::I64(i64::MAX))
+        );
+        // Every survivor was reachable, and every reachable entry was kept.
+        assert_eq!(stats.reachable, stats.promoted);
+        assert_eq!(stats.promoted.objects, 3);
+        assert_eq!(stats.promoted.boxed_values, 1);
+        assert_eq!(stats.image, host.heap_stats());
+        assert_eq!(stats.promoted, host.image_stats());
+        // Four roots, one per string, two for the cell (itself and its
+        // slot), and two for the heap box (itself and its value).
+        assert_eq!(stats.evacuation_work, 4 + 1 + 1 + 2 + 2);
     }
 
     #[test]

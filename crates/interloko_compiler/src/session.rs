@@ -5235,12 +5235,17 @@ fn call_function<'a>(
         handler.map(|handler| -> &mut dyn HostFunctionHandler { handler }),
     );
     match body {
-        Ok((value, trace, output)) => {
-            let turn = runtime
-                .finish_turn(&output)
-                .map_err(|error| FunctionCallError::TurnFailed { error })?;
-            Ok(FunctionCallOutcome { value, trace, turn })
-        }
+        Ok((value, trace, output)) => match runtime.finish_turn(&output, &mut []) {
+            Ok(turn) => Ok(FunctionCallOutcome { value, trace, turn }),
+            // A refused evacuation leaves the turn open; abort it so the
+            // image is as the call found it and the next call can begin.
+            Err(error) => {
+                runtime
+                    .abort_turn()
+                    .map_err(|error| FunctionCallError::TurnFailed { error })?;
+                Err(FunctionCallError::TurnFailed { error })
+            }
+        },
         Err(error) => {
             runtime
                 .abort_turn()
@@ -14219,6 +14224,34 @@ mod tests {
             .call_function(&artifacts, "tag", &[FunctionValue::Integer(0)], None)
             .expect("tag should run");
         assert_eq!(runtime.heap_stats(), tagged);
+    }
+
+    #[test]
+    fn runtime_turns_replay_deterministically() {
+        let artifacts =
+            CompilerSession::compile_source("turns.loko", TURN_PROGRAM, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let replay = || {
+            let mut runtime = artifacts.runtime().expect("tape is available");
+            let mut log = Vec::new();
+            for (name, args) in [
+                (
+                    "churn",
+                    &[FunctionValue::Integer(30), FunctionValue::Integer(0)][..],
+                ),
+                ("tag", &[FunctionValue::Integer(0)][..]),
+                ("tag-then-trap", &[FunctionValue::Integer(1)][..]),
+                ("tag", &[FunctionValue::Integer(1)][..]),
+            ] {
+                let outcome = runtime.call_function(&artifacts, name, args, None);
+                log.push((
+                    outcome.as_ref().ok().map(|outcome| outcome.turn),
+                    runtime.heap_stats(),
+                ));
+            }
+            log
+        };
+        assert_eq!(replay(), replay());
     }
 
     #[test]

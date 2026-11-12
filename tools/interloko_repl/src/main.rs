@@ -620,8 +620,14 @@ impl Repl {
         if let Some(turn) = self.last_turn {
             writeln!(
                 stdout,
-                "last turn: allocated {} objects ({} bytes), {} reachable at end",
-                turn.allocated.objects, turn.allocated.bytes, turn.reachable.objects
+                "last turn: allocated {} objects ({} bytes), {} reachable at end, \
+                 {} promoted, {} evacuation work, {} logged stores",
+                turn.allocated.objects,
+                turn.allocated.bytes,
+                turn.reachable.objects,
+                turn.promoted.objects + turn.promoted.boxed_values,
+                turn.evacuation_work,
+                turn.logged_stores
             )?;
         }
         Ok(())
