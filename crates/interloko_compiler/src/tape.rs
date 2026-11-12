@@ -146,6 +146,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     let control = ControlLayout {
         tags: abi.control.as_ref().map(|control| ControlTags {
             restart: control.restart,
+            abort: control.abort,
         }),
         restarts: module.restarts.clone(),
     };
@@ -277,6 +278,7 @@ struct ControlAbi {
     push_exit: HostSigId,
     check_exit: HostSigId,
     restart: TagId,
+    abort: TagId,
     exits: Vec<(lower::CallableSigId, TagId)>,
 }
 
@@ -329,6 +331,9 @@ impl ControlAbi {
                 &runtime::control::restart_payload().map(Into::into),
             )
             .map_err(build_error)?;
+        let abort = builder
+            .declare_tag("interloko.abort", &[])
+            .map_err(build_error)?;
         let exits = exit_sigs
             .into_iter()
             .map(|signature| {
@@ -365,6 +370,7 @@ impl ControlAbi {
                 runtime::control::check_exit_signature(),
             ),
             restart,
+            abort,
             exits,
         }))
     }

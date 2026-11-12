@@ -117,6 +117,7 @@ fn call_with_host_object(
         FuncRef::new(unit, entry),
         &args,
         InvocationOptions::default(),
+        &mut interloko_runtime::chooser::ReportUnhandled,
     )
     .expect("function should run");
     match outcome.outputs.as_slice() {

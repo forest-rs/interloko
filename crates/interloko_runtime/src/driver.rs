@@ -10,12 +10,18 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use execution_tape::host::{Host, HostError};
-use execution_tape::value::{FuncRef, TagRef, Value};
-use execution_tape::vm::{Invocation, InvocationOptions, PendingHostCall, RunStatus, TrapInfo, Vm};
+use execution_tape::host::{Host, HostError, ValueRef};
+use execution_tape::program::ValueType;
+use execution_tape::value::{FuncRef, Obj, TagRef, Value};
+use execution_tape::vm::{
+    Invocation, InvocationOptions, PendingHostCall, RunStatus, Trap, TrapInfo, Vm,
+};
 use interloko_model::ClassId;
 
 use crate::InterlokoHost;
+use crate::chooser::{
+    Choice, ConditionChooser, FrameSnapshot, OfferedRestart, RegisterSnapshot, UnhandledCondition,
+};
 use crate::control::{
     BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONTROL_CHECK_EXIT,
     CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlLayout, ControlState, ControlStats,
@@ -57,6 +63,11 @@ pub enum RunFailure {
         /// The trap that ended the VM invocation.
         trap: Box<TrapInfo>,
     },
+    /// A chooser aborted the run; every crossed cleanup ran.
+    Aborted {
+        /// The uncaught abort that ended the VM invocation.
+        trap: Box<TrapInfo>,
+    },
 }
 
 impl RunFailure {
@@ -64,7 +75,7 @@ impl RunFailure {
     #[must_use]
     pub const fn trap(&self) -> &TrapInfo {
         match self {
-            Self::Trap(trap) | Self::Control { trap, .. } => trap,
+            Self::Trap(trap) | Self::Control { trap, .. } | Self::Aborted { trap } => trap,
         }
     }
 }
@@ -75,24 +86,32 @@ impl RunFailure {
 /// describes. `options` may carry trace and access observers; the driver
 /// opts into yielded host calls itself. Hard VM limits apply to the whole
 /// run, including guest code the driver starts on the signalling stack.
+///
+/// A condition that no live handler accepts goes to `chooser` before anything
+/// unwinds.
 pub fn run<'a, H: RuntimeHost>(
     vm: &'a mut Vm<H>,
     control: &ControlLayout,
     entry: FuncRef,
     args: &'a [Value],
     options: InvocationOptions<'a>,
+    chooser: &mut dyn ConditionChooser,
 ) -> Result<RunOutcome, RunFailure> {
     // The program names its tags locally; the driver raises the VM tags they
     // were bound to when the entry unit was installed.
-    let restart = control
-        .tags
-        .and_then(|tags| vm.units().tag(entry.unit, tags.restart));
+    let tags = control.tags.and_then(|tags| {
+        let units = vm.units();
+        Some(VmTags {
+            restart: units.tag(entry.unit, tags.restart)?,
+            abort: units.tag(entry.unit, tags.abort)?,
+        })
+    });
     let mut invocation = vm
         .start(entry, args, options.yield_host_calls())
         .map_err(|trap| RunFailure::Trap(Box::new(trap)))?;
     let mut driver = Driver {
         control,
-        restart,
+        tags,
         state: ControlState::default(),
         fault: None,
     };
@@ -108,9 +127,9 @@ pub fn run<'a, H: RuntimeHost>(
                     stats: driver.state.stats(),
                 });
             }
-            RunStatus::Suspended | RunStatus::CallbackReturned => {}
-            RunStatus::AwaitingHost => {
-                if let Err(trap) = driver.service(&mut invocation) {
+            RunStatus::Suspended => {}
+            RunStatus::AwaitingHost | RunStatus::CallbackReturned => {
+                if let Err(trap) = driver.service(&mut invocation, chooser) {
                     return Err(driver.failure(trap));
                 }
             }
@@ -118,12 +137,44 @@ pub fn run<'a, H: RuntimeHost>(
     }
 }
 
+/// Copies the live frames and their initialized registers, innermost first.
+fn snapshot_frames<H: RuntimeHost>(pending: &PendingHostCall<'_, '_, H>) -> Vec<FrameSnapshot> {
+    let mut inspection = pending.inspect();
+    let frames = inspection.frames().collect::<Vec<_>>();
+    frames
+        .into_iter()
+        .map(|frame| {
+            let registers = inspection
+                .registers(&frame.activation)
+                .map(|registers| {
+                    registers
+                        .filter_map(|register| {
+                            register.value.map(|value| RegisterSnapshot {
+                                register: register.register,
+                                value: value.to_value(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            FrameSnapshot { frame, registers }
+        })
+        .collect()
+}
+
 struct Driver<'c> {
     control: &'c ControlLayout,
-    /// The VM tag of [`ControlLayout::tags`]' restart tag.
-    restart: Option<TagRef>,
+    /// The VM tags bound to [`ControlLayout::tags`] in the entry unit.
+    tags: Option<VmTags>,
     state: ControlState,
     fault: Option<ControlFault>,
+}
+
+/// Control tags as the VM raises and compares them.
+#[derive(Copy, Clone)]
+struct VmTags {
+    restart: TagRef,
+    abort: TagRef,
 }
 
 /// How to finish a pending request.
@@ -135,6 +186,13 @@ enum Action {
 
 impl Driver<'_> {
     fn failure(&self, trap: TrapInfo) -> RunFailure {
+        if let (Trap::Uncaught(exception), Some(tags)) = (&trap.trap, self.tags)
+            && exception.tag() == tags.abort
+        {
+            return RunFailure::Aborted {
+                trap: Box::new(trap),
+            };
+        }
         match self.fault {
             Some(fault) => RunFailure::Control {
                 fault,
@@ -147,6 +205,7 @@ impl Driver<'_> {
     fn service<H: RuntimeHost>(
         &mut self,
         invocation: &mut Invocation<'_, H>,
+        chooser: &mut dyn ConditionChooser,
     ) -> Result<(), TrapInfo> {
         let Some(mut pending) = invocation.pending_host_call() else {
             return Ok(());
@@ -154,7 +213,7 @@ impl Driver<'_> {
         if !is_control_symbol(pending.symbol()) {
             return pending.dispatch();
         }
-        match self.decide(&mut pending) {
+        match self.decide(&mut pending, chooser) {
             Action::Complete(mut values) => pending.complete(&mut values, Ok(0)),
             Action::Throw(tag, payload) => pending.throw(tag, payload),
             Action::Fail(fault) => {
@@ -166,7 +225,11 @@ impl Driver<'_> {
 
     /// Decides a control request while it waits, with the signalling frames
     /// and the host both reachable through `pending`.
-    fn decide<H: RuntimeHost>(&mut self, pending: &mut PendingHostCall<'_, '_, H>) -> Action {
+    fn decide<H: RuntimeHost>(
+        &mut self,
+        pending: &mut PendingHostCall<'_, '_, H>,
+        chooser: &mut dyn ConditionChooser,
+    ) -> Action {
         let Some(activation) = pending
             .inspect()
             .frames()
@@ -218,7 +281,13 @@ impl Driver<'_> {
                 let Some((class, applicable)) = applicable else {
                     return Action::Fail(ControlFault::MalformedRequest);
                 };
-                self.search(class, Value::Obj(condition), &applicable)
+                match self.search(Value::Obj(condition), &applicable) {
+                    Some(action) => action,
+                    None => {
+                        let resume_types = pending.return_types().to_vec();
+                        self.unhandled(pending, condition, class, &resume_types, chooser)
+                    }
+                }
             }
             _ => Action::Fail(ControlFault::MalformedRequest),
         }
@@ -241,18 +310,107 @@ impl Driver<'_> {
     }
 
     /// Selects the innermost applicable handler, still on the signalling
-    /// stack, and raises its restart.
-    fn search(&mut self, class: ClassId, condition: Value, applicable: &[bool]) -> Action {
-        let Some(restart) = self.restart else {
-            return Action::Fail(ControlFault::MalformedRequest);
+    /// stack, and raises its restart. `None` means no handler applies.
+    fn search(&mut self, condition: Value, applicable: &[bool]) -> Option<Action> {
+        let Some(tags) = self.tags else {
+            return Some(Action::Fail(ControlFault::MalformedRequest));
         };
         for index in (0..applicable.len()).rev() {
             self.state.note_searched();
             if applicable[index] {
                 let token = self.state.bindings()[index].token;
-                return Action::Throw(restart, alloc::vec![Value::U64(token.0), condition]);
+                return Some(Action::Throw(
+                    tags.restart,
+                    alloc::vec![Value::U64(token.0), condition],
+                ));
             }
         }
-        Action::Fail(ControlFault::UnhandledCondition { class })
+        None
+    }
+
+    /// Hands an unhandled condition to the chooser while every frame is
+    /// still live, then carries out its validated choice.
+    fn unhandled<H: RuntimeHost>(
+        &mut self,
+        pending: &mut PendingHostCall<'_, '_, H>,
+        condition: Obj,
+        class: ClassId,
+        resume_types: &[ValueType],
+        chooser: &mut dyn ConditionChooser,
+    ) -> Action {
+        let Some(tags) = self.tags else {
+            return Action::Fail(ControlFault::MalformedRequest);
+        };
+        let frames = snapshot_frames(pending);
+        let mut restarts = Vec::new();
+        for binding in self.state.bindings().iter().rev() {
+            if let BindingKind::Handler { descriptor } = binding.kind
+                && let Some(descriptor) = self.control.restarts.get(descriptor)
+            {
+                restarts.push(OfferedRestart::Handler {
+                    token: binding.token,
+                    descriptor,
+                    activation: &binding.activation,
+                });
+            }
+        }
+        restarts.push(OfferedRestart::UseValue {
+            types: resume_types,
+        });
+        restarts.push(OfferedRestart::Abort);
+        let state = &self.state;
+        let control = self.control;
+        pending.host_mut().with_runtime(|runtime| {
+            let choice = chooser.choose(&UnhandledCondition {
+                condition,
+                class,
+                runtime,
+                frames: &frames,
+                restarts: &restarts,
+            });
+            match choice {
+                Choice::Unhandled => Action::Fail(ControlFault::UnhandledCondition { class }),
+                Choice::Abort => Action::Throw(tags.abort, Vec::new()),
+                Choice::UseValue(values) => {
+                    let fits = values.len() == resume_types.len()
+                        && values.iter().zip(resume_types).all(|(value, expected)| {
+                            ValueRef::from_value(value).value_type() == *expected
+                        });
+                    if fits {
+                        Action::Complete(values)
+                    } else {
+                        Action::Fail(ControlFault::InvalidChoice)
+                    }
+                }
+                Choice::Restart { token, arguments } => {
+                    let site = state.position(token).and_then(|index| {
+                        match state.bindings()[index].kind {
+                            BindingKind::Handler { descriptor } => control.restarts.get(descriptor),
+                            BindingKind::Exit => None,
+                        }
+                    });
+                    let Some(site) = site else {
+                        return Action::Fail(ControlFault::InvalidChoice);
+                    };
+                    let payload_condition = match (site.parameters.as_slice(), arguments.as_slice())
+                    {
+                        ([], []) => Value::Obj(condition),
+                        ([parameter], [argument @ Value::Obj(_)])
+                            if runtime.value_is_instance(
+                                ValueRef::from_value(argument),
+                                parameter.class,
+                            ) =>
+                        {
+                            argument.clone()
+                        }
+                        _ => return Action::Fail(ControlFault::InvalidChoice),
+                    };
+                    Action::Throw(
+                        tags.restart,
+                        alloc::vec![Value::U64(token.0), payload_condition],
+                    )
+                }
+            }
+        })
     }
 }
