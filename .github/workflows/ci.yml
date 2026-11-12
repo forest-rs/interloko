@@ -1,0 +1,182 @@
+env:
+  # We aim to always test with the latest stable Rust toolchain, however we pin to a specific
+  # version like 1.70. Note that we only specify MAJOR.MINOR and not PATCH so that bugfixes still
+  # come automatically. If the version specified here is no longer the latest stable version,
+  # then please feel free to submit a PR that adjusts it along with the potential clippy fixes.
+  RUST_STABLE_VER: "1.98" # In quotes because otherwise (e.g.) 1.70 would be interpreted as 1.7
+  # The workspace does not declare a `rust-version`, so there is no MSRV job.
+  # Packages that build without the standard library. Everything else in the workspace is a
+  # tool or example that links `std`.
+  RUST_NO_STD_PKGS: >-
+    -p interloko_model
+    -p interloko_grammar
+    -p interloko_runtime
+    -p interloko_compiler
+  # A bare-metal target with no `std`, so an accidental `std` dependency fails the build.
+  RUST_NO_STD_TARGET: thumbv7em-none-eabihf
+
+
+# Rationale
+#
+# The `no_std` job builds the library crates for a target without `std`. `interloko_compiler`
+# keeps its `std` feature off there; the workspace-wide jobs enable it through `interloko_lab`.
+#
+# We use cargo-nextest, which has a faster concurrency model for running tests.
+# However cargo-nextest does not support running doc tests, so we also have a cargo test --doc step.
+# For more information see https://github.com/nextest-rs/nextest/issues/16
+#
+# We don't save caches in the merge-group cases, because those caches will never be re-used (apart
+# from the very rare cases where there are multiple PRs in the merge queue).
+# This is because GitHub doesn't share caches between merge queues and the main branch.
+
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  # We run on push, even though the commit is the same as when we ran in merge_group.
+  # This allows the cache to be primed.
+  # See https://github.com/orgs/community/discussions/66430
+  push:
+    branches:
+      - main
+
+jobs:
+  fmt:
+    name: formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE_VER }}
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+  clippy-stable:
+    name: cargo clippy
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE_VER }}
+          components: clippy
+
+      - name: restore cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  no-std:
+    name: cargo clippy (no_std)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE_VER }}
+          targets: ${{ env.RUST_NO_STD_TARGET }}
+          components: clippy
+
+      - name: restore cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+
+      - name: cargo clippy (no_std)
+        run: cargo clippy ${{ env.RUST_NO_STD_PKGS }} --locked --target ${{ env.RUST_NO_STD_TARGET }} -- -D warnings
+
+  test-stable:
+    name: cargo test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE_VER }}
+
+      - name: install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: restore cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+
+      - name: cargo nextest
+        run: cargo nextest run --workspace --locked --all-features --no-fail-fast
+
+      - name: cargo test --doc
+        run: cargo test --doc --workspace --locked --all-features --no-fail-fast
+
+  corpus:
+    name: corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE_VER }}
+
+      - name: restore cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+
+      - name: check corpus
+        run: cargo run -p interloko_corpus --locked -- check corpus
+
+  doc:
+    name: cargo doc
+    # NOTE: We don't have any platform specific docs in this workspace, so we only run on Ubuntu.
+    #       If we get per-platform docs (win/macos/linux/wasm32/..) then doc jobs should match that.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: restore cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+
+      # We test documentation using nightly to match docs.rs.
+      - name: cargo doc
+        run: cargo doc --workspace --locked --all-features --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: '--cfg docsrs -D warnings'
+
+  # If this fails, consider changing your text or adding something to _typos.toml.
+  typos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: check typos
+        uses: crate-ci/typos@v1.46.3
