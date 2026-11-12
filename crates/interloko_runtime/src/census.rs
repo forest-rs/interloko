@@ -38,9 +38,16 @@ pub struct TurnStats {
     /// Everything the turn allocated in the nursery. The nursery only grows
     /// during a turn, so this is also its high-water mark.
     pub allocated: HeapStats,
-    /// The part of the nursery still reachable from the turn's results when
-    /// it ended: the survivors.
+    /// The part of the nursery reachable when the turn ended, from its
+    /// results, the values the caller keeps, and the image (roots it
+    /// registered, slots it stored into).
     pub reachable: HeapStats,
+    /// What evacuation moved into the image: the survivors of the turn's
+    /// roots, which exclude results the caller did not keep. Always within
+    /// `reachable`; equal to it when every result is kept.
+    pub promoted: HeapStats,
+    /// Work units evacuation charged against the host's budget.
+    pub evacuation_work: u64,
     /// The image after the turn.
     pub image: HeapStats,
     /// Stores the turn made into image objects: the length of its write
