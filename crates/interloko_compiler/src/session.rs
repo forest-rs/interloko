@@ -39,11 +39,11 @@ use crate::{ast, lower, sem, tape, typing};
 /// Upstream execution evidence carried by [`ExecutionTrace`]: recorded
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
-/// Runtime heap entry counts reported by [`FunctionCallOutcome::heap`].
-pub use interloko_runtime::HeapStats;
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
+/// Runtime heap accounting reported by [`FunctionCallOutcome::turn`].
+pub use interloko_runtime::{HeapStats, TurnStats};
 
 /// Named source file accepted by a compiler session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -320,9 +320,9 @@ pub struct FunctionCallOutcome {
     pub value: FunctionValue,
     /// Recorded trace when tracing was requested.
     pub trace: Option<ExecutionTrace>,
-    /// Runtime heap sizes when the call returned. Each call starts from an
-    /// empty heap, so this is what the call allocated.
-    pub heap: HeapStats,
+    /// Heap accounting for the call, which is one runtime turn: what it
+    /// allocated and what is still reachable from its result at the end.
+    pub turn: TurnStats,
 }
 
 /// Embedding callback for scalar functions declared through
@@ -5214,7 +5214,7 @@ fn call_function<'a>(
     Ok(FunctionCallOutcome {
         value,
         trace: capture.map(TraceCapture::finish),
-        heap: host.heap_stats(),
+        turn: host.turn_stats(&output),
     })
 }
 
@@ -5251,8 +5251,14 @@ impl<'a> SharedFunctionCallHost<'a> {
         self.0.borrow().failure.clone()
     }
 
-    fn heap_stats(&self) -> HeapStats {
-        self.0.borrow().runtime.heap_stats()
+    /// Each call runs on a fresh host, so everything on its heap was
+    /// allocated by this turn.
+    fn turn_stats(&self, results: &[Value]) -> TurnStats {
+        let host = self.0.borrow();
+        TurnStats {
+            allocated: host.runtime.heap_stats(),
+            reachable: host.runtime.reachable_stats(results),
+        }
     }
 }
 
@@ -14014,6 +14020,28 @@ mod tests {
     }
 
     #[test]
+    fn turn_stats_separate_allocation_from_survival() {
+        let artifacts = CompilerSession::compile_source(
+            "survival.loko",
+            "define function main() => <string>\n  \
+             concatenate(concatenate(\"a\", \"b\"), integer-to-string(42))\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let outcome = artifacts
+            .call_function("main", &[], None)
+            .expect("main should run");
+        assert_eq!(outcome.value, FunctionValue::String("ab42".into()));
+        let turn = outcome.turn;
+        // Two literals, one intermediate, the integer text and the result.
+        assert_eq!(turn.allocated.objects, 5);
+        // Only the result string is reachable when the turn ends.
+        assert_eq!(turn.reachable.objects, 1);
+        assert!(turn.reachable.bytes < turn.allocated.bytes);
+        assert!(turn.survival_ratio().is_some_and(|ratio| ratio < 0.5));
+    }
+
+    #[test]
     fn boxed_scalar_dispatch_keeps_the_heap_flat() {
         let artifacts = CompilerSession::compile_source(
             "boxing.loko",
@@ -14041,15 +14069,15 @@ mod tests {
         assert_eq!(few.value, FunctionValue::Integer(3 * 55 + 2 * 10));
         assert_eq!(many.value, FunctionValue::Integer(3 * 20_100 + 2 * 200));
         // 800 boxed arguments, and not one heap box.
-        assert_eq!(many.heap, few.heap);
-        assert_eq!(many.heap.boxed_values, 0);
+        assert_eq!(many.turn.allocated, few.turn.allocated);
+        assert_eq!(many.turn.allocated.boxed_values, 0);
 
         // Integers outside the immediate range still box exactly, on the heap.
         let wide = artifacts
             .call_function("wide", &[FunctionValue::Integer(i64::MAX)], None)
             .expect("wide should run");
         assert_eq!(wide.value, FunctionValue::Integer(i64::MAX));
-        assert_eq!(wide.heap.boxed_values, 1);
+        assert_eq!(wide.turn.allocated.boxed_values, 1);
     }
 
     #[test]
@@ -14086,13 +14114,13 @@ mod tests {
         assert_eq!(few.value, FunctionValue::Integer(20));
         assert_eq!(many.value, FunctionValue::Integer(400));
         // 800 boxed objects and booleans: no boxes, and only the one point.
-        assert_eq!(many.heap, few.heap);
-        assert_eq!(many.heap.boxed_values, 0);
+        assert_eq!(many.turn.allocated, few.turn.allocated);
+        assert_eq!(many.turn.allocated.boxed_values, 0);
 
         // MOP queries still allocate metaobjects, but no box wrappers.
         let mop = call("mop", &[50, 0]);
         assert_eq!(mop.value, FunctionValue::Integer(50));
-        assert_eq!(mop.heap.boxed_values, 0);
+        assert_eq!(mop.turn.allocated.boxed_values, 0);
     }
 
     #[test]

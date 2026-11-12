@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod boxed;
+mod census;
 
 use alloc::string::String;
 use alloc::vec;
@@ -37,6 +38,7 @@ pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
 
 use boxed::BoxedHandle;
 pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
+pub use census::{HeapStats, TurnStats};
 
 /// Host-call symbol for object construction.
 pub const MAKE_OBJECT: &str = "interloko.make_object";
@@ -1367,20 +1369,6 @@ pub trait HostObjectAdapter {
     fn read_slot(&self, slot: SlotId, kind: ValueKind) -> Result<Value, RuntimeError>;
 }
 
-/// Entry counts of a runtime host's append-only heaps.
-///
-/// Neither heap shrinks: every runtime object and every heap-boxed value stays
-/// allocated for the host's lifetime. Values boxed as immediates (see
-/// [`INTERLOKO_VALUE_TYPE`]) are not counted because they never allocate.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct HeapStats {
-    /// Runtime objects: instances, strings, symbols, vectors, metaobjects,
-    /// and host-backed objects.
-    pub objects: usize,
-    /// Boxed `<object>` values stored on the heap rather than in a handle.
-    pub boxed_values: usize,
-}
-
 /// Host implementation for Interloko runtime object operations.
 pub struct InterlokoHost {
     layout: RuntimeLayout,
@@ -1399,15 +1387,6 @@ impl InterlokoHost {
             objects: Vec::new(),
             values: Vec::new(),
             symbols: Vec::new(),
-        }
-    }
-
-    /// Returns the current entry counts of this host's heaps.
-    #[must_use]
-    pub fn heap_stats(&self) -> HeapStats {
-        HeapStats {
-            objects: self.objects.len(),
-            boxed_values: self.values.len(),
         }
     }
 
