@@ -1571,11 +1571,17 @@ impl InterlokoHost {
             });
         }
         let value = self.value_for_slot(value, slot_info.kind)?;
-        if self.turn.is_some()
-            && Self::object_ref(object)?.space == Space::Image
-            && self.references_nursery(&value)
-        {
+        let location = Self::object_ref(object)?;
+        let in_image_turn = self.turn.is_some() && location.space == Space::Image;
+        if in_image_turn && self.references_nursery(&value) {
             return Err(RuntimeError::NurseryReferenceInImage { object, slot });
+        }
+        if in_image_turn
+            && let RuntimeObjectStorage::Native { slots } = &self.object(object)?.storage
+            && let Some(old) = slots.get(slot.0 as usize)
+        {
+            let old = old.clone();
+            self.log_image_store(location.index, slot.0 as usize, old);
         }
         let object = self.object_mut(object)?;
         let RuntimeObjectStorage::Native { slots } = &mut object.storage else {
@@ -2943,6 +2949,45 @@ mod tests {
         assert_eq!(stats.image, image);
         assert_eq!(host.heap_stats(), image);
         assert_eq!(host.finish_turn(&[]), Err(RuntimeError::NoOpenTurn));
+    }
+
+    #[test]
+    fn aborted_turns_undo_image_stores() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        let original = host.box_top_value(Value::I64(1)).expect("box");
+        let cell = object_of(
+            &host
+                .make_object(ClassId(2), &[ValueRef::Obj(object_of(&original))])
+                .expect("image cell"),
+        );
+        let boxed = |host: &mut InterlokoHost, value| {
+            object_of(&host.box_top_value(Value::I64(value)).expect("box"))
+        };
+        let before = host.heap_stats();
+
+        host.begin_turn().expect("turn opens");
+        for value in [5, 7] {
+            let value = boxed(&mut host, value);
+            host.write_slot(cell, SlotId(0), ValueRef::Obj(value))
+                .expect("image store");
+        }
+        let stats = host.abort_turn().expect("turn aborts");
+        assert_eq!(stats.logged_stores, 2);
+        assert_eq!(host.read_slot(cell, SlotId(0)), Ok(original.clone()));
+        assert_eq!(host.heap_stats(), before);
+
+        host.begin_turn().expect("turn opens");
+        let seven = boxed(&mut host, 7);
+        host.write_slot(cell, SlotId(0), ValueRef::Obj(seven))
+            .expect("image store");
+        let stats = host.finish_turn(&[]).expect("turn finishes");
+        assert_eq!(stats.logged_stores, 1);
+        assert_eq!(host.read_slot(cell, SlotId(0)), Ok(Value::Obj(seven)));
+
+        // Outside a turn, image stores are ordinary and unlogged.
+        host.write_slot(cell, SlotId(0), ValueRef::Obj(object_of(&original)))
+            .expect("setup store");
+        assert_eq!(host.read_slot(cell, SlotId(0)), Ok(original));
     }
 
     #[test]
