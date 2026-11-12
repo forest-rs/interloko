@@ -340,6 +340,9 @@ pub enum ValueKind {
         /// Slot id within the class's effective slot vector.
         slot: SlotId,
     },
+    /// First-class callable, stored as a VM closure. Its environment handle
+    /// belongs to the invocation that created it.
+    Callable,
 }
 
 /// Runtime method specializer. `None` is reserved for invalid or legacy
@@ -2480,6 +2483,7 @@ impl InterlokoHost {
             (ValueKind::I64, ValueRef::I64(value)) => Ok(Value::I64(value)),
             (ValueKind::F64, ValueRef::F64(value)) => Ok(Value::F64(value)),
             (ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
+            (ValueKind::Callable, ValueRef::Closure(closure)) => Ok(Value::Closure(closure)),
             (
                 ValueKind::Object(expected_class)
                 | ValueKind::String(expected_class)
@@ -2755,6 +2759,7 @@ fn value_type(kind: ValueKind) -> Option<ValueType> {
         | ValueKind::GenericFunctionObject(_)
         | ValueKind::MethodObject(_)
         | ValueKind::SlotDescriptorObject { .. } => Some(object_type()),
+        ValueKind::Callable => Some(ValueType::Closure),
     }
 }
 
