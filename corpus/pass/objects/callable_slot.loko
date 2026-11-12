@@ -1,0 +1,18 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump tape contains interloko.slot_get
+
+// A slot typed `<callable>` stores a closure: construction, assignment and
+// reads keep it a closure, so it can be applied after it is read back.
+
+define class <stash> (<object>)
+  slot fn :: <callable>;
+end;
+
+define function main() => <integer>
+  let stash = make(<stash>, fn: function (x :: <integer>) => <integer> x + 1 end);
+  let first :: <integer> = apply(stash.fn, 20);
+  let replaced = stash.fn := function (x :: <integer>) => <integer> x + first end;
+  let second :: <integer> = apply(stash.fn, 21);
+  second
+end;

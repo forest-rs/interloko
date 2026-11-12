@@ -10895,6 +10895,7 @@ fn runtime_kind_label(module: &sem::Module, kind: runtime::ValueKind) -> String 
         runtime::ValueKind::SlotDescriptorObject { class, slot } => {
             format!("slot-descriptor(c{}.s{})", class.0, slot.0)
         }
+        runtime::ValueKind::Callable => "callable".into(),
     }
 }
 
@@ -11036,6 +11037,7 @@ fn runtime_repr(kind: runtime::ValueKind) -> &'static str {
         | runtime::ValueKind::GenericFunctionObject(_)
         | runtime::ValueKind::MethodObject(_)
         | runtime::ValueKind::SlotDescriptorObject { .. } => "object-handle",
+        runtime::ValueKind::Callable => "closure",
     }
 }
 
