@@ -10,7 +10,7 @@ use interloko_compiler::diagnostic::DiagnosticCode;
 use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
-    CompilerSession, DumpStage, FunctionValue, IncrementalCompilerSession, RuntimeMode,
+    CompilerSession, DumpStage, FunctionValue, IncrementalCompilerSession, RuntimeMode, TurnStats,
 };
 use interloko_compiler::typing::TypingConfig;
 use interloko_diagnostics::DiagnosticRenderer;
@@ -34,6 +34,7 @@ fn run(args: Vec<String>) -> Result<Outcome> {
         "check" => check_command(args.get(1).map(String::as_str)),
         "list" => list_command(args.get(1).map(String::as_str)),
         "dump" => dump_command(&args),
+        "heap" => heap_command(&args[1..]),
         "-h" | "--help" | "help" => Err(CorpusError::Usage(usage())),
         _ => Err(CorpusError::Usage(usage())),
     }
@@ -70,6 +71,90 @@ fn check_command(root: Option<&str>) -> Result<Outcome> {
     } else {
         Ok(Outcome::CheckFailed)
     }
+}
+
+/// Runs `main` in every program under the given roots and reports what each
+/// turn allocated and what was still reachable at its end.
+///
+/// Programs need no expectation header, so example program directories can
+/// be measured too; programs that do not compile, have no zero-argument
+/// `main`, or trap are skipped.
+fn heap_command(roots: &[String]) -> Result<Outcome> {
+    let roots: Vec<PathBuf> = if roots.is_empty() {
+        vec![default_corpus_root()]
+    } else {
+        roots.iter().map(PathBuf::from).collect()
+    };
+    let mut total = TurnStats::default();
+    let (mut measured, mut skipped) = (0_usize, 0_usize);
+    println!(
+        "program objects reachable/allocated boxes reachable/allocated bytes reachable/allocated survival"
+    );
+    for root in &roots {
+        let mut paths = Vec::new();
+        collect_loko_files(root, &mut paths)?;
+        paths.sort();
+        for path in paths {
+            let source = read_to_string(&path)?;
+            let (host_registry, grammar_environment) = match parse_header(&path, &source) {
+                Ok((_, host_registry, grammar_environment)) => (host_registry, grammar_environment),
+                Err(_) => (
+                    HostMetaRegistry::default(),
+                    GrammarEnvironmentSelection::default(),
+                ),
+            };
+            let case = Case {
+                display_path: path.display().to_string(),
+                typing_config: parse_typing_config(&path, &source).unwrap_or_default(),
+                source,
+                expectations: Vec::new(),
+                host_registry,
+                grammar_environment,
+            };
+            let artifacts = compile_case(&case, RuntimeMode::CompileOnly);
+            let Ok(outcome) = artifacts.call_function("main", &[], None) else {
+                skipped += 1;
+                continue;
+            };
+            let turn = outcome.turn;
+            println!(
+                "{} {}/{} {}/{} {}/{} {}",
+                case.display_path,
+                turn.reachable.objects,
+                turn.allocated.objects,
+                turn.reachable.boxed_values,
+                turn.allocated.boxed_values,
+                turn.reachable.bytes,
+                turn.allocated.bytes,
+                survival_label(&turn),
+            );
+            for (sum, part) in [
+                (&mut total.allocated, turn.allocated),
+                (&mut total.reachable, turn.reachable),
+            ] {
+                sum.objects += part.objects;
+                sum.boxed_values += part.boxed_values;
+                sum.bytes += part.bytes;
+            }
+            measured += 1;
+        }
+    }
+    println!(
+        "heap: {measured} measured, {skipped} skipped; objects {}/{} boxes {}/{} bytes {}/{} survival {}",
+        total.reachable.objects,
+        total.allocated.objects,
+        total.reachable.boxed_values,
+        total.allocated.boxed_values,
+        total.reachable.bytes,
+        total.allocated.bytes,
+        survival_label(&total),
+    );
+    Ok(Outcome::Success)
+}
+
+fn survival_label(turn: &TurnStats) -> String {
+    turn.survival_ratio()
+        .map_or_else(|| "-".into(), |ratio| format!("{:.1}%", ratio * 100.0))
 }
 
 fn list_command(root: Option<&str>) -> Result<Outcome> {
@@ -608,7 +693,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_corpus".into());
     format!(
-        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|all"
+        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} heap [root...]\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|all"
     )
 }
 

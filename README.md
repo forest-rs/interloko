@@ -266,8 +266,10 @@ Boxed `<object>` values are VM objects of one host type. Floats, booleans,
 integers within 47 bits and references to runtime objects travel inside the
 object handle and never allocate a box; wider integers live in the runtime
 host's append-only heap. Runtime objects themselves (instances, strings,
-vectors, metaobjects) are never reclaimed either. `FunctionCallOutcome::heap`
-reports both heaps' sizes.
+vectors, metaobjects) are never reclaimed either. `FunctionCallOutcome::turn`
+reports what a call allocated and what was still reachable from its result
+and the interned symbols when it ended; `interloko_corpus heap [root...]`
+prints that survival for every program with a `main`.
 
 Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
 `Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed
