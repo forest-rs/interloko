@@ -6,15 +6,19 @@
 //! [`InterlokoHost::finish_turn`] when it returned, or
 //! [`InterlokoHost::abort_turn`] when it trapped; either way the nursery is
 //! emptied, so the turn's garbage costs nothing to reclaim. An aborted turn
-//! also drops the symbols it interned, leaving the image exactly as the turn
-//! found it.
+//! also drops the symbols it interned and undoes its stores into image
+//! objects, which the turn's write log records, leaving the image exactly
+//! as the turn found it: turns are transactional.
 
 use execution_tape::value::{Obj, Value};
 
 use crate::boxed::BoxedHandle;
-use crate::region::{ObjectRef, OpenTurn, Space};
+use alloc::vec::Vec;
+
+use crate::region::{LoggedStore, ObjectRef, OpenTurn, Space};
 use crate::{
-    HeapStats, INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeError, TurnStats,
+    HeapStats, INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeError,
+    RuntimeObjectStorage, TurnStats,
 };
 
 impl InterlokoHost {
@@ -27,6 +31,7 @@ impl InterlokoHost {
         self.turn = Some(OpenTurn {
             image: self.image.mark(),
             symbols: self.symbols.len(),
+            write_log: Vec::new(),
         });
         Ok(())
     }
@@ -44,28 +49,38 @@ impl InterlokoHost {
     /// resolve afterwards. The report counts what the turn allocated and
     /// what of it was still reachable from `results`.
     pub fn finish_turn(&mut self, results: &[Value]) -> Result<TurnStats, RuntimeError> {
-        if self.turn.is_none() {
+        let Some(turn) = self.turn.take() else {
             return Err(RuntimeError::NoOpenTurn);
-        }
-        let stats = self.turn_stats(results);
+        };
+        let stats = self.turn_stats_for(&turn, results);
         self.nursery.truncate(Default::default());
-        self.turn = None;
         Ok(stats)
     }
 
     /// Ends the open turn after it trapped, undoing its effect on the heap:
-    /// the nursery is emptied and symbols interned during the turn are
-    /// dropped, so [`InterlokoHost::heap_stats`] is as it was before the
+    /// stores into image objects are reverted newest first, the nursery is
+    /// emptied, and symbols interned during the turn are dropped, so the
+    /// image and [`InterlokoHost::heap_stats`] are as they were before the
     /// turn began.
     pub fn abort_turn(&mut self) -> Result<TurnStats, RuntimeError> {
-        let Some(turn) = self.turn.clone() else {
+        let Some(turn) = self.turn.take() else {
             return Err(RuntimeError::NoOpenTurn);
         };
-        let stats = self.turn_stats(&[]);
+        let stats = self.turn_stats_for(&turn, &[]);
+        for store in turn.write_log.into_iter().rev() {
+            if let Some(RuntimeObjectStorage::Native { slots }) = self
+                .image
+                .objects
+                .get_mut(store.index)
+                .map(|object| &mut object.storage)
+                && let Some(slot) = slots.get_mut(store.slot)
+            {
+                *slot = store.old;
+            }
+        }
         self.nursery.truncate(Default::default());
         self.image.truncate(turn.image);
         self.symbols.truncate(turn.symbols);
-        self.turn = None;
         Ok(stats)
     }
 
@@ -85,11 +100,21 @@ impl InterlokoHost {
         self.image.stats()
     }
 
-    fn turn_stats(&self, results: &[Value]) -> TurnStats {
+    fn turn_stats_for(&self, turn: &OpenTurn, results: &[Value]) -> TurnStats {
         TurnStats {
             allocated: self.nursery.stats(),
             reachable: self.reachable_stats(results),
             image: self.image.stats(),
+            logged_stores: turn.write_log.len(),
+        }
+    }
+
+    /// Records that a turn is about to overwrite `slot` of the image object
+    /// at `index`, which currently holds `old`. Outside a turn, image stores
+    /// are not logged.
+    pub(crate) fn log_image_store(&mut self, index: usize, slot: usize, old: Value) {
+        if let Some(turn) = &mut self.turn {
+            turn.write_log.push(LoggedStore { index, slot, old });
         }
     }
 

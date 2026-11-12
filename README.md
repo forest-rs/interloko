@@ -274,8 +274,11 @@ long-lived image holds interned symbols and objects an embedding creates
 outside a turn. `SessionArtifacts::runtime` returns a `SessionRuntime`
 whose image persists across calls (the REPL uses one; `:heap` shows it),
 while `SessionArtifacts::call_function` uses a fresh one per call.
-`FunctionCallOutcome::turn` reports what a call allocated and what was
-still reachable from its result at the end; `interloko_corpus heap
+Turns are transactional: a turn's stores into image objects are recorded
+in a write log, and a trapped turn replays it backwards, so the image is
+left as the turn found it. `FunctionCallOutcome::turn` reports what a call
+allocated, what was still reachable from its result at the end, and how
+many image stores it logged; `interloko_corpus heap
 [root...]` prints that survival for every program with a `main`. Until
 survivors are evacuated into the image, a turn may not store a value it
 allocated into an image object.

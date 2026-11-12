@@ -43,6 +43,9 @@ pub struct TurnStats {
     pub reachable: HeapStats,
     /// The image after the turn.
     pub image: HeapStats,
+    /// Stores the turn made into image objects: the length of its write
+    /// log.
+    pub logged_stores: usize,
 }
 
 impl TurnStats {

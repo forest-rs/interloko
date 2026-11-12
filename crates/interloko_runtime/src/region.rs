@@ -104,6 +104,23 @@ pub(crate) struct OpenTurn {
     pub(crate) image: RegionMark,
     /// Interned-symbol count when the turn began.
     pub(crate) symbols: usize,
+    /// Every store the turn made into an image object, in order.
+    pub(crate) write_log: Vec<LoggedStore>,
+}
+
+/// One store into an image object during a turn.
+///
+/// The log is the turn's undo journal (an aborted turn restores `old` in
+/// reverse order), its remembered set (the image slots that may now refer
+/// to the nursery), and evidence of what the turn changed in the image.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LoggedStore {
+    /// Image object written.
+    pub(crate) index: usize,
+    /// Slot written.
+    pub(crate) slot: usize,
+    /// Value the slot held before the store.
+    pub(crate) old: Value,
 }
 
 #[cfg(test)]
