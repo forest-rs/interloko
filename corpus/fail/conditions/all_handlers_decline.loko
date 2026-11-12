@@ -1,0 +1,16 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports unhandled condition <problem>
+// expect: diagnostics 0
+
+// Every applicable handler declines, so the search ends unhandled.
+
+define class <problem> (<object>)
+end;
+
+define function main() => <integer>
+  handle
+    signal(make(<problem>))
+  with restart <problem> when #f =>
+    1
+  end
+end;

@@ -1,0 +1,29 @@
+// expect: run 7
+// expect: diagnostics 0
+
+// While a guard runs, the handlers from the guarded one inward are masked.
+// The guard signals <probe>: the innermost <probe> handler would answer 99,
+// but it is masked, so the outer <probe> handler is selected and its
+// restart unwinds the guard, the original signal and both inner handles.
+
+define class <problem> (<object>)
+end;
+
+define class <probe> (<object>)
+end;
+
+define function risky() => <integer>
+  signal(make(<problem>))
+end;
+
+define function main() => <integer>
+  handle
+    handle
+      handle risky() with restart <probe> 99 end
+    with restart <problem> when signal(make(<probe>)) = 0 =>
+      1
+    end
+  with restart <probe>
+    7
+  end
+end;

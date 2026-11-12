@@ -43,7 +43,8 @@ rule let-name = name
 rule let-values-binding = `(` trailing-list-of<let-name-binding, `,`> `)`
 rule expression = handle-expression | block-expression | if-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
-rule restart-clause = `restart` restart-condition expression
+rule restart-clause = `restart` restart-condition restart-guard? expression
+rule restart-guard = `when` expression `=>`
 rule restart-condition = restart-parameter | restart-condition-type
 rule restart-parameter = restart-name type-annotation
 rule restart-name = name

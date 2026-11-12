@@ -3113,8 +3113,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "restart-clause",
-            "`restart` (restart-name type-annotation | restart-condition-type) expression",
+            "`restart` (restart-name type-annotation | restart-condition-type) restart-guard? expression",
             "syntax.rs:Parser::parse_restart_clause",
+        ),
+        (
+            "restart-guard",
+            "`when` expression `=>`",
+            "base_loko_primary::BaseLokoCstBuilder::build_restart",
         ),
         (
             "restart-name",
@@ -3846,6 +3851,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::RestartClause => Some("restart-clause"),
         CstKind::BlockExpr => Some("block-expression"),
         CstKind::BlockExitName => Some("block-exit-name"),
+        CstKind::RestartGuard => Some("restart-guard"),
         CstKind::CleanupClause => Some("cleanup-clause"),
         CstKind::SuperclassType => Some("superclass-type"),
         CstKind::AnnotationType => Some("annotation-type"),
@@ -4284,7 +4290,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 52);
+        assert_eq!(grammar.effective_rules.len(), 53);
 
         assert!(
             !records

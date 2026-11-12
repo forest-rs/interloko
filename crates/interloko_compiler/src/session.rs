@@ -4455,6 +4455,9 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner, else_branch, owner_index, sites);
         }
         sem::Expr::Handle { body, restart, .. } => {
+            if let Some(guard) = &restart.guard {
+                collect_dispatch_sites_in_expr(artifacts, owner.clone(), guard, owner_index, sites);
+            }
             collect_dispatch_sites_in_expr(artifacts, owner.clone(), body, owner_index, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, &restart.body, owner_index, sites);
         }
@@ -6366,6 +6369,11 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
                 );
             } else {
                 let _ = writeln!(out, "restart {} {}", restart.id, restart.class_name);
+            }
+            if let Some(guard) = &restart.guard {
+                indent_line(out, indent + 4);
+                let _ = writeln!(out, "when");
+                dump_ast_expr(out, guard, indent + 6);
             }
             dump_ast_expr(out, &restart.body, indent + 4);
         }
@@ -11542,6 +11550,11 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 restart.specializer.0,
                 sem_kind_list_label_for_expr(&restart.result_kinds)
             );
+            if let Some(guard) = &restart.guard {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "guard");
+                dump_sem_expr(out, guard, indent + 4);
+            }
             indent_line(out, indent + 2);
             let _ = writeln!(out, "body");
             dump_sem_expr(out, body, indent + 4);
@@ -12550,6 +12563,10 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 restart.result_kinds
             );
             fingerprint_sem_expr(module, body, out);
+            if let Some(guard) = &restart.guard {
+                out.push_str(":guard=");
+                fingerprint_sem_expr(module, guard, out);
+            }
             out.push_str(":restart=");
             fingerprint_sem_expr(module, &restart.body, out);
             out.push(')');

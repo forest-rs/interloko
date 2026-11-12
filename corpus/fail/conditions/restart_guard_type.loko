@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.restart-guard-type-mismatch
+// expect: diagnostic contains restart guard must produce <boolean>
+
+define class <problem> (<object>)
+end;
+
+define function main() => <integer>
+  handle signal(make(<problem>)) with restart <problem> when 1 => 2 end
+end;

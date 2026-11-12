@@ -146,6 +146,8 @@ pub enum DiagnosticCode {
     HandleRestartResultMismatch,
     /// A block body and its exit procedure have incompatible result kinds.
     BlockExitResultMismatch,
+    /// A restart guard does not produce one `<boolean>`.
+    RestartGuardTypeMismatch,
     /// `class-of` received an invalid value.
     ClassOfTypeMismatch,
     /// `instance?` received an invalid value.
@@ -279,6 +281,7 @@ impl DiagnosticCode {
         Self::SignalConditionTypeMismatch,
         Self::HandleRestartResultMismatch,
         Self::BlockExitResultMismatch,
+        Self::RestartGuardTypeMismatch,
         Self::ClassOfTypeMismatch,
         Self::InstanceOfTypeMismatch,
         Self::InstanceOfImpossible,
@@ -378,6 +381,7 @@ impl DiagnosticCode {
             Self::SignalConditionTypeMismatch => "sem.signal-condition-type-mismatch",
             Self::HandleRestartResultMismatch => "sem.handle-restart-result-mismatch",
             Self::BlockExitResultMismatch => "sem.block-exit-result-mismatch",
+            Self::RestartGuardTypeMismatch => "sem.restart-guard-type-mismatch",
             Self::ClassOfTypeMismatch => "sem.class-of-type-mismatch",
             Self::InstanceOfTypeMismatch => "sem.instance-of-type-mismatch",
             Self::InstanceOfImpossible => "sem.instance-of-impossible",
@@ -478,6 +482,7 @@ impl DiagnosticCode {
             "sem.signal-condition-type-mismatch" => Self::SignalConditionTypeMismatch,
             "sem.handle-restart-result-mismatch" => Self::HandleRestartResultMismatch,
             "sem.block-exit-result-mismatch" => Self::BlockExitResultMismatch,
+            "sem.restart-guard-type-mismatch" => Self::RestartGuardTypeMismatch,
             "sem.class-of-type-mismatch" => Self::ClassOfTypeMismatch,
             "sem.instance-of-type-mismatch" => Self::InstanceOfTypeMismatch,
             "sem.instance-of-impossible" => Self::InstanceOfImpossible,

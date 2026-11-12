@@ -53,6 +53,7 @@
 "sem.signal-condition-type-mismatch" = "signal condition must be a known object"
 "sem.handle-restart-result-mismatch" = "handle body and restart must have matching result kinds: body { $body }, restart { $restart }"
 "sem.block-exit-result-mismatch" = "block body and exit must have matching result kinds: body { $body }, exit { $exit }"
+"sem.restart-guard-type-mismatch" = "restart guard must produce <boolean>, not { $actual }"
 "sem.class-of-type-mismatch" = "class-of requires a known object"
 "sem.instance-of-type-mismatch" = "instance? expects { $expected } or a known object, got { $actual }"
 "sem.instance-of-impossible" = "instance? test is impossible: { $actual } is not { $expected }"

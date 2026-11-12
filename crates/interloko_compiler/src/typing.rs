@@ -1065,6 +1065,9 @@ fn for_each_child(expr: &sem::Expr, mut visit: impl FnMut(&sem::Expr)) {
         }
         sem::Expr::Handle { body, restart, .. } => {
             visit(body);
+            if let Some(guard) = &restart.guard {
+                visit(guard);
+            }
             visit(&restart.body);
         }
         sem::Expr::Block { body, cleanup, .. } => {
