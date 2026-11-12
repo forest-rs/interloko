@@ -88,4 +88,5 @@
 "runtime.unsupported-result" = "[ps] main returned unsupported value"
 "runtime.unhandled-condition" = "[ps] unhandled condition"
 "runtime.expired-exit" = "[ps] expired block exit"
+"runtime.aborted" = "[ps] aborted"
 "session.unknown-source" = "[ps] source file id unknown"

@@ -39,6 +39,7 @@ use crate::{ast, lower, sem, tape, typing};
 /// Upstream execution evidence carried by [`ExecutionTrace`]: recorded
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
+use interloko_runtime::chooser::{ConditionChooser, ReportUnhandled};
 use interloko_runtime::control::ControlFault;
 use interloko_runtime::driver::{self, RunFailure, RuntimeHost};
 use interloko_runtime::{
@@ -162,6 +163,8 @@ pub enum RuntimeResult {
     },
     /// A block exit procedure was called after its block had returned.
     ExpiredExit,
+    /// A condition chooser aborted the run after every crossed cleanup ran.
+    Aborted,
 }
 
 impl RuntimeResult {
@@ -177,6 +180,7 @@ impl RuntimeResult {
             Self::UnsupportedResult { .. } => Some(DiagnosticCode::RuntimeUnsupportedResult),
             Self::UnhandledCondition { .. } => Some(DiagnosticCode::RuntimeUnhandledCondition),
             Self::ExpiredExit => Some(DiagnosticCode::RuntimeExpiredExit),
+            Self::Aborted => Some(DiagnosticCode::RuntimeAborted),
         }
     }
 
@@ -210,6 +214,7 @@ impl fmt::Display for RuntimeResult {
                 write!(formatter, "unhandled condition {class}")
             }
             Self::ExpiredExit => formatter.write_str("block exit called after its block returned"),
+            Self::Aborted => formatter.write_str("aborted by the condition chooser"),
         }
     }
 }
@@ -381,7 +386,7 @@ impl SessionRuntime {
             function_name,
             arguments,
             trace,
-            None,
+            CallServices::default(),
         )
     }
 
@@ -523,6 +528,21 @@ pub enum FunctionCallError {
         /// Partial trace captured up to the call, when requested.
         trace: Option<ExecutionTrace>,
     },
+    /// A condition chooser aborted the call after every crossed cleanup ran.
+    Aborted {
+        /// Trace of the whole run, including the unwinding, when requested.
+        trace: Option<ExecutionTrace>,
+    },
+}
+
+/// Embedding services for one direct-function call.
+#[derive(Default)]
+pub struct CallServices<'a> {
+    /// Answers declared host functions.
+    pub host_functions: Option<&'a mut dyn HostFunctionHandler>,
+    /// Chooses a restart for conditions no live handler accepts. Without
+    /// one, they are reported unhandled.
+    pub chooser: Option<&'a mut dyn ConditionChooser>,
 }
 
 impl fmt::Display for FunctionCallError {
@@ -573,6 +593,7 @@ impl fmt::Display for FunctionCallError {
             Self::ExpiredExit { .. } => {
                 formatter.write_str("block exit called after its block returned")
             }
+            Self::Aborted { .. } => formatter.write_str("aborted by the condition chooser"),
         }
     }
 }
@@ -2096,7 +2117,7 @@ impl SessionArtifacts {
             function_name,
             arguments,
             trace,
-            None,
+            CallServices::default(),
         )
     }
 
@@ -2138,7 +2159,40 @@ impl SessionArtifacts {
             function_name,
             arguments,
             trace,
-            Some(handler),
+            CallServices {
+                host_functions: Some(handler),
+                chooser: None,
+            },
+        )
+    }
+
+    /// Calls a direct function with embedding services: declared host
+    /// functions, and a chooser for conditions no handler accepts.
+    ///
+    /// The chooser runs while the signalling computation is suspended, before
+    /// anything unwinds. Without one, such conditions end the call as
+    /// [`FunctionCallError::UnhandledCondition`].
+    pub fn call_function_with<'a>(
+        &'a self,
+        function_name: &str,
+        arguments: &[FunctionValue],
+        trace: Option<ExecutionTraceDetail>,
+        services: CallServices<'a>,
+    ) -> Result<FunctionCallOutcome, FunctionCallError> {
+        let tape = self
+            .tape
+            .as_ref()
+            .ok_or(FunctionCallError::TapeUnavailable)?;
+        let mut runtime = InterlokoHost::new(tape.runtime.clone());
+        call_function(
+            &self.sem,
+            &self.host_registry,
+            tape,
+            &mut runtime,
+            function_name,
+            arguments,
+            trace,
+            services,
         )
     }
 
@@ -5195,7 +5249,7 @@ fn run_main_with_trace(
         "main",
         &[],
         trace,
-        None,
+        CallServices::default(),
     ) {
         Ok(outcome) => (RuntimeResult::Returned(outcome.value), outcome.trace),
         Err(error) => runtime_result_for_main_error(module, error),
@@ -5220,6 +5274,7 @@ fn runtime_result_for_main_error(
             (RuntimeResult::UnhandledCondition { class }, trace)
         }
         FunctionCallError::ExpiredExit { trace } => (RuntimeResult::ExpiredExit, trace),
+        FunctionCallError::Aborted { trace } => (RuntimeResult::Aborted, trace),
         FunctionCallError::HostFunctionFailed {
             name,
             failure,
@@ -5264,7 +5319,7 @@ fn call_function<'a>(
     function_name: &str,
     arguments: &[FunctionValue],
     trace: Option<ExecutionTraceDetail>,
-    handler: Option<&'a mut dyn HostFunctionHandler>,
+    services: CallServices<'a>,
 ) -> Result<FunctionCallOutcome, FunctionCallError> {
     runtime
         .begin_turn()
@@ -5277,7 +5332,14 @@ fn call_function<'a>(
         function_name,
         arguments,
         trace,
-        handler.map(|handler| -> &mut dyn HostFunctionHandler { handler }),
+        CallServices {
+            host_functions: services
+                .host_functions
+                .map(|handler| -> &mut dyn HostFunctionHandler { handler }),
+            chooser: services
+                .chooser
+                .map(|chooser| -> &mut dyn ConditionChooser { chooser }),
+        },
     );
     match body {
         Ok((value, trace, output)) => match runtime.finish_turn(&output, &mut []) {
@@ -5314,8 +5376,17 @@ fn run_turn_body<'a>(
     function_name: &str,
     arguments: &[FunctionValue],
     trace: Option<ExecutionTraceDetail>,
-    handler: Option<&'a mut dyn HostFunctionHandler>,
+    services: CallServices<'a>,
 ) -> Result<(FunctionValue, Option<ExecutionTrace>, Vec<Value>), FunctionCallError> {
+    let CallServices {
+        host_functions: handler,
+        chooser,
+    } = services;
+    let mut report_unhandled = ReportUnhandled;
+    let chooser: &mut dyn ConditionChooser = match chooser {
+        Some(chooser) => chooser,
+        None => &mut report_unhandled,
+    };
     let function = module
         .functions
         .iter()
@@ -5383,6 +5454,7 @@ fn run_turn_body<'a>(
         FuncRef::new(unit, entry),
         &runtime_arguments,
         options,
+        chooser,
     );
     let output = match run {
         Ok(outcome) => outcome.outputs,
@@ -5410,6 +5482,7 @@ fn run_turn_body<'a>(
                     fault: ControlFault::ExpiredExit { .. },
                     ..
                 } => FunctionCallError::ExpiredExit { trace },
+                RunFailure::Aborted { .. } => FunctionCallError::Aborted { trace },
                 RunFailure::Control { trap, .. } | RunFailure::Trap(trap) => {
                     FunctionCallError::Trap { trap, trace }
                 }
@@ -17844,6 +17917,206 @@ end;
             &before_lowered.functions[original_function_count..original_methods_end],
             &after_lowered.functions[original_function_count..original_methods_end],
             "unrelated source-origin methods must be byte-equal across an add-method mutation"
+        );
+    }
+
+    use alloc::vec;
+    use interloko_runtime::chooser::{Choice, OfferedRestart, UnhandledCondition};
+
+    const UNHANDLED_SAMPLE: &str = "define class <bad-sample> (<object>)\n  slot value :: <float>;\nend;\n\
+         define class <skip-pixel> (<object>)\nend;\n\
+         define function check(v :: <float>) => <float>\n  if v < 0.0 then signal(make(<bad-sample>, value: v)) else v end\nend;\n\
+         define function pixel(v :: <float>) => <float>\n  handle check(v) with restart <skip-pixel> 0.5 end\nend;\n\
+         define function main() => <float>\n  pixel(0.0 - 1.0) + 1.0\nend;";
+
+    struct Scripted<F>(F);
+
+    impl<F: FnMut(&UnhandledCondition<'_>) -> Choice> ConditionChooser for Scripted<F> {
+        fn choose(&mut self, condition: &UnhandledCondition<'_>) -> Choice {
+            (self.0)(condition)
+        }
+    }
+
+    fn call_with_chooser(
+        artifacts: &SessionArtifacts,
+        chooser: &mut dyn ConditionChooser,
+    ) -> Result<FunctionValue, FunctionCallError> {
+        artifacts
+            .call_function_with(
+                "main",
+                &[],
+                None,
+                CallServices {
+                    host_functions: None,
+                    chooser: Some(chooser),
+                },
+            )
+            .map(|outcome| outcome.value)
+    }
+
+    #[test]
+    fn chooser_sees_the_suspended_signal_and_resumes_it_with_use_value() {
+        let artifacts = CompilerSession::compile_source(
+            "sample.loko",
+            UNHANDLED_SAMPLE,
+            RuntimeMode::CompileOnly,
+        );
+        let mut seen = Vec::new();
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            let class = condition
+                .runtime
+                .layout()
+                .class(condition.class)
+                .map(|class| class.name.clone());
+            let handler_frame = condition.restarts.iter().find_map(|restart| match restart {
+                OfferedRestart::Handler {
+                    descriptor,
+                    activation,
+                    ..
+                } => Some((
+                    descriptor.name.clone(),
+                    condition
+                        .frames
+                        .iter()
+                        .position(|frame| frame.frame.activation == **activation),
+                )),
+                _ => None,
+            });
+            let use_value = condition.restarts.iter().find_map(|restart| match restart {
+                OfferedRestart::UseValue { types } => Some(types.to_vec()),
+                _ => None,
+            });
+            seen.push((
+                class,
+                condition.frames.len(),
+                handler_frame,
+                use_value,
+                matches!(condition.restarts.last(), Some(OfferedRestart::Abort)),
+            ));
+            Choice::UseValue(vec![Value::F64(0.25)])
+        });
+        let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+        assert_eq!(value, FunctionValue::Float(1.25));
+        assert_eq!(
+            seen,
+            vec![(
+                Some("<bad-sample>".into()),
+                3,
+                Some(("skip-pixel".into(), Some(1))),
+                Some(vec![execution_tape::program::ValueType::F64]),
+                true,
+            )]
+        );
+    }
+
+    #[test]
+    fn chooser_invokes_a_program_defined_restart_that_did_not_apply() {
+        let artifacts = CompilerSession::compile_source(
+            "sample.loko",
+            UNHANDLED_SAMPLE,
+            RuntimeMode::CompileOnly,
+        );
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            condition
+                .restarts
+                .iter()
+                .find_map(|restart| match restart {
+                    OfferedRestart::Handler { token, .. } => Some(Choice::Restart {
+                        token: *token,
+                        arguments: Vec::new(),
+                    }),
+                    _ => None,
+                })
+                .unwrap_or(Choice::Unhandled)
+        });
+        let value = call_with_chooser(&artifacts, &mut chooser).expect("skip-pixel recovers");
+        assert_eq!(value, FunctionValue::Float(1.5));
+    }
+
+    #[test]
+    fn chooser_aborts_or_reports_and_bad_choices_fail_the_run() {
+        let artifacts = CompilerSession::compile_source(
+            "sample.loko",
+            UNHANDLED_SAMPLE,
+            RuntimeMode::CompileOnly,
+        );
+        let mut abort = Scripted(|_: &UnhandledCondition<'_>| Choice::Abort);
+        assert!(matches!(
+            call_with_chooser(&artifacts, &mut abort),
+            Err(FunctionCallError::Aborted { .. })
+        ));
+        let mut report = ReportUnhandled;
+        assert!(matches!(
+            call_with_chooser(&artifacts, &mut report),
+            Err(FunctionCallError::UnhandledCondition { class, .. }) if class == "<bad-sample>"
+        ));
+        let mut wrong_type =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::I64(1)]));
+        assert!(matches!(
+            call_with_chooser(&artifacts, &mut wrong_type),
+            Err(FunctionCallError::Trap { .. })
+        ));
+    }
+
+    #[derive(Default)]
+    struct CleanupLog(Vec<i64>);
+
+    impl HostFunctionHandler for CleanupLog {
+        fn call(
+            &mut self,
+            _function: &sem::HostFunction,
+            arguments: &[FunctionValue],
+        ) -> Result<FunctionValue, HostFunctionFailure> {
+            let [FunctionValue::Integer(value)] = arguments else {
+                return Err(HostFunctionFailure::new("expected one integer"));
+            };
+            self.0.push(*value);
+            Ok(FunctionValue::Integer(*value))
+        }
+    }
+
+    #[test]
+    fn abort_unwinds_through_cleanups_after_the_chooser_decides() {
+        let mut registry = sem::HostMetaRegistry::new();
+        registry.add_function(sem::HostFunction::new(
+            "note",
+            alloc::vec![sem::HostValueKind::Integer],
+            sem::HostValueKind::Integer,
+        ));
+        let artifacts = CompilerSession::compile_source_with_host_registry(
+            "abort.loko",
+            "define class <stop> (<object>)\nend;\n\
+             define function inner() => <integer>\n  block ()\n    signal(make(<stop>))\n  cleanup\n    note(1)\n  end\nend;\n\
+             define function main() => <integer>\n  block ()\n    inner() + 1\n  cleanup\n    note(2)\n  end\nend;",
+            RuntimeMode::CompileOnly,
+            &registry,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut log = CleanupLog::default();
+        let mut cleanups_before_choice = None;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            cleanups_before_choice = Some(condition.frames.len());
+            Choice::Abort
+        });
+        let result = artifacts.call_function_with(
+            "main",
+            &[],
+            None,
+            CallServices {
+                host_functions: Some(&mut log),
+                chooser: Some(&mut chooser),
+            },
+        );
+        assert!(matches!(result, Err(FunctionCallError::Aborted { .. })));
+        assert_eq!(
+            cleanups_before_choice,
+            Some(2),
+            "both frames were live at the choice"
+        );
+        assert_eq!(
+            log.0,
+            vec![1, 2],
+            "cleanups ran innermost first on the way out"
         );
     }
 }

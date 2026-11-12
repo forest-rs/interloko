@@ -216,6 +216,8 @@ pub enum DiagnosticCode {
     RuntimeUnhandledCondition,
     /// A block exit procedure was called after its block returned.
     RuntimeExpiredExit,
+    /// A condition chooser aborted the run.
+    RuntimeAborted,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -312,6 +314,7 @@ impl DiagnosticCode {
         Self::RuntimeUnsupportedResult,
         Self::RuntimeUnhandledCondition,
         Self::RuntimeExpiredExit,
+        Self::RuntimeAborted,
         Self::SessionUnknownSource,
     ];
 
@@ -410,6 +413,7 @@ impl DiagnosticCode {
             Self::RuntimeUnsupportedResult => "runtime.unsupported-result",
             Self::RuntimeUnhandledCondition => "runtime.unhandled-condition",
             Self::RuntimeExpiredExit => "runtime.expired-exit",
+            Self::RuntimeAborted => "runtime.aborted",
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -509,6 +513,7 @@ impl DiagnosticCode {
             "runtime.unsupported-result" => Self::RuntimeUnsupportedResult,
             "runtime.unhandled-condition" => Self::RuntimeUnhandledCondition,
             "runtime.expired-exit" => Self::RuntimeExpiredExit,
+            "runtime.aborted" => Self::RuntimeAborted,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })

@@ -90,6 +90,8 @@ pub struct ControlTags {
     /// Raised at a signal to reach the selected handler's activation, with
     /// payload `(token, condition)`.
     pub restart: TagId,
+    /// Raised to unwind the whole run; only cleanups catch it.
+    pub abort: TagId,
 }
 
 /// Control metadata of one emitted program.
@@ -150,6 +152,9 @@ pub enum ControlFault {
     },
     /// A control request did not match its protocol.
     MalformedRequest,
+    /// A chooser's answer did not match the restarts on offer or their
+    /// parameter types.
+    InvalidChoice,
 }
 
 /// Cumulative control work performed in one run.

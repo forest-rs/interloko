@@ -2670,12 +2670,14 @@ fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
             text: format!("unsupported main result {declared}"),
             class: "metric--warn",
         },
-        Some(result @ (RuntimeResult::UnhandledCondition { .. } | RuntimeResult::ExpiredExit)) => {
-            RuntimeSummary {
-                text: result.to_string(),
-                class: "metric--warn",
-            }
-        }
+        Some(
+            result @ (RuntimeResult::UnhandledCondition { .. }
+            | RuntimeResult::ExpiredExit
+            | RuntimeResult::Aborted),
+        ) => RuntimeSummary {
+            text: result.to_string(),
+            class: "metric--warn",
+        },
         None => RuntimeSummary {
             text: "not requested".into(),
             class: "metric--empty",

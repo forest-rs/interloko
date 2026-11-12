@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod boxed;
 mod census;
+pub mod chooser;
 pub mod control;
 pub mod driver;
 mod evacuate;

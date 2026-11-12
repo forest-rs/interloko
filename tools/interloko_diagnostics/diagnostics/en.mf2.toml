@@ -88,4 +88,5 @@
 "runtime.unsupported-result" = "main does not return one supported scalar value"
 "runtime.unhandled-condition" = "no live handler applies to a signalled condition"
 "runtime.expired-exit" = "a block exit was called after its block returned"
+"runtime.aborted" = "a condition chooser aborted the run"
 "session.unknown-source" = "session source file id is unknown"

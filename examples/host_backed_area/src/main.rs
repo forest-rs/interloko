@@ -119,6 +119,7 @@ fn sum_areas(
         FuncRef::new(unit, *entry),
         &args,
         InvocationOptions::default(),
+        &mut interloko_runtime::chooser::ReportUnhandled,
     )
     .map_err(|failure| format!("`sum-areas` failed: {}", failure.trap()))?;
     match outcome.outputs.as_slice() {
