@@ -9,8 +9,9 @@
 //! - Top 16 bits set and bit 47 set: an immediate `<integer>`, the low 47
 //!   bits sign-extended ([`IMMEDIATE_INTEGER_MIN`]..=[`IMMEDIATE_INTEGER_MAX`]).
 //! - Top 16 bits set and bit 47 clear: bits 46..45 select the kind of the
-//!   low 45 bits: a one-based boxed-value heap index (`00`), a runtime
-//!   object's own handle (`01`), or a boolean (`10`). `11` is unused.
+//!   low 45 bits: a one-based index into the image's boxed values (`00`), a
+//!   runtime object's own handle (`01`), a boolean (`10`), or a one-based
+//!   index into the nursery's boxed values (`11`).
 //!
 //! The tagged space is a sliver of NaN encodings (negative NaNs with the top
 //! payload bits set), which no IEEE arithmetic produces by default. Floats
@@ -21,6 +22,8 @@
 //! [`Obj`]: execution_tape::value::Obj
 
 use execution_tape::value::ObjHandle;
+
+use crate::region::Space;
 
 /// Top-16-bit tag shared by every non-float encoding.
 const TAG: u64 = 0xFFFF_0000_0000_0000;
@@ -39,6 +42,7 @@ const PAYLOAD: u64 = (1 << KIND_SHIFT) - 1;
 const KIND_HEAP: u64 = 0b00 << KIND_SHIFT;
 const KIND_OBJECT: u64 = 0b01 << KIND_SHIFT;
 const KIND_BOOL: u64 = 0b10 << KIND_SHIFT;
+const KIND_NURSERY_HEAP: u64 = 0b11 << KIND_SHIFT;
 
 /// Smallest `<integer>` boxed without heap allocation.
 pub const IMMEDIATE_INTEGER_MIN: i64 = -(1 << 46);
@@ -56,8 +60,8 @@ pub(crate) enum BoxedHandle {
     Bool(bool),
     /// A runtime object, by its own [`crate::INTERLOKO_OBJECT_TYPE`] handle.
     Object(ObjHandle),
-    /// A zero-based index into the boxed-value heap.
-    Heap(usize),
+    /// A zero-based index into a region's boxed values.
+    Heap(Space, usize),
     /// A tagged handle that names nothing.
     Invalid,
 }
@@ -78,12 +82,16 @@ impl BoxedHandle {
             return Self::Integer(shifted >> SIGN_EXTEND_SHIFT);
         }
         let payload = bits & PAYLOAD;
-        match bits & KIND_MASK {
-            // Heap indices are one-based so that the zero payload is invalid.
-            KIND_HEAP => usize::try_from(payload)
+        // Heap indices are one-based so that the zero payload is invalid.
+        let heap = |space| {
+            usize::try_from(payload)
                 .ok()
                 .and_then(|index| index.checked_sub(1))
-                .map_or(Self::Invalid, Self::Heap),
+                .map_or(Self::Invalid, |index| Self::Heap(space, index))
+        };
+        match bits & KIND_MASK {
+            KIND_HEAP => heap(Space::Image),
+            KIND_NURSERY_HEAP => heap(Space::Nursery),
             KIND_OBJECT => Self::Object(ObjHandle(payload)),
             KIND_BOOL if payload <= 1 => Self::Bool(payload == 1),
             _ => Self::Invalid,
@@ -117,16 +125,22 @@ impl BoxedHandle {
         (handle.0 <= PAYLOAD).then_some(ObjHandle(TAG | KIND_OBJECT | handle.0))
     }
 
-    /// Encodes a zero-based heap index, or `None` when the heap is full.
-    pub(crate) fn heap(index: usize) -> Option<ObjHandle> {
+    /// Encodes a zero-based index into `space`'s boxed values, or `None`
+    /// when the region is too large to address.
+    pub(crate) fn heap(space: Space, index: usize) -> Option<ObjHandle> {
         let one_based = u64::try_from(index).ok()?.checked_add(1)?;
-        (one_based <= PAYLOAD).then_some(ObjHandle(TAG | KIND_HEAP | one_based))
+        let kind = match space {
+            Space::Image => KIND_HEAP,
+            Space::Nursery => KIND_NURSERY_HEAP,
+        };
+        (one_based <= PAYLOAD).then_some(ObjHandle(TAG | kind | one_based))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{BoxedHandle, IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
+    use crate::region::Space;
     use execution_tape::value::ObjHandle;
 
     #[test]
@@ -184,10 +198,12 @@ mod tests {
     #[test]
     fn heap_indices_are_disjoint_from_immediates() {
         for index in [0, 1, 1000] {
-            let handle = BoxedHandle::heap(index).expect("heap handle");
-            assert_eq!(BoxedHandle::decode(handle), BoxedHandle::Heap(index));
+            for space in [Space::Image, Space::Nursery] {
+                let handle = BoxedHandle::heap(space, index).expect("heap handle");
+                assert_eq!(BoxedHandle::decode(handle), BoxedHandle::Heap(space, index));
+            }
         }
-        assert_eq!(BoxedHandle::heap(usize::MAX), None);
+        assert_eq!(BoxedHandle::heap(Space::Image, usize::MAX), None);
         assert_eq!(
             BoxedHandle::decode(BoxedHandle::INVALID),
             BoxedHandle::Invalid

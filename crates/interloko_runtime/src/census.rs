@@ -5,11 +5,14 @@
 //! entry plus the length (not capacity) of its out-of-line payload. They are
 //! meant for comparing turns and spotting growth, not for accounting RSS.
 
+use alloc::vec;
+use alloc::vec::Vec;
 use core::mem::size_of;
 
 use execution_tape::value::{Obj, Value};
 
 use crate::boxed::BoxedHandle;
+use crate::region::{ObjectRef, Region, Space};
 use crate::{
     INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeObject, RuntimeObjectStorage,
 };
@@ -29,14 +32,17 @@ pub struct HeapStats {
     pub bytes: usize,
 }
 
-/// Heap accounting for one turn: one call into the runtime.
+/// Heap accounting for one turn: one bounded call into the runtime.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct TurnStats {
-    /// Everything the turn allocated.
+    /// Everything the turn allocated in the nursery. The nursery only grows
+    /// during a turn, so this is also its high-water mark.
     pub allocated: HeapStats,
-    /// What is still reachable when the turn ends, from its results and the
-    /// long-lived roots (interned symbols).
+    /// The part of the nursery still reachable from the turn's results when
+    /// it ended: the survivors.
     pub reachable: HeapStats,
+    /// The image after the turn.
+    pub image: HeapStats,
 }
 
 impl TurnStats {
@@ -74,10 +80,9 @@ pub(crate) const fn boxed_value_bytes() -> usize {
     size_of::<Value>()
 }
 
-impl InterlokoHost {
-    /// Returns the current sizes of this host's heaps.
-    #[must_use]
-    pub fn heap_stats(&self) -> HeapStats {
+impl Region {
+    /// Returns the sizes of this region's entries.
+    pub(crate) fn stats(&self) -> HeapStats {
         HeapStats {
             objects: self.objects.len(),
             boxed_values: self.values.len(),
@@ -85,27 +90,69 @@ impl InterlokoHost {
                 + self.values.len() * boxed_value_bytes(),
         }
     }
+}
 
-    /// Returns the sizes of the heap entries reachable from `roots` and from
-    /// the host's long-lived roots (interned symbols).
+impl InterlokoHost {
+    /// Returns the current sizes of this host's heaps, image and nursery
+    /// together.
+    #[must_use]
+    pub fn heap_stats(&self) -> HeapStats {
+        let (image, nursery) = (self.image.stats(), self.nursery.stats());
+        HeapStats {
+            objects: image.objects + nursery.objects,
+            boxed_values: image.boxed_values + nursery.boxed_values,
+            bytes: image.bytes + nursery.bytes,
+        }
+    }
+
+    /// Returns the sizes of the nursery entries reachable from `roots`.
+    ///
+    /// The walk follows image objects reached from the roots too, since an
+    /// image object can refer to the nursery, but counts only nursery
+    /// entries: the ones that would have to survive the turn.
     #[must_use]
     pub fn reachable_stats(&self, roots: &[Value]) -> HeapStats {
-        let mut objects = alloc::vec![false; self.objects.len()];
-        let mut boxes = alloc::vec![false; self.values.len()];
-        let mut pending: alloc::vec::Vec<Value> = roots.to_vec();
-        pending.extend(self.symbols.iter().map(|entry| Value::Obj(entry.object)));
+        let marks = self.mark_reachable(roots);
+        let nursery = &marks[Space::Nursery as usize];
+        let reached = |marks: &[bool]| marks.iter().filter(|seen| **seen).count();
+        HeapStats {
+            objects: reached(&nursery.objects),
+            boxed_values: reached(&nursery.values),
+            bytes: self
+                .nursery
+                .objects
+                .iter()
+                .zip(&nursery.objects)
+                .filter(|(_, seen)| **seen)
+                .map(|(object, _)| object_bytes(object))
+                .sum::<usize>()
+                + reached(&nursery.values) * boxed_value_bytes(),
+        }
+    }
+
+    /// Marks every heap entry reachable from `roots`, per region (indexed by
+    /// [`Space`]).
+    pub(crate) fn mark_reachable(&self, roots: &[Value]) -> [RegionMarks; 2] {
+        let mut marks = [Space::Image, Space::Nursery].map(|space| {
+            let region = self.region(space);
+            RegionMarks {
+                objects: vec![false; region.objects.len()],
+                values: vec![false; region.values.len()],
+            }
+        });
+        let mut pending: Vec<Value> = roots.to_vec();
         while let Some(value) = pending.pop() {
             let Value::Obj(obj) = value else {
                 continue;
             };
             if obj.host_type == INTERLOKO_VALUE_TYPE {
                 match BoxedHandle::decode(obj.handle) {
-                    BoxedHandle::Heap(index) => {
-                        if let Some(seen) = boxes.get_mut(index)
+                    BoxedHandle::Heap(space, index) => {
+                        if let Some(seen) = marks[space as usize].values.get_mut(index)
                             && !*seen
                         {
                             *seen = true;
-                            pending.push(self.values[index].clone());
+                            pending.push(self.region(space).values[index].clone());
                         }
                     }
                     BoxedHandle::Object(handle) => pending.push(Value::Obj(Obj {
@@ -122,39 +169,34 @@ impl InterlokoHost {
             if obj.host_type != INTERLOKO_OBJECT_TYPE {
                 continue;
             }
-            let Some(index) = usize::try_from(obj.handle.0)
-                .ok()
-                .and_then(|raw| raw.checked_sub(1))
-            else {
+            let Some(at) = ObjectRef::decode(obj.handle) else {
                 continue;
             };
-            let Some(seen) = objects.get_mut(index) else {
+            let Some(seen) = marks[at.space as usize].objects.get_mut(at.index) else {
                 continue;
             };
             if *seen {
                 continue;
             }
             *seen = true;
-            match &self.objects[index].storage {
-                RuntimeObjectStorage::Native { slots } => pending.extend(slots.iter().cloned()),
-                RuntimeObjectStorage::Vector { elements } => {
-                    pending.extend(elements.iter().cloned());
-                }
-                _ => {}
-            }
+            pending.extend(object_edges(&self.region(at.space).objects[at.index]).cloned());
         }
-        let reached = |marks: &[bool]| marks.iter().filter(|seen| **seen).count();
-        HeapStats {
-            objects: reached(&objects),
-            boxed_values: reached(&boxes),
-            bytes: self
-                .objects
-                .iter()
-                .zip(&objects)
-                .filter(|(_, seen)| **seen)
-                .map(|(object, _)| object_bytes(object))
-                .sum::<usize>()
-                + reached(&boxes) * boxed_value_bytes(),
-        }
+        marks
     }
+}
+
+/// Reachability marks for one region.
+pub(crate) struct RegionMarks {
+    pub(crate) objects: Vec<bool>,
+    pub(crate) values: Vec<bool>,
+}
+
+/// Returns the values an object refers to.
+pub(crate) fn object_edges(object: &RuntimeObject) -> impl Iterator<Item = &Value> {
+    let edges: &[Value] = match &object.storage {
+        RuntimeObjectStorage::Native { slots } => slots,
+        RuntimeObjectStorage::Vector { elements } => elements,
+        _ => &[],
+    };
+    edges.iter()
 }

@@ -853,3 +853,31 @@ fn reload_discards_typed_definitions_after_the_last_load() {
     assert!(stdout.contains("source repl.loko (1 forms, 3 lines, clean)"));
     assert!(stdout.lines().any(|line| line == "10"));
 }
+
+#[test]
+fn repl_turns_keep_the_runtime_image_flat() {
+    let mut input = String::from(
+        "define function score(text :: <string>) => <integer>\n  \
+         if text = \"abcd\" then 1 else 0 end\nend;\n\
+         define function churn(n :: <integer>) => <integer>\n  \
+         if n = 0 then 0 else churn(n - 1) + score(concatenate(\"ab\", \"cd\")) end\nend;\n",
+    );
+    for _ in 0..10 {
+        input.push_str("churn(40)\n:heap\n");
+    }
+    input.push_str(":quit\n");
+    let (stdout, stderr) = run_repl(&input);
+
+    assert!(stderr.is_empty(), "{stderr}");
+    let images: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("image: "))
+        .collect();
+    assert_eq!(images.len(), 10, "{stdout}");
+    assert!(images.iter().all(|line| *line == images[0]), "{stdout}");
+    assert_eq!(images[0], "image: 0 objects, 0 boxed values, 0 bytes");
+    assert!(
+        stdout.contains("last turn: allocated 160 objects"),
+        "{stdout}"
+    );
+}

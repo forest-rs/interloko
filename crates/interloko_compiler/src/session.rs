@@ -325,6 +325,58 @@ pub struct FunctionCallOutcome {
     pub turn: TurnStats,
 }
 
+/// A runtime image that outlives calls.
+///
+/// [`SessionArtifacts::call_function`] runs each call on a fresh runtime
+/// host. A `SessionRuntime` instead keeps one host, so long-lived runtime
+/// state (interned symbols today) persists, and runs each call as one
+/// *turn*: the call allocates into a nursery that is emptied when it
+/// returns or traps, so repeated calls do not grow the heap.
+pub struct SessionRuntime {
+    host: InterlokoHost,
+}
+
+impl SessionRuntime {
+    /// Runs `function_name` from `artifacts` as one turn of this runtime.
+    ///
+    /// `artifacts` must have the runtime layout the image was created with;
+    /// otherwise the call fails with
+    /// [`FunctionCallError::RuntimeLayoutChanged`] and the image is
+    /// untouched.
+    pub fn call_function(
+        &mut self,
+        artifacts: &SessionArtifacts,
+        function_name: &str,
+        arguments: &[FunctionValue],
+        trace: Option<ExecutionTraceDetail>,
+    ) -> Result<FunctionCallOutcome, FunctionCallError> {
+        let tape = artifacts
+            .tape
+            .as_ref()
+            .ok_or(FunctionCallError::TapeUnavailable)?;
+        if *self.host.layout() != tape.runtime {
+            return Err(FunctionCallError::RuntimeLayoutChanged);
+        }
+        call_function(
+            &artifacts.sem,
+            &artifacts.host_registry,
+            tape,
+            &mut self.host,
+            function_name,
+            arguments,
+            trace,
+            None,
+        )
+    }
+
+    /// Returns the sizes of the whole runtime heap. Between turns the
+    /// nursery is empty, so this is the image.
+    #[must_use]
+    pub fn heap_stats(&self) -> HeapStats {
+        self.host.heap_stats()
+    }
+}
+
 /// Embedding callback for scalar functions declared through
 /// [`sem::HostMetaRegistry`].
 ///
@@ -435,6 +487,14 @@ pub enum FunctionCallError {
         /// Requested function name.
         name: String,
     },
+    /// The runtime could not open or close the call's turn.
+    TurnFailed {
+        /// Underlying runtime error.
+        error: runtime::RuntimeError,
+    },
+    /// A [`SessionRuntime`] was asked to run artifacts whose runtime layout
+    /// differs from the one its image was built for.
+    RuntimeLayoutChanged,
 }
 
 impl fmt::Display for FunctionCallError {
@@ -475,6 +535,10 @@ impl fmt::Display for FunctionCallError {
                 formatter,
                 "function `{name}` returned a runtime value that could not be inspected"
             ),
+            Self::TurnFailed { error } => write!(formatter, "runtime turn failed: {error:?}"),
+            Self::RuntimeLayoutChanged => {
+                formatter.write_str("the runtime image was built for a different runtime layout")
+            }
         }
     }
 }
@@ -1989,15 +2053,29 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
+        let mut runtime = InterlokoHost::new(tape.runtime.clone());
         call_function(
             &self.sem,
             &self.host_registry,
             tape,
+            &mut runtime,
             function_name,
             arguments,
             trace,
             None,
         )
+    }
+
+    /// Creates a runtime image for these artifacts that successive calls
+    /// share; see [`SessionRuntime`].
+    pub fn runtime(&self) -> Result<SessionRuntime, FunctionCallError> {
+        let tape = self
+            .tape
+            .as_ref()
+            .ok_or(FunctionCallError::TapeUnavailable)?;
+        Ok(SessionRuntime {
+            host: InterlokoHost::new(tape.runtime.clone()),
+        })
     }
 
     /// Calls a direct function while serving declared scalar host functions
@@ -2017,10 +2095,12 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
+        let mut runtime = InterlokoHost::new(tape.runtime.clone());
         call_function(
             &self.sem,
             &self.host_registry,
             tape,
+            &mut runtime,
             function_name,
             arguments,
             trace,
@@ -5065,7 +5145,17 @@ fn run_main_with_trace(
     tape: &tape::TapeModule,
     trace: Option<ExecutionTraceDetail>,
 ) -> (RuntimeResult, Option<ExecutionTrace>) {
-    match call_function(module, host_registry, tape, "main", &[], trace, None) {
+    let mut runtime = InterlokoHost::new(tape.runtime.clone());
+    match call_function(
+        module,
+        host_registry,
+        tape,
+        &mut runtime,
+        "main",
+        &[],
+        trace,
+        None,
+    ) {
         Ok(outcome) => (RuntimeResult::Returned(outcome.value), outcome.trace),
         Err(error) => runtime_result_for_main_error(module, error),
     }
@@ -5104,18 +5194,78 @@ fn runtime_result_for_main_error(
                 );
             (RuntimeResult::UnsupportedResult { declared }, None)
         }
+        // `main` runs on a fresh host with the artifacts' own layout, so its
+        // turn always opens and closes.
+        FunctionCallError::TurnFailed { .. } | FunctionCallError::RuntimeLayoutChanged => (
+            RuntimeResult::UnsupportedResult {
+                declared: error.to_string(),
+            },
+            None,
+        ),
     }
 }
 
+/// Runs one call as one turn of `runtime`: allocations go to its nursery,
+/// and the turn is finished when the call returns or aborted when it fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal call plumbing shared by the public call entry points"
+)]
 fn call_function<'a>(
     module: &sem::Module,
     host_registry: &'a sem::HostMetaRegistry,
     tape: &tape::TapeModule,
+    runtime: &mut InterlokoHost,
     function_name: &str,
     arguments: &[FunctionValue],
     trace: Option<ExecutionTraceDetail>,
     handler: Option<&'a mut dyn HostFunctionHandler>,
 ) -> Result<FunctionCallOutcome, FunctionCallError> {
+    runtime
+        .begin_turn()
+        .map_err(|error| FunctionCallError::TurnFailed { error })?;
+    let body = run_turn_body(
+        module,
+        host_registry,
+        tape,
+        &mut *runtime,
+        function_name,
+        arguments,
+        trace,
+        handler.map(|handler| -> &mut dyn HostFunctionHandler { handler }),
+    );
+    match body {
+        Ok((value, trace, output)) => {
+            let turn = runtime
+                .finish_turn(&output)
+                .map_err(|error| FunctionCallError::TurnFailed { error })?;
+            Ok(FunctionCallOutcome { value, trace, turn })
+        }
+        Err(error) => {
+            runtime
+                .abort_turn()
+                .map_err(|error| FunctionCallError::TurnFailed { error })?;
+            Err(error)
+        }
+    }
+}
+
+/// Returns the call's materialized result, its trace, and the raw VM
+/// results, which stay valid until the turn ends.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal call plumbing shared by the public call entry points"
+)]
+fn run_turn_body<'a>(
+    module: &sem::Module,
+    host_registry: &'a sem::HostMetaRegistry,
+    tape: &tape::TapeModule,
+    runtime: &'a mut InterlokoHost,
+    function_name: &str,
+    arguments: &[FunctionValue],
+    trace: Option<ExecutionTraceDetail>,
+    handler: Option<&'a mut dyn HostFunctionHandler>,
+) -> Result<(FunctionValue, Option<ExecutionTrace>, Vec<Value>), FunctionCallError> {
     let function = module
         .functions
         .iter()
@@ -5138,11 +5288,7 @@ fn call_function<'a>(
             name: function_name.to_string(),
         })?;
 
-    let host = SharedFunctionCallHost::new(
-        InterlokoHost::new(tape.runtime.clone()),
-        host_registry.functions(),
-        handler,
-    );
+    let host = SharedFunctionCallHost::new(runtime, host_registry.functions(), handler);
     let mut runtime_arguments = Vec::with_capacity(arguments.len());
     for (index, (argument, expected)) in arguments
         .iter()
@@ -5211,11 +5357,8 @@ fn call_function<'a>(
         }
     };
 
-    Ok(FunctionCallOutcome {
-        value,
-        trace: capture.map(TraceCapture::finish),
-        turn: host.turn_stats(&output),
-    })
+    drop(vm);
+    Ok((value, capture.map(TraceCapture::finish), output))
 }
 
 #[derive(Clone)]
@@ -5223,7 +5366,7 @@ struct SharedFunctionCallHost<'a>(Rc<RefCell<FunctionCallHost<'a>>>);
 
 impl<'a> SharedFunctionCallHost<'a> {
     fn new(
-        runtime: InterlokoHost,
+        runtime: &'a mut InterlokoHost,
         functions: &'a [sem::HostFunction],
         handler: Option<&'a mut dyn HostFunctionHandler>,
     ) -> Self {
@@ -5250,16 +5393,6 @@ impl<'a> SharedFunctionCallHost<'a> {
     fn failure(&self) -> Option<(String, HostFunctionFailure)> {
         self.0.borrow().failure.clone()
     }
-
-    /// Each call runs on a fresh host, so everything on its heap was
-    /// allocated by this turn.
-    fn turn_stats(&self, results: &[Value]) -> TurnStats {
-        let host = self.0.borrow();
-        TurnStats {
-            allocated: host.runtime.heap_stats(),
-            reachable: host.runtime.reachable_stats(results),
-        }
-    }
 }
 
 impl Host for SharedFunctionCallHost<'_> {
@@ -5278,7 +5411,7 @@ impl Host for SharedFunctionCallHost<'_> {
 }
 
 struct FunctionCallHost<'a> {
-    runtime: InterlokoHost,
+    runtime: &'a mut InterlokoHost,
     functions: &'a [sem::HostFunction],
     handler: Option<&'a mut dyn HostFunctionHandler>,
     failure: Option<(String, HostFunctionFailure)>,
@@ -14039,6 +14172,85 @@ mod tests {
         assert_eq!(turn.reachable.objects, 1);
         assert!(turn.reachable.bytes < turn.allocated.bytes);
         assert!(turn.survival_ratio().is_some_and(|ratio| ratio < 0.5));
+    }
+
+    const TURN_PROGRAM: &str = "define class <cell> (<object>)\n  \
+        slot value :: <integer>, init-value: 0;\nend;\n\
+        define function churn(n :: <integer>, acc :: <integer>) => <integer>\n  \
+        if n = 0 then acc else \
+        churn(n - 1, acc + make(<cell>).value + score(concatenate(\"ab\", \"cd\"))) end\nend;\n\
+        define function score(text :: <string>) => <integer>\n  \
+        if text = \"abcd\" then 4 else 0 end\nend;\n\
+        define function tag(n :: <integer>) => <boolean>\n  \
+        if n = 0 then #ready = #ready else #other = #other end\nend;\n\
+        define function tag-then-trap(n :: <integer>) => <integer>\n  \
+        if #fresh = #fresh then n + 9223372036854775807 else 0 end\nend;";
+
+    #[test]
+    fn runtime_turns_keep_the_heap_flat() {
+        let artifacts =
+            CompilerSession::compile_source("turns.loko", TURN_PROGRAM, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut runtime = artifacts.runtime().expect("tape is available");
+        let empty = runtime.heap_stats();
+        for _ in 0..20 {
+            let outcome = runtime
+                .call_function(
+                    &artifacts,
+                    "churn",
+                    &[FunctionValue::Integer(50), FunctionValue::Integer(0)],
+                    None,
+                )
+                .expect("churn should run");
+            assert_eq!(outcome.value, FunctionValue::Integer(200));
+            // Each turn allocates cells and strings, and none survive.
+            assert!(outcome.turn.allocated.objects >= 150);
+            assert_eq!(outcome.turn.reachable, HeapStats::default());
+            assert_eq!(runtime.heap_stats(), empty);
+        }
+
+        // Interned symbols are image state and persist across turns.
+        runtime
+            .call_function(&artifacts, "tag", &[FunctionValue::Integer(0)], None)
+            .expect("tag should run");
+        let tagged = runtime.heap_stats();
+        assert_eq!(tagged.objects, empty.objects + 1);
+        runtime
+            .call_function(&artifacts, "tag", &[FunctionValue::Integer(0)], None)
+            .expect("tag should run");
+        assert_eq!(runtime.heap_stats(), tagged);
+    }
+
+    #[test]
+    fn trapped_turns_leave_the_heap_unchanged() {
+        let artifacts =
+            CompilerSession::compile_source("turns.loko", TURN_PROGRAM, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut runtime = artifacts.runtime().expect("tape is available");
+        runtime
+            .call_function(&artifacts, "tag", &[FunctionValue::Integer(1)], None)
+            .expect("tag should run");
+        let before = runtime.heap_stats();
+        let trapped = runtime.call_function(
+            &artifacts,
+            "tag-then-trap",
+            &[FunctionValue::Integer(1)],
+            None,
+        );
+        assert!(matches!(trapped, Err(FunctionCallError::Trap { .. })));
+        // The trapped turn interned `#fresh`; the abort drops it again.
+        assert_eq!(runtime.heap_stats(), before);
+
+        // A runtime refuses artifacts with a different layout.
+        let other = CompilerSession::compile_source(
+            "other.loko",
+            "define class <other> (<object>)\nend;\ndefine function main() => <integer>\n  1\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert!(matches!(
+            runtime.call_function(&other, "main", &[], None),
+            Err(FunctionCallError::RuntimeLayoutChanged)
+        ));
     }
 
     #[test]

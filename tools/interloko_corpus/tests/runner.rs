@@ -154,7 +154,7 @@ fn heap_reports_turn_survival() {
     let dir = file.parent().expect("corpus file has a directory");
     let out = run_corpus(&["heap", dir.to_str().expect("corpus path should be utf8")]);
 
-    assert!(out.contains("vector_literals.loko 2/4 0/0"));
+    assert!(out.contains("vector_literals.loko 0/2 0/0"));
     assert!(out.contains("heap: "));
     assert!(out.contains(" survival "));
 }

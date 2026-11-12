@@ -10,6 +10,8 @@ extern crate alloc;
 
 mod boxed;
 mod census;
+mod region;
+mod turn;
 
 use alloc::string::String;
 use alloc::vec;
@@ -39,6 +41,7 @@ pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
 use boxed::BoxedHandle;
 pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
+use region::{ObjectRef, OpenTurn, Region, Space};
 
 /// Host-call symbol for object construction.
 pub const MAKE_OBJECT: &str = "interloko.make_object";
@@ -592,6 +595,19 @@ pub enum RuntimeError {
     /// A host object adapter could not read a requested slot.
     HostAdapterReadFailed {
         /// Effective slot id requested from the adapter.
+        slot: SlotId,
+    },
+    /// [`InterlokoHost::begin_turn`] was called while a turn was open.
+    TurnAlreadyOpen,
+    /// A turn operation was called with no turn open.
+    NoOpenTurn,
+    /// A turn tried to store a value it allocated into an image object.
+    /// Until survivors are evacuated at turn end, the image may not point
+    /// into the nursery.
+    NurseryReferenceInImage {
+        /// Image object being written.
+        object: Obj,
+        /// Effective slot being written.
         slot: SlotId,
     },
 }
@@ -1370,11 +1386,15 @@ pub trait HostObjectAdapter {
 }
 
 /// Host implementation for Interloko runtime object operations.
+///
+/// The heap is split into a long-lived image and a per-turn nursery; see
+/// [`InterlokoHost::begin_turn`].
 pub struct InterlokoHost {
     layout: RuntimeLayout,
-    objects: Vec<RuntimeObject>,
-    values: Vec<Value>,
+    image: Region,
+    nursery: Region,
     symbols: Vec<InternedObject>,
+    turn: Option<OpenTurn>,
 }
 
 impl InterlokoHost {
@@ -1384,10 +1404,17 @@ impl InterlokoHost {
         debug_assert!(layout.validate().is_ok());
         Self {
             layout,
-            objects: Vec::new(),
-            values: Vec::new(),
+            image: Region::default(),
+            nursery: Region::default(),
             symbols: Vec::new(),
+            turn: None,
         }
+    }
+
+    /// Returns the runtime layout this host serves.
+    #[must_use]
+    pub const fn layout(&self) -> &RuntimeLayout {
+        &self.layout
     }
 
     /// Creates a new runtime host after validating its layout.
@@ -1544,6 +1571,12 @@ impl InterlokoHost {
             });
         }
         let value = self.value_for_slot(value, slot_info.kind)?;
+        if self.turn.is_some()
+            && Self::object_ref(object)?.space == Space::Image
+            && self.references_nursery(&value)
+        {
+            return Err(RuntimeError::NurseryReferenceInImage { object, slot });
+        }
         let object = self.object_mut(object)?;
         let RuntimeObjectStorage::Native { slots } = &mut object.storage else {
             return Err(RuntimeError::SlotWriteRejected {
@@ -1600,35 +1633,43 @@ impl InterlokoHost {
         }
     }
 
-    fn object(&self, obj: Obj) -> Result<&RuntimeObject, RuntimeError> {
+    fn object_ref(obj: Obj) -> Result<ObjectRef, RuntimeError> {
         if obj.host_type != INTERLOKO_OBJECT_TYPE {
             return Err(RuntimeError::ObjectHostTypeMismatch {
                 object: obj,
                 expected: INTERLOKO_OBJECT_TYPE,
             });
         }
-        let index = usize::try_from(obj.handle.0)
-            .ok()
-            .and_then(|raw| raw.checked_sub(1))
-            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })?;
-        self.objects
-            .get(index)
+        ObjectRef::decode(obj.handle).ok_or(RuntimeError::InvalidObjectHandle { object: obj })
+    }
+
+    const fn region(&self, space: Space) -> &Region {
+        match space {
+            Space::Image => &self.image,
+            Space::Nursery => &self.nursery,
+        }
+    }
+
+    const fn region_mut(&mut self, space: Space) -> &mut Region {
+        match space {
+            Space::Image => &mut self.image,
+            Space::Nursery => &mut self.nursery,
+        }
+    }
+
+    fn object(&self, obj: Obj) -> Result<&RuntimeObject, RuntimeError> {
+        let location = Self::object_ref(obj)?;
+        self.region(location.space)
+            .objects
+            .get(location.index)
             .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
     }
 
     fn object_mut(&mut self, obj: Obj) -> Result<&mut RuntimeObject, RuntimeError> {
-        if obj.host_type != INTERLOKO_OBJECT_TYPE {
-            return Err(RuntimeError::ObjectHostTypeMismatch {
-                object: obj,
-                expected: INTERLOKO_OBJECT_TYPE,
-            });
-        }
-        let index = usize::try_from(obj.handle.0)
-            .ok()
-            .and_then(|raw| raw.checked_sub(1))
-            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })?;
-        self.objects
-            .get_mut(index)
+        let location = Self::object_ref(obj)?;
+        self.region_mut(location.space)
+            .objects
+            .get_mut(location.index)
             .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
     }
 
@@ -1647,7 +1688,8 @@ impl InterlokoHost {
                 host_type: INTERLOKO_OBJECT_TYPE,
                 handle,
             })),
-            BoxedHandle::Heap(index) => self
+            BoxedHandle::Heap(space, index) => self
+                .region(space)
                 .values
                 .get(index)
                 .cloned()
@@ -1670,11 +1712,13 @@ impl InterlokoHost {
             _ => None,
         };
         let handle = immediate.unwrap_or_else(|| {
-            let index = self.values.len();
-            self.values.push(value);
+            let space = self.allocation_space();
+            let region = self.region_mut(space);
+            let index = region.values.len();
+            region.values.push(value);
             // A heap too large to index yields a handle that never resolves,
             // so it fails on use instead of aliasing another value.
-            BoxedHandle::heap(index).unwrap_or(BoxedHandle::INVALID)
+            BoxedHandle::heap(space, index).unwrap_or(BoxedHandle::INVALID)
         });
         Value::Obj(Obj {
             host_type: INTERLOKO_VALUE_TYPE,
@@ -1682,9 +1726,19 @@ impl InterlokoHost {
         })
     }
 
+    /// Allocates `object` in the nursery during a turn and in the image
+    /// otherwise.
     fn push_object(&mut self, object: RuntimeObject) -> Value {
-        let handle = ObjHandle(u64::try_from(self.objects.len() + 1).unwrap_or(u64::MAX));
-        self.objects.push(object);
+        let space = self.allocation_space();
+        self.push_object_in(space, object)
+    }
+
+    fn push_object_in(&mut self, space: Space, object: RuntimeObject) -> Value {
+        let region = self.region_mut(space);
+        let index = region.objects.len();
+        region.objects.push(object);
+        // A region too large to index yields a handle that never resolves.
+        let handle = ObjectRef { space, index }.encode().unwrap_or(ObjHandle(0));
         Value::Obj(Obj {
             host_type: INTERLOKO_OBJECT_TYPE,
             handle,
@@ -2125,10 +2179,15 @@ impl InterlokoHost {
             return Ok(Value::Obj(entry.object));
         }
         let class = self.builtin_class(BuiltinValueClass::Symbol)?;
-        let value = self.push_object(RuntimeObject {
-            class,
-            storage: RuntimeObjectStorage::Symbol { name: name.clone() },
-        });
+        // Symbols are interned for the host's lifetime, so they live in the
+        // image even when a turn interns them.
+        let value = self.push_object_in(
+            Space::Image,
+            RuntimeObject {
+                class,
+                storage: RuntimeObjectStorage::Symbol { name: name.clone() },
+            },
+        );
         let Value::Obj(object) = value else {
             return Err(HostError::Failed);
         };
@@ -2823,6 +2882,67 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// `<object>`, `<string>`, and `<cell>` with one `<object>` slot.
+    fn cell_layout() -> RuntimeLayout {
+        RuntimeLayout {
+            classes: vec![
+                class("<object>", None, Vec::new()),
+                class("<string>", Some(OBJECT_CLASS_ID), Vec::new()),
+                class(
+                    "<cell>",
+                    Some(OBJECT_CLASS_ID),
+                    vec![slot("value", ValueKind::Any, ClassId(2), SlotId(0))],
+                ),
+            ],
+            generics: Vec::new(),
+            methods: Vec::new(),
+        }
+    }
+
+    fn object_of(value: &Value) -> Obj {
+        let Value::Obj(object) = value else {
+            panic!("expected an object, got {value:?}");
+        };
+        *object
+    }
+
+    #[test]
+    fn turn_allocations_live_in_the_nursery() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        let boxed_none = host.box_top_value(Value::Bool(false)).expect("box");
+        let cell = host
+            .make_object(ClassId(2), &[ValueRef::Obj(object_of(&boxed_none))])
+            .expect("image cell");
+        let image = host.heap_stats();
+        assert_eq!(image.objects, 1);
+
+        host.begin_turn().expect("turn opens");
+        assert_eq!(host.begin_turn(), Err(RuntimeError::TurnAlreadyOpen));
+        let text = host.make_string("transient").expect("string");
+        let boxed_text = host.box_top_value(text.clone()).expect("box");
+        assert_eq!(host.heap_stats().objects, 2);
+        assert_eq!(host.string_text(&text), Ok("transient"));
+        // The image may not point into the nursery until survivors can be
+        // evacuated.
+        assert_eq!(
+            host.write_slot(
+                object_of(&cell),
+                SlotId(0),
+                ValueRef::Obj(object_of(&boxed_text))
+            ),
+            Err(RuntimeError::NurseryReferenceInImage {
+                object: object_of(&cell),
+                slot: SlotId(0)
+            })
+        );
+        let stats = host.finish_turn(&[text]).expect("turn closes");
+        assert_eq!(stats.allocated.objects, 1);
+        assert_eq!(stats.reachable.objects, 1);
+        assert_eq!(stats.image, image);
+        assert_eq!(host.heap_stats(), image);
+        assert_eq!(host.finish_turn(&[]), Err(RuntimeError::NoOpenTurn));
     }
 
     #[test]

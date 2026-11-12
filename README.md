@@ -265,11 +265,20 @@ execution context is dropped.
 Boxed `<object>` values are VM objects of one host type. Floats, booleans,
 integers within 47 bits and references to runtime objects travel inside the
 object handle and never allocate a box; wider integers live in the runtime
-host's append-only heap. Runtime objects themselves (instances, strings,
-vectors, metaobjects) are never reclaimed either. `FunctionCallOutcome::turn`
-reports what a call allocated and what was still reachable from its result
-and the interned symbols when it ended; `interloko_corpus heap [root...]`
-prints that survival for every program with a `main`.
+host's heap.
+
+The runtime heap has two regions. Each call is one *turn*: everything it
+allocates (instances, strings, vectors, metaobjects, heap boxes) goes to a
+nursery that is emptied in one step when the call returns or traps. The
+long-lived image holds interned symbols and objects an embedding creates
+outside a turn. `SessionArtifacts::runtime` returns a `SessionRuntime`
+whose image persists across calls (the REPL uses one; `:heap` shows it),
+while `SessionArtifacts::call_function` uses a fresh one per call.
+`FunctionCallOutcome::turn` reports what a call allocated and what was
+still reachable from its result at the end; `interloko_corpus heap
+[root...]` prints that survival for every program with a `main`. Until
+survivors are evacuated into the image, a turn may not store a value it
+allocated into an image object.
 
 Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
 `Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed
