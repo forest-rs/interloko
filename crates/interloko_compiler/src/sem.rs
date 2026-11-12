@@ -2189,6 +2189,9 @@ pub struct Restart {
     pub specializer: ClassId,
     /// Optional handler-local bound to the signaled condition object.
     pub condition_local: Option<LocalId>,
+    /// Guard closure taking the condition and returning `<boolean>`. It runs
+    /// on the signalling stack during handler search; `#f` declines.
+    pub guard: Option<Box<Expr>>,
     /// Handler body evaluated when a matching condition is signaled.
     pub body: Box<Expr>,
     /// Handler result categories.
@@ -5923,6 +5926,10 @@ impl Lowering {
                 ClassId(u32::MAX)
             });
 
+        let guard = restart
+            .guard
+            .as_ref()
+            .map(|guard| Box::new(self.lower_restart_guard(ctx, restart, guard)));
         let scope_start = ctx.scope_start();
         let condition_local = restart.condition_name.as_ref().map(|name| {
             if ctx.find_local(name).is_some() {
@@ -5976,6 +5983,7 @@ impl Lowering {
             restart: Restart {
                 specializer,
                 condition_local,
+                guard,
                 body: Box::new(restart_body),
                 result_kinds: restart_kinds,
                 result_callable_sigs: restart_callable_sigs,
@@ -6067,6 +6075,53 @@ impl Lowering {
             cleanup,
             span,
         }
+    }
+
+    /// Lowers a restart guard to a closure over the handle's locals taking
+    /// the condition, typed by the clause's class, and returning `<boolean>`.
+    fn lower_restart_guard(
+        &mut self,
+        ctx: &mut FunctionContext,
+        restart: &ast::Restart,
+        guard: &ast::Expr,
+    ) -> Expr {
+        let span = guard.span();
+        let param = ast::FunctionParam {
+            id: restart.id,
+            name: restart
+                .condition_name
+                .clone()
+                .unwrap_or_else(|| "$condition".into()),
+            type_annotation: Some(ast::TypeAnnotation {
+                name: restart.class_name.clone(),
+                class_object: false,
+                callable: None,
+                span: restart.condition_span,
+            }),
+            span: restart.condition_span,
+        };
+        let body = ast::Block {
+            id: guard.id(),
+            lets: Vec::new(),
+            result: guard.clone(),
+            span,
+        };
+        let closure =
+            self.lower_closure_expr(ctx, core::slice::from_ref(&param), None, &body, span);
+        let results = match &closure {
+            Expr::Closure {
+                callable_signature, ..
+            } => callable_signature.results.clone(),
+            _ => Vec::new(),
+        };
+        if !matches!(results.as_slice(), [ValueKind::Bool] | [ValueKind::Error]) {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::RestartGuardTypeMismatch).with_arg(
+                    DiagnosticArg::text("actual", self.result_kinds_name(&results)),
+                ),
+            );
+        }
+        closure
     }
 
     /// Lowers the operands of a numeric operator.

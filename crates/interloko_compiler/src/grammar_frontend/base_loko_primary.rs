@@ -496,12 +496,25 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_restart(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        let nested = node
+        let mut nested = node
             .children
             .iter()
             .find(|child| child.is_rule("expression"))
             .map(|expr| vec![self.build_expr(expr)])
             .unwrap_or_default();
+        if let Some(guard) = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("restart-guard"))
+        {
+            let test = guard
+                .children
+                .iter()
+                .find(|child| child.is_rule("expression"))
+                .map(|expr| vec![self.build_expr(expr)])
+                .unwrap_or_default();
+            nested.push(self.node_with_nested(CstKind::RestartGuard, guard, test));
+        }
         let mut roles = Vec::new();
         if let Some(condition) = node
             .children

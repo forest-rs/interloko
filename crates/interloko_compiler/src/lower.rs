@@ -922,6 +922,8 @@ pub enum Instr {
         dst: Register,
         /// Index into [`Module::restarts`].
         descriptor: usize,
+        /// Guard closure register, run on the signalling stack during search.
+        guard: Option<Register>,
         /// Source span.
         span: Span,
     },
@@ -1874,6 +1876,9 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
                 uses.restarts.push(descriptor);
             }
             collect_known_callable_uses_in_expr(body, uses);
+            if let Some(guard) = &restart.guard {
+                collect_known_callable_uses_in_expr(guard, uses);
+            }
             collect_known_callable_uses_in_expr(&restart.body, uses);
         }
         sem::Expr::Block {
@@ -4004,6 +4009,12 @@ impl<'module> BodyLowering<'module> {
             .copied()
             .map(|kind| self.alloc(kind))
             .collect::<Vec<_>>();
+        let guard = restart
+            .guard
+            .as_deref()
+            .map(|guard| self.lower_expr(guard))
+            .transpose()?
+            .map(|guard| guard.reg);
         let token = self.alloc(ValueKind::U64);
         let descriptor = self
             .ids
@@ -4016,6 +4027,7 @@ impl<'module> BodyLowering<'module> {
         self.instructions.push(Instr::PushHandler {
             dst: token.reg,
             descriptor,
+            guard,
             span,
         });
 
@@ -5441,12 +5453,16 @@ impl Module {
             Instr::PushHandler {
                 dst,
                 descriptor,
+                guard,
                 span,
             } => {
                 write!(f, "  {dst} = condition.push-handler restart#{descriptor}")?;
                 if let Some(site) = self.restarts.get(*descriptor) {
                     write!(f, " ")?;
                     self.fmt_class(f, site.class)?;
+                }
+                if let Some(guard) = guard {
+                    write!(f, " when {guard}")?;
                 }
                 fmt_span(f, *span)
             }

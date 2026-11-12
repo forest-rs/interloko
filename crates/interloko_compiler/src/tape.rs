@@ -274,6 +274,7 @@ struct AbiTables {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ControlAbi {
     push_handler: HostSigId,
+    push_guarded_handler: HostSigId,
     pop: HostSigId,
     push_exit: HostSigId,
     check_exit: HostSigId,
@@ -356,6 +357,10 @@ impl ControlAbi {
             push_handler: builder.host_sig_for(
                 runtime::control::CONDITION_PUSH_HANDLER,
                 runtime::control::push_handler_signature(),
+            ),
+            push_guarded_handler: builder.host_sig_for(
+                runtime::control::CONDITION_PUSH_HANDLER,
+                runtime::control::push_guarded_handler_signature(),
             ),
             pop: builder.host_sig_for(
                 runtime::control::CONTROL_POP,
@@ -1309,16 +1314,26 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::PushHandler {
                 dst,
                 descriptor,
+                guard,
                 span,
             } => {
-                let sig = self.abi.control()?.push_handler;
+                let control = self.abi.control()?;
+                let (plain, guarded) = (control.push_handler, control.push_guarded_handler);
                 let descriptor_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(
                     descriptor_reg,
                     u64::try_from(*descriptor).unwrap_or(u64::MAX),
                 );
-                self.asm.host_call(0, sig, 0, &[descriptor_reg], &[dst.0]);
+                match guard {
+                    Some(guard) => {
+                        self.asm
+                            .host_call(0, guarded, 0, &[descriptor_reg, guard.0], &[dst.0]);
+                    }
+                    None => {
+                        self.asm.host_call(0, plain, 0, &[descriptor_reg], &[dst.0]);
+                    }
+                }
             }
             lower::Instr::PopBinding { token, span } => {
                 let sig = self.abi.control()?.pop;

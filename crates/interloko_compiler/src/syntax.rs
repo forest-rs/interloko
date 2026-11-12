@@ -69,6 +69,8 @@ pub enum TokenKind {
     With,
     /// `restart`.
     Restart,
+    /// `when`.
+    When,
     /// `block`.
     Block,
     /// `cleanup`.
@@ -179,6 +181,7 @@ impl TokenKind {
             | Self::Handle
             | Self::With
             | Self::Restart
+            | Self::When
             | Self::Block
             | Self::Cleanup
             | Self::End
@@ -313,6 +316,8 @@ pub enum CstKind {
     CleanupClause,
     /// Exit procedure name bound by a `block` expression.
     BlockExitName,
+    /// `when … =>` guard of a restart clause.
+    RestartGuard,
     /// Superclass type name in a class definition.
     SuperclassType,
     /// Nominal type name in an annotation.
@@ -630,6 +635,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::BlockExpr => 47,
         CstKind::CleanupClause => 48,
         CstKind::BlockExitName => 49,
+        CstKind::RestartGuard => 50,
     }
 }
 
@@ -684,6 +690,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::VectorStart => 44,
         TokenKind::Block => 48,
         TokenKind::Cleanup => 49,
+        TokenKind::When => 50,
     }
 }
 
@@ -887,6 +894,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "handle" => TokenKind::Handle,
                     "with" => TokenKind::With,
                     "restart" => TokenKind::Restart,
+                    "when" => TokenKind::When,
                     "block" => TokenKind::Block,
                     "cleanup" => TokenKind::Cleanup,
                     "end" => TokenKind::End,

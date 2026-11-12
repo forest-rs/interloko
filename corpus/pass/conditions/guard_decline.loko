@@ -1,0 +1,32 @@
+// expect: run 1133
+// expect: diagnostics 0
+// expect: dump ast contains when
+// expect: dump sem contains guard
+// expect: dump lowered contains when %r
+
+// The inner handler's guard runs on the signalling stack, before anything
+// unwinds, and can see `limit` from its enclosing activation. For small
+// codes it accepts; for large ones it declines and the search continues
+// outward to the handler in `main`.
+
+define class <problem> (<object>)
+  slot code :: <integer>;
+end;
+
+define function risky(code :: <integer>) => <integer>
+  signal(make(<problem>, code: code))
+end;
+
+define function inner(code :: <integer>, limit :: <integer>) => <integer>
+  handle
+    risky(code)
+  with restart e :: <problem> when e.code < limit =>
+    e.code + 100
+  end
+end;
+
+define function main() => <integer>
+  let small = handle inner(3, 10) with restart e :: <problem> e.code + 1000 end;
+  let large = handle inner(30, 10) with restart e :: <problem> e.code + 1000 end;
+  small + large
+end;

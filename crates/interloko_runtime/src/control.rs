@@ -16,6 +16,7 @@ use core::ops::Range;
 
 use execution_tape::host::HostSig;
 use execution_tape::program::{TagId, ValueType};
+use execution_tape::value::Value;
 use execution_tape::vm::ActivationId;
 use interloko_model::ClassId;
 
@@ -105,19 +106,21 @@ pub struct ControlLayout {
 }
 
 /// What a dynamic binding establishes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BindingKind {
     /// A `handle` site's handler and restart.
     Handler {
         /// Index into [`ControlLayout::restarts`].
         descriptor: usize,
+        /// Guard closure, in the run's own heap, that may decline.
+        guard: Option<Value>,
     },
     /// A `block` exit point, live until its block's extent ends.
     Exit,
 }
 
 /// One live dynamic binding.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DynamicBinding {
     /// Identity of this binding's extent.
     pub token: BindingToken,
@@ -243,6 +246,17 @@ impl ControlState {
 pub fn push_handler_signature() -> HostSig {
     HostSig {
         args: alloc::vec![ValueType::U64],
+        rets: alloc::vec![ValueType::U64],
+    }
+}
+
+/// Host signature for a guarded [`CONDITION_PUSH_HANDLER`]:
+/// `(descriptor, guard) -> token`. The guard takes the condition and returns
+/// `<boolean>`.
+#[must_use]
+pub fn push_guarded_handler_signature() -> HostSig {
+    HostSig {
+        args: alloc::vec![ValueType::U64, ValueType::Closure],
         rets: alloc::vec![ValueType::U64],
     }
 }

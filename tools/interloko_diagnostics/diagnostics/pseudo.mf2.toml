@@ -53,6 +53,7 @@
 "sem.signal-condition-type-mismatch" = "[ps] signal condition got { $actual }, need object condition"
 "sem.handle-restart-result-mismatch" = "[ps] handle body { $body } differs from restart { $restart }"
 "sem.block-exit-result-mismatch" = "[ps] block body { $body } differs from exit { $exit }"
+"sem.restart-guard-type-mismatch" = "[ps] restart guard is { $actual }"
 "sem.class-of-type-mismatch" = "[ps] class-of got { $actual }, need object"
 "sem.instance-of-type-mismatch" = "[ps] instance? got { $actual }, need { $expected }"
 "sem.instance-of-impossible" = "[ps] instance? cannot match { $actual } as { $expected }"

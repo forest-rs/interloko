@@ -664,6 +664,9 @@ pub struct Restart {
     pub condition_span: Span,
     /// Nominal condition class handled by this restart.
     pub class_name: String,
+    /// Guard evaluated on the signalling stack before the restart is taken;
+    /// `#f` declines and the search continues outward.
+    pub guard: Option<Box<Expr>>,
     /// Handler expression evaluated when a matching condition is signaled.
     pub body: Box<Expr>,
     /// Source span.
@@ -2099,6 +2102,7 @@ impl<'tree> Lowering<'tree> {
                 condition_name: None,
                 condition_span: node.span,
                 class_name: String::new(),
+                guard: None,
                 body: Box::new(Expr::Error {
                     id: self.ast_id(node),
                     span: node.span,
@@ -2163,18 +2167,38 @@ impl<'tree> Lowering<'tree> {
             .children
             .iter()
             .find_map(|child| match child {
-                CstElement::Node(expr) if !expr.kind.is_role() => Some(self.lower_expr(expr)),
+                CstElement::Node(expr)
+                    if !expr.kind.is_role() && expr.kind != CstKind::RestartGuard =>
+                {
+                    Some(self.lower_expr(expr))
+                }
                 _ => None,
             })
             .unwrap_or(Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
             });
+        let guard = node.child_nodes(CstKind::RestartGuard).next().map(|guard| {
+            Box::new(
+                guard
+                    .children
+                    .iter()
+                    .find_map(|child| match child {
+                        CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                        CstElement::Token(_) => None,
+                    })
+                    .unwrap_or(Expr::Error {
+                        id: self.ast_id(guard),
+                        span: guard.span,
+                    }),
+            )
+        });
         Restart {
             id: self.ast_id(node),
             condition_name: condition.map(|(_, text)| text.to_string()),
             condition_span: condition.map_or(node.span, |(span, _)| span),
             class_name,
+            guard,
             body: Box::new(body),
             span: node.span,
         }
