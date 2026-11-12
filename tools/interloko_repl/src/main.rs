@@ -15,8 +15,8 @@ use interloko_compiler::identity::{ArtifactKey, SourceFileId};
 use interloko_compiler::sem;
 use interloko_compiler::session::{
     DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, EnvironmentOrigin,
-    FunctionValue, IncrementalCompilerSession, RuntimeMode, SessionArtifacts, TopLevelFormKind,
-    TopLevelFormSpan,
+    FunctionCallError, FunctionCallOutcome, FunctionValue, IncrementalCompilerSession, RuntimeMode,
+    SessionArtifacts, SessionRuntime, TopLevelFormKind, TopLevelFormSpan, TurnStats,
 };
 use interloko_compiler::syntax::{self, TokenKind};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -37,6 +37,7 @@ const COMMANDS: &[&str] = &[
     ":quit",
     ":source",
     ":forms",
+    ":heap",
     ":run",
     ":load",
     ":write",
@@ -192,6 +193,10 @@ struct Repl {
     source_buffer: ReplSourceBuffer,
     pending_definition: String,
     last_artifacts: Option<SessionArtifacts>,
+    /// Runtime image shared by evaluations while the runtime layout stays
+    /// the same; each evaluation is one turn against it.
+    runtime: Option<SessionRuntime>,
+    last_turn: Option<TurnStats>,
     last_loaded_path: Option<PathBuf>,
     last_checkpoint: Option<BufferCheckpoint>,
     dirty: bool,
@@ -210,6 +215,8 @@ impl Repl {
             source_buffer: ReplSourceBuffer::default(),
             pending_definition: String::new(),
             last_artifacts: None,
+            runtime: None,
+            last_turn: None,
             last_loaded_path: None,
             last_checkpoint: None,
             dirty: false,
@@ -290,6 +297,7 @@ impl Repl {
             ":quit" => return Ok(false),
             ":source" => self.print_source(stdout)?,
             ":forms" => self.print_forms(stdout)?,
+            ":heap" => self.print_heap(stdout)?,
             ":run" => self.run_function(&args, stdout, stderr)?,
             ":load" => self.load_file(&args, stdout, stderr)?,
             ":write" => self.write_file(&args, stdout, stderr)?,
@@ -411,7 +419,7 @@ impl Repl {
             return Ok(());
         };
         let artifacts = self.ensure_artifacts(stderr)?;
-        match artifacts.call_function(name, &[], None) {
+        match self.run_turn(&artifacts, name) {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
             Err(error) => writeln!(
                 stderr,
@@ -560,7 +568,7 @@ impl Repl {
             return Ok(());
         }
 
-        match artifacts.call_function(SCRATCH_FUNCTION, &[], None) {
+        match self.run_turn(&artifacts, SCRATCH_FUNCTION) {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
             Err(error) => writeln!(
                 stderr,
@@ -568,6 +576,53 @@ impl Repl {
                 self.style.error_label("runtime error:"),
                 error
             )?,
+        }
+        Ok(())
+    }
+
+    /// Runs `name` as one turn of the REPL's runtime image, starting a new
+    /// image when the definitions changed the runtime layout.
+    fn run_turn(
+        &mut self,
+        artifacts: &SessionArtifacts,
+        name: &str,
+    ) -> std::result::Result<FunctionCallOutcome, FunctionCallError> {
+        if let Some(runtime) = &mut self.runtime {
+            match runtime.call_function(artifacts, name, &[], None) {
+                Err(FunctionCallError::RuntimeLayoutChanged) => {}
+                result => {
+                    self.last_turn = result.as_ref().ok().map(|outcome| outcome.turn);
+                    return result;
+                }
+            }
+        }
+        let mut runtime = artifacts.runtime()?;
+        let result = runtime.call_function(artifacts, name, &[], None);
+        self.runtime = Some(runtime);
+        self.last_turn = result.as_ref().ok().map(|outcome| outcome.turn);
+        result
+    }
+
+    fn print_heap<W>(&self, stdout: &mut W) -> Result<()>
+    where
+        W: Write,
+    {
+        let Some(runtime) = &self.runtime else {
+            writeln!(stdout, "no runtime image yet")?;
+            return Ok(());
+        };
+        let image = runtime.heap_stats();
+        writeln!(
+            stdout,
+            "image: {} objects, {} boxed values, {} bytes",
+            image.objects, image.boxed_values, image.bytes
+        )?;
+        if let Some(turn) = self.last_turn {
+            writeln!(
+                stdout,
+                "last turn: allocated {} objects ({} bytes), {} reachable at end",
+                turn.allocated.objects, turn.allocated.bytes, turn.reachable.objects
+            )?;
         }
         Ok(())
     }
@@ -1264,6 +1319,8 @@ impl Repl {
         self.source_buffer.clear();
         self.pending_definition.clear();
         self.last_artifacts = None;
+        self.runtime = None;
+        self.last_turn = None;
         self.last_loaded_path = None;
         self.last_checkpoint = None;
         self.dirty = false;
@@ -2820,6 +2877,7 @@ fn help_text() -> &'static str {
   :source                       show accepted source with line numbers
   :forms                        list accepted top-level forms
   :run <zero-arg-function>      run a named zero-argument function
+  :heap                         show the runtime image and the last turn's heap use
   :load <file>                  replace accepted source from a Loko source file
   :write <file>                 write rendered accepted source to a Loko source file
   :reload                       reload the last loaded source file

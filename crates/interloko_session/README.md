@@ -50,6 +50,11 @@ traces come from the existing compiler/runtime interface.
 - Rewind restores compiler mutation history, not external effects or VM heap state.
 - Source replacement recompiles the candidate. This wrapper does not add
   incremental compilation, a scheduler or a persistent runtime image.
+- Each call runs as one runtime turn on a fresh host, and
+  `FunctionCallOutcome::turn` reports what it allocated and what survived.
+  A runtime image that outlives calls (`SessionArtifacts::runtime`) is tied
+  to one runtime layout, which an accepted edit may change, so it is not
+  retained here.
 - Construction uses the compiler's builtin grammar environment. Custom staged
   grammar registry injection is not exposed by this initial session wrapper.
 - Filesystem, transport, UI, document composition and execution scheduling belong
