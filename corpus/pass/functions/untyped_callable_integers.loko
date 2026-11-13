@@ -1,0 +1,18 @@
+// expect: run 9
+// expect: diagnostics 0
+
+// An untyped `<callable>`'s register kinds come from the call site, so
+// limited integers cross it as the `<integer>`s they are: arguments widen,
+// and a limited result is checked back into its range.
+define function call(f :: <callable>) => <integer>
+  f(3i32)
+end;
+
+define function narrow(f :: <callable>) => <u32>
+  f(4)
+end;
+
+define function main() => <integer>
+  call(function (x :: <integer>) => <integer> x + 1 end)
+    + as(<integer>, narrow(function (x :: <integer>) => <integer> x + 1 end))
+end;

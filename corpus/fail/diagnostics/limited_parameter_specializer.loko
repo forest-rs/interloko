@@ -1,0 +1,16 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.limited-parameter-specializer
+// expect: diagnostic contains the generic declares this parameter <u32>
+
+// A method that specialized a `<u32>` parameter on `<integer>` would see a
+// `<u32>` anyway, so `level - 5` would be checked in the `<u32>` range
+// rather than computed as the `<integer>` the method declared.
+define generic adjust(level :: <u32>) => <integer>;
+
+define method adjust(level :: <integer>) => <integer>
+  level - 5
+end;
+
+define function main() => <integer>
+  adjust(1)
+end;

@@ -53,6 +53,7 @@
 "sem.shift-count-out-of-range" = "[ps] shift count out of range"
 "sem.abstract-numeric-type-unsupported" = "[ps] { $class } abstract, no value type"
 "sem.limited-type-specializer" = "[ps] limited type specializer"
+"sem.limited-parameter-specializer" = "[ps] limited parameter specializer"
 "sem.apply-arity-mismatch" = "[ps] apply needs callable first"
 "sem.apply-target-type-mismatch" = "[ps] apply target got { $actual }, need { $expected }"
 "sem.signal-condition-type-mismatch" = "[ps] signal condition got { $actual }, need object condition"

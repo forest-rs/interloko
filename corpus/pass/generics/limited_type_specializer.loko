@@ -1,21 +1,14 @@
 // expect: run 12u32
 // expect: diagnostics 0
 
-// A generic may declare a limited integer parameter. Its methods may
-// restate the limited type or specialize on a class that covers it, and
-// receive the unboxed `<u32>` either way.
+// A generic may declare a limited integer parameter, and its methods
+// restate the limited type: they receive the unboxed `<u32>`.
 define generic channel(level :: <u32>) => <u32>;
 
 define method channel(level :: <u32>) => <u32>
   level
 end;
 
-define generic scaled(level :: <u32>) => <u32>;
-
-define method scaled(level :: <integer>) => <u32>
-  level
-end;
-
 define function main() => <u32>
-  scaled(channel(12))
+  channel(12)
 end;

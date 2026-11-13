@@ -1,0 +1,12 @@
+// expect: run 7u32
+// expect: diagnostics 0
+
+// Literals in `values(...)` adopt the 32-bit types their positions expect.
+define function two() => (<i32>, <u32>)
+  values(-1, 7)
+end;
+
+define function main() => <u32>
+  let (a :: <i32>, b :: <u32>) = two();
+  b
+end;

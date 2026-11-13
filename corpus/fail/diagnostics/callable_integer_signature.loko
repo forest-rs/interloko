@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic contains callable(<integer>) => <integer>
+
+// A callable's signature fixes its register kinds, so an `<i32>` parameter
+// does not stand in for an `<integer>` one, even though `<i32>` values are
+// integers: callers could pass integers outside its range.
+define function main() => <integer>
+  let f :: callable(<integer>) => <integer> = function (x :: <i32>) => <integer> x end;
+  f(5)
+end;
