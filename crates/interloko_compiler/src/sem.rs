@@ -13,7 +13,8 @@ use crate::promotion;
 use crate::syntax::Span;
 
 pub use interloko_model::{
-    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
+    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, LimitedInteger, MethodId, Number32,
+    OBJECT_CLASS_ID, SingleFloatBits, SlotId,
 };
 pub use interloko_runtime::FloatFunction;
 
@@ -100,6 +101,12 @@ pub enum ValueKind {
     I64,
     /// IEEE 754 binary64 float value corresponding to source `<float>`.
     F64,
+    /// `<i32>` integer: an `<integer>` known to fit in 32 signed bits.
+    I32,
+    /// `<u32>` integer: an `<integer>` known to fit in 32 unsigned bits.
+    U32,
+    /// IEEE 754 binary32 float value, source `<single-float>`.
+    F32,
     /// Boolean value.
     Bool,
     /// Runtime string object.
@@ -129,6 +136,18 @@ pub enum ValueKind {
     KnownCallable(KnownCallable),
     /// Invalid or unknown value.
     Error,
+}
+
+impl ValueKind {
+    /// Returns whether this is an unboxed number: `<integer>`, `<i32>`,
+    /// `<u32>`, `<double-float>` or `<single-float>`.
+    #[must_use]
+    pub const fn is_number(self) -> bool {
+        matches!(
+            self,
+            Self::I64 | Self::F64 | Self::I32 | Self::U32 | Self::F32
+        )
+    }
 }
 
 /// Callable argument and result categories carried by a typed callable value.
@@ -355,6 +374,12 @@ pub enum HostValueKind {
     Integer,
     /// IEEE 754 binary64 float.
     Float,
+    /// `<i32>` integer.
+    I32,
+    /// `<u32>` integer.
+    U32,
+    /// IEEE 754 binary32 float, `<single-float>`.
+    SingleFloat,
     /// Boolean value.
     Boolean,
     /// Owned UTF-8 string value.
@@ -638,6 +663,9 @@ impl Module {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::DoubleFloat,
             } => Some(ValueKind::F64),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::SingleFloat,
+            } => Some(ValueKind::F32),
             // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
@@ -672,8 +700,12 @@ impl Module {
             | ValueKind::String(class)
             | ValueKind::Symbol(class)
             | ValueKind::Vector(class) => Some(class),
-            ValueKind::I64 => self.builtin_value_class(BuiltinValueClass::Integer),
+            // `<i32>` and `<u32>` are limited `<integer>` types, not classes.
+            ValueKind::I64 | ValueKind::I32 | ValueKind::U32 => {
+                self.builtin_value_class(BuiltinValueClass::Integer)
+            }
             ValueKind::F64 => self.builtin_value_class(BuiltinValueClass::DoubleFloat),
+            ValueKind::F32 => self.builtin_value_class(BuiltinValueClass::SingleFloat),
             ValueKind::ClassObject(_) => self.builtin_value_class(BuiltinValueClass::Class),
             ValueKind::GenericFunctionObject(_) => {
                 self.builtin_value_class(BuiltinValueClass::GenericFunction)
@@ -702,6 +734,7 @@ impl Module {
         match expr {
             Expr::ConstI64 { .. } => ValueKind::I64,
             Expr::ConstF64 { .. } => ValueKind::F64,
+            Expr::Const32 { value, .. } => number32_kind(*value),
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
             Expr::Convert { to, .. } => to.value_kind(),
             Expr::FloatCall { builtin, .. } => builtin.result_kind(),
@@ -799,6 +832,75 @@ fn generic_param_boxes_scalars_in<'a>(
         .filter(|(method_generic, _)| *method_generic == generic.id)
         .filter_map(|(_, specializers)| specializers.get(index).copied().flatten())
         .any(|class| class == OBJECT_CLASS_ID || is_scalar_value_class_in(classes, class))
+}
+
+/// Returns the value category of a limited integer type.
+const fn limited_integer_kind(limited: LimitedInteger) -> ValueKind {
+    match limited {
+        LimitedInteger::I32 => ValueKind::I32,
+        LimitedInteger::U32 => ValueKind::U32,
+    }
+}
+
+/// Returns the value category of a 32-bit constant.
+const fn number32_kind(value: Number32) -> ValueKind {
+    match value {
+        Number32::I32(_) => ValueKind::I32,
+        Number32::U32(_) => ValueKind::U32,
+        Number32::F32(_) => ValueKind::F32,
+    }
+}
+
+/// Gives an unsuffixed numeric literal the 32-bit type its context expects.
+///
+/// Literals are untyped until their context says otherwise: an integer
+/// literal expected as an `<i32>` or `<u32>` becomes one when its value is a
+/// member of that type, and a float literal expected as a `<single-float>`
+/// becomes the nearest binary32 value unless that overflows. Anything else
+/// is returned unchanged, so the ordinary type check still reports it.
+fn adapt_literal(expr: Expr, expected: Option<&[ValueKind]>) -> Expr {
+    let Some(&[expected]) = expected else {
+        return expr;
+    };
+    let adapted = match (&expr, expected) {
+        (Expr::ConstI64 { value, .. }, ValueKind::I32) => {
+            i32::try_from(*value).ok().map(Number32::I32)
+        }
+        (Expr::ConstI64 { value, .. }, ValueKind::U32) => {
+            u32::try_from(*value).ok().map(Number32::U32)
+        }
+        (Expr::ConstF64 { value, .. }, ValueKind::F32) => {
+            // Narrowing rounds to nearest. Literal text is decimal, so this
+            // can differ from rounding the text directly to binary32 only in
+            // double-rounding corner cases, which an `f32` suffix avoids.
+            let single = value.to_f64() as f32;
+            single
+                .is_finite()
+                .then_some(Number32::F32(SingleFloatBits::from_f32(single)))
+        }
+        _ => None,
+    };
+    match adapted {
+        Some(value) => Expr::Const32 {
+            value,
+            span: expr.span(),
+        },
+        None => expr,
+    }
+}
+
+/// Adapts each literal argument to its parameter's expected kind; see
+/// [`adapt_literal`].
+fn adapt_literal_args<'a>(
+    args: &mut [Expr],
+    expected: impl IntoIterator<Item = Option<&'a ValueKind>>,
+) {
+    for (arg, expected) in args.iter_mut().zip(expected) {
+        if let Some(expected) = expected {
+            let literal = core::mem::replace(arg, Expr::Error { span: arg.span() });
+            *arg = adapt_literal(literal, Some(core::slice::from_ref(expected)));
+        }
+    }
 }
 
 /// Builds the body of a numeric generic's method from the promotion rules,
@@ -1745,6 +1847,13 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// `<i32>`, `<u32>` or `<single-float>` constant.
+    Const32 {
+        /// Constant value; floats compare by bit pattern.
+        value: Number32,
+        /// Source span.
+        span: Span,
+    },
     /// Boolean constant.
     ConstBool {
         /// Constant value.
@@ -2131,6 +2240,7 @@ impl Expr {
         match self {
             Self::ConstI64 { span, .. }
             | Self::ConstF64 { span, .. }
+            | Self::Const32 { span, .. }
             | Self::ConstBool { span, .. }
             | Self::StringLiteral { span, .. }
             | Self::SymbolLiteral { span, .. }
@@ -2562,6 +2672,9 @@ impl Lowering {
         match kind {
             HostValueKind::Integer => ValueKind::I64,
             HostValueKind::Float => ValueKind::F64,
+            HostValueKind::I32 => ValueKind::I32,
+            HostValueKind::U32 => ValueKind::U32,
+            HostValueKind::SingleFloat => ValueKind::F32,
             HostValueKind::Boolean => ValueKind::Bool,
             HostValueKind::String => ValueKind::String(
                 self.builtin_value_class(BuiltinValueClass::String)
@@ -2895,13 +3008,16 @@ impl Lowering {
                     continue;
                 };
                 let mut ctx = FunctionContext::new();
-                let value = self.lower_expr(&mut ctx, init_value);
-                self.diagnostics.extend(ctx.diagnostics);
                 let slot_kind = self
                     .classes
                     .get(lowered_class_index)
                     .and_then(|class| class.direct_slots.get(slot_index))
                     .map_or(ValueKind::Error, |slot| slot.kind);
+                let value = adapt_literal(
+                    self.lower_expr(&mut ctx, init_value),
+                    Some(core::slice::from_ref(&slot_kind)),
+                );
+                self.diagnostics.extend(ctx.diagnostics);
                 let value_kind = self.expr_kind(&value);
                 if !self.kinds_match(slot_kind, value_kind) {
                     self.diagnostics.push(
@@ -3138,6 +3254,9 @@ impl Lowering {
                             | ValueKind::Symbol(_)
                             | ValueKind::I64
                             | ValueKind::F64
+                            | ValueKind::I32
+                            | ValueKind::U32
+                            | ValueKind::F32
                             | ValueKind::Vector(_)
                             | ValueKind::Error
                     )
@@ -3349,10 +3468,8 @@ impl Lowering {
     /// number.
     fn dispatches_numerically(kinds: &[ValueKind]) -> bool {
         kinds.iter().all(|kind| {
-            matches!(
-                kind,
-                ValueKind::I64 | ValueKind::F64 | ValueKind::Any | ValueKind::Object(_)
-            )
+            NumericKind::of(*kind).is_some()
+                || matches!(kind, ValueKind::Any | ValueKind::Object(_))
         }) && kinds.iter().any(|kind| NumericKind::of(*kind).is_none())
     }
 
@@ -4578,11 +4695,21 @@ impl Lowering {
         expected_results: Option<&[ValueKind]>,
     ) -> Expr {
         match expr {
-            ast::Expr::Number { value, span, .. } => Expr::ConstI64 {
-                value: *value,
-                span: *span,
-            },
-            ast::Expr::Float { value, span, .. } => Expr::ConstF64 {
+            ast::Expr::Number { value, span, .. } => adapt_literal(
+                Expr::ConstI64 {
+                    value: *value,
+                    span: *span,
+                },
+                expected_results,
+            ),
+            ast::Expr::Float { value, span, .. } => adapt_literal(
+                Expr::ConstF64 {
+                    value: *value,
+                    span: *span,
+                },
+                expected_results,
+            ),
+            ast::Expr::Number32 { value, span, .. } => Expr::Const32 {
                 value: *value,
                 span: *span,
             },
@@ -4684,7 +4811,7 @@ impl Lowering {
                         *span,
                     );
                 }
-                let lowered_args: Vec<_> =
+                let mut lowered_args: Vec<_> =
                     args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
                 if callee == "class-of" {
                     if args.len() == 1 {
@@ -4707,6 +4834,7 @@ impl Lowering {
                 }
                 if let Some(symbol) = self.resolve_function(callee) {
                     if symbol.arity() == args.len() {
+                        adapt_literal_args(&mut lowered_args, symbol.param_kinds.iter().map(Some));
                         for (index, (arg, expected)) in
                             lowered_args.iter().zip(&symbol.param_kinds).enumerate()
                         {
@@ -4788,6 +4916,10 @@ impl Lowering {
                 }
                 if let Some(function) = self.resolve_host_function(callee).cloned() {
                     if function.param_kinds.len() == args.len() {
+                        adapt_literal_args(
+                            &mut lowered_args,
+                            function.param_kinds.iter().map(Some),
+                        );
                         for (index, (arg, expected)) in
                             lowered_args.iter().zip(&function.param_kinds).enumerate()
                         {
@@ -4836,15 +4968,19 @@ impl Lowering {
                 }
                 if let Some(symbol) = self.resolve_generic(callee) {
                     if symbol.arity() == args.len() {
+                        adapt_literal_args(
+                            &mut lowered_args,
+                            symbol.param_kinds.iter().map(Option::as_ref),
+                        );
                         for (index, (arg, expected)) in
                             lowered_args.iter().zip(&symbol.param_kinds).enumerate()
                         {
                             let actual = self.expr_kind(arg);
-                            let boxed_scalar = NumericKind::of(actual).is_some()
+                            let boxed_scalar = actual.is_number()
                                 && self.generic_param_boxes_scalars(symbol.id, index);
-                            let Some(expected) = expected.or_else(|| {
-                                NumericKind::of(actual).is_some().then_some(ValueKind::Any)
-                            }) else {
+                            let Some(expected) =
+                                expected.or_else(|| actual.is_number().then_some(ValueKind::Any))
+                            else {
                                 continue;
                             };
                             if !boxed_scalar && !self.generic_argument_matches(expected, actual) {
@@ -5510,6 +5646,9 @@ impl Lowering {
                 ValueKind::Any
                     | ValueKind::I64
                     | ValueKind::F64
+                    | ValueKind::I32
+                    | ValueKind::U32
+                    | ValueKind::F32
                     | ValueKind::String(_)
                     | ValueKind::Symbol(_)
                     | ValueKind::Vector(_)
@@ -6298,6 +6437,9 @@ impl Lowering {
             | ValueKind::Vector(_)
             | ValueKind::I64
             | ValueKind::F64
+            | ValueKind::I32
+            | ValueKind::U32
+            | ValueKind::F32
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -6369,6 +6511,9 @@ impl Lowering {
             | ValueKind::Vector(_)
             | ValueKind::I64
             | ValueKind::F64
+            | ValueKind::I32
+            | ValueKind::U32
+            | ValueKind::F32
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -6474,7 +6619,10 @@ impl Lowering {
                 );
                 continue;
             };
-            let value = self.lower_expr(ctx, &field.value);
+            let value = adapt_literal(
+                self.lower_expr(ctx, &field.value),
+                Some(core::slice::from_ref(&slot.kind)),
+            );
             let value_kind = self.expr_kind(&value);
             if !self.kinds_match(slot.kind, value_kind) {
                 ctx.diagnostics.push(
@@ -6607,6 +6755,7 @@ impl Lowering {
             );
             return Expr::Error { span };
         }
+        let value = adapt_literal(value, Some(core::slice::from_ref(&slot.kind)));
         let value_kind = self.expr_kind(&value);
         if !self.kinds_match(slot.kind, value_kind) {
             ctx.diagnostics.push(
@@ -6709,6 +6858,7 @@ impl Lowering {
             Expr::Convert { to, .. } => to.value_kind(),
             Expr::FloatCall { builtin, .. } => builtin.result_kind(),
             Expr::ConstF64 { .. } => ValueKind::F64,
+            Expr::Const32 { value, .. } => number32_kind(*value),
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
             Expr::VectorLiteral { class, .. } => ValueKind::Vector(*class),
@@ -6917,6 +7067,9 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::DoubleFloat,
             } => Some(ValueKind::F64),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::SingleFloat,
+            } => Some(ValueKind::F32),
             // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
@@ -6944,8 +7097,12 @@ impl Lowering {
             ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
                 Some(class)
             }
-            ValueKind::I64 => self.builtin_value_class(BuiltinValueClass::Integer),
+            // `<i32>` and `<u32>` are limited `<integer>` types, not classes.
+            ValueKind::I64 | ValueKind::I32 | ValueKind::U32 => {
+                self.builtin_value_class(BuiltinValueClass::Integer)
+            }
             ValueKind::F64 => self.builtin_value_class(BuiltinValueClass::DoubleFloat),
+            ValueKind::F32 => self.builtin_value_class(BuiltinValueClass::SingleFloat),
             ValueKind::Object(class) => Some(class),
             ValueKind::ClassObject(_) => self.builtin_value_class(BuiltinValueClass::Class),
             ValueKind::GenericFunctionObject(_) => {
@@ -7128,8 +7285,11 @@ impl Lowering {
     /// An abstract numeric specializer such as `<real>` covers integers and
     /// floats, which have different unboxed representations. The parameter
     /// keeps the generic's scalar kind when the generic fixes one (a `<real>`
-    /// method on a `<float>` generic receives an f64); otherwise it receives
-    /// the boxed `<object>` value that dispatch already classified.
+    /// method on a `<double-float>` generic receives an f64); otherwise it
+    /// receives the boxed `<object>` value that dispatch already classified.
+    ///
+    /// A limited type such as `<u32>` is not a class, so it can only restate
+    /// the generic's own parameter type; it then specializes on `<integer>`.
     fn resolve_method_specializer(
         &mut self,
         param: &ast::MethodParam,
@@ -7137,6 +7297,17 @@ impl Lowering {
     ) -> (MethodSpecializer, ValueKind) {
         if param.class_name == "<object>" {
             return (Some(OBJECT_CLASS_ID), ValueKind::Any);
+        }
+        if let Some(limited) = LimitedInteger::from_name(&param.class_name) {
+            let kind = limited_integer_kind(limited);
+            if generic_kind != Some(kind) {
+                self.diagnostics.push(
+                    Diagnostic::error(param.span, DiagnosticCode::LimitedTypeSpecializer)
+                        .with_arg(DiagnosticArg::text("type", limited.name())),
+                );
+                return (Some(ClassId(u32::MAX)), ValueKind::Error);
+            }
+            return (self.builtin_value_class(BuiltinValueClass::Integer), kind);
         }
         let Some(class) = self.resolve_class(&param.class_name) else {
             self.diagnostics.push(
@@ -7146,15 +7317,20 @@ impl Lowering {
             return (Some(ClassId(u32::MAX)), ValueKind::Error);
         };
         let (class_id, origin) = (class.id, class.origin);
+        // A numeric specializer on a generic that fixes a scalar kind sees
+        // that kind: an `<integer>` method on an `<i32>` generic gets the
+        // `<i32>`.
+        if let ClassOrigin::BuiltinValue { kind } = origin
+            && kind.is_numeric()
+            && let Some(scalar) = generic_kind.filter(|kind| kind.is_number())
+        {
+            return (Some(class_id), scalar);
+        }
         if let ClassOrigin::BuiltinValue { kind } = origin
             && kind.is_numeric()
             && self.kind_for_builtin_class(class_id).is_none()
         {
-            let kind = match generic_kind {
-                Some(scalar @ (ValueKind::I64 | ValueKind::F64)) => scalar,
-                _ => ValueKind::Any,
-            };
-            return (Some(class_id), kind);
+            return (Some(class_id), ValueKind::Any);
         }
         let kind = self
             .kind_for_builtin_class(class_id)
@@ -7200,6 +7376,9 @@ impl Lowering {
                 .map_or(ValueKind::Error, ValueKind::Symbol),
             "<integer>" => ValueKind::I64,
             "<double-float>" => ValueKind::F64,
+            "<single-float>" => ValueKind::F32,
+            "<i32>" => ValueKind::I32,
+            "<u32>" => ValueKind::U32,
             "<number>" | "<real>" | "<rational>" | "<float>" => {
                 diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::AbstractNumericTypeUnsupported)
@@ -7249,6 +7428,12 @@ impl Lowering {
                 .value_kind_class(actual)
                 .is_some_and(|actual| matches!(expected, ValueKind::Object(expected) if self.is_same_or_subclass(actual, expected)))
             || expected == actual
+            // `<i32>` and `<u32>` are subtypes of `<integer>`; they widen
+            // exactly.
+            || matches!(
+                (expected, actual),
+                (ValueKind::I64, ValueKind::I32 | ValueKind::U32)
+            )
             || matches!(expected, ValueKind::Error)
             || matches!(actual, ValueKind::Error)
     }
@@ -7270,9 +7455,10 @@ impl Lowering {
             // A scalar argument reaches every method specialized on its
             // class or a superclass, such as `<float>` or `<real>` for an
             // f64.
-            ValueKind::I64 | ValueKind::F64 => self
-                .value_kind_class(expected)
-                .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
+            ValueKind::I64 | ValueKind::F64 | ValueKind::I32 | ValueKind::U32 | ValueKind::F32 => {
+                self.value_kind_class(expected)
+                    .is_some_and(|class| self.is_same_or_subclass(class, specializer))
+            }
             ValueKind::Bool
             | ValueKind::Callable
             | ValueKind::ClassObject(_)
@@ -7314,8 +7500,11 @@ impl Lowering {
                 actual,
                 ValueKind::Callable | ValueKind::KnownCallable(_) | ValueKind::Error
             ),
-            ValueKind::I64
-            | ValueKind::F64
+            ValueKind::I64 => matches!(actual, ValueKind::I64 | ValueKind::I32 | ValueKind::U32),
+            ValueKind::F64
+            | ValueKind::I32
+            | ValueKind::U32
+            | ValueKind::F32
             | ValueKind::Bool
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
@@ -7338,6 +7527,9 @@ impl Lowering {
             ValueKind::Any => "<object>".into(),
             ValueKind::I64 => "<integer>".into(),
             ValueKind::F64 => "<double-float>".into(),
+            ValueKind::I32 => "<i32>".into(),
+            ValueKind::U32 => "<u32>".into(),
+            ValueKind::F32 => "<single-float>".into(),
             ValueKind::Bool => "<boolean>".into(),
             ValueKind::Callable => "<callable>".into(),
             ValueKind::String(_) => "<string>".into(),

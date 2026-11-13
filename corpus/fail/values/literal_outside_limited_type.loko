@@ -1,0 +1,9 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.local-type-mismatch
+// expect: diagnostic contains expects <u32>
+
+// An unsuffixed literal becomes a `<u32>` only when its value is in range.
+define function main() => <u32>
+  let level :: <u32> = -1;
+  level
+end;

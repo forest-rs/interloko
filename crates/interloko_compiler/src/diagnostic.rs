@@ -48,6 +48,8 @@ pub enum DiagnosticCode {
     AstIntegerLiteralOutOfRange,
     /// A float literal is too large to be represented as a finite `f64`.
     AstFloatLiteralOutOfRange,
+    /// A literal with an integer type suffix has a fraction or exponent.
+    AstLiteralSuffixMismatch,
     /// A string literal is unterminated or contains an unsupported escape.
     AstMalformedStringLiteral,
     /// A slot option is missing its keyword value.
@@ -134,6 +136,8 @@ pub enum DiagnosticCode {
     IntegerDivisionUnsupported,
     /// An abstract numeric class such as `<real>` was used as a value type.
     AbstractNumericTypeUnsupported,
+    /// A method specializes on a limited type its generic does not declare.
+    LimitedTypeSpecializer,
     /// A comparison operand is not a number.
     ComparisonOperandTypeMismatch,
     /// `apply` is missing its callable target.
@@ -232,6 +236,7 @@ impl DiagnosticCode {
         Self::SyntaxExpectedToken,
         Self::AstIntegerLiteralOutOfRange,
         Self::AstFloatLiteralOutOfRange,
+        Self::AstLiteralSuffixMismatch,
         Self::AstMalformedStringLiteral,
         Self::AstSlotOptionRequiresKeyword,
         Self::AstSlotInitValueRequiresExpression,
@@ -275,6 +280,7 @@ impl DiagnosticCode {
         Self::ArithmeticOperandTypeMismatch,
         Self::IntegerDivisionUnsupported,
         Self::AbstractNumericTypeUnsupported,
+        Self::LimitedTypeSpecializer,
         Self::ComparisonOperandTypeMismatch,
         Self::ApplyArityMismatch,
         Self::ApplyTargetTypeMismatch,
@@ -330,6 +336,7 @@ impl DiagnosticCode {
             Self::SyntaxExpectedToken => "syntax.expected-token",
             Self::AstIntegerLiteralOutOfRange => "ast.integer-literal-out-of-range",
             Self::AstFloatLiteralOutOfRange => "ast.float-literal-out-of-range",
+            Self::AstLiteralSuffixMismatch => "ast.literal-suffix-mismatch",
             Self::AstMalformedStringLiteral => "ast.malformed-string-literal",
             Self::AstSlotOptionRequiresKeyword => "ast.slot-option-requires-keyword",
             Self::AstSlotInitValueRequiresExpression => "ast.slot-init-value-requires-expression",
@@ -375,6 +382,7 @@ impl DiagnosticCode {
             Self::ArithmeticOperandTypeMismatch => "sem.arithmetic-operand-type-mismatch",
             Self::IntegerDivisionUnsupported => "sem.integer-division-unsupported",
             Self::AbstractNumericTypeUnsupported => "sem.abstract-numeric-type-unsupported",
+            Self::LimitedTypeSpecializer => "sem.limited-type-specializer",
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
@@ -431,6 +439,7 @@ impl DiagnosticCode {
             "syntax.expected-token" => Self::SyntaxExpectedToken,
             "ast.integer-literal-out-of-range" => Self::AstIntegerLiteralOutOfRange,
             "ast.float-literal-out-of-range" => Self::AstFloatLiteralOutOfRange,
+            "ast.literal-suffix-mismatch" => Self::AstLiteralSuffixMismatch,
             "ast.malformed-string-literal" => Self::AstMalformedStringLiteral,
             "ast.slot-option-requires-keyword" => Self::AstSlotOptionRequiresKeyword,
             "ast.slot-init-value-requires-expression" => Self::AstSlotInitValueRequiresExpression,
@@ -476,6 +485,7 @@ impl DiagnosticCode {
             "sem.arithmetic-operand-type-mismatch" => Self::ArithmeticOperandTypeMismatch,
             "sem.integer-division-unsupported" => Self::IntegerDivisionUnsupported,
             "sem.abstract-numeric-type-unsupported" => Self::AbstractNumericTypeUnsupported,
+            "sem.limited-type-specializer" => Self::LimitedTypeSpecializer,
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,

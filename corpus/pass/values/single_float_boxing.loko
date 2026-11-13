@@ -1,0 +1,36 @@
+// expect: run 1.5f32
+// expect: diagnostics 0
+// expect: dump tape contains interloko.box_value
+// expect: dump lowered contains kind#dispatch
+
+// `<single-float>` values live in slots and box to `<object>` with their
+// format intact, so dispatch still sees a `<single-float>`, which is a
+// `<float>` but not a `<double-float>`.
+define class <pixel> (<object>)
+  slot alpha :: <single-float>;
+  slot raw;
+end;
+
+define generic kind(x);
+
+define method kind(x :: <single-float>) => <single-float>
+  x
+end;
+
+define method kind(x :: <double-float>) => <single-float>
+  0.0f32
+end;
+
+define method kind(x :: <object>) => <single-float>
+  -1.0f32
+end;
+
+define function main() => <single-float>
+  let pixel = make(<pixel>, alpha: 1.5, raw: 1.5f32);
+  let boxed :: <object> = pixel.alpha;
+  if instance?(pixel.raw, <float>) then
+    if instance?(pixel.raw, <double-float>) then -2.0f32 else kind(boxed) end
+  else
+    -3.0f32
+  end
+end;

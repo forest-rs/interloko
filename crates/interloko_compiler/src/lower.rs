@@ -56,6 +56,12 @@ pub enum ValueKind {
     I64,
     /// IEEE 754 binary64 float value.
     F64,
+    /// `<i32>` integer value.
+    I32,
+    /// `<u32>` integer value.
+    U32,
+    /// IEEE 754 binary32 float value.
+    F32,
     /// Unsigned integer value used by runtime metadata.
     U64,
     /// Boolean value used by control-flow conditions.
@@ -421,6 +427,261 @@ impl F64UnaryOp {
     }
 }
 
+/// One-operand instruction of `execution_tape`'s `0xFD` prefix: 32-bit
+/// float operations and the conversions to and from 32-bit values.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Num32UnaryOp {
+    /// `f32.neg`: Sign-bit negation.
+    F32Neg,
+    /// `f32.abs`: Sign-bit clear.
+    F32Abs,
+    /// `f32.floor`: Round toward negative infinity.
+    F32Floor,
+    /// `f32.ceil`: Round toward positive infinity.
+    F32Ceil,
+    /// `f32.trunc`: Round toward zero.
+    F32Trunc,
+    /// `f32.nearest`: Round to nearest, ties to even.
+    F32Nearest,
+    /// `f32.sqrt`: Correctly rounded square root.
+    F32Sqrt,
+    /// `i32.to_i64`: Sign extension; exact.
+    I32ToI64,
+    /// `u32.to_i64`: Zero extension; exact.
+    U32ToI64,
+    /// `i64.to_i32`: Narrowing; traps unless the value fits.
+    I64ToI32,
+    /// `i64.to_u64_wrap`: Reinterprets the bits as unsigned.
+    I64ToU64Wrap,
+    /// `u64.to_u32`: Narrowing; traps unless the value fits.
+    U64ToU32,
+    /// `i32.to_u32`: Sign change; traps on a negative value.
+    I32ToU32,
+    /// `u32.to_i32`: Sign change; traps above `i32::MAX`.
+    U32ToI32,
+    /// `f32.to_f64`: Widening; exact.
+    F32ToF64,
+    /// `f64.to_f32`: Narrowing; rounds to nearest, ties to even.
+    F64ToF32,
+    /// `f32.to_i32`: Truncation; traps on NaN, infinities and out-of-range values.
+    F32ToI32,
+    /// `f32.to_u32`: Truncation; traps on NaN, infinities and out-of-range values.
+    F32ToU32,
+    /// `f64.to_i32`: Truncation; traps on NaN, infinities and out-of-range values.
+    F64ToI32,
+    /// `f64.to_u32`: Truncation; traps on NaN, infinities and out-of-range values.
+    F64ToU32,
+    /// `i32.to_f32`: Rounds to nearest, ties to even.
+    I32ToF32,
+    /// `u32.to_f32`: Rounds to nearest, ties to even.
+    U32ToF32,
+    /// `i64.to_f32`: Rounds once to nearest, ties to even.
+    I64ToF32,
+    /// `i32.to_f64`: Exact.
+    I32ToF64,
+    /// `u32.to_f64`: Exact.
+    U32ToF64,
+}
+
+impl Num32UnaryOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::F32Neg => "f32.neg",
+            Self::F32Abs => "f32.abs",
+            Self::F32Floor => "f32.floor",
+            Self::F32Ceil => "f32.ceil",
+            Self::F32Trunc => "f32.trunc",
+            Self::F32Nearest => "f32.nearest",
+            Self::F32Sqrt => "f32.sqrt",
+            Self::I32ToI64 => "i32.to_i64",
+            Self::U32ToI64 => "u32.to_i64",
+            Self::I64ToI32 => "i64.to_i32",
+            Self::I64ToU64Wrap => "i64.to_u64_wrap",
+            Self::U64ToU32 => "u64.to_u32",
+            Self::I32ToU32 => "i32.to_u32",
+            Self::U32ToI32 => "u32.to_i32",
+            Self::F32ToF64 => "f32.to_f64",
+            Self::F64ToF32 => "f64.to_f32",
+            Self::F32ToI32 => "f32.to_i32",
+            Self::F32ToU32 => "f32.to_u32",
+            Self::F64ToI32 => "f64.to_i32",
+            Self::F64ToU32 => "f64.to_u32",
+            Self::I32ToF32 => "i32.to_f32",
+            Self::U32ToF32 => "u32.to_f32",
+            Self::I64ToF32 => "i64.to_f32",
+            Self::I32ToF64 => "i32.to_f64",
+            Self::U32ToF64 => "u32.to_f64",
+        }
+    }
+}
+
+/// Two-operand `i32`, `u32` or `f32` instruction of `execution_tape`'s
+/// `0xFD` prefix. Comparisons write a `bool`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Num32BinaryOp {
+    /// `i32.add`: Wrapping addition.
+    I32Add,
+    /// `i32.sub`: Wrapping subtraction.
+    I32Sub,
+    /// `i32.mul`: Wrapping multiplication.
+    I32Mul,
+    /// `i32.and`: Bitwise and.
+    I32And,
+    /// `i32.or`: Bitwise or.
+    I32Or,
+    /// `i32.xor`: Bitwise exclusive or.
+    I32Xor,
+    /// `i32.shl`: Left shift by the count masked to 0..=31.
+    I32Shl,
+    /// `i32.shr`: Arithmetic right shift by the count masked to 0..=31.
+    I32Shr,
+    /// `i32.eq`: Equality.
+    I32Eq,
+    /// `i32.lt`: Less than.
+    I32Lt,
+    /// `i32.gt`: Greater than.
+    I32Gt,
+    /// `i32.le`: Less than or equal.
+    I32Le,
+    /// `i32.ge`: Greater than or equal.
+    I32Ge,
+    /// `u32.add`: Wrapping addition.
+    U32Add,
+    /// `u32.sub`: Wrapping subtraction.
+    U32Sub,
+    /// `u32.mul`: Wrapping multiplication.
+    U32Mul,
+    /// `u32.and`: Bitwise and.
+    U32And,
+    /// `u32.or`: Bitwise or.
+    U32Or,
+    /// `u32.xor`: Bitwise exclusive or.
+    U32Xor,
+    /// `u32.shl`: Left shift by the count masked to 0..=31.
+    U32Shl,
+    /// `u32.shr`: Logical right shift by the count masked to 0..=31.
+    U32Shr,
+    /// `u32.eq`: Equality.
+    U32Eq,
+    /// `u32.lt`: Less than.
+    U32Lt,
+    /// `u32.gt`: Greater than.
+    U32Gt,
+    /// `u32.le`: Less than or equal.
+    U32Le,
+    /// `u32.ge`: Greater than or equal.
+    U32Ge,
+    /// `f32.add`: Addition.
+    F32Add,
+    /// `f32.sub`: Subtraction.
+    F32Sub,
+    /// `f32.mul`: Multiplication.
+    F32Mul,
+    /// `f32.div`: Division; never traps.
+    F32Div,
+    /// `f32.rem`: Truncated remainder with the sign of `a`.
+    F32Rem,
+    /// `f32.min`: NaN-propagating minimum.
+    F32Min,
+    /// `f32.max`: NaN-propagating maximum.
+    F32Max,
+    /// `f32.eq`: Equality; false for NaN.
+    F32Eq,
+    /// `f32.ne`: Inequality; true for NaN.
+    F32Ne,
+    /// `f32.lt`: Less than.
+    F32Lt,
+    /// `f32.gt`: Greater than.
+    F32Gt,
+    /// `f32.le`: Less than or equal.
+    F32Le,
+    /// `f32.ge`: Greater than or equal.
+    F32Ge,
+}
+
+impl Num32BinaryOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::I32Add => "i32.add",
+            Self::I32Sub => "i32.sub",
+            Self::I32Mul => "i32.mul",
+            Self::I32And => "i32.and",
+            Self::I32Or => "i32.or",
+            Self::I32Xor => "i32.xor",
+            Self::I32Shl => "i32.shl",
+            Self::I32Shr => "i32.shr",
+            Self::I32Eq => "i32.eq",
+            Self::I32Lt => "i32.lt",
+            Self::I32Gt => "i32.gt",
+            Self::I32Le => "i32.le",
+            Self::I32Ge => "i32.ge",
+            Self::U32Add => "u32.add",
+            Self::U32Sub => "u32.sub",
+            Self::U32Mul => "u32.mul",
+            Self::U32And => "u32.and",
+            Self::U32Or => "u32.or",
+            Self::U32Xor => "u32.xor",
+            Self::U32Shl => "u32.shl",
+            Self::U32Shr => "u32.shr",
+            Self::U32Eq => "u32.eq",
+            Self::U32Lt => "u32.lt",
+            Self::U32Gt => "u32.gt",
+            Self::U32Le => "u32.le",
+            Self::U32Ge => "u32.ge",
+            Self::F32Add => "f32.add",
+            Self::F32Sub => "f32.sub",
+            Self::F32Mul => "f32.mul",
+            Self::F32Div => "f32.div",
+            Self::F32Rem => "f32.rem",
+            Self::F32Min => "f32.min",
+            Self::F32Max => "f32.max",
+            Self::F32Eq => "f32.eq",
+            Self::F32Ne => "f32.ne",
+            Self::F32Lt => "f32.lt",
+            Self::F32Gt => "f32.gt",
+            Self::F32Le => "f32.le",
+            Self::F32Ge => "f32.ge",
+        }
+    }
+}
+
+/// Overflow-reporting `i32` or `u32` arithmetic of `execution_tape`'s
+/// `0xFD` prefix.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Num32CheckedOp {
+    /// `i32.add_ovf`: Signed addition writing the wrapped result and an overflow flag.
+    I32AddOvf,
+    /// `i32.sub_ovf`: Signed subtraction writing the wrapped result and an overflow flag.
+    I32SubOvf,
+    /// `i32.mul_ovf`: Signed multiplication writing the wrapped result and an overflow flag.
+    I32MulOvf,
+    /// `u32.add_ovf`: Unsigned addition writing the wrapped result and an overflow flag.
+    U32AddOvf,
+    /// `u32.sub_ovf`: Unsigned subtraction writing the wrapped result and an overflow flag.
+    U32SubOvf,
+    /// `u32.mul_ovf`: Unsigned multiplication writing the wrapped result and an overflow flag.
+    U32MulOvf,
+}
+
+impl Num32CheckedOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::I32AddOvf => "i32.add_ovf",
+            Self::I32SubOvf => "i32.sub_ovf",
+            Self::I32MulOvf => "i32.mul_ovf",
+            Self::U32AddOvf => "u32.add_ovf",
+            Self::U32SubOvf => "u32.sub_ovf",
+            Self::U32MulOvf => "u32.mul_ovf",
+        }
+    }
+}
+
 /// A lowered function signature and body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
@@ -495,6 +756,55 @@ pub enum Instr {
         dst: Register,
         /// Constant value, compared by bit pattern.
         value: sem::FloatBits,
+        /// Source span.
+        span: Span,
+    },
+    /// `<i32>`, `<u32>` or `<single-float>` constant.
+    Const32 {
+        /// Destination register.
+        dst: Register,
+        /// Constant value; floats compare by bit pattern.
+        value: sem::Number32,
+        /// Source span.
+        span: Span,
+    },
+    /// One-operand `0xFD` instruction: 32-bit float math or a conversion.
+    Num32Unary {
+        /// Destination register.
+        dst: Register,
+        /// Operation.
+        op: Num32UnaryOp,
+        /// Operand register.
+        src: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Two-operand `i32`, `u32` or `f32` instruction.
+    Num32Binary {
+        /// Destination register.
+        dst: Register,
+        /// Operation.
+        op: Num32BinaryOp,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// 32-bit integer arithmetic writing the wrapped result and whether the
+    /// exact result left the type's range.
+    Num32Checked {
+        /// Destination register for the wrapped result.
+        dst: Register,
+        /// Destination `bool` register set when the result overflowed.
+        overflow: Register,
+        /// Operation.
+        op: Num32CheckedOp,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
         /// Source span.
         span: Span,
     },
@@ -2004,6 +2314,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         }
         sem::Expr::ConstI64 { .. }
         | sem::Expr::ConstF64 { .. }
+        | sem::Expr::Const32 { .. }
         | sem::Expr::ConstBool { .. }
         | sem::Expr::StringLiteral { .. }
         | sem::Expr::SymbolLiteral { .. }
@@ -2903,8 +3214,12 @@ impl<'module> BodyLowering<'module> {
             return Ok(());
         }
 
-        if let Some(scalar @ (sem::ValueKind::I64 | sem::ValueKind::F64)) =
-            generic.param_kinds.get(index).copied().flatten()
+        if let Some(scalar) = generic
+            .param_kinds
+            .get(index)
+            .copied()
+            .flatten()
+            .filter(|kind| kind.is_number())
         {
             let label = if is_scalar_value_class(self.module, value_kind(scalar)?, specializer) {
                 labels.success
@@ -2983,6 +3298,19 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::ConstF64 { value, span } => {
                 let result = self.alloc(ValueKind::F64);
                 self.instructions.push(Instr::ConstF64 {
+                    dst: result.reg,
+                    value: *value,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::Const32 { value, span } => {
+                let result = self.alloc(match value {
+                    sem::Number32::I32(_) => ValueKind::I32,
+                    sem::Number32::U32(_) => ValueKind::U32,
+                    sem::Number32::F32(_) => ValueKind::F32,
+                });
+                self.instructions.push(Instr::Const32 {
                     dst: result.reg,
                     value: *value,
                     span: *span,
@@ -3250,7 +3578,7 @@ impl<'module> BodyLowering<'module> {
             } => {
                 let object = self.lower_expr(object)?;
                 let result = self.alloc(ValueKind::ClassObject(Some(*class)));
-                if matches!(object.kind, ValueKind::I64 | ValueKind::F64) {
+                if is_unboxed_number(object.kind) {
                     self.emit_class_meta_object(result.reg, *class, *span);
                 } else {
                     let class_id = self.alloc(ValueKind::U64);
@@ -3272,7 +3600,7 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::InstanceOf { value, class, span } => {
                 let value = self.lower_expr(value)?;
-                if matches!(value.kind, ValueKind::I64 | ValueKind::F64) {
+                if is_unboxed_number(value.kind) {
                     let result = self.alloc(ValueKind::Bool);
                     self.instructions.push(Instr::ConstBool {
                         dst: result.reg,
@@ -4520,6 +4848,18 @@ impl<'module> BodyLowering<'module> {
         if expected == ValueKind::Any {
             return self.box_any(value, span);
         }
+        // `<i32>` and `<u32>` are `<integer>`s: they widen exactly, and an
+        // `<integer>` narrows to them only when it is in range.
+        if expected == ValueKind::I64 && matches!(value.kind, ValueKind::I32 | ValueKind::U32) {
+            return Ok(self.widen_integer(value, span));
+        }
+        if value.kind == ValueKind::Any
+            && matches!(expected, ValueKind::I32 | ValueKind::U32)
+            && let Some(class) = scalar_concrete_class(self.module, expected)
+        {
+            let integer = self.unbox(value, class, ValueKind::I64, span);
+            return Ok(self.narrow_integer(integer, expected, span));
+        }
         if value.kind == ValueKind::Any
             && let Some(class) = scalar_concrete_class(self.module, expected)
         {
@@ -4559,6 +4899,12 @@ impl<'module> BodyLowering<'module> {
         if value.kind == ValueKind::Any {
             return Ok(value);
         }
+        // A boxed `<i32>` or `<u32>` is the `<integer>` it is.
+        let value = if matches!(value.kind, ValueKind::I32 | ValueKind::U32) {
+            self.widen_integer(value, span)
+        } else {
+            value
+        };
         if matches!(
             value.kind,
             ValueKind::U64 | ValueKind::Function(_) | ValueKind::Closure(_) | ValueKind::Aggregate
@@ -4575,6 +4921,45 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(boxed)
+    }
+
+    /// Emits one `0xFD` instruction with a single operand.
+    fn num32_unary(
+        &mut self,
+        op: Num32UnaryOp,
+        src: Register,
+        kind: ValueKind,
+        span: Span,
+    ) -> Value {
+        let result = self.alloc(kind);
+        self.instructions.push(Instr::Num32Unary {
+            dst: result.reg,
+            op,
+            src,
+            span,
+        });
+        result
+    }
+
+    /// Widens an `<i32>` or `<u32>` to the `<integer>` it is; exact.
+    fn widen_integer(&mut self, value: Value, span: Span) -> Value {
+        let op = match value.kind {
+            ValueKind::U32 => Num32UnaryOp::U32ToI64,
+            _ => Num32UnaryOp::I32ToI64,
+        };
+        self.num32_unary(op, value.reg, ValueKind::I64, span)
+    }
+
+    /// Narrows an `<integer>` to `<i32>` or `<u32>`, trapping unless the
+    /// value is in the type's range.
+    fn narrow_integer(&mut self, value: Value, to: ValueKind, span: Span) -> Value {
+        if to == ValueKind::I32 {
+            return self.num32_unary(Num32UnaryOp::I64ToI32, value.reg, ValueKind::I32, span);
+        }
+        // A negative `i64` reinterprets as an unsigned value of at least
+        // 2^63, which `u64.to_u32` rejects like any other out-of-range one.
+        let bits = self.num32_unary(Num32UnaryOp::I64ToU64Wrap, value.reg, ValueKind::U64, span);
+        self.num32_unary(Num32UnaryOp::U64ToU32, bits.reg, ValueKind::U32, span)
     }
 
     fn alloc(&mut self, kind: ValueKind) -> Value {
@@ -4984,6 +5369,9 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::Any => Ok(ValueKind::Any),
         sem::ValueKind::I64 => Ok(ValueKind::I64),
         sem::ValueKind::F64 => Ok(ValueKind::F64),
+        sem::ValueKind::I32 => Ok(ValueKind::I32),
+        sem::ValueKind::U32 => Ok(ValueKind::U32),
+        sem::ValueKind::F32 => Ok(ValueKind::F32),
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::String(class)
         | sem::ValueKind::Symbol(class)
@@ -5081,6 +5469,9 @@ fn dispatcher_param_kind(
         ) => ValueKind::Object(Some(class)),
         Some(sem::ValueKind::I64) => ValueKind::I64,
         Some(sem::ValueKind::F64) => ValueKind::F64,
+        Some(sem::ValueKind::I32) => ValueKind::I32,
+        Some(sem::ValueKind::U32) => ValueKind::U32,
+        Some(sem::ValueKind::F32) => ValueKind::F32,
         Some(sem::ValueKind::Bool) => ValueKind::Bool,
         Some(sem::ValueKind::Callable) => ValueKind::Closure(None),
         None if object_handle => ValueKind::Object(None),
@@ -5089,25 +5480,43 @@ fn dispatcher_param_kind(
     }
 }
 
+/// Returns whether `kind` is an unboxed number, whose class is known
+/// statically.
+const fn is_unboxed_number(kind: ValueKind) -> bool {
+    matches!(
+        kind,
+        ValueKind::I64 | ValueKind::F64 | ValueKind::I32 | ValueKind::U32 | ValueKind::F32
+    )
+}
+
 /// Returns the unboxed scalar kind whose values `class` describes: `i64`
-/// for `<integer>`, `f64` for `<float>` and `<double-float>`.
+/// for `<integer>`, `f64` for `<double-float>` and `f32` for
+/// `<single-float>`.
 fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<ValueKind> {
     match module.classes.get(class.0 as usize)?.origin {
         sem::ClassOrigin::BuiltinValue {
             kind: sem::BuiltinValueClass::Integer,
         } => Some(ValueKind::I64),
         sem::ClassOrigin::BuiltinValue {
-            kind: sem::BuiltinValueClass::Float | sem::BuiltinValueClass::DoubleFloat,
+            kind: sem::BuiltinValueClass::DoubleFloat,
         } => Some(ValueKind::F64),
+        sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::SingleFloat,
+        } => Some(ValueKind::F32),
         _ => None,
     }
 }
 
 /// Returns the concrete built-in class of the unboxed scalar kind `kind`.
+///
+/// `<i32>` and `<u32>` values are `<integer>`s.
 fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::ClassId> {
     match kind {
-        ValueKind::I64 => builtin_class(module, sem::BuiltinValueClass::Integer),
+        ValueKind::I64 | ValueKind::I32 | ValueKind::U32 => {
+            builtin_class(module, sem::BuiltinValueClass::Integer)
+        }
         ValueKind::F64 => builtin_class(module, sem::BuiltinValueClass::DoubleFloat),
+        ValueKind::F32 => builtin_class(module, sem::BuiltinValueClass::SingleFloat),
         _ => None,
     }
 }
@@ -5118,8 +5527,9 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
 /// `<rational>` or `<float>`, `<real>`, `<number>`, and `<object>`.
 fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::ClassId) -> bool {
     let concrete = match kind {
-        ValueKind::I64 => sem::BuiltinValueClass::Integer,
+        ValueKind::I64 | ValueKind::I32 | ValueKind::U32 => sem::BuiltinValueClass::Integer,
         ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
+        ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
         _ => return false,
     };
     builtin_class(module, concrete).is_some_and(|actual| module.is_same_or_subclass(actual, class))
@@ -5139,6 +5549,9 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         ValueKind::Any
         | ValueKind::I64
         | ValueKind::F64
+        | ValueKind::I32
+        | ValueKind::U32
+        | ValueKind::F32
         | ValueKind::U64
         | ValueKind::Bool
         | ValueKind::Function(_)
@@ -5317,6 +5730,40 @@ impl Module {
             }
             Instr::ConstF64 { dst, value, span } => {
                 write!(f, "  {dst} = const.f64 {value}")?;
+                fmt_span(f, *span)
+            }
+            Instr::Const32 { dst, value, span } => {
+                let mnemonic = match value {
+                    sem::Number32::I32(_) => "const.i32",
+                    sem::Number32::U32(_) => "const.u32",
+                    sem::Number32::F32(_) => "const.f32",
+                };
+                write!(f, "  {dst} = {mnemonic} {value}")?;
+                fmt_span(f, *span)
+            }
+            Instr::Num32Unary { dst, op, src, span } => {
+                write!(f, "  {dst} = {} {src}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
+            Instr::Num32Binary {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  {dst} = {} {lhs}, {rhs}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
+            Instr::Num32Checked {
+                dst,
+                overflow,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  {dst}, {overflow} = {} {lhs}, {rhs}", op.mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::ConstBool { dst, value, span } => {
@@ -5773,6 +6220,9 @@ impl Module {
             ValueKind::Any => write!(f, "any"),
             ValueKind::I64 => write!(f, "i64"),
             ValueKind::F64 => write!(f, "f64"),
+            ValueKind::I32 => write!(f, "i32"),
+            ValueKind::U32 => write!(f, "u32"),
+            ValueKind::F32 => write!(f, "f32"),
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
             ValueKind::Aggregate => write!(f, "agg"),

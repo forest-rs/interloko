@@ -190,6 +190,9 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::Any => runtime::any_type(),
         lower::ValueKind::I64 => ValueType::I64,
         lower::ValueKind::F64 => ValueType::F64,
+        lower::ValueKind::I32 => ValueType::I32,
+        lower::ValueKind::U32 => ValueType::U32,
+        lower::ValueKind::F32 => ValueType::F32,
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
         lower::ValueKind::Function(_) => ValueType::Func,
@@ -272,6 +275,7 @@ struct AbiTables {
     class_of_any: HostSigId,
     unbox_i64: HostSigId,
     unbox_f64: HostSigId,
+    unbox_f32: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
     slot_set: Vec<Vec<HostSigId>>,
     string_literal: Option<HostSigId>,
@@ -285,6 +289,7 @@ struct AbiTables {
     float_functions: Vec<(sem::FloatFunction, HostSigId)>,
     box_i64: HostSigId,
     box_f64: HostSigId,
+    box_f32: HostSigId,
     box_bool: HostSigId,
     box_object: HostSigId,
     instance_any: HostSigId,
@@ -484,6 +489,10 @@ impl AbiTables {
             runtime::UNBOX_VALUE,
             runtime::unbox_value_signature(ValueType::F64),
         );
+        let unbox_f32 = builder.host_sig_for(
+            runtime::UNBOX_VALUE,
+            runtime::unbox_value_signature(ValueType::F32),
+        );
         let box_i64 = builder.host_sig_for(
             runtime::BOX_VALUE,
             runtime::box_value_signature(ValueType::I64),
@@ -491,6 +500,10 @@ impl AbiTables {
         let box_f64 = builder.host_sig_for(
             runtime::BOX_VALUE,
             runtime::box_value_signature(ValueType::F64),
+        );
+        let box_f32 = builder.host_sig_for(
+            runtime::BOX_VALUE,
+            runtime::box_value_signature(ValueType::F32),
         );
         let box_bool = builder.host_sig_for(
             runtime::BOX_VALUE,
@@ -556,6 +569,7 @@ impl AbiTables {
             class_of_any,
             unbox_i64,
             unbox_f64,
+            unbox_f32,
             slot_get,
             slot_set,
             string_literal,
@@ -569,6 +583,7 @@ impl AbiTables {
             float_functions,
             box_i64,
             box_f64,
+            box_f32,
             box_bool,
             box_object,
             instance_any,
@@ -889,6 +904,115 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_f64(dst.0, value.to_f64());
             }
+            lower::Instr::Const32 { dst, value, span } => {
+                self.set_span(*span);
+                match value {
+                    sem::Number32::I32(value) => self.asm.const_i32(dst.0, *value),
+                    sem::Number32::U32(value) => self.asm.const_u32(dst.0, *value),
+                    sem::Number32::F32(bits) => self.asm.const_f32_bits(dst.0, bits.to_bits()),
+                };
+            }
+            lower::Instr::Num32Unary { dst, op, src, span } => {
+                self.set_span(*span);
+                let (dst, src) = (dst.0, src.0);
+                match op {
+                    lower::Num32UnaryOp::F32Neg => self.asm.f32_neg(dst, src),
+                    lower::Num32UnaryOp::F32Abs => self.asm.f32_abs(dst, src),
+                    lower::Num32UnaryOp::F32Floor => self.asm.f32_floor(dst, src),
+                    lower::Num32UnaryOp::F32Ceil => self.asm.f32_ceil(dst, src),
+                    lower::Num32UnaryOp::F32Trunc => self.asm.f32_trunc(dst, src),
+                    lower::Num32UnaryOp::F32Nearest => self.asm.f32_nearest(dst, src),
+                    lower::Num32UnaryOp::F32Sqrt => self.asm.f32_sqrt(dst, src),
+                    lower::Num32UnaryOp::I32ToI64 => self.asm.i32_to_i64(dst, src),
+                    lower::Num32UnaryOp::U32ToI64 => self.asm.u32_to_i64(dst, src),
+                    lower::Num32UnaryOp::I64ToI32 => self.asm.i64_to_i32(dst, src),
+                    lower::Num32UnaryOp::I64ToU64Wrap => self.asm.i64_to_u64_wrap(dst, src),
+                    lower::Num32UnaryOp::U64ToU32 => self.asm.u64_to_u32(dst, src),
+                    lower::Num32UnaryOp::I32ToU32 => self.asm.i32_to_u32(dst, src),
+                    lower::Num32UnaryOp::U32ToI32 => self.asm.u32_to_i32(dst, src),
+                    lower::Num32UnaryOp::F32ToF64 => self.asm.f32_to_f64(dst, src),
+                    lower::Num32UnaryOp::F64ToF32 => self.asm.f64_to_f32(dst, src),
+                    lower::Num32UnaryOp::F32ToI32 => self.asm.f32_to_i32(dst, src),
+                    lower::Num32UnaryOp::F32ToU32 => self.asm.f32_to_u32(dst, src),
+                    lower::Num32UnaryOp::F64ToI32 => self.asm.f64_to_i32(dst, src),
+                    lower::Num32UnaryOp::F64ToU32 => self.asm.f64_to_u32(dst, src),
+                    lower::Num32UnaryOp::I32ToF32 => self.asm.i32_to_f32(dst, src),
+                    lower::Num32UnaryOp::U32ToF32 => self.asm.u32_to_f32(dst, src),
+                    lower::Num32UnaryOp::I64ToF32 => self.asm.i64_to_f32(dst, src),
+                    lower::Num32UnaryOp::I32ToF64 => self.asm.i32_to_f64(dst, src),
+                    lower::Num32UnaryOp::U32ToF64 => self.asm.u32_to_f64(dst, src),
+                };
+            }
+            lower::Instr::Num32Binary {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                match op {
+                    lower::Num32BinaryOp::I32Add => self.asm.i32_add(dst, a, b),
+                    lower::Num32BinaryOp::I32Sub => self.asm.i32_sub(dst, a, b),
+                    lower::Num32BinaryOp::I32Mul => self.asm.i32_mul(dst, a, b),
+                    lower::Num32BinaryOp::I32And => self.asm.i32_and(dst, a, b),
+                    lower::Num32BinaryOp::I32Or => self.asm.i32_or(dst, a, b),
+                    lower::Num32BinaryOp::I32Xor => self.asm.i32_xor(dst, a, b),
+                    lower::Num32BinaryOp::I32Shl => self.asm.i32_shl(dst, a, b),
+                    lower::Num32BinaryOp::I32Shr => self.asm.i32_shr(dst, a, b),
+                    lower::Num32BinaryOp::I32Eq => self.asm.i32_eq(dst, a, b),
+                    lower::Num32BinaryOp::I32Lt => self.asm.i32_lt(dst, a, b),
+                    lower::Num32BinaryOp::I32Gt => self.asm.i32_gt(dst, a, b),
+                    lower::Num32BinaryOp::I32Le => self.asm.i32_le(dst, a, b),
+                    lower::Num32BinaryOp::I32Ge => self.asm.i32_ge(dst, a, b),
+                    lower::Num32BinaryOp::U32Add => self.asm.u32_add(dst, a, b),
+                    lower::Num32BinaryOp::U32Sub => self.asm.u32_sub(dst, a, b),
+                    lower::Num32BinaryOp::U32Mul => self.asm.u32_mul(dst, a, b),
+                    lower::Num32BinaryOp::U32And => self.asm.u32_and(dst, a, b),
+                    lower::Num32BinaryOp::U32Or => self.asm.u32_or(dst, a, b),
+                    lower::Num32BinaryOp::U32Xor => self.asm.u32_xor(dst, a, b),
+                    lower::Num32BinaryOp::U32Shl => self.asm.u32_shl(dst, a, b),
+                    lower::Num32BinaryOp::U32Shr => self.asm.u32_shr(dst, a, b),
+                    lower::Num32BinaryOp::U32Eq => self.asm.u32_eq(dst, a, b),
+                    lower::Num32BinaryOp::U32Lt => self.asm.u32_lt(dst, a, b),
+                    lower::Num32BinaryOp::U32Gt => self.asm.u32_gt(dst, a, b),
+                    lower::Num32BinaryOp::U32Le => self.asm.u32_le(dst, a, b),
+                    lower::Num32BinaryOp::U32Ge => self.asm.u32_ge(dst, a, b),
+                    lower::Num32BinaryOp::F32Add => self.asm.f32_add(dst, a, b),
+                    lower::Num32BinaryOp::F32Sub => self.asm.f32_sub(dst, a, b),
+                    lower::Num32BinaryOp::F32Mul => self.asm.f32_mul(dst, a, b),
+                    lower::Num32BinaryOp::F32Div => self.asm.f32_div(dst, a, b),
+                    lower::Num32BinaryOp::F32Rem => self.asm.f32_rem(dst, a, b),
+                    lower::Num32BinaryOp::F32Min => self.asm.f32_min(dst, a, b),
+                    lower::Num32BinaryOp::F32Max => self.asm.f32_max(dst, a, b),
+                    lower::Num32BinaryOp::F32Eq => self.asm.f32_eq(dst, a, b),
+                    lower::Num32BinaryOp::F32Ne => self.asm.f32_ne(dst, a, b),
+                    lower::Num32BinaryOp::F32Lt => self.asm.f32_lt(dst, a, b),
+                    lower::Num32BinaryOp::F32Gt => self.asm.f32_gt(dst, a, b),
+                    lower::Num32BinaryOp::F32Le => self.asm.f32_le(dst, a, b),
+                    lower::Num32BinaryOp::F32Ge => self.asm.f32_ge(dst, a, b),
+                };
+            }
+            lower::Instr::Num32Checked {
+                dst,
+                overflow,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                let (dst, overflow, a, b) = (dst.0, overflow.0, lhs.0, rhs.0);
+                match op {
+                    lower::Num32CheckedOp::I32AddOvf => self.asm.i32_add_ovf(dst, overflow, a, b),
+                    lower::Num32CheckedOp::I32SubOvf => self.asm.i32_sub_ovf(dst, overflow, a, b),
+                    lower::Num32CheckedOp::I32MulOvf => self.asm.i32_mul_ovf(dst, overflow, a, b),
+                    lower::Num32CheckedOp::U32AddOvf => self.asm.u32_add_ovf(dst, overflow, a, b),
+                    lower::Num32CheckedOp::U32SubOvf => self.asm.u32_sub_ovf(dst, overflow, a, b),
+                    lower::Num32CheckedOp::U32MulOvf => self.asm.u32_mul_ovf(dst, overflow, a, b),
+                };
+            }
             lower::Instr::ConstBool { dst, value, span } => {
                 self.set_span(*span);
                 self.asm.const_bool(dst.0, *value);
@@ -972,13 +1096,18 @@ impl<'a> FunctionEmitter<'a> {
                 let sig = match from {
                     lower::ValueKind::I64 => self.abi.box_i64,
                     lower::ValueKind::F64 => self.abi.box_f64,
+                    lower::ValueKind::F32 => self.abi.box_f32,
                     lower::ValueKind::Bool => self.abi.box_bool,
                     lower::ValueKind::Object(_)
                     | lower::ValueKind::ClassObject(_)
                     | lower::ValueKind::GenericFunctionObject(_)
                     | lower::ValueKind::MethodObject(_)
                     | lower::ValueKind::SlotDescriptorObject => self.abi.box_object,
+                    // `<i32>` and `<u32>` widen to the `<integer>` they
+                    // are before boxing.
                     lower::ValueKind::Any
+                    | lower::ValueKind::I32
+                    | lower::ValueKind::U32
                     | lower::ValueKind::U64
                     | lower::ValueKind::Function(_)
                     | lower::ValueKind::Closure(_)
@@ -1309,6 +1438,7 @@ impl<'a> FunctionEmitter<'a> {
                 let sig = match kind {
                     lower::ValueKind::I64 => self.abi.unbox_i64,
                     lower::ValueKind::F64 => self.abi.unbox_f64,
+                    lower::ValueKind::F32 => self.abi.unbox_f32,
                     _ => return Err(invalid_lowered("unbox result kind is not a scalar")),
                 };
                 let class_reg = self.alloc_temp(ValueType::U64);

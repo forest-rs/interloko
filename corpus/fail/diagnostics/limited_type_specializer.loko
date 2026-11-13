@@ -1,0 +1,15 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.limited-type-specializer
+// expect: diagnostic contains <i32> is a limited <integer> type, not a class
+
+// Dispatch selects methods by class, and `<i32>` is a range of `<integer>`,
+// so it can specialize a method only where the generic already declares it.
+define generic level(x);
+
+define method level(x :: <i32>) => <i32>
+  x
+end;
+
+define function main()
+  0
+end;
