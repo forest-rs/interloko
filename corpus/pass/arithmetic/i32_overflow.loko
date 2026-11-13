@@ -1,0 +1,9 @@
+// expect: runtime code runtime.integer-overflow
+// expect: diagnostics 0
+
+// `<i32>` arithmetic traps when the exact result leaves the type's range,
+// rather than wrapping.
+define function main() => <i32>
+  let x :: <i32> = 2147483647;
+  x + 1
+end;

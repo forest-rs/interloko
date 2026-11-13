@@ -1,0 +1,12 @@
+// expect: run 0.20000000149011612
+// expect: diagnostics 0
+// expect: dump lowered contains f32.to_f64
+
+// Floats are contagious to the widest format present: a single-float meeting
+// a double-float computes in binary64, after widening exactly, so the
+// single's rounding error shows.
+define function main() => <double-float>
+  let tenth = 0.1f32;
+  let wide :: <double-float> = 0.1;
+  tenth + wide
+end;

@@ -915,11 +915,7 @@ fn numeric_method_body(
         return Expr::Error { span };
     };
     let Some((rhs_kind, rhs)) = operands.next() else {
-        return Expr::Negate {
-            kind: lhs_kind,
-            value: Box::new(lhs),
-            span,
-        };
+        return negate_number(lhs, lhs_kind, span);
     };
     match operator {
         promotion::NumericOperator::Arithmetic(op) => {
@@ -935,24 +931,60 @@ fn numeric_method_body(
             }
         }
         promotion::NumericOperator::Compare(op) => {
-            match promotion::comparison(lhs_kind, rhs_kind) {
-                promotion::ComparisonRule::Same { kind } => Expr::Compare {
-                    op,
-                    kind,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                    span,
-                },
-                promotion::ComparisonRule::ExactMixed => Expr::MixedCompare {
-                    op,
-                    lhs_kind,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                    span,
-                },
-            }
+            compare_numbers(op, (lhs, lhs_kind), (rhs, rhs_kind), span)
         }
         promotion::NumericOperator::Negate => Expr::Error { span },
+    }
+}
+
+/// Builds `-value` for an operand of kind `kind`, by [`promotion::negation`].
+fn negate_number(value: Expr, kind: NumericKind, span: Span) -> Expr {
+    let to = promotion::negation(kind);
+    Expr::Negate {
+        kind: to,
+        value: Box::new(promote_operand(value, kind, to)),
+        span,
+    }
+}
+
+/// Builds a comparison of two numbers by [`promotion::comparison`].
+fn compare_numbers(
+    op: CompareOp,
+    (lhs, lhs_kind): (Expr, NumericKind),
+    (rhs, rhs_kind): (Expr, NumericKind),
+    span: Span,
+) -> Expr {
+    match promotion::comparison(lhs_kind, rhs_kind) {
+        promotion::ComparisonRule::Promote { kind } => Expr::Compare {
+            op,
+            kind,
+            lhs: Box::new(promote_operand(lhs, lhs_kind, kind)),
+            rhs: Box::new(promote_operand(rhs, rhs_kind, kind)),
+            span,
+        },
+        promotion::ComparisonRule::ExactMixed => {
+            // The float side widens to binary64 exactly; the integer side is
+            // already an `<integer>`.
+            let widen = |operand, kind: NumericKind| {
+                if kind.is_float() {
+                    (
+                        promote_operand(operand, kind, NumericKind::Float),
+                        NumericKind::Float,
+                    )
+                } else {
+                    (operand, kind)
+                }
+            };
+            let (lhs, lhs_kind) = widen(lhs, lhs_kind);
+            let (rhs, _) = widen(rhs, rhs_kind);
+            Expr::MixedCompare {
+                op,
+                lhs_kind,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            }
+        }
     }
 }
 
@@ -1571,8 +1603,14 @@ impl From<ast::BinaryOp> for BinaryOp {
 pub enum NumericKind {
     /// Signed 64-bit integers, source `<integer>`.
     Integer,
-    /// IEEE 754 binary64 floats, source `<float>`.
+    /// IEEE 754 binary64 floats, source `<double-float>`.
     Float,
+    /// `<i32>` integers.
+    I32,
+    /// `<u32>` integers.
+    U32,
+    /// IEEE 754 binary32 floats, source `<single-float>`.
+    SingleFloat,
 }
 
 impl NumericKind {
@@ -1582,6 +1620,9 @@ impl NumericKind {
         match self {
             Self::Integer => ValueKind::I64,
             Self::Float => ValueKind::F64,
+            Self::I32 => ValueKind::I32,
+            Self::U32 => ValueKind::U32,
+            Self::SingleFloat => ValueKind::F32,
         }
     }
 
@@ -1591,7 +1632,34 @@ impl NumericKind {
         match kind {
             ValueKind::I64 => Some(Self::Integer),
             ValueKind::F64 => Some(Self::Float),
+            ValueKind::I32 => Some(Self::I32),
+            ValueKind::U32 => Some(Self::U32),
+            ValueKind::F32 => Some(Self::SingleFloat),
             _ => None,
+        }
+    }
+
+    /// Returns whether this kind holds integers.
+    #[must_use]
+    pub const fn is_integer(self) -> bool {
+        matches!(self, Self::Integer | Self::I32 | Self::U32)
+    }
+
+    /// Returns whether this kind holds IEEE 754 floats.
+    #[must_use]
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::Float | Self::SingleFloat)
+    }
+
+    /// Returns the source name of this kind's type.
+    #[must_use]
+    pub const fn type_name(self) -> &'static str {
+        match self {
+            Self::Integer => "<integer>",
+            Self::Float => "<double-float>",
+            Self::I32 => "<i32>",
+            Self::U32 => "<u32>",
+            Self::SingleFloat => "<single-float>",
         }
     }
 }
@@ -2130,13 +2198,13 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Exact comparison of one integer with one float, as mathematical
-    /// values; see [`crate::promotion`].
+    /// Exact comparison of one `<integer>` with one binary64 float, as
+    /// mathematical values; see [`crate::promotion`].
     MixedCompare {
         /// Operator.
         op: CompareOp,
-        /// Numeric kind of the left operand; the right operand has the other
-        /// kind.
+        /// Numeric kind of the left operand, [`NumericKind::Integer`] or
+        /// [`NumericKind::Float`]; the right operand has the other kind.
         lhs_kind: NumericKind,
         /// Left operand.
         lhs: Box<Expr>,
@@ -2145,14 +2213,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Conversion between `<integer>` and `<float>`, from source
-    /// `as(<float>, n)` or `as(<integer>, x)`.
+    /// Conversion between numeric kinds, from source such as
+    /// `as(<double-float>, n)` or `as(<integer>, x)`, or inserted by the
+    /// promotion rules.
     ///
-    /// Integer to float rounds to nearest, ties to even. Float to integer is
-    /// exact: it traps unless the operand is an integral value in the `i64`
-    /// range, so rounding is always an explicit `round`/`floor`/... choice.
+    /// Widening is exact. Integer to float, and binary64 to binary32, round
+    /// to nearest, ties to even. Narrowing an integer traps unless the value
+    /// is in the target's range, and float to integer is exact: it traps
+    /// unless the operand is an integral value in range, so rounding is
+    /// always an explicit `round`/`floor`/... choice.
     Convert {
-        /// Numeric kind of the result; the operand has the other kind.
+        /// Numeric kind of the result; the operand has another kind.
         to: NumericKind,
         /// Converted operand.
         value: Box<Expr>,
@@ -3484,6 +3555,9 @@ impl Lowering {
                     .map(|kind| match kind {
                         NumericKind::Integer => "integer",
                         NumericKind::Float => "float",
+                        NumericKind::SingleFloat => "single-float",
+                        NumericKind::I32 => "i32",
+                        NumericKind::U32 => "u32",
                     })
                     .collect::<Vec<_>>()
                     .join(",");
@@ -5095,9 +5169,7 @@ impl Lowering {
                 let kind = match promotion::arithmetic(op, lhs_kind, rhs_kind) {
                     promotion::ArithmeticRule::Promote { kind } => kind,
                     promotion::ArithmeticRule::Undefined => {
-                        if self.expr_kind(&lhs) == ValueKind::I64
-                            && self.expr_kind(&rhs) == ValueKind::I64
-                        {
+                        if lhs_kind.is_integer() && rhs_kind.is_integer() {
                             ctx.diagnostics.push(Diagnostic::error(
                                 *span,
                                 DiagnosticCode::IntegerDivisionUnsupported,
@@ -5135,11 +5207,7 @@ impl Lowering {
                     }
                     return Expr::Error { span: *span };
                 };
-                Expr::Negate {
-                    kind,
-                    value: Box::new(value),
-                    span: *span,
-                }
+                negate_number(value, kind, *span)
             }
             ast::Expr::Compare {
                 op, lhs, rhs, span, ..
@@ -6280,6 +6348,9 @@ impl Lowering {
         let hint =
             NumericKind::of(self.expr_kind(&lhs)).map_or(ValueKind::I64, NumericKind::value_kind);
         let rhs = self.lower_expr_expected(ctx, rhs, Some(hint));
+        // A literal on the left adopts a 32-bit right operand's type, as one
+        // on the right already did through the hint: `1 + x` like `x + 1`.
+        let lhs = adapt_literal(lhs, Some(&[self.expr_kind(&rhs)]));
         (lhs, rhs)
     }
 
@@ -6344,22 +6415,7 @@ impl Lowering {
             ) else {
                 return Expr::Error { span };
             };
-            return match promotion::comparison(lhs_kind, rhs_kind) {
-                promotion::ComparisonRule::Same { kind } => Expr::Compare {
-                    op: op.into(),
-                    kind,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                    span,
-                },
-                promotion::ComparisonRule::ExactMixed => Expr::MixedCompare {
-                    op: op.into(),
-                    lhs_kind,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                    span,
-                },
-            };
+            return compare_numbers(op.into(), (lhs, lhs_kind), (rhs, rhs_kind), span);
         }
 
         if lhs_kind == rhs_kind && matches!(lhs_kind, ValueKind::String(_) | ValueKind::Symbol(_)) {

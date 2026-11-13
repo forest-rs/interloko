@@ -1,0 +1,7 @@
+// expect: runtime code runtime.integer-overflow
+// expect: diagnostics 0
+
+define function main() => <i32>
+  let low = -2147483648i32;
+  -low
+end;

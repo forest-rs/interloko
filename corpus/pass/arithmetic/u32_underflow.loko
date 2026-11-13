@@ -1,0 +1,8 @@
+// expect: runtime code runtime.integer-overflow
+// expect: diagnostics 0
+// expect: dump lowered contains u32.sub_ovf
+
+define function main() => <u32>
+  let frames :: <u32> = 0;
+  frames - 1
+end;

@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.integer-division-unsupported
+
+// Limited integer types are `<integer>`s, so `/` is undefined for them too.
+define function main() => <i32>
+  let x :: <i32> = 7;
+  x / 2
+end;

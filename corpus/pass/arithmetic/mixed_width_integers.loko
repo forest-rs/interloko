@@ -1,0 +1,13 @@
+// expect: run 6442450942
+// expect: diagnostics 0
+// expect: dump lowered contains i32.to_i64
+// expect: dump lowered contains u32.to_i64
+// expect: dump lowered contains i64.add_ovf
+
+// Integers of different types compute as `<integer>`, where the exact
+// result fits even though it fits neither 32-bit type.
+define function main() => <integer>
+  let a :: <i32> = 2147483647;
+  let b :: <u32> = 4294967295;
+  a + b
+end;

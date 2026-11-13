@@ -1,0 +1,15 @@
+// expect: run 3.5
+// expect: diagnostics 0
+// expect: dump eop contains origin=numeric(+) sealed=<real>
+
+// Boxed operands dispatch through the built-in numeric generics, whose
+// methods follow the same promotion rules: a boxed single-float meeting an
+// integer stays single, and meeting a double widens.
+define function add(x :: <object>, y :: <object>) => <object>
+  x + y
+end;
+
+define function main() => <double-float>
+  let single = as(<single-float>, add(1.5f32, 1));
+  as(<double-float>, add(single, 1.0)) - 0.0
+end;

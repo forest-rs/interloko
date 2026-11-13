@@ -1,0 +1,20 @@
+// expect: run #t
+// expect: diagnostics 0
+// expect: dump lowered contains f32.lt
+
+// Comparisons are exact across formats: `0.1f32` is not the double `0.1`,
+// while `0.5f32` is exactly `0.5`, and the integer 16777217 is above every
+// single-float near it.
+define function main() => <boolean>
+  let near = 16777216.0f32;
+  let wide :: <double-float> = 0.1;
+  if 0.1f32 = wide then
+    #f
+  else
+    if 0.5f32 = 0.5 then
+      if 16777217 > near then 0.25f32 < 0.5f32 else #f end
+    else
+      #f
+    end
+  end
+end;

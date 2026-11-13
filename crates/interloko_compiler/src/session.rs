@@ -11000,6 +11000,9 @@ const fn numeric_kind_label(kind: sem::NumericKind) -> &'static str {
     match kind {
         sem::NumericKind::Integer => "integer",
         sem::NumericKind::Float => "float",
+        sem::NumericKind::I32 => "i32",
+        sem::NumericKind::U32 => "u32",
+        sem::NumericKind::SingleFloat => "single-float",
     }
 }
 

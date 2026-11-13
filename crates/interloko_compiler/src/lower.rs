@@ -3780,6 +3780,30 @@ impl<'module> BodyLowering<'module> {
                         });
                         Ok(result)
                     }
+                    sem::NumericKind::SingleFloat => {
+                        let op = match op {
+                            sem::BinaryOp::Add => Num32BinaryOp::F32Add,
+                            sem::BinaryOp::Sub => Num32BinaryOp::F32Sub,
+                            sem::BinaryOp::Mul => Num32BinaryOp::F32Mul,
+                            sem::BinaryOp::Div => Num32BinaryOp::F32Div,
+                        };
+                        Ok(self.num32_binary(op, lhs.reg, rhs.reg, ValueKind::F32, *span))
+                    }
+                    sem::NumericKind::I32 | sem::NumericKind::U32 => {
+                        let unsigned = *kind == sem::NumericKind::U32;
+                        let op = match (op, unsigned) {
+                            (sem::BinaryOp::Add, false) => Num32CheckedOp::I32AddOvf,
+                            (sem::BinaryOp::Sub, false) => Num32CheckedOp::I32SubOvf,
+                            (sem::BinaryOp::Mul, false) => Num32CheckedOp::I32MulOvf,
+                            (sem::BinaryOp::Add, true) => Num32CheckedOp::U32AddOvf,
+                            (sem::BinaryOp::Sub, true) => Num32CheckedOp::U32SubOvf,
+                            (sem::BinaryOp::Mul, true) => Num32CheckedOp::U32MulOvf,
+                            (sem::BinaryOp::Div, _) => {
+                                return Err(invalid_semantic("integer division has no lowering"));
+                            }
+                        };
+                        Ok(self.lower_checked_num32_arith(op, lhs, rhs.reg, *span))
+                    }
                 }
             }
             sem::Expr::FloatCall {
@@ -3789,18 +3813,7 @@ impl<'module> BodyLowering<'module> {
             } => self.lower_float_call(*builtin, args, *span),
             sem::Expr::Convert { to, value, span } => {
                 let value = self.lower_expr(value)?;
-                match to {
-                    sem::NumericKind::Float => {
-                        let result = self.alloc(ValueKind::F64);
-                        self.instructions.push(Instr::I64ToF64 {
-                            dst: result.reg,
-                            src: value.reg,
-                            span: *span,
-                        });
-                        Ok(result)
-                    }
-                    sem::NumericKind::Integer => self.lower_exact_float_to_integer(value, *span),
-                }
+                self.convert_number(value, *to, *span)
             }
             sem::Expr::Negate { kind, value, span } => {
                 let value = self.lower_expr(value)?;
@@ -3831,6 +3844,30 @@ impl<'module> BodyLowering<'module> {
                         });
                         Ok(result)
                     }
+                    sem::NumericKind::SingleFloat => Ok(self.num32_unary(
+                        Num32UnaryOp::F32Neg,
+                        value.reg,
+                        ValueKind::F32,
+                        *span,
+                    )),
+                    sem::NumericKind::I32 => {
+                        // `0 - x` overflows only for `i32::MIN`.
+                        let zero = self.alloc(ValueKind::I32);
+                        self.instructions.push(Instr::Const32 {
+                            dst: zero.reg,
+                            value: sem::Number32::I32(0),
+                            span: *span,
+                        });
+                        Ok(self.lower_checked_num32_arith(
+                            Num32CheckedOp::I32SubOvf,
+                            zero,
+                            value.reg,
+                            *span,
+                        ))
+                    }
+                    sem::NumericKind::U32 => Err(invalid_semantic(
+                        "`<u32>` negation is promoted to `<integer>` before lowering",
+                    )),
                 }
             }
             sem::Expr::MixedCompare {
@@ -3847,6 +3884,13 @@ impl<'module> BodyLowering<'module> {
                 let (integer, float, op) = match lhs_kind {
                     sem::NumericKind::Integer => (lhs.reg, rhs.reg, *op),
                     sem::NumericKind::Float => (rhs.reg, lhs.reg, op.reversed()),
+                    sem::NumericKind::I32
+                    | sem::NumericKind::U32
+                    | sem::NumericKind::SingleFloat => {
+                        return Err(invalid_semantic(
+                            "exact mixed comparisons take an `<integer>` and a binary64 float",
+                        ));
+                    }
                 };
                 Ok(self.lower_exact_integer_float_compare(op, integer, float, *span))
             }
@@ -3871,6 +3915,15 @@ impl<'module> BodyLowering<'module> {
                     sem::NumericKind::Float => Instr::F64Compare {
                         dst: result.reg,
                         op: *op,
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                        span: *span,
+                    },
+                    kind @ (sem::NumericKind::I32
+                    | sem::NumericKind::U32
+                    | sem::NumericKind::SingleFloat) => Instr::Num32Binary {
+                        dst: result.reg,
+                        op: num32_compare(*kind, *op),
                         lhs: lhs.reg,
                         rhs: rhs.reg,
                         span: *span,
@@ -4941,6 +4994,136 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
+    /// Emits one `0xFD` instruction with two operands.
+    fn num32_binary(
+        &mut self,
+        op: Num32BinaryOp,
+        lhs: Register,
+        rhs: Register,
+        kind: ValueKind,
+        span: Span,
+    ) -> Value {
+        let result = self.alloc(kind);
+        self.instructions.push(Instr::Num32Binary {
+            dst: result.reg,
+            op,
+            lhs,
+            rhs,
+            span,
+        });
+        result
+    }
+
+    /// Lowers checked `<i32>` or `<u32>` arithmetic: the overflow-reporting
+    /// instruction, then the same overflow trap as `<integer>` arithmetic,
+    /// because a limited type promises its range.
+    fn lower_checked_num32_arith(
+        &mut self,
+        op: Num32CheckedOp,
+        lhs: Value,
+        rhs: Register,
+        span: Span,
+    ) -> Value {
+        let result = self.alloc(lhs.kind);
+        let overflow = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::Num32Checked {
+            dst: result.reg,
+            overflow: overflow.reg,
+            op,
+            lhs: lhs.reg,
+            rhs,
+            span,
+        });
+        let overflowed = self.alloc_label();
+        let done = self.alloc_label();
+        self.instructions.push(Instr::Branch {
+            cond: overflow.reg,
+            then_label: overflowed,
+            else_label: done,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: overflowed });
+        self.instructions.push(Instr::Trap {
+            trap: LokoTrap::IntegerOverflow,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: done });
+        result
+    }
+
+    /// Converts a number to `to`.
+    ///
+    /// Widening (`<i32>` or `<u32>` to `<integer>`, `<single-float>` to
+    /// `<double-float>`) is exact. Integer to float rounds to nearest, ties
+    /// to even, once. Binary64 to binary32 rounds the same way. Narrowing an
+    /// integer traps unless the value is in range, and float to integer is
+    /// exact: it traps unless the float is integral and in range, so
+    /// rounding is always an explicit `round`/`floor`/... choice.
+    fn convert_number(
+        &mut self,
+        value: Value,
+        to: sem::NumericKind,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        use sem::NumericKind as N;
+        let from = match value.kind {
+            ValueKind::I64 => N::Integer,
+            ValueKind::F64 => N::Float,
+            ValueKind::I32 => N::I32,
+            ValueKind::U32 => N::U32,
+            ValueKind::F32 => N::SingleFloat,
+            _ => return Err(invalid_semantic("conversion operand is not a number")),
+        };
+        let unary =
+            |this: &mut Self, op, value: Value, kind| this.num32_unary(op, value.reg, kind, span);
+        Ok(match (from, to) {
+            (from, to) if from == to => value,
+            (N::I32 | N::U32, N::Integer) => self.widen_integer(value, span),
+            (N::Integer, N::I32) => self.narrow_integer(value, ValueKind::I32, span),
+            (N::Integer, N::U32) => self.narrow_integer(value, ValueKind::U32, span),
+            (N::I32, N::U32) => unary(self, Num32UnaryOp::I32ToU32, value, ValueKind::U32),
+            (N::U32, N::I32) => unary(self, Num32UnaryOp::U32ToI32, value, ValueKind::I32),
+            (N::Integer, N::Float) => {
+                let result = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::I64ToF64 {
+                    dst: result.reg,
+                    src: value.reg,
+                    span,
+                });
+                result
+            }
+            (N::I32, N::Float) => unary(self, Num32UnaryOp::I32ToF64, value, ValueKind::F64),
+            (N::U32, N::Float) => unary(self, Num32UnaryOp::U32ToF64, value, ValueKind::F64),
+            (N::Integer, N::SingleFloat) => {
+                unary(self, Num32UnaryOp::I64ToF32, value, ValueKind::F32)
+            }
+            (N::I32, N::SingleFloat) => unary(self, Num32UnaryOp::I32ToF32, value, ValueKind::F32),
+            (N::U32, N::SingleFloat) => unary(self, Num32UnaryOp::U32ToF32, value, ValueKind::F32),
+            (N::SingleFloat, N::Float) => {
+                unary(self, Num32UnaryOp::F32ToF64, value, ValueKind::F64)
+            }
+            (N::Float, N::SingleFloat) => {
+                unary(self, Num32UnaryOp::F64ToF32, value, ValueKind::F32)
+            }
+            // Binary32 widens to binary64 exactly, so one exact path serves
+            // both float formats.
+            (N::SingleFloat, N::Integer | N::I32 | N::U32) => {
+                let wide = unary(self, Num32UnaryOp::F32ToF64, value, ValueKind::F64);
+                self.lower_exact_float_to_integer(wide, to, span)
+            }
+            (N::Float, N::Integer | N::I32 | N::U32) => {
+                self.lower_exact_float_to_integer(value, to, span)
+            }
+            (from, to) => {
+                return Err(invalid_semantic(&alloc::format!(
+                    "no conversion from {} to {}",
+                    from.type_name(),
+                    to.type_name()
+                )));
+            }
+        })
+    }
+
     /// Widens an `<i32>` or `<u32>` to the `<integer>` it is; exact.
     fn widen_integer(&mut self, value: Value, span: Span) -> Value {
         let op = match value.kind {
@@ -5085,26 +5268,48 @@ impl<'module> BodyLowering<'module> {
         Ok(result)
     }
 
-    /// Lowers `as(<integer>, x)`: `f64.to_i64` truncates and traps on NaN,
-    /// infinities, and out-of-range values; converting back and comparing
-    /// then traps on any fractional part, so only integral floats convert.
+    /// Lowers an exact binary64-to-integer conversion such as
+    /// `as(<integer>, x)`: `f64.to_i64` (or `f64.to_i32`/`f64.to_u32`)
+    /// truncates and traps on NaN, infinities, and out-of-range values;
+    /// converting back and comparing then traps on any fractional part, so
+    /// only integral floats convert.
     fn lower_exact_float_to_integer(
         &mut self,
         value: Value,
+        to: sem::NumericKind,
         span: Span,
-    ) -> Result<Value, LowerError> {
-        let result = self.alloc(ValueKind::I64);
-        self.instructions.push(Instr::F64ToI64 {
-            dst: result.reg,
-            src: value.reg,
-            span,
-        });
-        let round_trip = self.alloc(ValueKind::F64);
-        self.instructions.push(Instr::I64ToF64 {
-            dst: round_trip.reg,
-            src: result.reg,
-            span,
-        });
+    ) -> Value {
+        let (result, round_trip) = match to {
+            sem::NumericKind::I32 => {
+                let result =
+                    self.num32_unary(Num32UnaryOp::F64ToI32, value.reg, ValueKind::I32, span);
+                let back =
+                    self.num32_unary(Num32UnaryOp::I32ToF64, result.reg, ValueKind::F64, span);
+                (result, back)
+            }
+            sem::NumericKind::U32 => {
+                let result =
+                    self.num32_unary(Num32UnaryOp::F64ToU32, value.reg, ValueKind::U32, span);
+                let back =
+                    self.num32_unary(Num32UnaryOp::U32ToF64, result.reg, ValueKind::F64, span);
+                (result, back)
+            }
+            _ => {
+                let result = self.alloc(ValueKind::I64);
+                self.instructions.push(Instr::F64ToI64 {
+                    dst: result.reg,
+                    src: value.reg,
+                    span,
+                });
+                let round_trip = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::I64ToF64 {
+                    dst: round_trip.reg,
+                    src: result.reg,
+                    span,
+                });
+                (result, round_trip)
+            }
+        };
         let exact = self.alloc(ValueKind::Bool);
         self.instructions.push(Instr::F64Compare {
             dst: exact.reg,
@@ -5127,7 +5332,7 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         self.instructions.push(Instr::Label { label: done });
-        Ok(result)
+        result
     }
 
     /// Lowers `integer op float` exactly, comparing mathematical values
@@ -5477,6 +5682,28 @@ fn dispatcher_param_kind(
         None if object_handle => ValueKind::Object(None),
         None => ValueKind::Any,
         Some(_) => ValueKind::Object(None),
+    }
+}
+
+/// Returns the `0xFD` comparison of `op` on operands of a 32-bit `kind`.
+const fn num32_compare(kind: sem::NumericKind, op: sem::CompareOp) -> Num32BinaryOp {
+    use sem::CompareOp as C;
+    match (kind, op) {
+        (sem::NumericKind::I32, C::Eq) => Num32BinaryOp::I32Eq,
+        (sem::NumericKind::I32, C::Lt) => Num32BinaryOp::I32Lt,
+        (sem::NumericKind::I32, C::Le) => Num32BinaryOp::I32Le,
+        (sem::NumericKind::I32, C::Gt) => Num32BinaryOp::I32Gt,
+        (sem::NumericKind::I32, C::Ge) => Num32BinaryOp::I32Ge,
+        (sem::NumericKind::U32, C::Eq) => Num32BinaryOp::U32Eq,
+        (sem::NumericKind::U32, C::Lt) => Num32BinaryOp::U32Lt,
+        (sem::NumericKind::U32, C::Le) => Num32BinaryOp::U32Le,
+        (sem::NumericKind::U32, C::Gt) => Num32BinaryOp::U32Gt,
+        (sem::NumericKind::U32, C::Ge) => Num32BinaryOp::U32Ge,
+        (_, C::Eq) => Num32BinaryOp::F32Eq,
+        (_, C::Lt) => Num32BinaryOp::F32Lt,
+        (_, C::Le) => Num32BinaryOp::F32Le,
+        (_, C::Gt) => Num32BinaryOp::F32Gt,
+        (_, C::Ge) => Num32BinaryOp::F32Ge,
     }
 }
 
