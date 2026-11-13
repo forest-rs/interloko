@@ -4,10 +4,10 @@
 // expect: dump tape contains interloko.unbox_value
 
 // `as` unboxes a float from `<object>` after checking its class.
-define function unbox(x :: <object>) => <float>
+define function unbox(x :: <object>) => <double-float>
   as(<double-float>, x)
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   unbox(2.5)
 end;

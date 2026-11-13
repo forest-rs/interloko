@@ -2,10 +2,10 @@
 // expect: diagnostics 0
 
 // Float builtins resolve after user definitions, so programs keep their names.
-define function sqrt(x :: <float>) => <float>
+define function sqrt(x :: <double-float>) => <double-float>
   42.0
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   sqrt(4.0)
 end;

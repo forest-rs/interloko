@@ -7,14 +7,14 @@
 // values, so scalars dispatch by class like objects do.
 define generic bump(x);
 
-define method bump(x :: <double-float>) => <float>
+define method bump(x :: <double-float>) => <double-float>
   x + 1.0
 end;
 
-define method bump(x :: <integer>) => <float>
-  as(<float>, x + 1)
+define method bump(x :: <integer>) => <double-float>
+  as(<double-float>, x + 1)
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   bump(2.5) + bump(1)
 end;

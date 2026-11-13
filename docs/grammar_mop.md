@@ -179,7 +179,7 @@ A frontend metadata directive selects it by name:
 recognized by the interpreted grammar and converted into structural function
 forms through the `emit-function`, expression, call, and left-fold binary
 actions. Calculator literals mean what Loko literals mean: `2` is an
-`<integer>` and `2.0` or `2e0` is a `<float>`, so the same operand-kind
+`<integer>` and `2.0` or `2e0` is a `<double-float>`, so the same operand-kind
 rules apply, and calls reach Loko functions and the float library
 (`sqrt(2.0)`). Rust still implements those safe action primitives and
 calculator-specific validation, but it is no longer a duplicate recognizer, a

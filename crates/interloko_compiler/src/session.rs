@@ -14276,7 +14276,7 @@ mod tests {
     fn float_to_integer_conversion_is_exact_or_traps() {
         let artifacts = CompilerSession::compile_source(
             "convert.loko",
-            "define function to-integer(x :: <float>) => <integer>\n  as(<integer>, x)\nend;",
+            "define function to-integer(x :: <double-float>) => <integer>\n  as(<integer>, x)\nend;",
             RuntimeMode::CompileOnly,
         );
         assert_eq!(artifacts.diagnostics, Vec::new());
@@ -14352,9 +14352,9 @@ mod tests {
 
         let artifacts = CompilerSession::compile_source(
             "compare.loko",
-            "define function lt(n :: <integer>, x :: <float>) => <boolean>\n  n < x\nend;\n\
-             define function eq(n :: <integer>, x :: <float>) => <boolean>\n  n = x\nend;\n\
-             define function ge(x :: <float>, n :: <integer>) => <boolean>\n  x >= n\nend;",
+            "define function lt(n :: <integer>, x :: <double-float>) => <boolean>\n  n < x\nend;\n\
+             define function eq(n :: <integer>, x :: <double-float>) => <boolean>\n  n = x\nend;\n\
+             define function ge(x :: <double-float>, n :: <integer>) => <boolean>\n  x >= n\nend;",
             RuntimeMode::CompileOnly,
         );
         assert_eq!(artifacts.diagnostics, Vec::new());
@@ -14671,9 +14671,9 @@ mod tests {
     fn unboxing_checks_the_boxed_class() {
         let artifacts = CompilerSession::compile_source(
             "unbox.loko",
-            "define function as-float(x :: <object>) => <float>\n  as(<float>, x)\nend;\n\
-             define function from-integer() => <float>\n  as-float(as(<object>, 7))\nend;\n\
-             define function from-float() => <float>\n  as-float(as(<object>, 7.5))\nend;",
+            "define function as-float(x :: <object>) => <double-float>\n  as(<double-float>, x)\nend;\n\
+             define function from-integer() => <double-float>\n  as-float(as(<object>, 7))\nend;\n\
+             define function from-float() => <double-float>\n  as-float(as(<object>, 7.5))\nend;",
             RuntimeMode::CompileOnly,
         );
         assert_eq!(artifacts.diagnostics, Vec::new());
@@ -14712,8 +14712,8 @@ mod tests {
         ));
         let artifacts = CompilerSession::compile_source_with_host_registry(
             "floats.loko",
-            "define function identity(x :: <float>) => <float>\n  x\nend;\n\
-             define function body-temperature() => <float>\n  to-celsius(98.6)\nend;",
+            "define function identity(x :: <double-float>) => <double-float>\n  x\nend;\n\
+             define function body-temperature() => <double-float>\n  to-celsius(98.6)\nend;",
             RuntimeMode::CompileOnly,
             &registry,
         );
@@ -17981,11 +17981,11 @@ end;
     use alloc::vec;
     use interloko_runtime::chooser::{Choice, OfferedRestart, UnhandledCondition};
 
-    const UNHANDLED_SAMPLE: &str = "define class <bad-sample> (<object>)\n  slot value :: <float>;\nend;\n\
+    const UNHANDLED_SAMPLE: &str = "define class <bad-sample> (<object>)\n  slot value :: <double-float>;\nend;\n\
          define class <skip-pixel> (<object>)\nend;\n\
-         define function check(v :: <float>) => <float>\n  if v < 0.0 then signal(make(<bad-sample>, value: v)) else v end\nend;\n\
-         define function pixel(v :: <float>) => <float>\n  handle check(v) with restart <skip-pixel> 0.5 end\nend;\n\
-         define function main() => <float>\n  pixel(0.0 - 1.0) + 1.0\nend;";
+         define function check(v :: <double-float>) => <double-float>\n  if v < 0.0 then signal(make(<bad-sample>, value: v)) else v end\nend;\n\
+         define function pixel(v :: <double-float>) => <double-float>\n  handle check(v) with restart <skip-pixel> 0.5 end\nend;\n\
+         define function main() => <double-float>\n  pixel(0.0 - 1.0) + 1.0\nend;";
 
     struct Scripted<F>(F);
 
@@ -18178,15 +18178,15 @@ end;
         );
     }
 
-    const HOT_SWAP: &str = "define class <bad-sample> (<object>)\n  slot value :: <float>;\nend;\n\
+    const HOT_SWAP: &str = "define class <bad-sample> (<object>)\n  slot value :: <double-float>;\nend;\n\
          define class <skip-pixel> (<object>)\nend;\n\
-         define class <sphere> (<object>)\n  slot radius :: <float>;\nend;\n\
-         define function check-sample(value :: <float>) => <float>\n  if value < 0.0 then signal(make(<bad-sample>, value: value)) else value end\nend;\n\
-         define generic shade(s :: <sphere>, distance :: <float>) => <float>;\n\
-         define method shade(s :: <sphere>, distance :: <float>) => <float>\n  check-sample(1.0 - distance / s.radius)\nend;\n\
-         define function pixel(s :: <sphere>, x :: <float>) => <float>\n  handle shade(s, x) with restart <skip-pixel> 0.0 end\nend;\n\
-         define function render(s :: <sphere>) => <float>\n  pixel(s, 0.5) + pixel(s, 1.5) + pixel(s, 2.0)\nend;\n\
-         define function main() => <float>\n  render(make(<sphere>, radius: 1.0))\nend;";
+         define class <sphere> (<object>)\n  slot radius :: <double-float>;\nend;\n\
+         define function check-sample(value :: <double-float>) => <double-float>\n  if value < 0.0 then signal(make(<bad-sample>, value: value)) else value end\nend;\n\
+         define generic shade(s :: <sphere>, distance :: <double-float>) => <double-float>;\n\
+         define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>\n  check-sample(1.0 - distance / s.radius)\nend;\n\
+         define function pixel(s :: <sphere>, x :: <double-float>) => <double-float>\n  handle shade(s, x) with restart <skip-pixel> 0.0 end\nend;\n\
+         define function render(s :: <sphere>) => <double-float>\n  pixel(s, 0.5) + pixel(s, 1.5) + pixel(s, 2.0)\nend;\n\
+         define function main() => <double-float>\n  render(make(<sphere>, radius: 1.0))\nend;";
 
     /// `HOT_SWAP` with `shade` fixed to clamp at black, and `render` changed
     /// so that a frame finishing on the old code is visible in the result.
@@ -18369,8 +18369,8 @@ end;
         let reshaped = CompilerSession::compile_source(
             "shader.loko",
             &HOT_SWAP.replace(
-                "  slot radius :: <float>;\n",
-                "  slot radius :: <float>;\n  slot tint :: <float>, init-value: 0.0;\n",
+                "  slot radius :: <double-float>;\n",
+                "  slot radius :: <double-float>;\n  slot tint :: <double-float>, init-value: 0.0;\n",
             ),
             RuntimeMode::CompileOnly,
         );

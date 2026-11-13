@@ -2,6 +2,6 @@
 // expect: diagnostic code sem.function-argument-type-mismatch
 // expect: diagnostic contains sqrt
 
-define function main() => <float>
+define function main() => <double-float>
   sqrt(2)
 end;

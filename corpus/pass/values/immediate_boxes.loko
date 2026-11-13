@@ -9,7 +9,7 @@ define method keep(x :: <object>) => <object>
   x
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   let small = as(<integer>, keep(70368744177663));
   let wide = as(<integer>, keep(-9223372036854775808));
   if small = 70368744177663 then

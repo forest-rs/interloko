@@ -1565,7 +1565,7 @@ mod tests {
         let (module, artifact) = decisions_for(&format!(
             "{FLOATS}define function to-float(x :: <object>) => <double-float>\n  \
              as(<double-float>, x)\nend;\n\
-             define function up(x :: <double-float>) => <float>\n  as(<float>, x)\nend;\n\
+             define function up(x :: <double-float>) => <object>\n  as(<float>, x)\nend;\n\
              define function never() => <double-float>\n  \
              as(<double-float>, as(<object>, \"text\"))\nend;\n\
              define function on-object(x :: <object>)\n  size-of(x)\nend;\n\

@@ -2,6 +2,6 @@
 // expect: diagnostics 0
 
 // Float division never traps: dividing by zero yields a signed infinity.
-define function main() => <float>
+define function main() => <double-float>
   -1.0 / 0.0
 end;

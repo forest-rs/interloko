@@ -381,7 +381,7 @@ fn types_label(types: &[ValueType]) -> String {
         .iter()
         .map(|kind| match kind {
             ValueType::I64 => "<integer>".to_string(),
-            ValueType::F64 => "<float>".to_string(),
+            ValueType::F64 => "<double-float>".to_string(),
             ValueType::Bool => "<boolean>".to_string(),
             other => format!("{other:?}"),
         })

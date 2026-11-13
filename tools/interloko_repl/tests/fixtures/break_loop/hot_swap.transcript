@@ -28,7 +28,7 @@ frames (innermost first):
   frame:5 main  u0:f3
 restarts:
   restart:0 skip-pixel()  the handle site's recovery
-  restart:1 use-value(<float>)  the signal returns the value
+  restart:1 use-value(<double-float>)  the signal returns the value
   restart:2 retry(frame)  call a frame's function again, with current definitions
   restart:3 abort()  unwind to top level, running cleanups
 choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
@@ -36,14 +36,14 @@ choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
 // A broken edit is rejected and changes nothing; the fixed one installs.
 > :edit form:f6
 editing form:f6; enter a replacement definition
-> define method shade(s :: <sphere>, distance :: <float>) => <float>
+> define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>
 >   // A ray that misses the sphere is black, not negatively bright.
 >   check-sample(max(0, 1.0 - distance / s.radius), distance)
 > end;
 ! diagnostics:
-!   Error sem.function-argument-type-mismatch 1021..1022 function `max` argument 1 expects <float> but got <integer>
+!   Error sem.function-argument-type-mismatch 1091..1092 function `max` argument 1 expects <float> but got <integer>
 ! edit rejected; the definitions and break [1] are unchanged
-> define method shade(s :: <sphere>, distance :: <float>) => <float>
+> define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>
 >   // A ray that misses the sphere is black, not negatively bright.
 >   check-sample(max(0.0, 1.0 - distance / s.radius), distance)
 > end;
@@ -79,12 +79,12 @@ frames (innermost first):
   frame:5 main  u0:f3
 restarts:
   restart:0 skip-pixel()  the handle site's recovery
-  restart:1 use-value(<float>)  the signal returns the value
+  restart:1 use-value(<double-float>)  the signal returns the value
   restart:2 retry(frame)  call a frame's function again, with current definitions
   restart:3 abort()  unwind to top level, running cleanups
 choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
 > :restart use-value "dark"
-! error: use-value expects <float>, got "dark"; break [1] is still waiting
+! error: use-value expects <double-float>, got "dark"; break [1] is still waiting
 > :restart use-value 0.25
 1.75
 
@@ -100,7 +100,7 @@ frames (innermost first):
   frame:5 main  u0:f3
 restarts:
   restart:0 skip-pixel()  the handle site's recovery
-  restart:1 use-value(<float>)  the signal returns the value
+  restart:1 use-value(<double-float>)  the signal returns the value
   restart:2 retry(frame)  call a frame's function again, with current definitions
   restart:3 abort()  unwind to top level, running cleanups
 choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition

@@ -10,8 +10,8 @@
 // expect: dump typing contains expected=dispatch whole methods=1 boxed-params=0
 
 // Float values are exactly `<double-float>`, which sits under the abstract
-// `<float>`: methods on either class cover them, and widening to `<float>`
-// needs no runtime check. An `<object>` argument leaves method selection to
+// `<float>`: methods on either class cover them, and a cast to
+// `<double-float>` needs no runtime check. An `<object>` argument leaves method selection to
 // the runtime, and an `<integer>`-only generic never accepts a float; that
 // call is in a branch that is never taken, so the program still runs.
 
@@ -25,7 +25,7 @@ define method size-of(x :: <integer>)
   2
 end;
 
-define generic magnitude(x :: <float>) => <integer>;
+define generic magnitude(x :: <double-float>) => <integer>;
 
 define method magnitude(x :: <float>) => <integer>
   5
@@ -37,8 +37,8 @@ define method whole(x :: <integer>)
   x
 end;
 
-define function widen(x :: <double-float>) => <float>
-  as(<float>, x)
+define function widen(x :: <double-float>) => <double-float>
+  as(<double-float>, x)
 end;
 
 define function on-object(x :: <object>)

@@ -5,15 +5,15 @@
 // one-line formulas; it is also where the Rust driver puts expressions typed
 // on the command line.
 
-define constant pi :: <float> = 3.141592653589793;
-define constant e :: <float> = 2.718281828459045;
+define constant pi :: <double-float> = 3.141592653589793;
+define constant e :: <double-float> = 2.718281828459045;
 
 /// An arithmetic expression tree node.
 define class <node> (<object>)
 end;
 
 define class <number-node> (<node>)
-  slot value :: <float>;
+  slot value :: <double-float>;
 end;
 
 define class <binary-node> (<node>)
@@ -22,13 +22,13 @@ define class <binary-node> (<node>)
   slot right :: <node>;
 end;
 
-define generic evaluate(node :: <node>) => <float>;
+define generic evaluate(node :: <node>) => <double-float>;
 
-define method evaluate(node :: <number-node>) => <float>
+define method evaluate(node :: <number-node>) => <double-float>
   node.value
 end;
 
-define method evaluate(node :: <binary-node>) => <float>
+define method evaluate(node :: <binary-node>) => <double-float>
   let a = evaluate(node.left);
   let b = evaluate(node.right);
   if node.operator = #add then
@@ -42,7 +42,7 @@ define method evaluate(node :: <binary-node>) => <float>
   end
 end;
 
-define function number(value :: <float>) => <node>
+define function number(value :: <double-float>) => <node>
   make(<number-node>, value: value)
 end;
 
@@ -51,7 +51,7 @@ define function binary(operator :: <symbol>, left :: <node>, right :: <node>) =>
 end;
 
 /// Fahrenheit for 37 degrees Celsius, built as a tree: 37 * 9 / 5 + 32.
-define function body-temperature() => <float>
+define function body-temperature() => <double-float>
   evaluate(
     binary(#add,
            binary(#divide, binary(#multiply, number(37.0), number(9.0)), number(5.0)),
@@ -59,7 +59,7 @@ define function body-temperature() => <float>
 end;
 
 /// Renders `label = value` for display.
-define function describe(label :: <string>, value :: <float>) => <string>
+define function describe(label :: <string>, value :: <double-float>) => <string>
   concatenate(concatenate(label, " = "), float-to-string(value))
 end;
 
@@ -72,7 +72,7 @@ end;
 
 /// Integer inputs convert explicitly; the result converts back only if exact.
 define function whole-days(hours :: <integer>) => <integer>
-  as(<integer>, floor(as(<float>, hours) / 24.0))
+  as(<integer>, floor(as(<double-float>, hours) / 24.0))
 end;
 
 // grammar-activate: calculator

@@ -146,7 +146,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/float_box_cast.loko"));
     assert!(out.contains("ok pass/typing/float_dispatch.loko"));
     assert!(out.contains("ok pass/typing/float_casts.loko"));
-    assert!(out.contains("corpus: 245 passed, 0 failed, 245 total"));
+    assert!(out.contains("corpus: 246 passed, 0 failed, 246 total"));
 }
 
 #[test]

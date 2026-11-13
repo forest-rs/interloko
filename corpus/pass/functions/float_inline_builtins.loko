@@ -4,6 +4,6 @@
 // expect: dump lowered contains f64.rem
 // expect: dump tape contains f64.max
 
-define function main() => <float>
+define function main() => <double-float>
   abs(-3.0) + min(1.0, 2.0) + max(1.0, 2.0) + remainder(-7.5, 2.0)
 end;

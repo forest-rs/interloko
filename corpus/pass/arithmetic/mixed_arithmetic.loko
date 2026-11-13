@@ -4,6 +4,6 @@
 
 // An integer operand meets a float by converting to a float first, so
 // statically typed mixed arithmetic needs no dispatch.
-define function main() => <float>
+define function main() => <double-float>
   1 + 2.0 * 2 + 3 / 2.0 - 0
 end;

@@ -47,7 +47,7 @@
 "sem.arithmetic-operand-type-mismatch" = "arithmetic operands must be numbers, not { $lhs } and { $rhs }"
 "sem.comparison-operand-type-mismatch" = "comparison operands must be numbers, not { $lhs } and { $rhs }"
 "sem.integer-division-unsupported" = "`/` divides floats; convert integer operands with as(<float>, …)"
-"sem.abstract-numeric-type-unsupported" = "{ $class } is abstract and cannot type a value yet; use <integer>, <float>, or <object>"
+"sem.abstract-numeric-type-unsupported" = "{ $class } is abstract and cannot type a value yet; use a concrete class such as <integer> or <double-float>, or <object>"
 "sem.apply-arity-mismatch" = "apply expects a callable and arguments"
 "sem.apply-target-type-mismatch" = "apply target must be a { $expected }, got { $actual }"
 "sem.signal-condition-type-mismatch" = "signal condition must be a known object"

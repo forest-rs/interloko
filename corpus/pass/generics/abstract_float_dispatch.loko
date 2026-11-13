@@ -4,17 +4,17 @@
 
 // `<float>` is abstract; literals are `<double-float>` instances. A method
 // on the concrete class is more specific than one on `<float>`.
-define generic weight(x :: <float>) => <float>;
+define generic weight(x) => <double-float>;
 
-define method weight(x :: <float>) => <float>
+define method weight(x :: <float>) => <double-float>
   1.0
 end;
 
-define method weight(x :: <double-float>) => <float>
+define method weight(x :: <double-float>) => <double-float>
   2.0
 end;
 
-define function classify(x :: <object>) => <float>
+define function classify(x :: <object>) => <double-float>
   if instance?(x, <number>) then
     if instance?(x, <float>) then 1.0 else 0.0 end
   else
@@ -22,6 +22,6 @@ define function classify(x :: <object>) => <float>
   end
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   if instance?(2.5, <real>) then weight(2.5) + classify(2.5) else 0.0 end
 end;

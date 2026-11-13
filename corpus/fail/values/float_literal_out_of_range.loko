@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code ast.float-literal-out-of-range
 
-define function main() => <float>
+define function main() => <double-float>
   1e400
 end;
