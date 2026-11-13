@@ -1,0 +1,7 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains trap 2 (inexact float to integer conversion)
+
+define function main() => <i32>
+  as(<i32>, 2.5f32)
+end;

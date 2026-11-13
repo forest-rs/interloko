@@ -1,0 +1,27 @@
+// expect: run 40000u32
+// expect: diagnostics 0
+// expect: dump lowered contains i64.to_i32
+// expect: dump lowered contains u64.to_u32
+// expect: dump lowered contains f64.to_i32
+// expect: dump lowered contains i32.to_u32
+// expect: dump tape contains u32.to_i64
+
+// `as` converts between the limited integer types and from any number,
+// exactly: an integer must be in the target's range, and a float must be
+// integral, so rounding stays an explicit `round`/`floor`/... choice. From
+// `<object>` it checks for an `<integer>` first.
+define function frames(raw :: <object>) => <u32>
+  as(<u32>, raw)
+end;
+
+define function main() => <u32>
+  let big :: <integer> = 40000;
+  let narrow = as(<i32>, big);
+  let from-float = as(<i32>, 40000.0);
+  let unsigned = as(<u32>, narrow);
+  if as(<integer>, unsigned) = big then
+    if from-float = narrow then frames(40000) else 1u32 end
+  else
+    0u32
+  end
+end;

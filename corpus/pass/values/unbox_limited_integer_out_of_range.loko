@@ -1,0 +1,10 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+
+define function frames(x :: <object>) => <u32>
+  as(<u32>, x)
+end;
+
+define function main() => <u32>
+  frames(4294967296)
+end;

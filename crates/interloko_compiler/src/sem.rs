@@ -742,7 +742,8 @@ impl Module {
             | Expr::Compare { .. }
             | Expr::MixedCompare { .. }
             | Expr::ValueEqual { .. }
-            | Expr::InstanceOf { .. } => ValueKind::Bool,
+            | Expr::InstanceOf { .. }
+            | Expr::InstanceOfLimited { .. } => ValueKind::Bool,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
             Expr::VectorLiteral { class, .. } => ValueKind::Vector(*class),
@@ -2118,6 +2119,16 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Runtime membership test for a limited integer type: whether the
+    /// value is an `<integer>` in the type's range.
+    InstanceOfLimited {
+        /// Tested value.
+        value: Box<Expr>,
+        /// Target type.
+        limited: LimitedInteger,
+        /// Source span.
+        span: Span,
+    },
     /// Runtime checked object cast.
     Cast {
         /// Cast value.
@@ -2332,6 +2343,7 @@ impl Expr {
             | Self::Signal { span, .. }
             | Self::ClassOf { span, .. }
             | Self::InstanceOf { span, .. }
+            | Self::InstanceOfLimited { span, .. }
             | Self::Cast { span, .. }
             | Self::MakeObject { span, .. }
             | Self::AccessorCall { span, .. }
@@ -6476,6 +6488,17 @@ impl Lowering {
         class_name: &str,
         span: Span,
     ) -> Expr {
+        // A limited type's members are `<integer>`s in its range.
+        if let Some(limited) = LimitedInteger::from_name(class_name) {
+            return match self.lower_instance_of(ctx, value, "<integer>", span) {
+                Expr::InstanceOf { value, .. } => Expr::InstanceOfLimited {
+                    value,
+                    limited,
+                    span,
+                },
+                other => other,
+            };
+        }
         let Some(class) = self.resolve_class(class_name) else {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
@@ -6538,6 +6561,10 @@ impl Lowering {
         class_name: &str,
         span: Span,
     ) -> Expr {
+        if let Some(limited) = LimitedInteger::from_name(class_name) {
+            let value = self.lower_expr(ctx, value);
+            return self.cast_to_limited(ctx, value, limited, span);
+        }
         let Some(class) = self.resolve_class(class_name) else {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
@@ -6547,6 +6574,47 @@ impl Lowering {
         };
         let class_id = class.id;
         let value = self.lower_expr(ctx, value);
+        self.cast_to_class(ctx, value, class_id, span)
+    }
+
+    /// Lowers `as(<i32>, x)` or `as(<u32>, x)`: a checked conversion from
+    /// any number (exact for floats, in range for integers), or a checked
+    /// cast to `<integer>` followed by that conversion.
+    fn cast_to_limited(
+        &mut self,
+        ctx: &mut FunctionContext,
+        value: Expr,
+        limited: LimitedInteger,
+        span: Span,
+    ) -> Expr {
+        let to = NumericKind::of(limited_integer_kind(limited)).unwrap_or(NumericKind::Integer);
+        let value = match NumericKind::of(self.expr_kind(&value)) {
+            Some(from) if from == to => return value,
+            Some(_) => value,
+            None => {
+                let Some(integer) = self.builtin_value_class(BuiltinValueClass::Integer) else {
+                    return Expr::Error { span };
+                };
+                match self.cast_to_class(ctx, value, integer, span) {
+                    error @ Expr::Error { .. } => return error,
+                    integer => integer,
+                }
+            }
+        };
+        Expr::Convert {
+            to,
+            value: Box::new(value),
+            span,
+        }
+    }
+
+    fn cast_to_class(
+        &mut self,
+        ctx: &mut FunctionContext,
+        value: Expr,
+        class_id: ClassId,
+        span: Span,
+    ) -> Expr {
         if let Some(from) = NumericKind::of(self.expr_kind(&value))
             && let Some(to) = self
                 .kind_for_builtin_class(class_id)
@@ -6948,7 +7016,8 @@ impl Lowering {
             | Expr::Compare { .. }
             | Expr::MixedCompare { .. }
             | Expr::ValueEqual { .. }
-            | Expr::InstanceOf { .. } => ValueKind::Bool,
+            | Expr::InstanceOf { .. }
+            | Expr::InstanceOfLimited { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,
             Expr::Capture { result_kind, .. } => *result_kind,
             Expr::ConstantRef { result_kind, .. } => *result_kind,
