@@ -56,7 +56,7 @@ pub fn is_control_symbol(symbol: &str) -> bool {
             | CONTROL_POP
             | CONTROL_PUSH_EXIT
             | CONTROL_CHECK_EXIT
-            | crate::code::CODE_DISPATCHER
+            | crate::code::CODE_DISPATCH
     )
 }
 
@@ -175,6 +175,10 @@ pub struct ControlStats {
     pub signals: u64,
     /// Bindings inspected while searching for handlers.
     pub bindings_searched: u64,
+    /// Generic sends the driver dispatched.
+    pub sends: u64,
+    /// Sends answered from the dispatch cache.
+    pub send_cache_hits: u64,
 }
 
 /// The dynamic binding stack of one run.
@@ -238,6 +242,13 @@ impl ControlState {
 
     pub(crate) fn note_signal(&mut self) {
         self.stats.signals = self.stats.signals.saturating_add(1);
+    }
+
+    pub(crate) fn note_send(&mut self, cache_hit: bool) {
+        self.stats.sends = self.stats.sends.saturating_add(1);
+        if cache_hit {
+            self.stats.send_cache_hits = self.stats.send_cache_hits.saturating_add(1);
+        }
     }
 
     pub(crate) fn note_searched(&mut self) {

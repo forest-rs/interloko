@@ -164,6 +164,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         generics: vec![FuncId(0); module.runtime.generics.len()],
         methods: vec![FuncId(0); module.runtime.methods.len()],
         functions: Vec::new(),
+        dispatch: module.dispatch.clone(),
     };
     for (function, func) in module.functions.iter().zip(&ids.functions) {
         let slot = match function.kind {
@@ -292,7 +293,6 @@ struct AbiTables {
     cast_object: HostSigId,
     tags: SharedTags,
     control: Option<ControlAbi>,
-    resolve_generic: Option<HostSigId>,
 }
 
 /// Control tags every program imports by name, so that code units installed
@@ -536,17 +536,6 @@ impl AbiTables {
         let float_functions = float_function_sigs(builder, module);
         let tags = SharedTags::import(builder)?;
         let control = ControlAbi::declare(builder, module)?;
-        let resolve_generic = module
-            .functions
-            .iter()
-            .flat_map(|function| &function.instructions)
-            .any(|instr| matches!(instr, lower::Instr::ResolveGeneric { .. }))
-            .then(|| {
-                builder.host_sig_for(
-                    runtime::code::CODE_DISPATCHER,
-                    runtime::code::dispatcher_signature(),
-                )
-            });
         let host_functions = module
             .host_functions
             .iter()
@@ -588,7 +577,6 @@ impl AbiTables {
             cast_object,
             tags,
             control,
-            resolve_generic,
         })
     }
 
@@ -1148,15 +1136,27 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.call(0, callee, 0, &args, &dsts);
             }
-            lower::Instr::ResolveGeneric { dst, generic, span } => {
-                let sig = self
-                    .abi
-                    .resolve_generic
-                    .ok_or_else(|| invalid_lowered("generic resolution signature is missing"))?;
+            lower::Instr::SelectMethod {
+                dst,
+                generic,
+                args,
+                span,
+            } => {
+                let arg_types = args
+                    .iter()
+                    .map(|arg| self.register_type(*arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let sig = self.builder.host_sig_for(
+                    runtime::code::CODE_DISPATCH,
+                    runtime::code::dispatch_signature(&arg_types),
+                );
                 let generic_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(generic_reg, u64::from(generic.0));
-                self.asm.host_call(0, sig, 0, &[generic_reg], &[dst.0]);
+                let mut operands = Vec::with_capacity(args.len() + 1);
+                operands.push(generic_reg);
+                operands.extend(args.iter().map(|arg| arg.0));
+                self.asm.host_call(0, sig, 0, &operands, &[dst.0]);
             }
             lower::Instr::CallIndirect {
                 dsts,
