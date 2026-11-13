@@ -7,10 +7,11 @@
 //! stack before anything unwinds. Every other request dispatches to the
 //! embedding's [`Host`] unchanged.
 //!
-//! A run links [`CodeUnit`]s: it installs the entry unit, and generic sends
-//! ask the driver for the newest dispatcher
-//! ([`crate::code::CODE_DISPATCHER`]), while every frame keeps running the
-//! unit it entered.
+//! A run links [`CodeUnit`]s: it installs the entry unit, and a chooser may
+//! install replacements while a condition is unhandled. Generic sends ask
+//! the driver for the newest dispatcher ([`crate::code::CODE_DISPATCHER`]),
+//! and a retried frame calls the newest version of its function, while every
+//! frame keeps running the unit it entered.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -29,11 +30,11 @@ use crate::InterlokoHost;
 use crate::chooser::{
     Choice, ConditionChooser, FrameSnapshot, OfferedRestart, RegisterSnapshot, UnhandledCondition,
 };
-use crate::code::{CODE_DISPATCHER, CodeUnit, Definition, UnitTable};
+use crate::code::{CODE_DISPATCHER, CodeMismatch, CodeUnit, Definition, UnitTable};
 use crate::control::{
     ABORT_TAG, BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL,
     CONTROL_CHECK_EXIT, CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats,
-    RESTART_TAG, RestartDescriptor, is_control_symbol, restart_payload,
+    RESTART_TAG, RETRY_TAG, RestartDescriptor, is_control_symbol, restart_payload, retry_payload,
 };
 
 /// A [`Host`] backed by an [`InterlokoHost`], which the driver consults for
@@ -109,6 +110,8 @@ pub enum LinkError {
     Tag(TagError),
     /// The VM refused the program.
     Install(InstallError),
+    /// The unit cannot replace the code the run already installed.
+    Mismatch(CodeMismatch),
 }
 
 impl core::fmt::Display for LinkError {
@@ -116,6 +119,9 @@ impl core::fmt::Display for LinkError {
         match self {
             Self::Tag(error) => write!(formatter, "control tags: {error:?}"),
             Self::Install(error) => write!(formatter, "install refused: {error}"),
+            Self::Mismatch(mismatch) => {
+                write!(formatter, "cannot replace running code: {mismatch}")
+            }
         }
     }
 }
@@ -192,11 +198,15 @@ fn define_tags<H: Host>(vm: &mut Vm<H>) -> Result<VmTags, LinkError> {
     Ok(VmTags {
         restart: define(RESTART_TAG, &restart_payload())?,
         abort: define(ABORT_TAG, &[])?,
+        retry: define(RETRY_TAG, &retry_payload())?,
     })
 }
 
 /// Copies the live frames and their initialized registers, innermost first.
-fn snapshot_frames<H: RuntimeHost>(pending: &PendingHostCall<'_, '_, H>) -> Vec<FrameSnapshot> {
+fn snapshot_frames<H: RuntimeHost>(
+    pending: &PendingHostCall<'_, '_, H>,
+    units: &UnitTable,
+) -> Vec<FrameSnapshot> {
     let mut inspection = pending.inspect();
     let frames = inspection.frames().collect::<Vec<_>>();
     frames
@@ -215,7 +225,12 @@ fn snapshot_frames<H: RuntimeHost>(pending: &PendingHostCall<'_, '_, H>) -> Vec<
                         .collect()
                 })
                 .unwrap_or_default();
-            FrameSnapshot { frame, registers }
+            let code = units.frame(FuncRef::new(frame.location.unit, frame.location.func));
+            FrameSnapshot {
+                frame,
+                registers,
+                code,
+            }
         })
         .collect()
 }
@@ -252,6 +267,7 @@ struct Search {
 struct VmTags {
     restart: TagRef,
     abort: TagRef,
+    retry: TagRef,
 }
 
 /// How to finish a pending request.
@@ -550,6 +566,9 @@ impl Driver {
 
     /// Hands an unhandled condition to the chooser while every frame is
     /// still live, then carries out its validated choice.
+    ///
+    /// A chooser may first install replacement code; the driver links it
+    /// and asks again, with the frames showing what it superseded.
     fn unhandled<H: RuntimeHost>(
         &mut self,
         pending: &mut PendingHostCall<'_, '_, H>,
@@ -558,50 +577,115 @@ impl Driver {
         resume_types: &[ValueType],
         chooser: &mut dyn ConditionChooser,
     ) -> Action {
-        let frames = snapshot_frames(pending);
-        let choice = {
-            let mut restarts = Vec::new();
-            for binding in self.state.bindings().iter().rev() {
-                if let Some(descriptor) = self.site(&binding.kind) {
-                    restarts.push(OfferedRestart::Handler {
-                        token: binding.token,
-                        descriptor,
-                        activation: &binding.activation,
-                    });
+        let mut refused = None;
+        loop {
+            let frames = snapshot_frames(pending, &self.units);
+            let choice = {
+                let mut restarts = Vec::new();
+                for binding in self.state.bindings().iter().rev() {
+                    if let Some(descriptor) = self.site(&binding.kind) {
+                        restarts.push(OfferedRestart::Handler {
+                            token: binding.token,
+                            descriptor,
+                            activation: &binding.activation,
+                        });
+                    }
                 }
-            }
-            restarts.push(OfferedRestart::UseValue {
-                types: resume_types,
-            });
-            restarts.push(OfferedRestart::Abort);
-            pending.host_mut().with_runtime(|runtime| {
-                chooser.choose(&UnhandledCondition {
-                    condition,
-                    class,
-                    runtime,
-                    frames: &frames,
-                    restarts: &restarts,
+                restarts.push(OfferedRestart::UseValue {
+                    types: resume_types,
+                });
+                restarts.push(OfferedRestart::Retry);
+                restarts.push(OfferedRestart::Abort);
+                pending.host_mut().with_runtime(|runtime| {
+                    chooser.choose(&UnhandledCondition {
+                        condition,
+                        class,
+                        runtime,
+                        frames: &frames,
+                        restarts: &restarts,
+                        refused: refused.as_ref(),
+                    })
                 })
-            })
-        };
-        match choice {
-            Choice::Unhandled => Action::Fail(ControlFault::UnhandledCondition { class }),
-            Choice::Abort => Action::Throw(self.tags.abort, Vec::new()),
-            Choice::UseValue(values) => {
-                let fits = values.len() == resume_types.len()
-                    && values.iter().zip(resume_types).all(|(value, expected)| {
-                        ValueRef::from_value(value).value_type() == *expected
-                    });
-                if fits {
-                    Action::Complete(values)
-                } else {
-                    Action::Fail(ControlFault::InvalidChoice)
+            };
+            match choice {
+                Choice::Install(code) => refused = self.install(pending, code).err(),
+                Choice::Retry { frame } => return self.retry(&frames, &frame),
+                Choice::Unhandled => {
+                    return Action::Fail(ControlFault::UnhandledCondition { class });
                 }
-            }
-            Choice::Restart { token, arguments } => {
-                self.restart(pending, condition, token, &arguments)
+                Choice::Abort => return Action::Throw(self.tags.abort, Vec::new()),
+                Choice::UseValue(values) => {
+                    let fits = values.len() == resume_types.len()
+                        && values.iter().zip(resume_types).all(|(value, expected)| {
+                            ValueRef::from_value(value).value_type() == *expected
+                        });
+                    return if fits {
+                        Action::Complete(values)
+                    } else {
+                        Action::Fail(ControlFault::InvalidChoice)
+                    };
+                }
+                Choice::Restart { token, arguments } => {
+                    return self.restart(pending, condition, token, &arguments);
+                }
             }
         }
+    }
+
+    /// Installs `code` while the signal waits, after checking it can take
+    /// over from the newest unit.
+    fn install<H: RuntimeHost>(
+        &mut self,
+        pending: &mut PendingHostCall<'_, '_, H>,
+        code: Arc<CodeUnit>,
+    ) -> Result<(), LinkError> {
+        if let Some(newest) = self.units.newest() {
+            code.check_replaces(newest).map_err(LinkError::Mismatch)?;
+        }
+        let unit = pending
+            .install(Arc::clone(&code.program))
+            .map_err(LinkError::Install)?;
+        self.units.push(unit, code);
+        Ok(())
+    }
+
+    /// Unwinds to `target` and calls the newest version of its function
+    /// there with the frame's own arguments.
+    ///
+    /// Every function and method body is a retry region: each one the
+    /// exception crosses counts it down and raises it again, and the target,
+    /// reached at zero, makes the call and returns its results.
+    fn retry(&self, frames: &[FrameSnapshot], target: &ActivationId) -> Action {
+        let Some(index) = frames
+            .iter()
+            .position(|frame| frame.frame.activation == *target)
+        else {
+            return Action::Fail(ControlFault::InvalidChoice);
+        };
+        let code = &frames[index].code;
+        let Some(current) = code.current.filter(|_| code.is_retryable()) else {
+            return Action::Fail(ControlFault::InvalidChoice);
+        };
+        if self.units.signature(current) != self.units.signature(code.func) {
+            return Action::Fail(ControlFault::InvalidChoice);
+        }
+        let crossed = frames[..index]
+            .iter()
+            .filter(|frame| {
+                frame
+                    .code
+                    .definition
+                    .as_ref()
+                    .is_some_and(Definition::is_retryable)
+            })
+            .count();
+        Action::Throw(
+            self.tags.retry,
+            alloc::vec![
+                Value::I64(i64::try_from(crossed).unwrap_or(i64::MAX)),
+                Value::Func(current),
+            ],
+        )
     }
 
     /// Invokes an offered `handle` site's restart with checked arguments.

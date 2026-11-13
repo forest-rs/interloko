@@ -321,6 +321,9 @@ pub enum ControlTag {
     /// Transfer to a `block` through its exit procedure. The payload is the
     /// exit point's token, then the block's result values.
     Exit(CallableSigId),
+    /// Retry a frame with its function's current definition. The payload is
+    /// how many more retry regions to cross, then the function to call.
+    Retry,
 }
 
 /// One clause of a protected region.
@@ -1373,7 +1376,7 @@ impl<'module> Lowering<'module> {
         let mut body = BodyLowering::for_function(self.module, &self.ids, function)?;
         let rets = self.value_kinds(&function.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
-        body.lower_block(&function.body, &rets)?;
+        body.lower_retryable_block(&function.body, &rets, function.span)?;
         Ok(Function {
             id: self.lower_function_id(function.id)?,
             name: function.name.clone(),
@@ -1392,7 +1395,7 @@ impl<'module> Lowering<'module> {
         let mut body = BodyLowering::for_method(self.module, &self.ids, method)?;
         let rets = self.value_kinds(&method.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
-        body.lower_block(&method.body, &rets)?;
+        body.lower_retryable_block(&method.body, &rets, method.span)?;
         let generic = self
             .module
             .generics
@@ -2332,6 +2335,106 @@ impl<'module> BodyLowering<'module> {
         self.instructions.push(Instr::Return {
             values,
             span: block.result.span(),
+        });
+        Ok(())
+    }
+
+    /// Lowers a function or method body inside a retry region.
+    ///
+    /// A retry exception counts down through the retry regions it crosses.
+    /// The region it reaches at zero calls the function it carries with this
+    /// frame's own arguments and returns the results, so the frame's caller
+    /// sees an ordinary return from the newer code. Parameters live in the
+    /// input registers, which the body never writes.
+    fn lower_retryable_block(
+        &mut self,
+        block: &sem::Block,
+        expected: &[ValueKind],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let retry_label = self.alloc_label();
+        self.instructions.push(Instr::EnterRegion {
+            catches: vec![Catch::Tag {
+                tag: ControlTag::Retry,
+                target: retry_label,
+            }],
+        });
+        self.lower_block(block, expected)?;
+        self.instructions.push(Instr::LeaveRegion);
+
+        let remaining = self.alloc(ValueKind::I64);
+        let callee = self.alloc(ValueKind::Function(None));
+        let exception = self.alloc(ValueKind::Exn);
+        self.instructions.push(Instr::CatchTarget {
+            label: retry_label,
+            params: vec![remaining.reg, callee.reg, exception.reg],
+        });
+        let zero = self.alloc(ValueKind::I64);
+        let here = self.alloc(ValueKind::Bool);
+        let here_label = self.alloc_label();
+        let onward_label = self.alloc_label();
+        self.instructions.push(Instr::ConstI64 {
+            dst: zero.reg,
+            value: 0,
+            span,
+        });
+        self.instructions.push(Instr::I64Compare {
+            dst: here.reg,
+            op: sem::CompareOp::Eq,
+            lhs: remaining.reg,
+            rhs: zero.reg,
+            span,
+        });
+        self.instructions.push(Instr::Branch {
+            cond: here.reg,
+            then_label: here_label,
+            else_label: onward_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label {
+            label: onward_label,
+        });
+        let one = self.alloc(ValueKind::I64);
+        let next = self.alloc(ValueKind::I64);
+        let overflow = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::ConstI64 {
+            dst: one.reg,
+            value: 1,
+            span,
+        });
+        self.instructions.push(Instr::I64Binary {
+            dst: next.reg,
+            overflow: overflow.reg,
+            op: I64ArithOp::Sub,
+            lhs: remaining.reg,
+            rhs: one.reg,
+            span,
+        });
+        self.instructions.push(Instr::Throw {
+            tag: ControlTag::Retry,
+            payload: vec![next.reg, callee.reg],
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: here_label });
+        let args = self.params.iter().map(|param| param.reg).collect();
+        let arg_kinds = self.params.iter().map(|param| param.kind).collect();
+        let results = expected
+            .iter()
+            .map(|kind| self.alloc(*kind).reg)
+            .collect::<Vec<_>>();
+        self.instructions.push(Instr::CallIndirect {
+            dsts: results.clone(),
+            callee: callee.reg,
+            args,
+            arg_kinds,
+            rets: expected.to_vec(),
+            span,
+        });
+        self.instructions.push(Instr::Return {
+            values: results,
+            span,
         });
         Ok(())
     }
@@ -5020,6 +5123,7 @@ pub fn control_tag_name(tag: ControlTag) -> String {
     match tag {
         ControlTag::Restart => "restart".into(),
         ControlTag::Exit(signature) => format!("exit#{}", signature.0),
+        ControlTag::Retry => "retry".into(),
     }
 }
 
@@ -5784,7 +5888,7 @@ mod tests {
         let dump = module.dump();
         assert!(dump.contains("local l2 c = %r3: i64"));
         assert!(dump.contains("%r3, %r4 = i64.add_ovf %r1, %r2"));
-        assert!(dump.contains("br %r4, bb0, bb1"));
+        assert!(dump.contains("br %r4, bb1, bb2"));
         assert!(dump.contains("trap 3 (integer overflow)"));
         assert!(dump.contains("call l0(%r1, %r2)"));
     }

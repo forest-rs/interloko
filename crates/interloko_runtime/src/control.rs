@@ -41,6 +41,9 @@ pub const CONTROL_CHECK_EXIT: &str = "interloko.control.check_exit";
 pub const RESTART_TAG: &str = "interloko.restart";
 /// VM tag raised to unwind the whole run; only cleanups catch it.
 pub const ABORT_TAG: &str = "interloko.abort";
+/// VM tag raised to retry a frame, with payload [`retry_payload`]:
+/// `(retry frames still to cross, function to call instead)`.
+pub const RETRY_TAG: &str = "interloko.retry";
 
 /// Whether `symbol` is a control request serviced by [`crate::driver`]
 /// rather than by a [`execution_tape::host::Host`].
@@ -94,9 +97,9 @@ pub struct RestartDescriptor {
 
 /// Control metadata of one emitted program.
 ///
-/// Programs import the shared control tags ([`RESTART_TAG`]) by name, so
-/// every unit of a run throws and catches the same exceptions. The driver
-/// defines them, with [`ABORT_TAG`], before it installs a unit.
+/// Programs import the shared control tags ([`RESTART_TAG`], [`RETRY_TAG`])
+/// by name, so every unit of a run throws and catches the same exceptions.
+/// The driver defines them, with [`ABORT_TAG`], before it installs a unit.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ControlLayout {
     /// Restart sites, indexed by the descriptor operand of
@@ -305,4 +308,10 @@ pub fn check_exit_signature() -> HostSig {
 #[must_use]
 pub fn restart_payload() -> [ValueType; 2] {
     [ValueType::U64, object_type()]
+}
+
+/// Payload types of the retry tag: `(i64 frames to cross, function)`.
+#[must_use]
+pub fn retry_payload() -> [ValueType; 2] {
+    [ValueType::I64, ValueType::Func]
 }

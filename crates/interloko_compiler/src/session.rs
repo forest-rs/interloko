@@ -2171,6 +2171,18 @@ impl SessionArtifacts {
         )
     }
 
+    /// The compiled program as a code unit, when the artifacts emitted tape.
+    ///
+    /// A chooser installs it into a suspended run with
+    /// [`interloko_runtime::chooser::Choice::Install`] to hot-swap edited
+    /// definitions under the frames that are still running.
+    #[must_use]
+    pub fn code_unit(&self) -> Option<alloc::sync::Arc<interloko_runtime::code::CodeUnit>> {
+        self.tape
+            .as_ref()
+            .map(|tape| alloc::sync::Arc::clone(&tape.code))
+    }
+
     /// Calls a direct function with embedding services: declared host
     /// functions, and a chooser for conditions no handler accepts.
     ///
@@ -18141,5 +18153,264 @@ end;
             vec![1, 2],
             "cleanups ran innermost first on the way out"
         );
+    }
+
+    const HOT_SWAP: &str = "define class <bad-sample> (<object>)\n  slot value :: <float>;\nend;\n\
+         define class <skip-pixel> (<object>)\nend;\n\
+         define class <sphere> (<object>)\n  slot radius :: <float>;\nend;\n\
+         define function check-sample(value :: <float>) => <float>\n  if value < 0.0 then signal(make(<bad-sample>, value: value)) else value end\nend;\n\
+         define generic shade(s :: <sphere>, distance :: <float>) => <float>;\n\
+         define method shade(s :: <sphere>, distance :: <float>) => <float>\n  check-sample(1.0 - distance / s.radius)\nend;\n\
+         define function pixel(s :: <sphere>, x :: <float>) => <float>\n  handle shade(s, x) with restart <skip-pixel> 0.0 end\nend;\n\
+         define function render(s :: <sphere>) => <float>\n  pixel(s, 0.5) + pixel(s, 1.5) + pixel(s, 2.0)\nend;\n\
+         define function main() => <float>\n  render(make(<sphere>, radius: 1.0))\nend;";
+
+    /// `HOT_SWAP` with `shade` fixed to clamp at black, and `render` changed
+    /// so that a frame finishing on the old code is visible in the result.
+    fn hot_swap_fixed() -> String {
+        HOT_SWAP
+            .replace(
+                "check-sample(1.0 - distance / s.radius)",
+                "check-sample(max(0.0, 1.0 - distance / s.radius))",
+            )
+            .replace("pixel(s, 2.0)\n", "pixel(s, 2.0) + 100.0\n")
+    }
+
+    fn hot_swap_artifacts() -> (SessionArtifacts, SessionArtifacts) {
+        let broken =
+            CompilerSession::compile_source("shader.loko", HOT_SWAP, RuntimeMode::CompileOnly);
+        let fixed = CompilerSession::compile_source(
+            "shader.loko",
+            &hot_swap_fixed(),
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(broken.diagnostics, Vec::new());
+        assert_eq!(fixed.diagnostics, Vec::new());
+        (broken, fixed)
+    }
+
+    /// Names a frame by its unit's function name, for assertions.
+    fn frame_name(
+        artifacts: &[&SessionArtifacts],
+        frame: &interloko_runtime::chooser::FrameSnapshot,
+    ) -> String {
+        let func = frame.code.func.func;
+        artifacts
+            .iter()
+            .find_map(|artifacts| {
+                let program = artifacts.tape.as_ref()?.program().program();
+                program.function_name(func.0).map(String::from)
+            })
+            .unwrap_or_else(|| format!("f{}", func.0))
+    }
+
+    /// Installs the fixed shader while the signal is suspended, then retries
+    /// the `shade` frame.
+    struct HotSwap<'a> {
+        fixed: &'a SessionArtifacts,
+        asked: usize,
+        superseded: Vec<(String, bool, bool)>,
+    }
+
+    impl ConditionChooser for HotSwap<'_> {
+        fn choose(&mut self, condition: &UnhandledCondition<'_>) -> Choice {
+            self.asked += 1;
+            assert!(
+                condition.refused.is_none(),
+                "install refused: {:?}",
+                condition.refused
+            );
+            match self.asked {
+                1 => Choice::Install(self.fixed.code_unit().expect("fixed shader has tape")),
+                2 => {
+                    self.superseded = condition
+                        .frames
+                        .iter()
+                        .map(|frame| {
+                            (
+                                frame_name(&[self.fixed], frame),
+                                frame.code.superseded,
+                                frame.code.is_retryable(),
+                            )
+                        })
+                        .collect();
+                    let shade = condition
+                        .frames
+                        .iter()
+                        .find(|frame| {
+                            matches!(
+                                frame.code.definition,
+                                Some(interloko_runtime::code::Definition::Method(_))
+                            )
+                        })
+                        .expect("the shade method is suspended");
+                    Choice::Retry {
+                        frame: shade.frame.activation.clone(),
+                    }
+                }
+                // The fixed method never signals; asking again means a send
+                // reached superseded code.
+                _ => Choice::Unhandled,
+            }
+        }
+    }
+
+    #[test]
+    fn hot_swap_retries_a_suspended_frame_with_its_edited_method() {
+        let (broken, fixed) = hot_swap_artifacts();
+        let mut chooser = HotSwap {
+            fixed: &fixed,
+            asked: 0,
+            superseded: Vec::new(),
+        };
+        let value = call_with_chooser(&broken, &mut chooser).expect("retry recovers");
+
+        // 0.5 from the first pixel, 0.0 from the retried shade and 0.0 from
+        // the third pixel, whose old `pixel` frame sent `shade` to the new
+        // method. The old `render` frame finished on its old code: no 100.0.
+        assert_eq!(value, FunctionValue::Float(0.5));
+        assert_eq!(chooser.asked, 2);
+        assert_eq!(
+            chooser.superseded,
+            vec![
+                ("check-sample".into(), false, true),
+                ("shade#method0".into(), true, true),
+                ("shade#dispatch".into(), false, false),
+                ("pixel".into(), false, true),
+                ("render".into(), true, true),
+                ("main".into(), false, true),
+            ]
+        );
+
+        // A new call runs the new code from the start.
+        let value = fixed
+            .call_function("main", &[], None)
+            .expect("fixed shader runs")
+            .value;
+        assert_eq!(value, FunctionValue::Float(100.5));
+    }
+
+    #[test]
+    fn restarts_established_by_old_code_catch_signals_from_new_code() {
+        let (broken, _) = hot_swap_artifacts();
+        // The edit makes shade signal for every ray; the old `pixel` frame's
+        // `<skip-pixel>` handle site is offered and taken across units.
+        let always_bad = CompilerSession::compile_source(
+            "shader.loko",
+            &HOT_SWAP.replace(
+                "check-sample(1.0 - distance / s.radius)",
+                "check-sample(0.0 - distance)",
+            ),
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(always_bad.diagnostics, Vec::new());
+        let mut asked = 0;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            if asked == 1 {
+                return Choice::Install(always_bad.code_unit().expect("tape"));
+            }
+            if asked == 2 {
+                let shade = condition
+                    .frames
+                    .iter()
+                    .find(|frame| frame.code.superseded)
+                    .expect("shade is superseded");
+                return Choice::Retry {
+                    frame: shade.frame.activation.clone(),
+                };
+            }
+            // The retried shade signals from the new unit; skip the pixel
+            // through the handle site the old `pixel` frame established.
+            condition
+                .restarts
+                .iter()
+                .find_map(|restart| match restart {
+                    OfferedRestart::Handler { token, .. } => Some(Choice::Restart {
+                        token: *token,
+                        arguments: Vec::new(),
+                    }),
+                    _ => None,
+                })
+                .unwrap_or(Choice::Unhandled)
+        });
+        let value = call_with_chooser(&broken, &mut chooser).expect("skip-pixel recovers");
+        // 0.5, then two pixels skipped through old handle sites.
+        assert_eq!(value, FunctionValue::Float(0.5));
+        assert_eq!(asked, 4);
+    }
+
+    #[test]
+    fn install_refuses_code_that_changes_the_runtime_layout() {
+        let (broken, _) = hot_swap_artifacts();
+        let reshaped = CompilerSession::compile_source(
+            "shader.loko",
+            &HOT_SWAP.replace(
+                "  slot radius :: <float>;\n",
+                "  slot radius :: <float>;\n  slot tint :: <float>, init-value: 0.0;\n",
+            ),
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(reshaped.diagnostics, Vec::new());
+        let mut refusals = Vec::new();
+        let mut asked = 0;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            refusals.push(condition.refused.cloned());
+            if asked == 1 {
+                Choice::Install(reshaped.code_unit().expect("tape"))
+            } else {
+                Choice::UseValue(vec![Value::F64(0.25)])
+            }
+        });
+        let value = call_with_chooser(&broken, &mut chooser).expect("use-value resumes");
+        // Both failing pixels resume with 0.25 on the original code.
+        assert_eq!(value, FunctionValue::Float(1.0));
+        assert_eq!(
+            refusals,
+            vec![
+                None,
+                Some(driver::LinkError::Mismatch(
+                    interloko_runtime::code::CodeMismatch::Layout
+                )),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hot_swapped_run_records_and_replays_across_units() {
+        let (broken, fixed) = hot_swap_artifacts();
+        let mut chooser = HotSwap {
+            fixed: &fixed,
+            asked: 0,
+            superseded: Vec::new(),
+        };
+        let outcome = broken
+            .call_function_with(
+                "main",
+                &[],
+                Some(ExecutionTraceDetail::Boundaries),
+                CallServices {
+                    host_functions: None,
+                    chooser: Some(&mut chooser),
+                },
+            )
+            .expect("retry recovers");
+        assert_eq!(outcome.value, FunctionValue::Float(0.5));
+        let trace = outcome.trace.expect("trace was requested");
+        let recording = trace.recording();
+        assert_eq!(recording.status(), Ok(()));
+        assert_eq!(recording.units().len(), 2, "the edit was installed mid-run");
+        assert!(
+            recording
+                .units()
+                .nth(1)
+                .is_some_and(|unit| unit.installed.is_some())
+        );
+        match recording.replay() {
+            Ok(execution_tape::recording::ReplayOutcome::Returned(_)) => {}
+            other => panic!("replay should reproduce the hot-swapped run, got {other:?}"),
+        }
     }
 }
