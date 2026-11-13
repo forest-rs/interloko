@@ -5907,7 +5907,7 @@ impl Lowering {
         ctx: &mut FunctionContext,
         target: Expr,
         function: FunctionId,
-        args: Vec<Expr>,
+        mut args: Vec<Expr>,
         span: Span,
     ) -> Expr {
         let Some(symbol) = self.functions.get(function.0 as usize) else {
@@ -5928,6 +5928,7 @@ impl Lowering {
             );
             return Expr::Error { span };
         }
+        adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Some));
         for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
             let actual = self.expr_kind(arg);
             if !self.kinds_match(*expected, actual) {
@@ -6044,7 +6045,7 @@ impl Lowering {
         ctx: &mut FunctionContext,
         target: Expr,
         generic: GenericFunctionId,
-        args: Vec<Expr>,
+        mut args: Vec<Expr>,
         span: Span,
     ) -> Expr {
         let Some(symbol) = self.generic_symbols.get(generic.0 as usize) else {
@@ -6065,6 +6066,7 @@ impl Lowering {
             );
             return Expr::Error { span };
         }
+        adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Option::as_ref));
         for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
             let Some(expected) = *expected else {
                 continue;
@@ -6099,7 +6101,7 @@ impl Lowering {
         &self,
         ctx: &mut FunctionContext,
         target: Expr,
-        args: Vec<Expr>,
+        mut args: Vec<Expr>,
         expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
@@ -6119,6 +6121,7 @@ impl Lowering {
                 );
                 return Expr::Error { span };
             }
+            adapt_literal_args(&mut args, signature.params.iter().map(Some));
             for (index, (arg, expected)) in args.iter().zip(&signature.params).enumerate() {
                 let actual = self.expr_kind(arg);
                 if !self.kinds_match(*expected, actual) {
