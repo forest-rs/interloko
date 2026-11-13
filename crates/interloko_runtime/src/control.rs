@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use execution_tape::host::HostSig;
-use execution_tape::program::{TagId, ValueType};
-use execution_tape::value::Value;
+use execution_tape::program::ValueType;
+use execution_tape::value::{UnitId, Value};
 use execution_tape::vm::ActivationId;
 use interloko_model::ClassId;
 
@@ -36,6 +36,12 @@ pub const CONTROL_PUSH_EXIT: &str = "interloko.control.push_exit";
 /// Host symbol that checks an exit point is still live before exiting to it.
 pub const CONTROL_CHECK_EXIT: &str = "interloko.control.check_exit";
 
+/// VM tag raised at a signal to reach the selected handler's activation,
+/// with payload [`restart_payload`]: `(token, condition)`.
+pub const RESTART_TAG: &str = "interloko.restart";
+/// VM tag raised to unwind the whole run; only cleanups catch it.
+pub const ABORT_TAG: &str = "interloko.abort";
+
 /// Whether `symbol` is a control request serviced by [`crate::driver`]
 /// rather than by a [`execution_tape::host::Host`].
 #[must_use]
@@ -47,6 +53,7 @@ pub fn is_control_symbol(symbol: &str) -> bool {
             | CONTROL_POP
             | CONTROL_PUSH_EXIT
             | CONTROL_CHECK_EXIT
+            | crate::code::CODE_DISPATCHER
     )
 }
 
@@ -85,21 +92,13 @@ pub struct RestartDescriptor {
     pub span: Range<usize>,
 }
 
-/// Tags the runtime raises to transfer control.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ControlTags {
-    /// Raised at a signal to reach the selected handler's activation, with
-    /// payload `(token, condition)`.
-    pub restart: TagId,
-    /// Raised to unwind the whole run; only cleanups catch it.
-    pub abort: TagId,
-}
-
 /// Control metadata of one emitted program.
+///
+/// Programs import the shared control tags ([`RESTART_TAG`]) by name, so
+/// every unit of a run throws and catches the same exceptions. The driver
+/// defines them, with [`ABORT_TAG`], before it installs a unit.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ControlLayout {
-    /// Control tags, present when the program uses dynamic control.
-    pub tags: Option<ControlTags>,
     /// Restart sites, indexed by the descriptor operand of
     /// [`CONDITION_PUSH_HANDLER`].
     pub restarts: Vec<RestartDescriptor>,
@@ -110,7 +109,9 @@ pub struct ControlLayout {
 pub enum BindingKind {
     /// A `handle` site's handler and restart.
     Handler {
-        /// Index into [`ControlLayout::restarts`].
+        /// Unit whose code established the handler.
+        unit: UnitId,
+        /// Index into that unit's [`ControlLayout::restarts`].
         descriptor: usize,
         /// Guard closure, in the run's own heap, that may decline.
         guard: Option<Value>,

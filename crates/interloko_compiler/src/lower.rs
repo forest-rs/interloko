@@ -715,6 +715,16 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Resolves a generic function to its current dispatcher, which may
+    /// belong to a newer code unit than the caller's.
+    ResolveGeneric {
+        /// Destination function register.
+        dst: Register,
+        /// Generic function, by its id in the shared runtime layout.
+        generic: sem::GenericFunctionId,
+        /// Source span.
+        span: Span,
+    },
     /// Indirect call through a first-class callable value.
     CallIndirect {
         /// Destination registers.
@@ -1593,33 +1603,57 @@ impl<'module> Lowering<'module> {
             .map(|(index, _)| input_register(spec.call_params.len() + 1 + index))
             .collect::<Vec<_>>();
         let ret = spec.rets.first().copied().unwrap_or(ValueKind::Any);
+        let mut register_kinds = params
+            .iter()
+            .map(|param| param.kind)
+            .chain(spec.rets.iter().copied())
+            .collect::<Vec<_>>();
+        let call = match spec.callable {
+            // A generic sends through its current dispatcher, like a call site.
+            sem::KnownCallable::GenericFunction(generic) => {
+                // Register kinds start at r1, so the new kind is the last register.
+                register_kinds.push(ValueKind::Function(None));
+                let callee = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
+                vec![
+                    Instr::ResolveGeneric {
+                        dst: callee,
+                        generic,
+                        span: spec.span,
+                    },
+                    Instr::CallIndirect {
+                        dsts: results.clone(),
+                        callee,
+                        args: call_args,
+                        arg_kinds: spec.call_params.to_vec(),
+                        rets: spec.rets.clone(),
+                        span: spec.span,
+                    },
+                ]
+            }
+            _ => vec![Instr::Call {
+                dsts: results.clone(),
+                callee: spec.target,
+                args: call_args,
+                span: spec.span,
+            }],
+        };
+        let mut instructions = call;
+        instructions.push(Instr::Return {
+            values: results,
+            span: spec.span,
+        });
         Ok(Function {
             id: spec.id,
             name: spec.name,
             kind: FunctionKind::CallableThunk {
                 callable: spec.callable,
             },
-            register_kinds: params
-                .iter()
-                .map(|param| param.kind)
-                .chain(spec.rets.iter().copied())
-                .collect(),
+            register_kinds,
             params,
             ret,
             rets: spec.rets,
             locals: Vec::new(),
-            instructions: vec![
-                Instr::Call {
-                    dsts: results.clone(),
-                    callee: spec.target,
-                    args: call_args,
-                    span: spec.span,
-                },
-                Instr::Return {
-                    values: results,
-                    span: spec.span,
-                },
-            ],
+            instructions,
             span: spec.span,
         })
     }
@@ -2298,6 +2332,35 @@ impl<'module> BodyLowering<'module> {
         self.instructions.push(Instr::Return {
             values,
             span: block.result.span(),
+        });
+        Ok(())
+    }
+
+    /// Sends to a generic function through its current dispatcher.
+    fn send(
+        &mut self,
+        generic: &sem::GenericFunction,
+        args: Vec<Register>,
+        dsts: Vec<Register>,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let callee = self.alloc(ValueKind::Function(None));
+        self.instructions.push(Instr::ResolveGeneric {
+            dst: callee.reg,
+            generic: generic.id,
+            span,
+        });
+        let arg_kinds = (0..generic.arity)
+            .map(|index| dispatcher_param_kind(self.module, generic, index))
+            .collect();
+        let rets = self.value_kinds(&generic.result_kinds)?;
+        self.instructions.push(Instr::CallIndirect {
+            dsts,
+            callee: callee.reg,
+            args,
+            arg_kinds,
+            rets,
+            span,
         });
         Ok(())
     }
@@ -2998,17 +3061,7 @@ impl<'module> BodyLowering<'module> {
                     ));
                 }
                 let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
-                self.instructions.push(Instr::Call {
-                    dsts: vec![result.reg],
-                    callee: self
-                        .ids
-                        .generics
-                        .get(generic.0 as usize)
-                        .copied()
-                        .ok_or_else(|| invalid_semantic("generic id is out of range"))?,
-                    args,
-                    span: *span,
-                });
+                self.send(generic_info, args, vec![result.reg], *span)?;
                 Ok(result)
             }
             sem::Expr::CallableCall {
@@ -3451,17 +3504,12 @@ impl<'module> BodyLowering<'module> {
                     .copied()
                     .map(|kind| self.alloc(kind))
                     .collect::<Vec<_>>();
-                self.instructions.push(Instr::Call {
-                    dsts: results.iter().map(|result| result.reg).collect(),
-                    callee: self
-                        .ids
-                        .generics
-                        .get(generic.0 as usize)
-                        .copied()
-                        .ok_or_else(|| invalid_semantic("generic id is out of range"))?,
+                self.send(
+                    generic_info,
                     args,
-                    span: *span,
-                });
+                    results.iter().map(|result| result.reg).collect(),
+                    *span,
+                )?;
                 Ok(results)
             }
             sem::Expr::CallableCall {
@@ -5271,6 +5319,10 @@ impl Module {
                 self.fmt_result_list(f, dsts)?;
                 write!(f, " = call l{}", callee.0)?;
                 self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
+            Instr::ResolveGeneric { dst, generic, span } => {
+                write!(f, "  {dst} = resolve-generic g{}", generic.0)?;
                 fmt_span(f, *span)
             }
             Instr::CallIndirect {

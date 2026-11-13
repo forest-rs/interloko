@@ -8,13 +8,12 @@
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::{self, Write as _};
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
-use execution_tape::value::{FuncRef, Value};
+use execution_tape::value::Value;
 use execution_tape::vm::{InvocationOptions, Limits, Trap, TrapInfo, Vm};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -375,7 +374,7 @@ impl SessionRuntime {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        if *self.host.layout() != tape.runtime {
+        if *self.host.layout() != *tape.runtime() {
             return Err(FunctionCallError::RuntimeLayoutChanged);
         }
         call_function(
@@ -516,6 +515,11 @@ pub enum FunctionCallError {
     /// A [`SessionRuntime`] was asked to run artifacts whose runtime layout
     /// differs from the one its image was built for.
     RuntimeLayoutChanged,
+    /// The program could not be installed and linked into the call's VM.
+    Link {
+        /// Why linking failed.
+        error: driver::LinkError,
+    },
     /// A signalled condition found no applicable live handler.
     UnhandledCondition {
         /// Source name of the condition's class.
@@ -587,6 +591,7 @@ impl fmt::Display for FunctionCallError {
             Self::RuntimeLayoutChanged => {
                 formatter.write_str("the runtime image was built for a different runtime layout")
             }
+            Self::Link { error } => write!(formatter, "cannot link the program: {error}"),
             Self::UnhandledCondition { class, .. } => {
                 write!(formatter, "unhandled condition {class}")
             }
@@ -2108,7 +2113,7 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        let mut runtime = InterlokoHost::new(tape.runtime.clone());
+        let mut runtime = InterlokoHost::new(tape.runtime().clone());
         call_function(
             &self.sem,
             &self.host_registry,
@@ -2129,7 +2134,7 @@ impl SessionArtifacts {
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
         Ok(SessionRuntime {
-            host: InterlokoHost::new(tape.runtime.clone()),
+            host: InterlokoHost::new(tape.runtime().clone()),
         })
     }
 
@@ -2150,7 +2155,7 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        let mut runtime = InterlokoHost::new(tape.runtime.clone());
+        let mut runtime = InterlokoHost::new(tape.runtime().clone());
         call_function(
             &self.sem,
             &self.host_registry,
@@ -2183,7 +2188,7 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        let mut runtime = InterlokoHost::new(tape.runtime.clone());
+        let mut runtime = InterlokoHost::new(tape.runtime().clone());
         call_function(
             &self.sem,
             &self.host_registry,
@@ -2278,7 +2283,7 @@ impl SessionArtifacts {
                 |tape| {
                     format!(
                         "{}",
-                        execution_tape::disasm::disassemble_verified(&tape.program)
+                        execution_tape::disasm::disassemble_verified(tape.program())
                     )
                 },
             ),
@@ -5243,7 +5248,7 @@ fn run_main_with_trace(
     tape: &tape::TapeModule,
     trace: Option<ExecutionTraceDetail>,
 ) -> (RuntimeResult, Option<ExecutionTrace>) {
-    let mut runtime = InterlokoHost::new(tape.runtime.clone());
+    let mut runtime = InterlokoHost::new(tape.runtime().clone());
     match call_function(
         module,
         host_registry,
@@ -5299,7 +5304,9 @@ fn runtime_result_for_main_error(
         }
         // `main` runs on a fresh host with the artifacts' own layout, so its
         // turn always opens and closes.
-        FunctionCallError::TurnFailed { .. } | FunctionCallError::RuntimeLayoutChanged => (
+        FunctionCallError::TurnFailed { .. }
+        | FunctionCallError::RuntimeLayoutChanged
+        | FunctionCallError::Link { .. } => (
             RuntimeResult::UnsupportedResult {
                 declared: error.to_string(),
             },
@@ -5442,19 +5449,15 @@ fn run_turn_body<'a>(
     }
 
     let mut vm = Vm::new(host.clone(), Limits::default());
-    // A fresh VM has room for a unit, and the program imports no tags.
-    let unit = vm
-        .install(Arc::clone(&tape.program))
-        .expect("a fresh VM installs a program without tag imports");
-    let mut capture = trace.map(|detail| TraceCapture::new(&tape.program, detail));
+    let mut capture = trace.map(|detail| TraceCapture::new(tape.program(), detail));
     let mut options = InvocationOptions::default();
     if let Some(capture) = capture.as_mut() {
         options = options.trace(capture.mask(), capture.sink());
     }
     let run = driver::run(
         &mut vm,
-        &tape.control,
-        FuncRef::new(unit, entry),
+        &tape.code,
+        entry,
         &runtime_arguments,
         options,
         chooser,
@@ -5476,7 +5479,7 @@ fn run_turn_body<'a>(
                     ..
                 } => FunctionCallError::UnhandledCondition {
                     class: tape
-                        .runtime
+                        .runtime()
                         .class(class)
                         .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
                     trace,
@@ -5486,6 +5489,7 @@ fn run_turn_body<'a>(
                     ..
                 } => FunctionCallError::ExpiredExit { trace },
                 RunFailure::Aborted { .. } => FunctionCallError::Aborted { trace },
+                RunFailure::Link(error) => FunctionCallError::Link { error },
                 RunFailure::Control { trap, .. } | RunFailure::Trap(trap) => {
                     FunctionCallError::Trap { trap, trace }
                 }
@@ -13641,7 +13645,7 @@ mod tests {
             }
             let trace = artifacts.runtime_trace.as_ref().unwrap();
             let view = artifacts.execution_trace_view(trace);
-            let tape = &artifacts.tape.as_ref().unwrap().program;
+            let tape = &artifacts.tape.as_ref().unwrap().program();
             let is_call_site = |location: TracedLocation<'_>| {
                 execution_tape::disasm::disassemble_function(
                     tape.program(),

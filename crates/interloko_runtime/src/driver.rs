@@ -6,26 +6,34 @@
 //! are visible: a signal searches the dynamic bindings on the signalling
 //! stack before anything unwinds. Every other request dispatches to the
 //! embedding's [`Host`] unchanged.
+//!
+//! A run links [`CodeUnit`]s: it installs the entry unit, and generic sends
+//! ask the driver for the newest dispatcher
+//! ([`crate::code::CODE_DISPATCHER`]), while every frame keeps running the
+//! unit it entered.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use execution_tape::host::{Host, HostError, ValueRef};
 use execution_tape::program::ValueType;
-use execution_tape::value::{FuncRef, Obj, TagRef, Value};
+use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, Value};
 use execution_tape::vm::{
-    ActivationId, Invocation, InvocationOptions, PendingHostCall, RunStatus, Trap, TrapInfo, Vm,
+    ActivationId, InstallError, Invocation, InvocationOptions, PendingHostCall, RunStatus,
+    TagError, Trap, TrapInfo, Vm,
 };
-use interloko_model::ClassId;
+use interloko_model::{ClassId, GenericFunctionId};
 
 use crate::InterlokoHost;
 use crate::chooser::{
     Choice, ConditionChooser, FrameSnapshot, OfferedRestart, RegisterSnapshot, UnhandledCondition,
 };
+use crate::code::{CODE_DISPATCHER, CodeUnit, Definition, UnitTable};
 use crate::control::{
-    BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONTROL_CHECK_EXIT,
-    CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlLayout, ControlState, ControlStats,
-    is_control_symbol,
+    ABORT_TAG, BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL,
+    CONTROL_CHECK_EXIT, CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats,
+    RESTART_TAG, RestartDescriptor, is_control_symbol, restart_payload,
 };
 
 /// A [`Host`] backed by an [`InterlokoHost`], which the driver consults for
@@ -68,49 +76,85 @@ pub enum RunFailure {
         /// The uncaught abort that ended the VM invocation.
         trap: Box<TrapInfo>,
     },
+    /// The entry unit could not be linked into the VM; nothing ran.
+    Link(LinkError),
 }
 
 impl RunFailure {
-    /// The trap that ended the VM invocation.
+    /// The trap that ended the VM invocation, if one started.
     #[must_use]
-    pub const fn trap(&self) -> &TrapInfo {
+    pub const fn trap(&self) -> Option<&TrapInfo> {
         match self {
-            Self::Trap(trap) | Self::Control { trap, .. } | Self::Aborted { trap } => trap,
+            Self::Trap(trap) | Self::Control { trap, .. } | Self::Aborted { trap } => Some(trap),
+            Self::Link(_) => None,
         }
     }
 }
 
-/// Runs `entry` with `args` to completion, servicing host requests.
+impl core::fmt::Display for RunFailure {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Trap(trap) => write!(formatter, "{trap}"),
+            Self::Control { fault, trap } => write!(formatter, "{fault:?}: {trap}"),
+            Self::Aborted { .. } => formatter.write_str("aborted by the condition chooser"),
+            Self::Link(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+/// Why a code unit could not be linked into a run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkError {
+    /// The VM already defines a control tag with a different payload.
+    Tag(TagError),
+    /// The VM refused the program.
+    Install(InstallError),
+}
+
+impl core::fmt::Display for LinkError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Tag(error) => write!(formatter, "control tags: {error:?}"),
+            Self::Install(error) => write!(formatter, "install refused: {error}"),
+        }
+    }
+}
+
+/// Installs `unit` in `vm` and runs its function `entry` with `args` to
+/// completion, servicing host requests.
 ///
-/// `entry` names a function of a unit installed from the program `control`
-/// describes. `options` may carry trace and access observers; the driver
-/// opts into yielded host calls itself. Hard VM limits apply to the whole
-/// run, including guest code the driver starts on the signalling stack.
+/// The driver defines the control tags the unit imports, unless the VM
+/// already has them, and installs the unit as a new VM unit; installing is
+/// explicit and never cached, so every run adds one unit. `options` may carry
+/// trace and access observers; the driver opts into yielded host calls
+/// itself. Hard VM limits apply to the whole run, including guest code the
+/// driver starts on the signalling stack.
 ///
 /// A condition that no live handler accepts goes to `chooser` before anything
 /// unwinds.
 pub fn run<'a, H: RuntimeHost>(
     vm: &'a mut Vm<H>,
-    control: &ControlLayout,
-    entry: FuncRef,
+    unit: &Arc<CodeUnit>,
+    entry: FuncId,
     args: &'a [Value],
     options: InvocationOptions<'a>,
     chooser: &mut dyn ConditionChooser,
 ) -> Result<RunOutcome, RunFailure> {
-    // The program names its tags locally; the driver raises the VM tags they
-    // were bound to when the entry unit was installed.
-    let tags = control.tags.and_then(|tags| {
-        let units = vm.units();
-        Some(VmTags {
-            restart: units.tag(entry.unit, tags.restart)?,
-            abort: units.tag(entry.unit, tags.abort)?,
-        })
-    });
+    let tags = define_tags(vm).map_err(RunFailure::Link)?;
+    let installed = vm
+        .install(Arc::clone(&unit.program))
+        .map_err(|error| RunFailure::Link(LinkError::Install(error)))?;
+    let mut units = UnitTable::default();
+    units.push(installed, Arc::clone(unit));
     let mut invocation = vm
-        .start(entry, args, options.yield_host_calls())
+        .start(
+            FuncRef::new(installed, entry),
+            args,
+            options.yield_host_calls(),
+        )
         .map_err(|trap| RunFailure::Trap(Box::new(trap)))?;
     let mut driver = Driver {
-        control,
+        units,
         tags,
         state: ControlState::default(),
         searches: Vec::new(),
@@ -138,6 +182,19 @@ pub fn run<'a, H: RuntimeHost>(
     }
 }
 
+/// Defines the control tags units import, or finds them when the VM already
+/// has them.
+fn define_tags<H: Host>(vm: &mut Vm<H>) -> Result<VmTags, LinkError> {
+    let mut define = |name: &str, payload: &[ValueType]| match vm.units().defined_tag(name) {
+        Some(tag) => Ok(tag),
+        None => vm.define_tag(name, payload).map_err(LinkError::Tag),
+    };
+    Ok(VmTags {
+        restart: define(RESTART_TAG, &restart_payload())?,
+        abort: define(ABORT_TAG, &[])?,
+    })
+}
+
 /// Copies the live frames and their initialized registers, innermost first.
 fn snapshot_frames<H: RuntimeHost>(pending: &PendingHostCall<'_, '_, H>) -> Vec<FrameSnapshot> {
     let mut inspection = pending.inspect();
@@ -163,10 +220,9 @@ fn snapshot_frames<H: RuntimeHost>(pending: &PendingHostCall<'_, '_, H>) -> Vec<
         .collect()
 }
 
-struct Driver<'c> {
-    control: &'c ControlLayout,
-    /// The VM tags bound to [`ControlLayout::tags`] in the entry unit.
-    tags: Option<VmTags>,
+struct Driver {
+    units: UnitTable,
+    tags: VmTags,
     state: ControlState,
     searches: Vec<Search>,
     fault: Option<ControlFault>,
@@ -206,10 +262,10 @@ enum Action {
     Fail(ControlFault),
 }
 
-impl Driver<'_> {
+impl Driver {
     fn failure(&self, trap: TrapInfo) -> RunFailure {
-        if let (Trap::Uncaught(exception), Some(tags)) = (&trap.trap, self.tags)
-            && exception.tag() == tags.abort
+        if let Trap::Uncaught(exception) = &trap.trap
+            && exception.tag() == self.tags.abort
         {
             return RunFailure::Aborted {
                 trap: Box::new(trap),
@@ -236,8 +292,13 @@ impl Driver<'_> {
             return Ok(());
         };
         let guard_returned = status == RunStatus::CallbackReturned;
-        if !guard_returned && !is_control_symbol(pending.symbol()) {
-            return pending.dispatch();
+        if !guard_returned {
+            if pending.symbol() == CODE_DISPATCHER {
+                return self.resolve_dispatcher(pending);
+            }
+            if !is_control_symbol(pending.symbol()) {
+                return pending.dispatch();
+            }
         }
         // A search whose signalling activation has unwound is over.
         let activations = pending
@@ -264,6 +325,28 @@ impl Driver<'_> {
         }
     }
 
+    /// Answers a generic send with the newest unit's dispatcher.
+    fn resolve_dispatcher<H: RuntimeHost>(
+        &mut self,
+        pending: PendingHostCall<'_, '_, H>,
+    ) -> Result<(), TrapInfo> {
+        let generic = match pending.arguments().next() {
+            Some(ValueRef::U64(generic)) => u32::try_from(generic).ok(),
+            _ => None,
+        };
+        let dispatcher = generic.and_then(|generic| {
+            self.units
+                .current(&Definition::Generic(GenericFunctionId(generic)))
+        });
+        match dispatcher {
+            Some(dispatcher) => pending.complete(&mut [Value::Func(dispatcher)], Ok(0)),
+            None => {
+                self.fault.get_or_insert(ControlFault::MalformedRequest);
+                pending.complete(&mut [], Err(HostError::Failed))
+            }
+        }
+    }
+
     /// Decides a new control request while it waits, with the signalling
     /// frames and the host both reachable through `pending`. `activations`
     /// are the live ones, innermost first.
@@ -282,10 +365,12 @@ impl Driver<'_> {
             .collect::<Vec<_>>();
         match (pending.symbol(), args.as_slice()) {
             (CONDITION_PUSH_HANDLER, [Value::U64(descriptor), guard @ ..]) => {
-                let Some(descriptor) = usize::try_from(*descriptor)
-                    .ok()
-                    .filter(|index| *index < self.control.restarts.len())
-                else {
+                let unit = pending.unit();
+                let Some(descriptor) = usize::try_from(*descriptor).ok().filter(|index| {
+                    self.units
+                        .get(unit)
+                        .is_some_and(|code| *index < code.control.restarts.len())
+                }) else {
                     return Action::Fail(ControlFault::MalformedRequest);
                 };
                 let guard = match guard {
@@ -293,9 +378,14 @@ impl Driver<'_> {
                     [guard @ Value::Closure(_)] => Some(guard.clone()),
                     _ => return Action::Fail(ControlFault::MalformedRequest),
                 };
-                let token = self
-                    .state
-                    .push(BindingKind::Handler { descriptor, guard }, activation);
+                let token = self.state.push(
+                    BindingKind::Handler {
+                        unit,
+                        descriptor,
+                        guard,
+                    },
+                    activation,
+                );
                 Action::Complete(alloc::vec![Value::U64(token.0)])
             }
             (CONTROL_PUSH_EXIT, []) => {
@@ -411,12 +501,12 @@ impl Driver<'_> {
     /// Takes the handler at `index` for the innermost search: its restart is
     /// raised at the signal.
     fn accept(&mut self, index: usize) -> Action {
-        let (Some(search), Some(tags)) = (self.searches.pop(), self.tags) else {
+        let Some(search) = self.searches.pop() else {
             return Action::Fail(ControlFault::MalformedRequest);
         };
         let token = self.state.bindings()[index].token;
         Action::Throw(
-            tags.restart,
+            self.tags.restart,
             alloc::vec![Value::U64(token.0), Value::Obj(search.condition)],
         )
     }
@@ -436,18 +526,24 @@ impl Driver<'_> {
         masked
     }
 
+    /// The restart site a handler binding established, from its unit.
+    fn site(&self, kind: &BindingKind) -> Option<&RestartDescriptor> {
+        match kind {
+            BindingKind::Handler {
+                unit, descriptor, ..
+            } => self.units.get(*unit)?.control.restarts.get(*descriptor),
+            BindingKind::Exit => None,
+        }
+    }
+
     /// Which live bindings, outermost first, are handlers accepting `class`.
     fn applicable(&self, runtime: &InterlokoHost, class: ClassId) -> Vec<bool> {
         self.state
             .bindings()
             .iter()
-            .map(|binding| match binding.kind {
-                BindingKind::Handler { descriptor, .. } => self
-                    .control
-                    .restarts
-                    .get(descriptor)
-                    .is_some_and(|site| runtime.layout.is_same_or_subclass(class, site.class)),
-                BindingKind::Exit => false,
+            .map(|binding| {
+                self.site(&binding.kind)
+                    .is_some_and(|site| runtime.layout.is_same_or_subclass(class, site.class))
             })
             .collect()
     }
@@ -462,81 +558,82 @@ impl Driver<'_> {
         resume_types: &[ValueType],
         chooser: &mut dyn ConditionChooser,
     ) -> Action {
-        let Some(tags) = self.tags else {
-            return Action::Fail(ControlFault::MalformedRequest);
-        };
         let frames = snapshot_frames(pending);
-        let mut restarts = Vec::new();
-        for binding in self.state.bindings().iter().rev() {
-            if let BindingKind::Handler { descriptor, .. } = binding.kind
-                && let Some(descriptor) = self.control.restarts.get(descriptor)
-            {
-                restarts.push(OfferedRestart::Handler {
-                    token: binding.token,
-                    descriptor,
-                    activation: &binding.activation,
-                });
+        let choice = {
+            let mut restarts = Vec::new();
+            for binding in self.state.bindings().iter().rev() {
+                if let Some(descriptor) = self.site(&binding.kind) {
+                    restarts.push(OfferedRestart::Handler {
+                        token: binding.token,
+                        descriptor,
+                        activation: &binding.activation,
+                    });
+                }
+            }
+            restarts.push(OfferedRestart::UseValue {
+                types: resume_types,
+            });
+            restarts.push(OfferedRestart::Abort);
+            pending.host_mut().with_runtime(|runtime| {
+                chooser.choose(&UnhandledCondition {
+                    condition,
+                    class,
+                    runtime,
+                    frames: &frames,
+                    restarts: &restarts,
+                })
+            })
+        };
+        match choice {
+            Choice::Unhandled => Action::Fail(ControlFault::UnhandledCondition { class }),
+            Choice::Abort => Action::Throw(self.tags.abort, Vec::new()),
+            Choice::UseValue(values) => {
+                let fits = values.len() == resume_types.len()
+                    && values.iter().zip(resume_types).all(|(value, expected)| {
+                        ValueRef::from_value(value).value_type() == *expected
+                    });
+                if fits {
+                    Action::Complete(values)
+                } else {
+                    Action::Fail(ControlFault::InvalidChoice)
+                }
+            }
+            Choice::Restart { token, arguments } => {
+                self.restart(pending, condition, token, &arguments)
             }
         }
-        restarts.push(OfferedRestart::UseValue {
-            types: resume_types,
-        });
-        restarts.push(OfferedRestart::Abort);
-        let state = &self.state;
-        let control = self.control;
-        pending.host_mut().with_runtime(|runtime| {
-            let choice = chooser.choose(&UnhandledCondition {
-                condition,
-                class,
-                runtime,
-                frames: &frames,
-                restarts: &restarts,
-            });
-            match choice {
-                Choice::Unhandled => Action::Fail(ControlFault::UnhandledCondition { class }),
-                Choice::Abort => Action::Throw(tags.abort, Vec::new()),
-                Choice::UseValue(values) => {
-                    let fits = values.len() == resume_types.len()
-                        && values.iter().zip(resume_types).all(|(value, expected)| {
-                            ValueRef::from_value(value).value_type() == *expected
-                        });
-                    if fits {
-                        Action::Complete(values)
-                    } else {
-                        Action::Fail(ControlFault::InvalidChoice)
-                    }
-                }
-                Choice::Restart { token, arguments } => {
-                    let site = state.position(token).and_then(|index| {
-                        match state.bindings()[index].kind {
-                            BindingKind::Handler { descriptor, .. } => {
-                                control.restarts.get(descriptor)
-                            }
-                            BindingKind::Exit => None,
-                        }
-                    });
-                    let Some(site) = site else {
-                        return Action::Fail(ControlFault::InvalidChoice);
-                    };
-                    let payload_condition = match (site.parameters.as_slice(), arguments.as_slice())
-                    {
-                        ([], []) => Value::Obj(condition),
-                        ([parameter], [argument @ Value::Obj(_)])
-                            if runtime.value_is_instance(
-                                ValueRef::from_value(argument),
-                                parameter.class,
-                            ) =>
-                        {
-                            argument.clone()
-                        }
-                        _ => return Action::Fail(ControlFault::InvalidChoice),
-                    };
-                    Action::Throw(
-                        tags.restart,
-                        alloc::vec![Value::U64(token.0), payload_condition],
-                    )
-                }
+    }
+
+    /// Invokes an offered `handle` site's restart with checked arguments.
+    fn restart<H: RuntimeHost>(
+        &self,
+        pending: &mut PendingHostCall<'_, '_, H>,
+        condition: Obj,
+        token: BindingToken,
+        arguments: &[Value],
+    ) -> Action {
+        let site = self
+            .state
+            .position(token)
+            .and_then(|index| self.site(&self.state.bindings()[index].kind));
+        let Some(site) = site else {
+            return Action::Fail(ControlFault::InvalidChoice);
+        };
+        let payload_condition = match (site.parameters.as_slice(), arguments) {
+            ([], []) => Some(Value::Obj(condition)),
+            ([parameter], [argument @ Value::Obj(_)]) => pending
+                .host_mut()
+                .with_runtime(|runtime| {
+                    runtime.value_is_instance(ValueRef::from_value(argument), parameter.class)
+                })
+                .then(|| argument.clone()),
+            _ => None,
+        };
+        match payload_condition {
+            Some(payload) => {
+                Action::Throw(self.tags.restart, alloc::vec![Value::U64(token.0), payload])
             }
-        })
+            None => Action::Fail(ControlFault::InvalidChoice),
+        }
     }
 }

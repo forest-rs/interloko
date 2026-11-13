@@ -224,7 +224,7 @@ fn run_and_trace_commands_expose_execution_trace() {
     assert!(instruction_trace.starts_with("execution trace: instructions\n"));
     assert!(instruction_trace.contains("instructions: "));
     assert!(instruction_trace.contains(" instr main@0 "));
-    assert!(instruction_trace.contains(" call -> area#dispatch@0"));
+    assert!(instruction_trace.contains(" call.indirect -> area#dispatch@0"));
 }
 
 #[test]

@@ -11,7 +11,7 @@
 
 use std::error::Error;
 
-use execution_tape::value::{FuncRef, Value};
+use execution_tape::value::Value;
 use execution_tape::vm::{InvocationOptions, Limits, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
@@ -95,7 +95,7 @@ fn sum_areas(
         .and_then(|function| tape.functions.get(function.id.0 as usize))
         .ok_or("missing function `sum-areas`")?;
 
-    let layout = &tape.runtime;
+    let layout = tape.runtime();
     let circle_class = layout
         .class_id("<rust-circle>")
         .ok_or("missing `<rust-circle>`")?;
@@ -111,17 +111,16 @@ fn sum_areas(
         .map_err(|error| format!("cannot install `<rust-square>`: {error:?}"))?;
 
     let mut vm = Vm::new(host, Limits::default());
-    let unit = vm.install(std::sync::Arc::clone(&tape.program))?;
     let args = [circle, square];
     let outcome = interloko_runtime::driver::run(
         &mut vm,
-        &tape.control,
-        FuncRef::new(unit, *entry),
+        &tape.code,
+        *entry,
         &args,
         InvocationOptions::default(),
         &mut interloko_runtime::chooser::ReportUnhandled,
     )
-    .map_err(|failure| format!("`sum-areas` failed: {}", failure.trap()))?;
+    .map_err(|failure| format!("`sum-areas` failed: {failure}"))?;
     match outcome.outputs.as_slice() {
         [Value::I64(value)] => Ok(*value),
         other => Err(format!("`sum-areas` returned {other:?}").into()),

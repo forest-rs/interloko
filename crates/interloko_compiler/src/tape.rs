@@ -22,25 +22,37 @@ use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::lower;
 use crate::sem;
 use crate::syntax::Span;
-use interloko_runtime::control::{ControlLayout, ControlTags};
+use interloko_runtime::code::CodeUnit;
+use interloko_runtime::control::ControlLayout;
 use interloko_runtime::{self as runtime, RuntimeLayout};
 
 /// A verified tape program emitted from lowered Interloko IR.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TapeModule {
-    /// Verified executable tape program.
+    /// The verified program with its runtime layout and link metadata, as
+    /// the runtime installs it.
     ///
-    /// Shared so artifact snapshots and execution recordings refer to one
-    /// prepared program instead of copying it.
-    pub program: Arc<VerifiedProgram>,
-    /// Runtime layout required by the Interloko host.
-    pub runtime: RuntimeLayout,
+    /// Shared so artifact snapshots, runs and execution recordings refer to
+    /// one prepared program instead of copying it.
+    pub code: Arc<CodeUnit>,
     /// `execution_tape` function ids in lowered function order.
     pub functions: Vec<FuncId>,
     /// `execution_tape` function id for `main`, if present.
     pub main: Option<FuncId>,
-    /// Control tags and restart sites the runtime driver needs.
-    pub control: ControlLayout,
+}
+
+impl TapeModule {
+    /// Verified executable tape program.
+    #[must_use]
+    pub fn program(&self) -> &Arc<VerifiedProgram> {
+        &self.code.program
+    }
+
+    /// Runtime layout required by the Interloko host.
+    #[must_use]
+    pub fn runtime(&self) -> &RuntimeLayout {
+        &self.code.layout
+    }
 }
 
 /// Tape emission error.
@@ -143,19 +155,32 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
     }
 
     let program = builder.build_verified().map_err(build_error)?;
-    let control = ControlLayout {
-        tags: abi.control.as_ref().map(|control| ControlTags {
-            restart: control.restart,
-            abort: control.abort,
-        }),
-        restarts: module.restarts.clone(),
-    };
-    Ok(TapeModule {
+    let mut code = CodeUnit {
         program: Arc::new(program),
-        runtime: module.runtime.clone(),
+        layout: module.runtime.clone(),
+        control: ControlLayout {
+            restarts: module.restarts.clone(),
+        },
+        generics: vec![FuncId(0); module.runtime.generics.len()],
+        methods: vec![FuncId(0); module.runtime.methods.len()],
+        functions: Vec::new(),
+    };
+    for (function, func) in module.functions.iter().zip(&ids.functions) {
+        let slot = match function.kind {
+            lower::FunctionKind::Dispatcher(generic) => code.generics.get_mut(generic.0 as usize),
+            lower::FunctionKind::Method(method) => code.methods.get_mut(method.0 as usize),
+            lower::FunctionKind::Function(_) => {
+                code.functions.push((function.name.clone(), *func));
+                continue;
+            }
+            _ => continue,
+        };
+        *slot.ok_or_else(|| invalid_lowered("dispatcher or method is not in the layout"))? = *func;
+    }
+    Ok(TapeModule {
+        code: Arc::new(code),
         functions: ids.functions,
         main,
-        control,
     })
 }
 
@@ -265,7 +290,28 @@ struct AbiTables {
     instance_object: HostSigId,
     cast_any: HostSigId,
     cast_object: HostSigId,
+    tags: SharedTags,
     control: Option<ControlAbi>,
+    resolve_generic: Option<HostSigId>,
+}
+
+/// Control tags every program imports by name, so that code units installed
+/// in one VM throw and catch the same exceptions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SharedTags {
+    restart: TagId,
+}
+
+impl SharedTags {
+    fn import(builder: &mut ProgramBuilder) -> Result<Self, TapeError> {
+        let restart = builder
+            .import_tag(
+                runtime::control::RESTART_TAG,
+                &runtime::control::restart_payload().map(Into::into),
+            )
+            .map_err(build_error)?;
+        Ok(Self { restart })
+    }
 }
 
 /// Host signatures and tags for dynamic control, declared only when a module
@@ -278,8 +324,6 @@ struct ControlAbi {
     pop: HostSigId,
     push_exit: HostSigId,
     check_exit: HostSigId,
-    restart: TagId,
-    abort: TagId,
     exits: Vec<(lower::CallableSigId, TagId)>,
 }
 
@@ -326,15 +370,6 @@ impl ControlAbi {
         if !uses_control {
             return Ok(None);
         }
-        let restart = builder
-            .declare_tag(
-                "interloko.restart",
-                &runtime::control::restart_payload().map(Into::into),
-            )
-            .map_err(build_error)?;
-        let abort = builder
-            .declare_tag("interloko.abort", &[])
-            .map_err(build_error)?;
         let exits = exit_sigs
             .into_iter()
             .map(|signature| {
@@ -374,22 +409,16 @@ impl ControlAbi {
                 runtime::control::CONTROL_CHECK_EXIT,
                 runtime::control::check_exit_signature(),
             ),
-            restart,
-            abort,
             exits,
         }))
     }
 
-    fn tag(&self, tag: lower::ControlTag) -> Result<TagId, TapeError> {
-        match tag {
-            lower::ControlTag::Restart => Ok(self.restart),
-            lower::ControlTag::Exit(signature) => self
-                .exits
-                .iter()
-                .find(|(candidate, _)| *candidate == signature)
-                .map(|(_, tag)| *tag)
-                .ok_or_else(|| invalid_lowered("exit tag is missing")),
-        }
+    fn exit_tag(&self, signature: lower::CallableSigId) -> Result<TagId, TapeError> {
+        self.exits
+            .iter()
+            .find(|(candidate, _)| *candidate == signature)
+            .map(|(_, tag)| *tag)
+            .ok_or_else(|| invalid_lowered("exit tag is missing"))
     }
 }
 
@@ -494,7 +523,19 @@ impl AbiTables {
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
         let runtime_calls = runtime_call_sigs(builder);
         let float_functions = float_function_sigs(builder, module);
+        let tags = SharedTags::import(builder)?;
         let control = ControlAbi::declare(builder, module)?;
+        let resolve_generic = module
+            .functions
+            .iter()
+            .flat_map(|function| &function.instructions)
+            .any(|instr| matches!(instr, lower::Instr::ResolveGeneric { .. }))
+            .then(|| {
+                builder.host_sig_for(
+                    runtime::code::CODE_DISPATCHER,
+                    runtime::code::dispatcher_signature(),
+                )
+            });
         let host_functions = module
             .host_functions
             .iter()
@@ -534,8 +575,17 @@ impl AbiTables {
             instance_object,
             cast_any,
             cast_object,
+            tags,
             control,
+            resolve_generic,
         })
+    }
+
+    fn tag(&self, tag: lower::ControlTag) -> Result<TagId, TapeError> {
+        match tag {
+            lower::ControlTag::Restart => Ok(self.tags.restart),
+            lower::ControlTag::Exit(signature) => self.control()?.exit_tag(signature),
+        }
     }
 
     fn control(&self) -> Result<&ControlAbi, TapeError> {
@@ -1086,6 +1136,16 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.call(0, callee, 0, &args, &dsts);
             }
+            lower::Instr::ResolveGeneric { dst, generic, span } => {
+                let sig = self
+                    .abi
+                    .resolve_generic
+                    .ok_or_else(|| invalid_lowered("generic resolution signature is missing"))?;
+                let generic_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(generic_reg, u64::from(generic.0));
+                self.asm.host_call(0, sig, 0, &[generic_reg], &[dst.0]);
+            }
             lower::Instr::CallIndirect {
                 dsts,
                 callee,
@@ -1364,7 +1424,7 @@ impl<'a> FunctionEmitter<'a> {
                     .map(|catch| {
                         Ok(match catch {
                             lower::Catch::Tag { tag, target } => {
-                                Catch::TagRef(self.abi.control()?.tag(*tag)?, self.label(*target)?)
+                                Catch::TagRef(self.abi.tag(*tag)?, self.label(*target)?)
                             }
                             lower::Catch::All { target } => Catch::AllRef(self.label(*target)?),
                         })
@@ -1396,7 +1456,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm.host_call(0, sig, 0, &[token.0], &[]);
             }
             lower::Instr::Throw { tag, payload, span } => {
-                let tag = self.abi.control()?.tag(*tag)?;
+                let tag = self.abi.tag(*tag)?;
                 self.set_span(*span);
                 self.builder
                     .emit_throw(&mut self.asm, tag, &reg_slice(payload))
@@ -1527,7 +1587,7 @@ mod tests {
     }
 
     fn runtime_class<'a>(tape: &'a TapeModule, name: &str) -> &'a runtime::RuntimeClass {
-        tape.runtime
+        tape.runtime()
             .classes
             .iter()
             .find(|class| class.name == name)
@@ -1541,8 +1601,23 @@ mod tests {
              define function main()\n  add(40, 2)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        assert_eq!(tape.program.program().functions.len(), 2);
+        assert_eq!(tape.program().program().functions.len(), 2);
         assert_eq!(tape.main, Some(FuncId(1)));
+    }
+
+    fn has_call_sig(
+        program: &execution_tape::program::Program,
+        args: &[ValueType],
+        rets: &[ValueType],
+    ) -> bool {
+        program.call_sigs.iter().any(|sig| {
+            program
+                .call_sig_args(sig)
+                .is_ok_and(|kinds| kinds.iter().eq(args.iter()))
+                && program
+                    .call_sig_rets(sig)
+                    .is_ok_and(|kinds| kinds.iter().eq(rets.iter()))
+        })
     }
 
     #[test]
@@ -1552,23 +1627,11 @@ mod tests {
              define function main()\n  let f = inc;\n  apply(f, 2)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        let program = tape.program.program();
+        let program = tape.program().program();
 
-        assert_eq!(program.call_sigs.len(), 1);
-        assert_eq!(
-            program
-                .call_sig_args(&program.call_sigs[0])
-                .expect("indirect call args should decode"),
-            &[ValueType::I64],
-        );
-        assert_eq!(
-            program
-                .call_sig_rets(&program.call_sigs[0])
-                .expect("indirect call rets should decode"),
-            &[ValueType::I64],
-        );
+        assert!(has_call_sig(program, &[ValueType::I64], &[ValueType::I64]));
 
-        let disassembly = execution_tape::disasm::disassemble_verified(&tape.program).to_string();
+        let disassembly = execution_tape::disasm::disassemble_verified(tape.program()).to_string();
         assert!(disassembly.contains("const.func"));
         assert!(disassembly.contains("call.indirect"));
     }
@@ -1582,23 +1645,15 @@ mod tests {
              define function main()\n  let g = area;\n  apply(g, make(<circle>, radius: 5))\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        let program = tape.program.program();
+        let program = tape.program().program();
 
-        assert_eq!(program.call_sigs.len(), 1);
-        assert_eq!(
-            program
-                .call_sig_args(&program.call_sigs[0])
-                .expect("indirect generic args should decode"),
+        assert!(has_call_sig(
+            program,
             &[runtime::object_type()],
-        );
-        assert_eq!(
-            program
-                .call_sig_rets(&program.call_sigs[0])
-                .expect("indirect generic rets should decode"),
-            &[ValueType::I64],
-        );
+            &[ValueType::I64]
+        ));
 
-        let disassembly = execution_tape::disasm::disassemble_verified(&tape.program).to_string();
+        let disassembly = execution_tape::disasm::disassemble_verified(tape.program()).to_string();
         assert!(disassembly.contains("name=\"area#dispatch\""));
         assert!(disassembly.contains("const.func"));
         assert!(disassembly.contains("call.indirect"));
@@ -1612,7 +1667,7 @@ mod tests {
              define function main()\n  callit(inc)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        let program = tape.program.program();
+        let program = tape.program().program();
 
         assert_eq!(
             program
@@ -1620,7 +1675,7 @@ mod tests {
                 .expect("callit args should decode"),
             &[ValueType::Closure],
         );
-        let disassembly = execution_tape::disasm::disassemble_verified(&tape.program).to_string();
+        let disassembly = execution_tape::disasm::disassemble_verified(tape.program()).to_string();
         assert!(disassembly.contains("name=\"callit\""));
         assert!(disassembly.contains("const.func"));
         assert!(disassembly.contains("closure.new"));
@@ -1636,7 +1691,7 @@ mod tests {
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        assert_eq!(tape.program.program().functions.len(), 5);
+        assert_eq!(tape.program().program().functions.len(), 5);
         assert_eq!(tape.main, Some(FuncId(0)));
         let circle = runtime_class(&tape, "<circle>");
         assert_eq!(circle.slots[0].name, "radius");
@@ -1648,7 +1703,7 @@ mod tests {
         let module = lower_source("define function main()\n  if 10 >= 5 then 42 else 0 end\nend;");
         let tape = emit(&module).expect("tape emission should succeed");
 
-        assert_eq!(tape.program.program().functions.len(), 1);
+        assert_eq!(tape.program().program().functions.len(), 1);
         assert_eq!(tape.main, Some(FuncId(0)));
     }
 
@@ -1660,7 +1715,7 @@ mod tests {
         );
         let tape = emit(&module).expect("tape emission should succeed");
 
-        assert_eq!(tape.program.program().functions.len(), 3);
+        assert_eq!(tape.program().program().functions.len(), 3);
         assert_eq!(tape.main, Some(FuncId(0)));
     }
 
@@ -1672,7 +1727,7 @@ mod tests {
         );
         let tape = emit(&module).expect("tape emission should succeed");
 
-        assert_eq!(tape.program.program().functions.len(), 3);
+        assert_eq!(tape.program().program().functions.len(), 3);
         let flag = runtime_class(&tape, "<flag>");
         assert_eq!(flag.slots[0].name, "valid?");
         assert_eq!(flag.slots[0].kind, runtime::ValueKind::Bool);
@@ -1686,7 +1741,7 @@ mod tests {
         );
         let tape = emit(&module).expect("tape emission should succeed");
 
-        assert_eq!(tape.program.program().functions.len(), 3);
+        assert_eq!(tape.program().program().functions.len(), 3);
         let box_class = runtime_class(&tape, "<box>");
         assert_eq!(box_class.slots[0].name, "value");
         assert_eq!(box_class.slots[0].kind, runtime::ValueKind::Any);
@@ -1701,7 +1756,7 @@ mod tests {
              define function box()\n  make(<box>, value: 3)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        let program = tape.program.program();
+        let program = tape.program().program();
         let make_sigs: Vec<_> = program
             .host_sigs
             .iter()
@@ -1734,7 +1789,7 @@ mod tests {
              define function second()\n  #[3]\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        let program = tape.program.program();
+        let program = tape.program().program();
         let vector_sigs: Vec<_> = program
             .host_sigs
             .iter()

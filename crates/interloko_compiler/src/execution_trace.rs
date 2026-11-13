@@ -352,7 +352,7 @@ impl<'a> ExecutionTraceView<'a> {
             .map(|invocation| invocation.entry.unit);
         let meaning = match (lowered, tape, entry) {
             (Some(lowered), Some(tape), Some(unit))
-                if core::ptr::eq(trace.recording.program(), Arc::as_ptr(&tape.program)) =>
+                if core::ptr::eq(trace.recording.program(), Arc::as_ptr(tape.program())) =>
             {
                 Some(ProgramMeaning {
                     unit,
