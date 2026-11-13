@@ -3740,6 +3740,10 @@ impl<'module> BodyLowering<'module> {
                     let value = self.lower_expr(&field.value)?;
                     let value = if slot.kind == sem::ValueKind::Any {
                         self.box_any(value, field.span)?
+                    } else if slot.kind == sem::ValueKind::I64
+                        && matches!(value.kind, ValueKind::I32 | ValueKind::U32)
+                    {
+                        self.widen_integer(value, field.span)
                     } else {
                         value
                     };
