@@ -14,9 +14,10 @@ use interloko_compiler::grammar_frontend;
 use interloko_compiler::identity::{ArtifactKey, SourceFileId};
 use interloko_compiler::sem;
 use interloko_compiler::session::{
-    DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject, EnvironmentOrigin,
-    FunctionCallError, FunctionCallOutcome, FunctionValue, IncrementalCompilerSession, RuntimeMode,
-    SessionArtifacts, SessionRuntime, TopLevelFormKind, TopLevelFormSpan, TurnStats,
+    CallServices, DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject,
+    EnvironmentOrigin, FunctionCallError, FunctionCallOutcome, FunctionValue,
+    IncrementalCompilerSession, RuntimeMode, SessionArtifacts, SessionRuntime, TopLevelFormKind,
+    TopLevelFormSpan, TurnStats,
 };
 use interloko_compiler::syntax::{self, TokenKind};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
@@ -27,6 +28,8 @@ use reedline::{
     ReedlineError, ReedlineEvent, ReedlineMenu, Signal, Span, StyledText, Suggestion,
     default_emacs_keybindings,
 };
+
+mod break_loop;
 
 type Result<T> = std::result::Result<T, ReplError>;
 
@@ -58,6 +61,7 @@ const COMMANDS: &[&str] = &[
     ":show-form",
     ":drop-form",
     ":invoke",
+    ":frames",
 ];
 const DUMP_STAGES: &[&str] = &[
     "syntax", "ast", "sem", "mop", "eop", "lowered", "tape", "all",
@@ -96,10 +100,9 @@ where
 {
     let mut repl = Repl::new(OutputStyle::Plain)?;
 
-    let lines = input.lines();
-    for line in lines {
-        let line = line?;
-        if !repl.handle_line(&line, stdout, stderr)? {
+    let mut lines = BufLines(input.lines());
+    while let Some(line) = lines.next_line(false)? {
+        if !repl.handle_line_from(&line, &mut lines, stdout, stderr)? {
             break;
         }
     }
@@ -128,9 +131,17 @@ where
         refresh_completion_state(&completion_state, &repl);
         let prompt = InterlokoPrompt {
             pending_definition: repl.has_pending_definition(),
+            breaking: false,
         };
         match line_editor.read_line(&prompt)? {
-            Signal::Success(line) if !repl.handle_line(&line, stdout, stderr)? => {
+            Signal::Success(line)
+                if !repl.handle_line_from(
+                    &line,
+                    &mut EditorLines(&mut line_editor),
+                    stdout,
+                    stderr,
+                )? =>
+            {
                 break;
             }
             Signal::Success(_) => {}
@@ -237,7 +248,24 @@ impl Repl {
         true
     }
 
+    #[cfg(test)]
     fn handle_line<W, E>(&mut self, line: &str, stdout: &mut W, stderr: &mut E) -> Result<bool>
+    where
+        W: Write,
+        E: Write,
+    {
+        self.handle_line_from(line, &mut NoInput, stdout, stderr)
+    }
+
+    /// Handles one input line. A run that breaks on an unhandled condition
+    /// reads its break-loop commands from `source`.
+    fn handle_line_from<W, E>(
+        &mut self,
+        line: &str,
+        source: &mut dyn LineSource,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<bool>
     where
         W: Write,
         E: Write,
@@ -260,7 +288,7 @@ impl Repl {
         }
 
         if trimmed.starts_with(':') {
-            return self.handle_command(trimmed, stdout, stderr);
+            return self.handle_command_from(trimmed, source, stdout, stderr);
         }
 
         if trimmed.starts_with("define ") || trimmed.starts_with("///") {
@@ -272,13 +300,14 @@ impl Repl {
             return Ok(true);
         }
 
-        self.evaluate_expression(line, stdout, stderr)?;
+        self.evaluate_expression(line, source, stdout, stderr)?;
         Ok(true)
     }
 
-    fn handle_command<W, E>(
+    fn handle_command_from<W, E>(
         &mut self,
         command_line: &str,
+        source: &mut dyn LineSource,
         stdout: &mut W,
         stderr: &mut E,
     ) -> Result<bool>
@@ -298,7 +327,8 @@ impl Repl {
             ":source" => self.print_source(stdout)?,
             ":forms" => self.print_forms(stdout)?,
             ":heap" => self.print_heap(stdout)?,
-            ":run" => self.run_function(&args, stdout, stderr)?,
+            ":run" => self.run_function(&args, source, stdout, stderr)?,
+            ":frames" => writeln!(stdout, "no suspended computation")?,
             ":load" => self.load_file(&args, stdout, stderr)?,
             ":write" => self.write_file(&args, stdout, stderr)?,
             ":reload" => self.reload_file(&args, stdout, stderr)?,
@@ -409,7 +439,13 @@ impl Repl {
         Ok(())
     }
 
-    fn run_function<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    fn run_function<W, E>(
+        &mut self,
+        args: &[&str],
+        source: &mut dyn LineSource,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
     where
         W: Write,
         E: Write,
@@ -419,7 +455,7 @@ impl Repl {
             return Ok(());
         };
         let artifacts = self.ensure_artifacts(stderr)?;
-        match self.run_turn(&artifacts, name) {
+        match self.run_turn(&artifacts, name, source, stdout, stderr)? {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
             Err(error) => writeln!(
                 stderr,
@@ -555,6 +591,7 @@ impl Repl {
     fn evaluate_expression<W, E>(
         &mut self,
         expression: &str,
+        source: &mut dyn LineSource,
         stdout: &mut W,
         stderr: &mut E,
     ) -> Result<()>
@@ -562,13 +599,13 @@ impl Repl {
         W: Write,
         E: Write,
     {
-        let source = self.source_with_scratch(expression);
-        let artifacts = self.compile_source(source, stderr, true)?;
+        let text = self.source_with_scratch(expression);
+        let artifacts = self.compile_source(text, stderr, true)?;
         if artifacts.has_errors() {
             return Ok(());
         }
 
-        match self.run_turn(&artifacts, SCRATCH_FUNCTION) {
+        match self.run_turn(&artifacts, SCRATCH_FUNCTION, source, stdout, stderr)? {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
             Err(error) => writeln!(
                 stderr,
@@ -581,26 +618,72 @@ impl Repl {
     }
 
     /// Runs `name` as one turn of the REPL's runtime image, starting a new
-    /// image when the definitions changed the runtime layout.
-    fn run_turn(
+    /// image when the definitions changed the runtime layout. An unhandled
+    /// condition enters the break loop, which reads from `source`.
+    fn run_turn<W, E>(
         &mut self,
         artifacts: &SessionArtifacts,
         name: &str,
-    ) -> std::result::Result<FunctionCallOutcome, FunctionCallError> {
-        if let Some(runtime) = &mut self.runtime {
-            match runtime.call_function(artifacts, name, &[], None) {
-                Err(FunctionCallError::RuntimeLayoutChanged) => {}
-                result => {
-                    self.last_turn = result.as_ref().ok().map(|outcome| outcome.turn);
-                    return result;
-                }
-            }
+        source: &mut dyn LineSource,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<std::result::Result<FunctionCallOutcome, FunctionCallError>>
+    where
+        W: Write,
+        E: Write,
+    {
+        let mut runtime = match self.runtime.take() {
+            Some(runtime) => runtime,
+            None => match artifacts.runtime() {
+                Ok(runtime) => runtime,
+                Err(error) => return Ok(Err(error)),
+            },
+        };
+        let mut result = self.call_in(&mut runtime, artifacts, name, source, stdout, stderr);
+        if matches!(result, Ok(Err(FunctionCallError::RuntimeLayoutChanged))) {
+            runtime = match artifacts.runtime() {
+                Ok(runtime) => runtime,
+                Err(error) => return Ok(Err(error)),
+            };
+            result = self.call_in(&mut runtime, artifacts, name, source, stdout, stderr);
         }
-        let mut runtime = artifacts.runtime()?;
-        let result = runtime.call_function(artifacts, name, &[], None);
         self.runtime = Some(runtime);
-        self.last_turn = result.as_ref().ok().map(|outcome| outcome.turn);
+        self.last_turn = result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.as_ref().ok())
+            .map(|outcome| outcome.turn);
         result
+    }
+
+    fn call_in<W, E>(
+        &mut self,
+        runtime: &mut SessionRuntime,
+        artifacts: &SessionArtifacts,
+        name: &str,
+        source: &mut dyn LineSource,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<std::result::Result<FunctionCallOutcome, FunctionCallError>>
+    where
+        W: Write,
+        E: Write,
+    {
+        let mut chooser = break_loop::BreakLoop::new(self, source, stdout, stderr);
+        let result = runtime.call_function_with(
+            artifacts,
+            name,
+            &[],
+            None,
+            CallServices {
+                host_functions: None,
+                chooser: Some(&mut chooser),
+            },
+        );
+        match chooser.error.take() {
+            Some(error) => Err(error),
+            None => Ok(result),
+        }
     }
 
     fn print_heap<W>(&self, stdout: &mut W) -> Result<()>
@@ -1401,6 +1484,18 @@ impl ReplSourceBuffer {
             entry.form.index = index;
         }
         Some(buffer)
+    }
+
+    /// Replaces the form at `index` with `definition`, keeping the blank
+    /// lines above it. Form facts are refreshed after the source compiles.
+    fn replace_form(&mut self, index: usize, definition: &str) {
+        if let Some(entry) = self.entries.get_mut(index) {
+            let content = entry.source.len() - entry.source.trim_start().len();
+            let blank_lines = entry.source[..content].rfind('\n').map_or(0, |n| n + 1);
+            entry.source.truncate(blank_lines);
+            entry.source.push_str(definition.trim_end());
+            entry.source.push('\n');
+        }
     }
 
     fn push_definition(&mut self, source: String) {
@@ -2882,7 +2977,8 @@ fn help_text() -> &'static str {
   :quit                         exit
   :source                       show accepted source with line numbers
   :forms                        list accepted top-level forms
-  :run <zero-arg-function>      run a named zero-argument function
+  :run <zero-arg-function>      run a named zero-argument function; an unhandled
+                                condition enters the break loop (:help there)
   :heap                         show the runtime image and the last turn's heap use
   :load <file>                  replace accepted source from a Loko source file
   :write <file>                 write rendered accepted source to a Loko source file
@@ -3281,11 +3377,14 @@ fn completion_token(before_cursor: &str, pos: usize) -> (usize, &str) {
 
 struct InterlokoPrompt {
     pending_definition: bool,
+    breaking: bool,
 }
 
 impl Prompt for InterlokoPrompt {
     fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
-        if self.pending_definition {
+        if self.breaking {
+            "break [1]".into()
+        } else if self.pending_definition {
             "define".into()
         } else {
             "interloko".into()
@@ -3317,6 +3416,49 @@ impl Prompt for InterlokoPrompt {
             PromptHistorySearchStatus::Failing => "history?",
         };
         format!("({status}: {}) ", history_search.term).into()
+    }
+}
+
+/// Where the REPL reads its next line. A break loop reads its commands from
+/// the same source while the run it serves stays suspended.
+trait LineSource {
+    /// Reads one line, or `None` at the end of input. `breaking` says the
+    /// line is for a break loop.
+    fn next_line(&mut self, breaking: bool) -> Result<Option<String>>;
+}
+
+/// No further input: a break loop reports its condition unhandled.
+struct NoInput;
+
+impl LineSource for NoInput {
+    fn next_line(&mut self, _breaking: bool) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+/// Lines of a non-interactive input stream.
+struct BufLines<R>(io::Lines<R>);
+
+impl<R: BufRead> LineSource for BufLines<R> {
+    fn next_line(&mut self, _breaking: bool) -> Result<Option<String>> {
+        Ok(self.0.next().transpose()?)
+    }
+}
+
+/// Lines from the interactive editor.
+struct EditorLines<'a>(&'a mut Reedline);
+
+impl LineSource for EditorLines<'_> {
+    fn next_line(&mut self, breaking: bool) -> Result<Option<String>> {
+        let prompt = InterlokoPrompt {
+            pending_definition: false,
+            breaking,
+        };
+        Ok(match self.0.read_line(&prompt)? {
+            Signal::Success(line) => Some(line),
+            Signal::CtrlD => None,
+            _ => Some(String::new()),
+        })
     }
 }
 

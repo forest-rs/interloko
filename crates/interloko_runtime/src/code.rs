@@ -193,6 +193,8 @@ impl CodeUnit {
 pub struct FrameCode {
     /// The function the frame runs.
     pub func: FuncRef,
+    /// That function's name in its unit's program, when the program names it.
+    pub name: Option<String>,
     /// The source definition it implements, if it implements one.
     pub definition: Option<Definition>,
     /// The function a new call of that definition would run.
@@ -262,8 +264,15 @@ impl UnitTable {
                     _ => true,
                 }
         });
+        let name = self.get(func.unit).and_then(|code| {
+            code.program
+                .program()
+                .function_name(func.func.0)
+                .map(String::from)
+        });
         FrameCode {
             func,
+            name,
             definition,
             current,
             superseded,

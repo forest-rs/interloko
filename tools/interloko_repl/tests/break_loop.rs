@@ -1,7 +1,8 @@
-//! Acceptance target for the break loop: the REPL scenario of
-//! `tests/fixtures/break_loop/break_loop.transcript`. The fixture's header
-//! explains what each step proves and which features it waits on. The lab
-//! scenario of the same transcript runs from `interloko_lab`'s tests.
+//! REPL scenarios of the break-loop transcripts in
+//! `tests/fixtures/break_loop/`: `hot_swap.transcript`, which passes, and the
+//! `break_loop.transcript` acceptance target, whose header explains what it
+//! still waits on. The lab scenario of that transcript runs from
+//! `interloko_lab`'s tests.
 
 #[allow(
     dead_code,
@@ -17,18 +18,27 @@ use std::process::{Command, Stdio};
 use transcript::ScenarioKind;
 
 #[test]
-#[ignore = "acceptance target: break loop (conditions + code units)"]
+fn hot_swap_transcript_repl_scenario() {
+    run_repl_transcript("tests/fixtures/break_loop/hot_swap.transcript");
+}
+
+#[test]
+#[ignore = "acceptance target: break-loop EOP objects, choose-restart and the lab chooser"]
 fn break_loop_transcript_repl_scenario() {
+    run_repl_transcript("tests/fixtures/break_loop/break_loop.transcript");
+}
+
+/// Feeds each REPL scenario of a transcript to one `interloko_repl` process
+/// and compares its output.
+fn run_repl_transcript(path: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text =
-        std::fs::read_to_string(root.join("tests/fixtures/break_loop/break_loop.transcript"))
-            .expect("read break-loop transcript");
+    let text = std::fs::read_to_string(root.join(path)).expect("read transcript");
     let scenarios = transcript::parse(&text);
     let repl_scenarios: Vec<_> = scenarios
         .iter()
         .filter(|scenario| scenario.kind == ScenarioKind::Repl)
         .collect();
-    assert!(!repl_scenarios.is_empty(), "no repl scenario in transcript");
+    assert!(!repl_scenarios.is_empty(), "no repl scenario in {path}");
 
     for scenario in repl_scenarios {
         for step in &scenario.steps {

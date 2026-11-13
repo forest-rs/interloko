@@ -1,0 +1,111 @@
+// Hot swap in the REPL break loop: what works today of the break-loop
+// milestone (`break_loop.transcript` is the fuller target).
+//
+// `raymarch.loko`'s `shade` method produces a negative brightness for rays
+// that miss the sphere, and `check-sample` signals `<bad-sample>`, which
+// nothing handles. The run stops with every frame live. Fixing `shade`
+// compiles the session again and installs it as a new code unit (`u1`)
+// beside the running one (`u0`): only the `shade` frame runs code the edit
+// replaced. `retry frame:1` unwinds to the `shade` call and makes it again
+// with the new method, so `main` returns 1.0 + 0.5 + 0.0 while `pixel`,
+// `render` and `main` finish on the code they started with. A new run takes
+// the new code from the start.
+//
+// Format: see `tests/support/transcript.rs`.
+
+=== repl: edit a method under a suspended signal and retry its frame
+
+> :load tests/fixtures/break_loop/raymarch.loko
+loaded tests/fixtures/break_loop/raymarch.loko (10 forms)
+> :run main
+break [1]: no handler for <bad-sample>; 6 frames suspended, nothing unwound
+frames (innermost first):
+  frame:0 check-sample  u0:f0
+  frame:1 shade#method0  u0:f4
+  frame:2 shade#dispatch  u0:f9
+  frame:3 pixel  u0:f1
+  frame:4 render  u0:f2
+  frame:5 main  u0:f3
+restarts:
+  restart:0 skip-pixel()  the handle site's recovery
+  restart:1 use-value(<float>)  the signal returns the value
+  restart:2 retry(frame)  call a frame's function again, with current definitions
+  restart:3 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+
+// A broken edit is rejected and changes nothing; the fixed one installs.
+> :edit form:f6
+editing form:f6; enter a replacement definition
+> define method shade(s :: <sphere>, distance :: <float>) => <float>
+>   // A ray that misses the sphere is black, not negatively bright.
+>   check-sample(max(0, 1.0 - distance / s.radius), distance)
+> end;
+! diagnostics:
+!   Error sem.function-argument-type-mismatch 1021..1022 function `max` argument 1 expects <float> but got <integer>
+! edit rejected; the definitions and break [1] are unchanged
+> define method shade(s :: <sphere>, distance :: <float>) => <float>
+>   // A ray that misses the sphere is black, not negatively bright.
+>   check-sample(max(0.0, 1.0 - distance / s.radius), distance)
+> end;
+installed the edit as a new code unit; still running replaced code:
+  frame:1 shade#method0  u0:f4  superseded by u1:f4
+> :frames
+frames (innermost first):
+  frame:0 check-sample  u0:f0
+  frame:1 shade#method0  u0:f4  superseded by u1:f4
+  frame:2 shade#dispatch  u0:f9
+  frame:3 pixel  u0:f1
+  frame:4 render  u0:f2
+  frame:5 main  u0:f3
+
+// Retry the shade frame with the new method: 1.0 + 0.5 + 0.0.
+> :restart retry frame:1
+1.5
+> :run main
+1.5
+
+// Bring the bug back, then resume the signal with a typed value:
+// 1.0 + 0.5 + 0.25. A string is refused and the break keeps waiting.
+> :reload
+reloaded tests/fixtures/break_loop/raymarch.loko (10 forms)
+> :run main
+break [1]: no handler for <bad-sample>; 6 frames suspended, nothing unwound
+frames (innermost first):
+  frame:0 check-sample  u0:f0
+  frame:1 shade#method0  u0:f4
+  frame:2 shade#dispatch  u0:f9
+  frame:3 pixel  u0:f1
+  frame:4 render  u0:f2
+  frame:5 main  u0:f3
+restarts:
+  restart:0 skip-pixel()  the handle site's recovery
+  restart:1 use-value(<float>)  the signal returns the value
+  restart:2 retry(frame)  call a frame's function again, with current definitions
+  restart:3 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :restart use-value "dark"
+! error: use-value expects <float>, got "dark"; break [1] is still waiting
+> :restart use-value 0.25
+1.75
+
+// Abort unwinds everything, running `render`'s cleanup on the way out.
+> :run main
+break [1]: no handler for <bad-sample>; 6 frames suspended, nothing unwound
+frames (innermost first):
+  frame:0 check-sample  u0:f0
+  frame:1 shade#method0  u0:f4
+  frame:2 shade#dispatch  u0:f9
+  frame:3 pixel  u0:f1
+  frame:4 render  u0:f2
+  frame:5 main  u0:f3
+restarts:
+  restart:0 skip-pixel()  the handle site's recovery
+  restart:1 use-value(<float>)  the signal returns the value
+  restart:2 retry(frame)  call a frame's function again, with current definitions
+  restart:3 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :restart abort
+! runtime error: aborted by the condition chooser
+> :frames
+no suspended computation
+> :quit

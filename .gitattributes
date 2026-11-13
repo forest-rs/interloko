@@ -1,3 +1,5 @@
 # Interloko sources keep LF on every platform: diagnostics, spans and tests
 # address them by byte offset.
 *.loko text eol=lf
+# Transcripts are compared line by line against tool output.
+*.transcript text eol=lf

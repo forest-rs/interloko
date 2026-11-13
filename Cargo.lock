@@ -498,8 +498,10 @@ version = "0.1.0"
 name = "interloko_repl"
 version = "0.1.0"
 dependencies = [
+ "execution_tape",
  "interloko_compiler",
  "interloko_diagnostics",
+ "interloko_runtime",
  "nu-ansi-term",
  "reedline",
 ]

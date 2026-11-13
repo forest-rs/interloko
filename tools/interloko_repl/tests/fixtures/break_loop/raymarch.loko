@@ -1,7 +1,6 @@
-// A one-row shader for the break-loop acceptance transcript
-// (`break_loop.transcript` next to this file). It does not compile yet:
-// `signal` with no lexically enclosing `handle`, and `block ... cleanup`,
-// are part of that target.
+// A one-row shader for the break-loop transcripts next to this file:
+// `hot_swap.transcript`, which the REPL passes today, and the fuller
+// `break_loop.transcript` acceptance target.
 
 define class <bad-sample> (<object>)
   slot value :: <float>;
