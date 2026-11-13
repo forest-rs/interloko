@@ -144,6 +144,8 @@ pub enum DiagnosticCode {
     AbstractNumericTypeUnsupported,
     /// A method specializes on a limited type its generic does not declare.
     LimitedTypeSpecializer,
+    /// A method specializes a limited-type generic parameter on a class instead of restating the limited type.
+    LimitedParameterSpecializer,
     /// A comparison operand is not a number.
     ComparisonOperandTypeMismatch,
     /// `apply` is missing its callable target.
@@ -290,6 +292,7 @@ impl DiagnosticCode {
         Self::ShiftCountOutOfRange,
         Self::AbstractNumericTypeUnsupported,
         Self::LimitedTypeSpecializer,
+        Self::LimitedParameterSpecializer,
         Self::ComparisonOperandTypeMismatch,
         Self::ApplyArityMismatch,
         Self::ApplyTargetTypeMismatch,
@@ -395,6 +398,7 @@ impl DiagnosticCode {
             Self::ShiftCountOutOfRange => "sem.shift-count-out-of-range",
             Self::AbstractNumericTypeUnsupported => "sem.abstract-numeric-type-unsupported",
             Self::LimitedTypeSpecializer => "sem.limited-type-specializer",
+            Self::LimitedParameterSpecializer => "sem.limited-parameter-specializer",
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
@@ -501,6 +505,7 @@ impl DiagnosticCode {
             "sem.shift-count-out-of-range" => Self::ShiftCountOutOfRange,
             "sem.abstract-numeric-type-unsupported" => Self::AbstractNumericTypeUnsupported,
             "sem.limited-type-specializer" => Self::LimitedTypeSpecializer,
+            "sem.limited-parameter-specializer" => Self::LimitedParameterSpecializer,
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,

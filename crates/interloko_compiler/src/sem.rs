@@ -850,6 +850,17 @@ fn float_call_kind(
     }
 }
 
+/// Returns whether two result lists hold integers of different types at the
+/// same position, which the one-way widening in `kinds_match` would accept
+/// but a join cannot.
+fn integer_types_differ(lhs: &[ValueKind], rhs: &[ValueKind]) -> bool {
+    lhs.iter().zip(rhs).any(|(lhs, rhs)| {
+        lhs != rhs
+            && NumericKind::of(*lhs).is_some_and(NumericKind::is_integer)
+            && NumericKind::of(*rhs).is_some_and(NumericKind::is_integer)
+    })
+}
+
 /// Returns the value category of a limited integer type.
 const fn limited_integer_kind(limited: LimitedInteger) -> ValueKind {
     match limited {
@@ -4975,10 +4986,15 @@ impl Lowering {
                     return self.lower_apply(ctx, args, expected_results, *span);
                 }
                 if callee == "values" {
-                    let values = args
+                    let mut values = args
                         .iter()
                         .map(|arg| self.lower_expr(ctx, arg))
                         .collect::<Vec<_>>();
+                    if let Some(expected) = expected_results
+                        && expected.len() == values.len()
+                    {
+                        adapt_literal_args(&mut values, expected.iter().map(Some));
+                    }
                     let result_kinds = values
                         .iter()
                         .map(|value| self.expr_kind(value))
@@ -5359,6 +5375,7 @@ impl Lowering {
                     self.lower_expr_expected_results(ctx, else_branch, expected_results);
                 self.adopt_divergent_kinds(&mut then_branch, &else_branch);
                 self.adopt_divergent_kinds(&mut else_branch, &then_branch);
+                self.join_integer_branches(&mut then_branch, &mut else_branch);
                 let condition_kind = self.expr_kind(&condition);
                 if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
                     ctx.diagnostics.push(
@@ -6158,17 +6175,32 @@ impl Lowering {
             );
             return Expr::Error { span };
         };
+        // An untyped callable's register kinds come from the call site, so
+        // limited integers cross it as the `<integer>`s they are: arguments
+        // widen, and a limited result is checked back into range.
+        let as_integer = |kind: ValueKind| match kind {
+            ValueKind::I32 | ValueKind::U32 => ValueKind::I64,
+            kind => kind,
+        };
         let arg_kinds = args
             .iter()
-            .map(|arg| self.expr_kind(arg))
+            .map(|arg| as_integer(self.expr_kind(arg)))
             .collect::<Vec<_>>();
-        Expr::CallableCall {
+        let call = |result_kinds: Vec<ValueKind>| Expr::CallableCall {
             callable: Box::new(target),
             args,
             arg_kinds,
-            result_kinds: result_kinds.to_vec(),
             result_callable_sigs: vec![None; result_kinds.len()],
+            result_kinds,
             span,
+        };
+        match result_kinds {
+            [narrow @ (ValueKind::I32 | ValueKind::U32)] => Expr::Convert {
+                to: NumericKind::of(*narrow).unwrap_or(NumericKind::Integer),
+                value: Box::new(call(vec![ValueKind::I64])),
+                span,
+            },
+            _ => call(result_kinds.iter().copied().map(as_integer).collect()),
         }
     }
 
@@ -6239,6 +6271,29 @@ impl Lowering {
     /// A signal never produces a value, so this only removes a spurious
     /// mismatch between, say, an `if` branch that signals and one that
     /// returns a float.
+    /// Widens `if` branches of different integer types to `<integer>`, the
+    /// type that holds both, so neither branch is truncated or rejected.
+    fn join_integer_branches(&self, lhs: &mut Expr, rhs: &mut Expr) {
+        let (Some(lhs_kind), Some(rhs_kind)) = (
+            NumericKind::of(self.expr_kind(lhs)),
+            NumericKind::of(self.expr_kind(rhs)),
+        ) else {
+            return;
+        };
+        if lhs_kind == rhs_kind || !lhs_kind.is_integer() || !rhs_kind.is_integer() {
+            return;
+        }
+        for (branch, kind) in [(lhs, lhs_kind), (rhs, rhs_kind)] {
+            let expr = core::mem::replace(
+                branch,
+                Expr::Error {
+                    span: branch.span(),
+                },
+            );
+            *branch = promote_operand(expr, kind, NumericKind::Integer);
+        }
+    }
+
     fn adopt_divergent_kinds(&self, expr: &mut Expr, sibling: &Expr) {
         if matches!(sibling, Expr::Signal { .. }) {
             return;
@@ -6313,7 +6368,10 @@ impl Lowering {
         self.adopt_divergent_kinds(&mut body, &restart_body);
 
         let body_kinds = self.expr_kinds(&body);
-        if !self.result_kinds_match(&body_kinds, &restart_kinds)
+        // Both sides already fixed the restart's result kinds, so integer
+        // types must agree exactly here; nothing widens one to the other.
+        if (!self.result_kinds_match(&body_kinds, &restart_kinds)
+            || integer_types_differ(&body_kinds, &restart_kinds))
             && !result_kinds_contain_error(&body_kinds)
             && !result_kinds_contain_error(&restart_kinds)
         {
@@ -6395,9 +6453,18 @@ impl Lowering {
         let body_expected = exit
             .as_ref()
             .map_or(expected_results, |exit| Some(exit.result_kinds.as_slice()));
-        let body = self.lower_block(ctx, body, body_expected);
+        let mut body = self.lower_block(ctx, body, body_expected);
         ctx.hide_locals_from(scope_start);
         if let Some(exit) = &exit {
+            // A limited integer body widens to an `<integer>` exit.
+            if let ([ValueKind::I64], [narrow @ (ValueKind::I32 | ValueKind::U32)]) = (
+                exit.result_kinds.as_slice(),
+                self.expr_kinds(&body.result).as_slice(),
+            ) && let Some(from) = NumericKind::of(*narrow)
+            {
+                let result = core::mem::replace(&mut body.result, Expr::Error { span });
+                body.result = promote_operand(result, from, NumericKind::Integer);
+            }
             let body_kinds = self.expr_kinds(&body.result);
             if !self.result_kinds_match(&body_kinds, &exit.result_kinds)
                 && !result_kinds_contain_error(&body_kinds)
@@ -7708,9 +7775,21 @@ impl Lowering {
             return (Some(ClassId(u32::MAX)), ValueKind::Error);
         };
         let (class_id, origin) = (class.id, class.origin);
+        // A class specializer on a limited-integer parameter would hand the
+        // body a `<u32>` it declared as, say, `<integer>`, changing what its
+        // arithmetic means; methods restate the limited type instead.
+        if let Some(limited @ (ValueKind::I32 | ValueKind::U32)) = generic_kind
+            && class_id != OBJECT_CLASS_ID
+        {
+            self.diagnostics.push(
+                Diagnostic::error(param.span, DiagnosticCode::LimitedParameterSpecializer)
+                    .with_arg(DiagnosticArg::text("type", self.kind_name(limited))),
+            );
+            return (Some(class_id), ValueKind::Error);
+        }
         // A numeric specializer on a generic that fixes a scalar kind sees
-        // that kind: an `<integer>` method on an `<i32>` generic gets the
-        // `<i32>`.
+        // that kind: a `<real>` method on a `<double-float>` generic gets the
+        // f64.
         if let ClassOrigin::BuiltinValue { kind } = origin
             && kind.is_numeric()
             && let Some(scalar) = generic_kind.filter(|kind| kind.is_number())
@@ -8007,6 +8086,11 @@ impl Lowering {
                 .zip(actual.params.iter().copied())
                 .all(|(expected, actual)| self.kinds_match(expected, actual))
             && self.result_kinds_match(&expected.results, &actual.results)
+            // A callable's ABI fixes its register kinds, and nothing adapts
+            // an `<i32>` signature to an `<integer>` one, so integer types
+            // must match exactly.
+            && !integer_types_differ(&expected.params, &actual.params)
+            && !integer_types_differ(&expected.results, &actual.results)
     }
 
     fn callable_signature_name(&self, signature: &CallableSignature) -> String {

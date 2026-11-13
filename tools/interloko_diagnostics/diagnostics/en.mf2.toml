@@ -53,6 +53,7 @@
 "sem.shift-count-out-of-range" = "`{ $function }` shifts a 32-bit value by 0 to 31 bits, not { $count }"
 "sem.abstract-numeric-type-unsupported" = "{ $class } is abstract and cannot type a value yet; use a concrete class such as <integer> or <double-float>, or <object>"
 "sem.limited-type-specializer" = "{ $type } is a limited <integer> type, not a class; a method may specialize on it only where its generic declares the parameter { $type }"
+"sem.limited-parameter-specializer" = "the generic declares this parameter { $type }; a method must specialize it as { $type } too, so its body computes with the same type"
 "sem.apply-arity-mismatch" = "apply expects a callable and arguments"
 "sem.apply-target-type-mismatch" = "apply target must be a { $expected }, got { $actual }"
 "sem.signal-condition-type-mismatch" = "signal condition must be a known object"
