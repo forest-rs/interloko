@@ -1,0 +1,13 @@
+// expect: run #t
+// expect: diagnostics 0
+// expect: dump lowered contains u32.lt
+// expect: dump lowered contains i64.lt
+
+// Comparisons are exact. One type compares directly; mixed integer types
+// meet at `<integer>`, so `-1` is less than every `<u32>`, unlike C.
+define function main() => <boolean>
+  let small :: <u32> = 3;
+  let big :: <u32> = 4000000000;
+  let negative = -1i32;
+  if small < big then negative < small else #f end
+end;

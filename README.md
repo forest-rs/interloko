@@ -144,7 +144,13 @@ The current slices include:
   context expects when the value fits (`let level :: <u32> = 255`). They
   live in slots, cross `<object>` (a `<single-float>` keeps its format), and
   travel as `FunctionValue::I32`/`U32`/`SingleFloat` through typed calls and
-  host functions;
+  host functions. Arithmetic follows `promotion.rs`: one limited type stays
+  in it, checked (`runtime.integer-overflow` when a result leaves the
+  range), mixed integer types compute as `<integer>`, floats are contagious
+  to the widest format (`single + double` is a double, `integer + single`
+  a single), and comparisons are exact across all of them. Statically typed
+  operands compile to the `i32`/`u32`/`f32` instructions directly;
+  `<object>` operands dispatch through the same numeric generics;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

@@ -1,7 +1,7 @@
 // expect: run 21
 // expect: diagnostics 0
 // expect: dump typing contains dispatch proved rule=dispatch-covered
-// expect: dump typing contains expected=dispatch + methods=4
+// expect: dump typing contains expected=dispatch + methods=9
 
 // When soft typing knows each operand's exact class, a numeric dispatch is
 // proved to select a method.

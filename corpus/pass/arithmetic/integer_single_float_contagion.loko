@@ -1,0 +1,12 @@
+// expect: run 3.0f32
+// expect: diagnostics 0
+// expect: dump lowered contains i64.to_f32
+// expect: dump lowered contains i32.to_f32
+
+// An integer meeting a single-float converts to binary32 (Julia and Common
+// Lisp agree), from either integer type.
+define function main() => <single-float>
+  let n = 3;
+  let k = -2i32;
+  n * 0.5f32 + k * 0.5f32 + 2.5f32
+end;

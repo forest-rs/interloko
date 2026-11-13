@@ -1,0 +1,16 @@
+// expect: run 0.75f32
+// expect: diagnostics 0
+// expect: dump lowered contains f32.mul
+// expect: dump lowered contains f32.sub
+// expect: dump lowered contains f32.neg
+// expect: dump tape contains f32.div
+
+// Single-floats compute in binary32. An unsuffixed float literal beside one
+// is a single-float too, so `x * 0.5` never widens.
+define function mix(x :: <single-float>, y :: <single-float>) => <single-float>
+  -(x * 0.5 - y / 2.0)
+end;
+
+define function main() => <single-float>
+  mix(0.5f32, 2.0f32)
+end;

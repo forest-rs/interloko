@@ -1,0 +1,17 @@
+// expect: run -6i32
+// expect: diagnostics 0
+// expect: dump lowered contains i32.add_ovf
+// expect: dump lowered contains i32.mul_ovf
+// expect: dump lowered contains trap 3 (integer overflow)
+// expect: dump tape contains i32.sub_ovf
+
+// Two operands of one limited type compute in it, checked: the result must
+// stay in the type's range. A literal partner adopts the type, so `x + 1`
+// and `2 * x` stay `<i32>`.
+define function step(x :: <i32>) => <i32>
+  2 * x + 1 - 9
+end;
+
+define function main() => <i32>
+  step(1)
+end;

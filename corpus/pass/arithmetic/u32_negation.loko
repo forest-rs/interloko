@@ -1,0 +1,9 @@
+// expect: run -5
+// expect: diagnostics 0
+// expect: dump lowered contains u32.to_i64
+
+// `<u32>` has no negative members, so `-x` is the `<integer>` it denotes.
+define function main() => <integer>
+  let level :: <u32> = 5;
+  -level
+end;
