@@ -17,7 +17,7 @@ use std::process::Command;
 use transcript::ScenarioKind;
 
 #[test]
-#[ignore = "acceptance target: break loop (conditions + code units)"]
+#[ignore = "acceptance target: the lab chooser (`run --chooser`)"]
 fn break_loop_transcript_lab_scenario() {
     // Transcript paths are relative to the `interloko_repl` package root.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../interloko_repl");

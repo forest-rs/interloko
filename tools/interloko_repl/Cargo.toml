@@ -6,8 +6,10 @@ license.workspace = true
 description = "Plain-stdio REPL for Interloko compiler sessions."
 
 [dependencies]
+execution_tape.workspace = true
 interloko_compiler = { path = "../../crates/interloko_compiler" }
 interloko_diagnostics = { path = "../interloko_diagnostics" }
+interloko_runtime = { path = "../../crates/interloko_runtime" }
 nu-ansi-term = "0.50.3"
 reedline = "0.47.0"
 

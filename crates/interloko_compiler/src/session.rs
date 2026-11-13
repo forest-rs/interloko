@@ -370,6 +370,28 @@ impl SessionRuntime {
         arguments: &[FunctionValue],
         trace: Option<ExecutionTraceDetail>,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
+        self.call_function_with(
+            artifacts,
+            function_name,
+            arguments,
+            trace,
+            CallServices::default(),
+        )
+    }
+
+    /// Runs `function_name` as one turn of this runtime with embedding
+    /// services; see [`SessionArtifacts::call_function_with`].
+    ///
+    /// A chooser that hot-swaps code installs units into this call's VM
+    /// only; the turn stays open while it decides.
+    pub fn call_function_with<'a>(
+        &mut self,
+        artifacts: &'a SessionArtifacts,
+        function_name: &str,
+        arguments: &[FunctionValue],
+        trace: Option<ExecutionTraceDetail>,
+        services: CallServices<'a>,
+    ) -> Result<FunctionCallOutcome, FunctionCallError> {
         let tape = artifacts
             .tape
             .as_ref()
@@ -385,7 +407,7 @@ impl SessionRuntime {
             function_name,
             arguments,
             trace,
-            CallServices::default(),
+            services,
         )
     }
 
