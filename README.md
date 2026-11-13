@@ -114,11 +114,12 @@ The current slices include:
 - a numeric class tower: `<number>` > `<real>`, then `<rational>` >
   `<integer>` and `<float>` > `<double-float>`, where only `<integer>` and
   `<double-float>` are concrete; methods may specialize on any of them, and
-  an abstract specializer such as `<real>` receives the boxed value unless
-  the generic fixes a scalar parameter type;
+  an abstract specializer such as `<real>` or `<float>` receives the boxed
+  value unless the generic fixes a scalar parameter type, while annotations
+  name a concrete class;
 - floats: literals such as `1.5`/`2e10` are `<double-float>` (IEEE 754
   binary64) instances under the abstract `<number>` > `<real>` > `<float>`
-  classes, with slots, boxing to `<object>`, `<float>`/`<double-float>`
+  classes, with slots, boxing to `<object>`, `<double-float>`
   annotations and method dispatch, and IEEE `+ - * /`,
   negation, and comparisons; an integer meeting a float is converted to a
   float for arithmetic and compared exactly (`2^53 + 1 > 2.0^53`), by the
@@ -127,7 +128,7 @@ The current slices include:
   dispatches through a built-in generic (`+`, `<`, `negative`, ...) whose
   methods come from the same rules; these generics show up in EOP and soft
   typing like any other and are sealed over `<real>`; explicit
-  `as(<float>, n)` and exact
+  `as(<double-float>, n)` and exact
   `as(<integer>, x)` conversions, and a float library (`abs`, `min`, `max`,
   `remainder`, `nan?`, `finite?`, `floor`, `ceiling`, `round`, `truncate`,
   `sqrt`, `cbrt`, `exp`, `log`, `log2`, `log10`, trigonometric and

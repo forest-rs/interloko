@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 // expect: dump lowered contains box.any
 
-define function main() => <float>
+define function main() => <double-float>
   let boxed = as(<object>, 2.5);
-  if instance?(boxed, <float>) then as(<float>, boxed) else 0.0 end
+  if instance?(boxed, <float>) then as(<double-float>, boxed) else 0.0 end
 end;

@@ -1,6 +1,6 @@
 // expect: run -0.0
 // expect: diagnostics 0
 
-define function main() => <float>
+define function main() => <double-float>
   -0.0
 end;

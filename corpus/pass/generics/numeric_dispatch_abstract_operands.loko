@@ -12,6 +12,6 @@ define method total(x :: <real>, y :: <real>) => <object>
   x + y
 end;
 
-define function main() => <float>
-  as(<float>, total(1, 2.5)) + as(<float>, as(<integer>, total(2, 3)))
+define function main() => <double-float>
+  as(<double-float>, total(1, 2.5)) + as(<double-float>, as(<integer>, total(2, 3)))
 end;

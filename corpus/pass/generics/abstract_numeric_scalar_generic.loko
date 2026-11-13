@@ -3,9 +3,9 @@
 
 // A method on an abstract numeric class under a generic with a scalar
 // parameter receives that scalar unboxed, so its body can do arithmetic.
-define generic weight(x :: <float>) => <float>;
+define generic weight(x :: <double-float>) => <double-float>;
 
-define method weight(x :: <real>) => <float>
+define method weight(x :: <real>) => <double-float>
   x + 1.0
 end;
 
@@ -15,6 +15,6 @@ define method successor(n :: <rational>) => <integer>
   n + 1
 end;
 
-define function main() => <float>
-  weight(2.5) + as(<float>, successor(3))
+define function main() => <double-float>
+  weight(2.5) + as(<double-float>, successor(3))
 end;

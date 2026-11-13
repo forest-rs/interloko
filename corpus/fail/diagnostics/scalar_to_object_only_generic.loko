@@ -4,15 +4,15 @@
 // No method of `area` can apply to a float, so its parameter carries raw
 // object handles and a float argument is rejected.
 define class <circle> (<object>)
-  slot radius :: <float>;
+  slot radius :: <double-float>;
 end;
 
 define generic area(shape);
 
-define method area(c :: <circle>) => <float>
+define method area(c :: <circle>) => <double-float>
   c.radius * c.radius
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   area(2.5)
 end;

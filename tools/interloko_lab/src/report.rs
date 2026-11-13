@@ -1799,7 +1799,7 @@ fn value_kind_label(module: &sem::Module, kind: ValueKind) -> String {
     match kind {
         ValueKind::Any => "<object>".into(),
         ValueKind::I64 => "<integer>".into(),
-        ValueKind::F64 => "<float>".into(),
+        ValueKind::F64 => "<double-float>".into(),
         ValueKind::Bool => "<boolean>".into(),
         ValueKind::String(id) | ValueKind::Symbol(id) | ValueKind::Vector(id) => {
             class_name(module, id)

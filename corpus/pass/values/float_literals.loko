@@ -5,12 +5,12 @@
 // expect: dump lowered contains const.f64 2.5e-7
 // expect: dump tape contains const.f64
 
-define constant $avogadro :: <float> = 6.02214076e23;
+define constant $avogadro :: <double-float> = 6.02214076e23;
 
-define function tiny() => <float>
+define function tiny() => <double-float>
   0.00000025
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   $avogadro
 end;

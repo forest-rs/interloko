@@ -3,12 +3,12 @@
 // expect: dump sem contains <float>
 // expect: dump lowered contains scale#dispatch
 
-define generic scale(x :: <float>) => <float>;
+define generic scale(x :: <double-float>) => <double-float>;
 
-define method scale(x :: <float>) => <float>
+define method scale(x :: <float>) => <double-float>
   x
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   scale(2.5)
 end;

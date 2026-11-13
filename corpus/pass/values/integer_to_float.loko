@@ -4,6 +4,6 @@
 // expect: dump lowered contains i64.to_f64
 
 // 2^53 + 1 is not a float; conversion rounds to nearest, ties to even.
-define function main() => <float>
-  as(<float>, 9007199254740993)
+define function main() => <double-float>
+  as(<double-float>, 9007199254740993)
 end;

@@ -635,15 +635,16 @@ impl Module {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Integer,
             } => Some(ValueKind::I64),
-            // `<double-float>` is the only concrete float class, so a value
-            // typed `<float>` is represented as an f64 until `<single-float>`
-            // gives `<float>` a second representation to choose from.
             ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Float | BuiltinValueClass::DoubleFloat,
+                kind: BuiltinValueClass::DoubleFloat,
             } => Some(ValueKind::F64),
+            // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
-                    BuiltinValueClass::Number | BuiltinValueClass::Real | BuiltinValueClass::Rational,
+                    BuiltinValueClass::Number
+                    | BuiltinValueClass::Real
+                    | BuiltinValueClass::Rational
+                    | BuiltinValueClass::Float,
             } => None,
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
@@ -6913,15 +6914,16 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Integer,
             } => Some(ValueKind::I64),
-            // `<double-float>` is the only concrete float class, so a value
-            // typed `<float>` is represented as an f64 until `<single-float>`
-            // gives `<float>` a second representation to choose from.
             ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Float | BuiltinValueClass::DoubleFloat,
+                kind: BuiltinValueClass::DoubleFloat,
             } => Some(ValueKind::F64),
+            // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
-                    BuiltinValueClass::Number | BuiltinValueClass::Real | BuiltinValueClass::Rational,
+                    BuiltinValueClass::Number
+                    | BuiltinValueClass::Real
+                    | BuiltinValueClass::Rational
+                    | BuiltinValueClass::Float,
             } => None,
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Vector,
@@ -7197,10 +7199,8 @@ impl Lowering {
                 .builtin_value_class(BuiltinValueClass::Symbol)
                 .map_or(ValueKind::Error, ValueKind::Symbol),
             "<integer>" => ValueKind::I64,
-            // See `kind_for_builtin_class`: `<float>` is f64 while
-            // `<double-float>` is its only concrete subclass.
-            "<float>" | "<double-float>" => ValueKind::F64,
-            "<number>" | "<real>" | "<rational>" => {
+            "<double-float>" => ValueKind::F64,
+            "<number>" | "<real>" | "<rational>" | "<float>" => {
                 diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::AbstractNumericTypeUnsupported)
                         .with_arg(DiagnosticArg::text("class", type_name)),
@@ -8878,7 +8878,7 @@ mod tests {
 
         let float_branch = lower_source(
             "define class <bad> (<object>)\nend;\n\
-             define function pick(x :: <float>)\n  if x < 0.0 then signal(make(<bad>)) else x end\nend;",
+             define function pick(x :: <double-float>)\n  if x < 0.0 then signal(make(<bad>)) else x end\nend;",
         );
         assert!(
             float_branch.diagnostics.is_empty(),

@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 
 // Non-finite floats have no literal syntax and render as `inf`, `-inf`, `nan`.
-define function show(x :: <float>, rest :: <string>) => <string>
+define function show(x :: <double-float>, rest :: <string>) => <string>
   concatenate(concatenate(float-to-string(x), " "), rest)
 end;
 

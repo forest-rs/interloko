@@ -5,5 +5,5 @@
 
 // Float-to-integer conversion is exact; only integral floats convert.
 define function main() => <integer>
-  as(<integer>, -42.0) + as(<integer>, as(<float>, 0))
+  as(<integer>, -42.0) + as(<integer>, as(<double-float>, 0))
 end;

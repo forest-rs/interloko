@@ -73,7 +73,7 @@ frames (innermost first):
   frame:3 render(s: <sphere>, film: <film>)          function:f2@1  repl.loko:53
   frame:4 main()                                     function:f3@1  repl.loko:60
 restarts:
-  restart:0 use-value(value :: <float>)  the signal in frame:0 returns value
+  restart:0 use-value(value :: <double-float>)  the signal in frame:0 returns value
   restart:1 skip-pixel()                 the handle in frame:2 (repl.loko:45) returns 0.0
   restart:2 retry(frame :: <frame>)      call a frame's function again, with current definitions
   restart:3 abort()                      unwind to top level, running cleanups
@@ -88,8 +88,8 @@ origin: runtime
 presentation:
   title: <bad-sample> value: -0.5, distance: 1.5
 slots:
-  value :: <float> = -0.5
-  distance :: <float> = 1.5
+  value :: <double-float> = -0.5
+  distance :: <double-float> = 1.5
 signalled:
   frame:0 check-sample at repl.loko:26
 handler search:
@@ -110,11 +110,11 @@ source:
   location: repl.loko:37
   defined by: form:f6 method definition
 code:
-  method:m0 shade(c3:<sphere>, c15:<float>) -> float
+  method:m0 shade(c3:<sphere>, c15:<double-float>) -> float
   unit: method:m0@1 (current)
 locals:
   s :: <sphere> = <sphere> radius: 1.0
-  distance :: <float> = 1.5
+  distance :: <double-float> = 1.5
 called from:
   frame:2 pixel at repl.loko:44
 affordances:
@@ -126,13 +126,13 @@ object restart:0
 kind: restart
 origin: built-in
 presentation:
-  title: use-value(value :: <float>) => <float>
+  title: use-value(value :: <double-float>) => <double-float>
 parameters:
-  value :: <float>
+  value :: <double-float>
 resumes:
   frame:0 check-sample at repl.loko:26: the signal returns value
 choose:
-  :invoke condition:0 choose-restart restart:0 value: <float>
+  :invoke condition:0 choose-restart restart:0 value: <double-float>
 affordances:
   inspect
 
@@ -141,19 +141,19 @@ affordances:
 // unit while frame:1 keeps the old one.
 > :edit method:m0
 editing form:f6 method shade (method:m0); enter a replacement definition, or :cancel
-  34 | define method shade(s :: <sphere>, distance :: <float>) => <float>
+  34 | define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>
   35 |   // Brightness falls off linearly with distance from the sphere's axis.
   36 |   // Bug: a ray that misses the sphere gets a negative brightness.
   37 |   check-sample(1.0 - distance / s.radius, distance)
   38 | end;
-> define method shade(s :: <sphere>, distance :: <float>) => <float>
+> define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>
 >   // A ray that misses the sphere is black, not negatively bright.
 >   check-sample(max(0, 1.0 - distance / s.radius), distance)
 > end;
 ! diagnostics:
-!   Error sem.function-argument-type-mismatch 1072..1073 function `max` argument 1 expects <float> but got <integer>
+!   Error sem.function-argument-type-mismatch 1142..1143 function `max` argument 1 expects <float> but got <integer>
 ! edit rejected: form:f6 and method:m0@1 are unchanged; still editing form:f6
-> define method shade(s :: <sphere>, distance :: <float>) => <float>
+> define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>
 >   // A ray that misses the sphere is black, not negatively bright.
 >   check-sample(max(0.0, 1.0 - distance / s.radius), distance)
 > end;
@@ -189,13 +189,13 @@ frames (innermost first):
   frame:3 render(s: <sphere>, film: <film>)          function:f2@1  repl.loko:53
   frame:4 main()                                     function:f3@1  repl.loko:60
 restarts:
-  restart:0 use-value(value :: <float>)  the signal in frame:0 returns value
+  restart:0 use-value(value :: <double-float>)  the signal in frame:0 returns value
   restart:1 skip-pixel()                 the handle in frame:2 (repl.loko:45) returns 0.0
   restart:2 retry(frame :: <frame>)      call a frame's function again, with current definitions
   restart:3 abort()                      unwind to top level, running cleanups
 choose with :restart <n|name> [args...] or :invoke condition:0 choose-restart
 > :restart use-value "dark"
-! error: restart:0 use-value expects value :: <float>, got "dark" :: <string>; break [1] is still waiting
+! error: restart:0 use-value expects value :: <double-float>, got "dark" :: <string>; break [1] is still waiting
 > :restart use-value 0.25
 restart:0 use-value: the signal in frame:0 returns 0.25
 1.75
@@ -212,7 +212,7 @@ frames (innermost first):
   frame:3 render(s: <sphere>, film: <film>)          function:f2@1  repl.loko:53
   frame:4 main()                                     function:f3@1  repl.loko:60
 restarts:
-  restart:0 use-value(value :: <float>)  the signal in frame:0 returns value
+  restart:0 use-value(value :: <double-float>)  the signal in frame:0 returns value
   restart:1 skip-pixel()                 the handle in frame:2 (repl.loko:45) returns 0.0
   restart:2 retry(frame :: <frame>)      call a frame's function again, with current definitions
   restart:3 abort()                      unwind to top level, running cleanups
@@ -232,7 +232,7 @@ no suspended computation
 $ interloko_lab run --chooser tests/fixtures/break_loop/choices.toml tests/fixtures/break_loop/raymarch.loko
 signal condition:0 <bad-sample> value: -0.5, distance: 1.5 at tests/fixtures/break_loop/raymarch.loko:26
   no applicable handler; asking chooser scripted (tests/fixtures/break_loop/choices.toml)
-  offered restart:0 use-value(value :: <float>)
+  offered restart:0 use-value(value :: <double-float>)
   offered restart:1 skip-pixel()
   offered restart:2 retry(frame :: <frame>)
   offered restart:3 abort()

@@ -4,7 +4,7 @@
 // expect: dump tape contains interloko.box_value
 
 define class <reading> (<object>)
-  slot celsius :: <float>;
+  slot celsius :: <double-float>;
   slot raw;
 end;
 

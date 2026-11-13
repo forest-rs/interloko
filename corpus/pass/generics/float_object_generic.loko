@@ -7,6 +7,6 @@ define method keep(x :: <object>) => <object>
   x
 end;
 
-define function main() => <float>
+define function main() => <double-float>
   as(<double-float>, keep(2.5))
 end;

@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.abstract-numeric-type-unsupported
+// expect: diagnostic contains <float> is abstract
+
+// `<float>` is abstract like `<real>`: it names no one representation for
+// a value, so annotations name a concrete format such as `<double-float>`.
+// Methods may still specialize on `<float>`.
+define function half(x :: <float>) => <double-float>
+  0.5
+end;
+
+define function main() => <double-float>
+  half(1.0)
+end;
