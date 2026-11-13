@@ -4,7 +4,7 @@
 //! tests run the session's verified tape with an `InterlokoHost` that holds
 //! the Rust objects, the same way an embedder passes host objects.
 
-use execution_tape::value::{FuncRef, Value};
+use execution_tape::value::Value;
 use execution_tape::vm::{InvocationOptions, Limits, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
@@ -92,9 +92,9 @@ fn call_with_host_object(
         .copied()
         .expect("function should have a tape entry");
 
-    let mut host = InterlokoHost::new(tape.runtime.clone());
+    let mut host = InterlokoHost::new(tape.runtime().clone());
     let class = tape
-        .runtime
+        .runtime()
         .class_id(class_name)
         .expect("host class should be in runtime layout");
     let mut argument = host
@@ -107,14 +107,11 @@ fn call_with_host_object(
     }
 
     let mut vm = Vm::new(host, Limits::default());
-    let unit = vm
-        .install(std::sync::Arc::clone(&tape.program))
-        .expect("program should install");
     let args = [argument];
     let outcome = interloko_runtime::driver::run(
         &mut vm,
-        &tape.control,
-        FuncRef::new(unit, entry),
+        &tape.code,
+        entry,
         &args,
         InvocationOptions::default(),
         &mut interloko_runtime::chooser::ReportUnhandled,
