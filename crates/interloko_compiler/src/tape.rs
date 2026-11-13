@@ -1154,6 +1154,21 @@ impl<'a> FunctionEmitter<'a> {
                     lower::F64BinaryOp::Max => self.asm.f64_max(dst, a, b),
                 };
             }
+            lower::Instr::I64Bitwise {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                match op {
+                    lower::I64BitOp::And => self.asm.i64_and(dst, a, b),
+                    lower::I64BitOp::Or => self.asm.i64_or(dst, a, b),
+                    lower::I64BitOp::Xor => self.asm.i64_xor(dst, a, b),
+                };
+            }
             lower::Instr::F64Unary { dst, op, src, span } => {
                 self.set_span(*span);
                 match op {

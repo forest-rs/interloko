@@ -1,0 +1,18 @@
+// expect: diagnostics 2
+// expect: diagnostic code sem.wrapping-operand-type-mismatch
+// expect: diagnostic contains `+%` wraps within one fixed-width type such as <u32>; its operands are <integer> and <integer>
+// expect: diagnostic contains `*%` wraps within one fixed-width type such as <u32>; its operands are <i32> and <u32>
+
+// `<integer>` has no modulus to wrap at, and two different widths have no
+// one modulus, so wrapping needs two operands of one fixed-width type.
+define function unbounded(x :: <integer>) => <integer>
+  x +% 1
+end;
+
+define function mixed(x :: <i32>, y :: <u32>) => <integer>
+  x *% y
+end;
+
+define function main()
+  0
+end;

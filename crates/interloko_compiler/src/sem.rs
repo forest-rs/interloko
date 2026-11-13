@@ -1582,6 +1582,85 @@ pub enum BinaryOp {
     Mul,
     /// Division. Defined for floats only; integer division has no `/`.
     Div,
+    /// `+%`: addition modulo 2^32, defined only on two operands of one
+    /// fixed-width type.
+    WrappingAdd,
+    /// `-%`: subtraction modulo 2^32, like [`Self::WrappingAdd`].
+    WrappingSub,
+    /// `*%`: multiplication modulo 2^32, like [`Self::WrappingAdd`].
+    WrappingMul,
+    /// `logand(x, y)`: bitwise and, exact on integers of any type.
+    LogAnd,
+    /// `logior(x, y)`: bitwise inclusive or, exact on integers of any type.
+    LogIor,
+    /// `logxor(x, y)`: bitwise exclusive or, exact on integers of any type.
+    LogXor,
+    /// `shift-left(x, n)`: shifts a fixed-width `x` left by `n` in 0..=31,
+    /// discarding the bits shifted out.
+    ShiftLeft,
+    /// `shift-right(x, n)`: shifts a fixed-width `x` right by `n` in
+    /// 0..=31: arithmetic for `<i32>`, logical for `<u32>`, so both round
+    /// toward negative infinity.
+    ShiftRight,
+}
+
+impl BinaryOp {
+    /// Returns whether this is an explicit wrapping (modular) operator.
+    #[must_use]
+    pub const fn is_wrapping(self) -> bool {
+        matches!(
+            self,
+            Self::WrappingAdd | Self::WrappingSub | Self::WrappingMul
+        )
+    }
+
+    /// Returns whether this is a bitwise function on integers.
+    #[must_use]
+    pub const fn is_bitwise(self) -> bool {
+        matches!(
+            self,
+            Self::LogAnd | Self::LogIor | Self::LogXor | Self::ShiftLeft | Self::ShiftRight
+        )
+    }
+
+    /// Returns whether this is a bit shift.
+    #[must_use]
+    pub const fn is_shift(self) -> bool {
+        matches!(self, Self::ShiftLeft | Self::ShiftRight)
+    }
+
+    /// Returns the bitwise function called `name`, if any. Like the float
+    /// library, these resolve after every user definition of the name.
+    #[must_use]
+    pub fn bitwise_function(name: &str) -> Option<Self> {
+        Some(match name {
+            "logand" => Self::LogAnd,
+            "logior" => Self::LogIor,
+            "logxor" => Self::LogXor,
+            "shift-left" => Self::ShiftLeft,
+            "shift-right" => Self::ShiftRight,
+            _ => return None,
+        })
+    }
+
+    /// Returns the operator's source spelling.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::WrappingAdd => "+%",
+            Self::WrappingSub => "-%",
+            Self::WrappingMul => "*%",
+            Self::LogAnd => "logand",
+            Self::LogIor => "logior",
+            Self::LogXor => "logxor",
+            Self::ShiftLeft => "shift-left",
+            Self::ShiftRight => "shift-right",
+        }
+    }
 }
 
 impl From<ast::BinaryOp> for BinaryOp {
@@ -1591,6 +1670,9 @@ impl From<ast::BinaryOp> for BinaryOp {
             ast::BinaryOp::Sub => Self::Sub,
             ast::BinaryOp::Mul => Self::Mul,
             ast::BinaryOp::Div => Self::Div,
+            ast::BinaryOp::WrappingAdd => Self::WrappingAdd,
+            ast::BinaryOp::WrappingSub => Self::WrappingSub,
+            ast::BinaryOp::WrappingMul => Self::WrappingMul,
         }
     }
 }
@@ -5129,6 +5211,9 @@ impl Lowering {
                 if let Some(builtin) = FloatBuiltin::from_name(callee) {
                     return self.lower_float_call(ctx, builtin, lowered_args, *span);
                 }
+                if let Some(op) = BinaryOp::bitwise_function(callee) {
+                    return self.lower_bitwise(ctx, op, lowered_args, *span);
+                }
                 ctx.diagnostics.push(
                     Diagnostic::error(*span, DiagnosticCode::UnresolvedFunctionOrGeneric)
                         .with_arg(DiagnosticArg::text("callee", callee.clone())),
@@ -5162,6 +5247,9 @@ impl Lowering {
             } => {
                 let (lhs, rhs) = self.lower_numeric_operands(ctx, lhs, rhs);
                 let op = BinaryOp::from(*op);
+                if op.is_wrapping() {
+                    return self.lower_wrapping(ctx, op, lhs, rhs, *span);
+                }
                 if Self::dispatches_numerically(&[self.expr_kind(&lhs), self.expr_kind(&rhs)]) {
                     return self.numeric_dispatch(
                         promotion::NumericOperator::Arithmetic(op),
@@ -6397,6 +6485,134 @@ impl Lowering {
                 .with_arg(DiagnosticArg::text("rhs", self.kind_name(rhs_kind))),
         );
         None
+    }
+
+    /// Lowers a call of `logand`, `logior`, `logxor`, `shift-left` or
+    /// `shift-right`. Their operands must be statically known integers;
+    /// the rules come from [`promotion::arithmetic`]. A constant shift
+    /// count is checked here; any other is checked when it runs.
+    fn lower_bitwise(
+        &mut self,
+        ctx: &mut FunctionContext,
+        op: BinaryOp,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        let [lhs, rhs] = match <[Expr; 2]>::try_from(args) {
+            Ok(args) => args,
+            Err(args) => {
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                        .with_arg(DiagnosticArg::text("callee", op.symbol()))
+                        .with_arg(DiagnosticArg::unsigned("expected_count", 2))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "actual_count",
+                            u64::try_from(args.len()).unwrap_or(u64::MAX),
+                        )),
+                );
+                return Expr::Error { span };
+            }
+        };
+        // Literals adopt a 32-bit partner's type, as for arithmetic.
+        let rhs = adapt_literal(rhs, Some(&[self.expr_kind(&lhs)]));
+        let lhs = adapt_literal(lhs, Some(&[self.expr_kind(&rhs)]));
+        let (lhs_kind, rhs_kind) = (self.expr_kind(&lhs), self.expr_kind(&rhs));
+        if lhs_kind == ValueKind::Error || rhs_kind == ValueKind::Error {
+            return Expr::Error { span };
+        }
+        let rule = match (NumericKind::of(lhs_kind), NumericKind::of(rhs_kind)) {
+            (Some(lhs_numeric), Some(rhs_numeric)) => {
+                match promotion::arithmetic(op, lhs_numeric, rhs_numeric) {
+                    promotion::ArithmeticRule::Promote { kind } => {
+                        Some((kind, lhs_numeric, rhs_numeric))
+                    }
+                    promotion::ArithmeticRule::Undefined => None,
+                }
+            }
+            _ => None,
+        };
+        let Some((kind, lhs_numeric, rhs_numeric)) = rule else {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::IntegerOperandTypeMismatch)
+                    .with_arg(DiagnosticArg::text("function", op.symbol()))
+                    .with_arg(DiagnosticArg::text("lhs", self.kind_name(lhs_kind)))
+                    .with_arg(DiagnosticArg::text("rhs", self.kind_name(rhs_kind))),
+            );
+            return Expr::Error { span };
+        };
+        if op.is_shift() {
+            let count = match &rhs {
+                Expr::ConstI64 { value, .. } => Some(*value),
+                Expr::Const32 {
+                    value: Number32::I32(value),
+                    ..
+                } => Some(i64::from(*value)),
+                Expr::Const32 {
+                    value: Number32::U32(value),
+                    ..
+                } => Some(i64::from(*value)),
+                _ => None,
+            };
+            if let Some(count) = count
+                && !(0..32).contains(&count)
+            {
+                ctx.diagnostics.push(
+                    Diagnostic::error(rhs.span(), DiagnosticCode::ShiftCountOutOfRange)
+                        .with_arg(DiagnosticArg::text("function", op.symbol()))
+                        .with_arg(DiagnosticArg::text("count", format!("{count}"))),
+                );
+                return Expr::Error { span };
+            }
+        }
+        Expr::Binary {
+            op,
+            kind,
+            lhs: Box::new(promote_operand(lhs, lhs_numeric, kind)),
+            rhs: Box::new(promote_operand(rhs, rhs_numeric, kind)),
+            span,
+        }
+    }
+
+    /// Lowers `+%`, `-%` or `*%`. Wrapping needs a modulus, so both
+    /// operands must already share one fixed-width type; there is no
+    /// promotion and no dispatch.
+    fn lower_wrapping(
+        &mut self,
+        ctx: &mut FunctionContext,
+        op: BinaryOp,
+        lhs: Expr,
+        rhs: Expr,
+        span: Span,
+    ) -> Expr {
+        let (lhs_kind, rhs_kind) = (self.expr_kind(&lhs), self.expr_kind(&rhs));
+        if lhs_kind == ValueKind::Error || rhs_kind == ValueKind::Error {
+            return Expr::Error { span };
+        }
+        match (NumericKind::of(lhs_kind), NumericKind::of(rhs_kind)) {
+            (Some(lhs_kind), Some(rhs_kind))
+                if matches!(
+                    promotion::arithmetic(op, lhs_kind, rhs_kind),
+                    promotion::ArithmeticRule::Promote { .. }
+                ) =>
+            {
+                Expr::Binary {
+                    op,
+                    kind: lhs_kind,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span,
+                }
+            }
+            _ => {
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::WrappingOperandTypeMismatch)
+                        .with_arg(DiagnosticArg::text("op", op.symbol()))
+                        .with_arg(DiagnosticArg::text("lhs", self.kind_name(lhs_kind)))
+                        .with_arg(DiagnosticArg::text("rhs", self.kind_name(rhs_kind))),
+                );
+                Expr::Error { span }
+            }
+        }
     }
 
     fn lower_compare(

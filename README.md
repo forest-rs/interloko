@@ -153,7 +153,11 @@ The current slices include:
   `<object>` operands dispatch through the same numeric generics.
   `as(<u32>, x)` and friends convert exactly between every numeric type
   (out-of-range integers and non-integral floats trap), and
-  `instance?(x, <u32>)` tests for an `<integer>` in the range;
+  `instance?(x, <u32>)` tests for an `<integer>` in the range. Wrapping is
+  only ever explicit: `+%`, `-%` and `*%` compute modulo 2^32 on two
+  operands of one fixed-width type. `logand`, `logior` and `logxor` are
+  exact on every integer type, and `shift-left`/`shift-right` shift an
+  `<i32>` or `<u32>` by 0 to 31 bits (other counts are rejected or trap);
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

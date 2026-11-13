@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 
 // `<i32>` arithmetic traps when the exact result leaves the type's range,
-// rather than wrapping.
+// rather than wrapping; `+%` is the explicit wrapping operator.
 define function main() => <i32>
   let x :: <i32> = 2147483647;
   x + 1

@@ -1,0 +1,7 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.shift-count-out-of-range
+// expect: diagnostic contains `shift-left` shifts a 32-bit value by 0 to 31 bits, not 32
+
+define function main() => <u32>
+  shift-left(1u32, 32)
+end;

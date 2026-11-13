@@ -114,6 +114,12 @@ pub enum TokenKind {
     Star,
     /// `/` (a lone slash; `//` starts a comment).
     Slash,
+    /// `+%`, wrapping addition.
+    PlusPercent,
+    /// `-%`, wrapping subtraction.
+    MinusPercent,
+    /// `*%`, wrapping multiplication.
+    StarPercent,
     /// `=`.
     Equal,
     /// `=>`.
@@ -164,6 +170,9 @@ impl TokenKind {
             | Self::Minus
             | Self::Star
             | Self::Slash
+            | Self::PlusPercent
+            | Self::MinusPercent
+            | Self::StarPercent
             | Self::Equal
             | Self::Less
             | Self::LessEqual
@@ -671,6 +680,9 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Comment => 25,
         TokenKind::DocComment => 46,
         TokenKind::Slash => 47,
+        TokenKind::PlusPercent => 51,
+        TokenKind::MinusPercent => 52,
+        TokenKind::StarPercent => 53,
         TokenKind::Error => 26,
         TokenKind::If => 27,
         TokenKind::Then => 28,
@@ -742,13 +754,25 @@ pub fn lex(source: &str) -> Vec<Token> {
                 pos += 1;
                 TokenKind::Comma
             }
+            b'+' if bytes.get(pos + 1) == Some(&b'%') => {
+                pos += 2;
+                TokenKind::PlusPercent
+            }
             b'+' => {
                 pos += 1;
                 TokenKind::Plus
             }
+            b'-' if bytes.get(pos + 1) == Some(&b'%') => {
+                pos += 2;
+                TokenKind::MinusPercent
+            }
             b'-' => {
                 pos += 1;
                 TokenKind::Minus
+            }
+            b'*' if bytes.get(pos + 1) == Some(&b'%') => {
+                pos += 2;
+                TokenKind::StarPercent
             }
             b'*' => {
                 pos += 1;
@@ -1031,6 +1055,33 @@ mod tests {
         assert_eq!(numbers("3.e4"), ["3"]);
         assert_eq!(numbers("4e"), ["4"]);
         assert_eq!(numbers("5e-x"), ["5"]);
+    }
+
+    #[test]
+    fn lex_wrapping_operators_as_single_tokens() {
+        let kinds = |source: &str| {
+            lex(source)
+                .into_iter()
+                .map(|token| token.kind)
+                .filter(|kind| *kind != TokenKind::Whitespace)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds("a +% b -% c *% d"),
+            [
+                TokenKind::Ident,
+                TokenKind::PlusPercent,
+                TokenKind::Ident,
+                TokenKind::MinusPercent,
+                TokenKind::Ident,
+                TokenKind::StarPercent,
+                TokenKind::Ident,
+            ]
+        );
+        assert_eq!(
+            kinds("a + b"),
+            [TokenKind::Ident, TokenKind::Plus, TokenKind::Ident]
+        );
     }
 
     #[test]

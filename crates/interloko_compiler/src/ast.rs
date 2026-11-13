@@ -324,6 +324,12 @@ pub enum BinaryOp {
     Mul,
     /// Division.
     Div,
+    /// Wrapping addition, `+%`.
+    WrappingAdd,
+    /// Wrapping subtraction, `-%`.
+    WrappingSub,
+    /// Wrapping multiplication, `*%`.
+    WrappingMul,
 }
 
 /// Integer comparison operator.
@@ -2086,6 +2092,19 @@ impl<'tree> Lowering<'tree> {
             Some(TokenKind::Slash) => Expr::Binary {
                 id: self.ast_id(node),
                 op: BinaryOp::Div,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(
+                op @ (TokenKind::PlusPercent | TokenKind::MinusPercent | TokenKind::StarPercent),
+            ) => Expr::Binary {
+                id: self.ast_id(node),
+                op: match op {
+                    TokenKind::PlusPercent => BinaryOp::WrappingAdd,
+                    TokenKind::MinusPercent => BinaryOp::WrappingSub,
+                    _ => BinaryOp::WrappingMul,
+                },
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
                 span: node.span,

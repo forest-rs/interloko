@@ -1,0 +1,14 @@
+// expect: run 723471715u32
+// expect: diagnostics 0
+// expect: dump lowered contains u32.xor
+
+// Marsaglia's 32-bit xorshift, a common audio noise source.
+define function xorshift(x :: <u32>) => <u32>
+  let a = logxor(x, shift-left(x, 13));
+  let b = logxor(a, shift-right(a, 17));
+  logxor(b, shift-left(b, 5))
+end;
+
+define function main() => <u32>
+  xorshift(2463534242)
+end;
