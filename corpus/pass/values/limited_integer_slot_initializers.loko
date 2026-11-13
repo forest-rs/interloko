@@ -1,0 +1,18 @@
+// expect: run 21
+// expect: diagnostics 0
+// expect: dump lowered contains u32.to_i64
+
+// An `<i32>` or `<u32>` value is an `<integer>`, so it initializes an
+// `<integer>` slot or constant directly, widening exactly.
+define constant $seven :: <integer> = 7i32;
+
+define class <counter> (<object>)
+  slot base :: <integer>, init-value: 5u32;
+  slot step :: <integer>;
+end;
+
+define function main() => <integer>
+  let k :: <i32> = 9;
+  let counter = make(<counter>, step: k);
+  counter.base + counter.step + $seven
+end;
