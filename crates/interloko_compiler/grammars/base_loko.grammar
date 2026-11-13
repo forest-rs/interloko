@@ -59,9 +59,9 @@ rule comparison-expression = additive-expression comparison-tail?
 rule comparison-tail = comparison-op additive-expression
 rule comparison-op = `=` | `<=` | `<` | `>=` | `>`
 rule additive-expression = multiplicative-expression (add-op multiplicative-expression)*
-rule add-op = `+` | `-`
+rule add-op = `+%` | `-%` | `+` | `-`
 rule multiplicative-expression = unary-expression (mul-op unary-expression)*
-rule mul-op = `*` | `/`
+rule mul-op = `*%` | `*` | `/`
 rule unary-expression = negative-expression | postfix-expression
 rule negative-expression = `-` unary-expression
 rule postfix-expression = primary-expression (`.` member-name)*

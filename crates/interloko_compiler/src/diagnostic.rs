@@ -134,6 +134,12 @@ pub enum DiagnosticCode {
     ArithmeticOperandTypeMismatch,
     /// `/` was applied to integers; division is defined for floats only.
     IntegerDivisionUnsupported,
+    /// A wrapping operator's operands are not two values of one fixed-width integer type.
+    WrappingOperandTypeMismatch,
+    /// A bitwise function received an operand that is not an integer.
+    IntegerOperandTypeMismatch,
+    /// A constant shift count is outside the shifted type's width.
+    ShiftCountOutOfRange,
     /// An abstract numeric class such as `<real>` was used as a value type.
     AbstractNumericTypeUnsupported,
     /// A method specializes on a limited type its generic does not declare.
@@ -279,6 +285,9 @@ impl DiagnosticCode {
         Self::IfBranchTypeMismatch,
         Self::ArithmeticOperandTypeMismatch,
         Self::IntegerDivisionUnsupported,
+        Self::WrappingOperandTypeMismatch,
+        Self::IntegerOperandTypeMismatch,
+        Self::ShiftCountOutOfRange,
         Self::AbstractNumericTypeUnsupported,
         Self::LimitedTypeSpecializer,
         Self::ComparisonOperandTypeMismatch,
@@ -381,6 +390,9 @@ impl DiagnosticCode {
             Self::IfBranchTypeMismatch => "sem.if-branch-type-mismatch",
             Self::ArithmeticOperandTypeMismatch => "sem.arithmetic-operand-type-mismatch",
             Self::IntegerDivisionUnsupported => "sem.integer-division-unsupported",
+            Self::WrappingOperandTypeMismatch => "sem.wrapping-operand-type-mismatch",
+            Self::IntegerOperandTypeMismatch => "sem.integer-operand-type-mismatch",
+            Self::ShiftCountOutOfRange => "sem.shift-count-out-of-range",
             Self::AbstractNumericTypeUnsupported => "sem.abstract-numeric-type-unsupported",
             Self::LimitedTypeSpecializer => "sem.limited-type-specializer",
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
@@ -484,6 +496,9 @@ impl DiagnosticCode {
             "sem.if-branch-type-mismatch" => Self::IfBranchTypeMismatch,
             "sem.arithmetic-operand-type-mismatch" => Self::ArithmeticOperandTypeMismatch,
             "sem.integer-division-unsupported" => Self::IntegerDivisionUnsupported,
+            "sem.wrapping-operand-type-mismatch" => Self::WrappingOperandTypeMismatch,
+            "sem.integer-operand-type-mismatch" => Self::IntegerOperandTypeMismatch,
+            "sem.shift-count-out-of-range" => Self::ShiftCountOutOfRange,
             "sem.abstract-numeric-type-unsupported" => Self::AbstractNumericTypeUnsupported,
             "sem.limited-type-specializer" => Self::LimitedTypeSpecializer,
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,

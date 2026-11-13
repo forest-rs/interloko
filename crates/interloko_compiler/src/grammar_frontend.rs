@@ -3168,12 +3168,12 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "additive-expression",
-            "multiplicative-expression ((`+` | `-`) multiplicative-expression)*",
+            "multiplicative-expression ((`+%` | `-%` | `+` | `-`) multiplicative-expression)*",
             "syntax.rs:Parser::parse_add",
         ),
         (
             "multiplicative-expression",
-            "unary-expression ((`*` | `/`) unary-expression)*",
+            "unary-expression ((`*%` | `*` | `/`) unary-expression)*",
             "syntax.rs:Parser::parse_mul",
         ),
         (

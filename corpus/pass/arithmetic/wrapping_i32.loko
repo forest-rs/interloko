@@ -1,0 +1,11 @@
+// expect: run -2147483648i32
+// expect: diagnostics 0
+// expect: dump lowered contains i32.sub
+
+// Signed wrapping goes round two's complement: `i32::MAX +% 1` is
+// `i32::MIN`, and back again.
+define function main() => <i32>
+  let top :: <i32> = 2147483647;
+  let low = top +% 1;
+  (low -% 1) +% 1
+end;

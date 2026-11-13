@@ -3127,6 +3127,9 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::RBracket
         | TokenKind::VectorStart
         | TokenKind::Comma
+        | TokenKind::PlusPercent
+        | TokenKind::MinusPercent
+        | TokenKind::StarPercent
         | TokenKind::Plus
         | TokenKind::Minus
         | TokenKind::Star

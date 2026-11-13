@@ -24,6 +24,14 @@
 //!   promise to stay in it. Unsuffixed literals adapt to their partner's
 //!   type first (see `sem::adapt_literal`), so `x + 1` with an `<i32>` `x`
 //!   stays `<i32>`.
+//! - The wrapping operators `+%`, `-%` and `*%` compute modulo 2^32 and
+//!   are defined only on two operands of one fixed-width type; they never
+//!   promote, so wrapping is always an explicit choice.
+//! - `logand`, `logior` and `logxor` are exact on integers (two's
+//!   complement of unbounded width) and promote like arithmetic.
+//!   `shift-left` and `shift-right` take a fixed-width value and a count
+//!   in 0..=31 converted to its type; `shift-left` discards the bits it
+//!   shifts out, like a bit operation rather than multiplication.
 //! - Negation keeps the operand's kind, except that `<u32>` has no negative
 //!   members, so `-x` of a `<u32>` is the `<integer>` it denotes.
 //! - Comparisons are exact, as mathematical values (Common Lisp
@@ -92,6 +100,14 @@ impl NumericOperator {
             Self::Arithmetic(BinaryOp::Sub) => "-",
             Self::Arithmetic(BinaryOp::Mul) => "*",
             Self::Arithmetic(BinaryOp::Div) => "/",
+            Self::Arithmetic(BinaryOp::WrappingAdd) => "+%",
+            Self::Arithmetic(BinaryOp::WrappingSub) => "-%",
+            Self::Arithmetic(BinaryOp::WrappingMul) => "*%",
+            Self::Arithmetic(BinaryOp::LogAnd) => "logand",
+            Self::Arithmetic(BinaryOp::LogIor) => "logior",
+            Self::Arithmetic(BinaryOp::LogXor) => "logxor",
+            Self::Arithmetic(BinaryOp::ShiftLeft) => "shift-left",
+            Self::Arithmetic(BinaryOp::ShiftRight) => "shift-right",
             Self::Compare(CompareOp::Eq) => "=",
             Self::Compare(CompareOp::Lt) => "<",
             Self::Compare(CompareOp::Le) => "<=",
@@ -157,6 +173,32 @@ pub const fn promote(lhs: NumericKind, rhs: NumericKind) -> NumericKind {
 /// Returns how `lhs op rhs` is computed.
 #[must_use]
 pub const fn arithmetic(op: BinaryOp, lhs: NumericKind, rhs: NumericKind) -> ArithmeticRule {
+    if op.is_shift() {
+        // The count converts to the shifted value's type.
+        return match (lhs, rhs) {
+            (NumericKind::I32 | NumericKind::U32, rhs) if rhs.is_integer() => {
+                ArithmeticRule::Promote { kind: lhs }
+            }
+            _ => ArithmeticRule::Undefined,
+        };
+    }
+    if op.is_bitwise() {
+        return if lhs.is_integer() && rhs.is_integer() {
+            ArithmeticRule::Promote {
+                kind: promote(lhs, rhs),
+            }
+        } else {
+            ArithmeticRule::Undefined
+        };
+    }
+    if op.is_wrapping() {
+        return match (lhs, rhs) {
+            (NumericKind::I32, NumericKind::I32) | (NumericKind::U32, NumericKind::U32) => {
+                ArithmeticRule::Promote { kind: lhs }
+            }
+            _ => ArithmeticRule::Undefined,
+        };
+    }
     let kind = promote(lhs, rhs);
     if matches!(op, BinaryOp::Div) && kind.is_integer() {
         ArithmeticRule::Undefined
@@ -254,6 +296,16 @@ mod tests {
         for kind in [I32, U32] {
             assert_eq!(
                 arithmetic(BinaryOp::Div, kind, kind),
+                ArithmeticRule::Undefined
+            );
+        }
+        assert_eq!(
+            arithmetic(BinaryOp::WrappingAdd, U32, U32),
+            ArithmeticRule::Promote { kind: U32 }
+        );
+        for (lhs, rhs) in [(I32, U32), (Integer, Integer), (U32, Integer)] {
+            assert_eq!(
+                arithmetic(BinaryOp::WrappingMul, lhs, rhs),
                 ArithmeticRule::Undefined
             );
         }

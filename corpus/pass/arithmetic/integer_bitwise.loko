@@ -1,0 +1,16 @@
+// expect: run 271
+// expect: diagnostics 0
+// expect: dump lowered contains i64.and
+// expect: dump lowered contains i64.xor
+// expect: dump lowered contains i32.shr
+
+// `logand`, `logior` and `logxor` are exact on every integer type, as on
+// two's complement integers of unbounded width; mixed types meet at
+// `<integer>`. `shift-right` of an `<i32>` is arithmetic, rounding toward
+// negative infinity.
+define function main() => <integer>
+  let byte-mask :: <u32> = 255;
+  let low = logand(-1, byte-mask);
+  let quarter = shift-right(-17i32, 2);
+  low + logxor(12, 10) + logior(12, 3) + as(<integer>, quarter)
+end;

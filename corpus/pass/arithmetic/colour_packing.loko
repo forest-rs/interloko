@@ -1,0 +1,21 @@
+// expect: run 128u32
+// expect: diagnostics 0
+// expect: dump lowered contains u32.shl
+// expect: dump lowered contains u32.or
+// expect: dump lowered contains u32.and
+// expect: dump tape contains u32.shr
+
+// Packing and unpacking an ARGB colour in a `<u32>`: `shift-left` discards
+// the bits it shifts out, `shift-right` on a `<u32>` is logical, and the
+// `log...` functions are the bitwise operations.
+define function pack(a :: <u32>, r :: <u32>, g :: <u32>, b :: <u32>) => <u32>
+  logior(logior(shift-left(a, 24), shift-left(r, 16)), logior(shift-left(g, 8), b))
+end;
+
+define function green(argb :: <u32>) => <u32>
+  logand(shift-right(argb, 8), 255)
+end;
+
+define function main() => <u32>
+  green(pack(255, 255, 128, 64))
+end;

@@ -1,0 +1,10 @@
+// expect: diagnostics 2
+// expect: diagnostic code sem.integer-operand-type-mismatch
+// expect: diagnostic contains `logand` takes integers, not <double-float> and <integer>
+// expect: diagnostic contains `shift-right` takes integers, not <integer> and <integer>
+
+// Bitwise functions take statically known integers. Shifts need a
+// fixed-width value: `<integer>` has no width to shift within.
+define function main(x :: <double-float>, n :: <integer>) => <integer>
+  logand(x, 1) + shift-right(n, 1)
+end;

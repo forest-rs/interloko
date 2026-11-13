@@ -248,6 +248,8 @@ pub enum LokoTrap {
     InexactFloatToInteger,
     /// `<integer>` arithmetic overflowed the 64-bit fixnum range.
     IntegerOverflow,
+    /// A `shift-left` or `shift-right` count was outside 0..=31.
+    ShiftCountOutOfRange,
 }
 
 impl LokoTrap {
@@ -256,6 +258,7 @@ impl LokoTrap {
         Self::NoApplicableMethod,
         Self::InexactFloatToInteger,
         Self::IntegerOverflow,
+        Self::ShiftCountOutOfRange,
     ];
 
     /// Returns the tape trap code for this condition.
@@ -265,6 +268,7 @@ impl LokoTrap {
             Self::NoApplicableMethod => 1,
             Self::InexactFloatToInteger => 2,
             Self::IntegerOverflow => 3,
+            Self::ShiftCountOutOfRange => 4,
         }
     }
 
@@ -275,6 +279,7 @@ impl LokoTrap {
             1 => Some(Self::NoApplicableMethod),
             2 => Some(Self::InexactFloatToInteger),
             3 => Some(Self::IntegerOverflow),
+            4 => Some(Self::ShiftCountOutOfRange),
             _ => None,
         }
     }
@@ -286,6 +291,7 @@ impl LokoTrap {
             Self::NoApplicableMethod => "no applicable method",
             Self::InexactFloatToInteger => "inexact float to integer conversion",
             Self::IntegerOverflow => "integer overflow",
+            Self::ShiftCountOutOfRange => "shift count out of range",
         }
     }
 
@@ -294,7 +300,9 @@ impl LokoTrap {
     pub const fn diagnostic_code(self) -> DiagnosticCode {
         match self {
             Self::IntegerOverflow => DiagnosticCode::RuntimeIntegerOverflow,
-            Self::NoApplicableMethod | Self::InexactFloatToInteger => DiagnosticCode::RuntimeTrap,
+            Self::NoApplicableMethod | Self::InexactFloatToInteger | Self::ShiftCountOutOfRange => {
+                DiagnosticCode::RuntimeTrap
+            }
         }
     }
 }
@@ -318,6 +326,29 @@ impl I64ArithOp {
             Self::Add => "i64.add_ovf",
             Self::Sub => "i64.sub_ovf",
             Self::Mul => "i64.mul_ovf",
+        }
+    }
+}
+
+/// Signed 64-bit bitwise operation; exact on `<integer>`s.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum I64BitOp {
+    /// `a & b`.
+    And,
+    /// `a | b`.
+    Or,
+    /// `a ^ b`.
+    Xor,
+}
+
+impl I64BitOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::And => "i64.and",
+            Self::Or => "i64.or",
+            Self::Xor => "i64.xor",
         }
     }
 }
@@ -910,6 +941,19 @@ pub enum Instr {
         overflow: Register,
         /// Arithmetic operator.
         op: I64ArithOp,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Signed integer bitwise operation.
+    I64Bitwise {
+        /// Destination register.
+        dst: Register,
+        /// Bitwise operator.
+        op: I64BitOp,
         /// Left operand register.
         lhs: Register,
         /// Right operand register.
@@ -3761,30 +3805,39 @@ impl<'module> BodyLowering<'module> {
                 rhs,
                 span,
             } => {
+                // Sem rejects constant shift counts outside 0..=31.
+                let constant_count = matches!(**rhs, sem::Expr::Const32 { .. });
                 let lhs = self.lower_expr(lhs)?;
                 let rhs = self.lower_expr(rhs)?;
+                if op.is_wrapping() || op.is_bitwise() {
+                    if op.is_shift() && !constant_count {
+                        self.lower_shift_count_check(*kind, rhs.reg, *span);
+                    }
+                    return self.lower_bit_operation(*op, *kind, lhs, rhs.reg, *span);
+                }
+                let not_arithmetic = || invalid_semantic("integer division has no lowering");
                 match kind {
                     sem::NumericKind::Integer => {
                         let op = match op {
                             sem::BinaryOp::Add => I64ArithOp::Add,
                             sem::BinaryOp::Sub => I64ArithOp::Sub,
                             sem::BinaryOp::Mul => I64ArithOp::Mul,
-                            sem::BinaryOp::Div => {
-                                return Err(invalid_semantic("integer division has no lowering"));
-                            }
+                            _ => return Err(not_arithmetic()),
                         };
                         Ok(self.lower_checked_integer_arith(op, lhs.reg, rhs.reg, *span))
                     }
                     sem::NumericKind::Float => {
+                        let op = match op {
+                            sem::BinaryOp::Add => F64BinaryOp::Add,
+                            sem::BinaryOp::Sub => F64BinaryOp::Sub,
+                            sem::BinaryOp::Mul => F64BinaryOp::Mul,
+                            sem::BinaryOp::Div => F64BinaryOp::Div,
+                            _ => return Err(not_arithmetic()),
+                        };
                         let result = self.alloc(ValueKind::F64);
                         self.instructions.push(Instr::F64Binary {
                             dst: result.reg,
-                            op: match op {
-                                sem::BinaryOp::Add => F64BinaryOp::Add,
-                                sem::BinaryOp::Sub => F64BinaryOp::Sub,
-                                sem::BinaryOp::Mul => F64BinaryOp::Mul,
-                                sem::BinaryOp::Div => F64BinaryOp::Div,
-                            },
+                            op,
                             lhs: lhs.reg,
                             rhs: rhs.reg,
                             span: *span,
@@ -3797,6 +3850,7 @@ impl<'module> BodyLowering<'module> {
                             sem::BinaryOp::Sub => Num32BinaryOp::F32Sub,
                             sem::BinaryOp::Mul => Num32BinaryOp::F32Mul,
                             sem::BinaryOp::Div => Num32BinaryOp::F32Div,
+                            _ => return Err(not_arithmetic()),
                         };
                         Ok(self.num32_binary(op, lhs.reg, rhs.reg, ValueKind::F32, *span))
                     }
@@ -3809,9 +3863,7 @@ impl<'module> BodyLowering<'module> {
                             (sem::BinaryOp::Add, true) => Num32CheckedOp::U32AddOvf,
                             (sem::BinaryOp::Sub, true) => Num32CheckedOp::U32SubOvf,
                             (sem::BinaryOp::Mul, true) => Num32CheckedOp::U32MulOvf,
-                            (sem::BinaryOp::Div, _) => {
-                                return Err(invalid_semantic("integer division has no lowering"));
-                            }
+                            _ => return Err(not_arithmetic()),
                         };
                         Ok(self.lower_checked_num32_arith(op, lhs, rhs.reg, *span))
                     }
@@ -5154,6 +5206,120 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
+    /// Lowers a wrapping operator (`+%`, `-%`, `*%`) or a bitwise function
+    /// (`logand`, `logior`, `logxor`, `shift-left`, `shift-right`); none of
+    /// them can overflow.
+    fn lower_bit_operation(
+        &mut self,
+        op: sem::BinaryOp,
+        kind: sem::NumericKind,
+        lhs: Value,
+        rhs: Register,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        use sem::BinaryOp as B;
+        use sem::NumericKind as N;
+        if kind == N::Integer {
+            let op = match op {
+                B::LogAnd => I64BitOp::And,
+                B::LogIor => I64BitOp::Or,
+                B::LogXor => I64BitOp::Xor,
+                _ => {
+                    return Err(invalid_semantic(
+                        "`<integer>` has no wrapping or shift lowering",
+                    ));
+                }
+            };
+            let result = self.alloc(ValueKind::I64);
+            self.instructions.push(Instr::I64Bitwise {
+                dst: result.reg,
+                op,
+                lhs: lhs.reg,
+                rhs,
+                span,
+            });
+            return Ok(result);
+        }
+        let op = match (kind, op) {
+            (N::I32, B::WrappingAdd) => Num32BinaryOp::I32Add,
+            (N::I32, B::WrappingSub) => Num32BinaryOp::I32Sub,
+            (N::I32, B::WrappingMul) => Num32BinaryOp::I32Mul,
+            (N::I32, B::LogAnd) => Num32BinaryOp::I32And,
+            (N::I32, B::LogIor) => Num32BinaryOp::I32Or,
+            (N::I32, B::LogXor) => Num32BinaryOp::I32Xor,
+            (N::I32, B::ShiftLeft) => Num32BinaryOp::I32Shl,
+            (N::I32, B::ShiftRight) => Num32BinaryOp::I32Shr,
+            (N::U32, B::WrappingAdd) => Num32BinaryOp::U32Add,
+            (N::U32, B::WrappingSub) => Num32BinaryOp::U32Sub,
+            (N::U32, B::WrappingMul) => Num32BinaryOp::U32Mul,
+            (N::U32, B::LogAnd) => Num32BinaryOp::U32And,
+            (N::U32, B::LogIor) => Num32BinaryOp::U32Or,
+            (N::U32, B::LogXor) => Num32BinaryOp::U32Xor,
+            (N::U32, B::ShiftLeft) => Num32BinaryOp::U32Shl,
+            (N::U32, B::ShiftRight) => Num32BinaryOp::U32Shr,
+            _ => {
+                return Err(invalid_semantic(
+                    "wrapping and bit operations need one fixed-width integer type",
+                ));
+            }
+        };
+        Ok(self.num32_binary(op, lhs.reg, rhs, lhs.kind, span))
+    }
+
+    /// Traps unless a shift count is in 0..=31. The tape masks counts with
+    /// `& 31`; Loko never relies on that, so `shift-left(x, 32)` cannot
+    /// quietly mean `x`.
+    fn lower_shift_count_check(&mut self, kind: sem::NumericKind, count: Register, span: Span) {
+        let (count_kind, limit, below) = if kind == sem::NumericKind::U32 {
+            (ValueKind::U32, sem::Number32::U32(32), Num32BinaryOp::U32Lt)
+        } else {
+            (ValueKind::I32, sem::Number32::I32(32), Num32BinaryOp::I32Lt)
+        };
+        let bound = self.alloc(count_kind);
+        self.instructions.push(Instr::Const32 {
+            dst: bound.reg,
+            value: limit,
+            span,
+        });
+        let in_range = self.num32_binary(below, count, bound.reg, ValueKind::Bool, span);
+        let [check_low, outside, done] = core::array::from_fn(|_| self.alloc_label());
+        self.instructions.push(Instr::Branch {
+            cond: in_range.reg,
+            then_label: check_low,
+            else_label: outside,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: check_low });
+        if kind == sem::NumericKind::I32 {
+            self.instructions.push(Instr::Const32 {
+                dst: bound.reg,
+                value: sem::Number32::I32(0),
+                span,
+            });
+            let non_negative = self.num32_binary(
+                Num32BinaryOp::I32Ge,
+                count,
+                bound.reg,
+                ValueKind::Bool,
+                span,
+            );
+            self.instructions.push(Instr::Branch {
+                cond: non_negative.reg,
+                then_label: done,
+                else_label: outside,
+                span,
+            });
+        } else {
+            self.instructions.push(Instr::Jump { label: done, span });
+        }
+        self.instructions.push(Instr::Label { label: outside });
+        self.instructions.push(Instr::Trap {
+            trap: LokoTrap::ShiftCountOutOfRange,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: done });
+    }
+
     /// Emits one `0xFD` instruction with two operands.
     fn num32_binary(
         &mut self,
@@ -6239,6 +6405,16 @@ impl Module {
                 fmt_span(f, *span)
             }
             Instr::F64Binary {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  {dst} = {} {lhs}, {rhs}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
+            Instr::I64Bitwise {
                 dst,
                 op,
                 lhs,

@@ -1,0 +1,16 @@
+// expect: run 2165703038u32
+// expect: diagnostics 0
+// expect: dump lowered contains u32.mul
+// expect: dump lowered contains u32.add
+// expect: dump tape contains u32.mul
+
+// `+%`, `-%` and `*%` compute modulo 2^32 within one fixed-width type: the
+// explicit way to wrap, here a linear congruential generator for audio
+// noise. Plain `+` and `*` on the same values would trap on overflow.
+define function next(seed :: <u32>) => <u32>
+  seed *% 1664525 +% 1013904223
+end;
+
+define function main() => <u32>
+  next(next(next(1)))
+end;
