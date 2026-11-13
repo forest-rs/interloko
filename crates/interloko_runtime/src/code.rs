@@ -8,10 +8,14 @@
 //! unhandled. The VM keeps every unit, so a frame keeps running the code it
 //! entered; definitions resolve to the newest unit that has them.
 //!
-//! Generic sends are late-bound: compiled code asks for a generic's current
-//! dispatcher (see [`CODE_DISPATCHER`]) and calls it indirectly, so a frame
-//! running superseded code still sends to the newest methods. Direct calls to
-//! source functions stay within the caller's unit.
+//! Generic sends are late-bound and dispatched by the runtime: compiled code
+//! asks [`CODE_DISPATCH`] for the method its arguments select and calls it
+//! indirectly. The driver chooses from the newest unit's [`GenericDispatch`]
+//! table and caches the choice per argument classes until the next install,
+//! so a frame running superseded code still sends to the newest methods.
+//! When the table cannot decide (scalar dispatch, or a method that needs its
+//! arguments converted), the answer is the newest unit's compiled dispatcher.
+//! Direct calls to source functions stay within the caller's unit.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -21,23 +25,72 @@ use execution_tape::host::HostSig;
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, UnitId};
 use execution_tape::verifier::VerifiedProgram;
-use interloko_model::{GenericFunctionId, MethodId};
+use interloko_model::{ClassId, GenericFunctionId, MethodId};
 
 use crate::RuntimeLayout;
 use crate::control::ControlLayout;
 
-/// Host symbol that resolves a generic function to its current dispatcher.
+/// Host symbol that chooses the function a generic send calls.
 ///
-/// The argument is the generic's id in the shared runtime layout; the result
-/// is a function value for `call.indirect`.
-pub const CODE_DISPATCHER: &str = "interloko.code.dispatcher";
+/// The arguments are the generic's id in the shared runtime layout, then the
+/// send's own arguments; the result is a function value taking those
+/// arguments, for `call.indirect`: the selected method, or the generic's
+/// dispatcher.
+pub const CODE_DISPATCH: &str = "interloko.code.dispatch";
 
-/// Host signature for [`CODE_DISPATCHER`]: `(generic) -> dispatcher`.
+/// Host signature for [`CODE_DISPATCH`]: `(generic, args...) -> function`.
 #[must_use]
-pub fn dispatcher_signature() -> HostSig {
+pub fn dispatch_signature(args: &[ValueType]) -> HostSig {
+    let mut all = alloc::vec![ValueType::U64];
+    all.extend_from_slice(args);
     HostSig {
-        args: alloc::vec![ValueType::U64],
+        args: all,
         rets: alloc::vec![ValueType::Func],
+    }
+}
+
+/// How the runtime selects a generic's method, in the order its compiled
+/// dispatcher tests them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenericDispatch {
+    /// Methods, most specific first. The first whose specializers all
+    /// accept the arguments' classes is selected.
+    pub cases: Vec<DispatchCase>,
+    /// Argument positions some case specializes, whose classes select.
+    pub positions: Vec<usize>,
+}
+
+/// One method in a [`GenericDispatch`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchCase {
+    /// The method, by its id in the shared runtime layout.
+    pub method: MethodId,
+    /// Class each argument must be an instance of; `None` accepts anything.
+    pub specializers: Vec<Option<ClassId>>,
+    /// Whether the method takes the send's arguments and returns its results
+    /// unchanged, so the send can call it without the dispatcher.
+    pub direct: bool,
+}
+
+impl GenericDispatch {
+    /// The case selected for arguments of `class_of` each position, or
+    /// `None` when no method applies.
+    pub(crate) fn select(
+        &self,
+        class_of: impl Fn(usize) -> Option<ClassId>,
+        is_subclass: impl Fn(ClassId, ClassId) -> bool,
+    ) -> Option<&DispatchCase> {
+        self.cases.iter().find(|case| {
+            case.specializers
+                .iter()
+                .enumerate()
+                .all(|(index, specializer)| match specializer {
+                    None => true,
+                    Some(specializer) => {
+                        class_of(index).is_some_and(|class| is_subclass(class, *specializer))
+                    }
+                })
+        })
     }
 }
 
@@ -56,6 +109,9 @@ pub struct CodeUnit {
     pub methods: Vec<FuncId>,
     /// Source functions by name.
     pub functions: Vec<(String, FuncId)>,
+    /// Runtime method selection of each generic, in layout generic order;
+    /// `None` leaves the choice to the generic's dispatcher.
+    pub dispatch: Vec<Option<GenericDispatch>>,
 }
 
 /// The source definition a tape function implements.
@@ -231,6 +287,10 @@ impl UnitTable {
         self.units.last().map(|(_, code)| code)
     }
 
+    pub(crate) fn newest_unit(&self) -> Option<UnitId> {
+        self.units.last().map(|(unit, _)| *unit)
+    }
+
     pub(crate) fn get(&self, unit: UnitId) -> Option<&CodeUnit> {
         self.units
             .iter()
@@ -282,4 +342,50 @@ impl UnitTable {
 
 fn index_u32(index: usize) -> u32 {
     u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case(method: u32, specializers: &[Option<u32>]) -> DispatchCase {
+        DispatchCase {
+            method: MethodId(method),
+            specializers: specializers
+                .iter()
+                .map(|class| class.map(ClassId))
+                .collect(),
+            direct: true,
+        }
+    }
+
+    #[test]
+    fn selection_takes_the_first_case_whose_specializers_all_accept() {
+        // Classes 2 and 3 are subclasses of 1; class 4 is unrelated.
+        let is_subclass =
+            |class: ClassId, of: ClassId| class == of || (of == ClassId(1) && class.0 <= 3);
+        let plan = GenericDispatch {
+            cases: alloc::vec![
+                case(0, &[Some(2), Some(3)]),
+                case(1, &[Some(2), None]),
+                case(2, &[Some(1), Some(1)]),
+            ],
+            positions: alloc::vec![0, 1],
+        };
+        let select = |classes: [u32; 2]| {
+            plan.select(
+                |index| classes.get(index).copied().map(ClassId),
+                is_subclass,
+            )
+            .map(|case| case.method.0)
+        };
+        assert_eq!(select([2, 3]), Some(0));
+        assert_eq!(select([2, 2]), Some(1));
+        assert_eq!(select([3, 2]), Some(2));
+        assert_eq!(
+            select([4, 2]),
+            None,
+            "no case applies: the dispatcher decides"
+        );
+    }
 }

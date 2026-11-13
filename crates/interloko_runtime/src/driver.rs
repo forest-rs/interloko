@@ -9,11 +9,12 @@
 //!
 //! A run links [`CodeUnit`]s: it installs the entry unit, and a chooser may
 //! install replacements while a condition is unhandled. Generic sends ask
-//! the driver for the newest dispatcher ([`crate::code::CODE_DISPATCHER`]),
+//! the driver which method to call ([`crate::code::CODE_DISPATCH`]),
 //! and a retried frame calls the newest version of its function, while every
 //! frame keeps running the unit it entered.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -30,7 +31,7 @@ use crate::InterlokoHost;
 use crate::chooser::{
     Choice, ConditionChooser, FrameSnapshot, OfferedRestart, RegisterSnapshot, UnhandledCondition,
 };
-use crate::code::{CODE_DISPATCHER, CodeMismatch, CodeUnit, Definition, UnitTable};
+use crate::code::{CODE_DISPATCH, CodeMismatch, CodeUnit, Definition, UnitTable};
 use crate::control::{
     ABORT_TAG, BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL,
     CONTROL_CHECK_EXIT, CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats,
@@ -161,6 +162,7 @@ pub fn run<'a, H: RuntimeHost>(
         .map_err(|trap| RunFailure::Trap(Box::new(trap)))?;
     let mut driver = Driver {
         units,
+        sends: BTreeMap::new(),
         tags,
         state: ControlState::default(),
         searches: Vec::new(),
@@ -237,6 +239,9 @@ fn snapshot_frames<H: RuntimeHost>(
 
 struct Driver {
     units: UnitTable,
+    /// Functions sends selected, by generic and the classes of the argument
+    /// positions its methods specialize. Cleared by every install.
+    sends: BTreeMap<SendKey, FuncRef>,
     tags: VmTags,
     state: ControlState,
     searches: Vec<Search>,
@@ -260,6 +265,35 @@ struct Search {
     stack_len: usize,
     /// Binding whose guard is running on the signalling stack.
     guarding: Option<usize>,
+}
+
+/// The classes that select a send, for up to [`SendKey::POSITIONS`]
+/// specialized positions; wider sends are not cached.
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SendKey {
+    generic: u32,
+    classes: [u32; SendKey::POSITIONS],
+}
+
+impl SendKey {
+    const POSITIONS: usize = 4;
+
+    fn new(
+        generic: GenericFunctionId,
+        classes: impl ExactSizeIterator<Item = Option<ClassId>>,
+    ) -> Option<Self> {
+        if classes.len() > Self::POSITIONS {
+            return None;
+        }
+        let mut key = [u32::MAX; Self::POSITIONS];
+        for (slot, class) in key.iter_mut().zip(classes) {
+            *slot = class?.0;
+        }
+        Some(Self {
+            generic: generic.0,
+            classes: key,
+        })
+    }
 }
 
 /// Control tags as the VM raises and compares them.
@@ -309,8 +343,8 @@ impl Driver {
         };
         let guard_returned = status == RunStatus::CallbackReturned;
         if !guard_returned {
-            if pending.symbol() == CODE_DISPATCHER {
-                return self.resolve_dispatcher(pending);
+            if pending.symbol() == CODE_DISPATCH {
+                return self.dispatch(pending);
             }
             if !is_control_symbol(pending.symbol()) {
                 return pending.dispatch();
@@ -341,26 +375,74 @@ impl Driver {
         }
     }
 
-    /// Answers a generic send with the newest unit's dispatcher.
-    fn resolve_dispatcher<H: RuntimeHost>(
+    /// Answers a generic send with the function its arguments select from
+    /// the newest unit: a method, or the generic's dispatcher when the
+    /// unit's dispatch table cannot decide, so the dispatcher's own checks
+    /// and traps apply.
+    fn dispatch<H: RuntimeHost>(
         &mut self,
-        pending: PendingHostCall<'_, '_, H>,
+        mut pending: PendingHostCall<'_, '_, H>,
     ) -> Result<(), TrapInfo> {
-        let generic = match pending.arguments().next() {
-            Some(ValueRef::U64(generic)) => u32::try_from(generic).ok(),
+        let args = pending
+            .arguments()
+            .map(|value| value.to_value())
+            .collect::<Vec<_>>();
+        let generic = match args.first() {
+            Some(Value::U64(generic)) => u32::try_from(*generic).ok().map(GenericFunctionId),
             _ => None,
         };
-        let dispatcher = generic.and_then(|generic| {
-            self.units
-                .current(&Definition::Generic(GenericFunctionId(generic)))
+        let target = generic.and_then(|generic| {
+            self.select(&mut pending, generic, &args[1..])
+                .or_else(|| self.units.current(&Definition::Generic(generic)))
         });
-        match dispatcher {
-            Some(dispatcher) => pending.complete(&mut [Value::Func(dispatcher)], Ok(0)),
+        match target {
+            Some(target) => pending.complete(&mut [Value::Func(target)], Ok(0)),
             None => {
                 self.fault.get_or_insert(ControlFault::MalformedRequest);
                 pending.complete(&mut [], Err(HostError::Failed))
             }
         }
+    }
+
+    /// Selects a directly callable method of the newest unit, consulting and
+    /// filling the dispatch cache.
+    fn select<H: RuntimeHost>(
+        &mut self,
+        pending: &mut PendingHostCall<'_, '_, H>,
+        generic: GenericFunctionId,
+        args: &[Value],
+    ) -> Option<FuncRef> {
+        let unit = self.units.newest_unit()?;
+        let code = Arc::clone(self.units.newest()?);
+        let plan = code.dispatch.get(generic.0 as usize)?.as_ref()?;
+        let mut classes = alloc::vec![None; args.len()];
+        let found = pending.host_mut().with_runtime(|runtime| {
+            for &position in &plan.positions {
+                let value = args.get(position)?;
+                classes[position] = Some(runtime.class_of_any(ValueRef::from_value(value)).ok()?);
+            }
+            Some(())
+        });
+        found?;
+        let key = SendKey::new(generic, plan.positions.iter().map(|&index| classes[index]));
+        if let Some(target) = key.and_then(|key| self.sends.get(&key)) {
+            self.state.note_send(true);
+            return Some(*target);
+        }
+        self.state.note_send(false);
+        let case = pending.host_mut().with_runtime(|runtime| {
+            plan.select(
+                |index| classes.get(index).copied().flatten(),
+                |class, specializer| runtime.layout().is_same_or_subclass(class, specializer),
+            )
+            .cloned()
+        })?;
+        let method = code.methods.get(case.method.0 as usize)?;
+        let target = case.direct.then(|| FuncRef::new(unit, *method))?;
+        if let Some(key) = key {
+            self.sends.insert(key, target);
+        }
+        Some(target)
     }
 
     /// Decides a new control request while it waits, with the signalling
@@ -646,6 +728,8 @@ impl Driver {
             .install(Arc::clone(&code.program))
             .map_err(LinkError::Install)?;
         self.units.push(unit, code);
+        // Selections name the previous newest unit's methods.
+        self.sends.clear();
         Ok(())
     }
 

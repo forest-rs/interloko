@@ -16,6 +16,7 @@ use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
 use interloko_runtime::RuntimeLayout;
+use interloko_runtime::code::{DispatchCase, GenericDispatch};
 use interloko_runtime::control::{RestartDescriptor, RestartParameter};
 
 /// Durable function identifier within a lowered module.
@@ -103,6 +104,9 @@ pub struct Module {
     pub functions: Vec<Function>,
     /// Lowered function id for `main`, if present.
     pub main: Option<FunctionId>,
+    /// Runtime method selection for each generic, in generic id order;
+    /// `None` leaves sends to the generic's dispatcher.
+    pub dispatch: Vec<Option<GenericDispatch>>,
 }
 
 /// A host-backed function signature lowered to backend value categories.
@@ -718,13 +722,16 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
-    /// Resolves a generic function to its current dispatcher, which may
-    /// belong to a newer code unit than the caller's.
-    ResolveGeneric {
+    /// Asks the runtime which function a generic send calls with these
+    /// arguments: the selected method of the newest code unit, or that
+    /// unit's dispatcher. Either takes the send's arguments unchanged.
+    SelectMethod {
         /// Destination function register.
         dst: Register,
         /// Generic function, by its id in the shared runtime layout.
         generic: sem::GenericFunctionId,
+        /// The send's argument registers, in dispatcher parameter kinds.
+        args: Vec<Register>,
         /// Source span.
         span: Span,
     },
@@ -1299,6 +1306,12 @@ impl<'module> Lowering<'module> {
             })
             .collect::<Result<Vec<_>, LowerError>>()?;
 
+        let dispatch = self
+            .module
+            .generics
+            .iter()
+            .map(|generic| self.dispatch_plan(generic))
+            .collect::<Result<Vec<_>, LowerError>>()?;
         Ok(Module {
             runtime: runtime_bridge::runtime_layout_from_sem(self.module),
             restarts: self.ids.restarts.clone(),
@@ -1306,7 +1319,61 @@ impl<'module> Lowering<'module> {
             host_functions,
             functions,
             main,
+            dispatch,
         })
+    }
+
+    /// How the runtime can select `generic`'s method without its dispatcher.
+    ///
+    /// Selection needs the class of every specialized argument, so a generic
+    /// that dispatches on an unboxed scalar parameter, which the dispatcher
+    /// decides statically, has no plan. A method is called directly only
+    /// when the dispatcher would pass its arguments and results through
+    /// unchanged; otherwise the send falls back to the dispatcher.
+    fn dispatch_plan(
+        &self,
+        generic: &sem::GenericFunction,
+    ) -> Result<Option<GenericDispatch>, LowerError> {
+        let generic_rets = self.value_kinds(&generic.result_kinds)?;
+        let mut cases = Vec::new();
+        let mut positions = Vec::new();
+        for method in sorted_methods(self.module, generic) {
+            if method.specializers.len() != generic.arity || method.params.len() != generic.arity {
+                return Ok(None);
+            }
+            let mut specializers = Vec::with_capacity(generic.arity);
+            let mut direct = self.value_kinds(&method.result_kinds)? == generic_rets;
+            for (index, specializer) in method.specializers.iter().copied().enumerate() {
+                let dispatched = dispatcher_param_kind(self.module, generic, index);
+                let specializer = specializer.filter(|class| *class != sem::OBJECT_CLASS_ID);
+                if specializer.is_some() {
+                    if !matches!(dispatched, ValueKind::Object(_) | ValueKind::Any) {
+                        return Ok(None);
+                    }
+                    if !positions.contains(&index) {
+                        positions.push(index);
+                    }
+                }
+                let local = method
+                    .locals
+                    .get(method.params[index].0 as usize)
+                    .ok_or_else(|| invalid_semantic("method parameter local id is out of range"))?;
+                let param = self.value_kind(local.kind)?;
+                let passes_through = param == dispatched
+                    || (matches!(dispatched, ValueKind::Object(_))
+                        && specializer
+                            .is_some_and(|class| param == ValueKind::Object(Some(class))));
+                direct &= passes_through;
+                specializers.push(specializer);
+            }
+            cases.push(DispatchCase {
+                method: method.id,
+                specializers,
+                direct,
+            });
+        }
+        positions.sort_unstable();
+        Ok(Some(GenericDispatch { cases, positions }))
     }
 
     /// Lowers the closure body shared by exit procedures of one signature:
@@ -1612,15 +1679,16 @@ impl<'module> Lowering<'module> {
             .chain(spec.rets.iter().copied())
             .collect::<Vec<_>>();
         let call = match spec.callable {
-            // A generic sends through its current dispatcher, like a call site.
+            // A first-class generic sends like a call site.
             sem::KnownCallable::GenericFunction(generic) => {
                 // Register kinds start at r1, so the new kind is the last register.
                 register_kinds.push(ValueKind::Function(None));
                 let callee = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
                 vec![
-                    Instr::ResolveGeneric {
+                    Instr::SelectMethod {
                         dst: callee,
                         generic,
+                        args: call_args.clone(),
                         span: spec.span,
                     },
                     Instr::CallIndirect {
@@ -2439,7 +2507,7 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    /// Sends to a generic function through its current dispatcher.
+    /// Sends to a generic function: the runtime selects the method.
     fn send(
         &mut self,
         generic: &sem::GenericFunction,
@@ -2448,9 +2516,10 @@ impl<'module> BodyLowering<'module> {
         span: Span,
     ) -> Result<(), LowerError> {
         let callee = self.alloc(ValueKind::Function(None));
-        self.instructions.push(Instr::ResolveGeneric {
+        self.instructions.push(Instr::SelectMethod {
             dst: callee.reg,
             generic: generic.id,
+            args: args.clone(),
             span,
         });
         let arg_kinds = (0..generic.arity)
@@ -2897,22 +2966,7 @@ impl<'module> BodyLowering<'module> {
     }
 
     fn sorted_methods(&self, generic: &sem::GenericFunction) -> Vec<&'module sem::Method> {
-        let mut methods: Vec<_> = self
-            .module
-            .methods
-            .iter()
-            .filter(|method| method.generic == generic.id)
-            .collect();
-        methods.sort_by(|left, right| {
-            if self.module.method_more_specific(left, right) {
-                core::cmp::Ordering::Less
-            } else if self.module.method_more_specific(right, left) {
-                core::cmp::Ordering::Greater
-            } else {
-                left.id.0.cmp(&right.id.0)
-            }
-        });
-        methods
+        sorted_methods(self.module, generic)
     }
 
     fn lower_expr(&mut self, expr: &sem::Expr) -> Result<Value, LowerError> {
@@ -5103,6 +5157,29 @@ fn builtin_class(module: &sem::Module, kind: sem::BuiltinValueClass) -> Option<s
         .map(|class| class.id)
 }
 
+/// A generic's methods in the order its dispatcher tests them, most
+/// specific first.
+fn sorted_methods<'module>(
+    module: &'module sem::Module,
+    generic: &sem::GenericFunction,
+) -> Vec<&'module sem::Method> {
+    let mut methods: Vec<_> = module
+        .methods
+        .iter()
+        .filter(|method| method.generic == generic.id)
+        .collect();
+    methods.sort_by(|left, right| {
+        if module.method_more_specific(left, right) {
+            core::cmp::Ordering::Less
+        } else if module.method_more_specific(right, left) {
+            core::cmp::Ordering::Greater
+        } else {
+            left.id.0.cmp(&right.id.0)
+        }
+    });
+    methods
+}
+
 fn input_register(index: usize) -> Register {
     Register(u32::try_from(index + 1).unwrap_or(u32::MAX))
 }
@@ -5425,8 +5502,14 @@ impl Module {
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
-            Instr::ResolveGeneric { dst, generic, span } => {
-                write!(f, "  {dst} = resolve-generic g{}", generic.0)?;
+            Instr::SelectMethod {
+                dst,
+                generic,
+                args,
+                span,
+            } => {
+                write!(f, "  {dst} = select-method g{}", generic.0)?;
+                self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
             Instr::CallIndirect {

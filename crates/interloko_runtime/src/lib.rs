@@ -2329,7 +2329,7 @@ impl InterlokoHost {
         Ok(self.object(obj)?)
     }
 
-    fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
+    pub(crate) fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
         match value {
             ValueRef::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
             ValueRef::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),

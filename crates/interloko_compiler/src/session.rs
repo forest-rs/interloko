@@ -13612,7 +13612,8 @@ mod tests {
             entry.object_id(),
             Some(EnvironmentObjectId::new("function:f0"))
         );
-        assert!(view.activation_count() >= 3);
+        // main and the method: the runtime selects the method directly.
+        assert!(view.activation_count() >= 2);
         let slot_read = view
             .host_calls()
             .find(|call| call.symbol == Some("interloko.slot_get"))
@@ -13623,7 +13624,7 @@ mod tests {
         ));
         let source = slot_read.location.source.expect("slot read has a span");
         assert_eq!(&AREA[source.offset..source.offset + 1], "c");
-        assert!(slot_read.stack.depth() >= Some(3));
+        assert!(slot_read.stack.depth() >= Some(2));
         let outcome = view.outcome().expect("outcome should be captured");
         assert!(matches!(
             outcome.result,
@@ -13758,7 +13759,7 @@ mod tests {
         assert!(view.instructions().len() > 0);
         assert!(
             view.instructions()
-                .any(|step| step.mnemonic() == "call" && step.next.is_some())
+                .any(|step| step.mnemonic() == "call.indirect" && step.next.is_some())
         );
         assert!(
             artifacts
@@ -18434,5 +18435,56 @@ end;
             Ok(execution_tape::recording::ReplayOutcome::Returned(_)) => {}
             other => panic!("replay should reproduce the hot-swapped run, got {other:?}"),
         }
+    }
+
+    const SEND_CACHE: &str = "define class <too-heavy> (<object>)\nend;\n\
+         define class <shape> (<object>)\n  slot size :: <integer>, init-value: 1;\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 1;\nend;\n\
+         define generic weight(s :: <shape>) => <integer>;\n\
+         define method weight(s :: <shape>) => <integer>\n  1\nend;\n\
+         define method weight(s :: <circle>) => <integer>\n  10\nend;\n\
+         define function check(w :: <integer>) => <integer>\n  if w > 50 then signal(make(<too-heavy>)) else w end\nend;\n\
+         define function main() => <integer>\n  let c = make(<circle>);\n  weight(c) + weight(c) + check(100) + weight(c)\nend;";
+
+    #[test]
+    fn sends_select_methods_in_the_runtime_and_installs_clear_the_cache() {
+        let original =
+            CompilerSession::compile_source("weights.loko", SEND_CACHE, RuntimeMode::CompileOnly);
+        let heavier = CompilerSession::compile_source(
+            "weights.loko",
+            &SEND_CACHE.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(original.diagnostics, Vec::new());
+        assert_eq!(heavier.diagnostics, Vec::new());
+
+        // `weight` dispatches on an object, so the runtime calls the method
+        // itself instead of the dispatcher.
+        let plan = original.tape.as_ref().unwrap().code.dispatch[0]
+            .as_ref()
+            .expect("weight is selected in the runtime");
+        assert!(plan.cases.iter().all(|case| case.direct));
+        assert!(
+            original
+                .dump_stage(DumpStage::Lowered)
+                .contains("select-method g0(")
+        );
+
+        // The first two sends select and cache `weight(<circle>)`. The signal
+        // installs a heavier circle and resumes with 0; the last send, with
+        // the same argument classes, must reach the new method: 10 + 10 + 0
+        // + 20. A cached choice from before the install would give 30.
+        let mut asked = 0;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            assert!(condition.refused.is_none());
+            match asked {
+                1 => Choice::Install(heavier.code_unit().expect("tape")),
+                _ => Choice::UseValue(vec![Value::I64(0)]),
+            }
+        });
+        let value = call_with_chooser(&original, &mut chooser).expect("use-value resumes");
+        assert_eq!(value, FunctionValue::Integer(40));
+        assert_eq!(asked, 2);
     }
 }

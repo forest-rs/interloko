@@ -209,7 +209,7 @@ fn run_and_trace_commands_expose_execution_trace() {
     assert!(run.starts_with("100\nexecution trace: boundaries\n"));
     assert!(run.contains("capture: complete"));
     assert!(run.contains("invocation: main [function:f0]"));
-    assert!(run.contains("activations: 3 entered"));
+    assert!(run.contains("activations: 2 entered"));
     assert!(run.contains("host-call interloko.slot_get"));
     assert!(run.contains("at area#method0@"));
     assert!(run.contains(" from main@"));
@@ -224,7 +224,7 @@ fn run_and_trace_commands_expose_execution_trace() {
     assert!(instruction_trace.starts_with("execution trace: instructions\n"));
     assert!(instruction_trace.contains("instructions: "));
     assert!(instruction_trace.contains(" instr main@0 "));
-    assert!(instruction_trace.contains(" call.indirect -> area#dispatch@0"));
+    assert!(instruction_trace.contains(" call.indirect -> area#method0@0"));
 }
 
 #[test]
@@ -646,7 +646,7 @@ fn report_handles_plain_loko_sources() {
         .unwrap();
     assert!(timeline.contains("<strong>run starts at main</strong>"));
     assert!(timeline.contains("<strong>host interloko.slot_get · returned</strong>"));
-    assert!(timeline.contains(" · from area#dispatch@"));
+    assert!(timeline.contains(" · from main@"));
     assert!(timeline.contains("<strong>run returns</strong>"));
 }
 
