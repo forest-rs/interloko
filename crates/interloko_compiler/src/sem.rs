@@ -737,7 +737,9 @@ impl Module {
             Expr::Const32 { value, .. } => number32_kind(*value),
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
             Expr::Convert { to, .. } => to.value_kind(),
-            Expr::FloatCall { builtin, .. } => builtin.result_kind(),
+            Expr::FloatCall { builtin, args, .. } => {
+                float_call_kind(*builtin, args, |arg| self.expr_kind(arg))
+            }
             Expr::ConstBool { .. }
             | Expr::Compare { .. }
             | Expr::MixedCompare { .. }
@@ -833,6 +835,19 @@ fn generic_param_boxes_scalars_in<'a>(
         .filter(|(method_generic, _)| *method_generic == generic.id)
         .filter_map(|(_, specializers)| specializers.get(index).copied().flatten())
         .any(|class| class == OBJECT_CLASS_ID || is_scalar_value_class_in(classes, class))
+}
+
+/// Returns the result category of a float builtin call: `<boolean>` for
+/// predicates, otherwise the arguments' shared float format.
+fn float_call_kind(
+    builtin: FloatBuiltin,
+    args: &[Expr],
+    kind_of: impl Fn(&Expr) -> ValueKind,
+) -> ValueKind {
+    match builtin.result_kind() {
+        ValueKind::F64 if args.first().map(kind_of) == Some(ValueKind::F32) => ValueKind::F32,
+        kind => kind,
+    }
 }
 
 /// Returns the value category of a limited integer type.
@@ -1797,8 +1812,11 @@ impl From<ast::CompareOp> for CompareOp {
 /// Builtins resolve by name only after user functions, generics, host
 /// functions, and accessors, so a program may define its own `abs` or `max`
 /// without conflict. Every argument must be a `<float>`; integers are not
-/// converted implicitly. Operations with a tape instruction lower inline;
-/// [`FloatBuiltin::Library`] functions call the runtime host.
+/// converted implicitly. Arguments of one format compute in it; mixed
+/// formats widen to `<double-float>`, like arithmetic. Operations with a
+/// tape instruction lower inline, in either format; [`FloatBuiltin::Library`]
+/// functions call the runtime host in binary64, so a `<single-float>`
+/// argument widens exactly and the result rounds once back to binary32.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FloatBuiltin {
     /// `abs(x)`: magnitude, clearing the sign bit.
@@ -1924,8 +1942,9 @@ impl FloatBuiltin {
         }
     }
 
-    /// Returns the result category: `<boolean>` for predicates, otherwise
-    /// `<float>`.
+    /// Returns the result category for binary64 arguments: `<boolean>` for
+    /// predicates, otherwise `<double-float>`. Single-float arguments give a
+    /// single-float result.
     #[must_use]
     pub const fn result_kind(self) -> ValueKind {
         match self {
@@ -1973,7 +1992,8 @@ pub enum Intrinsic {
     /// Returns one immutable vector element as `<object>`.
     VectorRef,
     /// Renders a float as its shortest round-trip literal text, such as
-    /// `1.0`, `2.5e-7`, `inf`, or `nan`.
+    /// `1.0`, `2.5e-7`, `inf`, or `nan`; a `<single-float>` carries its
+    /// `f32` suffix, as in `0.1f32`.
     FloatToString,
     /// Renders an integer in decimal.
     IntegerToString,
@@ -5724,10 +5744,16 @@ impl Lowering {
             );
             return Expr::Error { span };
         }
+        // Literals adopt a single-float partner's format, as for arithmetic.
+        let single = args.iter().any(|arg| self.expr_kind(arg) == ValueKind::F32);
+        let mut args = args;
+        if single {
+            adapt_literal_args(&mut args, core::iter::repeat(Some(&ValueKind::F32)));
+        }
         let mut valid = true;
         for (index, arg) in args.iter().enumerate() {
             let actual = self.expr_kind(arg);
-            if !matches!(actual, ValueKind::F64 | ValueKind::Error) {
+            if !matches!(actual, ValueKind::F64 | ValueKind::F32 | ValueKind::Error) {
                 valid = false;
                 ctx.diagnostics.push(
                     Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
@@ -5743,6 +5769,19 @@ impl Lowering {
         }
         if !valid {
             return Expr::Error { span };
+        }
+        // Mixed formats widen to binary64.
+        if args.iter().any(|arg| self.expr_kind(arg) == ValueKind::F64) {
+            args = args
+                .into_iter()
+                .map(|arg| {
+                    if self.expr_kind(&arg) == ValueKind::F32 {
+                        promote_operand(arg, NumericKind::SingleFloat, NumericKind::Float)
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
         }
         Expr::FloatCall {
             builtin,
@@ -5854,8 +5893,10 @@ impl Lowering {
             (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => {
                 matches!(actual, ValueKind::Vector(_) | ValueKind::Any)
             }
-            (Intrinsic::VectorRef, 1) | (Intrinsic::IntegerToString, 0) => actual == ValueKind::I64,
-            (Intrinsic::FloatToString, 0) => actual == ValueKind::F64,
+            (Intrinsic::VectorRef, 1) | (Intrinsic::IntegerToString, 0) => {
+                matches!(actual, ValueKind::I64 | ValueKind::I32 | ValueKind::U32)
+            }
+            (Intrinsic::FloatToString, 0) => matches!(actual, ValueKind::F64 | ValueKind::F32),
             (Intrinsic::Concatenate, 0 | 1) => matches!(actual, ValueKind::String(_)),
             _ => false,
         }
@@ -7196,7 +7237,9 @@ impl Lowering {
             Expr::ConstI64 { .. } => ValueKind::I64,
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
             Expr::Convert { to, .. } => to.value_kind(),
-            Expr::FloatCall { builtin, .. } => builtin.result_kind(),
+            Expr::FloatCall { builtin, args, .. } => {
+                float_call_kind(*builtin, args, |arg| self.expr_kind(arg))
+            }
             Expr::ConstF64 { .. } => ValueKind::F64,
             Expr::Const32 { value, .. } => number32_kind(*value),
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),

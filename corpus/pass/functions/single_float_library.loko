@@ -1,0 +1,11 @@
+// expect: run 0.47942555f32
+// expect: diagnostics 0
+// expect: dump lowered contains f32.to_f64
+// expect: dump lowered contains float.call interloko.float.sin
+// expect: dump lowered contains f64.to_f32
+
+// Library functions without a tape instruction compute in binary64: the
+// single-float argument widens exactly and the result rounds once back.
+define function main() => <single-float>
+  sin(0.5f32)
+end;
