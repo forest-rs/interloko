@@ -150,7 +150,10 @@ The current slices include:
   to the widest format (`single + double` is a double, `integer + single`
   a single), and comparisons are exact across all of them. Statically typed
   operands compile to the `i32`/`u32`/`f32` instructions directly;
-  `<object>` operands dispatch through the same numeric generics;
+  `<object>` operands dispatch through the same numeric generics.
+  `as(<u32>, x)` and friends convert exactly between every numeric type
+  (out-of-range integers and non-integral floats trap), and
+  `instance?(x, <u32>)` tests for an `<integer>` in the range;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

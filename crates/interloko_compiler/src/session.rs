@@ -4431,7 +4431,9 @@ fn collect_dispatch_sites_in_expr(
         } => {
             collect_dispatch_sites_in_expr(artifacts, owner, condition, owner_index, sites);
         }
-        sem::Expr::InstanceOf { value, .. } | sem::Expr::Cast { value, .. } => {
+        sem::Expr::InstanceOf { value, .. }
+        | sem::Expr::InstanceOfLimited { value, .. }
+        | sem::Expr::Cast { value, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
         }
         sem::Expr::MakeObject { class, fields, .. } => {
@@ -11515,6 +11517,10 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "instance? c{}", class.0);
             dump_sem_expr(out, value, indent + 2);
         }
+        sem::Expr::InstanceOfLimited { value, limited, .. } => {
+            let _ = writeln!(out, "instance? {}", limited.name());
+            dump_sem_expr(out, value, indent + 2);
+        }
         sem::Expr::Cast { value, class, .. } => {
             let _ = writeln!(out, "as c{}", class.0);
             dump_sem_expr(out, value, indent + 2);
@@ -12485,6 +12491,11 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .get(class.0 as usize)
                 .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "instance?({definition}:");
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::InstanceOfLimited { value, limited, .. } => {
+            let _ = write!(out, "instance?({}:", limited.name());
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }

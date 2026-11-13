@@ -1,0 +1,22 @@
+// expect: run 21
+// expect: diagnostics 0
+// expect: dump sem contains instance? <u32>
+
+// `instance?(x, <u32>)` asks whether `x` is an `<integer>` in the range;
+// floats never are, whatever their value.
+define function score(x :: <object>) => <integer>
+  if instance?(x, <u32>) then 1 else 0 end
+end;
+
+define function main() => <integer>
+  let negative = -1i32;
+  let wide :: <integer> = 4294967296;
+  let top :: <u32> = 4294967295;
+  score(7) * 10
+    + score(-1)
+    + score(7.0)
+    + (if instance?(negative, <u32>) then 100 else 0 end)
+    + (if instance?(wide, <u32>) then 100 else 0 end)
+    + (if instance?(top, <i32>) then 100 else 0 end)
+    + (if instance?(top, <u32>) then 11 else 0 end)
+end;

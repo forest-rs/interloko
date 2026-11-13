@@ -1,0 +1,9 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+
+// `-1` is an `<integer>` but not a `<u32>`, so converting it traps rather
+// than wrapping.
+define function main() => <u32>
+  let n = -1;
+  as(<u32>, n)
+end;

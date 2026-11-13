@@ -1033,6 +1033,7 @@ fn for_each_child(expr: &sem::Expr, mut visit: impl FnMut(&sem::Expr)) {
         }
         | sem::Expr::ClassOf { object: inner, .. }
         | sem::Expr::InstanceOf { value: inner, .. }
+        | sem::Expr::InstanceOfLimited { value: inner, .. }
         | sem::Expr::Cast { value: inner, .. }
         | sem::Expr::AccessorCall {
             receiver: inner, ..

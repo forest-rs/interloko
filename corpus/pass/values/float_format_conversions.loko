@@ -1,0 +1,13 @@
+// expect: run 0.10000000149011612
+// expect: diagnostics 0
+// expect: dump lowered contains f64.to_f32
+// expect: dump lowered contains f32.to_f64
+
+// `as(<single-float>, x)` rounds once to the nearest binary32; widening
+// back is exact, so the rounding error shows. Integers convert to either
+// format, rounding to nearest.
+define function main() => <double-float>
+  let tenth = as(<single-float>, 0.1);
+  let big = as(<single-float>, 16777217);
+  if as(<integer>, big) = 16777216 then as(<double-float>, tenth) else 0.0 end
+end;

@@ -2236,6 +2236,9 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         | sem::Expr::InstanceOf {
             value: condition, ..
         }
+        | sem::Expr::InstanceOfLimited {
+            value: condition, ..
+        }
         | sem::Expr::Cast {
             value: condition, ..
         } => {
@@ -3630,6 +3633,14 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::InstanceOfLimited {
+                value,
+                limited,
+                span,
+            } => {
+                let value = self.lower_expr(value)?;
+                Ok(self.lower_limited_membership(value, *limited, *span))
+            }
             sem::Expr::Cast { value, class, span } => {
                 let value = self.lower_expr(value)?;
                 if *class == sem::OBJECT_CLASS_ID {
@@ -4991,6 +5002,155 @@ impl<'module> BodyLowering<'module> {
             src,
             span,
         });
+        result
+    }
+
+    /// Lowers `instance?(value, <i32>)` or `<u32>`: whether the value is an
+    /// `<integer>` in the limited type's range.
+    fn lower_limited_membership(
+        &mut self,
+        value: Value,
+        limited: sem::LimitedInteger,
+        span: Span,
+    ) -> Value {
+        let const_bool = |this: &mut Self, value| {
+            let result = this.alloc(ValueKind::Bool);
+            this.instructions.push(Instr::ConstBool {
+                dst: result.reg,
+                value,
+                span,
+            });
+            result
+        };
+        let const32 = |this: &mut Self, value| {
+            let constant = this.alloc(match value {
+                sem::Number32::I32(_) => ValueKind::I32,
+                _ => ValueKind::U32,
+            });
+            this.instructions.push(Instr::Const32 {
+                dst: constant.reg,
+                value,
+                span,
+            });
+            constant
+        };
+        match (value.kind, limited) {
+            (ValueKind::I32, sem::LimitedInteger::I32)
+            | (ValueKind::U32, sem::LimitedInteger::U32) => const_bool(self, true),
+            (ValueKind::I32, sem::LimitedInteger::U32) => {
+                let zero = const32(self, sem::Number32::I32(0));
+                self.num32_binary(
+                    Num32BinaryOp::I32Ge,
+                    value.reg,
+                    zero.reg,
+                    ValueKind::Bool,
+                    span,
+                )
+            }
+            (ValueKind::U32, sem::LimitedInteger::I32) => {
+                let max = const32(self, sem::Number32::U32(i32::MAX.cast_unsigned()));
+                self.num32_binary(
+                    Num32BinaryOp::U32Le,
+                    value.reg,
+                    max.reg,
+                    ValueKind::Bool,
+                    span,
+                )
+            }
+            (ValueKind::I64, limited) => self.lower_integer_in_range(value, limited, span),
+            (ValueKind::Any, limited) => {
+                // Test the class first: only an `<integer>` unboxes.
+                let result = self.alloc(ValueKind::Bool);
+                let is_integer = self.alloc(ValueKind::Bool);
+                let integer_class = builtin_class(self.module, sem::BuiltinValueClass::Integer)
+                    .unwrap_or(sem::ClassId(u32::MAX));
+                self.instructions.push(Instr::InstanceOf {
+                    dst: is_integer.reg,
+                    value: value.reg,
+                    input: value.kind,
+                    class: integer_class,
+                    span,
+                });
+                let [check, outside, done] = core::array::from_fn(|_| self.alloc_label());
+                self.instructions.extend([
+                    Instr::Branch {
+                        cond: is_integer.reg,
+                        then_label: check,
+                        else_label: outside,
+                        span,
+                    },
+                    Instr::Label { label: check },
+                ]);
+                let integer = self.unbox(value, integer_class, ValueKind::I64, span);
+                let inside = self.lower_integer_in_range(integer, limited, span);
+                self.instructions.extend([
+                    Instr::Move {
+                        dst: result.reg,
+                        src: inside.reg,
+                        span,
+                    },
+                    Instr::Jump { label: done, span },
+                    Instr::Label { label: outside },
+                    Instr::ConstBool {
+                        dst: result.reg,
+                        value: false,
+                        span,
+                    },
+                    Instr::Jump { label: done, span },
+                    Instr::Label { label: done },
+                ]);
+                result
+            }
+            // Floats and objects are never `<integer>`s.
+            _ => const_bool(self, false),
+        }
+    }
+
+    /// Tests whether an `<integer>` lies in a limited type's range.
+    fn lower_integer_in_range(
+        &mut self,
+        value: Value,
+        limited: sem::LimitedInteger,
+        span: Span,
+    ) -> Value {
+        let result = self.alloc(ValueKind::Bool);
+        let bound = self.alloc(ValueKind::I64);
+        let [above_min, done] = core::array::from_fn(|_| self.alloc_label());
+        self.instructions.extend([
+            Instr::ConstI64 {
+                dst: bound.reg,
+                value: limited.min(),
+                span,
+            },
+            Instr::I64Compare {
+                dst: result.reg,
+                op: sem::CompareOp::Ge,
+                lhs: value.reg,
+                rhs: bound.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: result.reg,
+                then_label: above_min,
+                else_label: done,
+                span,
+            },
+            Instr::Label { label: above_min },
+            Instr::ConstI64 {
+                dst: bound.reg,
+                value: limited.max(),
+                span,
+            },
+            Instr::I64Compare {
+                dst: result.reg,
+                op: sem::CompareOp::Le,
+                lhs: value.reg,
+                rhs: bound.reg,
+                span,
+            },
+            Instr::Jump { label: done, span },
+            Instr::Label { label: done },
+        ]);
         result
     }
 
