@@ -262,6 +262,12 @@ pub enum FunctionValue {
     Integer(i64),
     /// IEEE 754 binary64 float value.
     Float(f64),
+    /// `<i32>` integer value.
+    I32(i32),
+    /// `<u32>` integer value.
+    U32(u32),
+    /// IEEE 754 binary32 float value, `<single-float>`.
+    SingleFloat(f32),
     /// Boolean value.
     Boolean(bool),
     /// Runtime string value copied out of the execution host.
@@ -271,12 +277,20 @@ pub enum FunctionValue {
 impl fmt::Display for FunctionValue {
     /// Renders the value as Loko literal text: integers in decimal, floats
     /// as their shortest round-trip literal (`1.0`, `2.5e-7`; `inf`, `-inf`,
-    /// and `nan` for non-finite values), booleans as `#t`/`#f`, and strings
-    /// quoted with Loko escapes.
+    /// and `nan` for non-finite values), 32-bit values with their type
+    /// suffix (`7i32`, `7u32`, `1.5f32`), booleans as `#t`/`#f`, and
+    /// strings quoted with Loko escapes.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Integer(value) => write!(formatter, "{value}"),
             Self::Float(value) => write!(formatter, "{}", sem::FloatBits::from_f64(*value)),
+            Self::I32(value) => write!(formatter, "{}", sem::Number32::I32(*value)),
+            Self::U32(value) => write!(formatter, "{}", sem::Number32::U32(*value)),
+            Self::SingleFloat(value) => write!(
+                formatter,
+                "{}",
+                sem::Number32::F32(sem::SingleFloatBits::from_f32(*value))
+            ),
             Self::Boolean(true) => formatter.write_str("#t"),
             Self::Boolean(false) => formatter.write_str("#f"),
             Self::String(value) => {
@@ -303,6 +317,9 @@ impl FunctionValue {
         match self {
             Self::Integer(_) => FunctionValueKind::Integer,
             Self::Float(_) => FunctionValueKind::Float,
+            Self::I32(_) => FunctionValueKind::I32,
+            Self::U32(_) => FunctionValueKind::U32,
+            Self::SingleFloat(_) => FunctionValueKind::SingleFloat,
             Self::Boolean(_) => FunctionValueKind::Boolean,
             Self::String(_) => FunctionValueKind::String,
         }
@@ -316,6 +333,12 @@ pub enum FunctionValueKind {
     Integer,
     /// IEEE 754 binary64 float value.
     Float,
+    /// `<i32>` integer value.
+    I32,
+    /// `<u32>` integer value.
+    U32,
+    /// IEEE 754 binary32 float value.
+    SingleFloat,
     /// Boolean value.
     Boolean,
     /// Runtime string value.
@@ -327,6 +350,9 @@ impl fmt::Display for FunctionValueKind {
         match self {
             Self::Integer => formatter.write_str("integer"),
             Self::Float => formatter.write_str("float"),
+            Self::I32 => formatter.write_str("i32"),
+            Self::U32 => formatter.write_str("u32"),
+            Self::SingleFloat => formatter.write_str("single-float"),
             Self::Boolean => formatter.write_str("boolean"),
             Self::String => formatter.write_str("string"),
         }
@@ -4508,6 +4534,7 @@ fn collect_dispatch_sites_in_expr(
         }
         sem::Expr::ConstI64 { .. }
         | sem::Expr::ConstF64 { .. }
+        | sem::Expr::Const32 { .. }
         | sem::Expr::ConstBool { .. }
         | sem::Expr::StringLiteral { .. }
         | sem::Expr::SymbolLiteral { .. }
@@ -5049,6 +5076,10 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
         sem::Expr::ConstF64 { .. } => {
             module.builtin_value_class(sem::BuiltinValueClass::DoubleFloat)
         }
+        sem::Expr::Const32 { value, .. } => module.builtin_value_class(match value {
+            sem::Number32::I32(_) | sem::Number32::U32(_) => sem::BuiltinValueClass::Integer,
+            sem::Number32::F32(_) => sem::BuiltinValueClass::SingleFloat,
+        }),
         sem::Expr::MakeObject { class_id, .. } => Some(*class_id),
         sem::Expr::StringLiteral { class, .. }
         | sem::Expr::SymbolLiteral { class, .. }
@@ -5463,6 +5494,9 @@ fn run_turn_body<'a>(
         let value = match (argument, expected) {
             (FunctionValue::Integer(value), sem::ValueKind::I64) => Value::I64(*value),
             (FunctionValue::Float(value), sem::ValueKind::F64) => Value::F64(*value),
+            (FunctionValue::I32(value), sem::ValueKind::I32) => Value::I32(*value),
+            (FunctionValue::U32(value), sem::ValueKind::U32) => Value::U32(*value),
+            (FunctionValue::SingleFloat(value), sem::ValueKind::F32) => Value::F32(*value),
             (FunctionValue::Boolean(value), sem::ValueKind::Bool) => Value::Bool(*value),
             (FunctionValue::String(value), sem::ValueKind::String(_)) => host
                 .make_string(value)
@@ -5534,6 +5568,9 @@ fn run_turn_body<'a>(
     let value = match (function.result_kinds.as_slice(), output.as_slice()) {
         ([sem::ValueKind::I64], [Value::I64(value)]) => FunctionValue::Integer(*value),
         ([sem::ValueKind::F64], [Value::F64(value)]) => FunctionValue::Float(*value),
+        ([sem::ValueKind::I32], [Value::I32(value)]) => FunctionValue::I32(*value),
+        ([sem::ValueKind::U32], [Value::U32(value)]) => FunctionValue::U32(*value),
+        ([sem::ValueKind::F32], [Value::F32(value)]) => FunctionValue::SingleFloat(*value),
         ([sem::ValueKind::Bool], [Value::Bool(value)]) => FunctionValue::Boolean(*value),
         ([sem::ValueKind::String(_)], [value]) => {
             FunctionValue::String(host.string_text(value).map_err(|_| {
@@ -5632,6 +5669,11 @@ impl FunctionCallHost<'_> {
                 Ok(FunctionValue::Integer(value))
             }
             (sem::HostValueKind::Float, ValueRef::F64(value)) => Ok(FunctionValue::Float(value)),
+            (sem::HostValueKind::I32, ValueRef::I32(value)) => Ok(FunctionValue::I32(value)),
+            (sem::HostValueKind::U32, ValueRef::U32(value)) => Ok(FunctionValue::U32(value)),
+            (sem::HostValueKind::SingleFloat, ValueRef::F32(value)) => {
+                Ok(FunctionValue::SingleFloat(value))
+            }
             (sem::HostValueKind::Boolean, ValueRef::Bool(value)) => {
                 Ok(FunctionValue::Boolean(value))
             }
@@ -5656,6 +5698,11 @@ impl FunctionCallHost<'_> {
         match (kind, value) {
             (sem::HostValueKind::Integer, FunctionValue::Integer(value)) => Ok(Value::I64(value)),
             (sem::HostValueKind::Float, FunctionValue::Float(value)) => Ok(Value::F64(value)),
+            (sem::HostValueKind::I32, FunctionValue::I32(value)) => Ok(Value::I32(value)),
+            (sem::HostValueKind::U32, FunctionValue::U32(value)) => Ok(Value::U32(value)),
+            (sem::HostValueKind::SingleFloat, FunctionValue::SingleFloat(value)) => {
+                Ok(Value::F32(value))
+            }
             (sem::HostValueKind::Boolean, FunctionValue::Boolean(value)) => Ok(Value::Bool(value)),
             (sem::HostValueKind::String, FunctionValue::String(value)) => self
                 .runtime
@@ -5736,6 +5783,9 @@ const fn host_value_kind_label(kind: sem::HostValueKind) -> &'static str {
     match kind {
         sem::HostValueKind::Integer => "integer",
         sem::HostValueKind::Float => "float",
+        sem::HostValueKind::I32 => "i32",
+        sem::HostValueKind::U32 => "u32",
+        sem::HostValueKind::SingleFloat => "single-float",
         sem::HostValueKind::Boolean => "boolean",
         sem::HostValueKind::String => "string",
     }
@@ -6258,6 +6308,9 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         }
         ast::Expr::Float { id, value, .. } => {
             let _ = writeln!(out, "{id} float {value}");
+        }
+        ast::Expr::Number32 { id, value, .. } => {
+            let _ = writeln!(out, "{id} number32 {value}");
         }
         ast::Expr::Bool { id, value, .. } => {
             let _ = writeln!(out, "{id} bool {value}");
@@ -10861,6 +10914,9 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::F64 => "float".into(),
+        sem::ValueKind::I32 => "i32".into(),
+        sem::ValueKind::U32 => "u32".into(),
+        sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_label(module, "string", class),
@@ -10911,6 +10967,9 @@ fn runtime_kind_label(module: &sem::Module, kind: runtime::ValueKind) -> String 
         runtime::ValueKind::Any => "object-top".into(),
         runtime::ValueKind::I64 => "integer".into(),
         runtime::ValueKind::F64 => "float".into(),
+        runtime::ValueKind::I32 => "i32".into(),
+        runtime::ValueKind::U32 => "u32".into(),
+        runtime::ValueKind::F32 => "single-float".into(),
         runtime::ValueKind::Bool => "boolean".into(),
         runtime::ValueKind::String(class) => value_class_label(module, "string", class),
         runtime::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
@@ -10949,6 +11008,9 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::F64 => "float".into(),
+        sem::ValueKind::I32 => "i32".into(),
+        sem::ValueKind::U32 => "u32".into(),
+        sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => format!("string(c{})", class.0),
@@ -10990,6 +11052,9 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::Any => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::F64 => "float".into(),
+        sem::ValueKind::I32 => "i32".into(),
+        sem::ValueKind::U32 => "u32".into(),
+        sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_fingerprint(module, "string", class),
@@ -11046,6 +11111,9 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::Any => "boxed-any",
         sem::ValueKind::I64 => "i64",
         sem::ValueKind::F64 => "f64",
+        sem::ValueKind::I32 => "i32",
+        sem::ValueKind::U32 => "u32",
+        sem::ValueKind::F32 => "f32",
         sem::ValueKind::Bool => "bool",
         sem::ValueKind::String(_)
         | sem::ValueKind::Symbol(_)
@@ -11066,6 +11134,9 @@ fn runtime_repr(kind: runtime::ValueKind) -> &'static str {
         runtime::ValueKind::Any => "boxed-any",
         runtime::ValueKind::I64 => "i64",
         runtime::ValueKind::F64 => "f64",
+        runtime::ValueKind::I32 => "i32",
+        runtime::ValueKind::U32 => "u32",
+        runtime::ValueKind::F32 => "f32",
         runtime::ValueKind::Bool => "bool",
         runtime::ValueKind::String(_)
         | runtime::ValueKind::Symbol(_)
@@ -11262,6 +11333,9 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         }
         sem::Expr::ConstF64 { value, .. } => {
             let _ = writeln!(out, "const.f64 {value}");
+        }
+        sem::Expr::Const32 { value, .. } => {
+            let _ = writeln!(out, "const.32 {value}");
         }
         sem::Expr::ConstBool { value, .. } => {
             let _ = writeln!(out, "const.bool {value}");
@@ -12211,6 +12285,13 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         }
         sem::Expr::ConstF64 { value, .. } => {
             let _ = write!(out, "f64({:#x})", value.to_bits());
+        }
+        sem::Expr::Const32 { value, .. } => {
+            let _ = match value {
+                sem::Number32::I32(value) => write!(out, "i32({value})"),
+                sem::Number32::U32(value) => write!(out, "u32({value})"),
+                sem::Number32::F32(bits) => write!(out, "f32({:#x})", bits.to_bits()),
+            };
         }
         sem::Expr::ConstBool { value, .. } => {
             let _ = write!(out, "bool({value})");
@@ -14747,6 +14828,87 @@ mod tests {
             .expect("host call should run")
             .value;
         assert_eq!(celsius, FunctionValue::Float((98.6 - 32.0) * 5.0 / 9.0));
+    }
+
+    /// Packs a colour from three channels, as a graphics host would.
+    struct PackHandler;
+
+    impl HostFunctionHandler for PackHandler {
+        fn call(
+            &mut self,
+            _function: &sem::HostFunction,
+            arguments: &[FunctionValue],
+        ) -> Result<FunctionValue, HostFunctionFailure> {
+            let [
+                FunctionValue::U32(red),
+                FunctionValue::I32(green),
+                FunctionValue::SingleFloat(blue),
+            ] = arguments
+            else {
+                return Err(HostFunctionFailure::new("expected u32, i32, single-float"));
+            };
+            let green = u32::try_from(*green).map_err(|_| HostFunctionFailure::new("green"))?;
+            // The test channel is in 0.0..=1.0.
+            let blue = (blue * 255.0) as u32;
+            Ok(FunctionValue::U32(red << 16 | green << 8 | blue))
+        }
+    }
+
+    #[test]
+    fn session_32_bit_values_cross_call_and_host_boundaries() {
+        let mut registry = sem::HostMetaRegistry::new();
+        registry.add_function(sem::HostFunction::new(
+            "pack",
+            alloc::vec![
+                sem::HostValueKind::U32,
+                sem::HostValueKind::I32,
+                sem::HostValueKind::SingleFloat,
+            ],
+            sem::HostValueKind::U32,
+        ));
+        let artifacts = CompilerSession::compile_source_with_host_registry(
+            "colour.loko",
+            "define function same-i32(x :: <i32>) => <i32>\n  x\nend;\n\
+             define function same-u32(x :: <u32>) => <u32>\n  x\nend;\n\
+             define function same-single(x :: <single-float>) => <single-float>\n  x\nend;\n\
+             define function orange() => <u32>\n  pack(255, 128, 0.0)\nend;",
+            RuntimeMode::CompileOnly,
+            &registry,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let call = |name: &str, argument: FunctionValue| {
+            artifacts
+                .call_function(name, &[argument], None)
+                .expect("call should run")
+                .value
+        };
+        assert_eq!(
+            call("same-i32", FunctionValue::I32(i32::MIN)),
+            FunctionValue::I32(i32::MIN)
+        );
+        assert_eq!(
+            call("same-u32", FunctionValue::U32(u32::MAX)),
+            FunctionValue::U32(u32::MAX)
+        );
+        let single = call("same-single", FunctionValue::SingleFloat(0.1));
+        assert_eq!(single, FunctionValue::SingleFloat(0.1));
+        assert_eq!(single.kind(), FunctionValueKind::SingleFloat);
+        assert_eq!(single.to_string(), "0.1f32");
+        // 32-bit kinds are distinct from their 64-bit relatives.
+        assert!(matches!(
+            artifacts.call_function("same-u32", &[FunctionValue::Integer(1)], None),
+            Err(FunctionCallError::ArgumentTypeMismatch {
+                actual: FunctionValueKind::Integer,
+                ..
+            })
+        ));
+
+        let orange = artifacts
+            .call_function_with_host("orange", &[], None, &mut PackHandler)
+            .expect("host call should run")
+            .value;
+        assert_eq!(orange, FunctionValue::U32(0x00FF_8000));
+        assert_eq!(orange.to_string(), "16744448u32");
     }
 
     #[derive(Default)]

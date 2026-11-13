@@ -80,7 +80,9 @@ pub enum TokenKind {
     /// User identifier.
     Ident,
     /// Base-10 numeric literal: an integer such as `42`, or a float with a
-    /// fraction and/or exponent such as `1.5`, `2e10`, or `6.02e-23`.
+    /// fraction and/or exponent such as `1.5`, `2e10`, or `6.02e-23`,
+    /// optionally followed by a 32-bit type suffix: `7i32`, `7u32`,
+    /// `1.5f32`.
     Number,
     /// Boolean literal, currently `#t` or `#f`.
     Bool,
@@ -916,12 +918,17 @@ pub fn lex(source: &str) -> Vec<Token> {
     tokens
 }
 
+/// Suffixes that give a numeric literal a 32-bit type.
+pub const NUMBER_SUFFIXES: [&str; 3] = ["i32", "u32", "f32"];
+
 /// Returns the end of the numeric literal starting at `start`.
 ///
 /// Mirrors the base grammar's `number` rule: digits, then an optional
 /// fraction that must have digits on both sides of the `.` (so `x.radius`
 /// style postfix access after a number never becomes part of the literal),
-/// then an optional exponent that must contain at least one digit.
+/// then an optional exponent that must contain at least one digit, then an
+/// optional type suffix from [`NUMBER_SUFFIXES`] that does not run on into
+/// a longer name.
 fn lex_number_end(bytes: &[u8], start: usize) -> usize {
     let digits_end = |mut pos: usize| {
         while pos < bytes.len() && bytes[pos].is_ascii_digit() {
@@ -940,6 +947,14 @@ fn lex_number_end(bytes: &[u8], start: usize) -> usize {
         }
         if bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
             pos = digits_end(exponent);
+        }
+    }
+    for suffix in NUMBER_SUFFIXES {
+        let end = pos + suffix.len();
+        if bytes.get(pos..end) == Some(suffix.as_bytes())
+            && (end == bytes.len() || !is_ident_continue(bytes, end))
+        {
+            return end;
         }
     }
     pos
@@ -1016,5 +1031,22 @@ mod tests {
         assert_eq!(numbers("3.e4"), ["3"]);
         assert_eq!(numbers("4e"), ["4"]);
         assert_eq!(numbers("5e-x"), ["5"]);
+    }
+
+    #[test]
+    fn lex_numbers_take_a_whole_32_bit_suffix() {
+        let numbers = |source: &str| {
+            lex(source)
+                .into_iter()
+                .filter(|token| token.kind == TokenKind::Number)
+                .map(|token| token.text(source).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            numbers("7i32 7u32 1.5f32 2e3f32 5f32"),
+            ["7i32", "7u32", "1.5f32", "2e3f32", "5f32"]
+        );
+        // A suffix that runs on into a longer name is not a suffix.
+        assert_eq!(numbers("7i320 7u32x 7i64"), ["7", "7", "7"]);
     }
 }

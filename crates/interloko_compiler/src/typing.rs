@@ -892,6 +892,9 @@ fn fit(module: &sem::Module, operand: StaticType, expected: Option<ClassId>) -> 
         ValueKind::Bool | ValueKind::Callable | ValueKind::KnownCallable(_) => Fit::Never,
         ValueKind::I64
         | ValueKind::F64
+        | ValueKind::I32
+        | ValueKind::U32
+        | ValueKind::F32
         | ValueKind::String(_)
         | ValueKind::Symbol(_)
         | ValueKind::Vector(_)
@@ -1080,6 +1083,7 @@ fn for_each_child(expr: &sem::Expr, mut visit: impl FnMut(&sem::Expr)) {
         }
         sem::Expr::ConstI64 { .. }
         | sem::Expr::ConstF64 { .. }
+        | sem::Expr::Const32 { .. }
         | sem::Expr::ConstBool { .. }
         | sem::Expr::StringLiteral { .. }
         | sem::Expr::SymbolLiteral { .. }
@@ -1156,6 +1160,9 @@ pub fn static_type_name(module: &sem::Module, ty: StaticType) -> String {
         ValueKind::Error => "<error>".into(),
         ValueKind::I64
         | ValueKind::F64
+        | ValueKind::I32
+        | ValueKind::U32
+        | ValueKind::F32
         | ValueKind::String(_)
         | ValueKind::Symbol(_)
         | ValueKind::Vector(_)

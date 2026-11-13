@@ -1800,6 +1800,9 @@ fn value_kind_label(module: &sem::Module, kind: ValueKind) -> String {
         ValueKind::Any => "<object>".into(),
         ValueKind::I64 => "<integer>".into(),
         ValueKind::F64 => "<double-float>".into(),
+        ValueKind::I32 => "<i32>".into(),
+        ValueKind::U32 => "<u32>".into(),
+        ValueKind::F32 => "<single-float>".into(),
         ValueKind::Bool => "<boolean>".into(),
         ValueKind::String(id) | ValueKind::Symbol(id) | ValueKind::Vector(id) => {
             class_name(module, id)

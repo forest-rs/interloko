@@ -135,11 +135,21 @@ The current slices include:
   hyperbolic functions, `atan2`, `pow`, `hypot`) whose names user
   definitions may shadow; `float-to-string`, `integer-to-string`, and
   `concatenate` build result text;
+- 32-bit numbers for graphics, colour and audio code: `<single-float>`
+  (IEEE 754 binary32, a second concrete `<float>`) and the limited integer
+  types `<i32>` and `<u32>`, which are `limited(<integer>, ...)` ranges
+  rather than classes, so their values are `<integer>`s that widen
+  implicitly and box as integers. Literals take a suffix (`-7i32`,
+  `255u32`, `0.5f32`), and an unsuffixed literal adopts the 32-bit type its
+  context expects when the value fits (`let level :: <u32> = 255`). They
+  live in slots, cross `<object>` (a `<single-float>` keeps its format), and
+  travel as `FunctionValue::I32`/`U32`/`SingleFloat` through typed calls and
+  host functions;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
 - embedding-declared scalar host functions with typed integer, float,
-  boolean, and string arguments/results, EOP discovery, and a handler-aware call surface;
+  32-bit, boolean, and string arguments/results, EOP discovery, and a handler-aware call surface;
 - read-only grammar MOP inspection plus trusted staged grammar adapters;
 - structured EOP records for environment/workbench objects and affordances;
 - explicit host-backed class/slot metadata for Rust interop experiments;
@@ -263,10 +273,10 @@ recompile older tapes and regenerate any source sidecars with them. Runtime
 results use an explicit owned output vector and remain readable after their
 execution context is dropped.
 
-Boxed `<object>` values are VM objects of one host type. Floats, booleans,
-integers within 47 bits and references to runtime objects travel inside the
-object handle and never allocate a box; wider integers live in the runtime
-host's heap.
+Boxed `<object>` values are VM objects of one host type. Floats (both
+formats), booleans, integers within 47 bits and references to runtime
+objects travel inside the object handle and never allocate a box; wider
+integers live in the runtime host's heap.
 
 The runtime heap has two regions. Each call is one *turn*: everything it
 allocates (instances, strings, vectors, metaobjects, heap boxes) goes to a

@@ -1,0 +1,21 @@
+// expect: run 4294967295u32
+// expect: diagnostics 0
+// expect: dump ast contains number32 -2147483648i32
+// expect: dump sem contains const.32 4294967295u32
+// expect: dump lowered contains const.i32 -2147483648i32
+// expect: dump lowered contains const.u32 4294967295u32
+
+// `i32` and `u32` suffixes write `<i32>` and `<u32>` integers. An
+// unsuffixed literal is untyped until its context asks for a limited
+// integer type; it then becomes one when its value is in range.
+define constant $min :: <i32> = -2147483648;
+
+define function brightest() => <u32>
+  4294967295
+end;
+
+define function main() => <u32>
+  let floor = -2147483648i32;
+  let same :: <i32> = $min;
+  brightest()
+end;

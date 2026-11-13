@@ -10,14 +10,20 @@
 //!   bits sign-extended ([`IMMEDIATE_INTEGER_MIN`]..=[`IMMEDIATE_INTEGER_MAX`]).
 //! - Top 16 bits set and bit 47 clear: bits 46..45 select the kind of the
 //!   low 45 bits: a one-based index into the image's boxed values (`00`), a
-//!   runtime object's own handle (`01`), a boolean (`10`), or a one-based
-//!   index into the nursery's boxed values (`11`).
+//!   runtime object's own handle (`01`), a small immediate (`10`), or a
+//!   one-based index into the nursery's boxed values (`11`). A small
+//!   immediate is a boolean (payload `0` or `1`) or, with bit 32 set, a
+//!   `<single-float>` whose IEEE 754 bits are the low 32 bits.
 //!
 //! The tagged space is a sliver of NaN encodings (negative NaNs with the top
 //! payload bits set), which no IEEE arithmetic produces by default. Floats
 //! with those exact bits, integers outside the immediate range, and other
 //! values (`u64`s, objects whose handle does not fit) are boxed on the heap,
-//! so boxing never changes a value's bits.
+//! so boxing never changes a value's bits. Every `<single-float>` is
+//! immediate.
+//!
+//! `<i32>` and `<u32>` are limited `<integer>` types, not classes: their
+//! values box as the `<integer>` they are, always immediate.
 //!
 //! [`Obj`]: execution_tape::value::Obj
 
@@ -41,7 +47,9 @@ const KIND_MASK: u64 = 0b11 << KIND_SHIFT;
 const PAYLOAD: u64 = (1 << KIND_SHIFT) - 1;
 const KIND_HEAP: u64 = 0b00 << KIND_SHIFT;
 const KIND_OBJECT: u64 = 0b01 << KIND_SHIFT;
-const KIND_BOOL: u64 = 0b10 << KIND_SHIFT;
+const KIND_SMALL: u64 = 0b10 << KIND_SHIFT;
+/// Set in a small immediate's payload for a `<single-float>`.
+const SINGLE_FLOAT_FLAG: u64 = 1 << 32;
 const KIND_NURSERY_HEAP: u64 = 0b11 << KIND_SHIFT;
 
 /// Smallest `<integer>` boxed without heap allocation.
@@ -56,6 +64,8 @@ pub(crate) enum BoxedHandle {
     Float(f64),
     /// An immediate `<integer>`.
     Integer(i64),
+    /// An immediate `<single-float>`.
+    SingleFloat(f32),
     /// An immediate boolean.
     Bool(bool),
     /// A runtime object, by its own [`crate::INTERLOKO_OBJECT_TYPE`] handle.
@@ -93,7 +103,11 @@ impl BoxedHandle {
             KIND_HEAP => heap(Space::Image),
             KIND_NURSERY_HEAP => heap(Space::Nursery),
             KIND_OBJECT => Self::Object(ObjHandle(payload)),
-            KIND_BOOL if payload <= 1 => Self::Bool(payload == 1),
+            KIND_SMALL if payload <= 1 => Self::Bool(payload == 1),
+            KIND_SMALL if payload >> 32 == SINGLE_FLOAT_FLAG >> 32 => {
+                // The flag check leaves exactly the low 32 bits.
+                Self::SingleFloat(f32::from_bits(payload as u32))
+            }
             _ => Self::Invalid,
         }
     }
@@ -116,7 +130,13 @@ impl BoxedHandle {
 
     /// Encodes a boolean as an immediate handle.
     pub(crate) const fn immediate_bool(value: bool) -> ObjHandle {
-        ObjHandle(TAG | KIND_BOOL | value as u64)
+        ObjHandle(TAG | KIND_SMALL | value as u64)
+    }
+
+    /// Encodes a `<single-float>` as an immediate handle; every bit pattern
+    /// fits.
+    pub(crate) const fn immediate_single_float(value: f32) -> ObjHandle {
+        ObjHandle(TAG | KIND_SMALL | SINGLE_FLOAT_FLAG | value.to_bits() as u64)
     }
 
     /// Encodes a runtime object's handle, or `None` when it is too large to
@@ -193,6 +213,37 @@ mod tests {
         ] {
             assert_eq!(BoxedHandle::immediate_integer(value), None);
         }
+    }
+
+    #[test]
+    fn single_floats_are_immediate_and_distinct_from_booleans() {
+        for value in [
+            0.0_f32,
+            -0.0,
+            1.5,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NAN,
+            f32::from_bits(1),
+            f32::from_bits(u32::MAX),
+        ] {
+            let handle = BoxedHandle::immediate_single_float(value);
+            let BoxedHandle::SingleFloat(decoded) = BoxedHandle::decode(handle) else {
+                panic!("{value} should decode as a single float");
+            };
+            assert_eq!(decoded.to_bits(), value.to_bits());
+        }
+        // `0.0f32` has payload bit 32 set, so it is never `#f`.
+        assert_ne!(
+            BoxedHandle::immediate_single_float(0.0),
+            BoxedHandle::immediate_bool(false)
+        );
+        // A small payload with bits above 32 names nothing.
+        assert_eq!(
+            BoxedHandle::decode(ObjHandle(BoxedHandle::immediate_bool(false).0 | (1 << 33))),
+            BoxedHandle::Invalid
+        );
     }
 
     #[test]

@@ -1,0 +1,21 @@
+// expect: run "<integer>"
+// expect: diagnostics 0
+// expect: dump lowered contains i32.to_i64
+// expect: dump lowered contains u32.to_i64
+
+// `<i32>` and `<u32>` are `limited(<integer>, ...)` types, not classes: their
+// values are `<integer>`s. They widen exactly where an `<integer>` is
+// expected and box as the integer they are.
+define function twice(n :: <integer>) => <integer>
+  n + n
+end;
+
+define function main() => <string>
+  let small :: <i32> = -3;
+  let boxed :: <object> = 10u32;
+  if twice(small) = -6 then
+    if instance?(boxed, <integer>) then class-name(object-class(boxed)) else "boxed" end
+  else
+    "twice"
+  end
+end;

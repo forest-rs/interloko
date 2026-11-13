@@ -1,0 +1,13 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-argument-type-mismatch
+// expect: diagnostic contains expects <i32> but got <integer>
+
+// An `<integer>` widens from `<i32>` implicitly, but narrowing it is an
+// explicit, checked `as(<i32>, n)`.
+define function level(x :: <i32>) => <i32>
+  x
+end;
+
+define function main(n :: <integer>) => <i32>
+  level(n)
+end;

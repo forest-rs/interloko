@@ -170,6 +170,7 @@ impl InterlokoHost {
                         handle,
                     })),
                     BoxedHandle::Float(_)
+                    | BoxedHandle::SingleFloat(_)
                     | BoxedHandle::Integer(_)
                     | BoxedHandle::Bool(_)
                     | BoxedHandle::Invalid => {}

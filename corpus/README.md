@@ -14,7 +14,8 @@ Supported expectations:
 
 - `run VALUE`: compile and run zero-argument `main`, expecting the scalar
   `VALUE` written as Loko literal text: `42` (integer), `42.0` or `4.2e1`
-  (float; also `inf`, `-inf`, `nan`), `#t`/`#f` (boolean), or `"text"`
+  (float; also `inf`, `-inf`, `nan`), `7i32`, `7u32` or `1.5f32` (32-bit
+  values; also `nanf32` and friends), `#t`/`#f` (boolean), or `"text"`
   (string, with `\n`, `\t`, `\"`, and `\\` escapes). The literal form names
   the type, so `run 42` does not match a string `"42"` or a float `42.0`.
   Floats match by exact value: `run nan` matches any NaN and `run -0.0`

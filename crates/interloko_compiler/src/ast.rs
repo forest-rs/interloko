@@ -12,7 +12,7 @@ use crate::grammar_frontend::{
 };
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
-use interloko_model::FloatBits;
+use interloko_model::{FloatBits, Number32, SingleFloatBits};
 
 /// AST module containing function definitions.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -362,6 +362,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Literal with a 32-bit type suffix, such as `7u32` or `1.5f32`.
+    Number32 {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Parsed value; `f32` literals round once to the nearest binary32.
+        value: Number32,
+        /// Source span.
+        span: Span,
+    },
     /// Boolean literal.
     Bool {
         /// Stable-ish AST node identity.
@@ -598,6 +607,7 @@ impl Expr {
         match self {
             Self::Number { id, .. }
             | Self::Float { id, .. }
+            | Self::Number32 { id, .. }
             | Self::Bool { id, .. }
             | Self::String { id, .. }
             | Self::Symbol { id, .. }
@@ -628,6 +638,7 @@ impl Expr {
         match self {
             Self::Number { span, .. }
             | Self::Float { span, .. }
+            | Self::Number32 { span, .. }
             | Self::Bool { span, .. }
             | Self::String { span, .. }
             | Self::Symbol { span, .. }
@@ -1474,6 +1485,9 @@ impl<'tree> Lowering<'tree> {
                 span: unary.span,
             };
         };
+        if let Some((digits, suffix)) = split_number_suffix(text) {
+            return self.lower_number32(unary, unary.span, digits, suffix, true);
+        }
         if is_float_literal_text(text) {
             return self.lower_float_literal(unary, unary.span, text, true);
         }
@@ -1520,6 +1534,9 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             };
         };
+        if let Some((digits, suffix)) = split_number_suffix(text) {
+            return self.lower_number32(node, span, digits, suffix, false);
+        }
         if is_float_literal_text(text) {
             return self.lower_float_literal(node, span, text, false);
         }
@@ -1565,6 +1582,72 @@ impl<'tree> Lowering<'tree> {
                     span,
                 }
             }
+        }
+    }
+
+    /// Lowers a literal with a 32-bit type suffix; `digits` is the literal
+    /// without its suffix and `negate` applies a leading `-`.
+    fn lower_number32(
+        &mut self,
+        node: &CstNode,
+        span: Span,
+        digits: &str,
+        suffix: &str,
+        negate: bool,
+    ) -> Expr {
+        let value = if suffix == "f32" {
+            match digits.parse::<f32>() {
+                Ok(value) if value.is_finite() => {
+                    Some(Number32::F32(SingleFloatBits::from_f32(if negate {
+                        -value
+                    } else {
+                        value
+                    })))
+                }
+                _ => {
+                    self.diagnostics.push(Diagnostic::error(
+                        span,
+                        DiagnosticCode::AstFloatLiteralOutOfRange,
+                    ));
+                    None
+                }
+            }
+        } else if is_float_literal_text(digits) {
+            self.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::AstLiteralSuffixMismatch)
+                    .with_arg(DiagnosticArg::text("suffix", suffix)),
+            );
+            None
+        } else {
+            let value = digits
+                .parse::<u64>()
+                .ok()
+                .map(|magnitude| {
+                    let magnitude = i128::from(magnitude);
+                    if negate { -magnitude } else { magnitude }
+                })
+                .and_then(|value| match suffix {
+                    "i32" => i32::try_from(value).ok().map(Number32::I32),
+                    _ => u32::try_from(value).ok().map(Number32::U32),
+                });
+            if value.is_none() {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    DiagnosticCode::AstIntegerLiteralOutOfRange,
+                ));
+            }
+            value
+        };
+        match value {
+            Some(value) => Expr::Number32 {
+                id: self.ast_id(node),
+                value,
+                span,
+            },
+            None => Expr::Error {
+                id: self.ast_id(node),
+                span,
+            },
         }
     }
 
@@ -2674,6 +2757,14 @@ impl FrontendFormLowering {
 
 /// Returns whether a lexed `Number` token spells a float rather than an
 /// integer: floats are exactly the numbers with a fraction or an exponent.
+/// Splits a numeric literal into its digits and its 32-bit type suffix, if
+/// it has one.
+fn split_number_suffix(text: &str) -> Option<(&str, &'static str)> {
+    crate::syntax::NUMBER_SUFFIXES
+        .iter()
+        .find_map(|suffix| text.strip_suffix(suffix).map(|digits| (digits, *suffix)))
+}
+
 fn is_float_literal_text(text: &str) -> bool {
     text.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'))
 }

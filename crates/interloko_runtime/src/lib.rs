@@ -318,6 +318,12 @@ pub enum ValueKind {
     I64,
     /// IEEE 754 binary64 float value.
     F64,
+    /// `<i32>` integer value.
+    I32,
+    /// `<u32>` integer value.
+    U32,
+    /// IEEE 754 binary32 float value.
+    F32,
     /// Boolean value.
     Bool,
     /// String object value.
@@ -1642,11 +1648,17 @@ impl InterlokoHost {
     }
 
     /// Boxes a value into the top `<object>` runtime representation.
+    ///
+    /// `<i32>` and `<u32>` values box as the `<integer>`s they are.
     pub fn box_top_value(&mut self, value: Value) -> Result<Value, RuntimeError> {
         match value {
-            Value::I64(_) | Value::F64(_) | Value::Bool(_) | Value::U64(_) => {
-                Ok(self.push_boxed_value(value))
-            }
+            Value::I64(_)
+            | Value::F64(_)
+            | Value::I32(_)
+            | Value::U32(_)
+            | Value::F32(_)
+            | Value::Bool(_)
+            | Value::U64(_) => Ok(self.push_boxed_value(value)),
             Value::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.push_boxed_value(Value::Obj(obj)))
             }
@@ -1704,6 +1716,7 @@ impl InterlokoHost {
         }
         match BoxedHandle::decode(obj.handle) {
             BoxedHandle::Float(value) => Ok(Value::F64(value)),
+            BoxedHandle::SingleFloat(value) => Ok(Value::F32(value)),
             BoxedHandle::Integer(value) => Ok(Value::I64(value)),
             BoxedHandle::Bool(value) => Ok(Value::Bool(value)),
             BoxedHandle::Object(handle) => Ok(Value::Obj(Obj {
@@ -1724,9 +1737,15 @@ impl InterlokoHost {
     /// booleans, and runtime-object handles in the handle when they fit and
     /// allocating a heap box otherwise.
     fn push_boxed_value(&mut self, value: Value) -> Value {
+        let value = match value {
+            Value::I32(value) => Value::I64(i64::from(value)),
+            Value::U32(value) => Value::I64(i64::from(value)),
+            value => value,
+        };
         let immediate = match value {
             Value::I64(value) => BoxedHandle::immediate_integer(value),
             Value::F64(value) => BoxedHandle::immediate_float(value),
+            Value::F32(value) => Some(BoxedHandle::immediate_single_float(value)),
             Value::Bool(value) => Some(BoxedHandle::immediate_bool(value)),
             Value::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 BoxedHandle::immediate_object(obj.handle)
@@ -2127,7 +2146,7 @@ impl Host for InterlokoHost {
                     return Err(HostError::Failed);
                 }
                 rets[0] = match self.boxed_value(*obj)? {
-                    value @ (Value::I64(_) | Value::F64(_)) => value,
+                    value @ (Value::I64(_) | Value::F64(_) | Value::F32(_)) => value,
                     _ => return Err(HostError::Failed),
                 };
                 Ok(0)
@@ -2152,6 +2171,7 @@ impl Host for InterlokoHost {
                 let value = match args {
                     [ValueRef::I64(value)] => Value::I64(*value),
                     [ValueRef::F64(value)] => Value::F64(*value),
+                    [ValueRef::F32(value)] => Value::F32(*value),
                     [ValueRef::Bool(value)] => Value::Bool(*value),
                     [ValueRef::U64(value)] => Value::U64(*value),
                     [ValueRef::Obj(obj)] if obj.host_type == INTERLOKO_OBJECT_TYPE => {
@@ -2331,16 +2351,22 @@ impl InterlokoHost {
 
     pub(crate) fn class_of_any(&self, value: ValueRef<'_>) -> Result<ClassId, HostError> {
         match value {
-            ValueRef::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
+            ValueRef::I64(_) | ValueRef::I32(_) | ValueRef::U32(_) => {
+                self.builtin_class(BuiltinValueClass::Integer)
+            }
             ValueRef::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),
+            ValueRef::F32(_) => self.builtin_class(BuiltinValueClass::SingleFloat),
             ValueRef::Bool(_) | ValueRef::U64(_) => Ok(OBJECT_CLASS_ID),
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.object(obj)?.class)
             }
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
                 match self.boxed_value(obj)? {
-                    Value::I64(_) => self.builtin_class(BuiltinValueClass::Integer),
+                    Value::I64(_) | Value::I32(_) | Value::U32(_) => {
+                        self.builtin_class(BuiltinValueClass::Integer)
+                    }
                     Value::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),
+                    Value::F32(_) => self.builtin_class(BuiltinValueClass::SingleFloat),
                     Value::Bool(_) | Value::U64(_) => Ok(OBJECT_CLASS_ID),
                     Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
                         Ok(self.object(boxed)?.class)
@@ -2483,6 +2509,9 @@ impl InterlokoHost {
             }
             (ValueKind::I64, ValueRef::I64(value)) => Ok(Value::I64(value)),
             (ValueKind::F64, ValueRef::F64(value)) => Ok(Value::F64(value)),
+            (ValueKind::I32, ValueRef::I32(value)) => Ok(Value::I32(value)),
+            (ValueKind::U32, ValueRef::U32(value)) => Ok(Value::U32(value)),
+            (ValueKind::F32, ValueRef::F32(value)) => Ok(Value::F32(value)),
             (ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
             (ValueKind::Callable, ValueRef::Closure(closure)) => Ok(Value::Closure(closure)),
             (
@@ -2575,7 +2604,7 @@ pub fn class_of_any_signature() -> HostSig {
 }
 
 /// Returns the [`UNBOX_VALUE`] host signature producing `output`
-/// (`ValueType::I64` or `ValueType::F64`).
+/// (`ValueType::I64`, `ValueType::F64` or `ValueType::F32`).
 #[must_use]
 pub fn unbox_value_signature(output: ValueType) -> HostSig {
     HostSig {
@@ -2751,6 +2780,9 @@ fn value_type(kind: ValueKind) -> Option<ValueType> {
         ValueKind::Any => Some(any_type()),
         ValueKind::I64 => Some(ValueType::I64),
         ValueKind::F64 => Some(ValueType::F64),
+        ValueKind::I32 => Some(ValueType::I32),
+        ValueKind::U32 => Some(ValueType::U32),
+        ValueKind::F32 => Some(ValueType::F32),
         ValueKind::Bool => Some(ValueType::Bool),
         ValueKind::String(_)
         | ValueKind::Symbol(_)

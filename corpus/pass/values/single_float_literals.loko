@@ -1,0 +1,17 @@
+// expect: run 0.1f32
+// expect: diagnostics 0
+// expect: dump ast contains number32 1.5f32
+// expect: dump lowered contains const.f32 0.1f32
+// expect: dump tape contains const.f32
+
+// An `f32` suffix writes a `<single-float>`, rounded once from the decimal
+// text. An unsuffixed float literal in a `<single-float>` context is the
+// nearest single-float, so `0.1` there means `0.1f32`, not the double.
+define function gain() => <single-float>
+  1.5f32
+end;
+
+define function main() => <single-float>
+  let tenth :: <single-float> = 0.1;
+  tenth
+end;

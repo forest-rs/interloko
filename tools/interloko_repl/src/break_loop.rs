@@ -382,6 +382,9 @@ fn types_label(types: &[ValueType]) -> String {
         .map(|kind| match kind {
             ValueType::I64 => "<integer>".to_string(),
             ValueType::F64 => "<double-float>".to_string(),
+            ValueType::I32 => "<i32>".to_string(),
+            ValueType::U32 => "<u32>".to_string(),
+            ValueType::F32 => "<single-float>".to_string(),
             ValueType::Bool => "<boolean>".to_string(),
             other => format!("{other:?}"),
         })
@@ -394,6 +397,24 @@ fn parse_value(types: &[ValueType], literal: &str) -> Option<Value> {
     match types {
         [ValueType::F64] => literal.parse::<f64>().ok().map(Value::F64),
         [ValueType::I64] => literal.parse::<i64>().ok().map(Value::I64),
+        [ValueType::I32] => literal
+            .strip_suffix("i32")
+            .unwrap_or(literal)
+            .parse::<i32>()
+            .ok()
+            .map(Value::I32),
+        [ValueType::U32] => literal
+            .strip_suffix("u32")
+            .unwrap_or(literal)
+            .parse::<u32>()
+            .ok()
+            .map(Value::U32),
+        [ValueType::F32] => literal
+            .strip_suffix("f32")
+            .unwrap_or(literal)
+            .parse::<f32>()
+            .ok()
+            .map(Value::F32),
         [ValueType::Bool] => match literal {
             "#t" => Some(Value::Bool(true)),
             "#f" => Some(Value::Bool(false)),

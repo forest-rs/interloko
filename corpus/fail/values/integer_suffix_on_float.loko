@@ -1,0 +1,7 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.literal-suffix-mismatch
+// expect: diagnostic contains write i32 on whole digits
+
+define function main() => <i32>
+  1.5i32
+end;

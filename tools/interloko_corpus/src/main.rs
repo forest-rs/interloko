@@ -434,6 +434,21 @@ fn parse_run_value(text: &str) -> Option<FunctionValue> {
         }
         return Some(FunctionValue::String(decoded));
     }
+    if let Some(digits) = text.strip_suffix("i32") {
+        return digits.parse().ok().map(FunctionValue::I32);
+    }
+    if let Some(digits) = text.strip_suffix("u32") {
+        return digits.parse().ok().map(FunctionValue::U32);
+    }
+    if let Some(digits) = text.strip_suffix("f32") {
+        return match digits {
+            "inf" => Some(f32::INFINITY),
+            "-inf" => Some(f32::NEG_INFINITY),
+            "nan" => Some(f32::NAN),
+            _ => digits.parse().ok(),
+        }
+        .map(FunctionValue::SingleFloat);
+    }
     match text {
         "inf" => return Some(FunctionValue::Float(f64::INFINITY)),
         "-inf" => return Some(FunctionValue::Float(f64::NEG_INFINITY)),
