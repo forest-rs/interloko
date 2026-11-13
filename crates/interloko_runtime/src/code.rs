@@ -4,7 +4,8 @@
 //! what the runtime needs beside the tape: the runtime layout its objects and
 //! dispatch assume, its control metadata, and which tape function implements
 //! each source definition. [`crate::driver::run`] installs the entry unit in
-//! the VM. The VM keeps every unit, so a frame keeps running the code it
+//! the VM, and a chooser may install a replacement while a condition is
+//! unhandled. The VM keeps every unit, so a frame keeps running the code it
 //! entered; definitions resolve to the newest unit that has them.
 //!
 //! Generic sends are late-bound: compiled code asks for a generic's current
@@ -68,6 +69,45 @@ pub enum Definition {
     Generic(GenericFunctionId),
 }
 
+impl Definition {
+    /// Whether frames of this definition can be retried: source functions
+    /// and methods compile with a retry region, dispatchers do not.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Function(_) | Self::Method(_))
+    }
+}
+
+/// Why a unit cannot replace the code a run already installed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CodeMismatch {
+    /// The units disagree on classes, slots, generics or methods, so objects
+    /// and dispatch would change meaning under live frames.
+    Layout,
+    /// A generic's dispatcher takes or returns different kinds, so sends from
+    /// older units could not call it.
+    GenericSignature {
+        /// The generic whose signature changed.
+        generic: GenericFunctionId,
+    },
+}
+
+impl core::fmt::Display for CodeMismatch {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Layout => {
+                formatter.write_str("the runtime layout changed (classes, slots or methods)")
+            }
+            Self::GenericSignature { generic } => {
+                write!(formatter, "generic #{} changed its signature", generic.0)
+            }
+        }
+    }
+}
+
+/// A function's argument and result kinds.
+pub(crate) type Signature = (Vec<ValueType>, Vec<ValueType>);
+
 impl CodeUnit {
     /// The source definition `func` implements, if any.
     #[must_use]
@@ -101,6 +141,77 @@ impl CodeUnit {
                 .map(|(_, func)| *func),
         }
     }
+
+    /// Checks that this unit can take over from `older` in one run.
+    pub fn check_replaces(&self, older: &Self) -> Result<(), CodeMismatch> {
+        if self.layout != older.layout || self.generics.len() != older.generics.len() {
+            return Err(CodeMismatch::Layout);
+        }
+        for (index, (new, old)) in self.generics.iter().zip(&older.generics).enumerate() {
+            if self.signature(*new) != older.signature(*old) {
+                return Err(CodeMismatch::GenericSignature {
+                    generic: GenericFunctionId(index_u32(index)),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Argument and result kinds of `func`.
+    /// Whether `func` here and `other_func` in `other` have the same
+    /// signature and bytecode. Unchanged definitions recompile identically
+    /// unless an edit renumbered what their code refers to.
+    pub(crate) fn same_code(&self, func: FuncId, other: &Self, other_func: FuncId) -> bool {
+        self.signature(func) == other.signature(other_func)
+            && self.bytecode(func).is_some()
+            && self.bytecode(func) == other.bytecode(other_func)
+    }
+
+    fn bytecode(&self, func: FuncId) -> Option<&[u8]> {
+        let program = self.program.program();
+        program
+            .functions
+            .get(func.0 as usize)?
+            .bytecode(program)
+            .ok()
+    }
+
+    pub(crate) fn signature(&self, func: FuncId) -> Option<Signature> {
+        let program = self.program.program();
+        let function = program.functions.get(func.0 as usize)?;
+        let args = program.function_arg_types(function).ok()?;
+        let rets = program.function_ret_types(function).ok()?;
+        Some((
+            args.iter().cloned().collect(),
+            rets.iter().cloned().collect(),
+        ))
+    }
+}
+
+/// Where a suspended frame's code stands among a run's installed units.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrameCode {
+    /// The function the frame runs.
+    pub func: FuncRef,
+    /// The source definition it implements, if it implements one.
+    pub definition: Option<Definition>,
+    /// The function a new call of that definition would run.
+    pub current: Option<FuncRef>,
+    /// Whether that function's code differs from the code this frame runs:
+    /// a newer unit changed the definition under the frame.
+    pub superseded: bool,
+}
+
+impl FrameCode {
+    /// Whether the frame can be retried with its current definition.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.current.is_some()
+            && self
+                .definition
+                .as_ref()
+                .is_some_and(Definition::is_retryable)
+    }
 }
 
 /// The code units one run installed, oldest first.
@@ -112,6 +223,10 @@ pub(crate) struct UnitTable {
 impl UnitTable {
     pub(crate) fn push(&mut self, unit: UnitId, code: Arc<CodeUnit>) {
         self.units.push((unit, code));
+    }
+
+    pub(crate) fn newest(&self) -> Option<&Arc<CodeUnit>> {
+        self.units.last().map(|(_, code)| code)
     }
 
     pub(crate) fn get(&self, unit: UnitId) -> Option<&CodeUnit> {
@@ -127,6 +242,32 @@ impl UnitTable {
             .iter()
             .rev()
             .find_map(|(unit, code)| Some(FuncRef::new(*unit, code.function(definition)?)))
+    }
+
+    pub(crate) fn signature(&self, func: FuncRef) -> Option<Signature> {
+        self.get(func.unit)?.signature(func.func)
+    }
+
+    pub(crate) fn frame(&self, func: FuncRef) -> FrameCode {
+        let definition = self
+            .get(func.unit)
+            .and_then(|code| code.definition(func.func));
+        let current = definition
+            .as_ref()
+            .and_then(|definition| self.current(definition));
+        let superseded = current.is_some_and(|current| {
+            current != func
+                && match (self.get(func.unit), self.get(current.unit)) {
+                    (Some(old), Some(new)) => !old.same_code(func.func, new, current.func),
+                    _ => true,
+                }
+        });
+        FrameCode {
+            func,
+            definition,
+            current,
+            superseded,
+        }
     }
 }
 

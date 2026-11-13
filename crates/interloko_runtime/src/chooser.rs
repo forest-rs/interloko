@@ -7,6 +7,7 @@
 //! and carries it out. A REPL break loop, a scripted chooser or a recorded
 //! oracle are all choosers; [`ReportUnhandled`] is the default.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use execution_tape::program::ValueType;
@@ -15,7 +16,9 @@ use execution_tape::vm::{ActivationId, PausedFrame};
 use interloko_model::ClassId;
 
 use crate::InterlokoHost;
+use crate::code::{CodeUnit, FrameCode};
 use crate::control::{BindingToken, RestartDescriptor};
+use crate::driver::LinkError;
 
 /// One initialized register of a suspended frame.
 #[derive(Clone, Debug)]
@@ -33,6 +36,8 @@ pub struct FrameSnapshot {
     pub frame: PausedFrame,
     /// Registers definitely initialized at the frame's location.
     pub registers: Vec<RegisterSnapshot>,
+    /// The code unit the frame runs and whether newer code replaced it.
+    pub code: FrameCode,
 }
 
 /// A restart a chooser may select.
@@ -55,6 +60,10 @@ pub enum OfferedRestart<'a> {
         /// The signal expression's result types.
         types: &'a [ValueType],
     },
+    /// Unwind to a frame whose [`FrameCode::is_retryable`] holds and call
+    /// the newest version of its function there, with the frame's own
+    /// arguments; its result returns to the frame's caller.
+    Retry,
     /// Unwind the whole run, running every crossed cleanup.
     Abort,
 }
@@ -71,6 +80,8 @@ pub struct UnhandledCondition<'a> {
     pub frames: &'a [FrameSnapshot],
     /// Restarts on offer, innermost handler sites first, then the built-ins.
     pub restarts: &'a [OfferedRestart<'a>],
+    /// Why the chooser's last [`Choice::Install`] was refused, if it was.
+    pub refused: Option<&'a LinkError>,
 }
 
 /// A chooser's answer.
@@ -88,6 +99,15 @@ pub enum Choice {
     },
     /// Resume the signal with values matching [`OfferedRestart::UseValue`].
     UseValue(Vec<Value>),
+    /// Install replacement code while every frame stays suspended, then be
+    /// asked again. Frames keep the code they run; generic sends and retries
+    /// take the newest. The unit must keep the run's runtime layout.
+    Install(Arc<CodeUnit>),
+    /// Invoke [`OfferedRestart::Retry`] on the frame with this activation.
+    Retry {
+        /// The frame to retry.
+        frame: ActivationId,
+    },
     /// Unwind the run, running cleanups.
     Abort,
 }

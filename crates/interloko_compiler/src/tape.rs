@@ -300,6 +300,7 @@ struct AbiTables {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SharedTags {
     restart: TagId,
+    retry: TagId,
 }
 
 impl SharedTags {
@@ -310,7 +311,13 @@ impl SharedTags {
                 &runtime::control::restart_payload().map(Into::into),
             )
             .map_err(build_error)?;
-        Ok(Self { restart })
+        let retry = builder
+            .import_tag(
+                runtime::control::RETRY_TAG,
+                &runtime::control::retry_payload().map(Into::into),
+            )
+            .map_err(build_error)?;
+        Ok(Self { restart, retry })
     }
 }
 
@@ -352,13 +359,17 @@ impl ControlAbi {
                 | lower::Instr::Signal { .. }
                 | lower::Instr::PushExit { .. }
                 | lower::Instr::CheckExit { .. } => uses_control = true,
-                lower::Instr::Throw { tag, .. } => {
+                lower::Instr::Throw { tag, .. } if *tag != lower::ControlTag::Retry => {
                     uses_control = true;
                     note_tag(*tag);
                 }
                 lower::Instr::EnterRegion { catches } => {
                     for catch in catches {
-                        if let lower::Catch::Tag { tag, .. } = catch {
+                        // Every function body catches retries; that alone
+                        // needs no control host calls.
+                        if let lower::Catch::Tag { tag, .. } = catch
+                            && *tag != lower::ControlTag::Retry
+                        {
                             uses_control = true;
                             note_tag(*tag);
                         }
@@ -584,6 +595,7 @@ impl AbiTables {
     fn tag(&self, tag: lower::ControlTag) -> Result<TagId, TapeError> {
         match tag {
             lower::ControlTag::Restart => Ok(self.tags.restart),
+            lower::ControlTag::Retry => Ok(self.tags.retry),
             lower::ControlTag::Exit(signature) => self.control()?.exit_tag(signature),
         }
     }
@@ -1629,6 +1641,7 @@ mod tests {
         let tape = emit(&module).expect("tape emission should succeed");
         let program = tape.program().program();
 
+        // Retry regions add one indirect signature per function signature.
         assert!(has_call_sig(program, &[ValueType::I64], &[ValueType::I64]));
 
         let disassembly = execution_tape::disasm::disassemble_verified(tape.program()).to_string();
@@ -1647,6 +1660,7 @@ mod tests {
         let tape = emit(&module).expect("tape emission should succeed");
         let program = tape.program().program();
 
+        // Retry regions add one indirect signature per function signature.
         assert!(has_call_sig(
             program,
             &[runtime::object_type()],

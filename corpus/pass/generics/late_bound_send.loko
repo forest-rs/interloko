@@ -1,0 +1,25 @@
+// expect: run 9
+// expect: diagnostics 0
+// expect: dump lowered contains resolve-generic g0
+// expect: dump lowered contains region.enter [retry -> bb0]
+// expect: dump tape contains import "interloko.retry"
+// expect: dump tape contains ("interloko.code.dispatcher")
+
+// A generic send asks the runtime for the generic's current dispatcher and
+// calls it indirectly, so a code unit installed while this run is suspended
+// can replace `area`'s methods under it. Every function and method body is
+// a retry region, so a break loop can call it again with newer code.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define generic area(c :: <circle>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  c.radius * c.radius
+end;
+
+define function main() => <integer>
+  area(make(<circle>, radius: 3))
+end;
