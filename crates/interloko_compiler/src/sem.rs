@@ -6667,6 +6667,10 @@ impl Lowering {
         rhs: Expr,
         span: Span,
     ) -> Expr {
+        // `=` lowers its operands without a numeric hint, so a literal
+        // adopts a 32-bit partner's type here, as it does for `<`.
+        let rhs = adapt_literal(rhs, Some(&[self.expr_kind(&lhs)]));
+        let lhs = adapt_literal(lhs, Some(&[self.expr_kind(&rhs)]));
         let lhs_kind = self.expr_kind(&lhs);
         let rhs_kind = self.expr_kind(&rhs);
         if Self::dispatches_numerically(&[lhs_kind, rhs_kind]) {

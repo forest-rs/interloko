@@ -1,0 +1,13 @@
+// expect: run #t
+// expect: diagnostics 0
+// expect: dump lowered contains u32.eq
+// expect: dump lowered contains f32.eq
+
+// `=` treats a literal beside a 32-bit operand like `<` and `+` do: it
+// adopts the operand's type, so `level = 5` compares two `<u32>`s and
+// `gain = 0.1` compares with `0.1f32`, the value the program wrote.
+define function main() => <boolean>
+  let level :: <u32> = 5;
+  let gain = 0.1f32;
+  if level = 5 then gain = 0.1 else #f end
+end;
