@@ -292,8 +292,9 @@ pub struct TracedInstruction<'a> {
     pub index: usize,
     /// Executed instruction.
     pub location: TracedLocation<'a>,
-    /// Raw opcode byte.
-    pub opcode: u8,
+    /// Opcode code: the opcode byte, or `prefix << 8 | byte` for a
+    /// prefixed opcode.
+    pub opcode: u16,
     /// Actual successor, including call and return transitions.
     pub next: Option<TracedLocation<'a>>,
     /// Outcome of this attempt, separate from the invocation outcome.
@@ -303,10 +304,10 @@ pub struct TracedInstruction<'a> {
 }
 
 impl TracedInstruction<'_> {
-    /// Returns the opcode mnemonic, or `"?"` for an unknown byte.
+    /// Returns the opcode mnemonic, or `"?"` for an unknown code.
     #[must_use]
     pub fn mnemonic(&self) -> &'static str {
-        Opcode::from_u8(self.opcode).map_or("?", Opcode::mnemonic)
+        Opcode::from_code(self.opcode).map_or("?", Opcode::mnemonic)
     }
 }
 
@@ -662,7 +663,10 @@ impl<'a> ExecutionTraceView<'a> {
             RecordedValue::Bool(false) => out.push_str("#f"),
             RecordedValue::I64(value) => write!(out, "{value}")?,
             RecordedValue::U64(value) => write!(out, "{value}u")?,
+            RecordedValue::I32(value) => write!(out, "{value}i32")?,
+            RecordedValue::U32(value) => write!(out, "{value}u32")?,
             RecordedValue::F64(bits) => write!(out, "{:?}", f64::from_bits(*bits))?,
+            RecordedValue::F32(bits) => write!(out, "{:?}f32", f32::from_bits(*bits))?,
             RecordedValue::Decimal(value) => write!(out, "{value:?}")?,
             RecordedValue::Bytes(bytes) => write!(out, "#bytes[{}]", bytes.len())?,
             RecordedValue::Str(text) => write!(out, "{text:?}")?,

@@ -188,7 +188,7 @@ dependencies = [
 [[package]]
 name = "execution_tape"
 version = "0.1.0"
-source = "git+https://github.com/forest-rs/execution?rev=ef4c637ceebcc206206da37406fb1ebc91c02e7a#ef4c637ceebcc206206da37406fb1ebc91c02e7a"
+source = "git+https://github.com/forest-rs/execution?rev=33b2838b7cb6002d7c250888b97fe3e9f57ec99b#33b2838b7cb6002d7c250888b97fe3e9f57ec99b"
 
 [[package]]
 name = "fastrand"
