@@ -43,9 +43,12 @@
 //!
 //! The pass has no type representation of its own: [`StaticType`] is a
 //! [`ValueKind`] plus an optional exact class. Scalars reach it through their
-//! classes: [`ValueKind::F64`] is bounded by `<double-float>` via
-//! [`sem::Module::value_kind_class`], and that class is exact because nothing
-//! inherits from it. Abstract numeric classes (`<number>`, `<real>`,
+//! classes: [`ValueKind::F64`] is bounded by `<double-float>` and
+//! [`ValueKind::F32`] by `<single-float>` via
+//! [`sem::Module::value_kind_class`], and those classes are exact because
+//! nothing inherits from them. [`ValueKind::I32`] and [`ValueKind::U32`] are
+//! limited `<integer>` types rather than classes, so they are bounded by
+//! `<integer>`, which is what their values are. Abstract numeric classes (`<number>`, `<real>`,
 //! `<rational>`, `<float>`) have built-in subclasses, so they are only ever upper bounds.
 //! A new scalar kind needs the same class mapping in
 //! [`sem::Module::value_kind_class`] and [`sem::Module::builtin_value_kind`];
