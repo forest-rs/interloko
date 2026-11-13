@@ -1,0 +1,11 @@
+// expect: run "1.5 7"
+// expect: diagnostics 0
+// expect: dump lowered contains f64.min
+
+// Mixed float formats widen to binary64 as in arithmetic, and the integer
+// text functions take every integer type.
+define function main() => <string>
+  let wide :: <double-float> = 2.5;
+  let count :: <u32> = 7;
+  concatenate(concatenate(float-to-string(min(1.5f32, wide)), " "), integer-to-string(count))
+end;

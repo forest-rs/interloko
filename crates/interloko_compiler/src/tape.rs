@@ -782,6 +782,11 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::float_to_string_signature(),
         ),
         (
+            RuntimeOp::SingleFloatToString,
+            runtime::FLOAT_TO_STRING,
+            runtime::single_float_to_string_signature(),
+        ),
+        (
             RuntimeOp::IntegerToString,
             runtime::INTEGER_TO_STRING,
             runtime::integer_to_string_signature(),

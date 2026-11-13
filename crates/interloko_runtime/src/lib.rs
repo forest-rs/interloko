@@ -30,7 +30,8 @@ use execution_tape::host::{
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 use interloko_model::{
-    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID, SlotId,
+    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID,
+    SingleFloatBits, SlotId,
 };
 
 /// Host object type used for Interloko runtime objects.
@@ -275,6 +276,15 @@ impl FloatFunction {
 pub fn float_to_string_signature() -> HostSig {
     HostSig {
         args: vec![ValueType::F64],
+        rets: vec![object_type()],
+    }
+}
+
+/// Returns the host signature for [`FLOAT_TO_STRING`] on a `<single-float>`.
+#[must_use]
+pub fn single_float_to_string_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::F32],
         rets: vec![object_type()],
     }
 }
@@ -2075,10 +2085,14 @@ impl Host for InterlokoHost {
                 Ok(0)
             }
             FLOAT_TO_STRING => {
-                let [ValueRef::F64(value)] = args else {
-                    return Err(HostError::Failed);
+                let text = match args {
+                    [ValueRef::F64(value)] => alloc::format!("{}", FloatBits::from_f64(*value)),
+                    [ValueRef::F32(value)] => {
+                        alloc::format!("{}", SingleFloatBits::from_f32(*value))
+                    }
+                    _ => return Err(HostError::Failed),
                 };
-                rets[0] = self.push_string(alloc::format!("{}", FloatBits::from_f64(*value)))?;
+                rets[0] = self.push_string(text)?;
                 Ok(0)
             }
             INTEGER_TO_STRING => {

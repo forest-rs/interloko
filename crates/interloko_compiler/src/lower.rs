@@ -230,6 +230,8 @@ pub enum RuntimeOp {
     VectorRef,
     /// Renders a float as literal text.
     FloatToString,
+    /// Renders a `<single-float>` as suffixed literal text.
+    SingleFloatToString,
     /// Renders an integer in decimal.
     IntegerToString,
     /// Joins two strings into a new string.
@@ -4493,15 +4495,21 @@ impl<'module> BodyLowering<'module> {
         result_kind: sem::ValueKind,
         span: Span,
     ) -> Result<Value, LowerError> {
-        let op = runtime_op_for_intrinsic(intrinsic);
+        let mut op = runtime_op_for_intrinsic(intrinsic);
         let mut regs = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let value = self.lower_expr(arg)?;
             let value = if runtime_op_arg_is_any(op, index) {
                 self.box_any(value, arg.span())?
+            } else if matches!(value.kind, ValueKind::I32 | ValueKind::U32) {
+                // Integer arguments are `<integer>`s.
+                self.widen_integer(value, arg.span())
             } else {
                 value
             };
+            if op == RuntimeOp::FloatToString && value.kind == ValueKind::F32 {
+                op = RuntimeOp::SingleFloatToString;
+            }
             regs.push(value.reg);
         }
         let result = self.alloc(self.value_kind(result_kind)?);
@@ -5489,10 +5497,17 @@ impl<'module> BodyLowering<'module> {
         args: &[sem::Expr],
         span: Span,
     ) -> Result<Value, LowerError> {
-        let mut regs = Vec::with_capacity(args.len());
+        let mut values = Vec::with_capacity(args.len());
         for arg in args {
-            regs.push(self.lower_expr(arg)?.reg);
+            values.push(self.lower_expr(arg)?);
         }
+        if values
+            .first()
+            .is_some_and(|value| value.kind == ValueKind::F32)
+        {
+            return self.lower_single_float_call(builtin, &values, span);
+        }
+        let regs = values.iter().map(|value| value.reg).collect::<Vec<_>>();
         let operand = |index: usize| {
             regs.get(index)
                 .copied()
@@ -5592,6 +5607,78 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(result)
+    }
+
+    /// Lowers a float builtin on `<single-float>` arguments: inline `f32`
+    /// instructions where the tape has them, and otherwise the binary64
+    /// library function on exactly widened arguments, rounded once back.
+    fn lower_single_float_call(
+        &mut self,
+        builtin: sem::FloatBuiltin,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let operand = |index: usize| {
+            args.get(index)
+                .map(|value| value.reg)
+                .ok_or_else(|| invalid_semantic("float builtin argument is missing"))
+        };
+        let unary = |this: &mut Self, op| -> Result<Value, LowerError> {
+            Ok(this.num32_unary(op, operand(0)?, ValueKind::F32, span))
+        };
+        let binary = |this: &mut Self, op| -> Result<Value, LowerError> {
+            Ok(this.num32_binary(op, operand(0)?, operand(1)?, ValueKind::F32, span))
+        };
+        match builtin {
+            sem::FloatBuiltin::Abs => unary(self, Num32UnaryOp::F32Abs),
+            sem::FloatBuiltin::Floor => unary(self, Num32UnaryOp::F32Floor),
+            sem::FloatBuiltin::Ceiling => unary(self, Num32UnaryOp::F32Ceil),
+            sem::FloatBuiltin::Round => unary(self, Num32UnaryOp::F32Nearest),
+            sem::FloatBuiltin::Truncate => unary(self, Num32UnaryOp::F32Trunc),
+            sem::FloatBuiltin::Sqrt => unary(self, Num32UnaryOp::F32Sqrt),
+            sem::FloatBuiltin::Min => binary(self, Num32BinaryOp::F32Min),
+            sem::FloatBuiltin::Max => binary(self, Num32BinaryOp::F32Max),
+            sem::FloatBuiltin::Remainder => binary(self, Num32BinaryOp::F32Rem),
+            sem::FloatBuiltin::IsNan => {
+                // NaN is the only value unequal to itself.
+                let x = operand(0)?;
+                Ok(self.num32_binary(Num32BinaryOp::F32Ne, x, x, ValueKind::Bool, span))
+            }
+            sem::FloatBuiltin::IsFinite => {
+                // `abs(x) < inf` is false exactly for infinities and NaN.
+                let magnitude = unary(self, Num32UnaryOp::F32Abs)?;
+                let infinity = self.alloc(ValueKind::F32);
+                self.instructions.push(Instr::Const32 {
+                    dst: infinity.reg,
+                    value: sem::Number32::F32(sem::SingleFloatBits::from_f32(f32::INFINITY)),
+                    span,
+                });
+                Ok(self.num32_binary(
+                    Num32BinaryOp::F32Lt,
+                    magnitude.reg,
+                    infinity.reg,
+                    ValueKind::Bool,
+                    span,
+                ))
+            }
+            sem::FloatBuiltin::Library(function) => {
+                let wide = args
+                    .iter()
+                    .map(|arg| {
+                        self.num32_unary(Num32UnaryOp::F32ToF64, arg.reg, ValueKind::F64, span)
+                            .reg
+                    })
+                    .collect();
+                let result = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::FloatCall {
+                    dst: result.reg,
+                    function,
+                    args: wide,
+                    span,
+                });
+                Ok(self.num32_unary(Num32UnaryOp::F64ToF32, result.reg, ValueKind::F32, span))
+            }
+        }
     }
 
     /// Lowers an exact binary64-to-integer conversion such as
@@ -5973,6 +6060,7 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::MethodMetaObject
         | RuntimeOp::SlotDescriptorObject
         | RuntimeOp::FloatToString
+        | RuntimeOp::SingleFloatToString
         | RuntimeOp::IntegerToString
         | RuntimeOp::Concatenate => false,
     }
@@ -6193,7 +6281,7 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::MethodSpecializers => "method-specializers",
         RuntimeOp::VectorSize => "vector-size",
         RuntimeOp::VectorRef => "vector-ref",
-        RuntimeOp::FloatToString => "float-to-string",
+        RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",
     }

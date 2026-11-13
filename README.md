@@ -157,7 +157,10 @@ The current slices include:
   only ever explicit: `+%`, `-%` and `*%` compute modulo 2^32 on two
   operands of one fixed-width type. `logand`, `logior` and `logxor` are
   exact on every integer type, and `shift-left`/`shift-right` shift an
-  `<i32>` or `<u32>` by 0 to 31 bits (other counts are rejected or trap);
+  `<i32>` or `<u32>` by 0 to 31 bits (other counts are rejected or trap).
+  The float library takes single-floats too, inline in binary32 where the
+  tape has an instruction and through the binary64 library (rounded once
+  back) otherwise;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
