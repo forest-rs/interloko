@@ -1,0 +1,30 @@
+// expect: run 23
+// expect: diagnostics 0
+// expect: dump lowered contains i32.to_i64
+
+// 32-bit types flow through every call form: an `<i32>` widens where an
+// `<integer>` is expected (returns, locals, generic parameters), closures
+// declare 32-bit parameters, and a literal argument adopts the parameter's
+// type for direct, generic, and `apply`ed calls alike.
+define generic total(x :: <integer>) => <integer>;
+
+define method total(x :: <integer>) => <integer>
+  x
+end;
+
+define function widen(x :: <i32>) => <integer>
+  x
+end;
+
+define function pick(c :: <boolean>) => <u32>
+  if c then 1u32 else 2 end
+end;
+
+define function main() => <integer>
+  let w :: <integer> = 5i32;
+  let bump = function (x :: <u32>) => <u32> x +% 1 end;
+  let twice :: callable(<single-float>) => <single-float> =
+    function (y :: <single-float>) => <single-float> y * 2.0 end;
+  w + widen(3) + total(4i32) + as(<integer>, pick(#f))
+    + as(<integer>, bump(3)) + as(<integer>, apply(bump, 4)) + as(<integer>, twice(0.0))
+end;
