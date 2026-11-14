@@ -7,15 +7,22 @@
 //! exactly. Each binding records the VM activation that established it, so
 //! restarts can be attributed to frames.
 //!
-//! The VM owns frames, regions and unwinding. This module owns the language
-//! data; [`crate::driver`] services the host requests that change it.
+//! A signal searches those bindings through host requests, running guards
+//! as ordinary guest calls on the signalling stack. A condition no handler
+//! accepts is then suspended on a condition tag ([`ControlLayout::conditions`])
+//! and reaches the embedding as an `execution_tape` suspension, which the
+//! driver answers with the chooser's restart.
+//!
+//! The VM owns frames, regions, unwinding and suspensions. This module owns
+//! the language data; [`crate::driver`] services the host requests that change
+//! it and answers the suspensions.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
 use execution_tape::host::HostSig;
-use execution_tape::program::ValueType;
+use execution_tape::program::{TagId, ValueType};
 use execution_tape::value::{UnitId, Value};
 use execution_tape::vm::ActivationId;
 use interloko_model::ClassId;
@@ -24,11 +31,22 @@ use crate::object_type;
 
 /// Host symbol that pushes a condition handler binding and returns its token.
 pub const CONDITION_PUSH_HANDLER: &str = "interloko.condition.push_handler";
-/// Host symbol that signals a condition.
+/// Host symbol that starts a handler search for a signalled condition.
 ///
-/// A selected handler's restart is raised at the call. Its results are the
-/// values a resuming choice supplies.
+/// A selected handler's restart is raised at the call. Otherwise it returns
+/// `#t` when a guarded handler applies and its guard must run first
+/// ([`CONDITION_GUARD`]), or `#f` when no handler applies and the signal
+/// suspends on its condition tag.
 pub const CONDITION_SIGNAL: &str = "interloko.condition.signal";
+/// Host symbol that returns the guard the signalling activation's search is
+/// waiting on. The guest calls it with the condition.
+pub const CONDITION_GUARD: &str = "interloko.condition.guard";
+/// Host symbol that hands the search the guard's answer and continues it,
+/// with the same outcomes as [`CONDITION_SIGNAL`].
+pub const CONDITION_GUARD_RESULT: &str = "interloko.condition.guard_result";
+/// Host symbol that ends the signalling activation's search because its
+/// guard exited by an exception, which the guest raises again afterwards.
+pub const CONDITION_GUARD_UNWOUND: &str = "interloko.condition.guard_unwound";
 /// Host symbol that pops the innermost dynamic binding by token.
 pub const CONTROL_POP: &str = "interloko.control.pop";
 /// Host symbol that pushes a block exit point and returns its token.
@@ -53,6 +71,9 @@ pub fn is_control_symbol(symbol: &str) -> bool {
         symbol,
         CONDITION_PUSH_HANDLER
             | CONDITION_SIGNAL
+            | CONDITION_GUARD
+            | CONDITION_GUARD_RESULT
+            | CONDITION_GUARD_UNWOUND
             | CONTROL_POP
             | CONTROL_PUSH_EXIT
             | CONTROL_CHECK_EXIT
@@ -105,6 +126,11 @@ pub struct ControlLayout {
     /// Restart sites, indexed by the descriptor operand of
     /// [`CONDITION_PUSH_HANDLER`].
     pub restarts: Vec<RestartDescriptor>,
+    /// The program's condition tags: an unhandled signal suspends on one,
+    /// with payload `(condition)` and its own result types as the tag's
+    /// results. No guest code handles them, so each suspension reaches the
+    /// driver, which answers it with the chooser's restart.
+    pub conditions: Vec<TagId>,
 }
 
 /// What a dynamic binding establishes.
@@ -173,6 +199,8 @@ pub struct ControlStats {
     pub max_depth: usize,
     /// Conditions signalled.
     pub signals: u64,
+    /// Signalled conditions no handler accepted, answered by the chooser.
+    pub unhandled: u64,
     /// Bindings inspected while searching for handlers.
     pub bindings_searched: u64,
     /// Generic sends the driver dispatched.
@@ -244,6 +272,10 @@ impl ControlState {
         self.stats.signals = self.stats.signals.saturating_add(1);
     }
 
+    pub(crate) fn note_unhandled(&mut self) {
+        self.stats.unhandled = self.stats.unhandled.saturating_add(1);
+    }
+
     pub(crate) fn note_send(&mut self, cache_hit: bool) {
         self.stats.sends = self.stats.sends.saturating_add(1);
         if cache_hit {
@@ -276,16 +308,49 @@ pub fn push_guarded_handler_signature() -> HostSig {
     }
 }
 
-/// Host signature for [`CONDITION_SIGNAL`]: `(condition) -> resumption values`.
-///
-/// `rets` are the signal expression's result types, which is also the
-/// signature a resuming choice must supply.
+/// Host signature for [`CONDITION_SIGNAL`]: `(condition) -> guard pending`.
 #[must_use]
-pub fn signal_signature(rets: Vec<ValueType>) -> HostSig {
+pub fn signal_signature() -> HostSig {
     HostSig {
         args: alloc::vec![object_type()],
-        rets,
+        rets: alloc::vec![ValueType::Bool],
     }
+}
+
+/// Host signature for [`CONDITION_GUARD`]: `() -> guard`. The guard takes
+/// the condition and returns `<boolean>`.
+#[must_use]
+pub fn guard_signature() -> HostSig {
+    HostSig {
+        args: alloc::vec![],
+        rets: alloc::vec![ValueType::Closure],
+    }
+}
+
+/// Host signature for [`CONDITION_GUARD_RESULT`]: `(accepted) -> guard
+/// pending`.
+#[must_use]
+pub fn guard_result_signature() -> HostSig {
+    HostSig {
+        args: alloc::vec![ValueType::Bool],
+        rets: alloc::vec![ValueType::Bool],
+    }
+}
+
+/// Host signature for [`CONDITION_GUARD_UNWOUND`]: `() -> ()`.
+#[must_use]
+pub fn guard_unwound_signature() -> HostSig {
+    HostSig {
+        args: alloc::vec![],
+        rets: alloc::vec![],
+    }
+}
+
+/// Payload types of a condition tag: `(condition)`. Its results are the
+/// signal expression's result types, which a resuming choice supplies.
+#[must_use]
+pub fn condition_payload() -> [ValueType; 1] {
+    [object_type()]
 }
 
 /// Host signature for [`CONTROL_POP`]: `(token) -> ()`.

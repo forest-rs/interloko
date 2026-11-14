@@ -1,0 +1,39 @@
+// expect: run 105
+// expect: diagnostics 0
+
+// A guard can leave its search by exiting to a block in the signalling
+// function. That ends the search: the handlers established later in the
+// same activation are not masked by it, so `probe`'s signal is answered by
+// the innermost <probe> handler rather than the outer one.
+
+define class <problem> (<object>)
+end;
+
+define class <probe> (<object>)
+end;
+
+define class <other> (<object>)
+end;
+
+define function probe() => <integer>
+  signal(make(<probe>))
+end;
+
+define function main() => <integer>
+  handle
+    handle
+      (block (done)
+         handle signal(make(<problem>)) with restart <problem> when done(5) = 0 => 1 end
+       end)
+      + (handle
+           handle probe() with restart <probe> 100 end
+         with restart <other>
+           3
+         end)
+    with restart <other>
+      2
+    end
+  with restart <probe>
+    7
+  end
+end;
