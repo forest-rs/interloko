@@ -1046,6 +1046,13 @@ pub(crate) fn is_name(text: &str) -> bool {
     bytes.first().is_some_and(|first| is_name_start(*first)) && name_end(bytes, 0) == bytes.len()
 }
 
+/// Returns true when `text` is exactly one numeric literal under the base
+/// grammar's `number` rule, such as `1`, `2.5e3`, or `7i32`.
+pub(crate) fn is_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_digit) && lex_number_end(bytes, 0) == bytes.len()
+}
+
 fn lex_type_name_end(bytes: &[u8], start: usize) -> Option<usize> {
     let name_start = start + 1;
     if !bytes

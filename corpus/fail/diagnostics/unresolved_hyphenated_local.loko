@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unresolved-hyphenated-local
+// expect: diagnostic contains unresolved local `x-1`
+// expect: diagnostic contains did you mean `x - 1`?
+
+// A hyphen is a name character, so `x-1` names a local that does not exist;
+// it does not subtract. Because `x` is bound, the diagnostic suggests the
+// spaced form.
+define function main()
+  let x = 10;
+  x-1
+end;

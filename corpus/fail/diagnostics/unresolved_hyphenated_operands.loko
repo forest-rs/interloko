@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unresolved-hyphenated-local
+// expect: diagnostic contains did you mean `a - b`?
+
+// Both sides of the hyphen are bound, so `a-b` reads as a missing space.
+define function main()
+  let a = 7;
+  let b = 2;
+  a-b
+end;
