@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic code syntax.expected-token
+
+// `a-%b` is the name `a-` followed by a stray `%`, not `a -% b`: a hyphen
+// next to a name always joins it.
+define function main() => <u32>
+  let a :: <u32> = 7;
+  let b :: <u32> = 2;
+  a-%b
+end;

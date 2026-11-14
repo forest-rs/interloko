@@ -2,6 +2,7 @@
 "uncategorized" = "uncategorized diagnostic"
 "syntax.expected-expression" = "expected expression"
 "syntax.expected-token" = "expected { $expected }"
+"syntax.lexer-disagreement" = "internal error: the grammar read `{ $grammar }` but the lexer read `{ $lexer }`"
 "ast.integer-literal-out-of-range" = "integer literal is out of range"
 "ast.float-literal-out-of-range" = "float literal is too large to be a finite float"
 "ast.literal-suffix-mismatch" = "an integer suffix needs an integer literal; write { $suffix } on whole digits, or use f32"

@@ -238,6 +238,40 @@ impl Token {
     pub fn text(self, source: &str) -> &str {
         &source[self.span.start..self.span.end]
     }
+
+    /// Returns the span of the name this token carries, if any.
+    ///
+    /// Identifiers and reserved words are names in their entirety. A symbol
+    /// `#name`, a keyword symbol `#:name`, and a type name `<name>` carry a
+    /// name inside their punctuation. Other tokens carry no name.
+    pub(crate) const fn name_span(self) -> Option<Span> {
+        let Span { start, end } = self.span;
+        match self.kind {
+            TokenKind::Ident
+            | TokenKind::Define
+            | TokenKind::Function
+            | TokenKind::Class
+            | TokenKind::Slot
+            | TokenKind::Constant
+            | TokenKind::Generic
+            | TokenKind::Method
+            | TokenKind::Let
+            | TokenKind::If
+            | TokenKind::Then
+            | TokenKind::Else
+            | TokenKind::Handle
+            | TokenKind::With
+            | TokenKind::Restart
+            | TokenKind::When
+            | TokenKind::Block
+            | TokenKind::Cleanup
+            | TokenKind::End => Some(self.span),
+            TokenKind::Symbol => Some(Span::new(start + 1, end)),
+            TokenKind::Keyword => Some(Span::new(start + 2, end)),
+            TokenKind::TypeName => Some(Span::new(start + 1, end - 1)),
+            _ => None,
+        }
+    }
 }
 
 /// CST node kind.
@@ -856,25 +890,19 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'#' if matches!(bytes.get(pos + 1), Some(b't' | b'f'))
                 && bytes
                     .get(pos + 2)
-                    .is_none_or(|_| !is_ident_continue(bytes, pos + 2)) =>
+                    .is_none_or(|next| !is_name_continue(*next)) =>
             {
                 pos += 2;
                 TokenKind::Bool
             }
             b'#' if bytes.get(pos + 1) == Some(&b':')
-                && bytes.get(pos + 2).is_some_and(|next| is_ident_start(*next)) =>
+                && bytes.get(pos + 2).is_some_and(|next| is_name_start(*next)) =>
             {
-                pos += 3;
-                while pos < bytes.len() && is_ident_continue(bytes, pos) {
-                    pos += 1;
-                }
+                pos = name_end(bytes, pos + 2);
                 TokenKind::Keyword
             }
-            b'#' if bytes.get(pos + 1).is_some_and(|next| is_ident_start(*next)) => {
-                pos += 2;
-                while pos < bytes.len() && is_ident_continue(bytes, pos) {
-                    pos += 1;
-                }
+            b'#' if bytes.get(pos + 1).is_some_and(|next| is_name_start(*next)) => {
+                pos = name_end(bytes, pos + 1);
                 TokenKind::Symbol
             }
             b'/' if bytes.get(pos + 1) == Some(&b'/') => {
@@ -900,11 +928,8 @@ pub fn lex(source: &str) -> Vec<Token> {
                 pos = lex_number_end(bytes, pos);
                 TokenKind::Number
             }
-            b if is_ident_start(b) => {
-                pos += 1;
-                while pos < bytes.len() && is_ident_continue(bytes, pos) {
-                    pos += 1;
-                }
+            b if is_name_start(b) => {
+                pos = name_end(bytes, pos);
                 match &source[start..pos] {
                     "define" => TokenKind::Define,
                     "function" => TokenKind::Function,
@@ -951,8 +976,9 @@ pub const NUMBER_SUFFIXES: [&str; 3] = ["i32", "u32", "f32"];
 /// fraction that must have digits on both sides of the `.` (so `x.radius`
 /// style postfix access after a number never becomes part of the literal),
 /// then an optional exponent that must contain at least one digit, then an
-/// optional type suffix from [`NUMBER_SUFFIXES`] that does not run on into
-/// a longer name.
+/// optional type suffix from [`NUMBER_SUFFIXES`]. Like the grammar, the
+/// suffix is taken whatever follows it: `7i32-1` is `7i32 - 1`, because a
+/// name cannot start inside a number.
 fn lex_number_end(bytes: &[u8], start: usize) -> usize {
     let digits_end = |mut pos: usize| {
         while pos < bytes.len() && bytes[pos].is_ascii_digit() {
@@ -975,44 +1001,61 @@ fn lex_number_end(bytes: &[u8], start: usize) -> usize {
     }
     for suffix in NUMBER_SUFFIXES {
         let end = pos + suffix.len();
-        if bytes.get(pos..end) == Some(suffix.as_bytes())
-            && (end == bytes.len() || !is_ident_continue(bytes, end))
-        {
+        if bytes.get(pos..end) == Some(suffix.as_bytes()) {
             return end;
         }
     }
     pos
 }
 
-fn is_ident_start(byte: u8) -> bool {
+/// Returns true when `byte` can start a name.
+///
+/// Mirrors the first character class of the base grammar's `name` rule,
+/// `[$A-Za-z_]`.
+pub(crate) const fn is_name_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$'
 }
 
-fn lex_type_name_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut pos = start + 1;
-    let first = *bytes.get(pos)?;
-    if !is_ident_start(first) {
-        return None;
-    }
-    pos += 1;
-    while pos < bytes.len()
-        && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_' || bytes[pos] == b'-')
-    {
-        pos += 1;
-    }
-    if bytes.get(pos) == Some(&b'>') {
-        Some(pos + 1)
-    } else {
-        None
-    }
+/// Returns true when `byte` can continue a name.
+///
+/// Mirrors the base grammar's `[A-Za-z0-9_?-]`. As in Dylan, a hyphen is
+/// always a name character: `x-1`, `a-b`, and `x-` are single names, so
+/// subtraction is written with spaces, `x - 1`.
+pub(crate) const fn is_name_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'?' | b'-')
 }
 
-fn is_ident_continue(bytes: &[u8], pos: usize) -> bool {
-    let byte = bytes[pos];
-    byte.is_ascii_alphanumeric()
-        || byte == b'_'
-        || byte == b'?'
-        || (byte == b'-' && bytes.get(pos + 1).is_some_and(|next| is_ident_start(*next)))
+/// Returns the end of the name whose first byte is at `start`.
+///
+/// The caller has checked that `bytes[start]` is a name start. Every name
+/// boundary in the lexer goes through here, so the lexer cannot split a name
+/// anywhere the grammar would not.
+fn name_end(bytes: &[u8], start: usize) -> usize {
+    debug_assert!(is_name_start(bytes[start]));
+    let mut pos = start + 1;
+    while pos < bytes.len() && is_name_continue(bytes[pos]) {
+        pos += 1;
+    }
+    pos
+}
+
+/// Returns true when `text` is exactly one name under the base grammar's
+/// `name` rule.
+pub(crate) fn is_name(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.first().is_some_and(|first| is_name_start(*first)) && name_end(bytes, 0) == bytes.len()
+}
+
+fn lex_type_name_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let name_start = start + 1;
+    if !bytes
+        .get(name_start)
+        .is_some_and(|first| is_name_start(*first))
+    {
+        return None;
+    }
+    let pos = name_end(bytes, name_start);
+    (bytes.get(pos) == Some(&b'>')).then_some(pos + 1)
 }
 
 #[cfg(test)]
@@ -1097,7 +1140,70 @@ mod tests {
             numbers("7i32 7u32 1.5f32 2e3f32 5f32"),
             ["7i32", "7u32", "1.5f32", "2e3f32", "5f32"]
         );
-        // A suffix that runs on into a longer name is not a suffix.
-        assert_eq!(numbers("7i320 7u32x 7i64"), ["7", "7", "7"]);
+        // As in the grammar, a suffix ends the literal whatever follows it,
+        // so `7i32-1` subtracts; only a whole suffix counts.
+        assert_eq!(numbers("7i32-1 7i64"), ["7i32", "1", "7"]);
+    }
+
+    fn texts(source: &str) -> Vec<(TokenKind, &str)> {
+        lex(source)
+            .into_iter()
+            .filter(|token| !token.kind.is_trivia())
+            .map(|token| (token.kind, token.text(source)))
+            .collect()
+    }
+
+    #[test]
+    fn lex_hyphens_as_name_characters() {
+        use TokenKind::{Ident, Keyword, Minus, MinusPercent, Number, Symbol, TypeName};
+        assert_eq!(texts("x-1"), [(Ident, "x-1")]);
+        assert_eq!(
+            texts("a-b x- y--z"),
+            [(Ident, "a-b"), (Ident, "x-"), (Ident, "y--z")]
+        );
+        assert_eq!(texts("x - 1"), [(Ident, "x"), (Minus, "-"), (Number, "1")]);
+        assert_eq!(texts("x -1"), [(Ident, "x"), (Minus, "-"), (Number, "1")]);
+        assert_eq!(
+            texts("a -% b"),
+            [(Ident, "a"), (MinusPercent, "-%"), (Ident, "b")]
+        );
+        assert_eq!(
+            texts("a-%b"),
+            [(Ident, "a-"), (TokenKind::Error, "%"), (Ident, "b")]
+        );
+        assert_eq!(
+            texts("#foo-1 #:foo-1 #t-1 <foo-1?>"),
+            [
+                (Symbol, "#foo-1"),
+                (Keyword, "#:foo-1"),
+                (Symbol, "#t-1"),
+                (TypeName, "<foo-1?>"),
+            ]
+        );
+        assert_eq!(texts("end-1"), [(Ident, "end-1")]);
+    }
+
+    #[test]
+    fn name_spans_strip_token_punctuation() {
+        fn name(source: &str) -> Option<&str> {
+            let token = lex(source)[0];
+            token.name_span().map(|span| &source[span.start..span.end])
+        }
+        assert_eq!(name("x-1"), Some("x-1"));
+        assert_eq!(name("end"), Some("end"));
+        assert_eq!(name("#foo-1"), Some("foo-1"));
+        assert_eq!(name("#:foo-1"), Some("foo-1"));
+        assert_eq!(name("<foo-1>"), Some("foo-1"));
+        assert_eq!(name("12"), None);
+    }
+
+    #[test]
+    fn is_name_matches_the_grammar_name_rule() {
+        for name in ["x", "x-1", "x-", "$answer", "_tmp", "nan?", "a--b"] {
+            assert!(is_name(name), "{name}");
+        }
+        for text in ["", "1x", "-x", "x y", "x.y", "x%", "?x"] {
+            assert!(!is_name(text), "{text}");
+        }
     }
 }

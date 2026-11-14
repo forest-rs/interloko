@@ -27,6 +27,7 @@ pub(super) fn parse_file(
     match report.root {
         Some(root) => {
             let tokens = syntax::lex(source);
+            let disagreements = lexer_disagreements(&root, &tokens, source);
             let projector = BaseLokoCstProjector {
                 source_file,
                 source,
@@ -34,6 +35,7 @@ pub(super) fn parse_file(
             };
             let parse_tree = root.to_owned_tree();
             let mut syntax = projector.project(&root);
+            syntax.diagnostics.extend(disagreements);
             syntax.diagnostics.extend(
                 report
                     .errors
@@ -61,6 +63,58 @@ pub(super) fn parse_file(
             }
         }
     }
+}
+
+/// Reports every name or number that the lexer split differently from the
+/// grammar.
+///
+/// The grammar decides what source each `name` and `number` node covers, but
+/// the CST and AST read that text from lexer tokens. Were the two ever to
+/// disagree, the compiler would silently use different text than the grammar
+/// matched (historically `x` for the name `x-1`). The lexer shares the
+/// grammar's name and number rules, so this should never fire; when it does,
+/// it is an internal error that blocks compilation instead of a miscompile.
+fn lexer_disagreements(
+    root: &InterpretedRuleNode<'_>,
+    tokens: &[Token],
+    source: &str,
+) -> Vec<Diagnostic> {
+    root.walk()
+        .filter_map(|node| {
+            let span = Span::from(node.span);
+            let token = token_at(tokens, span.start);
+            let lexed = match node.name()? {
+                "name" => token.and_then(Token::name_span),
+                "number" => token
+                    .filter(|token| token.kind == TokenKind::Number)
+                    .map(|token| token.span),
+                _ => return None,
+            };
+            if lexed == Some(span) {
+                return None;
+            }
+            let lexer_text = lexed
+                .or(token.map(|token| token.span))
+                .map_or("", |lexed| &source[lexed.start..lexed.end]);
+            Some(
+                Diagnostic::error(span, DiagnosticCode::SyntaxLexerDisagreement)
+                    .with_arg(DiagnosticArg::text(
+                        "grammar",
+                        &source[span.start..span.end],
+                    ))
+                    .with_arg(DiagnosticArg::text("lexer", lexer_text)),
+            )
+        })
+        .collect()
+}
+
+/// Returns the token that covers byte `offset`, if any.
+fn token_at(tokens: &[Token], offset: usize) -> Option<Token> {
+    let index = tokens.partition_point(|token| token.span.end <= offset);
+    tokens
+        .get(index)
+        .copied()
+        .filter(|token| token.span.start <= offset)
 }
 
 fn syntax_tree_with_diagnostic(
@@ -1007,4 +1061,72 @@ fn span_contains(outer: impl Into<Span>, inner: impl Into<Span>) -> bool {
     let inner = inner.into();
     outer.start <= inner.start
         && (inner.end <= outer.end || inner.start == inner.end && inner.start <= outer.end)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    use super::*;
+    use crate::grammar_frontend::interpreter::compile_base_loko_grammar;
+
+    fn disagreements_with(source: &str, tokens: &[Token]) -> Vec<(String, String)> {
+        let grammar = compile_base_loko_grammar();
+        let report =
+            interloko_grammar::interpret_region_recovering(&grammar, "source-file", source, 0);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let root = report.root.expect("source parses");
+        lexer_disagreements(&root, tokens, source)
+            .into_iter()
+            .map(|diagnostic| {
+                assert_eq!(diagnostic.code, DiagnosticCode::SyntaxLexerDisagreement);
+                let arg = |name: &str| {
+                    diagnostic
+                        .args
+                        .iter()
+                        .find(|arg| arg.name == name)
+                        .map(|arg| arg.value.render())
+                        .expect("argument is present")
+                };
+                (arg("grammar"), arg("lexer"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lexer_agrees_with_grammar_on_names_and_numbers() {
+        let source = "define function main()\n  let x-1 = #t-1;\n  let y = end-2;\n  \
+                      f(foo-1: #:k-2, 7i32-1, <z-3?>, x-)\nend;";
+        assert!(disagreements_with(source, &syntax::lex(source)).is_empty());
+    }
+
+    #[test]
+    fn split_names_are_internal_errors_not_truncation() {
+        let source = "define function main()\n  x-1 + 2\nend;";
+        // Rebuild the token stream the way the lexer once split `x-1`:
+        // `x`, `-`, `1`. The grammar still reads the one name `x-1`.
+        let start = source.find("x-1").expect("name is present");
+        let mut tokens = syntax::lex(source);
+        let index = tokens
+            .iter()
+            .position(|token| token.span.start == start)
+            .expect("name token is present");
+        tokens.splice(
+            index..=index,
+            [
+                (TokenKind::Ident, start, start + 1),
+                (TokenKind::Minus, start + 1, start + 2),
+                (TokenKind::Number, start + 2, start + 3),
+            ]
+            .map(|(kind, start, end)| Token {
+                kind,
+                span: Span::new(start, end),
+            }),
+        );
+
+        assert_eq!(
+            disagreements_with(source, &tokens),
+            [("x-1".to_string(), "x".to_string())]
+        );
+    }
 }

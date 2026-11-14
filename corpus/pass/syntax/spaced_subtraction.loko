@@ -1,0 +1,10 @@
+// expect: run 15
+// expect: diagnostics 0
+
+// Subtraction is written with a space before the `-`: `x - 1` and `x -1`
+// both subtract, and spaced subtraction mixes freely with hyphenated names.
+define function main()
+  let x = 10;
+  let x-1 = 3;
+  (x - 1) + (x -1) - x-1
+end;

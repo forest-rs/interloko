@@ -1,0 +1,11 @@
+// expect: run 5u32
+// expect: diagnostics 0
+// expect: dump lowered contains u32.sub
+
+// Wrapping operators are spaced like the others: `a -% b`. Written
+// `a-%b`, the hyphen would join `a` as `a-`.
+define function main() => <u32>
+  let a :: <u32> = 7;
+  let b :: <u32> = 2;
+  a -% b
+end;

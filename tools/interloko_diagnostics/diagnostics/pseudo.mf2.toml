@@ -2,6 +2,7 @@
 "uncategorized" = "[ps] uncategorized diagnostic"
 "syntax.expected-expression" = "[ps] expression expected"
 "syntax.expected-token" = "[ps] need { $expected }"
+"syntax.lexer-disagreement" = "[ps] internal: grammar { $grammar } lexer { $lexer }"
 "ast.integer-literal-out-of-range" = "[ps] integer literal beyond range"
 "ast.float-literal-out-of-range" = "[ps] float literal beyond finite range"
 "ast.literal-suffix-mismatch" = "[ps] integer suffix on float literal"

@@ -1,0 +1,9 @@
+// expect: diagnostics 1
+// expect: diagnostic code syntax.expected-token
+
+// The hyphen joins `x` as the name `x-`, leaving `1` with nothing to do.
+// Subtraction needs a space before the `-`: `x - 1`.
+define function main()
+  let x = 10;
+  x- 1
+end;

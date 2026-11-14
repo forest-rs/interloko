@@ -2688,13 +2688,10 @@ fn push_report_diagnostic(report: &mut GrammarParseReport, diagnostic: Diagnosti
     }
 }
 
+/// Staged adapters emit forms that become base Loko definitions, so the names
+/// they produce must be names under the base grammar's `name` rule.
 fn valid_calculator_function_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == b'_')
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'?'))
+    crate::syntax::is_name(name)
 }
 
 fn valid_type_name(name: &str) -> bool {
@@ -2707,13 +2704,10 @@ fn valid_type_name(name: &str) -> bool {
     valid_record_type_fragment(inner)
 }
 
+/// A record type fragment is the name inside `<...>`, which the base grammar
+/// reads with its `name` rule.
 fn valid_record_type_fragment(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == b'_')
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    crate::syntax::is_name(name)
 }
 
 fn valid_record_field_name(name: &str) -> bool {
