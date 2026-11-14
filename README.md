@@ -310,6 +310,11 @@ reachable from its roots (values the caller keeps, image roots registered with
 `InterlokoHost::register_root`, and the image slots its write log names)
 are evacuated into the image in increasing nursery order, charged in work
 units against an evacuation budget; everything else is dropped.
+Nursery handles are numbered across turns rather than per turn, so a raw
+handle an embedder keeps past its turn is stale: resolving it fails with
+`RuntimeError::StaleNurseryHandle` instead of naming a later turn's
+object. The numbering wraps only after 2^44 nursery objects (2^45 heap
+boxes); image handles never go stale.
 `FunctionCallOutcome::turn` reports what a call allocated (the nursery
 high-water mark), what was reachable at the end, what was promoted, the
 evacuation work and the number of logged stores; `interloko_corpus heap

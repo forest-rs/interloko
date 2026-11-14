@@ -156,7 +156,7 @@ impl InterlokoHost {
                 continue;
             };
             if obj.host_type == INTERLOKO_VALUE_TYPE {
-                match BoxedHandle::decode(obj.handle) {
+                match BoxedHandle::decode(obj.handle, self.nursery_serials) {
                     BoxedHandle::Heap(space, index) => {
                         if let Some(seen) = marks[space as usize].values.get_mut(index)
                             && !*seen
@@ -180,7 +180,9 @@ impl InterlokoHost {
             if obj.host_type != INTERLOKO_OBJECT_TYPE {
                 continue;
             }
-            let Some(at) = ObjectRef::decode(obj.handle) else {
+            // A stale nursery handle decodes past the nursery's end and is
+            // skipped: it is no part of this heap.
+            let Some(at) = ObjectRef::decode(obj.handle, self.nursery_serials) else {
                 continue;
             };
             let Some(seen) = marks[at.space as usize].objects.get_mut(at.index) else {

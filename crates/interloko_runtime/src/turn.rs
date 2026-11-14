@@ -14,6 +14,12 @@
 //! dropped and the nursery is emptied, leaving the image exactly as the turn
 //! found it.
 //!
+//! Either way, the turn's nursery handles go stale when it ends. Every turn
+//! numbers its nursery entries after the previous turn's, so a handle kept
+//! from an ended turn never names a later turn's entry: resolving it fails
+//! with [`RuntimeError::StaleNurseryHandle`]. The numbering wraps only
+//! after `2^44` nursery objects (`2^45` heap boxes); see `region.rs`.
+//!
 //! Embedding state that must outlive turns (a break loop's held values,
 //! condition handlers kept across turns) registers itself explicitly with
 //! [`InterlokoHost::register_root`].
@@ -67,9 +73,10 @@ impl InterlokoHost {
     /// is reachable from them, but they are not kept. `keep` are values the
     /// caller holds past the turn: they are evacuated with every other
     /// survivor and rewritten in place to their image handles. Any other
-    /// nursery handle dangles once the turn ends and must not be used again:
-    /// it fails to resolve until a later turn allocates at the same index,
-    /// and then names that turn's entry.
+    /// nursery handle is stale once the turn ends: resolving it, in this
+    /// turn's absence or during any later turn, fails with
+    /// [`RuntimeError::StaleNurseryHandle`]. A stale handle passed as a
+    /// later turn's root or kept value names nothing and is left unchanged.
     ///
     /// When the evacuation would exceed the budget, nothing changes, the turn
     /// stays open, and the caller should abort it.
@@ -82,8 +89,10 @@ impl InterlokoHost {
             return Err(RuntimeError::NoOpenTurn);
         };
         let mut stats = self.turn_stats_for(&turn, &[results, keep].concat());
+        let ended = self.nursery.mark();
         match self.evacuate(&turn, keep) {
             Ok(evacuation) => {
+                self.nursery_serials.advance(ended);
                 stats.promoted = evacuation.promoted;
                 stats.evacuation_work = evacuation.work;
                 stats.image = self.image.stats();
@@ -101,7 +110,8 @@ impl InterlokoHost {
     /// first, roots registered by the turn are dropped, the nursery is
     /// emptied, and symbols interned during the turn are dropped, so the
     /// image and [`InterlokoHost::heap_stats`] are as they were before the
-    /// turn began.
+    /// turn began. The turn's nursery handles go stale, as when a turn
+    /// finishes; the next turn's handles do not reuse them.
     pub fn abort_turn(&mut self) -> Result<TurnStats, RuntimeError> {
         let Some(turn) = self.turn.take() else {
             return Err(RuntimeError::NoOpenTurn);
@@ -124,6 +134,7 @@ impl InterlokoHost {
                 *root = Some(value);
             }
         }
+        self.nursery_serials.advance(self.nursery.mark());
         self.nursery.truncate(Default::default());
         self.image.truncate(turn.image);
         self.symbols.truncate(turn.symbols);

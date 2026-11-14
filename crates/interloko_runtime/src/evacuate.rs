@@ -9,6 +9,11 @@
 //! survivors, in the roots, and in the image slots the write log names) is
 //! then rewritten to its image handle, and the nursery is dropped whole.
 //!
+//! Handles are decoded against the finishing turn's nursery serials, so a
+//! stale nursery handle among the roots (one kept from an earlier turn)
+//! names no survivor and is left as it is: it stays stale rather than being
+//! rewritten to the image handle of an unrelated object.
+//!
 //! The cost is charged in work units, checked against the host's
 //! evacuation budget before anything changes: one per evacuated entry, one
 //! per value it holds, and one per root.
@@ -21,7 +26,7 @@ use execution_tape::value::{Obj, Value};
 
 use crate::boxed::BoxedHandle;
 use crate::census::{boxed_value_bytes, object_bytes, object_edges};
-use crate::region::{ObjectRef, OpenTurn, Space};
+use crate::region::{NurserySerials, ObjectRef, OpenTurn, Space};
 use crate::{
     HeapStats, INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeError,
     RuntimeObjectStorage,
@@ -40,24 +45,28 @@ enum NurseryEntry {
     Box(usize),
 }
 
-/// Returns the nursery entry `value` refers to, if any.
-fn nursery_entry(value: &Value) -> Option<NurseryEntry> {
+/// Returns the nursery entry `value` refers to, if any. The index of a
+/// stale handle is past the nursery's end; callers bounds-check it.
+fn nursery_entry(value: &Value, serials: NurserySerials) -> Option<NurseryEntry> {
     let Value::Obj(obj) = value else {
         return None;
     };
     if obj.host_type == INTERLOKO_OBJECT_TYPE {
-        let at = ObjectRef::decode(obj.handle)?;
+        let at = ObjectRef::decode(obj.handle, serials)?;
         return (at.space == Space::Nursery).then_some(NurseryEntry::Object(at.index));
     }
     if obj.host_type != INTERLOKO_VALUE_TYPE {
         return None;
     }
-    match BoxedHandle::decode(obj.handle) {
+    match BoxedHandle::decode(obj.handle, serials) {
         BoxedHandle::Heap(Space::Nursery, index) => Some(NurseryEntry::Box(index)),
-        BoxedHandle::Object(handle) => nursery_entry(&Value::Obj(Obj {
-            host_type: INTERLOKO_OBJECT_TYPE,
-            handle,
-        })),
+        BoxedHandle::Object(handle) => nursery_entry(
+            &Value::Obj(Obj {
+                host_type: INTERLOKO_OBJECT_TYPE,
+                handle,
+            }),
+            serials,
+        ),
         _ => None,
     }
 }
@@ -66,6 +75,8 @@ fn nursery_entry(value: &Value) -> Option<NurseryEntry> {
 struct Remap {
     objects: Vec<Option<usize>>,
     values: Vec<Option<usize>>,
+    /// The finishing turn's serials, against which nursery handles decode.
+    serials: NurserySerials,
 }
 
 impl Remap {
@@ -83,14 +94,14 @@ impl Remap {
         if obj.host_type != INTERLOKO_VALUE_TYPE {
             return;
         }
-        match BoxedHandle::decode(obj.handle) {
+        match BoxedHandle::decode(obj.handle, self.serials) {
             BoxedHandle::Heap(Space::Nursery, index) => {
                 if let Some(handle) = self
                     .values
                     .get(index)
                     .copied()
                     .flatten()
-                    .and_then(|image| BoxedHandle::heap(Space::Image, image))
+                    .and_then(|image| BoxedHandle::heap(Space::Image, image, self.serials))
                 {
                     obj.handle = handle;
                 }
@@ -111,7 +122,7 @@ impl Remap {
         &self,
         handle: execution_tape::value::ObjHandle,
     ) -> Option<execution_tape::value::ObjHandle> {
-        let at = ObjectRef::decode(handle)?;
+        let at = ObjectRef::decode(handle, self.serials)?;
         if at.space != Space::Nursery {
             return None;
         }
@@ -120,7 +131,7 @@ impl Remap {
             space: Space::Image,
             index,
         }
-        .encode()
+        .encode(self.serials)
     }
 }
 
@@ -156,7 +167,11 @@ impl InterlokoHost {
         let mut object_marks = vec![false; self.nursery.objects.len()];
         let mut value_marks = vec![false; self.nursery.values.len()];
         let mut work = u64::try_from(roots.len()).unwrap_or(u64::MAX);
-        let mut pending: Vec<NurseryEntry> = roots.iter().filter_map(nursery_entry).collect();
+        let serials = self.nursery_serials;
+        let mut pending: Vec<NurseryEntry> = roots
+            .iter()
+            .filter_map(|root| nursery_entry(root, serials))
+            .collect();
         while let Some(entry) = pending.pop() {
             match entry {
                 NurseryEntry::Object(index) => {
@@ -169,7 +184,7 @@ impl InterlokoHost {
                     let object = &self.nursery.objects[index];
                     for edge in object_edges(object) {
                         work = work.saturating_add(1);
-                        pending.extend(nursery_entry(edge));
+                        pending.extend(nursery_entry(edge, serials));
                     }
                 }
                 NurseryEntry::Box(index) => {
@@ -180,7 +195,7 @@ impl InterlokoHost {
                         continue;
                     }
                     work = work.saturating_add(1);
-                    pending.extend(nursery_entry(&self.nursery.values[index]));
+                    pending.extend(nursery_entry(&self.nursery.values[index], serials));
                 }
             }
             work = work.saturating_add(1);
@@ -208,6 +223,7 @@ impl InterlokoHost {
         let remap = Remap {
             objects: assign(&object_marks, self.image.objects.len()),
             values: assign(&value_marks, self.image.values.len()),
+            serials,
         };
 
         let mut promoted = HeapStats::default();

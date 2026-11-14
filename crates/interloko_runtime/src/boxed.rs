@@ -10,10 +10,12 @@
 //!   bits sign-extended ([`IMMEDIATE_INTEGER_MIN`]..=[`IMMEDIATE_INTEGER_MAX`]).
 //! - Top 16 bits set and bit 47 clear: bits 46..45 select the kind of the
 //!   low 45 bits: a one-based index into the image's boxed values (`00`), a
-//!   runtime object's own handle (`01`), a small immediate (`10`), or a
-//!   one-based index into the nursery's boxed values (`11`). A small
-//!   immediate is a boolean (payload `0` or `1`) or, with bit 32 set, a
-//!   `<single-float>` whose IEEE 754 bits are the low 32 bits.
+//!   runtime object's own handle (`01`), a small immediate (`10`), or the
+//!   serial of a nursery box (`11`). A small immediate is a boolean (payload
+//!   `0` or `1`) or, with bit 32 set, a `<single-float>` whose IEEE 754 bits
+//!   are the low 32 bits. Nursery serials count across turns, so a box kept
+//!   past its turn is detected rather than aliased; see
+//!   [`crate::region`].
 //!
 //! The tagged space is a sliver of NaN encodings (negative NaNs with the top
 //! payload bits set), which no IEEE arithmetic produces by default. Floats
@@ -29,7 +31,7 @@
 
 use execution_tape::value::ObjHandle;
 
-use crate::region::Space;
+use crate::region::{NurserySerials, Space};
 
 /// Top-16-bit tag shared by every non-float encoding.
 const TAG: u64 = 0xFFFF_0000_0000_0000;
@@ -51,6 +53,11 @@ const KIND_SMALL: u64 = 0b10 << KIND_SHIFT;
 /// Set in a small immediate's payload for a `<single-float>`.
 const SINGLE_FLOAT_FLAG: u64 = 1 << 32;
 const KIND_NURSERY_HEAP: u64 = 0b11 << KIND_SHIFT;
+
+/// Width of a nursery box's serial: the whole payload.
+pub(crate) const NURSERY_SERIAL_BITS: u32 = KIND_SHIFT;
+/// Mask of a nursery box's serial.
+pub(crate) const NURSERY_SERIAL_MASK: u64 = (1 << NURSERY_SERIAL_BITS) - 1;
 
 /// Smallest `<integer>` boxed without heap allocation.
 pub const IMMEDIATE_INTEGER_MIN: i64 = -(1 << 46);
@@ -80,8 +87,11 @@ impl BoxedHandle {
     /// A tagged heap handle with payload zero, which never resolves.
     pub(crate) const INVALID: ObjHandle = ObjHandle(TAG | KIND_HEAP);
 
-    /// Decodes a boxed-value handle.
-    pub(crate) fn decode(handle: ObjHandle) -> Self {
+    /// Decodes a boxed-value handle against the open turn's `serials`.
+    ///
+    /// A nursery box from an earlier turn decodes to an index past the
+    /// nursery's end, so the caller's bounds check rejects it.
+    pub(crate) fn decode(handle: ObjHandle, serials: NurserySerials) -> Self {
         let bits = handle.0;
         if bits & TAG != TAG {
             return Self::Float(f64::from_bits(bits));
@@ -92,16 +102,20 @@ impl BoxedHandle {
             return Self::Integer(shifted >> SIGN_EXTEND_SHIFT);
         }
         let payload = bits & PAYLOAD;
-        // Heap indices are one-based so that the zero payload is invalid.
-        let heap = |space| {
-            usize::try_from(payload)
-                .ok()
-                .and_then(|index| index.checked_sub(1))
-                .map_or(Self::Invalid, |index| Self::Heap(space, index))
-        };
         match bits & KIND_MASK {
-            KIND_HEAP => heap(Space::Image),
-            KIND_NURSERY_HEAP => heap(Space::Nursery),
+            // Image indices are one-based so that the zero payload is invalid.
+            KIND_HEAP => payload
+                .checked_sub(1)
+                .and_then(|index| usize::try_from(index).ok())
+                .map_or(Self::Invalid, |index| Self::Heap(Space::Image, index)),
+            // An offset too large for `usize` is past any nursery's end too.
+            KIND_NURSERY_HEAP => {
+                let offset = payload.wrapping_sub(serials.values) & NURSERY_SERIAL_MASK;
+                Self::Heap(
+                    Space::Nursery,
+                    usize::try_from(offset).unwrap_or(usize::MAX),
+                )
+            }
             KIND_OBJECT => Self::Object(ObjHandle(payload)),
             KIND_SMALL if payload <= 1 => Self::Bool(payload == 1),
             KIND_SMALL if payload >> 32 == SINGLE_FLOAT_FLAG >> 32 => {
@@ -145,23 +159,34 @@ impl BoxedHandle {
         (handle.0 <= PAYLOAD).then_some(ObjHandle(TAG | KIND_OBJECT | handle.0))
     }
 
-    /// Encodes a zero-based index into `space`'s boxed values, or `None`
-    /// when the region is too large to address.
-    pub(crate) fn heap(space: Space, index: usize) -> Option<ObjHandle> {
-        let one_based = u64::try_from(index).ok()?.checked_add(1)?;
-        let kind = match space {
-            Space::Image => KIND_HEAP,
-            Space::Nursery => KIND_NURSERY_HEAP,
-        };
-        (one_based <= PAYLOAD).then_some(ObjHandle(TAG | kind | one_based))
+    /// Encodes a zero-based index into `space`'s boxed values against the
+    /// open turn's `serials`, or `None` when the region is too large to
+    /// address.
+    pub(crate) fn heap(space: Space, index: usize, serials: NurserySerials) -> Option<ObjHandle> {
+        let index = u64::try_from(index).ok()?;
+        match space {
+            Space::Image => {
+                let one_based = index.checked_add(1)?;
+                (one_based <= PAYLOAD).then_some(ObjHandle(TAG | KIND_HEAP | one_based))
+            }
+            Space::Nursery => (index <= NURSERY_SERIAL_MASK).then(|| {
+                let serial = serials.values.wrapping_add(index) & NURSERY_SERIAL_MASK;
+                ObjHandle(TAG | KIND_NURSERY_HEAP | serial)
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BoxedHandle, IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
-    use crate::region::Space;
+    use super::{BoxedHandle, IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN, NURSERY_SERIAL_MASK};
+    use crate::region::{NurserySerials, RegionMark, Space};
+    use alloc::vec::Vec;
     use execution_tape::value::ObjHandle;
+
+    fn decode(handle: ObjHandle) -> BoxedHandle {
+        BoxedHandle::decode(handle, NurserySerials::default())
+    }
 
     #[test]
     fn floats_round_trip_by_bits_or_fall_back_to_the_heap() {
@@ -180,7 +205,7 @@ mod tests {
             f64::from_bits(0xFFF8_0000_0000_0001),
         ] {
             let handle = BoxedHandle::immediate_float(value).expect("immediate float");
-            let BoxedHandle::Float(decoded) = BoxedHandle::decode(handle) else {
+            let BoxedHandle::Float(decoded) = decode(handle) else {
                 panic!("{value} should decode as a float");
             };
             assert_eq!(decoded.to_bits(), value.to_bits());
@@ -203,7 +228,7 @@ mod tests {
             IMMEDIATE_INTEGER_MAX - 1,
         ] {
             let handle = BoxedHandle::immediate_integer(value).expect("immediate integer");
-            assert_eq!(BoxedHandle::decode(handle), BoxedHandle::Integer(value));
+            assert_eq!(decode(handle), BoxedHandle::Integer(value));
         }
         for value in [
             IMMEDIATE_INTEGER_MAX + 1,
@@ -229,7 +254,7 @@ mod tests {
             f32::from_bits(u32::MAX),
         ] {
             let handle = BoxedHandle::immediate_single_float(value);
-            let BoxedHandle::SingleFloat(decoded) = BoxedHandle::decode(handle) else {
+            let BoxedHandle::SingleFloat(decoded) = decode(handle) else {
                 panic!("{value} should decode as a single float");
             };
             assert_eq!(decoded.to_bits(), value.to_bits());
@@ -241,41 +266,70 @@ mod tests {
         );
         // A small payload with bits above 32 names nothing.
         assert_eq!(
-            BoxedHandle::decode(ObjHandle(BoxedHandle::immediate_bool(false).0 | (1 << 33))),
+            decode(ObjHandle(BoxedHandle::immediate_bool(false).0 | (1 << 33))),
             BoxedHandle::Invalid
         );
     }
 
     #[test]
     fn heap_indices_are_disjoint_from_immediates() {
-        for index in [0, 1, 1000] {
-            for space in [Space::Image, Space::Nursery] {
-                let handle = BoxedHandle::heap(space, index).expect("heap handle");
-                assert_eq!(BoxedHandle::decode(handle), BoxedHandle::Heap(space, index));
+        for start in [0, 1, 1 << 30, NURSERY_SERIAL_MASK] {
+            let serials = NurserySerials {
+                objects: 0,
+                values: start,
+            };
+            for index in [0, 1, 1000] {
+                for space in [Space::Image, Space::Nursery] {
+                    let handle = BoxedHandle::heap(space, index, serials).expect("heap handle");
+                    assert_eq!(
+                        BoxedHandle::decode(handle, serials),
+                        BoxedHandle::Heap(space, index)
+                    );
+                }
             }
         }
-        assert_eq!(BoxedHandle::heap(Space::Image, usize::MAX), None);
-        assert_eq!(
-            BoxedHandle::decode(BoxedHandle::INVALID),
-            BoxedHandle::Invalid
-        );
+        let serials = NurserySerials::default();
+        assert_eq!(BoxedHandle::heap(Space::Image, usize::MAX, serials), None);
+        assert_eq!(decode(BoxedHandle::INVALID), BoxedHandle::Invalid);
     }
 
     #[test]
     fn booleans_and_object_handles_are_immediate() {
         for value in [false, true] {
             assert_eq!(
-                BoxedHandle::decode(BoxedHandle::immediate_bool(value)),
+                decode(BoxedHandle::immediate_bool(value)),
                 BoxedHandle::Bool(value)
             );
         }
         for raw in [1, 2, 1 << 40, (1 << 45) - 1] {
             let handle = BoxedHandle::immediate_object(ObjHandle(raw)).expect("object handle");
-            assert_eq!(
-                BoxedHandle::decode(handle),
-                BoxedHandle::Object(ObjHandle(raw))
-            );
+            assert_eq!(decode(handle), BoxedHandle::Object(ObjHandle(raw)));
         }
         assert_eq!(BoxedHandle::immediate_object(ObjHandle(1 << 45)), None);
+    }
+
+    #[test]
+    fn nursery_boxes_from_an_earlier_turn_decode_past_the_end() {
+        let mut serials = NurserySerials {
+            objects: 0,
+            values: NURSERY_SERIAL_MASK - 1,
+        };
+        let handles = (0..4)
+            .map(|index| BoxedHandle::heap(Space::Nursery, index, serials).expect("heap handle"))
+            .collect::<Vec<_>>();
+        serials.advance(RegionMark {
+            objects: 0,
+            values: 4,
+        });
+        assert_eq!(serials.values, 2);
+        // Each old handle now names an index at the top of the serial
+        // range, which no nursery reaches.
+        for (index, handle) in handles.into_iter().enumerate() {
+            let BoxedHandle::Heap(Space::Nursery, decoded) = BoxedHandle::decode(handle, serials)
+            else {
+                panic!("a nursery box stays a nursery box");
+            };
+            assert_eq!(decoded, (1 << 45) - 4 + index);
+        }
     }
 }

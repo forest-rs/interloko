@@ -47,7 +47,7 @@ pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
 use boxed::BoxedHandle;
 pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
-use region::{ObjectRef, OpenTurn, Region, Space};
+use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use turn::ImageRootId;
 
 /// Host-call symbol for object construction.
@@ -599,6 +599,15 @@ pub enum RuntimeError {
     /// A boxed value handle was well typed but unknown to this runtime host.
     InvalidBoxedValueHandle {
         /// Unknown boxed value object.
+        object: Obj,
+    },
+    /// A nursery handle, for a runtime object or a heap box, named no entry
+    /// of the open turn: the turn that allocated it has finished or
+    /// aborted, so the handle is stale. Keep values past a turn by passing
+    /// them to [`InterlokoHost::finish_turn`] or registering them with
+    /// [`InterlokoHost::register_root`].
+    StaleNurseryHandle {
+        /// The stale handle, with its host type.
         object: Obj,
     },
     /// A runtime value could not be represented as boxed top `<object>`.
@@ -1422,6 +1431,8 @@ pub struct InterlokoHost {
     layout: RuntimeLayout,
     image: Region,
     nursery: Region,
+    /// Where the open turn's nursery handle serials start.
+    nursery_serials: NurserySerials,
     symbols: Vec<InternedObject>,
     /// Values registered as image roots; released roots leave `None`.
     roots: Vec<Option<Value>>,
@@ -1439,6 +1450,7 @@ impl InterlokoHost {
             layout,
             image: Region::default(),
             nursery: Region::default(),
+            nursery_serials: NurserySerials::default(),
             symbols: Vec::new(),
             roots: Vec::new(),
             turn: None,
@@ -1606,7 +1618,7 @@ impl InterlokoHost {
             });
         }
         let value = self.value_for_slot(value, slot_info.kind)?;
-        let location = Self::object_ref(object)?;
+        let location = self.object_ref(object)?;
         let in_image_turn = self.turn.is_some() && location.space == Space::Image;
         if in_image_turn
             && let RuntimeObjectStorage::Native { slots } = &self.object(object)?.storage
@@ -1677,14 +1689,24 @@ impl InterlokoHost {
         }
     }
 
-    fn object_ref(obj: Obj) -> Result<ObjectRef, RuntimeError> {
+    fn object_ref(&self, obj: Obj) -> Result<ObjectRef, RuntimeError> {
         if obj.host_type != INTERLOKO_OBJECT_TYPE {
             return Err(RuntimeError::ObjectHostTypeMismatch {
                 object: obj,
                 expected: INTERLOKO_OBJECT_TYPE,
             });
         }
-        ObjectRef::decode(obj.handle).ok_or(RuntimeError::InvalidObjectHandle { object: obj })
+        ObjectRef::decode(obj.handle, self.nursery_serials)
+            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
+    }
+
+    /// The error for a well-formed handle into `space` that names no entry.
+    #[cold]
+    const fn unresolved(space: Space, object: Obj, invalid: RuntimeError) -> RuntimeError {
+        match space {
+            Space::Image => invalid,
+            Space::Nursery => RuntimeError::StaleNurseryHandle { object },
+        }
     }
 
     const fn region(&self, space: Space) -> &Region {
@@ -1702,19 +1724,31 @@ impl InterlokoHost {
     }
 
     fn object(&self, obj: Obj) -> Result<&RuntimeObject, RuntimeError> {
-        let location = Self::object_ref(obj)?;
+        let location = self.object_ref(obj)?;
         self.region(location.space)
             .objects
             .get(location.index)
-            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
+            .ok_or_else(|| {
+                Self::unresolved(
+                    location.space,
+                    obj,
+                    RuntimeError::InvalidObjectHandle { object: obj },
+                )
+            })
     }
 
     fn object_mut(&mut self, obj: Obj) -> Result<&mut RuntimeObject, RuntimeError> {
-        let location = Self::object_ref(obj)?;
+        let location = self.object_ref(obj)?;
         self.region_mut(location.space)
             .objects
             .get_mut(location.index)
-            .ok_or(RuntimeError::InvalidObjectHandle { object: obj })
+            .ok_or_else(|| {
+                Self::unresolved(
+                    location.space,
+                    obj,
+                    RuntimeError::InvalidObjectHandle { object: obj },
+                )
+            })
     }
 
     fn boxed_value(&self, obj: Obj) -> Result<Value, RuntimeError> {
@@ -1724,7 +1758,7 @@ impl InterlokoHost {
                 expected: INTERLOKO_VALUE_TYPE,
             });
         }
-        match BoxedHandle::decode(obj.handle) {
+        match BoxedHandle::decode(obj.handle, self.nursery_serials) {
             BoxedHandle::Float(value) => Ok(Value::F64(value)),
             BoxedHandle::SingleFloat(value) => Ok(Value::F32(value)),
             BoxedHandle::Integer(value) => Ok(Value::I64(value)),
@@ -1738,7 +1772,13 @@ impl InterlokoHost {
                 .values
                 .get(index)
                 .cloned()
-                .ok_or(RuntimeError::InvalidBoxedValueHandle { object: obj }),
+                .ok_or_else(|| {
+                    Self::unresolved(
+                        space,
+                        obj,
+                        RuntimeError::InvalidBoxedValueHandle { object: obj },
+                    )
+                }),
             BoxedHandle::Invalid => Err(RuntimeError::InvalidBoxedValueHandle { object: obj }),
         }
     }
@@ -1769,7 +1809,7 @@ impl InterlokoHost {
             region.values.push(value);
             // A heap too large to index yields a handle that never resolves,
             // so it fails on use instead of aliasing another value.
-            BoxedHandle::heap(space, index).unwrap_or(BoxedHandle::INVALID)
+            BoxedHandle::heap(space, index, self.nursery_serials).unwrap_or(BoxedHandle::INVALID)
         });
         Value::Obj(Obj {
             host_type: INTERLOKO_VALUE_TYPE,
@@ -1789,7 +1829,9 @@ impl InterlokoHost {
         let index = region.objects.len();
         region.objects.push(object);
         // A region too large to index yields a handle that never resolves.
-        let handle = ObjectRef { space, index }.encode().unwrap_or(ObjHandle(0));
+        let handle = ObjectRef { space, index }
+            .encode(self.nursery_serials)
+            .unwrap_or(ObjHandle(0));
         Value::Obj(Obj {
             host_type: INTERLOKO_OBJECT_TYPE,
             handle,
@@ -3195,6 +3237,189 @@ mod tests {
         );
     }
 
+    /// The result of resolving a stale nursery handle.
+    fn stale<T>(object: Obj) -> Result<T, RuntimeError> {
+        Err(RuntimeError::StaleNurseryHandle { object })
+    }
+
+    #[test]
+    fn handles_kept_across_finish_turn_are_stale() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        host.begin_turn().expect("turn opens");
+        let text = host.make_string("first").expect("string");
+        let wide = object_of(&host.box_top_value(Value::I64(i64::MAX)).expect("heap box"));
+        let boxed_text = object_of(&host.box_top_value(text.clone()).expect("box"));
+        let cell = object_of(
+            &host
+                .make_object(ClassId(2), &[ValueRef::Obj(wide)])
+                .expect("cell"),
+        );
+        host.finish_turn(&[], &mut []).expect("turn finishes");
+
+        let check = |host: &mut InterlokoHost| {
+            assert_eq!(host.string_text(&text), stale(object_of(&text)));
+            assert_eq!(host.boxed_value(wide), stale(wide));
+            assert_eq!(host.read_slot(cell, SlotId(0)), stale(cell));
+            assert_eq!(
+                host.write_slot(cell, SlotId(0), ValueRef::Obj(boxed_text)),
+                stale(cell)
+            );
+            // An immediate box carries the object handle, which is stale too.
+            let unboxed = host.boxed_value(boxed_text).expect("immediate box decodes");
+            assert_eq!(host.string_text(&unboxed), stale(object_of(&text)));
+        };
+        // Outside a turn the nursery is empty...
+        check(&mut host);
+        // ...and a later turn's entries at the same indices are not named
+        // by the old handles.
+        host.begin_turn().expect("turn opens");
+        let second = host.make_string("second").expect("string");
+        let other_wide = object_of(&host.box_top_value(Value::I64(i64::MIN)).expect("heap box"));
+        let other_cell = host
+            .make_object(ClassId(2), &[ValueRef::Obj(other_wide)])
+            .expect("cell");
+        check(&mut host);
+        assert_eq!(host.string_text(&second), Ok("second"));
+        assert_eq!(host.boxed_value(other_wide), Ok(Value::I64(i64::MIN)));
+        // Stale handles reach nothing, so they keep nothing alive, and a
+        // later turn's evacuation leaves them as they are.
+        let mut keep = [text.clone(), Value::Obj(wide), Value::Obj(cell)];
+        assert_eq!(host.reachable_stats(&keep), HeapStats::default());
+        host.register_root(Value::Obj(boxed_text));
+        let stats = host
+            .finish_turn(&[other_cell], &mut keep)
+            .expect("turn finishes");
+        assert_eq!(stats.promoted, HeapStats::default());
+        assert_eq!(keep, [text.clone(), Value::Obj(wide), Value::Obj(cell)]);
+        assert_eq!(host.image_stats(), HeapStats::default());
+        check(&mut host);
+    }
+
+    #[test]
+    fn handles_kept_across_an_aborted_turn_are_stale() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        host.begin_turn().expect("turn opens");
+        let text = host.make_string("doomed").expect("string");
+        let wide = object_of(&host.box_top_value(Value::I64(i64::MAX)).expect("heap box"));
+        host.abort_turn().expect("turn aborts");
+        assert_eq!(host.string_text(&text), stale(object_of(&text)));
+        assert_eq!(host.boxed_value(wide), stale(wide));
+
+        host.begin_turn().expect("turn opens");
+        let live = host.make_string("live").expect("string");
+        let live_wide = object_of(&host.box_top_value(Value::I64(i64::MIN)).expect("heap box"));
+        assert_eq!(host.string_text(&text), stale(object_of(&text)));
+        assert_eq!(host.boxed_value(wide), stale(wide));
+        assert_eq!(host.string_text(&live), Ok("live"));
+        assert_eq!(host.boxed_value(live_wide), Ok(Value::I64(i64::MIN)));
+        host.abort_turn().expect("turn aborts");
+    }
+
+    #[test]
+    fn survivors_resolve_through_stable_image_handles() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        host.begin_turn().expect("turn opens");
+        host.make_string("garbage").expect("string");
+        let mut keep = [
+            host.make_string("kept").expect("string"),
+            host.box_top_value(Value::I64(i64::MAX)).expect("heap box"),
+        ];
+        let nursery = keep.clone();
+        host.finish_turn(&[], &mut keep).expect("turn finishes");
+        assert_eq!(object_of(&keep[0]).handle, ObjHandle(1));
+        // The nursery handles are stale; the image handles they became
+        // resolve through any number of later turns, finished or aborted.
+        assert_eq!(
+            host.string_text(&nursery[0]),
+            Err(RuntimeError::StaleNurseryHandle {
+                object: object_of(&nursery[0])
+            })
+        );
+        for round in 0..4 {
+            host.begin_turn().expect("turn opens");
+            host.make_string("churn").expect("string");
+            host.box_top_value(Value::I64(i64::MIN)).expect("heap box");
+            assert_eq!(host.string_text(&keep[0]), Ok("kept"));
+            assert_eq!(
+                host.boxed_value(object_of(&keep[1])),
+                Ok(Value::I64(i64::MAX))
+            );
+            if round % 2 == 0 {
+                host.finish_turn(&[], &mut []).expect("turn finishes");
+            } else {
+                host.abort_turn().expect("turn aborts");
+            }
+        }
+        assert_eq!(object_of(&keep[0]).handle, ObjHandle(1));
+        assert_eq!(host.string_text(&keep[0]), Ok("kept"));
+    }
+
+    #[test]
+    fn nursery_serials_wrap_at_their_width() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        // Start two entries short of the wrap, so this turn's entries
+        // straddle it.
+        let top = NurserySerials {
+            objects: (1 << 44) - 2,
+            values: (1 << 45) - 2,
+        };
+        host.nursery_serials = top;
+        host.begin_turn().expect("turn opens");
+        let texts = ["a", "b", "c", "d"].map(|text| host.make_string(text).expect("string"));
+        let boxes = [1, 2, 3, 4]
+            .map(|n| object_of(&host.box_top_value(Value::I64(-(1 << 60) - n)).expect("box")));
+        // Handles past the wrap restart at serial zero.
+        assert_eq!(object_of(&texts[2]).handle.0, region::NURSERY_OBJECT_BIT);
+        for (value, text) in texts.iter().zip(["a", "b", "c", "d"]) {
+            assert_eq!(host.string_text(value), Ok(text));
+        }
+        for (boxed, n) in boxes.iter().zip(1..) {
+            assert_eq!(host.boxed_value(*boxed), Ok(Value::I64(-(1 << 60) - n)));
+        }
+        let mut keep = [texts[3].clone()];
+        host.finish_turn(&[], &mut keep).expect("turn finishes");
+        assert_eq!(
+            host.nursery_serials,
+            NurserySerials {
+                objects: 2,
+                values: 2
+            }
+        );
+        assert_eq!(host.string_text(&keep[0]), Ok("d"));
+
+        // After the wrap, handles from both sides of it are stale while
+        // the next turn's entries resolve.
+        host.begin_turn().expect("turn opens");
+        let fresh = ["e", "f", "g", "h"].map(|text| host.make_string(text).expect("string"));
+        for value in &texts {
+            assert_eq!(
+                host.string_text(value),
+                Err(RuntimeError::StaleNurseryHandle {
+                    object: object_of(value)
+                })
+            );
+        }
+        for boxed in boxes {
+            assert_eq!(
+                host.boxed_value(boxed),
+                Err(RuntimeError::StaleNurseryHandle { object: boxed })
+            );
+        }
+        assert_eq!(host.string_text(&fresh[0]), Ok("e"));
+        host.finish_turn(&[], &mut []).expect("turn finishes");
+
+        // The window is finite: once the serial counter has come all the
+        // way round to a stale handle's serial, the handle names that
+        // turn's entry. The guarantee is that this takes `2^44` nursery
+        // objects; here the counter is moved there directly.
+        host.nursery_serials = top;
+        host.begin_turn().expect("turn opens");
+        let reused = host.make_string("reused").expect("string");
+        assert_eq!(reused, texts[0]);
+        assert_eq!(host.string_text(&texts[0]), Ok("reused"));
+        host.finish_turn(&[], &mut []).expect("turn finishes");
+    }
+
     #[test]
     fn evacuation_is_independent_of_root_order() {
         let run = |reverse: bool| {
@@ -3391,6 +3616,15 @@ mod tests {
         slot: SlotId,
         access: &mut dyn AccessSink,
     ) -> Vec<Value> {
+        run_slot_get(host, object, slot, Some(access)).expect("slot-get program should run")
+    }
+
+    fn run_slot_get(
+        host: InterlokoHost,
+        object: Obj,
+        slot: SlotId,
+        access: Option<&mut dyn AccessSink>,
+    ) -> Result<Vec<Value>, execution_tape::vm::TrapInfo> {
         let sig = slot_get_signature(ValueKind::I64).expect("slot kind should have host sig");
         let mut builder = ProgramBuilder::new();
         let host_sig = builder.host_sig_for(SLOT_GET, sig);
@@ -3429,10 +3663,41 @@ mod tests {
             &mut outputs,
             TraceMask::NONE,
             None,
-            Some(access),
-        )
-        .expect("slot-get program should run");
-        outputs
+            access,
+        )?;
+        Ok(outputs)
+    }
+
+    #[test]
+    fn stale_nursery_handles_trap_in_the_vm() {
+        let mut host = InterlokoHost::new_checked(dispatch_layout()).expect("layout");
+        let circle = |host: &mut InterlokoHost, radius| {
+            object_of(
+                &host
+                    .make_object(ClassId(2), &[ValueRef::I64(1), ValueRef::I64(radius)])
+                    .expect("circle"),
+            )
+        };
+        host.begin_turn().expect("turn opens");
+        let stale = circle(&mut host, 10);
+        host.finish_turn(&[], &mut []).expect("turn finishes");
+        // The next turn allocates a circle at the same nursery index.
+        host.begin_turn().expect("turn opens");
+        let live = circle(&mut host, 20);
+        assert_ne!(live, stale);
+        let trap = run_slot_get(host, stale, SlotId(1), None)
+            .expect_err("a stale handle must not read the live circle");
+        assert!(
+            matches!(
+                &trap.trap,
+                execution_tape::vm::Trap::HostCallFailed {
+                    symbol,
+                    error: HostError::Failed,
+                    ..
+                } if symbol.as_ref() == SLOT_GET
+            ),
+            "{trap:?}"
+        );
     }
 
     #[test]
