@@ -103,6 +103,8 @@ than special generic-dispatch bytecode.
 The current slices include:
 
 - function definitions, locals, arithmetic, booleans, conditionals, and calls;
+- Dylan-style names, where a hyphen is always a name character: `x-1` and
+  `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`);
 - `<integer>` arithmetic on 64-bit fixnums that traps with
   `runtime.integer-overflow` instead of wrapping when `+`, `-`, `*`, or
   negation leaves the 64-bit range (bignum promotion is planned);

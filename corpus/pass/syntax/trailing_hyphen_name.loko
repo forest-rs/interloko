@@ -1,0 +1,8 @@
+// expect: run 5
+// expect: diagnostics 0
+
+// As in Dylan, a name may end in a hyphen.
+define function main()
+  let total- = 5;
+  total-
+end;

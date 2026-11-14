@@ -1,0 +1,11 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump ast contains name x-1
+
+// A hyphen is always a name character, as in Dylan: `x-1` is a local of its
+// own, distinct from `x`, rather than `x` minus one.
+define function main()
+  let x = 10;
+  let x-1 = 3;
+  x-1
+end;

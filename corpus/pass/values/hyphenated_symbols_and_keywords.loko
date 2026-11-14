@@ -1,0 +1,21 @@
+// expect: run 15
+// expect: diagnostics 0
+
+// Symbols, keyword symbols, and keyword arguments are names, so they keep
+// their hyphens and digits: `#foo-1`, `foo-1:`, and `#:foo-1` are one symbol,
+// distinct from `#foo`.
+define class <box> (<object>)
+  slot side-1 :: <integer>, init-keyword: side-1:;
+end;
+
+define function same-symbol(a :: <symbol>, b :: <symbol>) => <boolean>
+  a = b
+end;
+
+define function main()
+  let same = if same-symbol(#foo-1, #foo-1) then 1 else 0 end;
+  let distinct = if same-symbol(#foo-1, #foo) then 0 else 2 end;
+  let keyword = if same-symbol(foo-1:, #:foo-1) then 4 else 0 end;
+  let keyword-symbol = if same-symbol(foo-1:, #foo-1) then 8 else 0 end;
+  same + distinct + keyword + keyword-symbol + make(<box>, side-1: 9).side-1 - 9
+end;

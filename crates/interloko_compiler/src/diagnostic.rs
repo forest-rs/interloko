@@ -44,6 +44,10 @@ pub enum DiagnosticCode {
     SyntaxExpectedExpression,
     /// A parser expected a specific token or syntactic form.
     SyntaxExpectedToken,
+    /// Internal error: the lexer split a name or number somewhere the grammar
+    /// did not, so the compiler would have read different text than the
+    /// grammar matched.
+    SyntaxLexerDisagreement,
     /// An integer literal does not fit in the supported integer range.
     AstIntegerLiteralOutOfRange,
     /// A float literal is too large to be represented as a finite `f64`.
@@ -242,6 +246,7 @@ impl DiagnosticCode {
         Self::Uncategorized,
         Self::SyntaxExpectedExpression,
         Self::SyntaxExpectedToken,
+        Self::SyntaxLexerDisagreement,
         Self::AstIntegerLiteralOutOfRange,
         Self::AstFloatLiteralOutOfRange,
         Self::AstLiteralSuffixMismatch,
@@ -346,6 +351,7 @@ impl DiagnosticCode {
             Self::Uncategorized => "uncategorized",
             Self::SyntaxExpectedExpression => "syntax.expected-expression",
             Self::SyntaxExpectedToken => "syntax.expected-token",
+            Self::SyntaxLexerDisagreement => "syntax.lexer-disagreement",
             Self::AstIntegerLiteralOutOfRange => "ast.integer-literal-out-of-range",
             Self::AstFloatLiteralOutOfRange => "ast.float-literal-out-of-range",
             Self::AstLiteralSuffixMismatch => "ast.literal-suffix-mismatch",
@@ -453,6 +459,7 @@ impl DiagnosticCode {
             "uncategorized" => Self::Uncategorized,
             "syntax.expected-expression" => Self::SyntaxExpectedExpression,
             "syntax.expected-token" => Self::SyntaxExpectedToken,
+            "syntax.lexer-disagreement" => Self::SyntaxLexerDisagreement,
             "ast.integer-literal-out-of-range" => Self::AstIntegerLiteralOutOfRange,
             "ast.float-literal-out-of-range" => Self::AstFloatLiteralOutOfRange,
             "ast.literal-suffix-mismatch" => Self::AstLiteralSuffixMismatch,
