@@ -2278,7 +2278,8 @@ impl InterlokoHost {
         }
         let class = self.builtin_class(BuiltinValueClass::Symbol)?;
         // Symbols are interned for the host's lifetime, so they live in the
-        // image even when a turn interns them.
+        // image even when a turn interns them, and an aborted turn keeps
+        // them: dropping one would let the image reuse its index.
         let value = self.push_object_in(
             Space::Image,
             RuntimeObject {
@@ -3189,8 +3190,10 @@ mod tests {
         )
     }
 
-    #[test]
-    fn aborted_turns_restore_the_image_exactly() {
+    /// Builds the image every abort test starts from: a heap-boxed integer,
+    /// a cell holding it, a rooted string and an interned symbol. Returns the
+    /// host, the boxed integer, the cell and the root.
+    fn abort_fixture() -> (InterlokoHost, Value, Obj, ImageRootId) {
         let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
         let wide = host.box_top_value(Value::I64(i64::MAX)).expect("image box");
         let cell = object_of(
@@ -3201,7 +3204,25 @@ mod tests {
         let held = host.make_string("held").expect("string");
         let held_root = host.register_root(held);
         host.intern_symbol("setup".into()).expect("symbol");
-        let before = image_snapshot(&host);
+        (host, wide, cell, held_root)
+    }
+
+    /// Returns the name of the symbol `value` refers to.
+    fn symbol_name(host: &InterlokoHost, value: &Value) -> String {
+        match &host
+            .object(object_of(value))
+            .expect("symbol resolves")
+            .storage
+        {
+            RuntimeObjectStorage::Symbol { name } => name.clone(),
+            _ => panic!("expected a symbol, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn aborted_turns_restore_everything_but_interned_symbols() {
+        let (mut host, wide, cell, held_root) = abort_fixture();
+        let before = host.heap_stats();
 
         host.begin_turn().expect("turn opens");
         // Point the image cell into the nursery, twice.
@@ -3217,24 +3238,89 @@ mod tests {
         let rooted = host.make_string("rooted").expect("string");
         host.register_root(rooted);
         // Intern a new symbol and look up an existing one.
-        host.intern_symbol("fresh".into()).expect("symbol");
+        let fresh = host.intern_symbol("fresh".into()).expect("symbol");
         host.intern_symbol("setup".into()).expect("symbol");
-        assert_ne!(image_snapshot(&host), before);
-
         let stats = host.abort_turn().expect("turn aborts");
-        assert_eq!(stats.logged_stores, 2);
-        assert_eq!(image_snapshot(&host), before);
+
+        // The image is exactly that of a host which only interned the new
+        // symbol: every store, root change and nursery entry is undone.
+        let (mut reference, ..) = abort_fixture();
+        let expected = reference.intern_symbol("fresh".into()).expect("symbol");
+        assert_eq!(image_snapshot(&host), image_snapshot(&reference));
+        assert_eq!(fresh, expected);
         assert_eq!(host.read_slot(cell, SlotId(0)), Ok(wide.clone()));
         assert_eq!(host.boxed_value(object_of(&wide)), Ok(Value::I64(i64::MAX)));
         let held = host.image_root(held_root).expect("root restored").clone();
         assert_eq!(host.string_text(&held), Ok("held"));
 
-        // The dropped symbol interns afresh, at the end of the image.
-        let fresh = host.intern_symbol("fresh".into()).expect("symbol");
+        // The report counts the kept symbol, and only it.
+        assert_eq!(stats.logged_stores, 2);
+        assert_eq!(stats.interned.objects, 1);
+        assert_eq!(stats.interned.boxed_values, 0);
         assert_eq!(
-            object_of(&fresh).handle.0,
-            u64::try_from(host.image.objects.len()).expect("small")
+            stats.interned.bytes,
+            census::object_bytes(&host.image.objects[3])
         );
+        assert_eq!(stats.promoted, HeapStats::default());
+        assert_eq!(stats.image, host.image_stats());
+        assert_eq!(
+            host.heap_stats(),
+            HeapStats {
+                objects: before.objects + stats.interned.objects,
+                boxed_values: before.boxed_values,
+                bytes: before.bytes + stats.interned.bytes,
+            }
+        );
+    }
+
+    #[test]
+    fn symbols_interned_in_an_aborted_turn_keep_their_handles() {
+        let (mut host, ..) = abort_fixture();
+        host.begin_turn().expect("turn opens");
+        host.make_string("garbage").expect("string");
+        let kept = host.intern_symbol("kept".into()).expect("symbol");
+        host.abort_turn().expect("turn aborts");
+        assert_eq!(symbol_name(&host, &kept), "kept");
+
+        // Re-interning the name finds the same symbol, outside a turn and
+        // in a later one, and a turn that only looks it up interns nothing.
+        assert_eq!(
+            host.intern_symbol("kept".into()).expect("symbol"),
+            kept.clone()
+        );
+        host.begin_turn().expect("turn opens");
+        assert_eq!(
+            host.intern_symbol("kept".into()).expect("symbol"),
+            kept.clone()
+        );
+        let stats = host.abort_turn().expect("turn aborts");
+        assert_eq!(stats.interned, HeapStats::default());
+
+        // Later turns append to the image, by evacuation and by interning;
+        // none of them reuses the kept symbol's index.
+        let before = host.image_stats();
+        host.begin_turn().expect("turn opens");
+        let mut keep = [host.make_string("survivor").expect("string")];
+        let other = host.intern_symbol("other".into()).expect("symbol");
+        let stats = host.finish_turn(&[], &mut keep).expect("turn finishes");
+        assert_eq!(stats.interned.objects, 1);
+        assert_eq!(stats.promoted.objects, 1);
+        assert_eq!(
+            stats.image,
+            HeapStats {
+                objects: before.objects + 2,
+                boxed_values: before.boxed_values,
+                bytes: before.bytes + stats.interned.bytes + stats.promoted.bytes,
+            }
+        );
+        let late = host.intern_symbol("late".into()).expect("symbol");
+        for symbol in [&other, &late, &keep[0]] {
+            assert_ne!(object_of(symbol).handle, object_of(&kept).handle);
+        }
+        assert_eq!(symbol_name(&host, &kept), "kept");
+        assert_eq!(symbol_name(&host, &other), "other");
+        assert_eq!(host.string_text(&keep[0]), Ok("survivor"));
+        assert_eq!(host.intern_symbol("kept".into()).expect("symbol"), kept);
     }
 
     /// The result of resolving a stale nursery handle.

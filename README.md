@@ -304,8 +304,11 @@ outside a turn. `SessionArtifacts::runtime` returns a `SessionRuntime`
 whose image persists across calls (the REPL uses one; `:heap` shows it),
 while `SessionArtifacts::call_function` uses a fresh one per call.
 Turns are transactional: a turn's stores into image objects are recorded
-in a write log, and a trapped turn replays it backwards, so the image is
-left as the turn found it. When a turn returns, the nursery entries
+in a write log, and a trapped turn replays it backwards. Abort restores
+everything except symbols interned during the turn, which stay interned:
+interning is idempotent, so keeping them is harmless, and it means the
+image never reuses an index, so a symbol handle captured during an aborted
+turn keeps naming the same symbol. When a turn returns, the nursery entries
 reachable from its roots (values the caller keeps, image roots registered with
 `InterlokoHost::register_root`, and the image slots its write log names)
 are evacuated into the image in increasing nursery order, charged in work
@@ -317,8 +320,9 @@ object. The numbering wraps only after 2^44 nursery objects (2^45 heap
 boxes); image handles never go stale.
 `FunctionCallOutcome::turn` reports what a call allocated (the nursery
 high-water mark), what was reachable at the end, what was promoted, the
-evacuation work and the number of logged stores; `interloko_corpus heap
-[root...]` prints survival for every program with a `main`.
+symbols it interned, the evacuation work and the number of logged stores;
+`interloko_corpus heap [root...]` prints survival for every program with a
+`main`.
 
 Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
 `Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed

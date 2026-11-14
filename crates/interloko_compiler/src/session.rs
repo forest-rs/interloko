@@ -382,9 +382,10 @@ pub struct FunctionCallOutcome {
 ///
 /// [`SessionArtifacts::call_function`] runs each call on a fresh runtime
 /// host. A `SessionRuntime` instead keeps one host, so long-lived runtime
-/// state (interned symbols today) persists, and runs each call as one
-/// *turn*: the call allocates into a nursery that is emptied when it
-/// returns or traps, so repeated calls do not grow the heap.
+/// state (interned symbols today, including those interned by calls that
+/// trap) persists, and runs each call as one *turn*: the call allocates into
+/// a nursery that is emptied when it returns or traps, so repeated calls do
+/// not grow the heap.
 pub struct SessionRuntime {
     host: InterlokoHost,
 }
@@ -5440,7 +5441,8 @@ fn call_function<'a>(
         Ok((value, trace, output)) => match runtime.finish_turn(&output, &mut []) {
             Ok(turn) => Ok(FunctionCallOutcome { value, trace, turn }),
             // A refused evacuation leaves the turn open; abort it so the
-            // image is as the call found it and the next call can begin.
+            // image is as the call found it (apart from the symbols it
+            // interned, which stay) and the next call can begin.
             Err(error) => {
                 runtime
                     .abort_turn()
@@ -14657,7 +14659,7 @@ mod tests {
     }
 
     #[test]
-    fn trapped_turns_leave_the_heap_unchanged() {
+    fn trapped_turns_keep_only_their_interned_symbols() {
         let artifacts =
             CompilerSession::compile_source("turns.loko", TURN_PROGRAM, RuntimeMode::CompileOnly);
         assert_eq!(artifacts.diagnostics, Vec::new());
@@ -14673,8 +14675,21 @@ mod tests {
             None,
         );
         assert!(matches!(trapped, Err(FunctionCallError::Trap { .. })));
-        // The trapped turn interned `#fresh`; the abort drops it again.
-        assert_eq!(runtime.heap_stats(), before);
+        // The trapped turn interned `#fresh`; the abort undoes everything
+        // else but keeps the symbol, so its handle stays valid.
+        let after = runtime.heap_stats();
+        assert_eq!(after.objects, before.objects + 1);
+        assert_eq!(after.boxed_values, before.boxed_values);
+        // Trapping again finds `#fresh` already interned and leaves the heap
+        // exactly as it was.
+        let trapped = runtime.call_function(
+            &artifacts,
+            "tag-then-trap",
+            &[FunctionValue::Integer(1)],
+            None,
+        );
+        assert!(matches!(trapped, Err(FunctionCallError::Trap { .. })));
+        assert_eq!(runtime.heap_stats(), after);
 
         // A runtime refuses artifacts with a different layout.
         let other = CompilerSession::compile_source(

@@ -10,9 +10,17 @@
 //! image roots it registered, and the image slots its write log names) are
 //! evacuated into the image, and the rest of the nursery is dropped in one
 //! step. A turn that trapped ends with [`InterlokoHost::abort_turn`]: its
-//! image stores and root changes are undone, the symbols it interned are
-//! dropped and the nursery is emptied, leaving the image exactly as the turn
-//! found it.
+//! image stores and root changes are undone and the nursery is emptied,
+//! restoring everything except the symbols interned during the turn, which
+//! stay interned.
+//!
+//! Symbols are the one exception because interning is idempotent: interning
+//! a name again finds the same symbol, so keeping one changes nothing a later
+//! turn can observe except that its handle stays valid. Dropping them would
+//! hand their image indices to whatever the image appends next, and a symbol
+//! handle captured during the aborted turn would silently name that object
+//! instead. Image handles carry no serial to catch that, so the image never
+//! shrinks and never reuses an index.
 //!
 //! Either way, the turn's nursery handles go stale when it ends. Every turn
 //! numbers its nursery entries after the previous turn's, so a handle kept
@@ -78,6 +86,9 @@ impl InterlokoHost {
     /// [`RuntimeError::StaleNurseryHandle`]. A stale handle passed as a
     /// later turn's root or kept value names nothing and is left unchanged.
     ///
+    /// Symbols the turn interned joined the image when they were interned,
+    /// not by evacuation; the report counts them in [`TurnStats::interned`].
+    ///
     /// When the evacuation would exceed the budget, nothing changes, the turn
     /// stays open, and the caller should abort it.
     pub fn finish_turn(
@@ -107,16 +118,21 @@ impl InterlokoHost {
 
     /// Ends the open turn after it trapped, undoing its effect on the heap:
     /// stores into image objects and root releases are reverted newest
-    /// first, roots registered by the turn are dropped, the nursery is
-    /// emptied, and symbols interned during the turn are dropped, so the
-    /// image and [`InterlokoHost::heap_stats`] are as they were before the
-    /// turn began. The turn's nursery handles go stale, as when a turn
-    /// finishes; the next turn's handles do not reuse them.
+    /// first, roots registered by the turn are dropped, and the nursery is
+    /// emptied.
+    ///
+    /// Abort restores everything except the symbols interned during the
+    /// turn, which stay interned: their handles keep naming the same symbols,
+    /// and interning those names again returns the same handles. The image
+    /// and [`InterlokoHost::heap_stats`] are therefore as they were before
+    /// the turn began plus those symbols, which the report counts in
+    /// [`TurnStats::interned`]. The turn's nursery handles go stale, as when
+    /// a turn finishes; the next turn's handles do not reuse them.
     pub fn abort_turn(&mut self) -> Result<TurnStats, RuntimeError> {
         let Some(turn) = self.turn.take() else {
             return Err(RuntimeError::NoOpenTurn);
         };
-        let stats = self.turn_stats_for(&turn, &[]);
+        let mut stats = self.turn_stats_for(&turn, &[]);
         for store in turn.write_log.into_iter().rev() {
             if let Some(RuntimeObjectStorage::Native { slots }) = self
                 .image
@@ -135,9 +151,15 @@ impl InterlokoHost {
             }
         }
         self.nursery_serials.advance(self.nursery.mark());
-        self.nursery.truncate(Default::default());
-        self.image.truncate(turn.image);
-        self.symbols.truncate(turn.symbols);
+        self.nursery.clear();
+        // The image is left to grow: the only entries the turn appended to
+        // it are the symbols it interned, and those stay.
+        debug_assert_eq!(self.image.values.len(), turn.image.values);
+        debug_assert_eq!(
+            self.image.objects.len() - turn.image.objects,
+            self.symbols.len() - turn.symbols
+        );
+        stats.image = self.image.stats();
         Ok(stats)
     }
 
@@ -198,6 +220,7 @@ impl InterlokoHost {
             reachable: self.reachable_stats(&[results, &self.turn_roots(turn)].concat()),
             promoted: HeapStats::default(),
             evacuation_work: 0,
+            interned: self.image.stats_from(turn.image.objects),
             image: self.image.stats(),
             logged_stores: turn.write_log.len(),
         }

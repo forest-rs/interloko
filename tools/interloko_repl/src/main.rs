@@ -704,11 +704,12 @@ impl Repl {
             writeln!(
                 stdout,
                 "last turn: allocated {} objects ({} bytes), {} reachable at end, \
-                 {} promoted, {} evacuation work, {} logged stores",
+                 {} promoted, {} interned, {} evacuation work, {} logged stores",
                 turn.allocated.objects,
                 turn.allocated.bytes,
                 turn.reachable.objects,
                 turn.promoted.objects + turn.promoted.boxed_values,
+                turn.interned.objects,
                 turn.evacuation_work,
                 turn.logged_stores
             )?;
