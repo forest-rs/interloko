@@ -29,6 +29,7 @@
 "sem.unresolved-generic" = "[ps] generic not found: { $generic }"
 "sem.unresolved-function-or-generic" = "[ps] callable not found: { $callee }"
 "sem.unresolved-local" = "[ps] local not found: { $local }"
+"sem.unresolved-hyphenated-local" = "[ps] local not found: { $local }; spaced { $spaced }?"
 "sem.duplicate-local" = "[ps] local repeats: { $local }"
 "sem.ambiguous-callable" = "[ps] accessor value is ambiguous: { $accessor }"
 "sem.function-arity-mismatch" = "[ps] { $actual_count } args supplied to { $callee }; expected { $expected_count }"

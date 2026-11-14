@@ -100,6 +100,10 @@ pub enum DiagnosticCode {
     UnresolvedFunctionOrGeneric,
     /// A local binding could not be resolved.
     UnresolvedLocal,
+    /// A hyphenated name could not be resolved, but splits at a hyphen into
+    /// operands that do resolve, such as `x-1` with `x` bound. A hyphen is a
+    /// name character, so the likely intent is the spaced form, `x - 1`.
+    UnresolvedHyphenatedLocal,
     /// A parameter, local, or restart binding duplicates an existing local.
     DuplicateLocal,
     /// A callable value is ambiguous.
@@ -273,6 +277,7 @@ impl DiagnosticCode {
         Self::UnresolvedGeneric,
         Self::UnresolvedFunctionOrGeneric,
         Self::UnresolvedLocal,
+        Self::UnresolvedHyphenatedLocal,
         Self::DuplicateLocal,
         Self::AmbiguousCallable,
         Self::FunctionArityMismatch,
@@ -378,6 +383,7 @@ impl DiagnosticCode {
             Self::UnresolvedGeneric => "sem.unresolved-generic",
             Self::UnresolvedFunctionOrGeneric => "sem.unresolved-function-or-generic",
             Self::UnresolvedLocal => "sem.unresolved-local",
+            Self::UnresolvedHyphenatedLocal => "sem.unresolved-hyphenated-local",
             Self::DuplicateLocal => "sem.duplicate-local",
             Self::AmbiguousCallable => "sem.ambiguous-callable",
             Self::FunctionArityMismatch => "sem.function-arity-mismatch",
@@ -486,6 +492,7 @@ impl DiagnosticCode {
             "sem.unresolved-generic" => Self::UnresolvedGeneric,
             "sem.unresolved-function-or-generic" => Self::UnresolvedFunctionOrGeneric,
             "sem.unresolved-local" => Self::UnresolvedLocal,
+            "sem.unresolved-hyphenated-local" => Self::UnresolvedHyphenatedLocal,
             "sem.duplicate-local" => Self::DuplicateLocal,
             "sem.ambiguous-callable" => Self::AmbiguousCallable,
             "sem.function-arity-mismatch" => Self::FunctionArityMismatch,

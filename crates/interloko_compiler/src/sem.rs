@@ -10,7 +10,7 @@ use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
-use crate::syntax::Span;
+use crate::syntax::{self, Span};
 
 pub use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, LimitedInteger, MethodId, Number32,
@@ -2671,6 +2671,17 @@ impl FunctionContext {
             .map(|(_, local)| local)
             .find(|local| local.name == name)
             .map(|local| local.id)
+    }
+
+    /// Whether `name` is a visible local or an enclosing local this closure
+    /// could capture.
+    fn binds(&self, name: &str) -> bool {
+        self.find_local(name).is_some()
+            || self.captures.iter().any(|capture| capture.name == name)
+            || self
+                .capture_sources
+                .iter()
+                .any(|source| source.name == name)
     }
 
     fn visible_local_sources(&self) -> Vec<Local> {
@@ -5499,13 +5510,45 @@ impl Lowering {
                 Expr::Error { span }
             }
             AccessorResolution::None => {
-                ctx.diagnostics.push(
-                    Diagnostic::error(span, DiagnosticCode::UnresolvedLocal)
+                let diagnostic = match self.spaced_hyphen_suggestion(ctx, name) {
+                    Some(spaced) => {
+                        Diagnostic::error(span, DiagnosticCode::UnresolvedHyphenatedLocal)
+                            .with_arg(DiagnosticArg::text("local", name))
+                            .with_arg(DiagnosticArg::text("spaced", spaced))
+                    }
+                    None => Diagnostic::error(span, DiagnosticCode::UnresolvedLocal)
                         .with_arg(DiagnosticArg::text("local", name)),
-                );
+                };
+                ctx.diagnostics.push(diagnostic);
                 Expr::Error { span }
             }
         }
+    }
+
+    /// Suggests the spaced form of an unresolved hyphenated name.
+    ///
+    /// A hyphen is a name character, so `x-1` is one name rather than a
+    /// subtraction. When the name splits at a hyphen into a value that is in
+    /// scope and either a number or another value in scope, the author most
+    /// likely meant to subtract: `x-1` suggests `x - 1` and `a-b` suggests
+    /// `a - b`. The first such split wins.
+    fn spaced_hyphen_suggestion(&self, ctx: &FunctionContext, name: &str) -> Option<String> {
+        let is_value = |text: &str| syntax::is_name(text) && self.names_value(ctx, text);
+        name.match_indices('-').find_map(|(index, _)| {
+            let (left, right) = (&name[..index], &name[index + 1..]);
+            (is_value(left) && (syntax::is_number(right) || is_value(right)))
+                .then(|| format!("{left} - {right}"))
+        })
+    }
+
+    /// Whether `name` resolves as a value at this point, without recording
+    /// a closure capture the way resolving it for real would.
+    fn names_value(&self, ctx: &FunctionContext, name: &str) -> bool {
+        ctx.binds(name)
+            || self.resolve_constant(name).is_some()
+            || self.resolve_function(name).is_some()
+            || self.resolve_generic(name).is_some()
+            || self.resolve_accessor_callable(name) != AccessorResolution::None
     }
 
     fn lower_closure_expr(
@@ -9578,6 +9621,43 @@ mod tests {
             DiagnosticCode::UnresolvedLocal,
             &[("local", "x")]
         ));
+    }
+
+    #[test]
+    fn unresolved_hyphenated_names_suggest_the_spaced_form() {
+        let hint = |body: &str| {
+            let module = lower_source(&format!(
+                "define constant $limit = 3;\n\
+                 define function main()\n  let x = 10;\n  let a = 7;\n  {body}\nend;"
+            ));
+            assert_eq!(module.diagnostics.len(), 1, "{:?}", module.diagnostics);
+            let diagnostic = &module.diagnostics[0];
+            let spaced = diagnostic
+                .args
+                .iter()
+                .find(|arg| arg.name == "spaced")
+                .map(|arg| arg.value.render());
+            (diagnostic.code, spaced)
+        };
+        let spaced = |text: &str| {
+            (
+                DiagnosticCode::UnresolvedHyphenatedLocal,
+                Some(text.to_string()),
+            )
+        };
+
+        assert_eq!(hint("x-1"), spaced("x - 1"));
+        assert_eq!(hint("a-x"), spaced("a - x"));
+        assert_eq!(hint("$limit-1"), spaced("$limit - 1"));
+        assert_eq!(hint("x-2i32"), spaced("x - 2i32"));
+        // A closure sees `x` in its enclosing scope.
+        assert_eq!(hint("function() x-1 end"), spaced("x - 1"));
+        // Without a bound name on the left and an operand on the right, it
+        // is an ordinary unresolved local.
+        assert_eq!(hint("y-1"), (DiagnosticCode::UnresolvedLocal, None));
+        assert_eq!(hint("x-y"), (DiagnosticCode::UnresolvedLocal, None));
+        assert_eq!(hint("x--1"), (DiagnosticCode::UnresolvedLocal, None));
+        assert_eq!(hint("x-"), (DiagnosticCode::UnresolvedLocal, None));
     }
 
     #[test]
