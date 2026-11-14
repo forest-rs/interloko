@@ -545,6 +545,8 @@ impl<'a> ExecutionTraceView<'a> {
                     }
                     self.write_values(out, payload)?;
                 }
+                // An outcome from a newer VM: show its debug form.
+                other => write!(out, " {other:?}")?,
             }
             write!(out, " ")?;
             self.write_stack(out, call.location, &call.stack)?;
@@ -580,6 +582,7 @@ impl<'a> ExecutionTraceView<'a> {
                     InstructionOutcome::Caught { depth } => {
                         write!(out, " caught at depth {depth}")?;
                     }
+                    other => write!(out, " {other:?}")?,
                 }
                 writeln!(out)?;
             }

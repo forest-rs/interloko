@@ -2034,6 +2034,7 @@ fn trace_rows(view: &ExecutionTraceView<'_>) -> Vec<TraceRow> {
             HostOutcome::Returned { .. } => "returned".to_string(),
             HostOutcome::Failed(error) => format!("failed: {error}"),
             HostOutcome::Threw { tag, .. } => format!("threw tag#{}", tag.0),
+            other => format!("{other:?}"),
         };
         rows.push(TraceRow {
             class: "trace-event--host",
@@ -2676,7 +2677,8 @@ fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
         Some(
             result @ (RuntimeResult::UnhandledCondition { .. }
             | RuntimeResult::ExpiredExit
-            | RuntimeResult::Aborted),
+            | RuntimeResult::Aborted
+            | RuntimeResult::Failed { .. }),
         ) => RuntimeSummary {
             text: result.to_string(),
             class: "metric--warn",

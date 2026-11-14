@@ -98,4 +98,5 @@
 "runtime.unhandled-condition" = "no live handler applies to a signalled condition"
 "runtime.expired-exit" = "a block exit was called after its block returned"
 "runtime.aborted" = "a condition chooser aborted the run"
+"runtime.failed" = "the runtime ended the run for an unclassified reason"
 "session.unknown-source" = "session source file id is unknown"
