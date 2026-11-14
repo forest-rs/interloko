@@ -186,6 +186,14 @@ pub fn run<'a, H: RuntimeHost>(
                     return Err(driver.failure(trap));
                 }
             }
+            // Runs do not opt into yielded suspensions, so the VM traps an
+            // unhandled `suspend` itself. Should one ever be yielded, it
+            // ends the run exactly as that trap would.
+            RunStatus::AwaitingHandler => {
+                if let Some(suspension) = invocation.pending_suspension() {
+                    return Err(driver.failure(suspension.discard()));
+                }
+            }
         }
     }
 }
