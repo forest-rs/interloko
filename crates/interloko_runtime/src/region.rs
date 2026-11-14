@@ -8,6 +8,12 @@
 //! nursery is emptied in one step, so a turn's garbage costs nothing to
 //! reclaim.
 //!
+//! The image only grows. A turn appends to it only by interning symbols,
+//! and an aborted turn keeps them: abort restores everything except the
+//! symbols interned during the turn, which stay interned. No image index is
+//! ever reused, so an image handle names the same object for the host's
+//! lifetime.
+//!
 //! Object handles say which region they index. An image object's handle is
 //! its one-based index; a nursery object's handle sets
 //! [`NURSERY_OBJECT_BIT`] above a *serial*. Heap-boxed values use the
@@ -151,9 +157,10 @@ pub(crate) struct Region {
 }
 
 impl Region {
-    pub(crate) fn truncate(&mut self, mark: RegionMark) {
-        self.objects.truncate(mark.objects);
-        self.values.truncate(mark.values);
+    /// Drops every entry, keeping the allocations for the next turn.
+    pub(crate) fn clear(&mut self) {
+        self.objects.clear();
+        self.values.clear();
     }
 
     pub(crate) fn mark(&self) -> RegionMark {
@@ -164,7 +171,7 @@ impl Region {
     }
 }
 
-/// Length of a region at some point, for rolling back to it.
+/// Length of a region at some point.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RegionMark {
     pub(crate) objects: usize,
@@ -175,7 +182,8 @@ pub(crate) struct RegionMark {
 #[derive(Clone, Debug)]
 pub(crate) struct OpenTurn {
     /// Image length when the turn began. Only symbols interned during the
-    /// turn extend the image while it is open.
+    /// turn extend the image while it is open, so the objects past this mark
+    /// are those symbols, and they stay in the image however the turn ends.
     pub(crate) image: RegionMark,
     /// Interned-symbol count when the turn began.
     pub(crate) symbols: usize,
