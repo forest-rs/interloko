@@ -23,3 +23,8 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "control"
+harness = false
+required-features = ["std"]
