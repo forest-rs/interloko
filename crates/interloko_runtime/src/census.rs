@@ -48,6 +48,12 @@ pub struct TurnStats {
     pub promoted: HeapStats,
     /// Work units evacuation charged against the host's budget.
     pub evacuation_work: u64,
+    /// Symbols the turn interned. They join the image directly rather than
+    /// by evacuation, and stay in it even when the turn aborts, so the image
+    /// after a finished turn is the image before it plus `interned` plus
+    /// `promoted`, and after an aborted turn, the image before it plus
+    /// `interned`.
+    pub interned: HeapStats,
     /// The image after the turn.
     pub image: HeapStats,
     /// Stores the turn made into image objects: the length of its write
@@ -98,6 +104,16 @@ impl Region {
             boxed_values: self.values.len(),
             bytes: self.objects.iter().map(object_bytes).sum::<usize>()
                 + self.values.len() * boxed_value_bytes(),
+        }
+    }
+
+    /// Returns the sizes of the objects at or past index `start`.
+    pub(crate) fn stats_from(&self, start: usize) -> HeapStats {
+        let objects = self.objects.get(start..).unwrap_or_default();
+        HeapStats {
+            objects: objects.len(),
+            boxed_values: 0,
+            bytes: objects.iter().map(object_bytes).sum(),
         }
     }
 }
