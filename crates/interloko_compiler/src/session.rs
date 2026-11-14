@@ -164,6 +164,11 @@ pub enum RuntimeResult {
     ExpiredExit,
     /// A condition chooser aborted the run after every crossed cleanup ran.
     Aborted,
+    /// The runtime ended the run for a reason the session does not classify.
+    Failed {
+        /// What the runtime reported.
+        detail: String,
+    },
 }
 
 impl RuntimeResult {
@@ -180,6 +185,7 @@ impl RuntimeResult {
             Self::UnhandledCondition { .. } => Some(DiagnosticCode::RuntimeUnhandledCondition),
             Self::ExpiredExit => Some(DiagnosticCode::RuntimeExpiredExit),
             Self::Aborted => Some(DiagnosticCode::RuntimeAborted),
+            Self::Failed { .. } => Some(DiagnosticCode::RuntimeFailed),
         }
     }
 
@@ -214,6 +220,7 @@ impl fmt::Display for RuntimeResult {
             }
             Self::ExpiredExit => formatter.write_str("block exit called after its block returned"),
             Self::Aborted => formatter.write_str("aborted by the condition chooser"),
+            Self::Failed { detail } => write!(formatter, "runtime failed: {detail}"),
         }
     }
 }
@@ -585,6 +592,13 @@ pub enum FunctionCallError {
         /// Trace of the whole run, including the unwinding, when requested.
         trace: Option<ExecutionTrace>,
     },
+    /// The runtime ended the call for a reason the session does not classify.
+    RuntimeFailed {
+        /// What the runtime reported.
+        detail: String,
+        /// Partial trace captured before the failure, when requested.
+        trace: Option<ExecutionTrace>,
+    },
 }
 
 /// Embedding services for one direct-function call.
@@ -647,6 +661,7 @@ impl fmt::Display for FunctionCallError {
                 formatter.write_str("block exit called after its block returned")
             }
             Self::Aborted { .. } => formatter.write_str("aborted by the condition chooser"),
+            Self::RuntimeFailed { detail, .. } => write!(formatter, "runtime failed: {detail}"),
         }
     }
 }
@@ -5350,6 +5365,9 @@ fn runtime_result_for_main_error(
         }
         FunctionCallError::ExpiredExit { trace } => (RuntimeResult::ExpiredExit, trace),
         FunctionCallError::Aborted { trace } => (RuntimeResult::Aborted, trace),
+        FunctionCallError::RuntimeFailed { detail, trace } => {
+            (RuntimeResult::Failed { detail }, trace)
+        }
         FunctionCallError::HostFunctionFailed {
             name,
             failure,
@@ -5560,6 +5578,12 @@ fn run_turn_body<'a>(
                 } => FunctionCallError::ExpiredExit { trace },
                 RunFailure::Aborted { .. } => FunctionCallError::Aborted { trace },
                 RunFailure::Link(error) => FunctionCallError::Link { error },
+                failure @ RunFailure::UnsupportedStatus { .. } => {
+                    FunctionCallError::RuntimeFailed {
+                        detail: failure.to_string(),
+                        trace,
+                    }
+                }
                 RunFailure::Control { trap, .. } | RunFailure::Trap(trap) => {
                     FunctionCallError::Trap { trap, trace }
                 }

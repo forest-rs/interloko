@@ -240,6 +240,8 @@ pub enum DiagnosticCode {
     RuntimeExpiredExit,
     /// A condition chooser aborted the run.
     RuntimeAborted,
+    /// The runtime ended a run for a reason the session does not classify.
+    RuntimeFailed,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -346,6 +348,7 @@ impl DiagnosticCode {
         Self::RuntimeUnhandledCondition,
         Self::RuntimeExpiredExit,
         Self::RuntimeAborted,
+        Self::RuntimeFailed,
         Self::SessionUnknownSource,
     ];
 
@@ -454,6 +457,7 @@ impl DiagnosticCode {
             Self::RuntimeUnhandledCondition => "runtime.unhandled-condition",
             Self::RuntimeExpiredExit => "runtime.expired-exit",
             Self::RuntimeAborted => "runtime.aborted",
+            Self::RuntimeFailed => "runtime.failed",
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -563,6 +567,7 @@ impl DiagnosticCode {
             "runtime.unhandled-condition" => Self::RuntimeUnhandledCondition,
             "runtime.expired-exit" => Self::RuntimeExpiredExit,
             "runtime.aborted" => Self::RuntimeAborted,
+            "runtime.failed" => Self::RuntimeFailed,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })
@@ -861,6 +866,14 @@ mod tests {
         assert_eq!(
             crate::session::RuntimeResult::MainHasParameters.code(),
             Some(DiagnosticCode::RuntimeMainHasParameters)
+        );
+        let failed = crate::session::RuntimeResult::Failed {
+            detail: "the VM paused with unsupported run status Future".into(),
+        };
+        assert_eq!(failed.code(), Some(DiagnosticCode::RuntimeFailed));
+        assert_eq!(
+            alloc::string::ToString::to_string(&failed),
+            "runtime failed: the VM paused with unsupported run status Future"
         );
         let trap = |trap| crate::session::RuntimeResult::Trap {
             trap: execution_tape::vm::TrapInfo {

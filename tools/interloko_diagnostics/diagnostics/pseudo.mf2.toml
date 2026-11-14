@@ -98,4 +98,5 @@
 "runtime.unhandled-condition" = "[ps] unhandled condition"
 "runtime.expired-exit" = "[ps] expired block exit"
 "runtime.aborted" = "[ps] aborted"
+"runtime.failed" = "[ps] runtime failed"
 "session.unknown-source" = "[ps] source file id unknown"

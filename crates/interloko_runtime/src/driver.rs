@@ -22,6 +22,8 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -88,6 +90,12 @@ pub enum RunFailure {
     },
     /// The entry unit could not be linked into the VM; nothing ran.
     Link(LinkError),
+    /// The VM paused with a run status this driver does not service, so the
+    /// invocation was cancelled and rolled back.
+    UnsupportedStatus {
+        /// The status's `Debug` text.
+        status: String,
+    },
 }
 
 impl RunFailure {
@@ -96,7 +104,7 @@ impl RunFailure {
     pub const fn trap(&self) -> Option<&TrapInfo> {
         match self {
             Self::Trap(trap) | Self::Control { trap, .. } | Self::Aborted { trap } => Some(trap),
-            Self::Link(_) => None,
+            Self::Link(_) | Self::UnsupportedStatus { .. } => None,
         }
     }
 }
@@ -108,6 +116,12 @@ impl core::fmt::Display for RunFailure {
             Self::Control { fault, trap } => write!(formatter, "{fault:?}: {trap}"),
             Self::Aborted { .. } => formatter.write_str("aborted by the condition chooser"),
             Self::Link(error) => write!(formatter, "{error}"),
+            Self::UnsupportedStatus { status } => {
+                write!(
+                    formatter,
+                    "the VM paused with unsupported run status {status}"
+                )
+            }
         }
     }
 }
@@ -194,6 +208,13 @@ pub fn run<'a, H: RuntimeHost>(
             RunStatus::AwaitingHandler => invocation
                 .pending_suspension()
                 .map_or(Ok(()), |suspension| driver.answer(suspension, chooser)),
+            // A status from a newer VM that this driver cannot service.
+            // Returning drops the invocation, which cancels and rolls it back.
+            status => {
+                return Err(RunFailure::UnsupportedStatus {
+                    status: format!("{status:?}"),
+                });
+            }
         };
         if let Err(trap) = serviced {
             return Err(driver.failure(trap));
