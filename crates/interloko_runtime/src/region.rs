@@ -9,19 +9,54 @@
 //! reclaim.
 //!
 //! Object handles say which region they index. An image object's handle is
-//! its one-based index; a nursery object's handle also sets
-//! [`NURSERY_OBJECT_BIT`]. Heap-boxed values use the boxed-handle kinds `00`
-//! (image) and `11` (nursery); see [`crate::boxed`].
+//! its one-based index; a nursery object's handle sets
+//! [`NURSERY_OBJECT_BIT`] above a *serial*. Heap-boxed values use the
+//! boxed-handle kinds `00` (image index) and `11` (nursery serial); see
+//! [`crate::boxed`].
+//!
+//! # Nursery serials
+//!
+//! Every nursery entry gets the next serial of its kind, counting across
+//! turns rather than restarting at each one: a turn's entries take the
+//! serials after the previous turn's, whether that turn finished or
+//! aborted. [`NurserySerials`] records where the open turn's serials start,
+//! and a nursery handle resolves only when its serial falls within the
+//! open turn's entries. A handle kept past the end of its turn therefore
+//! names no entry of a later turn: resolving it fails with
+//! [`crate::RuntimeError::StaleNurseryHandle`] instead of aliasing whatever
+//! the later turn allocated at the same index.
+//!
+//! Serials are [`OBJECT_SERIAL_BITS`] wide for objects and
+//! [`crate::boxed::NURSERY_SERIAL_BITS`] wide for heap boxes, and wrap
+//! modulo that width. A stale handle can resolve again only once the
+//! counter has come back round to its serial, after `2^44` more nursery
+//! objects (`2^45` more boxes) have been allocated; until then it is
+//! always detected. That window is the guarantee, and it is deliberately
+//! finite: the serials have to fit beside the tag bits of a boxed
+//! `<object>`, and refusing to wrap would end the host's ability to run
+//! turns. Image handles carry no serial and never go stale.
+//!
+//! Decoding a nursery handle costs one subtraction and one mask beyond an
+//! image handle's decoding; the bounds check that follows is the one every
+//! handle already pays.
 
 use alloc::vec::Vec;
 
 use execution_tape::value::{ObjHandle, Value};
 
 use crate::RuntimeObject;
+use crate::boxed;
 
 /// Handle bit marking a nursery object. Object handles stay below
 /// `2^45` so that a boxed `<object>` can carry any of them immediately.
-pub(crate) const NURSERY_OBJECT_BIT: u64 = 1 << 44;
+pub(crate) const NURSERY_OBJECT_BIT: u64 = 1 << OBJECT_SERIAL_BITS;
+
+/// Width of a nursery object's serial: the handle bits below
+/// [`NURSERY_OBJECT_BIT`].
+pub(crate) const OBJECT_SERIAL_BITS: u32 = 44;
+
+/// Mask of a nursery object's serial.
+const OBJECT_SERIAL_MASK: u64 = NURSERY_OBJECT_BIT - 1;
 
 /// Which heap region an entry lives in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -32,6 +67,30 @@ pub(crate) enum Space {
     Nursery = 1,
 }
 
+/// Where the open turn's nursery serials start.
+///
+/// The nursery entry at index `i` has serial `start + i`, modulo the
+/// serial width, and a nursery serial `s` names index `s - start`, modulo
+/// the same width; only indices below the nursery's length resolve. When a
+/// turn ends, [`Self::advance`] moves both starts past every serial it
+/// used.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NurserySerials {
+    /// Serial of the open nursery's first object.
+    pub(crate) objects: u64,
+    /// Serial of the open nursery's first heap box.
+    pub(crate) values: u64,
+}
+
+impl NurserySerials {
+    /// Moves past the serials of a nursery that ended holding `ended`
+    /// entries, wrapping at the serial width.
+    pub(crate) const fn advance(&mut self, ended: RegionMark) {
+        self.objects = self.objects.wrapping_add(ended.objects as u64) & OBJECT_SERIAL_MASK;
+        self.values = self.values.wrapping_add(ended.values as u64) & boxed::NURSERY_SERIAL_MASK;
+    }
+}
+
 /// Location of a runtime object.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObjectRef {
@@ -40,31 +99,47 @@ pub(crate) struct ObjectRef {
 }
 
 impl ObjectRef {
-    /// Decodes an object handle, or `None` when it names no slot.
-    pub(crate) fn decode(handle: ObjHandle) -> Option<Self> {
-        let (space, one_based) = if handle.0 & NURSERY_OBJECT_BIT == 0 {
-            (Space::Image, handle.0)
-        } else {
-            (Space::Nursery, handle.0 & !NURSERY_OBJECT_BIT)
-        };
-        if one_based >= NURSERY_OBJECT_BIT {
+    /// Decodes an object handle against the open turn's `serials`, or
+    /// returns `None` when it names no slot.
+    ///
+    /// A nursery handle always decodes; one from an earlier turn decodes to
+    /// an index past the nursery's end, so the caller's bounds check
+    /// rejects it.
+    pub(crate) fn decode(handle: ObjHandle, serials: NurserySerials) -> Option<Self> {
+        let bits = handle.0;
+        if bits >> (OBJECT_SERIAL_BITS + 1) != 0 {
             return None;
         }
-        let index = usize::try_from(one_based).ok()?.checked_sub(1)?;
-        Some(Self { space, index })
+        if bits & NURSERY_OBJECT_BIT == 0 {
+            let index = usize::try_from(bits).ok()?.checked_sub(1)?;
+            return Some(Self {
+                space: Space::Image,
+                index,
+            });
+        }
+        let offset = bits.wrapping_sub(serials.objects) & OBJECT_SERIAL_MASK;
+        // An offset too large for `usize` is past any nursery's end too.
+        Some(Self {
+            space: Space::Nursery,
+            index: usize::try_from(offset).unwrap_or(usize::MAX),
+        })
     }
 
-    /// Encodes the handle of this location, or `None` when the index is too
-    /// large to address.
-    pub(crate) fn encode(self) -> Option<ObjHandle> {
-        let one_based = u64::try_from(self.index).ok()?.checked_add(1)?;
-        if one_based >= NURSERY_OBJECT_BIT {
-            return None;
+    /// Encodes the handle of this location against the open turn's
+    /// `serials`, or returns `None` when the index is too large to address.
+    pub(crate) fn encode(self, serials: NurserySerials) -> Option<ObjHandle> {
+        let index = u64::try_from(self.index).ok()?;
+        match self.space {
+            Space::Image => {
+                let one_based = index.checked_add(1)?;
+                (one_based < NURSERY_OBJECT_BIT).then_some(ObjHandle(one_based))
+            }
+            Space::Nursery => (index <= OBJECT_SERIAL_MASK).then(|| {
+                ObjHandle(
+                    NURSERY_OBJECT_BIT | (serials.objects.wrapping_add(index) & OBJECT_SERIAL_MASK),
+                )
+            }),
         }
-        Some(ObjHandle(match self.space {
-            Space::Image => one_based,
-            Space::Nursery => NURSERY_OBJECT_BIT | one_based,
-        }))
     }
 }
 
@@ -130,28 +205,119 @@ pub(crate) struct LoggedStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{NURSERY_OBJECT_BIT, ObjectRef, Space};
+    use super::{
+        NURSERY_OBJECT_BIT, NurserySerials, OBJECT_SERIAL_MASK, ObjectRef, RegionMark, Space,
+    };
     use execution_tape::value::ObjHandle;
 
     #[test]
     fn object_handles_round_trip_per_space() {
-        for space in [Space::Image, Space::Nursery] {
-            for index in [0, 1, 41, (1 << 44) - 2] {
-                let location = ObjectRef { space, index };
-                let handle = location.encode().expect("addressable");
-                assert!(handle.0 < 1 << 45);
-                assert_eq!(ObjectRef::decode(handle), Some(location));
-            }
-            assert_eq!(
-                ObjectRef {
-                    space,
-                    index: (1 << 44) - 1
+        let starts = [0, 1, 1 << 20, OBJECT_SERIAL_MASK];
+        for objects in starts {
+            let serials = NurserySerials { objects, values: 0 };
+            for space in [Space::Image, Space::Nursery] {
+                for index in [0, 1, 41, (1 << 44) - 2] {
+                    let location = ObjectRef { space, index };
+                    let handle = location.encode(serials).expect("addressable");
+                    assert!(handle.0 < 1 << 45);
+                    assert_eq!(ObjectRef::decode(handle, serials), Some(location));
                 }
-                .encode(),
-                None
+            }
+            // Image indices are one-based below the nursery bit; nursery
+            // indices use every serial.
+            let last = ObjectRef {
+                space: Space::Image,
+                index: (1 << 44) - 1,
+            };
+            assert_eq!(last.encode(serials), None);
+            let last = ObjectRef {
+                space: Space::Nursery,
+                index: (1 << 44) - 1,
+            };
+            assert_eq!(
+                ObjectRef::decode(last.encode(serials).expect("addressable"), serials),
+                Some(last)
             );
+            let past = ObjectRef {
+                space: Space::Nursery,
+                index: 1 << 44,
+            };
+            assert_eq!(past.encode(serials), None);
+            assert_eq!(ObjectRef::decode(ObjHandle(0), serials), None);
+            assert_eq!(ObjectRef::decode(ObjHandle(1 << 45), serials), None);
+            assert_eq!(ObjectRef::decode(ObjHandle(u64::MAX), serials), None);
         }
-        assert_eq!(ObjectRef::decode(ObjHandle(0)), None);
-        assert_eq!(ObjectRef::decode(ObjHandle(NURSERY_OBJECT_BIT)), None);
+    }
+
+    #[test]
+    fn image_handles_ignore_nursery_serials() {
+        let location = ObjectRef {
+            space: Space::Image,
+            index: 6,
+        };
+        let handle = location
+            .encode(NurserySerials::default())
+            .expect("addressable");
+        assert_eq!(handle, ObjHandle(7));
+        let later = NurserySerials {
+            objects: 12_345,
+            values: 678,
+        };
+        assert_eq!(location.encode(later), Some(handle));
+        assert_eq!(ObjectRef::decode(handle, later), Some(location));
+    }
+
+    #[test]
+    fn nursery_handles_decode_past_the_end_after_their_turn() {
+        let mut serials = NurserySerials::default();
+        let first = ObjectRef {
+            space: Space::Nursery,
+            index: 2,
+        };
+        let handle = first.encode(serials).expect("addressable");
+        serials.advance(RegionMark {
+            objects: 3,
+            values: 0,
+        });
+        // The same index in the next turn has a different handle, and the
+        // old handle decodes to an index the next turn has not reached:
+        // 2 - 3 wraps to the top of the serial range.
+        assert_ne!(first.encode(serials), Some(handle));
+        assert_eq!(
+            ObjectRef::decode(handle, serials),
+            Some(ObjectRef {
+                space: Space::Nursery,
+                index: (1 << 44) - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn serials_wrap_at_their_width() {
+        let mut serials = NurserySerials {
+            objects: OBJECT_SERIAL_MASK - 1,
+            values: crate::boxed::NURSERY_SERIAL_MASK,
+        };
+        // A nursery that straddles the wrap still round-trips.
+        for index in 0..4 {
+            let location = ObjectRef {
+                space: Space::Nursery,
+                index,
+            };
+            let handle = location.encode(serials).expect("addressable");
+            assert_eq!(handle.0 & NURSERY_OBJECT_BIT, NURSERY_OBJECT_BIT);
+            assert_eq!(ObjectRef::decode(handle, serials), Some(location));
+        }
+        serials.advance(RegionMark {
+            objects: 4,
+            values: 3,
+        });
+        assert_eq!(
+            serials,
+            NurserySerials {
+                objects: 2,
+                values: 2
+            }
+        );
     }
 }
