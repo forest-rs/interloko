@@ -1,11 +1,18 @@
 //! The one way to run Interloko tape.
 //!
-//! [`run`] starts a yielded `execution_tape` invocation and services every
-//! host request it admits. Control requests (handler and exit bindings,
-//! signals) are language policy and are handled here, where the VM's frames
-//! are visible: a signal searches the dynamic bindings on the signalling
-//! stack before anything unwinds. Every other request dispatches to the
-//! embedding's [`Host`] unchanged.
+//! [`run`] starts an `execution_tape` invocation that yields its host
+//! requests and its unhandled suspensions, and services both. Control
+//! requests (handler and exit bindings, handler searches) are language policy
+//! and are handled here, where the VM's frames are visible: a signal searches
+//! the dynamic bindings on the signalling stack before anything unwinds, and
+//! guards run there as ordinary guest calls. Every other request dispatches to
+//! the embedding's [`Host`] unchanged.
+//!
+//! A condition no handler accepts suspends on its condition tag. No guest
+//! code handles those tags, so the suspension reaches the driver with every
+//! frame still live, and the driver answers it with the chooser's choice:
+//! resuming the signal with values, or raising a restart, retry or abort at
+//! it so that every crossed cleanup runs.
 //!
 //! A run links [`CodeUnit`]s: it installs the entry unit, and a chooser may
 //! install replacements while a condition is unhandled. Generic sends ask
@@ -22,8 +29,8 @@ use execution_tape::host::{Host, HostError, ValueRef};
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, Value};
 use execution_tape::vm::{
-    ActivationId, InstallError, Invocation, InvocationOptions, PendingHostCall, RunStatus,
-    TagError, Trap, TrapInfo, Vm,
+    ActivationId, InstallError, InvocationInspection, InvocationOptions, PendingHostCall,
+    PendingSuspension, RunStatus, TagError, Trap, TrapInfo, Vm,
 };
 use interloko_model::{ClassId, GenericFunctionId};
 
@@ -33,9 +40,10 @@ use crate::chooser::{
 };
 use crate::code::{CODE_DISPATCH, CodeMismatch, CodeUnit, Definition, UnitTable};
 use crate::control::{
-    ABORT_TAG, BindingKind, BindingToken, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL,
-    CONTROL_CHECK_EXIT, CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats,
-    RESTART_TAG, RETRY_TAG, RestartDescriptor, is_control_symbol, restart_payload, retry_payload,
+    ABORT_TAG, BindingKind, BindingToken, CONDITION_GUARD, CONDITION_GUARD_RESULT,
+    CONDITION_GUARD_UNWOUND, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONTROL_CHECK_EXIT,
+    CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats, RESTART_TAG,
+    RETRY_TAG, RestartDescriptor, is_control_symbol, restart_payload, retry_payload,
 };
 
 /// A [`Host`] backed by an [`InterlokoHost`], which the driver consults for
@@ -133,9 +141,8 @@ impl core::fmt::Display for LinkError {
 /// The driver defines the control tags the unit imports, unless the VM
 /// already has them, and installs the unit as a new VM unit; installing is
 /// explicit and never cached, so every run adds one unit. `options` may carry
-/// trace and access observers; the driver opts into yielded host calls
-/// itself. Hard VM limits apply to the whole run, including guest code the
-/// driver starts on the signalling stack.
+/// trace and access observers; the driver opts into yielded host calls and
+/// suspensions itself. Hard VM limits apply to the whole run.
 ///
 /// A condition that no live handler accepts goes to `chooser` before anything
 /// unwinds.
@@ -157,7 +164,7 @@ pub fn run<'a, H: RuntimeHost>(
         .start(
             FuncRef::new(installed, entry),
             args,
-            options.yield_host_calls(),
+            options.yield_host_calls().yield_suspensions(),
         )
         .map_err(|trap| RunFailure::Trap(Box::new(trap)))?;
     let mut driver = Driver {
@@ -173,27 +180,23 @@ pub fn run<'a, H: RuntimeHost>(
             Ok(status) => status,
             Err(trap) => return Err(driver.failure(trap)),
         };
-        match status {
+        let serviced = match status {
             RunStatus::Complete => {
                 return Ok(RunOutcome {
                     outputs: invocation.take_outputs().unwrap_or_default(),
                     stats: driver.state.stats(),
                 });
             }
-            RunStatus::Suspended => {}
-            RunStatus::AwaitingHost | RunStatus::CallbackReturned => {
-                if let Err(trap) = driver.service(&mut invocation, status, chooser) {
-                    return Err(driver.failure(trap));
-                }
-            }
-            // Runs do not opt into yielded suspensions, so the VM traps an
-            // unhandled `suspend` itself. Should one ever be yielded, it
-            // ends the run exactly as that trap would.
-            RunStatus::AwaitingHandler => {
-                if let Some(suspension) = invocation.pending_suspension() {
-                    return Err(driver.failure(suspension.discard()));
-                }
-            }
+            RunStatus::Suspended => Ok(()),
+            RunStatus::AwaitingHost | RunStatus::CallbackReturned => invocation
+                .pending_host_call()
+                .map_or(Ok(()), |pending| driver.service(pending, status)),
+            RunStatus::AwaitingHandler => invocation
+                .pending_suspension()
+                .map_or(Ok(()), |suspension| driver.answer(suspension, chooser)),
+        };
+        if let Err(trap) = serviced {
+            return Err(driver.failure(trap));
         }
     }
 }
@@ -213,11 +216,10 @@ fn define_tags<H: Host>(vm: &mut Vm<H>) -> Result<VmTags, LinkError> {
 }
 
 /// Copies the live frames and their initialized registers, innermost first.
-fn snapshot_frames<H: RuntimeHost>(
-    pending: &PendingHostCall<'_, '_, H>,
+fn snapshot_frames(
+    mut inspection: InvocationInspection<'_>,
     units: &UnitTable,
 ) -> Vec<FrameSnapshot> {
-    let mut inspection = pending.inspect();
     let frames = inspection.frames().collect::<Vec<_>>();
     frames
         .into_iter()
@@ -256,17 +258,19 @@ struct Driver {
     fault: Option<ControlFault>,
 }
 
-/// One signal's handler search, alive while its `signal` request is pending.
+/// One signal's handler search, alive from its `signal` request until it
+/// selects a handler, finds none, or its guard exits by an exception. Each of
+/// those is a request from the signalling activation, so the search never
+/// outlives what it describes.
 ///
 /// While a guard runs, the bindings from the guarded one up to those live
 /// when this search began are masked: a signal from inside the guard sees
 /// only outer bindings and bindings the guard itself establishes.
 struct Search {
-    /// Activation that issued the `signal`; the search dies with it.
+    /// Activation that issued the `signal` and makes the search's requests.
     activation: ActivationId,
     condition: Obj,
     class: ClassId,
-    resume_types: Vec<ValueType>,
     /// Bindings below this index are still candidates.
     next: usize,
     /// Bindings live when the search began.
@@ -312,11 +316,13 @@ struct VmTags {
     retry: TagRef,
 }
 
-/// How to finish a pending request.
+/// How to finish a pending request or answer a suspended signal.
 enum Action {
+    /// Return these values where the guest waits.
     Complete(Vec<Value>),
+    /// Raise this exception where the guest waits.
     Throw(TagRef, Vec<Value>),
-    CallGuest(Value, Vec<Value>),
+    /// End the run with this fault.
     Fail(ControlFault),
 }
 
@@ -338,49 +344,81 @@ impl Driver {
         }
     }
 
-    /// Services the waiting request: a new one, or a `signal` whose guard
-    /// just returned to it.
+    /// Services a waiting host request.
+    ///
+    /// The driver never calls back into the guest, so a returned callback
+    /// is a protocol fault.
     fn service<H: RuntimeHost>(
         &mut self,
-        invocation: &mut Invocation<'_, H>,
+        mut pending: PendingHostCall<'_, '_, H>,
         status: RunStatus,
-        chooser: &mut dyn ConditionChooser,
     ) -> Result<(), TrapInfo> {
-        let Some(mut pending) = invocation.pending_host_call() else {
-            return Ok(());
-        };
-        let guard_returned = status == RunStatus::CallbackReturned;
-        if !guard_returned {
-            if pending.symbol() == CODE_DISPATCH {
-                return self.dispatch(pending);
-            }
-            if !is_control_symbol(pending.symbol()) {
-                return pending.dispatch();
-            }
-        }
-        // A search whose signalling activation has unwound is over.
-        let activations = pending
-            .inspect()
-            .frames()
-            .map(|frame| frame.activation)
-            .collect::<Vec<_>>();
-        self.searches
-            .retain(|search| activations.contains(&search.activation));
-        let action = if guard_returned {
-            let results = pending.take_callback_results().unwrap_or_default();
-            self.guard_returned(&mut pending, &results, chooser)
+        let action = if status == RunStatus::CallbackReturned {
+            Action::Fail(ControlFault::MalformedRequest)
+        } else if pending.symbol() == CODE_DISPATCH {
+            return self.dispatch(pending);
+        } else if !is_control_symbol(pending.symbol()) {
+            return pending.dispatch();
         } else {
-            self.decide(&mut pending, activations, chooser)
+            self.decide(&mut pending)
         };
         match action {
             Action::Complete(mut values) => pending.complete(&mut values, Ok(0)),
             Action::Throw(tag, payload) => pending.throw(tag, payload),
-            Action::CallGuest(callee, args) => pending.call_guest(callee, args),
             Action::Fail(fault) => {
                 self.fault.get_or_insert(fault);
                 pending.complete(&mut [], Err(HostError::Failed))
             }
         }
+    }
+
+    /// Answers a suspension: a signal that no handler accepted waits on its
+    /// condition tag, and the chooser decides how it continues.
+    fn answer<H: RuntimeHost>(
+        &mut self,
+        mut suspension: PendingSuspension<'_, '_, H>,
+        chooser: &mut dyn ConditionChooser,
+    ) -> Result<(), TrapInfo> {
+        let action = match self.suspended_condition(&mut suspension) {
+            Some((condition, class)) => {
+                self.state.note_unhandled();
+                let resume_types = suspension.result_types().to_vec();
+                self.unhandled(&mut suspension, condition, class, &resume_types, chooser)
+            }
+            None => Action::Fail(ControlFault::MalformedRequest),
+        };
+        match action {
+            Action::Complete(values) => suspension.resume(values),
+            Action::Throw(tag, payload) => suspension.resume_throw(tag, payload),
+            Action::Fail(fault) => {
+                self.fault.get_or_insert(fault);
+                Err(suspension.discard())
+            }
+        }
+    }
+
+    /// The condition and its class, when `suspension` waits on one of its
+    /// unit's condition tags with a condition object.
+    fn suspended_condition<H: RuntimeHost>(
+        &self,
+        suspension: &mut PendingSuspension<'_, '_, H>,
+    ) -> Option<(Obj, ClassId)> {
+        let code = self.units.get(suspension.location().unit)?;
+        if !code.control.conditions.contains(&suspension.local_tag()) {
+            return None;
+        }
+        let payload = suspension
+            .payload()
+            .map(|value| value.to_value())
+            .collect::<Vec<_>>();
+        let [Value::Obj(condition)] = payload.as_slice() else {
+            return None;
+        };
+        let condition = *condition;
+        let class = suspension
+            .host_mut()
+            .with_runtime(|runtime| runtime.object(condition).ok().map(|object| object.class))?;
+        Some((condition, class))
     }
 
     /// Answers a generic send with the function its arguments select from
@@ -453,23 +491,23 @@ impl Driver {
         Some(target)
     }
 
-    /// Decides a new control request while it waits, with the signalling
-    /// frames and the host both reachable through `pending`. `activations`
-    /// are the live ones, innermost first.
-    fn decide<H: RuntimeHost>(
-        &mut self,
-        pending: &mut PendingHostCall<'_, '_, H>,
-        activations: Vec<ActivationId>,
-        chooser: &mut dyn ConditionChooser,
-    ) -> Action {
-        let Some(activation) = activations.into_iter().next() else {
+    /// Decides a control request while it waits, with the requesting
+    /// frames and the host both reachable through `pending`.
+    fn decide<H: RuntimeHost>(&mut self, pending: &mut PendingHostCall<'_, '_, H>) -> Action {
+        let Some(activation) = pending
+            .inspect()
+            .frames()
+            .next()
+            .map(|frame| frame.activation)
+        else {
             return Action::Fail(ControlFault::MalformedRequest);
         };
+        let symbol = pending.symbol();
         let args = pending
             .arguments()
             .map(|value| value.to_value())
             .collect::<Vec<_>>();
-        match (pending.symbol(), args.as_slice()) {
+        match (symbol, args.as_slice()) {
             (CONDITION_PUSH_HANDLER, [Value::U64(descriptor), guard @ ..]) => {
                 let unit = pending.unit();
                 let Some(descriptor) = usize::try_from(*descriptor).ok().filter(|index| {
@@ -524,45 +562,60 @@ impl Driver {
                     activation,
                     condition,
                     class,
-                    resume_types: pending.return_types().to_vec(),
                     next: live,
                     stack_len: live,
                     guarding: None,
                 });
-                self.step(pending, chooser)
+                self.step(pending)
+            }
+            (CONDITION_GUARD, []) => match self.guarding(&activation) {
+                Some(index) => match &self.state.bindings()[index].kind {
+                    BindingKind::Handler {
+                        guard: Some(guard), ..
+                    } => Action::Complete(alloc::vec![guard.clone()]),
+                    _ => Action::Fail(ControlFault::MalformedRequest),
+                },
+                None => Action::Fail(ControlFault::MalformedRequest),
+            },
+            (CONDITION_GUARD_UNWOUND, []) => {
+                if self.guarding(&activation).is_none() {
+                    return Action::Fail(ControlFault::MalformedRequest);
+                }
+                self.searches.pop();
+                Action::Complete(Vec::new())
+            }
+            (CONDITION_GUARD_RESULT, [Value::Bool(accepted)]) => {
+                let Some(index) = self.guarding(&activation) else {
+                    return Action::Fail(ControlFault::MalformedRequest);
+                };
+                if let Some(search) = self.searches.last_mut() {
+                    search.guarding = None;
+                }
+                if *accepted {
+                    self.accept(index)
+                } else {
+                    self.step(pending)
+                }
             }
             _ => Action::Fail(ControlFault::MalformedRequest),
         }
     }
 
-    /// Continues the innermost search after its guard returned.
-    fn guard_returned<H: RuntimeHost>(
-        &mut self,
-        pending: &mut PendingHostCall<'_, '_, H>,
-        results: &[Value],
-        chooser: &mut dyn ConditionChooser,
-    ) -> Action {
-        let Some(search) = self.searches.last_mut() else {
-            return Action::Fail(ControlFault::MalformedRequest);
-        };
-        let Some(index) = search.guarding.take() else {
-            return Action::Fail(ControlFault::MalformedRequest);
-        };
-        match results {
-            [Value::Bool(true)] => self.accept(index),
-            [Value::Bool(false)] => self.step(pending, chooser),
-            _ => Action::Fail(ControlFault::MalformedRequest),
-        }
+    /// The binding whose guard the innermost search waits on, when that
+    /// search belongs to `activation`.
+    fn guarding(&self, activation: &ActivationId) -> Option<usize> {
+        self.searches
+            .last()
+            .filter(|search| search.activation == *activation)
+            .and_then(|search| search.guarding)
     }
 
     /// Advances the innermost search to its next applicable handler, still
-    /// on the signalling stack. A guarded handler's guard runs first as a
-    /// guest call; an unguarded one is taken at once.
-    fn step<H: RuntimeHost>(
-        &mut self,
-        pending: &mut PendingHostCall<'_, '_, H>,
-        chooser: &mut dyn ConditionChooser,
-    ) -> Action {
+    /// on the signalling stack. An unguarded handler is taken at once; for a
+    /// guarded one the request returns `#t`, and the guest runs the guard and
+    /// reports its answer. With no handler left the request returns `#f`,
+    /// and the guest suspends the signal for the chooser.
+    fn step<H: RuntimeHost>(&mut self, pending: &mut PendingHostCall<'_, '_, H>) -> Action {
         let Some(search) = self.searches.last() else {
             return Action::Fail(ControlFault::MalformedRequest);
         };
@@ -577,31 +630,21 @@ impl Driver {
                 continue;
             }
             let guard = match &self.state.bindings()[index].kind {
-                BindingKind::Handler { guard, .. } => guard.clone(),
+                BindingKind::Handler { guard, .. } => guard.as_ref(),
                 BindingKind::Exit => None,
             };
             let Some(search) = self.searches.last_mut() else {
                 return Action::Fail(ControlFault::MalformedRequest);
             };
             search.next = index;
-            match guard {
-                Some(guard) => {
-                    search.guarding = Some(index);
-                    return Action::CallGuest(guard, alloc::vec![Value::Obj(search.condition)]);
-                }
-                None => return self.accept(index),
+            if guard.is_some() {
+                search.guarding = Some(index);
+                return Action::Complete(alloc::vec![Value::Bool(true)]);
             }
+            return self.accept(index);
         }
-        let Some(search) = self.searches.pop() else {
-            return Action::Fail(ControlFault::MalformedRequest);
-        };
-        self.unhandled(
-            pending,
-            search.condition,
-            search.class,
-            &search.resume_types,
-            chooser,
-        )
+        self.searches.pop();
+        Action::Complete(alloc::vec![Value::Bool(false)])
     }
 
     /// Takes the handler at `index` for the innermost search: its restart is
@@ -661,7 +704,7 @@ impl Driver {
     /// and asks again, with the frames showing what it superseded.
     fn unhandled<H: RuntimeHost>(
         &mut self,
-        pending: &mut PendingHostCall<'_, '_, H>,
+        pending: &mut PendingSuspension<'_, '_, H>,
         condition: Obj,
         class: ClassId,
         resume_types: &[ValueType],
@@ -669,7 +712,7 @@ impl Driver {
     ) -> Action {
         let mut refused = None;
         loop {
-            let frames = snapshot_frames(pending, &self.units);
+            let frames = snapshot_frames(pending.inspect(), &self.units);
             let choice = {
                 let mut restarts = Vec::new();
                 for binding in self.state.bindings().iter().rev() {
@@ -726,7 +769,7 @@ impl Driver {
     /// over from the newest unit.
     fn install<H: RuntimeHost>(
         &mut self,
-        pending: &mut PendingHostCall<'_, '_, H>,
+        pending: &mut PendingSuspension<'_, '_, H>,
         code: Arc<CodeUnit>,
     ) -> Result<(), LinkError> {
         if let Some(newest) = self.units.newest() {
@@ -783,7 +826,7 @@ impl Driver {
     /// Invokes an offered `handle` site's restart with checked arguments.
     fn restart<H: RuntimeHost>(
         &self,
-        pending: &mut PendingHostCall<'_, '_, H>,
+        pending: &mut PendingSuspension<'_, '_, H>,
         condition: Obj,
         token: BindingToken,
         arguments: &[Value],

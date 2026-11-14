@@ -18489,6 +18489,227 @@ end;
         assert_eq!(value, FunctionValue::Float(100.5));
     }
 
+    /// Runs `main` traced with `chooser`, returning its value, or `None` when
+    /// it failed, and the recording.
+    fn traced_with_chooser(
+        artifacts: &SessionArtifacts,
+        chooser: &mut dyn ConditionChooser,
+    ) -> (Option<FunctionValue>, ExecutionTrace) {
+        let result = artifacts.call_function_with(
+            "main",
+            &[],
+            Some(ExecutionTraceDetail::Boundaries),
+            CallServices {
+                host_functions: None,
+                chooser: Some(chooser),
+            },
+        );
+        match result {
+            Ok(outcome) => (
+                Some(outcome.value),
+                outcome.trace.expect("traced run keeps its trace"),
+            ),
+            Err(
+                FunctionCallError::Aborted { trace }
+                | FunctionCallError::UnhandledCondition { trace, .. }
+                | FunctionCallError::Trap { trace, .. },
+            ) => (None, trace.expect("traced run keeps its trace")),
+            Err(error) => panic!("unexpected failure: {error}"),
+        }
+    }
+
+    #[test]
+    fn runs_answered_by_the_chooser_record_and_replay() {
+        let sample = CompilerSession::compile_source(
+            "sample.loko",
+            UNHANDLED_SAMPLE,
+            RuntimeMode::CompileOnly,
+        );
+        let (broken, fixed) = hot_swap_artifacts();
+        let restart = |condition: &UnhandledCondition<'_>| {
+            condition
+                .restarts
+                .iter()
+                .find_map(|restart| match restart {
+                    OfferedRestart::Handler { token, .. } => Some(Choice::Restart {
+                        token: *token,
+                        arguments: Vec::new(),
+                    }),
+                    _ => None,
+                })
+                .unwrap_or(Choice::Unhandled)
+        };
+        let mut use_value =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::F64(0.25)]));
+        let mut restart = Scripted(restart);
+        let mut abort = Scripted(|_: &UnhandledCondition<'_>| Choice::Abort);
+        let mut report = ReportUnhandled;
+        let mut hot_swap = HotSwap {
+            fixed: &fixed,
+            asked: 0,
+            superseded: Vec::new(),
+        };
+        let cases: [(&str, &SessionArtifacts, &mut dyn ConditionChooser, _); 5] = [
+            (
+                "use-value",
+                &sample,
+                &mut use_value,
+                Some(FunctionValue::Float(1.25)),
+            ),
+            (
+                "restart",
+                &sample,
+                &mut restart,
+                Some(FunctionValue::Float(1.5)),
+            ),
+            ("abort", &sample, &mut abort, None),
+            ("unhandled", &sample, &mut report, None),
+            (
+                "install and retry",
+                &broken,
+                &mut hot_swap,
+                Some(FunctionValue::Float(0.5)),
+            ),
+        ];
+        for (name, artifacts, chooser, expected) in cases {
+            let (value, trace) = traced_with_chooser(artifacts, chooser);
+            assert_eq!(value, expected, "{name}");
+            let recording = trace.recording();
+            assert_eq!(recording.status(), Ok(()), "{name}");
+            assert!(
+                recording.suspensions().len() > 0,
+                "{name}: the unhandled signal was yielded and answered"
+            );
+            recording
+                .replay()
+                .unwrap_or_else(|error| panic!("{name} replays: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn a_condition_signalled_inside_a_guard_reaches_the_chooser() {
+        // The guard signals <probe>, which nothing handles. The guard runs on
+        // the signalling stack, so its signal suspends on top of every frame
+        // and the chooser answers it like any other.
+        let artifacts = CompilerSession::compile_source(
+            "guard.loko",
+            "define class <problem> (<object>)\nend;\n\
+             define class <probe> (<object>)\nend;\n\
+             define function risky() => <integer>\n  signal(make(<problem>))\nend;\n\
+             define function main() => <integer>\n  handle risky() with restart <problem> when signal(make(<probe>)) = 0 => 1 end\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut seen = Vec::new();
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            seen.push((
+                condition
+                    .runtime
+                    .layout()
+                    .class(condition.class)
+                    .map(|class| class.name.clone()),
+                condition
+                    .frames
+                    .iter()
+                    .map(|frame| frame.code.name.clone().unwrap_or_default())
+                    .collect::<Vec<_>>(),
+            ));
+            Choice::UseValue(vec![Value::I64(0)])
+        });
+        let value = call_with_chooser(&artifacts, &mut chooser).expect("the guard accepts");
+        assert_eq!(value, FunctionValue::Integer(1));
+        assert_eq!(seen.len(), 1, "only the guard's signal is unhandled");
+        let (class, frames) = &seen[0];
+        assert_eq!(class.as_deref(), Some("<probe>"));
+        assert_eq!(
+            frames,
+            &["closure#0", "risky", "main"],
+            "the guard runs above the signaller, and nothing unwound"
+        );
+    }
+
+    #[test]
+    fn a_guard_unwound_by_a_retry_ends_its_search() {
+        // The guard's probe goes to the chooser, which retries `risky`: the
+        // retry unwinds the guard into the signalling frame, ending its
+        // search, and the new `risky` signals afresh. Its search must see the
+        // guarded handler again rather than skip it as still guarding.
+        let artifacts = CompilerSession::compile_source(
+            "retry.loko",
+            "define class <problem> (<object>)\nend;\n\
+             define class <probe> (<object>)\nend;\n\
+             define function risky() => <integer>\n  signal(make(<problem>))\nend;\n\
+             define function main() => <integer>\n  handle\n    handle risky() with restart <problem> when signal(make(<probe>)) = 1 => 1 end\n  with restart <problem>\n    2\n  end\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut asked = 0;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            if asked > 1 {
+                return Choice::UseValue(vec![Value::I64(1)]);
+            }
+            let risky = condition
+                .frames
+                .iter()
+                .find(|frame| frame.code.name.as_deref() == Some("risky"))
+                .expect("risky is suspended under the guard");
+            Choice::Retry {
+                frame: risky.frame.activation.clone(),
+            }
+        });
+        let value = call_with_chooser(&artifacts, &mut chooser).expect("the guard accepts");
+        assert_eq!(value, FunctionValue::Integer(1), "the guarded handler won");
+        assert_eq!(asked, 2, "the retried signal ran the guard again");
+    }
+
+    #[test]
+    fn control_stats_count_signals_searches_and_unhandled_conditions() {
+        // `main` establishes two handlers; the inner one is guarded. Its
+        // guard signals a <probe> that nothing handles, the chooser answers
+        // 0, so the guard declines and the outer handler applies.
+        let artifacts = CompilerSession::compile_source(
+            "stats.loko",
+            "define class <problem> (<object>)\nend;\n\
+             define class <probe> (<object>)\nend;\n\
+             define function risky() => <integer>\n  signal(make(<problem>))\nend;\n\
+             define function main() => <integer>\n  handle\n    handle risky() with restart <problem> when signal(make(<probe>)) = 1 => 1 end\n  with restart <problem>\n    2\n  end\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut chooser =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::I64(0)]));
+        let outcome = driver::run(
+            &mut vm,
+            &tape.code,
+            tape.main.expect("main"),
+            &[],
+            InvocationOptions::default(),
+            &mut chooser,
+        )
+        .expect("the outer handler recovers");
+        assert_eq!(outcome.outputs, vec![Value::I64(2)]);
+        assert_eq!(
+            outcome.stats,
+            interloko_runtime::control::ControlStats {
+                bindings_pushed: 2,
+                max_depth: 2,
+                signals: 2,
+                unhandled: 1,
+                // The guarded handler, then the outer one; the guard's probe
+                // was searched with both masked.
+                bindings_searched: 4,
+                sends: 0,
+                send_cache_hits: 0,
+            }
+        );
+    }
+
     #[test]
     fn restarts_established_by_old_code_catch_signals_from_new_code() {
         let (broken, _) = hot_swap_artifacts();

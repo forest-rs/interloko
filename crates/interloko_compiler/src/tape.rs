@@ -14,7 +14,9 @@ use alloc::vec::Vec;
 use execution_tape::asm::{Asm, Catch, FunctionAbi, FunctionSig, Label, ProgramBuilder};
 use execution_tape::contract::{Contract, ContractId};
 use execution_tape::host::HostSig;
-use execution_tape::program::{ConstId, ElemTypeId, HostSigId, SpanId, TagId, ValueType};
+use execution_tape::program::{
+    CallSigId, ConstId, ElemTypeId, HostSigId, SpanId, TagId, ValueType,
+};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -160,6 +162,11 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         layout: module.runtime.clone(),
         control: ControlLayout {
             restarts: module.restarts.clone(),
+            conditions: abi
+                .control
+                .as_ref()
+                .map(|control| control.conditions.iter().map(|(_, tag)| *tag).collect())
+                .unwrap_or_default(),
         },
         generics: vec![FuncId(0); module.runtime.generics.len()],
         methods: vec![FuncId(0); module.runtime.methods.len()],
@@ -336,7 +343,16 @@ struct ControlAbi {
     pop: HostSigId,
     push_exit: HostSigId,
     check_exit: HostSigId,
+    signal: HostSigId,
+    guard: HostSigId,
+    guard_result: HostSigId,
+    guard_unwound: HostSigId,
+    /// A guard's call: `(condition) -> <boolean>`.
+    guard_call: CallSigId,
     exits: Vec<(lower::CallableSigId, TagId)>,
+    /// Condition tags by the result types of the signals that suspend on
+    /// them.
+    conditions: Vec<(Vec<ValueType>, TagId)>,
 }
 
 impl ControlAbi {
@@ -346,6 +362,7 @@ impl ControlAbi {
     ) -> Result<Option<Self>, TapeError> {
         let mut uses_control = false;
         let mut exit_sigs = Vec::new();
+        let mut signal_results = Vec::<Vec<ValueType>>::new();
         let mut note_tag = |tag: lower::ControlTag| {
             if let lower::ControlTag::Exit(signature) = tag
                 && !exit_sigs.contains(&signature)
@@ -353,15 +370,25 @@ impl ControlAbi {
                 exit_sigs.push(signature);
             }
         };
-        for instr in module
-            .functions
-            .iter()
-            .flat_map(|function| &function.instructions)
-        {
+        for (function, instr) in module.functions.iter().flat_map(|function| {
+            function
+                .instructions
+                .iter()
+                .map(move |instr| (function, instr))
+        }) {
             match instr {
+                lower::Instr::Signal { dsts, .. } => {
+                    uses_control = true;
+                    let results = dsts
+                        .iter()
+                        .map(|dst| register_type(function, *dst))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if !signal_results.contains(&results) {
+                        signal_results.push(results);
+                    }
+                }
                 lower::Instr::PushHandler { .. }
                 | lower::Instr::PopBinding { .. }
-                | lower::Instr::Signal { .. }
                 | lower::Instr::PushExit { .. }
                 | lower::Instr::CheckExit { .. } => uses_control = true,
                 lower::Instr::Throw { tag, .. } if *tag != lower::ControlTag::Retry => {
@@ -404,7 +431,47 @@ impl ControlAbi {
                 Ok((signature, tag))
             })
             .collect::<Result<Vec<_>, TapeError>>()?;
+        let payload = runtime::control::condition_payload().map(Into::into);
+        let conditions = signal_results
+            .into_iter()
+            .enumerate()
+            .map(|(index, results)| {
+                let result_abi = results.iter().cloned().map(Into::into).collect::<Vec<_>>();
+                let tag = builder
+                    .declare_tag_with_results(
+                        &format!("interloko.condition#{index}"),
+                        &payload,
+                        &result_abi,
+                    )
+                    .map_err(build_error)?;
+                Ok((results, tag))
+            })
+            .collect::<Result<Vec<_>, TapeError>>()?;
+        let guard_call = builder
+            .call_sig(FunctionSig {
+                arg_types: vec![runtime::object_type()],
+                ret_types: vec![ValueType::Bool],
+            })
+            .map_err(build_error)?;
         Ok(Some(Self {
+            signal: builder.host_sig_for(
+                runtime::control::CONDITION_SIGNAL,
+                runtime::control::signal_signature(),
+            ),
+            guard: builder.host_sig_for(
+                runtime::control::CONDITION_GUARD,
+                runtime::control::guard_signature(),
+            ),
+            guard_result: builder.host_sig_for(
+                runtime::control::CONDITION_GUARD_RESULT,
+                runtime::control::guard_result_signature(),
+            ),
+            guard_unwound: builder.host_sig_for(
+                runtime::control::CONDITION_GUARD_UNWOUND,
+                runtime::control::guard_unwound_signature(),
+            ),
+            guard_call,
+            conditions,
             push_handler: builder.host_sig_for(
                 runtime::control::CONDITION_PUSH_HANDLER,
                 runtime::control::push_handler_signature(),
@@ -427,6 +494,14 @@ impl ControlAbi {
             ),
             exits,
         }))
+    }
+
+    fn condition_tag(&self, results: &[ValueType]) -> Result<TagId, TapeError> {
+        self.conditions
+            .iter()
+            .find(|(candidate, _)| candidate == results)
+            .map(|(_, tag)| *tag)
+            .ok_or_else(|| invalid_lowered("condition tag is missing"))
     }
 
     fn exit_tag(&self, signature: lower::CallableSigId) -> Result<TagId, TapeError> {
@@ -1566,20 +1641,7 @@ impl<'a> FunctionEmitter<'a> {
                 dsts,
                 condition,
                 span,
-            } => {
-                self.abi.control()?;
-                let rets = dsts
-                    .iter()
-                    .map(|dst| self.register_type(*dst))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let sig = self.builder.host_sig_for(
-                    runtime::control::CONDITION_SIGNAL,
-                    runtime::control::signal_signature(rets),
-                );
-                self.set_span(*span);
-                self.asm
-                    .host_call(0, sig, 0, &[condition.0], &reg_slice(dsts));
-            }
+            } => self.emit_signal(dsts, *condition, *span)?,
             lower::Instr::EnterRegion { catches } => {
                 let clauses = catches
                     .iter()
@@ -1628,6 +1690,77 @@ impl<'a> FunctionEmitter<'a> {
         Ok(())
     }
 
+    /// Emits a signal: a handler search that runs each applicable guard
+    /// here on the signalling stack, then a suspension on the condition tag
+    /// when no handler accepts. A selected handler's restart is raised at the
+    /// search request that selects it, and a guard that exits by an exception
+    /// ends the search before the exception continues.
+    ///
+    /// ```text
+    ///           pending = host_call signal(condition)
+    ///           jmp search
+    /// search:   br pending, guard, none
+    /// guard:    closure = host_call guard()
+    ///           region [catch_all_ref -> unwound]
+    ///             accepted = call.indirect closure(condition)
+    ///           pending = host_call guard_result(accepted)
+    ///           jmp search
+    /// unwound(exn):
+    ///           host_call guard_unwound()
+    ///           throw_ref exn
+    /// none:     dsts = suspend condition#n(condition)
+    /// ```
+    fn emit_signal(
+        &mut self,
+        dsts: &[lower::Register],
+        condition: lower::Register,
+        span: Span,
+    ) -> Result<(), TapeError> {
+        let control = self.abi.control()?;
+        let results = dsts
+            .iter()
+            .map(|dst| self.register_type(*dst))
+            .collect::<Result<Vec<_>, _>>()?;
+        let tag = control.condition_tag(&results)?;
+        let (signal, guard, guard_result, guard_unwound, guard_call) = (
+            control.signal,
+            control.guard,
+            control.guard_result,
+            control.guard_unwound,
+            control.guard_call,
+        );
+        let pending = self.alloc_temp(ValueType::Bool);
+        let closure = self.alloc_temp(ValueType::Closure);
+        let accepted = self.alloc_temp(ValueType::Bool);
+        let escaped = self.alloc_temp(ValueType::Exn);
+        let (search, run_guard, none) = (self.asm.label(), self.asm.label(), self.asm.label());
+        let unwound = self.asm.block(&[escaped]);
+        self.set_span(span);
+        self.asm.host_call(0, signal, 0, &[condition.0], &[pending]);
+        // Every block ends in a terminator: control never falls into a label.
+        self.asm.jmp(search);
+        self.asm.place(search).map_err(build_error)?;
+        self.asm.br(pending, run_guard, none);
+        self.asm.place(run_guard).map_err(build_error)?;
+        self.asm.host_call(0, guard, 0, &[], &[closure]);
+        self.asm.begin_region(&[Catch::AllRef(unwound)]);
+        self.asm
+            .call_indirect(0, guard_call, closure, 0, &[condition.0], &[accepted]);
+        self.asm
+            .end_region()
+            .ok_or_else(|| invalid_lowered("guard region is not open"))?;
+        self.asm
+            .host_call(0, guard_result, 0, &[accepted], &[pending]);
+        self.asm.jmp(search);
+        self.asm.place(unwound).map_err(build_error)?;
+        self.asm.host_call(0, guard_unwound, 0, &[], &[]);
+        self.asm.throw_ref(0, escaped);
+        self.asm.place(none).map_err(build_error)?;
+        self.asm
+            .suspend(0, tag, 0, &[condition.0], &reg_slice(dsts));
+        Ok(())
+    }
+
     fn label(&self, label: lower::LabelId) -> Result<Label, TapeError> {
         self.labels
             .get(label.0 as usize)
@@ -1636,13 +1769,7 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn register_type(&self, register: lower::Register) -> Result<ValueType, TapeError> {
-        register
-            .0
-            .checked_sub(1)
-            .and_then(|index| self.function.register_kinds.get(index as usize))
-            .copied()
-            .map(value_type)
-            .ok_or_else(|| invalid_lowered("register is out of range"))
+        register_type(self.function, register)
     }
 
     fn alloc_temp(&mut self, kind: ValueType) -> u32 {
@@ -1670,6 +1797,19 @@ impl<'a> FunctionEmitter<'a> {
             _ => Err(invalid_lowered("cast input kind is invalid")),
         }
     }
+}
+
+fn register_type(
+    function: &lower::Function,
+    register: lower::Register,
+) -> Result<ValueType, TapeError> {
+    register
+        .0
+        .checked_sub(1)
+        .and_then(|index| function.register_kinds.get(index as usize))
+        .copied()
+        .map(value_type)
+        .ok_or_else(|| invalid_lowered("register is out of range"))
 }
 
 fn labels_for(function: &lower::Function, asm: &mut Asm) -> Vec<Label> {
