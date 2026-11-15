@@ -1,0 +1,40 @@
+// expect: run 13
+// expect: diagnostics 0
+// expect: dump typing contains strict scope=declared overflow=runtime definitions=1 errors=0
+// expect: dump typing contains function measure strict=declared
+// expect: dump typing contains s0 dispatch proved rule=dispatch-covered
+
+// A strict function must prove every send it makes. `<shape>` is sealed
+// and abstract, so its cone is exactly `<circle>` and `<square>`, each of
+// which `area` has a method for: the send is proved, so the strict
+// function compiles exactly as it would otherwise. See
+// `fail/strict/unproved_dispatch.loko` for the open hierarchy.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define generic area(s :: <shape>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  3 * c.radius * c.radius
+end;
+
+define method area(s :: <square>) => <integer>
+  s.side * s.side
+end;
+
+define strict function measure(s :: <shape>) => <integer>
+  area(s)
+end;
+
+define function main() => <integer>
+  measure(make(<circle>, radius: 2)) + measure(make(<square>, side: 1))
+end;

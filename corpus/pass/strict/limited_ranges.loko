@@ -1,0 +1,22 @@
+// expect: run 14
+// expect: diagnostics 0
+// expect: dump typing contains function twice strict=declared
+// expect: dump typing contains range proved rule=range-within
+// expect: dump typing lacks strict=unproved
+
+// A value reaching a `limited(<integer>, ...)` parameter is range-checked
+// at the call. In a strict function that check must be proved, which it is
+// when the argument's own declared range lies within the parameter's: `n`
+// is 0 to 7, so `n` reaching 0 to 9 needs no runtime check.
+
+define function digit(d :: limited(<integer>, min: 0, max: 9)) => <integer>
+  d
+end;
+
+define strict function twice(n :: limited(<integer>, min: 0, max: 7)) => <integer>
+  digit(n) + digit(n)
+end;
+
+define function main() => <integer>
+  twice(7)
+end;

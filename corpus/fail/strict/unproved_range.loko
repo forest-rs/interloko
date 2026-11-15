@@ -1,0 +1,22 @@
+// expect: diagnostics 2
+// expect: diagnostic code typing.unproved-range
+// expect: diagnostic contains function twice is strict (declared), but typing cannot prove that <integer> is within limited(<integer>, min: 0, max: 9)
+// expect: dump typing contains range checked rule=range-overlaps
+// expect: dump typing contains strict=unproved
+
+// Any `<integer>` may reach `digit`'s 0 to 9 parameter, so each call in the
+// strict `twice` is a range check typing cannot prove. Declaring `n` with
+// that range moves the check to `twice`'s callers
+// (`pass/strict/limited_ranges.loko`).
+
+define function digit(d :: limited(<integer>, min: 0, max: 9)) => <integer>
+  d
+end;
+
+define strict function twice(n :: <integer>) => <integer>
+  digit(n) + digit(n)
+end;
+
+define function main() => <integer>
+  twice(3)
+end;

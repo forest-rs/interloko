@@ -1,0 +1,22 @@
+// typing: strict
+// expect: run 12
+// expect: diagnostics 0
+// expect: dump typing contains config=strict
+// expect: dump typing contains strict scope=all overflow=runtime definitions=2 errors=0
+// expect: dump typing contains function area-of strict=policy
+
+// The `strict` typing policy holds every definition to strict typing, with
+// no adjective in the source. This program proves every check it has.
+
+define class <rectangle> (<object>)
+  slot width :: <integer>;
+  slot height :: <integer>;
+end;
+
+define function area-of(r :: <rectangle>) => <integer>
+  r.width * r.height
+end;
+
+define function main() => <integer>
+  area-of(make(<rectangle>, width: 3, height: 4))
+end;

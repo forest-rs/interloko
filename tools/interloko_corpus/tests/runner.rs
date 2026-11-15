@@ -161,7 +161,39 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/type_errors/limited_argument_unhandled.loko"));
     assert!(out.contains("ok pass/no_applicable_method/unhandled.loko"));
     assert!(out.contains("ok pass/no_applicable_method/handled_by_exit.loko"));
-    assert!(out.contains("corpus: 428 passed, 0 failed, 428 total"));
+    assert!(out.contains("ok pass/strict/sealed_dispatch.loko"));
+    assert!(out.contains("ok pass/strict/policy_strict.loko"));
+    assert!(out.contains("ok fail/strict/unproved_dispatch.loko"));
+    assert!(out.contains("ok fail/strict/unproved_overflow.loko"));
+    assert!(out.contains("corpus: 439 passed, 0 failed, 439 total"));
+}
+
+#[test]
+fn strictness_measures_the_corpus_under_strict_typing() {
+    let root = corpus_root().join("pass/strict");
+    let out = run_corpus(&[
+        "strictness",
+        root.to_str().expect("corpus path should be utf8"),
+    ]);
+    assert!(out.contains("pass sealed_dispatch.loko"), "{out}");
+    assert!(
+        out.contains("strictness: 5/5 typed cases pass, 17/17 definitions; 0 untyped; errors "),
+        "{out}"
+    );
+
+    let root = corpus_root().join("fail/strict");
+    let out = run_corpus(&[
+        "strictness",
+        root.to_str().expect("corpus path should be utf8"),
+    ]);
+    assert!(
+        out.contains("fail unproved_dispatch.loko unproved-dispatch=1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("fail refuted_cast.loko refuted-cast=1"),
+        "{out}"
+    );
 }
 
 #[test]

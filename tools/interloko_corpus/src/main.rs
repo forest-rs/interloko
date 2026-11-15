@@ -37,6 +37,7 @@ fn run(args: Vec<String>) -> Result<Outcome> {
         "list" => list_command(args.get(1).map(String::as_str)),
         "dump" => dump_command(&args),
         "heap" => heap_command(&args[1..]),
+        "strictness" => strictness_command(args.get(1).map(String::as_str)),
         "-h" | "--help" | "help" => Err(CorpusError::Usage(usage())),
         _ => Err(CorpusError::Usage(usage())),
     }
@@ -151,6 +152,81 @@ fn heap_command(roots: &[String]) -> Result<Outcome> {
         total.reachable.bytes,
         total.allocated.bytes,
         survival_label(&total),
+    );
+    Ok(Outcome::Success)
+}
+
+/// Compiles every case as if the session held every definition to strict
+/// typing (`strict.scope=all`, on top of the case's own typing header) and
+/// reports how much of the corpus would pass: per case, its strict errors
+/// by kind (`unproved-dispatch`, `refuted-cast`, ...), then totals. Cases semantic analysis
+/// rejects are not typed and are counted apart.
+///
+/// This measures how usable strict typing is on code written without it;
+/// it changes nothing and always succeeds.
+fn strictness_command(root: Option<&str>) -> Result<Outcome> {
+    let root = root.map_or_else(default_corpus_root, PathBuf::from);
+    let cases = load_cases(&root)?;
+    let (mut typed, mut passing, mut untyped) = (0_usize, 0_usize, 0_usize);
+    let (mut definitions, mut clean_definitions) = (0_usize, 0_usize);
+    let mut codes = std::collections::BTreeMap::<String, usize>::new();
+    for case in &cases {
+        let mut strict = case.clone();
+        strict.typing_config = case
+            .typing_config
+            .apply_spec("strict.scope=all")
+            .expect("a valid strict setting");
+        let artifacts = compile_case(&strict, RuntimeMode::CompileOnly);
+        if artifacts.typing.status != interloko_compiler::typing::TypingStatus::Checked {
+            untyped += 1;
+            println!("untyped {}", case.display_path);
+            continue;
+        }
+        typed += 1;
+        let typing = &artifacts.typing;
+        let mut errors = std::collections::BTreeMap::<String, usize>::new();
+        for decision in typing.decisions() {
+            if let Some(violation) = typing.strict_violation(decision) {
+                let kind = format!("{}-{}", violation.as_str(), decision.check.as_str());
+                *errors.entry(kind).or_default() += 1;
+            }
+        }
+        definitions += typing.strict.len();
+        clean_definitions += typing
+            .strict
+            .iter()
+            .filter(|strict| {
+                typing.definition(strict.definition).is_none_or(|typed| {
+                    typed
+                        .decisions
+                        .iter()
+                        .all(|decision| typing.strict_violation(decision).is_none())
+                })
+            })
+            .count();
+        if errors.is_empty() {
+            passing += 1;
+            println!("pass {}", case.display_path);
+        } else {
+            let summary = errors
+                .iter()
+                .map(|(code, count)| format!("{code}={count}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("fail {} {summary}", case.display_path);
+        }
+        for (code, count) in errors {
+            *codes.entry(code).or_default() += count;
+        }
+    }
+    let totals = codes
+        .iter()
+        .map(|(code, count)| format!("{code}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "strictness: {passing}/{typed} typed cases pass, {clean_definitions}/{definitions} definitions; \
+         {untyped} untyped; errors {totals}"
     );
     Ok(Outcome::Success)
 }
@@ -322,20 +398,9 @@ fn parse_typing_config(path: &Path, source: &str) -> Result<TypingConfig> {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             if let Some(rest) = trimmed.strip_prefix("// typing:") {
-                config = TypingConfig::preset(rest.trim()).ok_or_else(|| {
-                    invalid_header(
-                        path,
-                        index + 1,
-                        &format!(
-                            "typing must be one of {}",
-                            TypingConfig::PRESETS
-                                .iter()
-                                .map(|name| format!("`{name}`"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    )
-                })?;
+                config = TypingConfig::default()
+                    .apply_spec(rest)
+                    .map_err(|error| invalid_header(path, index + 1, &error.to_string()))?;
             }
             continue;
         }
@@ -845,7 +910,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_corpus".into());
     format!(
-        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} heap [root...]\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all"
+        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} heap [root...]\n  {binary} strictness [corpus-root]\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all"
     )
 }
 

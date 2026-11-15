@@ -1,0 +1,29 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-dispatch
+// expect: diagnostic contains method measure(<shape>) is strict (generic measure is strict)
+// expect: dump typing contains method measure(<shape>) strict=generic(measure)
+
+// A method of a `strict` generic is strict even without the adjective
+// itself, so its send on an open `<shape>` is an error.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define generic describe(x);
+
+define method describe(c :: <circle>)
+  1
+end;
+
+define strict generic measure(s :: <shape>);
+
+define method measure(s :: <shape>)
+  describe(s)
+end;
+
+define function main() => <integer>
+  0
+end;

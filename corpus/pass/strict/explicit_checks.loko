@@ -1,0 +1,30 @@
+// expect: run 5
+// expect: diagnostics 0
+// expect: dump typing contains cast checked rule=cast-narrowing
+// expect: dump typing contains severity=silent origin=explicit
+// expect: dump typing contains instance checked rule=instance-sometimes
+// expect: dump typing contains severity=silent origin=test
+// expect: dump typing lacks strict=unproved
+
+// Strict code may still check at runtime when it says so: an explicit
+// `as` is a deliberate check, and an `instance?` test answers a question
+// rather than failing, so neither has to be proved.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 2;
+end;
+
+define strict function radius(s :: <shape>) => <integer>
+  as(<circle>, s).radius
+end;
+
+define strict function radius-or(s :: <shape>, default :: <integer>) => <integer>
+  if instance?(s, <circle>) then radius(s) else default end
+end;
+
+define function main() => <integer>
+  radius-or(make(<circle>), 0) + radius-or(make(<shape>), 3)
+end;
