@@ -704,6 +704,7 @@ fn display_uses_source_names() {
         show(of(range(5, 10))),
         "limited(<integer>, min: 5, max: 10)"
     );
+    assert_eq!(show(of(range(7, 7))), "singleton(7)");
     assert_eq!(
         show(of(Atom::Integer(IntRange {
             min: Some(0),

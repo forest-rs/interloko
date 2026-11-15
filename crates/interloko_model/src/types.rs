@@ -592,7 +592,7 @@ impl Type {
     }
 
     /// Returns a value that displays this type with source names, such as
-    /// `<circle>`, `exactly <shape>`, `<i32>`, or
+    /// `<circle>`, `exactly <shape>`, `<i32>`, `singleton(7)`, or
     /// `type-union(<string>, <boolean>)`.
     #[must_use]
     pub fn display<'a, N: TypeNames + ClassHierarchy + ?Sized>(
@@ -648,10 +648,11 @@ impl<N: TypeNames + ClassHierarchy + ?Sized> TypeDisplay<'_, N> {
                 }
                 names.write_class(out, *class)
             }
-            Atom::Integer(range) => match (range.limited(), *range == IntRange::INTEGER) {
-                (Some(limited), _) => out.write_str(limited.name()),
-                (None, true) => out.write_str("<integer>"),
-                (None, false) => {
+            Atom::Integer(range) => match (range.limited(), range.min, range.max) {
+                (Some(limited), _, _) => out.write_str(limited.name()),
+                (None, None, None) => out.write_str("<integer>"),
+                (None, Some(min), Some(max)) if min == max => write!(out, "singleton({min})"),
+                (None, _, _) => {
                     out.write_str("limited(<integer>")?;
                     if let Some(min) = range.min {
                         write!(out, ", min: {min}")?;
