@@ -44,6 +44,10 @@ use crate::{ast, lower, sem, tape, typing};
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
 use interloko_model::contract::Contract;
+/// What an unhandled `<no-applicable-method>` reports, in
+/// [`RuntimeResult::UnhandledCondition`] and
+/// [`FunctionCallError::UnhandledCondition`].
+pub use interloko_runtime::NoApplicableMethodReport;
 /// What an unhandled `<type-error>` reports, in
 /// [`RuntimeResult::UnhandledCondition`] and
 /// [`FunctionCallError::UnhandledCondition`].
@@ -170,10 +174,12 @@ pub enum RuntimeResult {
     UnhandledCondition {
         /// Source name of the condition's class.
         class: String,
-        /// What the condition reports when it is a `<type-error>`, such as
-        /// one a failed runtime check signalled. Its code is the outcome's
-        /// code.
+        /// What the condition reports when a failed runtime check signalled
+        /// it. Its code is the outcome's code.
         type_error: Option<alloc::boxed::Box<TypeErrorReport>>,
+        /// What the condition reports when a send that found no applicable
+        /// method signalled it. Its code is the outcome's code.
+        no_applicable_method: Option<alloc::boxed::Box<NoApplicableMethodReport>>,
     },
     /// A block exit procedure was called after its block had returned.
     ExpiredExit,
@@ -188,8 +194,9 @@ pub enum RuntimeResult {
 
 impl RuntimeResult {
     /// Stable code for non-successful runtime/session outcomes. An
-    /// unhandled `<type-error>` ends the run with its own code, such as
-    /// `type-error.cast`.
+    /// unhandled `<type-error>` or `<no-applicable-method>` the runtime
+    /// signalled ends the run with its own code, such as `type-error.cast`
+    /// or `dispatch.no-applicable-method`.
     #[must_use]
     pub fn code(&self) -> Option<DiagnosticCode> {
         match self {
@@ -199,12 +206,24 @@ impl RuntimeResult {
             Self::Trap { trap } => Some(trap_code(trap)),
             Self::HostFunctionFailed { .. } => Some(DiagnosticCode::RuntimeHostFunctionFailed),
             Self::UnsupportedResult { .. } => Some(DiagnosticCode::RuntimeUnsupportedResult),
-            Self::UnhandledCondition { type_error, .. } => {
-                Some(type_error.as_ref().and_then(|report| report.kind()).map_or(
-                    DiagnosticCode::RuntimeUnhandledCondition,
-                    DiagnosticCode::from,
-                ))
-            }
+            Self::UnhandledCondition {
+                type_error,
+                no_applicable_method,
+                ..
+            } => Some(
+                match (
+                    type_error.as_ref().and_then(|report| report.kind()),
+                    no_applicable_method,
+                ) {
+                    (Some(kind), _) => DiagnosticCode::from(kind),
+                    (None, Some(report))
+                        if report.code == DiagnosticCode::DispatchNoApplicableMethod.as_str() =>
+                    {
+                        DiagnosticCode::DispatchNoApplicableMethod
+                    }
+                    _ => DiagnosticCode::RuntimeUnhandledCondition,
+                },
+            ),
             Self::ExpiredExit => Some(DiagnosticCode::RuntimeExpiredExit),
             Self::Aborted => Some(DiagnosticCode::RuntimeAborted),
             Self::Failed { .. } => Some(DiagnosticCode::RuntimeFailed),
@@ -237,17 +256,32 @@ impl fmt::Display for RuntimeResult {
                     "main result {declared} is not one supported scalar"
                 )
             }
-            Self::UnhandledCondition { class, type_error } => {
+            Self::UnhandledCondition {
+                class,
+                type_error,
+                no_applicable_method,
+            } => {
                 write!(formatter, "unhandled condition {class}")?;
-                match type_error {
-                    Some(report) => write!(formatter, ": {report}"),
-                    None => Ok(()),
-                }
+                write_condition_report(formatter, type_error, no_applicable_method)
             }
             Self::ExpiredExit => formatter.write_str("block exit called after its block returned"),
             Self::Aborted => formatter.write_str("aborted by the condition chooser"),
             Self::Failed { detail } => write!(formatter, "runtime failed: {detail}"),
         }
+    }
+}
+
+/// Writes `: <report>` after an unhandled condition's class when the
+/// runtime signalled it for a failed check or send.
+fn write_condition_report(
+    formatter: &mut fmt::Formatter<'_>,
+    type_error: &Option<alloc::boxed::Box<TypeErrorReport>>,
+    no_applicable_method: &Option<alloc::boxed::Box<NoApplicableMethodReport>>,
+) -> fmt::Result {
+    match (type_error, no_applicable_method) {
+        (Some(report), _) => write!(formatter, ": {report}"),
+        (None, Some(report)) => write!(formatter, ": {report}"),
+        (None, None) => Ok(()),
     }
 }
 
@@ -636,8 +670,12 @@ pub enum FunctionCallError {
     UnhandledCondition {
         /// Source name of the condition's class.
         class: String,
-        /// What the condition reports when it is a `<type-error>`.
+        /// What the condition reports when a failed runtime check signalled
+        /// it.
         type_error: Option<alloc::boxed::Box<TypeErrorReport>>,
+        /// What the condition reports when a send that found no applicable
+        /// method signalled it.
+        no_applicable_method: Option<alloc::boxed::Box<NoApplicableMethodReport>>,
         /// Partial trace captured up to the signal, when requested.
         trace: Option<ExecutionTrace>,
     },
@@ -723,13 +761,13 @@ impl fmt::Display for FunctionCallError {
             }
             Self::Link { error } => write!(formatter, "cannot link the program: {error}"),
             Self::UnhandledCondition {
-                class, type_error, ..
+                class,
+                type_error,
+                no_applicable_method,
+                ..
             } => {
                 write!(formatter, "unhandled condition {class}")?;
-                match type_error {
-                    Some(report) => write!(formatter, ": {report}"),
-                    None => Ok(()),
-                }
+                write_condition_report(formatter, type_error, no_applicable_method)
             }
             Self::ExpiredExit { .. } => {
                 formatter.write_str("block exit called after its block returned")
@@ -6270,9 +6308,14 @@ fn runtime_result_for_main_error(
         FunctionCallError::UnhandledCondition {
             class,
             type_error,
+            no_applicable_method,
             trace,
         } => (
-            RuntimeResult::UnhandledCondition { class, type_error },
+            RuntimeResult::UnhandledCondition {
+                class,
+                type_error,
+                no_applicable_method,
+            },
             trace,
         ),
         FunctionCallError::ExpiredExit { trace } => (RuntimeResult::ExpiredExit, trace),
@@ -6502,9 +6545,10 @@ fn run_turn_body<'a>(
             }
             return Err(match failure {
                 // The condition belongs to the call's turn, which is still
-                // open, so a failed check's `<type-error>` can be read
-                // before it aborts. One the program signalled itself is an
-                // ordinary unhandled condition.
+                // open, so a failed check's `<type-error>` or a failed
+                // send's `<no-applicable-method>` can be read before it
+                // aborts. One the program signalled itself is an ordinary
+                // unhandled condition.
                 RunFailure::Control {
                     fault:
                         ControlFault::UnhandledCondition {
@@ -6520,6 +6564,10 @@ fn run_turn_body<'a>(
                         .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
                     type_error: failed_check
                         .then(|| host.type_error_report(condition))
+                        .flatten()
+                        .map(alloc::boxed::Box::new),
+                    no_applicable_method: failed_check
+                        .then(|| host.no_applicable_method_report(condition))
                         .flatten()
                         .map(alloc::boxed::Box::new),
                     trace,
@@ -6651,6 +6699,16 @@ impl<'a> SharedFunctionCallHost<'a> {
 
     fn type_error_report(&self, condition: execution_tape::value::Obj) -> Option<TypeErrorReport> {
         self.0.borrow().runtime.type_error_report(condition)
+    }
+
+    fn no_applicable_method_report(
+        &self,
+        condition: execution_tape::value::Obj,
+    ) -> Option<NoApplicableMethodReport> {
+        self.0
+            .borrow()
+            .runtime
+            .no_applicable_method_report(condition)
     }
 }
 
@@ -16678,11 +16736,11 @@ mod tests {
         if text = \"abcd\" then 4 else 0 end\nend;\n\
         define function tag(n :: <integer>) => <boolean>\n  \
         if n = 0 then #ready = #ready else #other = #other end\nend;\n\
-        define generic poke(x);\n\
-        define method poke(x :: <integer>) => <integer>\n  x\nend;\n\
+        define class <needy> (<cell>)\n  slot need :: <integer>;\nend;\n\
+        define function twin(c :: <cell>) => <cell>\n  make(class-of(c))\nend;\n\
         define function tag-then-trap(n :: <integer>) => <integer>\n  \
         if #fresh = #fresh then \
-        poke(if n = 0 then as(<object>, n) else as(<object>, #other) end) else 0 end\nend;";
+        twin(if n = 0 then make(<cell>) else make(<needy>, need: n) end).value else 0 end\nend;";
 
     #[test]
     fn runtime_turns_keep_the_heap_flat() {
@@ -20029,7 +20087,7 @@ end;
 
         // Dispatch through the surviving square method still works; the
         // triangle path is gone, so score_triangle no longer finds an
-        // applicable method and traps at the runtime dispatcher.
+        // applicable method and signals `<no-applicable-method>`.
         let square_result = run_scalar(&artifacts, "score_square");
         assert!(matches!(square_result, Ok(FunctionValue::Integer(49))));
         let circle_result = run_scalar(&artifacts, "score_circle");
@@ -20037,7 +20095,10 @@ end;
         let triangle_result = run_scalar(&artifacts, "score_triangle");
         assert!(matches!(
             triangle_result,
-            Err(FunctionCallError::Trap { .. })
+            Err(FunctionCallError::UnhandledCondition {
+                no_applicable_method: Some(_),
+                ..
+            })
         ));
     }
 
@@ -20080,7 +20141,13 @@ end;
         let circle_result = run_scalar(&artifacts, "score_circle");
         assert!(matches!(circle_result, Ok(FunctionValue::Integer(100))));
         let square_result = run_scalar(&artifacts, "score_square");
-        assert!(matches!(square_result, Err(FunctionCallError::Trap { .. })));
+        assert!(matches!(
+            square_result,
+            Err(FunctionCallError::UnhandledCondition {
+                no_applicable_method: Some(_),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -21176,6 +21243,303 @@ end;
         }
     }
 
+    /// `pick` and `area` have methods for `<circle>` only; `main` sends both
+    /// a `<square>`. `pick` promises a `<circle>` and `area` a result from 0
+    /// to 100, so their dispatchers check a `use-value` replacement.
+    const NO_METHOD: &str = "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define class <square> (<shape>)\n  slot side :: <integer>;\nend;\n\
+         define generic pick(s :: <shape>) => <circle>;\n\
+         define method pick(c :: <circle>) => <circle>\n  c\nend;\n\
+         define generic area(s :: <shape>) => limited(<integer>, min: 0, max: 100);\n\
+         define method area(c :: <circle>) => limited(<integer>, min: 0, max: 100)\n  \
+         3 * c.radius * c.radius\nend;\n\
+         define function measure(s :: <shape>) => <integer>\n  pick(s).radius + area(s)\nend;\n\
+         define function main() => <integer>\n  \
+         let spare :: <circle> = make(<circle>, radius: 5);\n  \
+         let wrong :: <square> = make(<square>, side: 2);\n  \
+         measure(wrong) + spare.radius\nend;";
+
+    /// What one break saw: the condition's class and code, and for a failed
+    /// send its generic and argument classes.
+    fn break_summary(condition: &UnhandledCondition<'_>) -> (String, String, String) {
+        let class = condition
+            .runtime
+            .layout()
+            .class(condition.class)
+            .map(|class| class.name.clone())
+            .unwrap_or_default();
+        match (condition.no_applicable_method(), condition.type_error()) {
+            (Some(report), _) => (
+                class,
+                report.code,
+                format!("{}({})", report.generic, report.argument_classes.join(", ")),
+            ),
+            (None, Some(report)) => (class, report.code, report.expected),
+            (None, None) => (class, String::new(), String::new()),
+        }
+    }
+
+    #[test]
+    fn a_send_that_finds_no_method_signals_and_checks_its_replacement() {
+        let artifacts =
+            CompilerSession::compile_source("sends.loko", NO_METHOD, RuntimeMode::RunMain);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let result = artifacts.runtime_result.as_ref().expect("main ran");
+        assert_eq!(
+            result.code(),
+            Some(DiagnosticCode::DispatchNoApplicableMethod)
+        );
+        assert_eq!(
+            result.to_string(),
+            "unhandled condition <no-applicable-method>: dispatch.no-applicable-method: \
+             no method of pick applies to (<square>), called with ({<square>})"
+        );
+        let mut outcomes = Vec::new();
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut seen = Vec::new();
+            // `pick`: a `<square>` is not the `<circle>` it promises, so the
+            // dispatcher signals a `<type-error>`, whose `<circle>` passes.
+            // `area`: 500 is outside its range, and 4 is inside.
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let summary = break_summary(condition);
+                let choice = match (seen.len(), condition.no_applicable_method()) {
+                    (0, Some(report)) => {
+                        assert!(condition.failed_check);
+                        assert_eq!(report.arguments, ["{<square>}"]);
+                        // The dispatcher signals; the sender is the frame to
+                        // retry.
+                        let [dispatcher, measure, ..] = condition.frames else {
+                            panic!("frames");
+                        };
+                        assert!(matches!(
+                            dispatcher.code.definition,
+                            Some(interloko_runtime::code::Definition::Generic(_))
+                        ));
+                        assert!(!dispatcher.code.is_retryable());
+                        assert!(measure.code.is_retryable());
+                        assert!(condition.restarts.iter().any(|restart| matches!(
+                            restart,
+                            OfferedRestart::UseValue { types } if *types == [runtime::object_type()]
+                        )));
+                        Choice::UseValue(vec![register_of_class(condition, "<square>")])
+                    }
+                    (1, None) => Choice::UseValue(vec![register_of_class(condition, "<circle>")]),
+                    (2, Some(_)) => Choice::UseValue(vec![Value::I64(500)]),
+                    (3, None) => Choice::UseValue(vec![Value::I64(4)]),
+                    (count, report) => panic!("{policy:?}: break {count}: {report:?}"),
+                };
+                seen.push(summary);
+                choice
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            outcomes.push((seen, value));
+        }
+        let pick = |class: &str, code: &str, detail: &str| {
+            (
+                String::from(class),
+                String::from(code),
+                String::from(detail),
+            )
+        };
+        assert_eq!(
+            outcomes[0],
+            (
+                vec![
+                    pick(
+                        "<no-applicable-method>",
+                        "dispatch.no-applicable-method",
+                        "pick(<square>)"
+                    ),
+                    pick("<type-error>", "type-error.entry", "<circle>"),
+                    pick(
+                        "<no-applicable-method>",
+                        "dispatch.no-applicable-method",
+                        "area(<square>)"
+                    ),
+                    pick(
+                        "<type-error>",
+                        "type-error.range",
+                        "limited(<integer>, min: 0, max: 100)"
+                    ),
+                ],
+                FunctionValue::Integer(14)
+            )
+        );
+        // Proved code elides nothing on the assumption that a send either
+        // finds a method or never returns.
+        assert_eq!(outcomes[0], outcomes[1]);
+    }
+
+    #[test]
+    fn a_replacement_of_the_wrong_kind_is_an_invalid_choice() {
+        let artifacts =
+            CompilerSession::compile_source("sends.loko", NO_METHOD, RuntimeMode::CompileOnly);
+        let mut chooser =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::I64(1)]));
+        let Err(FunctionCallError::Trap { .. }) = call_with_chooser(&artifacts, &mut chooser)
+        else {
+            panic!("an integer cannot stand in for a <circle>");
+        };
+    }
+
+    #[test]
+    fn a_failed_send_whose_result_is_a_known_callable_returns_it() {
+        // `pick`'s result is inferred from its method as `grow` itself, so
+        // callers apply it with `grow`'s signature and trust its `<circle>`
+        // result. No check of a closure could establish that, so the
+        // restart takes no value and the dispatcher returns `grow`.
+        let artifacts = CompilerSession::compile_source(
+            "known.loko",
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 3;\nend;\n\
+             define class <square> (<shape>)\nend;\n\
+             define function grow(c :: <circle>) => <circle>\n  \
+             make(<circle>, radius: c.radius + 1)\nend;\n\
+             define generic pick(s :: <shape>);\n\
+             define method pick(c :: <circle>)\n  grow\nend;\n\
+             define function main() => <integer>\n  \
+             let f = pick(make(<square>));\n  apply(f, make(<circle>)).radius\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(
+            artifacts.diagnostics.len(),
+            1,
+            "{:?}",
+            artifacts.diagnostics
+        );
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                assert!(condition.no_applicable_method().is_some());
+                assert!(condition.restarts.iter().any(|restart| matches!(
+                    restart,
+                    OfferedRestart::UseValue { types } if types.is_empty()
+                )));
+                Choice::UseValue(Vec::new())
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(4), "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_send_the_program_signals_again_is_an_ordinary_condition() {
+        // A handler that signals the condition it caught makes it the
+        // program's: its `use-value` is what that `signal` returns.
+        let artifacts = CompilerSession::compile_source(
+            "again.loko",
+            "define class <thing> (<object>)\nend;\n\
+             define generic poke(t :: <thing>) => <integer>;\n\
+             define function main() => <integer>\n  \
+             handle poke(make(<thing>)) with restart e :: <no-applicable-method> \
+             signal(e) + 1 end\nend;",
+            RuntimeMode::RunMain,
+        );
+        assert_eq!(
+            artifacts.runtime_result.as_ref().expect("main ran").code(),
+            Some(DiagnosticCode::RuntimeUnhandledCondition)
+        );
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            assert!(!condition.failed_check);
+            assert_eq!(condition.no_applicable_method(), None);
+            assert!(
+                condition
+                    .runtime
+                    .no_applicable_method_report(condition.condition)
+                    .is_some()
+            );
+            Choice::UseValue(vec![Value::I64(5)])
+        });
+        assert_eq!(
+            call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes"),
+            FunctionValue::Integer(6)
+        );
+    }
+
+    #[test]
+    fn a_failed_send_retries_its_sender_after_an_edit_installs() {
+        // While `pick` waits, a unit that adds `<square>` methods cannot
+        // install: methods are part of the runtime layout, which every unit
+        // of a run shares. An edit to `measure` that stops sending squares
+        // installs, and retrying `measure`'s frame runs it. The new methods
+        // serve the next run.
+        let artifacts =
+            CompilerSession::compile_source("sends.loko", NO_METHOD, RuntimeMode::CompileOnly);
+        let with_method = CompilerSession::compile_source(
+            "sends.loko",
+            &format!(
+                "{NO_METHOD}\ndefine method pick(s :: <square>) => <circle>\n  \
+                 make(<circle>, radius: s.side)\nend;\n\
+                 define method area(s :: <square>) => limited(<integer>, min: 0, max: 100)\n  \
+                 s.side * s.side\nend;"
+            ),
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(with_method.diagnostics, Vec::new());
+        let edited = CompilerSession::compile_source(
+            "sends.loko",
+            &NO_METHOD.replace(
+                "pick(s).radius + area(s)",
+                "if instance?(s, <circle>) then pick(s).radius + area(s) else 1 end",
+            ),
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(edited.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let with_method = with_method.with_codegen_policy(*policy);
+            let edited = edited.with_codegen_policy(*policy);
+            let mut asked = 0;
+            let mut refusals = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                asked += 1;
+                refusals.push(condition.refused.cloned());
+                assert!(condition.no_applicable_method().is_some());
+                match asked {
+                    1 => Choice::Install(with_method.code_unit().expect("tape")),
+                    2 => Choice::Install(edited.code_unit().expect("tape")),
+                    3 => {
+                        let measure = condition
+                            .frames
+                            .iter()
+                            .find(|frame| {
+                                frame.code.definition
+                                    == Some(interloko_runtime::code::Definition::Function(
+                                        "measure".into(),
+                                    ))
+                            })
+                            .expect("measure waits");
+                        assert!(measure.code.superseded);
+                        Choice::Retry {
+                            frame: measure.frame.activation.clone(),
+                        }
+                    }
+                    _ => Choice::Unhandled,
+                }
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("the retry returns");
+            assert_eq!(value, FunctionValue::Integer(6), "{policy:?}");
+            assert_eq!(
+                refusals,
+                vec![
+                    None,
+                    Some(driver::LinkError::Mismatch(
+                        interloko_runtime::code::CodeMismatch::Layout
+                    )),
+                    None,
+                ],
+                "{policy:?}"
+            );
+            // A new run starts from the code with the method.
+            let rerun = with_method
+                .call_function("main", &[], None)
+                .expect("the new method applies");
+            assert_eq!(rerun.value, FunctionValue::Integer(11), "{policy:?}");
+        }
+    }
+
     /// `byte` takes and `low` returns a `limited(<integer>, ...)`; `main`
     /// passes `feed`'s argument on, so typing cannot prove the checks.
     const LIMITED: &str = "define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>\n  n\nend;\n\
@@ -21741,6 +22105,50 @@ end;
     }
 
     #[test]
+    fn a_new_signal_elsewhere_leaves_dispatchers_unchanged() {
+        // A dispatcher signals `<no-applicable-method>` through a request
+        // with a fixed signature and resumes through a fixed condition tag,
+        // so an edit to `main` that signals with a new result shape, whose
+        // tag is declared in first-use order, leaves `round?#dispatch` the
+        // same bytecode: a frame waiting in it is not superseded.
+        let source = |main: &str| {
+            format!(
+                "define class <oops> (<object>)\nend;\n\
+                 define class <shape> (<object>)\nend;\n\
+                 define class <circle> (<shape>)\nend;\n\
+                 define generic round?(s :: <shape>) => <boolean>;\n\
+                 define method round?(c :: <circle>) => <boolean>\n  #t\nend;\n\
+                 define function main() => <integer>\n  {main}\nend;\n"
+            )
+        };
+        let compile = |main: &str| {
+            let artifacts = CompilerSession::compile_source(
+                "sends.loko",
+                &source(main),
+                RuntimeMode::CompileOnly,
+            );
+            assert_eq!(artifacts.diagnostics, Vec::new());
+            artifacts.code_unit().expect("tape")
+        };
+        let before = compile("if round?(make(<circle>)) then 1 else 0 end");
+        let after = compile(
+            "let (a :: <integer>, b :: <integer>) = signal(make(<oops>));\n  \
+             if round?(make(<circle>)) then a else b end",
+        );
+        let bytecode = |code: &CodeUnit, definition: &interloko_runtime::code::Definition| {
+            let program = code.program.program();
+            let func = code.function(definition).expect("function");
+            program.functions[func.0 as usize]
+                .bytecode(program)
+                .expect("bytecode")
+                .to_vec()
+        };
+        let round = interloko_runtime::code::Definition::Generic(sem::GenericFunctionId(0));
+        assert!(after.control.conditions.len() > before.control.conditions.len());
+        assert_eq!(bytecode(&before, &round), bytecode(&after, &round));
+    }
+
+    #[test]
     fn hot_swap_retries_a_suspended_frame_with_its_edited_method() {
         let (broken, fixed) = hot_swap_artifacts();
         let mut chooser = HotSwap {
@@ -21995,6 +22403,44 @@ end;
                 failed_sends: 0,
             }
         );
+    }
+
+    #[test]
+    fn control_stats_count_failed_sends() {
+        // `pick` fails once and `area` once more after its replacement
+        // passes; the dynamic sends that found no method are counted.
+        let artifacts =
+            CompilerSession::compile_source("sends.loko", NO_METHOD, RuntimeMode::CompileOnly)
+                .with_codegen_policy(lower::CodegenPolicy::Off);
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut chooser =
+            Scripted(
+                |condition: &UnhandledCondition<'_>| match condition.no_applicable_method() {
+                    Some(report) if report.generic == "pick" => {
+                        Choice::UseValue(vec![register_of_class(condition, "<circle>")])
+                    }
+                    _ => Choice::UseValue(vec![Value::I64(4)]),
+                },
+            );
+        let outcome = driver::run(
+            &mut vm,
+            &tape.code,
+            tape.main.expect("main"),
+            &[],
+            InvocationOptions::default(),
+            &mut chooser,
+        )
+        .expect("use-value resumes");
+        assert_eq!(outcome.outputs, vec![Value::I64(14)]);
+        let stats = outcome.stats;
+        assert_eq!(stats.failed_sends, 2);
+        assert_eq!(stats.signals, 2);
+        assert_eq!(stats.unhandled, 2);
+        assert!(stats.sends >= 2, "{stats:?}");
     }
 
     #[test]
@@ -23290,10 +23736,14 @@ end;
 
     const PARKED_PROGRAM: &str = "define class <problem> (<object>)\nend;\n\
          define function one() => <integer>\n  1\nend;\n\
+         define class <needy> (<problem>)\n  slot need :: <integer>;\nend;\n\
+         define function twin(p :: <problem>) => <problem>\n  make(class-of(p))\nend;\n\
          define generic poke(x);\n\
          define method poke(x :: <integer>) => <integer>\n  x\nend;\n\
          define function no-method(n :: <integer>) => <integer>\n  \
-         poke(if n = 0 then as(<object>, n) else as(<object>, #other) end)\nend;\n\
+         poke(if n = 0 then as(<object>, n) else as(<object>, \"other\") end)\nend;\n\
+         define function trapped(n :: <integer>) => <boolean>\n  \
+         instance?(twin(if n = 0 then make(<problem>) else make(<needy>, need: n) end), <needy>)\nend;\n\
          define function risky() => <integer>\n  signal(make(<problem>))\nend;\n\
          define function make-exit() => <callable>\n  block (out)\n    out\n  end\nend;\n\
          define function expired() => <integer>\n  \
@@ -23340,9 +23790,23 @@ end;
         // A trap, an abort and an unhandled condition each end their call
         // and leave the VM as reusable as a fresh one.
         let trapped =
-            runtime.call_function(&artifacts, "no-method", &[FunctionValue::Integer(1)], None);
+            runtime.call_function(&artifacts, "trapped", &[FunctionValue::Integer(1)], None);
         assert!(matches!(trapped, Err(FunctionCallError::Trap { .. })));
         assert_parked_fresh(&runtime, &artifacts);
+        // A failed send allocates its arguments' vector, the generic's
+        // metaobject and the condition in the call's turn, which ends.
+        let heap = runtime.heap_stats();
+        let failed =
+            runtime.call_function(&artifacts, "no-method", &[FunctionValue::Integer(1)], None);
+        assert!(matches!(
+            failed,
+            Err(FunctionCallError::UnhandledCondition {
+                no_applicable_method: Some(_),
+                ..
+            })
+        ));
+        assert_parked_fresh(&runtime, &artifacts);
+        assert_eq!(runtime.heap_stats(), heap);
         let mut abort = Scripted(|_: &UnhandledCondition<'_>| Choice::Abort);
         let aborted = runtime.call_function_with(
             &artifacts,

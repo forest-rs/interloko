@@ -1,0 +1,38 @@
+// expect: run 15
+// expect: diagnostics 1
+// expect: diagnostic code typing.dispatch-no-applicable-method
+// expect: dump typing contains dispatch refuted rule=dispatch-no-applicable-method
+// expect: dump typing contains overflow checked rule=overflow-possible
+
+// Typing knows no method of `area` accepts a `<label>`, and warns, but the
+// send is still compiled: it signals a `<no-applicable-method>`, which a
+// handler or a `use-value` restart can recover from. So the code after it
+// is not unreachable to typing, and the overflow check on its result stays
+// under either codegen policy, which the corpus runs this case under.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <label> (<object>)
+end;
+
+define generic area(s :: <object>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  10
+end;
+
+define function grown(l :: <label>) => <integer>
+  handle
+    area(l) + 1
+  with restart e :: <no-applicable-method>
+    5
+  end
+end;
+
+define function main() => <integer>
+  grown(make(<label>)) + area(make(<circle>))
+end;

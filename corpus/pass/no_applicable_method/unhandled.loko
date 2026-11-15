@@ -1,0 +1,35 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: run reports unhandled condition <no-applicable-method>: dispatch.no-applicable-method: no method of area applies to (<square>), called with ({<square>})
+// expect: diagnostics 0
+// expect: dump lowered contains = condition.no-applicable-method g0
+// expect: dump lowered lacks trap
+
+// A send whose argument no method accepts signals a
+// `<no-applicable-method>` instead of trapping. Nothing handles it here,
+// so the run ends with the condition's own code, and the report names the
+// generic and the classes of the arguments it was called with.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define generic area(s :: <shape>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  3 * c.radius * c.radius
+end;
+
+define function measure(s :: <shape>) => <integer>
+  area(s)
+end;
+
+define function main() => <integer>
+  measure(make(<square>, side: 2))
+end;

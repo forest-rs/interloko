@@ -1,0 +1,37 @@
+// expect: run 9
+// expect: diagnostics 0
+
+// A handler can leave through a block's exit procedure instead of
+// recovering at its handle site: the exit unwinds past the send that
+// found no method, and the block returns the exit's value.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define generic area(s :: <shape>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  3 * c.radius * c.radius
+end;
+
+define function measure(s :: <shape>) => <integer>
+  block (done)
+    handle
+      area(s) + 100
+    with restart e :: <no-applicable-method>
+      done(9)
+    end
+  end
+end;
+
+define function main() => <integer>
+  measure(make(<square>, side: 2))
+end;

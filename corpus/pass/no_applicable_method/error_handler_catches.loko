@@ -1,0 +1,37 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// `<no-applicable-method>` is an `<error>`, and that a `<condition>`, so a
+// handler for any of them catches a send that found no method, and only
+// one for `<type-error>` does not.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define generic corners(s :: <shape>) => <integer>;
+
+define method corners(c :: <circle>) => <integer>
+  0
+end;
+
+define function counted(s :: <shape>) => <integer>
+  handle
+    handle
+      corners(s)
+    with restart e :: <type-error>
+      1
+    end
+  with restart e :: <error>
+    if instance?(e, <no-applicable-method>) then 3 else 2 end
+  end
+end;
+
+define function main() => <integer>
+  counted(make(<square>))
+end;

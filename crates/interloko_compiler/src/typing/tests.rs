@@ -116,6 +116,45 @@ fn dispatch_with_no_possible_method_is_refuted_and_warns() {
 }
 
 #[test]
+fn a_refuted_send_still_yields_its_generic_result() {
+    // No method accepts a `<label>`, so the send always fails. It signals a
+    // `<no-applicable-method>` whose `use-value` restart supplies results
+    // the dispatcher checks against the generic's, so the code after the
+    // send is reachable and sees an `<integer>`, not bottom: the overflow
+    // check after it is decided on that, not dropped as unreachable.
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function f(l :: <label>) => <integer>\n  area(l) + 1\nend;\n\
+         define function main()\n  0\nend;"
+    ));
+    let [dispatch] = checks_of(&module, &artifact, "f", TypingCheck::Dispatch)
+        .try_into()
+        .expect("one dispatch");
+    assert_eq!(dispatch.verdict, TypingVerdict::Refuted);
+    let [overflow] = checks_of(&module, &artifact, "f", TypingCheck::Overflow)
+        .try_into()
+        .expect("one overflow check");
+    assert_eq!(overflow.verdict, TypingVerdict::Checked);
+    assert_ne!(overflow.rule, TypingRule::Unreachable);
+    assert_eq!(type_name(&module, &overflow.actual[0]), "<integer>");
+}
+
+#[test]
+fn a_send_does_not_narrow_its_arguments() {
+    // A send that finds no method continues with a `use-value`
+    // replacement, so its arguments need not be instances of any method's
+    // specializers afterwards: the test after it still depends on `x`.
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function f(x :: <object>) => <boolean>\n  \
+         let a = area(x);\n  instance?(x, <shape>)\nend;\n\
+         define function main()\n  0\nend;"
+    ));
+    let [test] = checks_of(&module, &artifact, "f", TypingCheck::Instance)
+        .try_into()
+        .expect("one instance test");
+    assert_eq!(test.verdict, TypingVerdict::Checked);
+}
+
+#[test]
 fn dispatch_on_an_unrelated_class_is_refuted() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function name(l :: <label>)\n  area(l)\nend;\n\

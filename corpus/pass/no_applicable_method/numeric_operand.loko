@@ -1,0 +1,17 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// Numeric generics dispatch like any other: `+` on a boxed `<object>` that
+// holds a string finds no method, and signals the same condition.
+
+define function add(x :: <object>) => <object>
+  x + 1
+end;
+
+define function main() => <integer>
+  handle
+    as(<integer>, add(as(<object>, "two")))
+  with restart e :: <no-applicable-method>
+    if generic-function-name(e.no-applicable-method-generic) = "+" then 3 else 0 end
+  end
+end;

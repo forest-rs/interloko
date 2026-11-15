@@ -1,0 +1,16 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: run reports no method of describe applies to (<thing>), called with ({<thing>})
+// expect: diagnostics 1
+// expect: diagnostic code typing.dispatch-no-applicable-method
+
+// A generic without methods still has a dispatcher, which every send to
+// it reaches and which signals the condition.
+
+define class <thing> (<object>)
+end;
+
+define generic describe(x :: <thing>) => <integer>;
+
+define function main() => <integer>
+  describe(make(<thing>))
+end;

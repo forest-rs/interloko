@@ -45,6 +45,21 @@
 //! establishes, and a replacement object is checked again. Proved checks
 //! have no failing path, which is why flow typing types a check that may
 //! fail by its expected type rather than by its operand.
+//!
+//! # Failing sends
+//!
+//! A send that finds no method for its arguments signals a
+//! `<no-applicable-method>` rather than trapping. Every such send reaches its
+//! generic's dispatcher: the runtime answers a dynamic send, and the
+//! generic's closure thunk, with the dispatcher when its table selects
+//! nothing, and a linked or inlined send only exists where typing proved a
+//! method applies. The dispatcher ends where its last method failed to
+//! match, so the passing path is unchanged; there it boxes its arguments
+//! into a `<vector>`, makes the condition
+//! ([`NoApplicableMethod`](crate::lower::Instr::NoApplicableMethod)) and
+//! signals it. A `use-value` restart supplies the send's results, which the
+//! dispatcher checks against the generic's declared result types, as an
+//! indirect entry checks its arguments, before it returns them.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -405,17 +420,21 @@ pub enum RuntimeOp {
     Concatenate,
 }
 
+/// The name of the symbol that stands in for a callable argument in the
+/// arguments of a `<no-applicable-method>`: no `<vector>` can hold a
+/// callable, which is not an `<object>`.
+pub const CALLABLE_ARGUMENT_SYMBOL: &str = "<callable>";
+
 /// Condition that compiled Loko code signals with an explicit tape `trap`.
 ///
 /// The tape carries [`LokoTrap::code`] as its trap code; runtime reporting
 /// recovers the condition with [`LokoTrap::from_code`]. Failed runtime type
 /// checks do not trap: they signal a `<type-error>` (see
-/// [`Instr::SignalTypeError`]). The codes those checks used to trap with,
-/// 2 to 4, are retired rather than reused.
+/// [`Instr::SignalTypeError`]), and a send that finds no method signals a
+/// `<no-applicable-method>` (see [`Instr::NoApplicableMethod`]). The codes
+/// those used to trap with, 1 to 4, are retired rather than reused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum LokoTrap {
-    /// A generic function call matched no applicable method.
-    NoApplicableMethod,
     /// `make` on a class value named no class the call can construct: not
     /// the call's static bound nor one of its subclasses.
     MakeClassOutsideBound,
@@ -426,17 +445,12 @@ pub enum LokoTrap {
 
 impl LokoTrap {
     /// Every Loko trap in code order.
-    pub const ALL: &'static [Self] = &[
-        Self::NoApplicableMethod,
-        Self::MakeClassOutsideBound,
-        Self::MakeMissingInitKeyword,
-    ];
+    pub const ALL: &'static [Self] = &[Self::MakeClassOutsideBound, Self::MakeMissingInitKeyword];
 
     /// Returns the tape trap code for this condition.
     #[must_use]
     pub const fn code(self) -> u32 {
         match self {
-            Self::NoApplicableMethod => 1,
             Self::MakeClassOutsideBound => 5,
             Self::MakeMissingInitKeyword => 6,
         }
@@ -446,7 +460,6 @@ impl LokoTrap {
     #[must_use]
     pub const fn from_code(code: u32) -> Option<Self> {
         match code {
-            1 => Some(Self::NoApplicableMethod),
             5 => Some(Self::MakeClassOutsideBound),
             6 => Some(Self::MakeMissingInitKeyword),
             _ => None,
@@ -457,7 +470,6 @@ impl LokoTrap {
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
-            Self::NoApplicableMethod => "no applicable method",
             Self::MakeClassOutsideBound => "make on a class outside the call's bound",
             Self::MakeMissingInitKeyword => "make on a class needing a missing init keyword",
         }
@@ -467,9 +479,9 @@ impl LokoTrap {
     #[must_use]
     pub const fn diagnostic_code(self) -> DiagnosticCode {
         match self {
-            Self::NoApplicableMethod
-            | Self::MakeClassOutsideBound
-            | Self::MakeMissingInitKeyword => DiagnosticCode::RuntimeTrap,
+            Self::MakeClassOutsideBound | Self::MakeMissingInitKeyword => {
+                DiagnosticCode::RuntimeTrap
+            }
         }
     }
 }
@@ -1639,6 +1651,19 @@ pub enum Instr {
     PopBinding {
         /// Token register returned by the matching push.
         token: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// Makes the `<no-applicable-method>` a send to `generic` signals when
+    /// no method accepts `arguments`: a generic's dispatcher, after its last
+    /// method failed to match.
+    NoApplicableMethod {
+        /// Destination condition register.
+        dst: Reg,
+        /// The generic the send called.
+        generic: sem::GenericFunctionId,
+        /// The send's arguments, boxed into a `<vector>`.
+        arguments: Reg,
         /// Source span.
         span: Span,
     },
@@ -4131,10 +4156,125 @@ impl<'module> BodyLowering<'module> {
             self.instructions.push(Instr::Label { label: unmatched });
         }
 
-        self.instructions.push(Instr::Trap {
-            trap: LokoTrap::NoApplicableMethod,
-            span: generic.span,
+        self.signal_no_applicable_method(generic)
+    }
+
+    /// Ends `generic`'s dispatcher where no method matched its arguments:
+    /// signals the `<no-applicable-method>` that names them, then returns
+    /// what a `use-value` restart supplies instead, once each value passes
+    /// the generic's declared result type. A class or class-object result
+    /// is checked as an indirect entry checks a parameter, and a limited
+    /// one for its range; a replacement that fails signals a `<type-error>`
+    /// whose own replacement is checked again. A result sem knows to be a
+    /// particular function, generic or accessor has that callable as its
+    /// only value, which no check of a closure could establish, so the
+    /// restart supplies no value for it and the dispatcher returns the
+    /// callable itself. Other results are whatever their register kind
+    /// holds, which the driver checks.
+    fn signal_no_applicable_method(
+        &mut self,
+        generic: &sem::GenericFunction,
+    ) -> Result<(), LowerError> {
+        let span = generic.span;
+        let vector_class = self
+            .module
+            .builtin_value_class(sem::BuiltinValueClass::Vector)
+            .ok_or_else(|| invalid_semantic("module has no <vector> class"))?;
+        let condition_class = self
+            .module
+            .condition_class(sem::ConditionClass::NoApplicableMethod)
+            .ok_or_else(|| invalid_semantic("module has no <no-applicable-method> class"))?;
+        let mut elements = Vec::with_capacity(generic.arity);
+        for index in 0..generic.arity {
+            let kind = dispatcher_param_kind(self.module, generic, index);
+            // No `<vector>` can hold a callable, which is not an `<object>`
+            // and never selects a method, so the symbol `#<callable>`
+            // stands in for it.
+            let argument = if matches!(kind, ValueKind::Closure(_) | ValueKind::Function(_)) {
+                let class = self
+                    .module
+                    .builtin_value_class(sem::BuiltinValueClass::Symbol)
+                    .ok_or_else(|| invalid_semantic("module has no <symbol> class"))?;
+                let symbol = self.alloc(ValueKind::Object(Some(class)));
+                self.instructions.push(Instr::SymbolLiteral {
+                    dst: symbol.reg,
+                    name: CALLABLE_ARGUMENT_SYMBOL.into(),
+                    class,
+                    span,
+                });
+                symbol
+            } else {
+                Value {
+                    reg: register_at(index),
+                    kind,
+                    reachable: true,
+                }
+            };
+            elements.push(self.box_any(argument, span)?.reg);
+        }
+        let arguments = self.alloc(ValueKind::Object(Some(vector_class)));
+        self.instructions.push(Instr::VectorLiteral {
+            dst: arguments.reg,
+            elements,
+            class: vector_class,
+            span,
         });
+        let condition = self.alloc(ValueKind::Object(Some(condition_class)));
+        self.instructions.push(Instr::NoApplicableMethod {
+            dst: condition.reg,
+            generic: generic.id,
+            arguments: arguments.reg,
+            span,
+        });
+        // The results a replacement supplies: every one but a known
+        // callable, whose only value is the callable.
+        let mut results = Vec::with_capacity(generic.result_kinds.len());
+        for kind in &generic.result_kinds {
+            results.push(match kind {
+                sem::ValueKind::KnownCallable(_) => None,
+                _ => Some(self.alloc(self.value_kind(*kind)?)),
+            });
+        }
+        self.instructions.push(Instr::Signal {
+            dsts: results.iter().flatten().map(|result| result.reg).collect(),
+            condition: condition.reg,
+            span,
+        });
+        // Typing classifies none of a dispatcher's checks.
+        let site = check_site_name(self.site_owner, None, span);
+        let mut values = Vec::with_capacity(results.len());
+        for (index, result) in results.iter().enumerate() {
+            let Some(result) = result else {
+                let sem::ValueKind::KnownCallable(callable) = generic.result_kinds[index] else {
+                    return Err(invalid_semantic("generic result kind changed"));
+                };
+                values.push(self.lower_known_callable(callable, span)?.reg);
+                continue;
+            };
+            let target = match generic.result_ranges.get(index).copied().flatten() {
+                Some(range) if result.kind == ValueKind::I64 => {
+                    Some(sem::EntryTarget::Range(range))
+                }
+                _ => entry_target(result.kind),
+            };
+            let Some(target) = target else {
+                values.push(result.reg);
+                continue;
+            };
+            let module = self.module;
+            let checked = entry_check(
+                module,
+                &mut self.code(),
+                target,
+                result.reg,
+                result.kind,
+                site.clone(),
+                span,
+            );
+            self.next_reg = register_at(self.register_kinds.len());
+            values.push(checked);
+        }
+        self.instructions.push(Instr::Return { values, span });
         Ok(())
     }
 
@@ -8942,6 +9082,19 @@ impl Module {
             }
             Instr::PopBinding { token, span } => {
                 write!(f, "  control.pop %{token}")?;
+                fmt_span(f, *span)
+            }
+            Instr::NoApplicableMethod {
+                dst,
+                generic,
+                arguments,
+                span,
+            } => {
+                write!(
+                    f,
+                    "  %{dst} = condition.no-applicable-method g{} %{arguments}",
+                    generic.0
+                )?;
                 fmt_span(f, *span)
             }
             Instr::Signal {
