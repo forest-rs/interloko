@@ -3,6 +3,8 @@
 // expect: dump typing contains s1 dispatch proved rule=dispatch-covered
 // expect: dump typing contains actual=exactly <square>
 // expect: dump typing contains because=narrowed(s0,else)
+// expect: dump types contains narrowed-uses=1
+// expect: dump types contains exactly <square> because=narrowed(s0,else)@
 
 // `shape` is one of two exact classes, so the else branch of
 // `instance?(shape, <circle>)` knows it is a <square>: the call of `sides`,

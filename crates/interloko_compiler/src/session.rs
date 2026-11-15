@@ -39,6 +39,7 @@ use crate::{ast, lower, sem, tape, typing};
 /// Upstream execution evidence carried by [`ExecutionTrace`]: recorded
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
+use interloko_model::contract::Contract;
 use interloko_runtime::chooser::{ConditionChooser, ReportUnhandled};
 use interloko_runtime::code::CodeUnit;
 use interloko_runtime::control::ControlFault;
@@ -706,6 +707,8 @@ pub enum DumpStage {
     Tape,
     /// Soft typing configuration and decisions.
     Typing,
+    /// Flow types of every binding and definition result, with reasons.
+    Types,
     /// All stage dumps.
     All,
 }
@@ -803,6 +806,9 @@ pub enum EnvironmentKind {
     TypingConfig,
     /// One soft typing decision about a residual runtime check.
     TypingDecision,
+    /// The type contract of a function, generic, or method: what code
+    /// compiled against it relies on.
+    Contract,
 }
 
 impl EnvironmentKind {
@@ -843,6 +849,7 @@ impl EnvironmentKind {
             Self::Mutation => "mutation",
             Self::TypingConfig => "typing-config",
             Self::TypingDecision => "typing-decision",
+            Self::Contract => "contract",
         }
     }
 }
@@ -989,6 +996,11 @@ pub enum EnvironmentAffordance {
     ShowGrammarExtension,
     /// Show soft typing policy or one typing decision with its provenance.
     ShowTyping,
+    /// Show the flow types of a definition's parameters, locals, and result,
+    /// with their reasons.
+    ShowTypes,
+    /// Show the typing decisions whose reasons cite a contract.
+    ShowDependents,
 }
 
 impl EnvironmentAffordance {
@@ -1033,6 +1045,8 @@ impl EnvironmentAffordance {
             Self::ShowGrammarRegistry,
             Self::ShowGrammarExtension,
             Self::ShowTyping,
+            Self::ShowTypes,
+            Self::ShowDependents,
         ]
     }
 
@@ -1086,6 +1100,8 @@ impl EnvironmentAffordance {
             Self::ShowGrammarRegistry => "show-grammar-registry",
             Self::ShowGrammarExtension => "show-grammar-extension",
             Self::ShowTyping => "show-typing",
+            Self::ShowTypes => "show-types",
+            Self::ShowDependents => "show-dependents",
         }
     }
 }
@@ -1230,7 +1246,31 @@ impl InspectionFacet {
     }
 }
 
-/// Typed soft typing data carried by typing environment objects.
+/// What generated code does with the runtime check a typing decision
+/// classifies.
+///
+/// Typing is advisory today: lowering keeps every runtime check, whatever
+/// the verdict. When lowering starts to use typing facts, a check it drops
+/// or specializes reports so here.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CheckCodegen {
+    /// The generated code performs the runtime check.
+    Kept,
+}
+
+impl CheckCodegen {
+    /// Returns the stable label used in EOP records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+        }
+    }
+}
+
+/// Typed soft typing data carried by typing and contract environment
+/// objects.
 ///
 /// Consumers read these values directly instead of parsing inspection text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1248,6 +1288,23 @@ pub enum TypingFacet {
         decision: typing::TypingDecision,
         /// Severity the configuration assigns to the decision.
         severity: typing::TypingSeverity,
+        /// The rendered reason chain of each operand type, in operand order,
+        /// as in the `because=` field of the typing dump.
+        reasons: Vec<String>,
+        /// What the verdict relies on outside its own body: cited contracts,
+        /// then method sets and closed classes.
+        /// [`SessionArtifacts::dependency_object_id`] names the EOP object
+        /// of each.
+        depends_on: Vec<typing::TypingDependency>,
+        /// What generated code does with the check.
+        codegen: CheckCodegen,
+    },
+    /// A definition's type contract.
+    Contract {
+        /// The function, generic, or method the contract belongs to.
+        definition: DefinitionId,
+        /// Its parameters and results.
+        contract: Contract,
     },
 }
 
@@ -1881,6 +1938,105 @@ impl SessionArtifacts {
         Some(self.typing.dump_definition(&self.sem, definition))
     }
 
+    /// Returns the flow type of a binding, check site, or source span, with
+    /// its provenance; see [`typing::TypingArtifact::type_of`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`typing::TypeQueryError`] when typing did not run or the
+    /// selector names nothing typed.
+    pub fn type_of(
+        &self,
+        selector: &typing::TypeSelector,
+    ) -> Result<typing::TypeReport, typing::TypeQueryError> {
+        self.typing.type_of(&self.sem, selector)
+    }
+
+    /// Renders the flow types of a function's, method's, or constant's
+    /// parameters, locals, and result, with their reasons, in the format of
+    /// [`DumpStage::Types`]. This is the `show-types` affordance.
+    ///
+    /// Returns `None` when `id` names no function, method, or constant.
+    #[must_use]
+    pub fn explain_types(&self, id: &str) -> Option<String> {
+        let definition = self.definition_object(id)?;
+        Some(self.typing.dump_definition_types(&self.sem, definition))
+    }
+
+    /// Renders a contract object and the typing decisions whose reasons cite
+    /// it. This is the `show-dependents` affordance.
+    ///
+    /// Dependents are found from the reasons the current typing facts
+    /// record, so this lists what the facts rely on now, not every caller
+    /// that could.
+    ///
+    /// Returns `None` when `id` names no contract object.
+    #[must_use]
+    pub fn explain_contract_dependents(&self, id: &str) -> Option<String> {
+        let module = &self.sem;
+        let (definition, contract) = module
+            .functions
+            .iter()
+            .map(|function| function.definition)
+            .chain(module.generics.iter().map(|generic| generic.definition))
+            .chain(module.methods.iter().map(|method| method.definition))
+            .find(|definition| contract_object_id(*definition) == id)
+            .and_then(|definition| Some((definition, module.contract(definition)?)))?;
+        let dependents = self.typing.contract_dependents(definition);
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "contract {id} of {}",
+            typing::definition_label(module, definition)
+        );
+        let _ = writeln!(
+            out,
+            "params: {}",
+            value_contract_list_label(module, &contract.params)
+        );
+        let _ = writeln!(
+            out,
+            "results: {}",
+            value_contract_list_label(module, &contract.results)
+        );
+        let _ = writeln!(out, "dependents: {}", dependents.len());
+        for decision in dependents {
+            let _ = writeln!(
+                out,
+                "  {} {} {} in {}",
+                typing_decision_object_id(decision),
+                decision.check.as_str(),
+                decision.verdict.as_str(),
+                typing::definition_label(module, decision.owner)
+            );
+        }
+        Some(out)
+    }
+
+    /// Returns the id of the EOP object a typing dependency refers to:
+    /// `contract:<definition>` for a function's, generic's, or method's
+    /// contract, `constant:kN` or `accessor:cN.sM` for a constant's value or
+    /// a slot read, `generic:gN` for a method set, and `class:cN` for a
+    /// closed class.
+    #[must_use]
+    pub fn dependency_object_id(&self, dependency: typing::TypingDependency) -> String {
+        typing_dependency_object_id(&self.sem, dependency)
+    }
+
+    /// The definition of the function, method, or constant object `id`.
+    fn definition_object(&self, id: &str) -> Option<DefinitionId> {
+        let module = &self.sem;
+        if let Some(index) = object_index(id, "function:f") {
+            return module.functions.get(index).map(|item| item.definition);
+        }
+        if let Some(index) = object_index(id, "method:m") {
+            return module.methods.get(index).map(|item| item.definition);
+        }
+        object_index(id, "constant:k")
+            .and_then(|index| module.constants.get(index))
+            .map(|item| item.definition)
+    }
+
     /// Returns true when any aggregated diagnostic is an error.
     ///
     /// Warnings are advisory: a compilation whose only diagnostics are
@@ -2417,6 +2573,7 @@ impl SessionArtifacts {
                 },
             ),
             DumpStage::Typing => self.typing.dump(&self.sem),
+            DumpStage::Types => self.typing.dump_types(&self.sem),
             DumpStage::All => {
                 let mut out = String::new();
                 for stage in [
@@ -2428,6 +2585,7 @@ impl SessionArtifacts {
                     DumpStage::Lowered,
                     DumpStage::Tape,
                     DumpStage::Typing,
+                    DumpStage::Types,
                 ] {
                     let _ = writeln!(out, "== {stage:?} ==");
                     out.push_str(&self.dump_stage(stage));
@@ -8457,6 +8615,19 @@ fn dump_environment_object_stage(
             },
             |definition| artifacts.typing.dump_definition(&artifacts.sem, definition),
         ),
+        DumpStage::Types => object.source.definition.map_or_else(
+            || {
+                format!(
+                    "types summary {}\nno typed definition\n",
+                    object.id.as_str()
+                )
+            },
+            |definition| {
+                artifacts
+                    .typing
+                    .dump_definition_types(&artifacts.sem, definition)
+            },
+        ),
         DumpStage::Syntax | DumpStage::Ast => {
             let mut out = String::new();
             let _ = writeln!(
@@ -9079,15 +9250,28 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
                     typing_policy_label(*config)
                 );
             }
-            TypingFacet::Decision { decision, severity } => {
+            TypingFacet::Decision {
+                decision,
+                severity,
+                reasons,
+                depends_on: _,
+                codegen,
+            } => {
                 let _ = writeln!(
                     out,
-                    "  check={} verdict={} rule={} severity={}",
+                    "  check={} verdict={} rule={} severity={} codegen={}",
                     decision.check.as_str(),
                     decision.verdict.as_str(),
                     decision.rule.as_str(),
-                    severity.as_str()
+                    severity.as_str(),
+                    codegen.as_str()
                 );
+                for (index, reason) in reasons.iter().enumerate() {
+                    let _ = writeln!(out, "  because #{index}: {reason}");
+                }
+            }
+            TypingFacet::Contract { definition, .. } => {
+                let _ = writeln!(out, "  contract of {definition}");
             }
         }
     }
@@ -9157,6 +9341,7 @@ fn dump_stage_name(stage: DumpStage) -> &'static str {
         DumpStage::Lowered => "lowered",
         DumpStage::Tape => "tape",
         DumpStage::Typing => "typing",
+        DumpStage::Types => "types",
         DumpStage::All => "all",
     }
 }
@@ -9300,6 +9485,7 @@ fn project_session_environment(
         project_environment_dispatch_site(module, sink, site);
     }
     project_typing(artifacts, &dispatch_sites, sink);
+    project_contracts(artifacts, sink);
     for entry in artifacts.mutations() {
         project_environment_mutation(module, sink, entry);
     }
@@ -9502,6 +9688,9 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
                 &[QueryArtifact::TypingConfig, QueryArtifact::Typing],
             );
         }
+        // Contract objects carry their source and artifact facets from
+        // projection.
+        EnvironmentKind::Contract => {}
         EnvironmentKind::TypingDecision => {
             if let Some(TypingFacet::Decision { decision, .. }) = &object.typing {
                 object.source =
@@ -10620,6 +10809,7 @@ fn project_environment_method(
         Aff::DumpTape,
         Aff::DumpEop,
         Aff::ShowDependencies,
+        Aff::ShowTypes,
     ]);
     if !generated {
         affordances.push(Aff::EditBody);
@@ -10695,6 +10885,7 @@ fn project_environment_function(
             Aff::DumpEop,
             Aff::Run,
             Aff::ShowDependencies,
+            Aff::ShowTypes,
             Aff::EditBody,
         ]),
         execution: Some(format!("callable=direct arity={}", function.params.len())),
@@ -10764,6 +10955,7 @@ fn project_environment_constant(
             Aff::DumpTape,
             Aff::DumpEop,
             Aff::ShowDependencies,
+            Aff::ShowTypes,
         ]),
         execution: Some("binding=immutable top-level".to_string()),
         inspection: format!(
@@ -10876,7 +11068,6 @@ fn project_typing(
 ) {
     use EnvironmentAffordance as Aff;
 
-    let module = &artifacts.sem;
     let typed = &artifacts.typing;
     let mut config = environment_object(EnvironmentObjectParts {
         id: TYPING_CONFIG_OBJECT_ID.into(),
@@ -10909,49 +11100,207 @@ fn project_typing(
     });
     sink.emit(config);
 
-    for decision in typed.decisions() {
-        let owner = typing::definition_label(module, decision.owner);
-        let expected = typing::expectation_label(module, &decision.expected);
-        let title = match (&decision.expected, decision.check) {
-            (typing::TypingExpectation::Dispatch { generic, .. }, _) => {
-                format!("dispatch {} in {owner}", generic_label(module, *generic))
+    for owner_typing in &typed.definitions {
+        for decision in &owner_typing.decisions {
+            project_typing_decision(artifacts, dispatch_sites, owner_typing, decision, sink);
+        }
+    }
+}
+
+fn project_typing_decision(
+    artifacts: &SessionArtifacts,
+    dispatch_sites: &[DispatchSiteRecord],
+    owner_typing: &typing::DefinitionTyping,
+    decision: &typing::TypingDecision,
+    sink: &mut dyn EnvironmentObjectSink,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let module = &artifacts.sem;
+    let typed = &artifacts.typing;
+    let owner = typing::definition_label(module, decision.owner);
+    let expected = typing::expectation_label(module, &decision.expected);
+    let title = match (&decision.expected, decision.check) {
+        (typing::TypingExpectation::Dispatch { generic, .. }, _) => {
+            format!("dispatch {} in {owner}", generic_label(module, *generic))
+        }
+        (_, typing::TypingCheck::Instance) => format!("instance? {expected} in {owner}"),
+        (_, typing::TypingCheck::Range) => format!("range {expected} in {owner}"),
+        (_, typing::TypingCheck::Overflow) => format!("overflow {expected} in {owner}"),
+        (_, typing::TypingCheck::Dispatch | typing::TypingCheck::Cast) => {
+            format!("cast to {expected} in {owner}")
+        }
+    };
+    let severity = typed.severity(decision);
+    let dispatch_site = typing_dispatch_site(decision, dispatch_sites)
+        .map_or_else(|| "none".into(), |site| site.id.clone());
+    let depends_on = owner_typing.dependencies(decision);
+    let depends_label = if depends_on.is_empty() {
+        "none".to_string()
+    } else {
+        depends_on
+            .iter()
+            .map(|dependency| artifacts.dependency_object_id(*dependency))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let codegen = CheckCodegen::Kept;
+    let mut object = environment_object(EnvironmentObjectParts {
+        id: typing_decision_object_id(decision),
+        kind: EnvironmentKind::TypingDecision,
+        meta_class: "<typing-decision>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title,
+        affordances: Vec::from([Aff::Inspect, Aff::ShowTyping, Aff::OpenSource, Aff::DumpEop]),
+        execution: None,
+        inspection: format!(
+            "check={} verdict={} rule={} owner={} span={}..{} expected={expected} actual={} severity={} dispatch-site={dispatch_site} depends-on={depends_label} codegen={}",
+            decision.check.as_str(),
+            decision.verdict.as_str(),
+            decision.rule.as_str(),
+            decision.owner,
+            decision.span.start,
+            decision.span.end,
+            typing::type_name_list(module, &decision.actual),
+            severity.as_str(),
+            codegen.as_str(),
+        ),
+    });
+    object.typing = Some(TypingFacet::Decision {
+        decision: decision.clone(),
+        severity,
+        reasons: decision
+            .because
+            .iter()
+            .map(|reason| owner_typing.reason_chain(module, *reason))
+            .collect(),
+        depends_on,
+        codegen,
+    });
+    sink.emit(object);
+}
+
+/// Stable EOP id of a definition's contract object, such as `contract:def…`.
+fn contract_object_id(definition: DefinitionId) -> String {
+    format!("contract:{definition}")
+}
+
+/// Projects one contract object per function, generic, and method.
+fn project_contracts(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
+    use EnvironmentAffordance as Aff;
+
+    let module = &artifacts.sem;
+    let mut dependents = alloc::collections::BTreeMap::<DefinitionId, usize>::new();
+    for owner in &artifacts.typing.definitions {
+        for decision in &owner.decisions {
+            for dependency in owner.dependencies(decision) {
+                if let typing::TypingDependency::Contract(definition) = dependency {
+                    *dependents.entry(definition).or_default() += 1;
+                }
             }
-            (_, typing::TypingCheck::Instance) => format!("instance? {expected} in {owner}"),
-            (_, typing::TypingCheck::Range) => format!("range {expected} in {owner}"),
-            (_, typing::TypingCheck::Overflow) => format!("overflow {expected} in {owner}"),
-            (_, typing::TypingCheck::Dispatch | typing::TypingCheck::Cast) => {
-                format!("cast to {expected} in {owner}")
-            }
+        }
+    }
+    let definitions = module
+        .functions
+        .iter()
+        .map(|function| (function.definition, function.span))
+        .chain(
+            module
+                .generics
+                .iter()
+                .map(|generic| (generic.definition, generic.span)),
+        )
+        .chain(
+            module
+                .methods
+                .iter()
+                .map(|method| (method.definition, method.span)),
+        );
+    for (definition, span) in definitions {
+        let Some(contract) = module.contract(definition) else {
+            continue;
         };
-        let severity = typed.severity(decision);
-        let dispatch_site = typing_dispatch_site(decision, dispatch_sites)
-            .map_or_else(|| "none".into(), |site| site.id.clone());
+        let label = typing::definition_label(module, definition);
         let mut object = environment_object(EnvironmentObjectParts {
-            id: typing_decision_object_id(decision),
-            kind: EnvironmentKind::TypingDecision,
-            meta_class: "<typing-decision>",
+            id: contract_object_id(definition),
+            kind: EnvironmentKind::Contract,
+            meta_class: "<contract>",
             origin: EnvironmentOrigin::CompilerGenerated,
             storage: EnvironmentStorage::CachedArtifact,
-            title,
-            affordances: Vec::from([Aff::Inspect, Aff::ShowTyping, Aff::OpenSource, Aff::DumpEop]),
+            title: format!("contract of {label}"),
+            affordances: Vec::from([
+                Aff::Inspect,
+                Aff::ShowDependents,
+                Aff::OpenSource,
+                Aff::DumpEop,
+            ]),
             execution: None,
             inspection: format!(
-                "check={} verdict={} rule={} owner={} span={}..{} expected={expected} actual={} severity={} dispatch-site={dispatch_site}",
-                decision.check.as_str(),
-                decision.verdict.as_str(),
-                decision.rule.as_str(),
-                decision.owner,
-                decision.span.start,
-                decision.span.end,
-                typing::type_name_list(module, &decision.actual),
-                severity.as_str(),
+                "definition={definition} params={} results={} dependents={}",
+                value_contract_list_label(module, &contract.params),
+                value_contract_list_label(module, &contract.results),
+                dependents.get(&definition).copied().unwrap_or(0)
             ),
         });
-        object.typing = Some(TypingFacet::Decision {
-            decision: decision.clone(),
-            severity,
+        object.source = SourceFacet::new(Some(artifacts.source.id), Some(definition), Some(span));
+        object.artifacts = artifact_facet(
+            artifacts.source.id,
+            &[QueryArtifact::Bind, QueryArtifact::Typing],
+        );
+        object.typing = Some(TypingFacet::Contract {
+            definition,
+            contract,
         });
         sink.emit(object);
+    }
+}
+
+/// Renders contract values as `(<integer>, callable(<integer>) => <circle>)`.
+fn value_contract_list_label(
+    module: &sem::Module,
+    values: &[interloko_model::contract::ValueContract],
+) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("{}", value.display(module)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({values})")
+}
+
+/// The EOP object a typing dependency refers to, as described by
+/// [`SessionArtifacts::dependency_object_id`].
+fn typing_dependency_object_id(
+    module: &sem::Module,
+    dependency: typing::TypingDependency,
+) -> String {
+    match dependency {
+        typing::TypingDependency::Contract(definition) => {
+            if module.contract(definition).is_some() {
+                return contract_object_id(definition);
+            }
+            if let Some(constant) = module
+                .constants
+                .iter()
+                .find(|constant| constant.definition == definition)
+            {
+                return format!("constant:k{}", constant.id.0);
+            }
+            module
+                .classes
+                .iter()
+                .find_map(|class| {
+                    class
+                        .direct_slots
+                        .iter()
+                        .find(|slot| slot.definition == definition)
+                        .map(|slot| format!("accessor:c{}.s{}", class.id.0, slot.id.0))
+                })
+                .unwrap_or_else(|| format!("definition:{definition}"))
+        }
+        typing::TypingDependency::Methods(generic) => format!("generic:g{}", generic.0),
+        typing::TypingDependency::Class(class) => format!("class:c{}", class.0),
     }
 }
 
@@ -11014,7 +11363,15 @@ fn explain_typing_decision(
         for reason in &decision.assumes {
             let _ = writeln!(out, "assumes: {}", owner.reason_chain(module, *reason));
         }
+        for dependency in owner.dependencies(decision) {
+            let _ = writeln!(
+                out,
+                "depends-on: {}",
+                artifacts.dependency_object_id(dependency)
+            );
+        }
     }
+    let _ = writeln!(out, "codegen: {}", CheckCodegen::Kept.as_str());
     let _ = writeln!(
         out,
         "severity: {} (config {} {} proved={} checked={} refuted={})",
@@ -13563,6 +13920,8 @@ mod tests {
                 "show-grammar-extension",
             ),
             (EnvironmentAffordance::ShowTyping, "show-typing"),
+            (EnvironmentAffordance::ShowTypes, "show-types"),
+            (EnvironmentAffordance::ShowDependents, "show-dependents"),
         ];
 
         let all = EnvironmentAffordance::all();
@@ -14809,9 +15168,9 @@ mod tests {
         let refuted = decisions
             .iter()
             .find_map(|object| match &object.typing {
-                Some(TypingFacet::Decision { decision, severity })
-                    if decision.verdict == typing::TypingVerdict::Refuted =>
-                {
+                Some(TypingFacet::Decision {
+                    decision, severity, ..
+                }) if decision.verdict == typing::TypingVerdict::Refuted => {
                     Some((*object, decision, *severity))
                 }
                 _ => None,
@@ -14852,6 +15211,160 @@ mod tests {
                 .contains("function main")
         );
         assert_eq!(artifacts.explain_typing("typing:missing"), None);
+    }
+
+    #[test]
+    fn decisions_name_their_dependencies_and_contracts_list_dependents() {
+        let artifacts = CompilerSession::compile_source(
+            "contracts.loko",
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  7\nend;\n\
+             define function pick() => <shape>\n  make(<circle>)\nend;\n\
+             define function main()\n  area(pick())\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let objects = artifacts.environment_objects();
+        let pick = artifacts.sem.functions[0].definition;
+        let main = artifacts.sem.functions[1].definition;
+        let decision = objects
+            .iter()
+            .find(|object| object.kind == EnvironmentKind::TypingDecision)
+            .expect("one typing decision");
+        let Some(TypingFacet::Decision {
+            reasons,
+            depends_on,
+            codegen,
+            ..
+        }) = &decision.typing
+        else {
+            panic!("decision facet: {:?}", decision.typing);
+        };
+        assert_eq!(*codegen, CheckCodegen::Kept);
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].starts_with("contract(declared)@"), "{reasons:?}");
+        assert_eq!(
+            depends_on,
+            &[
+                typing::TypingDependency::Contract(pick),
+                typing::TypingDependency::Methods(artifacts.sem.generics[0].id),
+            ]
+        );
+        let contract_id = format!("contract:{pick}");
+        assert!(
+            decision
+                .inspection
+                .detail
+                .contains(&format!("depends-on={contract_id},generic:g0 codegen=kept")),
+            "{}",
+            decision.inspection.detail
+        );
+        let explanation = artifacts
+            .explain_typing(decision.id.as_str())
+            .expect("decision explanation");
+        assert!(explanation.contains(&format!("depends-on: {contract_id}\n")));
+        assert!(explanation.contains("codegen: kept\n"));
+
+        let contract = eop_object(&objects, &contract_id);
+        assert_eq!(contract.kind, EnvironmentKind::Contract);
+        assert_eq!(contract.source.definition, Some(pick));
+        assert!(
+            contract
+                .affordances
+                .contains(EnvironmentAffordance::ShowDependents)
+        );
+        assert_eq!(
+            contract.typing,
+            Some(TypingFacet::Contract {
+                definition: pick,
+                contract: artifacts.sem.contract(pick).expect("pick has a contract"),
+            })
+        );
+        assert!(
+            contract
+                .inspection
+                .detail
+                .ends_with("params=() results=(<shape>) dependents=1")
+        );
+        let dependents = artifacts
+            .explain_contract_dependents(&contract_id)
+            .expect("dependents");
+        assert!(dependents.contains("results: (<shape>)\n"), "{dependents}");
+        assert!(dependents.contains("dependents: 1\n"), "{dependents}");
+        assert!(
+            dependents.contains(&format!("  {} dispatch", decision.id.as_str())),
+            "{dependents}"
+        );
+        // Every function, generic, and method has a contract object; the
+        // generic's own contract is not what the call's reason cites.
+        let main_contract = artifacts
+            .explain_contract_dependents(&format!("contract:{main}"))
+            .expect("main's contract");
+        assert!(main_contract.contains("dependents: 0\n"));
+        let generic = artifacts.sem.generics[0].definition;
+        assert!(
+            objects
+                .iter()
+                .any(|object| object.id.as_str() == format!("contract:{generic}"))
+        );
+        assert_eq!(
+            artifacts.explain_contract_dependents("contract:missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn show_types_lists_a_definitions_binding_types() {
+        let artifacts = CompilerSession::compile_source(
+            "types.loko",
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define function main() => <integer>\n  \
+             let s :: <shape> = make(<circle>);\n  \
+             if instance?(s, <circle>) then 1 else 0 end\nend;\n\
+             define constant $one = 1;",
+            RuntimeMode::CompileOnly,
+        );
+        assert!(artifacts.diagnostics.is_empty() || !artifacts.has_errors());
+        let objects = artifacts.environment_objects();
+        let main = eop_object(&objects, "function:f0");
+        assert!(main.affordances.contains(EnvironmentAffordance::ShowTypes));
+        let types = artifacts.explain_types("function:f0").expect("main types");
+        assert!(types.contains("function main"), "{types}");
+        assert!(
+            types.contains("local s@") && types.contains("exactly <circle> declared=<shape>"),
+            "{types}"
+        );
+        assert!(types.contains("    result "), "{types}");
+        let constant = artifacts
+            .explain_types("constant:k0")
+            .expect("constant types");
+        assert!(
+            constant.contains("result singleton(1) because=literal@"),
+            "{constant}"
+        );
+        assert_eq!(artifacts.explain_types("class:c1"), None);
+        assert_eq!(
+            artifacts.dump_environment_object_stage("function:f0", DumpStage::Types),
+            Some(types)
+        );
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Types)
+                .starts_with("types status=checked definitions=2 ")
+        );
+        let s = artifacts.sem.functions[0].locals[0].id;
+        let report = artifacts
+            .type_of(&typing::TypeSelector::Binding {
+                definition: artifacts.sem.functions[0].definition,
+                binding: typing::Binding::Local(s),
+            })
+            .expect("binding type");
+        assert_eq!(
+            typing::type_name(&artifacts.sem, &report.ty),
+            "exactly <circle>"
+        );
     }
 
     #[test]

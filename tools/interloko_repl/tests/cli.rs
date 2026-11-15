@@ -430,6 +430,43 @@ fn invoke_runs_supported_environment_object_affordances() {
 }
 
 #[test]
+fn invoke_shows_flow_types_and_contract_dependents() {
+    let definitions = "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic area(x);\n\
+         define method area(c :: <circle>)\n  7\nend;\n\
+         define function pick() => <shape>\n  make(<circle>)\nend;\n\
+         define function measure(s :: <shape>)\n  \
+         if instance?(s, <circle>) then area(s) else area(pick()) end\nend;\n";
+    let (stdout, stderr) = run_repl(&format!(
+        "{definitions}:invoke function:f1 show-types\n:dump types\n:dump eop\n:quit\n"
+    ));
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("function measure"), "{stdout}");
+    assert!(
+        stdout.contains(" <circle> because=narrowed(s0,then)@"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("types status=checked "), "{stdout}");
+    let contract = stdout
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("object "))
+        .find(|id| id.starts_with("contract:"))
+        .expect("a contract object")
+        .to_string();
+
+    let (stdout, stderr) = run_repl(&format!(
+        "{definitions}:invoke {contract} show-dependents\n:quit\n"
+    ));
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(
+        stdout.contains(&format!("contract {contract} of function pick")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("dependents: 1"), "{stdout}");
+}
+
+#[test]
 fn invoke_runs_linked_object_and_dispatch_affordances() {
     let (stdout, stderr) = run_repl(
         "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\

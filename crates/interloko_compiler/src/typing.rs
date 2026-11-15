@@ -1564,8 +1564,9 @@ pub fn expectation_label(module: &sem::Module, expected: &TypingExpectation) -> 
     }
 }
 
-/// Returns a source-level label for a typed definition, such as
-/// `function main` or `method area(<circle>)`.
+/// Returns a source-level label for a definition that has typing facts or
+/// a contract, such as `function main`, `method area(<circle>)`, or
+/// `generic area`.
 #[must_use]
 pub fn definition_label(module: &sem::Module, definition: DefinitionId) -> String {
     if let Some(function) = module
@@ -1599,6 +1600,13 @@ pub fn definition_label(module: &sem::Module, definition: DefinitionId) -> Strin
         .find(|constant| constant.definition == definition)
     {
         return format!("constant {}", constant.name);
+    }
+    if let Some(generic) = module
+        .generics
+        .iter()
+        .find(|generic| generic.definition == definition)
+    {
+        return format!("generic {}", generic.name);
     }
     format!("definition {definition}")
 }
