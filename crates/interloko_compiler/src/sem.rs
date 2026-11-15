@@ -12,6 +12,7 @@ use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
 
+use interloko_model::contract::Contract;
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
 
 pub use interloko_model::{
@@ -798,6 +799,99 @@ impl Module {
             ),
             ValueKind::Callable | ValueKind::KnownCallable(_) => Type::of(Atom::Callable, self),
         }
+    }
+
+    /// Returns the type contract of the generic, method or function
+    /// `definition` names, or `None` for any other definition.
+    ///
+    /// A contract is what code compiled against the definition relies on:
+    /// the types lowering trusts at each call without checking them. It maps
+    /// the value kinds this module resolved through [`Self::kind_type`]:
+    ///
+    /// - a generic's parameters are its declared types, `<object>` when
+    ///   undeclared, and its results are its declared result types or, for
+    ///   an open result, the kinds inferred from its methods, which every
+    ///   send trusts;
+    /// - a method's parameters are its specialized parameter kinds and its
+    ///   results are its generic's: a method is only ever called by a send
+    ///   or dispatcher of its generic, which trusts the generic's result
+    ///   types, never the method's own narrower ones;
+    /// - a function's parameters and results are its declared or inferred
+    ///   kinds.
+    ///
+    /// The contract never comes from a finer analysis of a body (such as
+    /// [`crate::typing`]), so a body edit changes a contract only when it
+    /// changes the kinds lowering trusts. Callable types do not yet carry
+    /// signatures, so a contract does not constrain a callable's
+    /// parameters or results.
+    #[must_use]
+    pub fn contract(&self, definition: DefinitionId) -> Option<Contract> {
+        if let Some(generic) = self
+            .generics
+            .iter()
+            .find(|generic| generic.definition == definition)
+        {
+            return Some(self.generic_contract(generic));
+        }
+        if let Some(method) = self
+            .methods
+            .iter()
+            .find(|method| method.definition == definition)
+        {
+            return Some(self.method_contract(method));
+        }
+        self.functions
+            .iter()
+            .find(|function| function.definition == definition)
+            .map(|function| self.function_contract(function))
+    }
+
+    /// Returns `generic`'s contract; see [`Self::contract`].
+    #[must_use]
+    pub fn generic_contract(&self, generic: &GenericFunction) -> Contract {
+        Contract {
+            params: generic
+                .param_kinds
+                .iter()
+                .map(|kind| kind.map_or_else(Type::top, |kind| self.kind_type(kind)))
+                .collect(),
+            results: self.kind_types(&generic.result_kinds),
+        }
+    }
+
+    /// Returns `method`'s contract; see [`Self::contract`].
+    #[must_use]
+    pub fn method_contract(&self, method: &Method) -> Contract {
+        Contract {
+            params: method
+                .params
+                .iter()
+                .map(|param| {
+                    method
+                        .locals
+                        .get(param.0 as usize)
+                        .map_or_else(Type::top, |local| self.kind_type(local.kind))
+                })
+                .collect(),
+            results: self.kind_types(
+                self.generics
+                    .get(method.generic.0 as usize)
+                    .map_or(&method.result_kinds, |generic| &generic.result_kinds),
+            ),
+        }
+    }
+
+    /// Returns `function`'s contract; see [`Self::contract`].
+    #[must_use]
+    pub fn function_contract(&self, function: &Function) -> Contract {
+        Contract {
+            params: self.kind_types(&function.param_kinds),
+            results: self.kind_types(&function.result_kinds),
+        }
+    }
+
+    fn kind_types(&self, kinds: &[ValueKind]) -> Vec<Type> {
+        kinds.iter().map(|kind| self.kind_type(*kind)).collect()
     }
 
     /// Returns the scalar value category of `expr`.

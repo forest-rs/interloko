@@ -1,9 +1,10 @@
 //! Shared Interloko substrate model facts.
 //!
 //! This crate owns small, durable identifiers and value-class names that are
-//! shared by compiler and runtime-shaped code, and the static type lattice
-//! ([`types`]) that the compiler's checkers and, later, the runtime reason
-//! with. It intentionally does not own syntax, semantic IR, lowering, tape
+//! shared by compiler and runtime-shaped code, the static type lattice
+//! ([`types`]) that the compiler's checkers and the runtime reason with, and
+//! the type [`contract`]s a definition promises its callers across code
+//! units. It intentionally does not own syntax, semantic IR, lowering, tape
 //! emission, runtime host execution, sessions, collaboration, permissions, or
 //! persistence.
 
@@ -11,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod contract;
 pub mod types;
 
 use core::fmt;
