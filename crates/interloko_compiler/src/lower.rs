@@ -3061,6 +3061,10 @@ struct BodyLowering<'module> {
     /// The closure whose body this is, which names its locals' and
     /// captures' typing bindings.
     closure: Option<sem::ClosureId>,
+    /// Scalars unboxed from a boxed local an `instance?` test refined, with
+    /// the boxed register they came from, innermost last. Boxing one of them
+    /// again reuses the box it came from.
+    unboxed_locals: Vec<(Register, Register)>,
 }
 
 impl<'module> BodyLowering<'module> {
@@ -3183,6 +3187,7 @@ impl<'module> BodyLowering<'module> {
             owner: None,
             checks: Vec::new(),
             closure: None,
+            unboxed_locals: Vec::new(),
         }
     }
 
@@ -3209,6 +3214,7 @@ impl<'module> BodyLowering<'module> {
             owner: None,
             checks: Vec::new(),
             closure: None,
+            unboxed_locals: Vec::new(),
         }
     }
 
@@ -4882,13 +4888,20 @@ impl<'module> BodyLowering<'module> {
             } => self.lower_signal_results(condition, *condition_class, result_kinds, *span),
             sem::Expr::If {
                 condition,
-                refinement: _,
+                refinement,
                 then_branch,
                 else_branch,
                 span,
             } => {
                 let result_kinds = self.module.expr_kinds(expr);
-                self.lower_results_if(&result_kinds, condition, then_branch, else_branch, *span)
+                self.lower_results_if(
+                    &result_kinds,
+                    condition,
+                    *refinement,
+                    then_branch,
+                    else_branch,
+                    *span,
+                )
             }
             sem::Expr::Handle {
                 body,
@@ -4916,10 +4929,14 @@ impl<'module> BodyLowering<'module> {
 
     /// Lowers an `if` whose result has the semantic join `result_kinds` of
     /// its branches; each branch converts its values to that join.
+    ///
+    /// A `refinement` that unboxes a local applies to the true branch: see
+    /// [`Self::enter_refinement`].
     fn lower_results_if(
         &mut self,
         result_kinds: &[sem::ValueKind],
         condition: &sem::Expr,
+        refinement: Option<sem::Refinement>,
         then_branch: &sem::Expr,
         else_branch: &sem::Expr,
         span: Span,
@@ -4930,17 +4947,19 @@ impl<'module> BodyLowering<'module> {
             }
             _ => None,
         };
+        let test_span = condition.span();
         let condition = self.lower_expr(condition)?;
         if condition.kind != ValueKind::Bool {
             return Err(invalid_semantic("if condition is not bool"));
         }
         if let Some(outcome) = decided {
-            let (live, dead) = if outcome {
-                (then_branch, else_branch)
-            } else {
-                (else_branch, then_branch)
-            };
-            return self.lower_one_branch(result_kinds, live, dead);
+            if !outcome {
+                return self.lower_one_branch(result_kinds, else_branch, then_branch);
+            }
+            let entered = self.enter_refinement(refinement, then_branch, test_span)?;
+            let values = self.lower_one_branch(result_kinds, then_branch, else_branch);
+            self.leave_refinement(entered);
+            return values;
         }
 
         let then_label = self.alloc_label();
@@ -4954,6 +4973,7 @@ impl<'module> BodyLowering<'module> {
         });
 
         self.instructions.push(Instr::Label { label: then_label });
+        let entered = self.enter_refinement(refinement, then_branch, test_span)?;
         let then_values = self.lower_results_expr(then_branch)?;
         let results = self
             .value_kinds(result_kinds)?
@@ -4971,6 +4991,7 @@ impl<'module> BodyLowering<'module> {
                 span,
             });
         }
+        self.leave_refinement(entered);
 
         self.instructions.push(Instr::Label { label: else_label });
         let else_values = self.lower_results_expr(else_branch)?;
@@ -4994,6 +5015,55 @@ impl<'module> BodyLowering<'module> {
                 ..result
             })
             .collect())
+    }
+
+    /// Applies a true-branch `refinement` that unboxes a local: the boxed
+    /// register unboxes once, at the top of `branch`, and every read of the
+    /// local there uses the scalar. Without this, each read would unbox on
+    /// its own. Returns what [`Self::leave_refinement`] restores.
+    ///
+    /// The `instance?` test that guards the branch passed (or typing proved
+    /// it), so the value is an instance of the scalar's class and the unbox
+    /// cannot fail; see `true_branch_refinement` in [`crate::sem`] for why
+    /// every `<integer>` unboxes to `i64`. A branch that never reads the
+    /// local does not unbox it.
+    fn enter_refinement(
+        &mut self,
+        refinement: Option<sem::Refinement>,
+        branch: &sem::Expr,
+        span: Span,
+    ) -> Result<Option<(sem::LocalId, Value)>, LowerError> {
+        let Some(refinement) = refinement else {
+            return Ok(None);
+        };
+        let kind = self.value_kind(refinement.kind)?;
+        let index = refinement.local.0 as usize;
+        let Some(boxed) = self.local_regs.get(index).copied().flatten() else {
+            return Ok(None);
+        };
+        if boxed.kind != ValueKind::Any
+            || !is_unboxed_number(kind)
+            || !facts::reads_local(branch, refinement.local)
+        {
+            return Ok(None);
+        }
+        let class = scalar_concrete_class(self.module, kind)
+            .ok_or_else(|| invalid_semantic("refined scalar kind has no class"))?;
+        let unboxed = self.unbox(boxed, class, kind, span);
+        self.unboxed_locals.push((unboxed.reg, boxed.reg));
+        self.local_regs[index] = Some(unboxed);
+        Ok(Some((refinement.local, boxed)))
+    }
+
+    /// Ends a refinement [`Self::enter_refinement`] applied: reads of the
+    /// local see its boxed register again.
+    fn leave_refinement(&mut self, entered: Option<(sem::LocalId, Value)>) {
+        if let Some((local, boxed)) = entered {
+            self.unboxed_locals.pop();
+            if let Some(slot) = self.local_regs.get_mut(local.0 as usize) {
+                *slot = Some(boxed);
+            }
+        }
     }
 
     /// Lowers the one branch of an `if` that typing proved its test takes.
@@ -6047,6 +6117,19 @@ impl<'module> BodyLowering<'module> {
     fn box_any(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
         if value.kind == ValueKind::Any {
             return Ok(value);
+        }
+        // A refined local's scalar is the value its box holds.
+        if let Some((_, boxed)) = self
+            .unboxed_locals
+            .iter()
+            .rev()
+            .find(|(unboxed, _)| *unboxed == value.reg)
+        {
+            return Ok(Value {
+                reg: *boxed,
+                kind: ValueKind::Any,
+                ..value
+            });
         }
         // A boxed `<i32>` or `<u32>` is the `<integer>` it is.
         let value = if matches!(value.kind, ValueKind::I32 | ValueKind::U32) {
@@ -8900,6 +8983,42 @@ mod tests {
                 .iter()
                 .any(|record| record.codegen == CheckCodegen::Inlined)
         );
+    }
+
+    #[test]
+    fn a_scalar_instance_test_unboxes_its_local_once() {
+        let source = "define function poly(x :: <object>) => <integer>\n  \
+            if instance?(x, <integer>) then x * x + x else 0 end\nend;\n\
+            define function main() => <integer>\n  poly(6)\nend;";
+        for policy in [CodegenPolicy::Off, CodegenPolicy::Proved] {
+            let poly = function_dump(&lower_with_policy(source, policy), "poly");
+            assert_eq!(poly.matches("unbox <integer>").count(), 1, "{poly}");
+            assert!(poly.contains("i64.mul_ovf"), "{poly}");
+            assert!(poly.contains("i64.add_ovf"), "{poly}");
+            assert!(!poly.contains("select-method"), "{poly}");
+            assert!(!poly.contains("box.any"), "{poly}");
+        }
+    }
+
+    #[test]
+    fn a_refined_local_unboxes_only_where_it_is_read_and_reboxes_to_its_box() {
+        let source = "define function keep(y :: <object>) => <object>\n  y\nend;\n\
+            define function unread(x :: <object>) => <integer>\n  \
+            if instance?(x, <integer>) then 1 else 0 end\nend;\n\
+            define function both(x :: <object>) => <object>\n  \
+            if instance?(x, <double-float>) then keep(x + 1.0) + keep(x) else x end\nend;\n\
+            define function main() => <integer>\n  unread(2)\nend;";
+        let module = lower_with_policy(source, CodegenPolicy::Proved);
+        let unread = function_dump(&module, "unread");
+        assert!(!unread.contains("unbox"), "{unread}");
+        // `keep(x)` passes the box `x` arrived in: the parameter register.
+        let both = function_dump(&module, "both");
+        assert_eq!(
+            both.matches("unbox <double-float>, %r1").count(),
+            1,
+            "{both}"
+        );
+        assert!(both.contains("call l0(%r1)"), "{both}");
     }
 
     fn const_i64(function: &Function, reg: Register) -> Option<i64> {
