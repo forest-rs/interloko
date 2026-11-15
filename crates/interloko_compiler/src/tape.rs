@@ -1032,7 +1032,11 @@ impl<'a> FunctionEmitter<'a> {
                     lower::Num32UnaryOp::I32ToI64 => self.asm.i32_to_i64(dst, src),
                     lower::Num32UnaryOp::U32ToI64 => self.asm.u32_to_i64(dst, src),
                     lower::Num32UnaryOp::I64ToI32 => self.asm.i64_to_i32(dst, src),
+                    lower::Num32UnaryOp::I64ToI32Wrap => self.asm.i64_to_i32_wrap(dst, src),
                     lower::Num32UnaryOp::I64ToU64Wrap => self.asm.i64_to_u64_wrap(dst, src),
+                    lower::Num32UnaryOp::U64ToU32Wrap => self.asm.u64_to_u32_wrap(dst, src),
+                    lower::Num32UnaryOp::I32ToU32Wrap => self.asm.i32_to_u32_wrap(dst, src),
+                    lower::Num32UnaryOp::U32ToI32Wrap => self.asm.u32_to_i32_wrap(dst, src),
                     lower::Num32UnaryOp::U64ToU32 => self.asm.u64_to_u32(dst, src),
                     lower::Num32UnaryOp::I32ToU32 => self.asm.i32_to_u32(dst, src),
                     lower::Num32UnaryOp::U32ToI32 => self.asm.u32_to_i32(dst, src),
@@ -1239,6 +1243,21 @@ impl<'a> FunctionEmitter<'a> {
                     lower::I64ArithOp::Add => self.asm.i64_add_ovf(dst, overflow, a, b),
                     lower::I64ArithOp::Sub => self.asm.i64_sub_ovf(dst, overflow, a, b),
                     lower::I64ArithOp::Mul => self.asm.i64_mul_ovf(dst, overflow, a, b),
+                };
+            }
+            lower::Instr::I64Unchecked {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                match op {
+                    lower::I64ArithOp::Add => self.asm.i64_add(dst, a, b),
+                    lower::I64ArithOp::Sub => self.asm.i64_sub(dst, a, b),
+                    lower::I64ArithOp::Mul => self.asm.i64_mul(dst, a, b),
                 };
             }
             lower::Instr::F64Binary {
@@ -1911,7 +1930,8 @@ mod tests {
         let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         let sem = sem::lower(&ast);
-        lower::lower(&sem).expect("lowering should succeed")
+        let typing = crate::typing::analyze(&sem, crate::typing::TypingConfig::default());
+        lower::lower(&sem, &typing, lower::CodegenPolicy::Off).expect("lowering should succeed")
     }
 
     fn runtime_class<'a>(tape: &'a TapeModule, name: &str) -> &'a runtime::RuntimeClass {

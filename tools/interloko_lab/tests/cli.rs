@@ -1373,7 +1373,10 @@ fn show_types_and_contract_dependents_explain_flow_types() {
         explanation.contains("depends-on: generic:g0\n"),
         "{explanation}"
     );
-    assert!(explanation.contains("codegen: kept\n"), "{explanation}");
+    assert!(
+        explanation.contains("codegen: kept (policy off)\n"),
+        "{explanation}"
+    );
     let record = run_lab(&["inspect", path, &decision]);
     assert!(record.contains("codegen=kept"), "{record}");
 }

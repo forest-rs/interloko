@@ -226,8 +226,14 @@ Each typing decision object carries, besides its verdict:
   contract (`constant:kN` or `accessor:cN.sM` for a constant's value or a
   slot read), `generic:gN` for the method set it assumes, and `class:cN` for
   a closed class it assumes gains no subclasses;
-- `codegen`: what generated code does with the check. Typing is advisory, so
-  this is always `kept` for now.
+- `codegen`: what generated code does with the check, compared with lowering
+  that ignores typing: `kept` (the same code), `elided` (the check is gone:
+  a constant `instance?` test, possibly with its dead branch, a cast that
+  reuses its operand, an untested shift count), `specialized` (the operation
+  without its check: wrapping arithmetic, a reinterpreting conversion) or
+  `inlined` (a numeric dispatch replaced by its method's operation). Only
+  the session's `CodegenPolicy::Proved` acts on typing; under the default
+  `CodegenPolicy::Off` every check is `kept`. `explain` names the policy.
 
 `contract:<definition-id>` objects show a definition's contract, the
 parameter and result types callers were compiled to rely on. Their
