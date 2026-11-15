@@ -4,6 +4,10 @@
 //! explicitly does not own syntax parsing, semantic name resolution, runtime
 //! object storage, or `execution_tape` bytecode encoding.
 //!
+//! Registers are [`execution_tape::program::Reg`]s, numbered as the tape
+//! function numbers them: r0 is the effect register and a function's inputs
+//! come first, from r1.
+//!
 //! # Typing facts
 //!
 //! Under the [`Proved`](crate::lower::CodegenPolicy::Proved) codegen policy,
@@ -25,6 +29,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+
+use execution_tape::program::Reg;
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::DefinitionId;
@@ -138,13 +144,6 @@ pub struct CheckCodegenRecord {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FunctionId(
     /// Zero-based lowered function index.
-    pub u32,
-);
-
-/// Durable virtual register identifier within one lowered function.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Register(
-    /// Register number. Register zero is reserved for the tape effect register.
     pub u32,
 );
 
@@ -920,6 +919,18 @@ pub struct Function {
     pub span: Span,
 }
 
+impl Function {
+    /// The kind of `register`, or `None` for the effect register r0 and
+    /// registers past the function's last.
+    #[must_use]
+    pub fn register_kind(&self, register: Reg) -> Option<ValueKind> {
+        let index = register.0.checked_sub(1)?;
+        self.register_kinds
+            .get(usize::try_from(index).ok()?)
+            .copied()
+    }
+}
+
 /// A lowered function parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Param {
@@ -930,7 +941,7 @@ pub struct Param {
     /// Parameter value category.
     pub kind: ValueKind,
     /// Input register.
-    pub reg: Register,
+    pub reg: Reg,
 }
 
 /// A lowered local assignment.
@@ -943,7 +954,7 @@ pub struct Local {
     /// Local value category.
     pub kind: ValueKind,
     /// Register holding the local value.
-    pub reg: Register,
+    pub reg: Reg,
 }
 
 /// Lowered executable instruction.
@@ -957,7 +968,7 @@ pub enum Instr {
     /// Signed integer constant.
     ConstI64 {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Constant value.
         value: i64,
         /// Source span.
@@ -966,7 +977,7 @@ pub enum Instr {
     /// Float constant.
     ConstF64 {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Constant value, compared by bit pattern.
         value: sem::FloatBits,
         /// Source span.
@@ -975,7 +986,7 @@ pub enum Instr {
     /// `<i32>`, `<u32>` or `<single-float>` constant.
     Const32 {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Constant value; floats compare by bit pattern.
         value: sem::Number32,
         /// Source span.
@@ -984,24 +995,24 @@ pub enum Instr {
     /// One-operand `0xFD` instruction: 32-bit float math or a conversion.
     Num32Unary {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Operation.
         op: Num32UnaryOp,
         /// Operand register.
-        src: Register,
+        src: Reg,
         /// Source span.
         span: Span,
     },
     /// Two-operand `i32`, `u32` or `f32` instruction.
     Num32Binary {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Operation.
         op: Num32BinaryOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
@@ -1009,22 +1020,22 @@ pub enum Instr {
     /// exact result left the type's range.
     Num32Checked {
         /// Destination register for the wrapped result.
-        dst: Register,
+        dst: Reg,
         /// Destination `bool` register set when the result overflowed.
-        overflow: Register,
+        overflow: Reg,
         /// Operation.
         op: Num32CheckedOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// Boolean constant.
     ConstBool {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Constant value.
         value: bool,
         /// Source span.
@@ -1033,7 +1044,7 @@ pub enum Instr {
     /// Runtime string literal.
     StringLiteral {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Decoded string value.
         value: String,
         /// Built-in string class.
@@ -1044,7 +1055,7 @@ pub enum Instr {
     /// Runtime symbol literal.
     SymbolLiteral {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Symbol name.
         name: String,
         /// Built-in symbol class.
@@ -1055,7 +1066,7 @@ pub enum Instr {
     /// Unsigned integer constant.
     ConstU64 {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Constant value.
         value: u64,
         /// Source span.
@@ -1064,7 +1075,7 @@ pub enum Instr {
     /// Class object constant represented by a runtime class id.
     ConstClass {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Nominal class represented by this value.
         class: sem::ClassId,
         /// Source span.
@@ -1073,7 +1084,7 @@ pub enum Instr {
     /// Direct function constant.
     ConstFunction {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Source function represented by this value.
         function: FunctionId,
         /// Source span.
@@ -1082,20 +1093,20 @@ pub enum Instr {
     /// Creates a first-class closure value from a function and captured environment.
     ClosureNew {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Closure body function.
         function: FunctionId,
         /// Captured value registers in environment order.
-        captures: Vec<Register>,
+        captures: Vec<Reg>,
         /// Source span.
         span: Span,
     },
     /// Reads one value from the current closure environment.
     CaptureGet {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Closure environment aggregate register.
-        env: Register,
+        env: Reg,
         /// Capture index.
         index: usize,
         /// Captured value category.
@@ -1106,9 +1117,9 @@ pub enum Instr {
     /// Boxes a concrete value into the top `<object>` runtime value.
     BoxValue {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Source register.
-        src: Register,
+        src: Reg,
         /// Source value category.
         from: ValueKind,
         /// Source span.
@@ -1118,15 +1129,15 @@ pub enum Instr {
     /// exact result overflowed `i64`.
     I64Binary {
         /// Destination register for the wrapped result.
-        dst: Register,
+        dst: Reg,
         /// Destination `bool` register set when the result overflowed.
-        overflow: Register,
+        overflow: Reg,
         /// Arithmetic operator.
         op: I64ArithOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
@@ -1135,94 +1146,94 @@ pub enum Instr {
     /// never wraps.
     I64Unchecked {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Arithmetic operator.
         op: I64ArithOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// Signed integer bitwise operation.
     I64Bitwise {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Bitwise operator.
         op: I64BitOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// IEEE 754 float arithmetic on two operands.
     F64Binary {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Binary operator.
         op: F64BinaryOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// IEEE 754 float operation on one operand.
     F64Unary {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Unary operator.
         op: F64UnaryOp,
         /// Operand register.
-        src: Register,
+        src: Reg,
         /// Source span.
         span: Span,
     },
     /// IEEE 754 float comparison; every comparison with NaN is false.
     F64Compare {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Comparison operator.
         op: sem::CompareOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// Calls a runtime float library function.
     FloatCall {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Called function.
         function: sem::FloatFunction,
         /// `f64` argument registers.
-        args: Vec<Register>,
+        args: Vec<Reg>,
         /// Source span.
         span: Span,
     },
     /// IEEE 754 inequality; true when either operand is NaN.
     F64NotEqual {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// Converts an integer to the nearest float, ties to even.
     I64ToF64 {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Integer operand register.
-        src: Register,
+        src: Reg,
         /// Source span.
         span: Span,
     },
@@ -1230,33 +1241,33 @@ pub enum Instr {
     /// and values outside the `i64` range.
     F64ToI64 {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Float operand register.
-        src: Register,
+        src: Reg,
         /// Source span.
         span: Span,
     },
     /// Signed integer comparison.
     I64Compare {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Comparison operator.
         op: sem::CompareOp,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// Runtime value equality.
     ValueEqual {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Operand value category.
         kind: ValueKind,
         /// Source span.
@@ -1265,11 +1276,11 @@ pub enum Instr {
     /// Ordinary direct call to another lowered function.
     Call {
         /// Destination registers.
-        dsts: Vec<Register>,
+        dsts: Vec<Reg>,
         /// Lowered callee function.
         callee: FunctionId,
         /// Argument registers.
-        args: Vec<Register>,
+        args: Vec<Reg>,
         /// Source span.
         span: Span,
     },
@@ -1278,22 +1289,22 @@ pub enum Instr {
     /// unit's dispatcher. Either takes the send's arguments unchanged.
     SelectMethod {
         /// Destination function register.
-        dst: Register,
+        dst: Reg,
         /// Generic function, by its id in the shared runtime layout.
         generic: sem::GenericFunctionId,
         /// The send's argument registers, in dispatcher parameter kinds.
-        args: Vec<Register>,
+        args: Vec<Reg>,
         /// Source span.
         span: Span,
     },
     /// Indirect call through a first-class callable value.
     CallIndirect {
         /// Destination registers.
-        dsts: Vec<Register>,
+        dsts: Vec<Reg>,
         /// Callable value register.
-        callee: Register,
+        callee: Reg,
         /// Argument registers.
-        args: Vec<Register>,
+        args: Vec<Reg>,
         /// Argument value categories.
         arg_kinds: Vec<ValueKind>,
         /// Result value categories.
@@ -1305,20 +1316,20 @@ pub enum Instr {
     /// initialization plan.
     MakeObject {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Nominal class to instantiate.
         class: sem::ClassId,
         /// Field value registers in slot order.
-        fields: Vec<Register>,
+        fields: Vec<Reg>,
         /// Source span.
         span: Span,
     },
     /// Runtime immutable vector construction.
     VectorLiteral {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Boxed element registers in source order.
-        elements: Vec<Register>,
+        elements: Vec<Reg>,
         /// Built-in vector class.
         class: sem::ClassId,
         /// Source span.
@@ -1327,11 +1338,11 @@ pub enum Instr {
     /// Runtime host call for kernel-provided object/model operations.
     RuntimeCall {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Runtime operation.
         op: RuntimeOp,
         /// Argument registers.
-        args: Vec<Register>,
+        args: Vec<Reg>,
         /// Result value category.
         kind: ValueKind,
         /// Source span.
@@ -1340,11 +1351,11 @@ pub enum Instr {
     /// Call through an embedding-provided host function.
     HostCall {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Registry-local host function.
         function: sem::HostFunctionId,
         /// Argument registers.
-        args: Vec<Register>,
+        args: Vec<Reg>,
         /// Result value category.
         kind: ValueKind,
         /// Source span.
@@ -1353,9 +1364,9 @@ pub enum Instr {
     /// Runtime slot read.
     ReadSlot {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Receiver object register.
-        receiver: Register,
+        receiver: Reg,
         /// Statically known receiver class.
         class: sem::ClassId,
         /// Slot to read.
@@ -1368,11 +1379,11 @@ pub enum Instr {
     /// Runtime native slot write.
     WriteSlot {
         /// Destination register receiving the assigned value.
-        dst: Register,
+        dst: Reg,
         /// Receiver object register.
-        receiver: Register,
+        receiver: Reg,
         /// Assigned value register.
-        value: Register,
+        value: Reg,
         /// Statically known receiver class.
         class: sem::ClassId,
         /// Slot to write.
@@ -1385,9 +1396,9 @@ pub enum Instr {
     /// Reads an object's runtime class id.
     ClassOf {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Object register.
-        object: Register,
+        object: Reg,
         /// Input kind: a runtime object or a boxed top `<object>` value.
         input: ValueKind,
         /// Source span.
@@ -1397,9 +1408,9 @@ pub enum Instr {
     /// `<object>` value; traps unless the value is an instance of `class`.
     UnboxValue {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Boxed value register.
-        value: Register,
+        value: Reg,
         /// Class the boxed value must belong to.
         class: sem::ClassId,
         /// Unboxed result kind, `i64` or `f64`.
@@ -1410,9 +1421,9 @@ pub enum Instr {
     /// Runtime class membership test.
     InstanceOf {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Tested value register.
-        value: Register,
+        value: Reg,
         /// Tested value kind.
         input: ValueKind,
         /// Target class.
@@ -1423,9 +1434,9 @@ pub enum Instr {
     /// Runtime checked cast from top `<object>` to a nominal object.
     CastObject {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Cast value register.
-        value: Register,
+        value: Reg,
         /// Cast value kind.
         input: ValueKind,
         /// Target class.
@@ -1437,9 +1448,9 @@ pub enum Instr {
     /// subclasses, trapping as a failed [`Self::CastObject`] does.
     CastClassObject {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Cast value register.
-        value: Register,
+        value: Reg,
         /// Cast value kind.
         input: ValueKind,
         /// Class the value must name, or name a subclass of.
@@ -1450,18 +1461,18 @@ pub enum Instr {
     /// Unsigned integer equality.
     EqU64 {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Left operand register.
-        lhs: Register,
+        lhs: Reg,
         /// Right operand register.
-        rhs: Register,
+        rhs: Reg,
         /// Source span.
         span: Span,
     },
     /// Conditional branch.
     Branch {
         /// Boolean condition register.
-        cond: Register,
+        cond: Reg,
         /// Target when `cond` is true.
         then_label: LabelId,
         /// Target when `cond` is false.
@@ -1479,16 +1490,16 @@ pub enum Instr {
     /// Register-to-register move.
     Move {
         /// Destination register.
-        dst: Register,
+        dst: Reg,
         /// Source register.
-        src: Register,
+        src: Reg,
         /// Source span.
         span: Span,
     },
     /// Function return.
     Return {
         /// Return value registers.
-        values: Vec<Register>,
+        values: Vec<Reg>,
         /// Source span.
         span: Span,
     },
@@ -1504,18 +1515,18 @@ pub enum Instr {
     /// token.
     PushHandler {
         /// Destination `u64` token register.
-        dst: Register,
+        dst: Reg,
         /// Index into [`Module::restarts`].
         descriptor: usize,
         /// Guard closure register, run on the signalling stack during search.
-        guard: Option<Register>,
+        guard: Option<Reg>,
         /// Source span.
         span: Span,
     },
     /// Pops the innermost dynamic binding, which must be `token`.
     PopBinding {
         /// Token register returned by the matching push.
-        token: Register,
+        token: Reg,
         /// Source span.
         span: Span,
     },
@@ -1526,9 +1537,9 @@ pub enum Instr {
     /// `use-value`) supplies; the run fails as unhandled when nothing applies.
     Signal {
         /// Registers receiving resumption values.
-        dsts: Vec<Register>,
+        dsts: Vec<Reg>,
         /// Condition object register.
-        condition: Register,
+        condition: Reg,
         /// Source span.
         span: Span,
     },
@@ -1544,19 +1555,19 @@ pub enum Instr {
         /// Target label.
         label: LabelId,
         /// Registers receiving the tag payload and the exception reference.
-        params: Vec<Register>,
+        params: Vec<Reg>,
     },
     /// Pushes a block exit point binding and writes its token.
     PushExit {
         /// Destination `u64` token register.
-        dst: Register,
+        dst: Reg,
         /// Source span.
         span: Span,
     },
     /// Fails the run as an expired exit unless the exit point `token` is live.
     CheckExit {
         /// Exit point token register.
-        token: Register,
+        token: Reg,
         /// Source span.
         span: Span,
     },
@@ -1565,14 +1576,14 @@ pub enum Instr {
         /// Raised tag.
         tag: ControlTag,
         /// Payload registers in tag order.
-        payload: Vec<Register>,
+        payload: Vec<Reg>,
         /// Source span.
         span: Span,
     },
     /// Rethrows a caught exception with its original tag, payload and origin.
     Rethrow {
         /// Exception reference register.
-        exception: Register,
+        exception: Reg,
         /// Source span.
         span: Span,
     },
@@ -2024,11 +2035,11 @@ impl<'module> Lowering<'module> {
     /// check the exit point is live, then throw the values to its block.
     fn lower_exit_thunk(&self, thunk: &ExitThunk) -> Result<Function, LowerError> {
         let kinds = self.value_kinds(&thunk.kinds)?;
-        let env = input_register(0);
+        let env = register_at(0);
         let values = (0..kinds.len())
-            .map(|index| input_register(index + 1))
+            .map(|index| register_at(index + 1))
             .collect::<Vec<_>>();
-        let token = Register(next_after_inputs(kinds.len() + 1));
+        let token = register_at(kinds.len() + 1);
         let mut params = vec![Param {
             source: None,
             name: "$env".into(),
@@ -2062,8 +2073,8 @@ impl<'module> Lowering<'module> {
                 payload.push(*value);
                 continue;
             };
+            let checked = register_at(register_kinds.len());
             register_kinds.push(*kind);
-            let checked = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
             checks.push(entry_check(target, checked, *value, *kind, span));
             payload.push(checked);
         }
@@ -2190,8 +2201,8 @@ impl<'module> Lowering<'module> {
             .effective_slots
             .get(accessor.slot.0 as usize)
             .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
-        let receiver = input_register(0);
-        let result = input_register(1);
+        let receiver = register_at(0);
+        let result = register_at(1);
         let ret = self.value_kind(slot.kind)?;
         Ok(Function {
             id: accessor.function,
@@ -2349,7 +2360,7 @@ impl<'module> Lowering<'module> {
             source: None,
             name: "$env".into(),
             kind: ValueKind::Aggregate,
-            reg: input_register(0),
+            reg: register_at(0),
         });
         params.extend(
             spec.call_params
@@ -2360,17 +2371,17 @@ impl<'module> Lowering<'module> {
                     source: None,
                     name: format!("arg{index}"),
                     kind,
-                    reg: input_register(index + 1),
+                    reg: register_at(index + 1),
                 }),
         );
         let mut call_args = (0..spec.call_params.len())
-            .map(|index| input_register(index + 1))
+            .map(|index| register_at(index + 1))
             .collect::<Vec<_>>();
         let results = spec
             .rets
             .iter()
             .enumerate()
-            .map(|(index, _)| input_register(spec.call_params.len() + 1 + index))
+            .map(|(index, _)| register_at(spec.call_params.len() + 1 + index))
             .collect::<Vec<_>>();
         let ret = spec.rets.first().copied().unwrap_or(ValueKind::Any);
         let mut register_kinds = params
@@ -2401,8 +2412,8 @@ impl<'module> Lowering<'module> {
                     });
                     continue;
                 }
+                let checked = register_at(register_kinds.len());
                 register_kinds.push(*kind);
-                let checked = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
                 instructions.push(entry_check(target, checked, *arg, *kind, spec.span));
                 *arg = checked;
             }
@@ -2410,9 +2421,8 @@ impl<'module> Lowering<'module> {
         let call = match spec.callable {
             // A first-class generic sends like a call site.
             sem::KnownCallable::GenericFunction(generic) => {
-                // Register kinds start at r1, so the new kind is the last register.
+                let callee = register_at(register_kinds.len());
                 register_kinds.push(ValueKind::Function(None));
-                let callee = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
                 vec![
                     Instr::SelectMethod {
                         dst: callee,
@@ -3012,7 +3022,7 @@ fn intern_callable_signature(
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Value {
-    reg: Register,
+    reg: Reg,
     kind: ValueKind,
     reachable: bool,
 }
@@ -3026,8 +3036,8 @@ struct BoundExit {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct MatchScratch {
-    class_const: Register,
-    cond: Register,
+    class_const: Reg,
+    cond: Reg,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -3048,7 +3058,7 @@ struct BodyLowering<'module> {
     local_regs: Vec<Option<Value>>,
     active_constants: Vec<sem::ConstantId>,
     register_kinds: Vec<ValueKind>,
-    next_reg: u32,
+    next_reg: Reg,
     next_label: u32,
     /// Typing facts lowering may act on, or `None` for generated code with
     /// no check sites of its own.
@@ -3064,7 +3074,7 @@ struct BodyLowering<'module> {
     /// Scalars unboxed from a boxed local an `instance?` test refined, with
     /// the boxed register they came from, innermost last. Boxing one of them
     /// again reuses the box it came from.
-    unboxed_locals: Vec<(Register, Register)>,
+    unboxed_locals: Vec<(Reg, Reg)>,
 }
 
 impl<'module> BodyLowering<'module> {
@@ -3075,10 +3085,10 @@ impl<'module> BodyLowering<'module> {
     ) -> Result<Self, LowerError> {
         let mut this = Self::new(module, ids, &function.locals);
         for (index, local_id) in function.params.iter().copied().enumerate() {
-            let reg = input_register(index);
+            let reg = register_at(index);
             this.bind_param(function.locals.get(local_id.0 as usize), local_id, reg)?;
         }
-        this.next_reg = next_after_inputs(function.params.len());
+        this.next_reg = register_at(function.params.len());
         Ok(this)
     }
 
@@ -3089,10 +3099,10 @@ impl<'module> BodyLowering<'module> {
     ) -> Result<Self, LowerError> {
         let mut this = Self::new(module, ids, &method.locals);
         for (index, local_id) in method.params.iter().copied().enumerate() {
-            let reg = input_register(index);
+            let reg = register_at(index);
             this.bind_param(method.locals.get(local_id.0 as usize), local_id, reg)?;
         }
-        this.next_reg = next_after_inputs(method.params.len());
+        this.next_reg = register_at(method.params.len());
         Ok(this)
     }
 
@@ -3103,7 +3113,7 @@ impl<'module> BodyLowering<'module> {
     ) -> Result<Self, LowerError> {
         let mut this = Self::new(module, ids, &closure.locals);
         let env = Value {
-            reg: input_register(0),
+            reg: register_at(0),
             kind: ValueKind::Aggregate,
             reachable: true,
         };
@@ -3118,10 +3128,10 @@ impl<'module> BodyLowering<'module> {
             reg: env.reg,
         });
         for (index, local_id) in closure.params.iter().copied().enumerate() {
-            let reg = input_register(index + 1);
+            let reg = register_at(index + 1);
             this.bind_param(closure.locals.get(local_id.0 as usize), local_id, reg)?;
         }
-        this.next_reg = next_after_inputs(closure.params.len() + 1);
+        this.next_reg = register_at(closure.params.len() + 1);
         Ok(this)
     }
 
@@ -3166,7 +3176,7 @@ impl<'module> BodyLowering<'module> {
                 source: None,
                 name: name.clone(),
                 kind: dispatcher_param_kind(module, generic, index),
-                reg: input_register(index),
+                reg: register_at(index),
             })
             .collect();
         Self {
@@ -3181,7 +3191,7 @@ impl<'module> BodyLowering<'module> {
             instructions: Vec::new(),
             local_regs: Vec::new(),
             active_constants: Vec::new(),
-            next_reg: next_after_inputs(generic.arity),
+            next_reg: register_at(generic.arity),
             next_label: 0,
             facts: None,
             owner: None,
@@ -3208,7 +3218,7 @@ impl<'module> BodyLowering<'module> {
             local_regs: vec![None; source_locals.len()],
             active_constants: Vec::new(),
             register_kinds: Vec::new(),
-            next_reg: 1,
+            next_reg: register_at(0),
             next_label: 0,
             facts: None,
             owner: None,
@@ -3316,7 +3326,7 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         local: Option<&sem::Local>,
         local_id: sem::LocalId,
-        reg: Register,
+        reg: Reg,
     ) -> Result<(), LowerError> {
         let Some(local) = local else {
             return Err(invalid_semantic("parameter local id is out of range"));
@@ -3329,7 +3339,7 @@ impl<'module> BodyLowering<'module> {
             reachable: true,
         };
         self.set_local(local_id, value)?;
-        assert_eq!(self.register_kinds.len() + 1, reg.0 as usize);
+        assert_eq!(register_at(self.register_kinds.len()), reg);
         self.register_kinds.push(kind);
         self.params.push(Param {
             source: Some(local_id),
@@ -3476,8 +3486,8 @@ impl<'module> BodyLowering<'module> {
     fn send(
         &mut self,
         generic: &sem::GenericFunction,
-        args: Vec<Register>,
-        dsts: Vec<Register>,
+        args: Vec<Reg>,
+        dsts: Vec<Reg>,
         span: Span,
     ) -> Result<(), LowerError> {
         let callee = self.alloc(ValueKind::Function(None));
@@ -3825,7 +3835,7 @@ impl<'module> BodyLowering<'module> {
                     .get(local_id.0 as usize)
                     .ok_or_else(|| invalid_semantic("method parameter local id is out of range"))?;
                 let value = Value {
-                    reg: input_register(index),
+                    reg: register_at(index),
                     kind: dispatcher_param_kind(self.module, generic, index),
                     reachable: true,
                 };
@@ -3925,7 +3935,7 @@ impl<'module> BodyLowering<'module> {
         let class_reg = self.alloc(ValueKind::U64);
         self.instructions.push(Instr::ClassOf {
             dst: class_reg.reg,
-            object: input_register(index),
+            object: register_at(index),
             input: dispatcher_param_kind(self.module, generic, index),
             span,
         });
@@ -5259,7 +5269,7 @@ impl<'module> BodyLowering<'module> {
         Ok(result)
     }
 
-    fn emit_class_meta_object(&mut self, dst: Register, class: sem::ClassId, span: Span) {
+    fn emit_class_meta_object(&mut self, dst: Reg, class: sem::ClassId, span: Span) {
         let class_id = self.alloc(ValueKind::U64);
         self.instructions.push(Instr::ConstU64 {
             dst: class_id.reg,
@@ -5380,7 +5390,7 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         function: FunctionId,
         sig: CallableSigId,
-        captures: &[Register],
+        captures: &[Reg],
         span: Span,
     ) -> Result<Value, LowerError> {
         let result = self.alloc(ValueKind::Closure(Some(sig)));
@@ -5757,7 +5767,7 @@ impl<'module> BodyLowering<'module> {
         args: &[sem::Expr],
         expected: &[sem::ValueKind],
         expected_callable_sigs: &[Option<sem::CallableSignature>],
-    ) -> Result<Vec<Register>, LowerError> {
+    ) -> Result<Vec<Reg>, LowerError> {
         let mut lowered = Vec::with_capacity(args.len());
         for (index, (arg, expected)) in args.iter().zip(expected).enumerate() {
             let value = self.lower_expr(arg)?;
@@ -5777,7 +5787,7 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         args: &[sem::Expr],
         expected: &[sem::ValueKind],
-    ) -> Result<(Vec<Register>, Vec<ValueKind>), LowerError> {
+    ) -> Result<(Vec<Reg>, Vec<ValueKind>), LowerError> {
         let mut regs = Vec::with_capacity(args.len());
         let mut kinds = Vec::with_capacity(args.len());
         for (arg, expected) in args.iter().zip(expected) {
@@ -5794,7 +5804,7 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         args: &[sem::Expr],
         generic: &sem::GenericFunction,
-    ) -> Result<Vec<Register>, LowerError> {
+    ) -> Result<Vec<Reg>, LowerError> {
         let mut lowered = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let value = self.lower_expr(arg)?;
@@ -6200,13 +6210,7 @@ impl<'module> BodyLowering<'module> {
     }
 
     /// Emits one `0xFD` instruction with a single operand.
-    fn num32_unary(
-        &mut self,
-        op: Num32UnaryOp,
-        src: Register,
-        kind: ValueKind,
-        span: Span,
-    ) -> Value {
+    fn num32_unary(&mut self, op: Num32UnaryOp, src: Reg, kind: ValueKind, span: Span) -> Value {
         let result = self.alloc(kind);
         self.instructions.push(Instr::Num32Unary {
             dst: result.reg,
@@ -6374,7 +6378,7 @@ impl<'module> BodyLowering<'module> {
         op: sem::BinaryOp,
         kind: sem::NumericKind,
         lhs: Value,
-        rhs: Register,
+        rhs: Reg,
         span: Span,
     ) -> Result<Value, LowerError> {
         use sem::BinaryOp as B;
@@ -6429,7 +6433,7 @@ impl<'module> BodyLowering<'module> {
     /// Traps unless a shift count is in 0..=31. The tape masks counts with
     /// `& 31`; Loko never relies on that, so `shift-left(x, 32)` cannot
     /// quietly mean `x`.
-    fn lower_shift_count_check(&mut self, kind: sem::NumericKind, count: Register, span: Span) {
+    fn lower_shift_count_check(&mut self, kind: sem::NumericKind, count: Reg, span: Span) {
         let (count_kind, limit, below) = if kind == sem::NumericKind::U32 {
             (ValueKind::U32, sem::Number32::U32(32), Num32BinaryOp::U32Lt)
         } else {
@@ -6484,8 +6488,8 @@ impl<'module> BodyLowering<'module> {
     fn num32_binary(
         &mut self,
         op: Num32BinaryOp,
-        lhs: Register,
-        rhs: Register,
+        lhs: Reg,
+        rhs: Reg,
         kind: ValueKind,
         span: Span,
     ) -> Value {
@@ -6507,7 +6511,7 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         op: Num32CheckedOp,
         lhs: Value,
-        rhs: Register,
+        rhs: Reg,
         span: Span,
     ) -> Value {
         let result = self.alloc(lhs.kind);
@@ -6663,13 +6667,13 @@ impl<'module> BodyLowering<'module> {
 
     fn alloc(&mut self, kind: ValueKind) -> Value {
         let value = Value {
-            reg: Register(self.next_reg),
+            reg: self.next_reg,
             kind,
             reachable: true,
         };
-        assert_eq!(self.register_kinds.len() + 1, self.next_reg as usize);
+        assert_eq!(register_at(self.register_kinds.len()), self.next_reg);
         self.register_kinds.push(kind);
-        self.next_reg = self.next_reg.saturating_add(1);
+        self.next_reg = register_at(self.register_kinds.len());
         value
     }
 
@@ -6695,7 +6699,7 @@ impl<'module> BodyLowering<'module> {
                 .copied()
                 .ok_or_else(|| invalid_semantic("float builtin argument is missing"))
         };
-        let binary = |op| -> Result<(F64BinaryOp, Register, Register), LowerError> {
+        let binary = |op| -> Result<(F64BinaryOp, Reg, Reg), LowerError> {
             Ok((op, operand(0)?, operand(1)?))
         };
         let unary = match builtin {
@@ -6942,8 +6946,8 @@ impl<'module> BodyLowering<'module> {
     fn lower_exact_integer_float_compare(
         &mut self,
         op: sem::CompareOp,
-        integer: Register,
-        float: Register,
+        integer: Reg,
+        float: Reg,
         span: Span,
     ) -> Value {
         let result = self.alloc(ValueKind::Bool);
@@ -7105,8 +7109,8 @@ impl<'module> BodyLowering<'module> {
     fn lower_checked_integer_arith(
         &mut self,
         op: I64ArithOp,
-        lhs: Register,
-        rhs: Register,
+        lhs: Reg,
+        rhs: Reg,
         span: Span,
     ) -> Value {
         let result = self.alloc(ValueKind::I64);
@@ -7137,8 +7141,8 @@ impl<'module> BodyLowering<'module> {
     fn lower_unchecked_integer_arith(
         &mut self,
         op: I64ArithOp,
-        lhs: Register,
-        rhs: Register,
+        lhs: Reg,
+        rhs: Reg,
         span: Span,
     ) -> Value {
         let result = self.alloc(ValueKind::I64);
@@ -7516,8 +7520,8 @@ fn entry_target(kind: ValueKind) -> Option<sem::EntryTarget> {
 /// requires, into `dst`.
 const fn entry_check(
     target: sem::EntryTarget,
-    dst: Register,
-    value: Register,
+    dst: Reg,
+    value: Reg,
     kind: ValueKind,
     span: Span,
 ) -> Instr {
@@ -7636,12 +7640,12 @@ fn merge_check_records(mut checks: Vec<CheckCodegenRecord>) -> Vec<CheckCodegenR
     merged
 }
 
-fn input_register(index: usize) -> Register {
-    Register(u32::try_from(index + 1).unwrap_or(u32::MAX))
-}
-
-fn next_after_inputs(input_count: usize) -> u32 {
-    u32::try_from(input_count + 1).unwrap_or(u32::MAX)
+/// The register whose kind is entry `index` of a function's register kinds.
+///
+/// Register zero is the tape effect register, so kinds start at r1 and a
+/// function's inputs take the first registers.
+fn register_at(index: usize) -> Reg {
+    Reg(u32::try_from(index + 1).unwrap_or(u32::MAX))
 }
 
 fn invalid_semantic(message: &str) -> LowerError {
@@ -7691,12 +7695,6 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
     }
 }
 
-impl fmt::Display for Register {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "%r{}", self.0)
-    }
-}
-
 impl fmt::Display for LabelId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "bb{}", self.0)
@@ -7723,7 +7721,7 @@ impl Module {
             if index != 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{} {}: ", param.reg, param.name)?;
+            write!(f, "%{} {}: ", param.reg, param.name)?;
             self.fmt_kind(f, param.kind)?;
         }
         write!(f, ") -> ")?;
@@ -7734,7 +7732,7 @@ impl Module {
         for local in &function.locals {
             write!(
                 f,
-                "  local l{} {} = {}: ",
+                "  local l{} {} = %{}: ",
                 local.source.0, local.name, local.reg
             )?;
             self.fmt_kind(f, local.kind)?;
@@ -7770,11 +7768,11 @@ impl Module {
         match instr {
             Instr::Label { label } => writeln!(f, "{label}:"),
             Instr::ConstI64 { dst, value, span } => {
-                write!(f, "  {dst} = const.i64 {value}")?;
+                write!(f, "  %{dst} = const.i64 {value}")?;
                 fmt_span(f, *span)
             }
             Instr::ConstF64 { dst, value, span } => {
-                write!(f, "  {dst} = const.f64 {value}")?;
+                write!(f, "  %{dst} = const.f64 {value}")?;
                 fmt_span(f, *span)
             }
             Instr::Const32 { dst, value, span } => {
@@ -7783,11 +7781,11 @@ impl Module {
                     sem::Number32::U32(_) => "const.u32",
                     sem::Number32::F32(_) => "const.f32",
                 };
-                write!(f, "  {dst} = {mnemonic} {value}")?;
+                write!(f, "  %{dst} = {mnemonic} {value}")?;
                 fmt_span(f, *span)
             }
             Instr::Num32Unary { dst, op, src, span } => {
-                write!(f, "  {dst} = {} {src}", op.mnemonic())?;
+                write!(f, "  %{dst} = {} %{src}", op.mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::Num32Binary {
@@ -7797,7 +7795,7 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst} = {} {lhs}, {rhs}", op.mnemonic())?;
+                write!(f, "  %{dst} = {} %{lhs}, %{rhs}", op.mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::Num32Checked {
@@ -7808,11 +7806,15 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst}, {overflow} = {} {lhs}, {rhs}", op.mnemonic())?;
+                write!(
+                    f,
+                    "  %{dst}, %{overflow} = {} %{lhs}, %{rhs}",
+                    op.mnemonic()
+                )?;
                 fmt_span(f, *span)
             }
             Instr::ConstBool { dst, value, span } => {
-                write!(f, "  {dst} = const.bool {value}")?;
+                write!(f, "  %{dst} = const.bool {value}")?;
                 fmt_span(f, *span)
             }
             Instr::StringLiteral {
@@ -7821,7 +7823,7 @@ impl Module {
                 class,
                 span,
             } => {
-                write!(f, "  {dst} = literal.string ")?;
+                write!(f, "  %{dst} = literal.string ")?;
                 fmt_quoted(f, value)?;
                 write!(f, ": ")?;
                 self.fmt_class(f, *class)?;
@@ -7833,16 +7835,16 @@ impl Module {
                 class,
                 span,
             } => {
-                write!(f, "  {dst} = literal.symbol #{name}: ")?;
+                write!(f, "  %{dst} = literal.symbol #{name}: ")?;
                 self.fmt_class(f, *class)?;
                 fmt_span(f, *span)
             }
             Instr::ConstU64 { dst, value, span } => {
-                write!(f, "  {dst} = const.u64 {value}")?;
+                write!(f, "  %{dst} = const.u64 {value}")?;
                 fmt_span(f, *span)
             }
             Instr::ConstClass { dst, class, span } => {
-                write!(f, "  {dst} = const.class ")?;
+                write!(f, "  %{dst} = const.class ")?;
                 self.fmt_class(f, *class)?;
                 fmt_span(f, *span)
             }
@@ -7851,7 +7853,7 @@ impl Module {
                 function,
                 span,
             } => {
-                write!(f, "  {dst} = const.function l{}", function.0)?;
+                write!(f, "  %{dst} = const.function l{}", function.0)?;
                 fmt_span(f, *span)
             }
             Instr::ClosureNew {
@@ -7860,7 +7862,7 @@ impl Module {
                 captures,
                 span,
             } => {
-                write!(f, "  {dst} = closure.new l{}", function.0)?;
+                write!(f, "  %{dst} = closure.new l{}", function.0)?;
                 self.fmt_arg_list(f, captures)?;
                 fmt_span(f, *span)
             }
@@ -7871,7 +7873,7 @@ impl Module {
                 kind,
                 span,
             } => {
-                write!(f, "  {dst} = capture.get {env}[{index}]: ")?;
+                write!(f, "  %{dst} = capture.get %{env}[{index}]: ")?;
                 self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
@@ -7881,7 +7883,7 @@ impl Module {
                 from,
                 span,
             } => {
-                write!(f, "  {dst} = box.any {src}: ")?;
+                write!(f, "  %{dst} = box.any %{src}: ")?;
                 self.fmt_kind(f, *from)?;
                 fmt_span(f, *span)
             }
@@ -7893,7 +7895,11 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst}, {overflow} = {} {lhs}, {rhs}", op.mnemonic())?;
+                write!(
+                    f,
+                    "  %{dst}, %{overflow} = {} %{lhs}, %{rhs}",
+                    op.mnemonic()
+                )?;
                 fmt_span(f, *span)
             }
             Instr::I64Unchecked {
@@ -7903,7 +7909,7 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst} = {} {lhs}, {rhs}", op.unchecked_mnemonic())?;
+                write!(f, "  %{dst} = {} %{lhs}, %{rhs}", op.unchecked_mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::F64Binary {
@@ -7913,7 +7919,7 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst} = {} {lhs}, {rhs}", op.mnemonic())?;
+                write!(f, "  %{dst} = {} %{lhs}, %{rhs}", op.mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::I64Bitwise {
@@ -7923,15 +7929,15 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst} = {} {lhs}, {rhs}", op.mnemonic())?;
+                write!(f, "  %{dst} = {} %{lhs}, %{rhs}", op.mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::F64Unary { dst, op, src, span } => {
-                write!(f, "  {dst} = {} {src}", op.mnemonic())?;
+                write!(f, "  %{dst} = {} %{src}", op.mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::I64ToF64 { dst, src, span } => {
-                write!(f, "  {dst} = i64.to_f64 {src}")?;
+                write!(f, "  %{dst} = i64.to_f64 %{src}")?;
                 fmt_span(f, *span)
             }
             Instr::FloatCall {
@@ -7940,7 +7946,7 @@ impl Module {
                 args,
                 span,
             } => {
-                write!(f, "  {dst} = float.call {}", function.symbol())?;
+                write!(f, "  %{dst} = float.call {}", function.symbol())?;
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
@@ -7950,11 +7956,11 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst} = f64.ne {lhs}, {rhs}")?;
+                write!(f, "  %{dst} = f64.ne %{lhs}, %{rhs}")?;
                 fmt_span(f, *span)
             }
             Instr::F64ToI64 { dst, src, span } => {
-                write!(f, "  {dst} = f64.to_i64 {src}")?;
+                write!(f, "  %{dst} = f64.to_i64 %{src}")?;
                 fmt_span(f, *span)
             }
             Instr::F64Compare {
@@ -7971,7 +7977,7 @@ impl Module {
                     sem::CompareOp::Gt => "f64.gt",
                     sem::CompareOp::Ge => "f64.ge",
                 };
-                write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
+                write!(f, "  %{dst} = {op} %{lhs}, %{rhs}")?;
                 fmt_span(f, *span)
             }
             Instr::I64Compare {
@@ -7988,7 +7994,7 @@ impl Module {
                     sem::CompareOp::Gt => "i64.gt",
                     sem::CompareOp::Ge => "i64.ge",
                 };
-                write!(f, "  {dst} = {op} {lhs}, {rhs}")?;
+                write!(f, "  %{dst} = {op} %{lhs}, %{rhs}")?;
                 fmt_span(f, *span)
             }
             Instr::ValueEqual {
@@ -7998,7 +8004,7 @@ impl Module {
                 kind,
                 span,
             } => {
-                write!(f, "  {dst} = value.eq {lhs}, {rhs}: ")?;
+                write!(f, "  %{dst} = value.eq %{lhs}, %{rhs}: ")?;
                 self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
@@ -8020,7 +8026,7 @@ impl Module {
                 args,
                 span,
             } => {
-                write!(f, "  {dst} = select-method g{}", generic.0)?;
+                write!(f, "  %{dst} = select-method g{}", generic.0)?;
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
@@ -8034,7 +8040,7 @@ impl Module {
             } => {
                 write!(f, "  ")?;
                 self.fmt_result_list(f, dsts)?;
-                write!(f, " = call.indirect {callee}")?;
+                write!(f, " = call.indirect %{callee}")?;
                 self.fmt_arg_list(f, args)?;
                 write!(f, ": ")?;
                 self.fmt_kind_list(f, rets)?;
@@ -8046,7 +8052,7 @@ impl Module {
                 fields,
                 span,
             } => {
-                write!(f, "  {dst} = make ")?;
+                write!(f, "  %{dst} = make ")?;
                 self.fmt_class(f, *class)?;
                 self.fmt_arg_list(f, fields)?;
                 fmt_span(f, *span)
@@ -8057,7 +8063,7 @@ impl Module {
                 class,
                 span,
             } => {
-                write!(f, "  {dst} = literal.vector ")?;
+                write!(f, "  %{dst} = literal.vector ")?;
                 self.fmt_class(f, *class)?;
                 self.fmt_arg_list(f, elements)?;
                 fmt_span(f, *span)
@@ -8069,7 +8075,7 @@ impl Module {
                 kind,
                 span,
             } => {
-                write!(f, "  {dst} = runtime.{}", runtime_op_name(*op))?;
+                write!(f, "  %{dst} = runtime.{}", runtime_op_name(*op))?;
                 self.fmt_arg_list(f, args)?;
                 write!(f, ": ")?;
                 self.fmt_kind(f, *kind)?;
@@ -8086,7 +8092,7 @@ impl Module {
                     .host_functions
                     .get(function.0 as usize)
                     .map_or("?", |function| function.name.as_str());
-                write!(f, "  {dst} = host.call h{} {name}", function.0)?;
+                write!(f, "  %{dst} = host.call h{} {name}", function.0)?;
                 self.fmt_arg_list(f, args)?;
                 write!(f, ": ")?;
                 self.fmt_kind(f, *kind)?;
@@ -8100,7 +8106,7 @@ impl Module {
                 kind,
                 span,
             } => {
-                write!(f, "  {dst} = slot.read {receiver}, ")?;
+                write!(f, "  %{dst} = slot.read %{receiver}, ")?;
                 self.fmt_slot(f, *class, *slot)?;
                 write!(f, ": ")?;
                 self.fmt_kind(f, *kind)?;
@@ -8115,16 +8121,16 @@ impl Module {
                 kind,
                 span,
             } => {
-                write!(f, "  {dst} = slot.write {receiver}, ")?;
+                write!(f, "  %{dst} = slot.write %{receiver}, ")?;
                 self.fmt_slot(f, *class, *slot)?;
-                write!(f, ", {value}: ")?;
+                write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
             Instr::ClassOf {
                 dst, object, span, ..
             } => {
-                write!(f, "  {dst} = class_of {object}")?;
+                write!(f, "  %{dst} = class_of %{object}")?;
                 fmt_span(f, *span)
             }
             Instr::UnboxValue {
@@ -8134,9 +8140,9 @@ impl Module {
                 kind,
                 span,
             } => {
-                write!(f, "  {dst} = unbox ")?;
+                write!(f, "  %{dst} = unbox ")?;
                 self.fmt_class(f, *class)?;
-                write!(f, ", {value}: ")?;
+                write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }
@@ -8147,7 +8153,7 @@ impl Module {
                 class,
                 span,
             } => {
-                write!(f, "  {dst} = instance? {value}: ")?;
+                write!(f, "  %{dst} = instance? %{value}: ")?;
                 self.fmt_kind(f, *input)?;
                 write!(f, ", ")?;
                 self.fmt_class(f, *class)?;
@@ -8160,9 +8166,9 @@ impl Module {
                 class,
                 span,
             } => {
-                write!(f, "  {dst} = as ")?;
+                write!(f, "  %{dst} = as ")?;
                 self.fmt_class(f, *class)?;
-                write!(f, ", {value}: ")?;
+                write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *input)?;
                 fmt_span(f, *span)
             }
@@ -8173,9 +8179,9 @@ impl Module {
                 bound,
                 span,
             } => {
-                write!(f, "  {dst} = as class ")?;
+                write!(f, "  %{dst} = as class ")?;
                 self.fmt_class(f, *bound)?;
-                write!(f, ", {value}: ")?;
+                write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *input)?;
                 fmt_span(f, *span)
             }
@@ -8185,7 +8191,7 @@ impl Module {
                 rhs,
                 span,
             } => {
-                write!(f, "  {dst} = u64.eq {lhs}, {rhs}")?;
+                write!(f, "  %{dst} = u64.eq %{lhs}, %{rhs}")?;
                 fmt_span(f, *span)
             }
             Instr::Branch {
@@ -8194,7 +8200,7 @@ impl Module {
                 else_label,
                 span,
             } => {
-                write!(f, "  br {cond}, {then_label}, {else_label}")?;
+                write!(f, "  br %{cond}, {then_label}, {else_label}")?;
                 fmt_span(f, *span)
             }
             Instr::Jump { label, span } => {
@@ -8202,7 +8208,7 @@ impl Module {
                 fmt_span(f, *span)
             }
             Instr::Move { dst, src, span } => {
-                write!(f, "  {dst} = mov {src}")?;
+                write!(f, "  %{dst} = mov %{src}")?;
                 fmt_span(f, *span)
             }
             Instr::Return { values, span } => {
@@ -8220,18 +8226,18 @@ impl Module {
                 guard,
                 span,
             } => {
-                write!(f, "  {dst} = condition.push-handler restart#{descriptor}")?;
+                write!(f, "  %{dst} = condition.push-handler restart#{descriptor}")?;
                 if let Some(site) = self.restarts.get(*descriptor) {
                     write!(f, " ")?;
                     self.fmt_class(f, site.class)?;
                 }
                 if let Some(guard) = guard {
-                    write!(f, " when {guard}")?;
+                    write!(f, " when %{guard}")?;
                 }
                 fmt_span(f, *span)
             }
             Instr::PopBinding { token, span } => {
-                write!(f, "  control.pop {token}")?;
+                write!(f, "  control.pop %{token}")?;
                 fmt_span(f, *span)
             }
             Instr::Signal {
@@ -8244,7 +8250,7 @@ impl Module {
                     self.fmt_result_list(f, dsts)?;
                     write!(f, " = ")?;
                 }
-                write!(f, "condition.signal {condition}")?;
+                write!(f, "condition.signal %{condition}")?;
                 fmt_span(f, *span)
             }
             Instr::EnterRegion { catches } => {
@@ -8269,20 +8275,20 @@ impl Module {
                     if index != 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{param}")?;
+                    write!(f, "%{param}")?;
                 }
                 writeln!(f, "):")
             }
             Instr::Rethrow { exception, span } => {
-                write!(f, "  rethrow {exception}")?;
+                write!(f, "  rethrow %{exception}")?;
                 fmt_span(f, *span)
             }
             Instr::PushExit { dst, span } => {
-                write!(f, "  {dst} = control.push-exit")?;
+                write!(f, "  %{dst} = control.push-exit")?;
                 fmt_span(f, *span)
             }
             Instr::CheckExit { token, span } => {
-                write!(f, "  control.check-exit {token}")?;
+                write!(f, "  control.check-exit %{token}")?;
                 fmt_span(f, *span)
             }
             Instr::Throw { tag, payload, span } => {
@@ -8394,21 +8400,21 @@ impl Module {
         }
     }
 
-    fn fmt_arg_list(&self, f: &mut fmt::Formatter<'_>, args: &[Register]) -> fmt::Result {
+    fn fmt_arg_list(&self, f: &mut fmt::Formatter<'_>, args: &[Reg]) -> fmt::Result {
         write!(f, "(")?;
         for (index, arg) in args.iter().enumerate() {
             if index != 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{arg}")?;
+            write!(f, "%{arg}")?;
         }
         write!(f, ")")
     }
 
-    fn fmt_result_list(&self, f: &mut fmt::Formatter<'_>, regs: &[Register]) -> fmt::Result {
+    fn fmt_result_list(&self, f: &mut fmt::Formatter<'_>, regs: &[Reg]) -> fmt::Result {
         match regs {
             [] => write!(f, "()"),
-            [reg] => write!(f, "{reg}"),
+            [reg] => write!(f, "%{reg}"),
             _ => self.fmt_arg_list(f, regs),
         }
     }
@@ -9078,7 +9084,7 @@ mod tests {
         assert_eq!(proved.matches("unbox").count(), 1, "{proved}");
     }
 
-    fn const_i64(function: &Function, reg: Register) -> Option<i64> {
+    fn const_i64(function: &Function, reg: Reg) -> Option<i64> {
         function.instructions.iter().find_map(|instr| match instr {
             Instr::ConstI64 { dst, value, .. } if *dst == reg => Some(*value),
             _ => None,

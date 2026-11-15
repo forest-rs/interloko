@@ -391,7 +391,7 @@ impl CodeUnit {
     pub fn definition_name(&self, definition: &Definition) -> String {
         let program_name = || {
             self.function(definition)
-                .and_then(|func| self.program.program().function_name(func.0))
+                .and_then(|func| self.program.program().function_name(func))
                 .map(String::from)
         };
         match definition {
@@ -431,13 +431,10 @@ impl CodeUnit {
 
     /// Argument and result kinds of `func`.
     pub(crate) fn signature(&self, func: FuncId) -> Option<Signature> {
-        let program = self.program.program();
-        let function = program.functions.get(func.0 as usize)?;
-        let args = program.function_arg_types(function).ok()?;
-        let rets = program.function_ret_types(function).ok()?;
+        let function = self.program.function(func)?;
         Some((
-            args.iter().cloned().collect(),
-            rets.iter().cloned().collect(),
+            function.arg_types().iter().cloned().collect(),
+            function.ret_types().iter().cloned().collect(),
         ))
     }
 }
@@ -527,7 +524,7 @@ impl UnitTable {
         let name = self.get(func.unit).and_then(|code| {
             code.program
                 .program()
-                .function_name(func.func.0)
+                .function_name(func.func)
                 .map(String::from)
         });
         let retry_refusal = match (&definition, current) {

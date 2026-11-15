@@ -10,7 +10,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use execution_tape::program::ValueType;
+use execution_tape::program::{Reg, ValueType};
 use execution_tape::value::{Obj, Value};
 use execution_tape::vm::{ActivationId, PausedFrame};
 use interloko_model::ClassId;
@@ -23,8 +23,8 @@ use crate::driver::LinkError;
 /// One initialized register of a suspended frame.
 #[derive(Clone, Debug)]
 pub struct RegisterSnapshot {
-    /// Function-local register number.
-    pub register: u32,
+    /// Function-local register.
+    pub register: Reg,
     /// Its value. Aggregate handles belong to the suspended invocation.
     pub value: Value,
 }

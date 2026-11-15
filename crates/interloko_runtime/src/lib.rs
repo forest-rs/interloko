@@ -3001,7 +3001,7 @@ fn runtime_slot_id(raw: u64) -> Result<SlotId, HostError> {
 mod tests {
     use super::*;
     use alloc::format;
-    use execution_tape::asm::{Asm, FunctionSig, ProgramBuilder};
+    use execution_tape::asm::{Asm, FunctionSig, ProgramBuilder, Reg};
     use execution_tape::trace::TraceMask;
     use execution_tape::value::FuncRef;
     use execution_tape::vm::{ExecutionContext, Limits, Vm};
@@ -3848,9 +3848,9 @@ mod tests {
             ValueType::U64,
             ValueType::I64
         ]);
-        asm.const_u64(2, u64::from(slot.0));
-        asm.host_call(0, host_sig, 0, &[1, 2], &[3]);
-        asm.ret(0, &[3]);
+        asm.const_u64(Reg(2), u64::from(slot.0));
+        asm.host_call(Reg(0), host_sig, Reg(0), &[Reg(1), Reg(2)], &[Reg(3)]);
+        asm.ret(Reg(0), &[Reg(3)]);
         let entry = builder
             .push_function_checked(
                 asm,
