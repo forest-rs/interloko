@@ -1,0 +1,18 @@
+// typing: soft strict.overflow=proved
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-overflow
+// expect: diagnostic contains function add is strict (declared), but typing cannot prove that `+` on (<integer>, <integer>)
+// expect: dump typing contains strict scope=declared overflow=proved definitions=1 errors=1
+
+// Overflow is a runtime check even in strict code unless the policy asks
+// for more: under `strict.overflow=proved`, `+` on two unbounded integers
+// may leave 64 bits, so the strict `add` must narrow its operands with
+// `limited` types first.
+
+define strict function add(a :: <integer>, b :: <integer>) => <integer>
+  a + b
+end;
+
+define function main() => <integer>
+  add(1, 2)
+end;

@@ -1,0 +1,37 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-dispatch
+// expect: diagnostic contains function measure is strict (declared), but typing cannot prove that `area` finds a method for <shape>
+// expect: dump typing contains s0 dispatch checked rule=dispatch-needs-runtime-class
+// expect: dump typing contains severity=error origin=implicit strict=unproved
+
+// `<shape>` is open: a later edit could add a subclass `area` has no method
+// for, so the send in the strict `measure` cannot be proved and is an
+// error rather than a runtime check. Sealing `<shape>` as abstract proves it
+// (`pass/strict/sealed_dispatch.loko`), and the error's fixes say so.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define generic area(s :: <shape>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  1
+end;
+
+define method area(s :: <square>) => <integer>
+  2
+end;
+
+define strict function measure(s :: <shape>) => <integer>
+  area(s)
+end;
+
+define function main() => <integer>
+  measure(make(<circle>))
+end;

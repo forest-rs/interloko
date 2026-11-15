@@ -1,0 +1,22 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-cast
+// expect: diagnostic contains function apply-shape is strict (declared), but typing cannot prove that <object> is <circle>
+// expect: dump typing contains cast checked rule=cast-narrowing
+// expect: dump typing contains origin=implicit strict=unproved
+
+// An untyped `<callable>` may return anything, so the compiler checks its
+// result where it meets the `<circle>` binding. That check is the
+// compiler's, not the program's, so strict code must prove it; an explicit
+// `as(<circle>, f(s))` would make it a deliberate one.
+
+define class <circle> (<object>)
+end;
+
+define strict function apply-shape(f :: <callable>, s :: <object>) => <circle>
+  let c :: <circle> = f(s);
+  c
+end;
+
+define function main() => <integer>
+  0
+end;

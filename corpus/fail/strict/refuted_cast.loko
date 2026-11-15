@@ -1,0 +1,21 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.cast-always-fails
+// expect: dump typing contains cast refuted rule=cast-disjoint
+// expect: dump typing contains origin=explicit strict=refuted
+
+// An explicit `as` need not be proved in strict code, but one that always
+// fails is still an error there. In soft code the same cast is a warning.
+
+define class <circle> (<object>)
+end;
+
+define class <label> (<object>)
+end;
+
+define strict function never() => <circle>
+  as(<circle>, as(<object>, make(<label>)))
+end;
+
+define function main() => <integer>
+  0
+end;

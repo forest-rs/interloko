@@ -34,9 +34,12 @@ Supported expectations:
   such as `dump lowered lacks select-method` for a dispatch lowering inlined.
 - `// host-class: <name> slot:<type>`: declare host-backed metadata for
   compile/dump corpus cases. This is a corpus runner header, not Loko syntax.
-- `// typing: soft|silent|strict`: select the soft typing preset used by the
-  session (default `soft`). Typing findings are advisory diagnostics and are
-  counted by `diagnostics N`.
+- `// typing: SPEC`: select the typing policy used by the session (default
+  `soft`), written as `set-typing-policy` takes it: a preset (`soft`,
+  `silent`, `strict`) and settings such as `cast.checked=warning` or
+  `strict.overflow=proved`. Typing findings are diagnostics and are counted
+  by `diagnostics N`; soft ones are warnings, and a strict definition's
+  unproved checks are errors that still let `main` run.
 - `// codegen: off|proved`: select the codegen policy the expectations are
   checked under (default `proved`, the compiler's default). Use `off` for a
   case about the code lowering emits without typing facts. Under `proved`, lowering drops or specializes
@@ -52,3 +55,12 @@ Supported expectations:
 Use `corpus/pass` for programs that should compile cleanly and then run to
 their expected value or runtime outcome. Use `corpus/fail` for programs that
 intentionally exercise diagnostics.
+
+`corpus/pass/strict` and `corpus/fail/strict` show strict typing: programs
+whose strict definitions prove every check they must, and one failing case
+per strict error.
+
+`interloko_corpus strictness [corpus-root]` compiles every case as if the
+session held every definition to strict typing (`strict.scope=all`) and
+reports which cases would pass and the strict errors of the rest, as a
+measure of how much code written without strictness already meets it.
