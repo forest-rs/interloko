@@ -1,0 +1,22 @@
+// expect: run 1
+// expect: diagnostics 0
+// expect: dump sem contains origin=source sealing=sealed
+// expect: dump eop contains sealing=sealed methods=1 assumed-by=1
+// expect: dump typing contains closed-world(sealed generic area has exactly methods {area(<circle>)})
+
+// A sealed generic's methods are the ones its source defines: its EOP
+// object offers no add-method, and its contract object says how many
+// decisions rely on its method set.
+
+define class <circle> (<object>)
+end;
+
+define sealed generic area(c :: <circle>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  1
+end;
+
+define function main() => <integer>
+  area(make(<circle>))
+end;

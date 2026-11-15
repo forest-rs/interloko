@@ -1,0 +1,33 @@
+// codegen: proved
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump typing contains dispatch proved rule=dispatch-covered
+// expect: dump lowered contains linked-send
+// expect: dump lowered lacks select-method
+
+// Every piece of the sealed <shape> is a sealed leaf that selects
+// `describe(<shape>)`, so the send on a <shape> is linked to that method.
+
+define sealed abstract class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define sealed class <circle> (<shape>)
+end;
+
+define sealed class <square> (<shape>)
+end;
+
+define generic describe(s :: <shape>) => <integer>;
+
+define method describe(s :: <shape>) => <integer>
+  s.size
+end;
+
+define function measure(s :: <shape>) => <integer>
+  describe(s)
+end;
+
+define function main() => <integer>
+  measure(make(<circle>)) + measure(make(<square>, size: 2))
+end;

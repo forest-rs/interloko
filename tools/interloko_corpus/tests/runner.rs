@@ -42,6 +42,9 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/typing/untaken_refuted_dispatch.loko"));
     assert!(out.contains("ok pass/typing/strict_runtime_checked_cast.loko"));
     assert!(out.contains("ok pass/typing/silent_policy_records_refuted_cast.loko"));
+    assert!(out.contains("ok pass/sealing/dispatch_covered.loko"));
+    assert!(out.contains("ok pass/sealing/sealed_leaf_linked.loko"));
+    assert!(out.contains("ok fail/sealing/abstract_make.loko"));
     assert!(out.contains("pass/control_flow/generic_guarded.loko"));
     assert!(out.contains("pass/generics/two_class_dispatch.loko"));
     assert!(out.contains("pass/restarts/recover_invalid_radius.loko"));
@@ -158,7 +161,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/type_errors/limited_argument_unhandled.loko"));
     assert!(out.contains("ok pass/no_applicable_method/unhandled.loko"));
     assert!(out.contains("ok pass/no_applicable_method/handled_by_exit.loko"));
-    assert!(out.contains("corpus: 415 passed, 0 failed, 415 total"));
+    assert!(out.contains("corpus: 425 passed, 0 failed, 425 total"));
 }
 
 #[test]

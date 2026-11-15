@@ -1,0 +1,30 @@
+// codegen: proved
+// expect: run 5
+// expect: diagnostics 0
+// expect: dump typing contains cast proved rule=cast-upcast
+// expect: dump typing contains because=narrowed(s0,else)
+// expect: dump typing contains <- {declared@
+// expect: dump eop contains codegen=elided
+
+// Past `instance?(s, <circle>)`, a sealed <shape> can only be a <square>,
+// so the cast is proved and `proved` lowering drops it. The narrowed fact
+// cites `<shape>`'s sealing, and so does the cast's decision.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function side(s :: <shape>) => <integer>
+  if instance?(s, <circle>) then 0 else as(<square>, s).side end
+end;
+
+define function main() => <integer>
+  side(make(<circle>, radius: 2)) + side(make(<square>, side: 5))
+end;
