@@ -6,13 +6,15 @@
 //! same tree with no operation, and its time is subtracted, so the report is
 //! the cost of the operation alone. One more case establishes handlers under
 //! a deep stack, because control requests look at the live frames. Unhandled
-//! signals are resumed with a value by a chooser. Run with
+//! signals are resumed with a value by a chooser. Every case runs under each
+//! codegen policy. Run with
 //! `cargo bench -p interloko_compiler --features std --bench control`.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use execution_tape::value::Value;
+use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::session::{
     CallServices, CompilerSession, FunctionValue, RuntimeMode, SessionArtifacts, SessionRuntime,
 };
@@ -149,8 +151,19 @@ fn measure(
 }
 
 fn main() {
-    let artifacts =
-        CompilerSession::compile_source("control.loko", SOURCE, RuntimeMode::CompileOnly);
+    for policy in CodegenPolicy::ALL {
+        println!("codegen {}", policy.as_str());
+        report(*policy);
+    }
+}
+
+fn report(policy: CodegenPolicy) {
+    let mut session = CompilerSession::new();
+    session.set_codegen_policy(policy);
+    let id = session.add_source("control.loko", SOURCE);
+    let artifacts = session
+        .compile(id, RuntimeMode::CompileOnly)
+        .expect("source was just added");
     assert!(!artifacts.has_errors(), "the benchmark program compiles");
     let mut runtime = artifacts.runtime().expect("a runtime image");
     let nanos = |duration: Duration| duration.as_secs_f64() * 1e9;

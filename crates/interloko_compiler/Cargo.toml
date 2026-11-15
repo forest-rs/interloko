@@ -33,3 +33,8 @@ required-features = ["std"]
 name = "calls"
 harness = false
 required-features = ["std"]
+
+[[bench]]
+name = "typed"
+harness = false
+required-features = ["std"]

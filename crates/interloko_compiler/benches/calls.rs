@@ -5,7 +5,7 @@
 //! fresh image builds one. This reports both for a function that returns a
 //! constant, next to that set-up alone, for a one-function program and for
 //! one with many classes, generics and functions, since installing interns
-//! the program's types and signatures.
+//! the program's types and signatures, under each codegen policy.
 //! Run with `cargo bench -p interloko_compiler --features std --bench calls`.
 
 use std::fmt::Write as _;
@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
+use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::session::{CompilerSession, RuntimeMode, SessionArtifacts};
 use interloko_runtime::driver;
 
@@ -110,13 +111,16 @@ fn report(label: &str, artifacts: &SessionArtifacts) {
 }
 
 fn main() {
-    for (label, classes) in [("one function", 0), ("64 classes", 64)] {
-        let artifacts = CompilerSession::compile_source(
-            "calls.loko",
-            &program(classes),
-            RuntimeMode::CompileOnly,
-        );
-        assert!(!artifacts.has_errors(), "the benchmark program compiles");
-        report(label, &artifacts);
+    for policy in CodegenPolicy::ALL {
+        for (label, classes) in [("one function", 0), ("64 classes", 64)] {
+            let mut session = CompilerSession::new();
+            session.set_codegen_policy(*policy);
+            let id = session.add_source("calls.loko", &program(classes));
+            let artifacts = session
+                .compile(id, RuntimeMode::CompileOnly)
+                .expect("source was just added");
+            assert!(!artifacts.has_errors(), "the benchmark program compiles");
+            report(&format!("{label}, codegen {}", policy.as_str()), &artifacts);
+        }
     }
 }
