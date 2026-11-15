@@ -1111,6 +1111,16 @@ pub enum EnvironmentAffordance {
     Annotate,
     /// Report what [`Self::Annotate`] would change without applying it.
     PreviewAnnotation,
+    /// Report what would fail if a function, method, generic, or constant
+    /// were strict, without changing it.
+    PreviewStrict,
+    /// Report what applying one of a strict error's fixes would change,
+    /// without applying it: the [`Self::PreviewAnnotation`] of the
+    /// annotation the fix writes.
+    PreviewFix,
+    /// Apply one of a strict error's fixes: the [`Self::Annotate`] mutation
+    /// it names.
+    ApplyFix,
 }
 
 impl EnvironmentAffordance {
@@ -1161,6 +1171,9 @@ impl EnvironmentAffordance {
             Self::SetCodegenPolicy,
             Self::Annotate,
             Self::PreviewAnnotation,
+            Self::PreviewStrict,
+            Self::PreviewFix,
+            Self::ApplyFix,
         ]
     }
 
@@ -1220,6 +1233,9 @@ impl EnvironmentAffordance {
             Self::SetCodegenPolicy => "set-codegen-policy",
             Self::Annotate => "annotate",
             Self::PreviewAnnotation => "preview-annotation",
+            Self::PreviewStrict => "preview-strict",
+            Self::PreviewFix => "preview-fix",
+            Self::ApplyFix => "apply-fix",
         }
     }
 }
@@ -1417,6 +1433,18 @@ pub enum TypingFacet {
         /// Its parameters and results.
         contract: Contract,
     },
+    /// A typing diagnostic and the decision it reports.
+    Finding {
+        /// The decision's EOP id, `typing:<definition>:s<n>`.
+        decision: String,
+        /// Why the decision's owner is strict, when it is.
+        strict: Option<typing::StrictSource>,
+        /// How the decision falls short of strict typing, when the finding
+        /// is a strict error.
+        violation: Option<typing::StrictViolation>,
+        /// The fixes a strict error suggests, in order; empty otherwise.
+        fixes: Vec<StrictFixOffer>,
+    },
     /// A place a type annotation can be written.
     Annotation {
         /// The stable target.
@@ -1589,6 +1617,20 @@ pub enum MutationEffect {
     InsertedMethod(sem::MethodId),
     /// [`SessionMutation::Annotate`] wrote an annotation.
     Annotated(alloc::boxed::Box<AnnotationOutcome>),
+}
+
+/// One fix a strict error suggests, as the workbench offers it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StrictFixOffer {
+    /// The fix.
+    pub fix: typing::StrictFix,
+    /// The fix in source terms, such as `annotate parameter s as
+    /// <circle>`.
+    pub description: String,
+    /// The annotation the fix writes, as a [`SessionMutation::Annotate`]
+    /// takes it: its target and type source. `None` for a fix no mutation
+    /// makes yet, such as sealing a class or writing an `as`.
+    pub annotation: Option<(AnnotationTarget, String)>,
 }
 
 /// What an annotation changed, or would change when previewed.
@@ -2149,8 +2191,11 @@ impl SessionArtifacts {
     ///
     /// `typing-config:session` renders the policy and every decision; a
     /// `typing:<definition>:s<n>` id renders one decision with its rule,
-    /// operand types, and the policy that set its severity. Function, method,
-    /// and constant ids render that definition's decisions.
+    /// operand types, the policy that set its severity, and for a strict
+    /// owner whether the decision meets strict typing and the fixes that
+    /// could make it. A typing finding's `diagnostic:d<n>` id renders the
+    /// decision it reports. Function, method, and constant ids render that
+    /// definition's decisions.
     #[must_use]
     pub fn explain_typing(&self, id: &str) -> Option<String> {
         if id == TYPING_CONFIG_OBJECT_ID {
@@ -2160,6 +2205,7 @@ impl SessionArtifacts {
             .typing
             .decisions()
             .find(|decision| typing_decision_object_id(decision) == id)
+            .or_else(|| self.finding_decision(id))
         {
             return Some(explain_typing_decision(self, decision));
         }
@@ -2176,6 +2222,129 @@ impl SessionArtifacts {
             .source
             .definition?;
         Some(self.typing.dump_definition(&self.sem, definition))
+    }
+
+    /// Returns the typing decision a diagnostic reports, by the diagnostic's
+    /// EOP id (`diagnostic:d<n>`); `None` when it names no typing finding.
+    #[must_use]
+    pub fn finding_decision(&self, diagnostic_id: &str) -> Option<&typing::TypingDecision> {
+        let diagnostic = object_index(diagnostic_id, "diagnostic:d")
+            .and_then(|index| self.diagnostics.get(index))?;
+        let id = diagnostic
+            .args
+            .iter()
+            .find(|arg| arg.name == "decision")?
+            .value
+            .render();
+        self.typing
+            .decisions()
+            .find(|decision| typing_decision_object_id(decision) == id)
+    }
+
+    /// The fixes strict typing suggests for `decision`, each with the
+    /// annotation mutation that makes it when there is one. Empty unless
+    /// the decision is unproved in a strict definition.
+    #[must_use]
+    pub fn strict_fixes(&self, decision: &typing::TypingDecision) -> Vec<StrictFixOffer> {
+        if self.typing.strict_violation(decision) != Some(typing::StrictViolation::Unproved) {
+            return Vec::new();
+        }
+        let Some(typed) = self.typing.definition(decision.owner) else {
+            return Vec::new();
+        };
+        let sites = self.annotation_sites();
+        typing::strict_fixes(&self.sem, typed, decision)
+            .into_iter()
+            .map(|fix| {
+                let annotation = match &fix {
+                    typing::StrictFix::Annotate { span, .. } => sites
+                        .iter()
+                        .find(|site| {
+                            site.span == *span
+                                && site.target.definition() == decision.owner
+                                && matches!(site.target, AnnotationTarget::Binding { .. })
+                        })
+                        .zip(fix.annotation_source(&self.sem))
+                        .map(|(site, type_source)| (site.target.clone(), type_source)),
+                    _ => None,
+                };
+                StrictFixOffer {
+                    description: fix.describe(&self.sem),
+                    fix,
+                    annotation,
+                }
+            })
+            .collect()
+    }
+
+    /// The annotation the `index`th fix (from zero) of the strict error
+    /// `diagnostic_id` writes, as [`SessionMutation::Annotate`] and
+    /// [`Self::preview_annotation`] take it. This is what the `apply-fix`
+    /// and `preview-fix` affordances do.
+    ///
+    /// Returns `None` when the diagnostic is not a strict error, has no
+    /// such fix, or the fix is not one an annotation makes.
+    #[must_use]
+    pub fn strict_fix_annotation(
+        &self,
+        diagnostic_id: &str,
+        index: usize,
+    ) -> Option<(AnnotationTarget, String)> {
+        let decision = self.finding_decision(diagnostic_id)?;
+        self.strict_fixes(decision)
+            .into_iter()
+            .nth(index)?
+            .annotation
+    }
+
+    /// Reports what would fail if the function, method, or constant `id`
+    /// names were strict, or each method of a generic, without changing
+    /// anything: each would-be error with its decision, reasons, and fixes.
+    /// This is the `preview-strict` affordance.
+    ///
+    /// Returns `None` when `id` names no such definition.
+    #[must_use]
+    pub fn preview_strict(&self, id: &str) -> Option<String> {
+        let module = &self.sem;
+        let definitions = match object_index(id, "generic:g") {
+            Some(index) => {
+                let generic = module.generics.get(index)?;
+                module
+                    .methods
+                    .iter()
+                    .filter(|method| method.generic == generic.id)
+                    .map(|method| method.definition)
+                    .collect()
+            }
+            None => alloc::vec![self.definition_object(id)?],
+        };
+        let mut out = String::new();
+        for definition in definitions {
+            let preview = self.typing.strict_preview(module, definition);
+            let _ = writeln!(
+                out,
+                "strict preview {} (not applied) strict={} errors={}",
+                typing::definition_label(module, definition),
+                self.typing
+                    .strictness(definition)
+                    .map_or("none", typing::StrictSource::as_str),
+                preview.len()
+            );
+            for diagnostic in &preview {
+                let _ = writeln!(
+                    out,
+                    "  {} {}..{} {}",
+                    diagnostic.code,
+                    diagnostic.span.start,
+                    diagnostic.span.end,
+                    render_diagnostic_args(diagnostic)
+                );
+                for note in &diagnostic.notes {
+                    let _ = writeln!(out, "    {}", note.message);
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Returns the flow type of a binding, check site, or source span, with
@@ -10032,6 +10201,31 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
             TypingFacet::SealedClass { assumption, .. } => {
                 let _ = writeln!(out, "  closed-world: {assumption}");
             }
+            TypingFacet::Finding {
+                decision,
+                strict,
+                violation,
+                fixes,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "  decision={decision} strict={} violation={}",
+                    strict.map_or("none", typing::StrictSource::as_str),
+                    violation.map_or("none", typing::StrictViolation::as_str)
+                );
+                for (index, offer) in fixes.iter().enumerate() {
+                    let _ = write!(
+                        out,
+                        "  fix #{index} {}: {}",
+                        offer.fix.kind(),
+                        offer.description
+                    );
+                    if let Some((target, type_source)) = &offer.annotation {
+                        let _ = write!(out, " (annotate {target} {type_source})");
+                    }
+                    out.push('\n');
+                }
+            }
             TypingFacet::Contract { definition, .. } => {
                 let _ = writeln!(out, "  contract of {definition}");
             }
@@ -10153,6 +10347,67 @@ fn render_diagnostic_labels(diagnostic: &Diagnostic) -> String {
     out
 }
 
+/// Projects one diagnostic. A typing finding also links its decision
+/// (`decision=` and [`TypingFacet::Finding`]), and a strict error lists its
+/// fixes, with `preview-fix` and `apply-fix` when an annotation makes one.
+fn project_diagnostic(
+    artifacts: &SessionArtifacts,
+    index: usize,
+    diagnostic: &Diagnostic,
+    sink: &mut dyn EnvironmentObjectSink,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let id = format!("diagnostic:d{index}");
+    let mut affordances = Vec::from([Aff::Inspect, Aff::OpenSource, Aff::DumpSem, Aff::DumpEop]);
+    let mut inspection = format!(
+        "code={} severity={:?} span={}..{} labels={} args={}",
+        diagnostic.code,
+        diagnostic.severity,
+        diagnostic.span.start,
+        diagnostic.span.end,
+        render_diagnostic_labels(diagnostic),
+        render_diagnostic_args(diagnostic)
+    );
+    let finding = artifacts.finding_decision(&id).map(|decision| {
+        let fixes = artifacts.strict_fixes(decision);
+        let _ = write!(
+            inspection,
+            " decision={}",
+            typing_decision_object_id(decision)
+        );
+        for (index, offer) in fixes.iter().enumerate() {
+            let _ = write!(inspection, " fix{index}=\"{}\"", offer.description);
+            if let Some((target, type_source)) = &offer.annotation {
+                let _ = write!(inspection, "@{target}:{type_source}");
+            }
+        }
+        affordances.push(Aff::ShowTyping);
+        if fixes.iter().any(|offer| offer.annotation.is_some()) {
+            affordances.extend([Aff::PreviewFix, Aff::ApplyFix]);
+        }
+        TypingFacet::Finding {
+            decision: typing_decision_object_id(decision),
+            strict: artifacts.typing.strictness(decision.owner),
+            violation: artifacts.typing.strict_violation(decision),
+            fixes,
+        }
+    });
+    let mut object = environment_object(EnvironmentObjectParts {
+        id,
+        kind: EnvironmentKind::Diagnostic,
+        meta_class: "<diagnostic>",
+        origin: EnvironmentOrigin::CompilerGenerated,
+        storage: EnvironmentStorage::CachedArtifact,
+        title: diagnostic.code.to_string(),
+        affordances,
+        execution: None,
+        inspection,
+    });
+    object.typing = finding;
+    sink.emit(object);
+}
+
 fn render_diagnostic_args(diagnostic: &Diagnostic) -> String {
     let mut out = String::new();
     out.push('[');
@@ -10267,25 +10522,7 @@ fn project_session_environment(
         project_environment_mutation(module, sink, entry);
     }
     for (index, diagnostic) in artifacts.diagnostics.iter().enumerate() {
-        sink.emit(environment_object(EnvironmentObjectParts {
-            id: format!("diagnostic:d{index}"),
-            kind: EnvironmentKind::Diagnostic,
-            meta_class: "<diagnostic>",
-            origin: EnvironmentOrigin::CompilerGenerated,
-            storage: EnvironmentStorage::CachedArtifact,
-            title: diagnostic.code.to_string(),
-            affordances: Vec::from([Aff::Inspect, Aff::OpenSource, Aff::DumpSem, Aff::DumpEop]),
-            execution: None,
-            inspection: format!(
-                "code={} severity={:?} span={}..{} labels={} args={}",
-                diagnostic.code,
-                diagnostic.severity,
-                diagnostic.span.start,
-                diagnostic.span.end,
-                render_diagnostic_labels(diagnostic),
-                render_diagnostic_args(diagnostic)
-            ),
-        }));
+        project_diagnostic(artifacts, index, diagnostic, sink);
     }
     for (index, class) in runtime.classes().iter().enumerate() {
         project_environment_runtime_class(module, sink, index, class);
@@ -11540,6 +11777,9 @@ fn project_environment_generic(
     if !generated && !generic.sealing.is_sealed() {
         affordances.push(Aff::AddMethod);
     }
+    if !generated {
+        affordances.push(Aff::PreviewStrict);
+    }
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("generic:g{}", generic.id.0),
         kind: EnvironmentKind::Generic,
@@ -11566,11 +11806,12 @@ fn project_environment_generic(
             dispatch_params_label(&generic.dispatch_params)
         )),
         inspection: format!(
-            "definition={} generic-id=g{} origin={} dispatch={dispatch} sealing={}",
+            "definition={} generic-id=g{} origin={} dispatch={dispatch} sealing={}{}",
             generic.definition,
             generic.id.0,
             sem_generic_origin_label(generic.origin),
-            generic.sealing.as_str()
+            generic.sealing.as_str(),
+            strict_label(generic.strict)
         ),
     }));
 }
@@ -11598,7 +11839,7 @@ fn project_environment_method(
         Aff::ShowTypes,
     ]);
     if !generated {
-        affordances.push(Aff::EditBody);
+        affordances.extend([Aff::EditBody, Aff::PreviewStrict]);
     }
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("method:m{}", method.id.0),
@@ -11624,10 +11865,11 @@ fn project_environment_method(
             method.generic.0
         )),
         inspection: format!(
-            "definition={} method-id=m{} method-origin={} specializer-origins={specializer_origins} applies-to={applicable}",
+            "definition={} method-id=m{} method-origin={} specializer-origins={specializer_origins} applies-to={applicable}{}",
             method.definition,
             method.id.0,
-            sem_method_origin_label(method.origin)
+            sem_method_origin_label(method.origin),
+            strict_label(method.strict)
         ),
     }));
 }
@@ -11673,11 +11915,14 @@ fn project_environment_function(
             Aff::ShowDependencies,
             Aff::ShowTypes,
             Aff::EditBody,
+            Aff::PreviewStrict,
         ]),
         execution: Some(format!("callable=direct arity={}", function.params.len())),
         inspection: format!(
-            "definition={} function-id=f{}",
-            function.definition, function.id.0
+            "definition={} function-id=f{}{}",
+            function.definition,
+            function.id.0,
+            strict_label(function.strict)
         ),
     }));
 }
@@ -11742,11 +11987,14 @@ fn project_environment_constant(
             Aff::DumpEop,
             Aff::ShowDependencies,
             Aff::ShowTypes,
+            Aff::PreviewStrict,
         ]),
         execution: Some("binding=immutable top-level".to_string()),
         inspection: format!(
-            "definition={} constant-id=k{}",
-            constant.definition, constant.id.0
+            "definition={} constant-id=k{}{}",
+            constant.definition,
+            constant.id.0,
+            strict_label(constant.strict)
         ),
     }));
 }
@@ -11946,7 +12194,7 @@ fn project_typing_decision(
         affordances: Vec::from([Aff::Inspect, Aff::ShowTyping, Aff::OpenSource, Aff::DumpEop]),
         execution: None,
         inspection: format!(
-            "check={} verdict={} rule={} owner={} span={}..{} expected={expected} actual={} severity={} dispatch-site={dispatch_site} depends-on={depends_label} codegen={}",
+            "check={} verdict={} rule={} owner={} span={}..{} expected={expected} actual={} severity={} dispatch-site={dispatch_site} depends-on={depends_label} codegen={} origin={} strict={}",
             decision.check.as_str(),
             decision.verdict.as_str(),
             decision.rule.as_str(),
@@ -11956,6 +12204,10 @@ fn project_typing_decision(
             typing::type_name_list(module, &decision.actual),
             severity.as_str(),
             codegen.as_str(),
+            decision.origin.as_str(),
+            typed
+                .strict_violation(decision)
+                .map_or("none", typing::StrictViolation::as_str),
         ),
     });
     object.typing = Some(TypingFacet::Decision {
@@ -12365,6 +12617,7 @@ fn explain_typing_decision(
         decision.owner
     );
     let _ = writeln!(out, "check: {}", decision.check.as_str());
+    let _ = writeln!(out, "origin: {}", decision.origin.as_str());
     let _ = writeln!(out, "verdict: {}", decision.verdict.as_str());
     let _ = writeln!(out, "rule: {}", decision.rule.as_str());
     let _ = writeln!(out, "span: {}..{}", decision.span.start, decision.span.end);
@@ -12428,6 +12681,33 @@ fn explain_typing_decision(
         policy.checked.as_str(),
         policy.refuted.as_str()
     );
+    match typed.strictness(decision.owner) {
+        Some(source) => {
+            let _ = writeln!(
+                out,
+                "strict: {} ({}; {})",
+                typed
+                    .strict_violation(decision)
+                    .map_or("ok", typing::StrictViolation::as_str),
+                source.describe(module),
+                if typed.config.strict.requires(decision) {
+                    "must be proved"
+                } else {
+                    "need not be proved"
+                }
+            );
+            for offer in artifacts.strict_fixes(decision) {
+                let _ = write!(out, "fix: {}", offer.description);
+                if let Some((target, type_source)) = &offer.annotation {
+                    let _ = write!(out, " (annotate {target} {type_source})");
+                }
+                out.push('\n');
+            }
+        }
+        None => {
+            let _ = writeln!(out, "strict: none");
+        }
+    }
     let contract = match artifacts.check_codegen(decision) {
         CheckCodegen::Kept => "contract: advisory; the runtime still performs this check",
         CheckCodegen::Linked => {
@@ -15075,6 +15355,9 @@ mod tests {
                 EnvironmentAffordance::PreviewAnnotation,
                 "preview-annotation",
             ),
+            (EnvironmentAffordance::PreviewStrict, "preview-strict"),
+            (EnvironmentAffordance::PreviewFix, "preview-fix"),
+            (EnvironmentAffordance::ApplyFix, "apply-fix"),
         ];
 
         let all = EnvironmentAffordance::all();

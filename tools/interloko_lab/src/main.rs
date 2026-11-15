@@ -723,6 +723,14 @@ fn invoke_affordance(
         return invoke_set_policy(file, object_id, affordance, extra, codegen);
     }
 
+    if matches!(
+        affordance,
+        EnvironmentAffordance::PreviewFix | EnvironmentAffordance::ApplyFix
+    ) {
+        let index = parse_fix_args(affordance, extra)?;
+        return invoke_fix(file, object_id, affordance, index, codegen);
+    }
+
     if !extra.is_empty() {
         return Err(LabError::Usage(format!(
             "affordance `{}` does not accept extra arguments",
@@ -970,6 +978,18 @@ fn invoke_affordance(
             );
             Ok(())
         }
+        EnvironmentAffordance::PreviewStrict => {
+            print!(
+                "{}",
+                workbench
+                    .artifacts
+                    .preview_strict(object.id.as_str())
+                    .ok_or_else(|| LabError::UnsupportedAffordance {
+                        name: affordance.as_str().into(),
+                    })?
+            );
+            Ok(())
+        }
         EnvironmentAffordance::Run => unreachable!("run handled before compile-only path"),
         _ => Err(LabError::UnsupportedAffordance {
             name: affordance.as_str().into(),
@@ -1074,6 +1094,51 @@ fn invoke_add_method(
     Ok(())
 }
 
+/// The fix index `preview-fix` and `apply-fix` take: none for the first
+/// fix, or one number counting from zero.
+fn parse_fix_args(affordance: EnvironmentAffordance, extra: &[String]) -> Result<usize> {
+    match extra {
+        [] => Ok(0),
+        [index] => index.parse().map_err(|_| {
+            LabError::Usage(format!(
+                "affordance `{}` takes an optional fix index, got `{index}`",
+                affordance.as_str()
+            ))
+        }),
+        _ => Err(LabError::Usage(format!(
+            "affordance `{}` takes an optional fix index",
+            affordance.as_str()
+        ))),
+    }
+}
+
+/// `preview-fix [n]` and `apply-fix [n]` on a strict error's
+/// `diagnostic:d<k>`: the annotation its `n`th fix writes, previewed or
+/// applied as `preview-annotation` and `annotate` would.
+fn invoke_fix(
+    file: &str,
+    object_id: &str,
+    affordance: EnvironmentAffordance,
+    index: usize,
+    codegen: CodegenPolicy,
+) -> Result<()> {
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
+    let object = workbench.object(object_id)?;
+    ensure_object_has_affordance(&object, affordance)?;
+    let (target, type_source) = workbench
+        .artifacts
+        .strict_fix_annotation(object_id, index)
+        .ok_or_else(|| {
+            LabError::Usage(format!(
+                "fix {index} of `{object_id}` is not one an annotation makes"
+            ))
+        })?;
+    println!("fix {index} of {object_id}: annotate {target} {type_source}");
+    let dry_run = affordance == EnvironmentAffordance::PreviewFix;
+    annotate_target(workbench, target, &type_source, dry_run)
+}
+
 fn parse_annotate_args(affordance: EnvironmentAffordance, extra: &[String]) -> Result<String> {
     match extra {
         [flag, type_source] if flag == "--type" => Ok(type_source.clone()),
@@ -1123,7 +1188,7 @@ fn invoke_annotate(
     } else {
         EnvironmentAffordance::Annotate
     };
-    let mut workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&workbench.artifacts.diagnostics)?;
     let object = workbench.object(object_id)?;
     ensure_object_has_affordance(&object, affordance)?;
@@ -1133,6 +1198,17 @@ fn invoke_annotate(
             affordance.as_str()
         ))
     })?;
+    annotate_target(workbench, target, type_source, dry_run)
+}
+
+/// Previews or applies annotating `target` with `type_source`, printing
+/// the outcome and its typing delta.
+fn annotate_target(
+    mut workbench: CompiledWorkbench,
+    target: AnnotationTarget,
+    type_source: &str,
+    dry_run: bool,
+) -> Result<()> {
     let failed = |error: MutationError| LabError::MutationFailed {
         request: "annotate",
         summary: format_mutation_error(&error),
@@ -1624,6 +1700,10 @@ fn print_diagnostics(diagnostics: &[interloko_compiler::diagnostic::Diagnostic])
                 .render(diagnostic)
                 .map_err(|error| LabError::DiagnosticCatalog(error.to_string()))?
         );
+        // Notes are facts, such as a strict error's reasons and fixes.
+        for note in &diagnostic.notes {
+            eprintln!("    {}", note.message);
+        }
     }
     Ok(())
 }
@@ -1638,7 +1718,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} [--codegen off|proved] COMMAND ...\n\ncommands:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]\n  {binary} invoke-affordance <file.loko> <generic:gN> add-method --source <method.loko>\n  {binary} invoke-affordance <file.loko> <binding:...|result:...> annotate|preview-annotation --type <type>\n  {binary} invoke-affordance <file.loko> typing-config:session set-typing-policy <preset|check.verdict=severity>...\n  {binary} invoke-affordance <file.loko> typing-config:session set-codegen-policy off|proved\n  {binary} annotate <file.loko> <binding:...|result:...> <type> [--dry-run]\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\noptions:\n  --codegen off|proved   codegen policy for every compile (default proved); may appear anywhere\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} [--codegen off|proved] COMMAND ...\n\ncommands:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]\n  {binary} invoke-affordance <file.loko> <generic:gN> add-method --source <method.loko>\n  {binary} invoke-affordance <file.loko> <binding:...|result:...> annotate|preview-annotation --type <type>\n  {binary} invoke-affordance <file.loko> typing-config:session set-typing-policy <preset|check.verdict=severity>...\n  {binary} invoke-affordance <file.loko> typing-config:session set-codegen-policy off|proved\n  {binary} invoke-affordance <file.loko> <function:...|method:...|generic:...|constant:...> preview-strict\n  {binary} invoke-affordance <file.loko> <diagnostic:dN> preview-fix|apply-fix [fix-index]\n  {binary} annotate <file.loko> <binding:...|result:...> <type> [--dry-run]\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\noptions:\n  --codegen off|proved   codegen policy for every compile (default proved); may appear anywhere\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 
