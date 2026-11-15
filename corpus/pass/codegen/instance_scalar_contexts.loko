@@ -1,0 +1,79 @@
+// expect: run 2251801961169016
+// expect: diagnostics 0
+
+// A local an `instance?` test unboxed is read everywhere a local can be
+// read: in a closure that captures it, a handler's body and restart, a
+// block that exits with it, a nested test of the same local, and as an
+// argument to `<object>` and `<integer>` parameters. `big` is too large to
+// box without a heap cell. Every case also runs under the other codegen
+// policy, which must agree.
+
+define class <odd> (<object>)
+  slot value :: <integer>;
+end;
+
+define function keep(y :: <object>) => <object>
+  y
+end;
+
+define function twice(n :: <integer>) => <integer>
+  n * 2
+end;
+
+define function adder(x :: <object>) => <integer>
+  if instance?(x, <integer>) then
+    apply(function (y :: <integer>) => <integer> x + y end, 1)
+  else
+    0
+  end
+end;
+
+define function recovered(x :: <object>) => <integer>
+  if instance?(x, <integer>) then
+    handle
+      if x < 0 then signal(make(<odd>, value: x)) else x end
+    with restart e :: <odd>
+      e.value + x
+    end
+  else
+    0
+  end
+end;
+
+define function exited(x :: <object>) => <integer>
+  if instance?(x, <integer>) then
+    block (return)
+      if x > 5 then return(x * 10) else x end
+    end
+  else
+    0
+  end
+end;
+
+define function nested(x :: <object>) => <integer>
+  if instance?(x, <integer>) then
+    if instance?(x, <i32>) then x + 1 else twice(x) end
+  else
+    0
+  end
+end;
+
+define function passed(x :: <object>) => <object>
+  if instance?(x, <double-float>) then keep(x) else x end
+end;
+
+define function main() => <integer>
+  let big :: <object> = 1125899906842624;
+  let top :: <object> = 2147483647;
+  adder(41)
+    + recovered(0 - 3)
+    + recovered(4)
+    + exited(7)
+    + exited(2)
+    + nested(top)
+    + nested(big)
+    + as(<integer>, as(<double-float>, passed(2.5)) * 2.0)
+    + adder("no")
+    + as(<integer>, keep(big)) - 1125899906842624
+    + exited(keep(3))
+end;

@@ -2565,7 +2565,8 @@ pub struct Let {
 pub struct Refinement {
     /// Refined local.
     pub local: LocalId,
-    /// Narrowed local kind in the true branch.
+    /// Narrowed local kind in the true branch: an object class, or the
+    /// unboxed scalar kind of a boxed `<object>` that passed a numeric test.
     pub kind: ValueKind,
 }
 
@@ -8891,27 +8892,58 @@ impl Lowering {
         }
     }
 
+    /// The narrower kind a local tested by `condition` has in the `if`'s
+    /// true branch, if any.
+    ///
+    /// An object class narrows the local to that class. A concrete scalar
+    /// class narrows a boxed `<object>` local to the scalar's unboxed kind:
+    /// `<integer>` to `i64`, `<double-float>` to `f64`, `<single-float>` to
+    /// `f32`. Every value that passes `instance?(x, <integer>)` is an `i64`,
+    /// because the runtime has no other `<integer>` representation: a boxed
+    /// `<i32>` or `<u32>` is the `<integer>` it denotes, and there are no
+    /// big integers yet (overflow traps where they would begin). When they
+    /// arrive, this narrowing must stop at a range that fits `i64`.
+    ///
+    /// A limited integer test, such as `instance?(x, <i32>)`, narrows to
+    /// `i64` as well, not to the limited kind: its members are `<integer>`s,
+    /// so `x + 1` must keep computing as an `<integer>` (as dispatch on the
+    /// boxed value does) rather than trap at the limited type's bound. Flow
+    /// typing knows the range and drops the overflow checks it rules out.
+    /// Abstract numeric classes have no single representation and do not
+    /// narrow.
     fn true_branch_refinement(&self, condition: &Expr) -> Option<Refinement> {
-        let Expr::InstanceOf { value, class, .. } = condition else {
-            return None;
+        let (value, class) = match condition {
+            Expr::InstanceOf { value, class, .. } => (value, Some(*class)),
+            Expr::InstanceOfLimited { value, .. } => (value, None),
+            _ => return None,
         };
-        // Instances of numeric classes are boxed scalars, not runtime
-        // objects, so `<object>` cannot be narrowed to them by an object cast.
-        if is_scalar_value_class_in(&self.classes, *class) {
-            return None;
-        }
         let Expr::Local {
             local, result_kind, ..
         } = value.as_ref()
         else {
             return None;
         };
+        // Only a boxed value unboxes; a local of any other kind either
+        // already has the scalar's kind or can never pass the test.
+        let unboxed = |kind: ValueKind| {
+            (*result_kind == ValueKind::Any).then_some(Refinement {
+                local: *local,
+                kind,
+            })
+        };
+        let class = match class {
+            None => return unboxed(ValueKind::I64),
+            Some(class) if is_scalar_value_class_in(&self.classes, class) => {
+                return self.kind_for_builtin_class(class).and_then(unboxed);
+            }
+            Some(class) => class,
+        };
         let kind = if let ValueKind::Object(actual) = result_kind
-            && self.is_same_or_subclass(*actual, *class)
+            && self.is_same_or_subclass(*actual, class)
         {
             ValueKind::Object(*actual)
         } else {
-            ValueKind::Object(*class)
+            ValueKind::Object(class)
         };
         Some(Refinement {
             local: *local,
@@ -11266,6 +11298,45 @@ mod tests {
                 class,
                 ..
             } if *class == circle_id
+        ));
+    }
+
+    #[test]
+    fn scalar_instance_tests_refine_a_boxed_local_to_its_unboxed_kind() {
+        let module = lower_source(
+            "define function f(x :: <object>) => <integer>\n  if instance?(x, <integer>) then x + 1 else 0 end\nend;\n\
+             define function g(x :: <object>) => <double-float>\n  if instance?(x, <double-float>) then x else 0.0 end\nend;\n\
+             define function h(x :: <object>) => <single-float>\n  if instance?(x, <single-float>) then x else 0.0f32 end\nend;\n\
+             define function i(x :: <object>) => <integer>\n  if instance?(x, <i32>) then x else 0 end\nend;\n\
+             define function j(x :: <object>) => <object>\n  if instance?(x, <real>) then x else 0 end\nend;\n\
+             define function k(x :: <i32>) => <integer>\n  if instance?(x, <integer>) then x else 0 end\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let refinement = |index: usize| {
+            let Expr::If { refinement, .. } = &module.functions[index].body.result else {
+                panic!("expected if");
+            };
+            refinement.map(|refinement| refinement.kind)
+        };
+        assert_eq!(refinement(0), Some(ValueKind::I64));
+        assert_eq!(refinement(1), Some(ValueKind::F64));
+        assert_eq!(refinement(2), Some(ValueKind::F32));
+        // A limited type's members are `<integer>`s: the local is an `i64`.
+        assert_eq!(refinement(3), Some(ValueKind::I64));
+        // `<real>` has no single representation.
+        assert_eq!(refinement(4), None);
+        // An unboxed local already has a scalar kind.
+        assert_eq!(refinement(5), None);
+        // The then branch adds `i64`s directly instead of sending `+`.
+        let Expr::If { then_branch, .. } = &module.functions[0].body.result else {
+            panic!("expected if");
+        };
+        assert!(matches!(
+            then_branch.as_ref(),
+            Expr::Binary {
+                kind: NumericKind::Integer,
+                ..
+            }
         ));
     }
 

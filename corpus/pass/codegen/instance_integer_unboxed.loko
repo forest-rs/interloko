@@ -1,0 +1,21 @@
+// codegen: proved
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains refinement l0 => integer
+// expect: dump lowered contains unbox <integer>
+// expect: dump lowered contains i64.mul_ovf
+// expect: dump lowered contains i64.add_ovf
+// expect: dump lowered lacks select-method
+
+// In the then branch of `instance?(x, <integer>)`, sem reads `x` as an
+// unboxed `<integer>`. Lowering unboxes it once, at the top of the branch,
+// and `x * x + x` is plain checked `i64` arithmetic: no dispatch, and no
+// unbox at each read. The test itself stays, since `x` may be anything.
+
+define function poly(x :: <object>) => <integer>
+  if instance?(x, <integer>) then x * x + x else 0 end
+end;
+
+define function main() => <integer>
+  poly(6) + poly("six")
+end;

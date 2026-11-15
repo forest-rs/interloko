@@ -284,6 +284,20 @@ pub(super) fn for_each_site(expr: &sem::Expr, visit: &mut impl FnMut(SiteId)) {
     });
 }
 
+/// Whether the code `expr` evaluates reads `local`, directly or to capture
+/// it in a closure.
+pub(super) fn reads_local(expr: &sem::Expr, local: sem::LocalId) -> bool {
+    let mut reads = false;
+    visit_exprs(expr, &mut |inner| match inner {
+        sem::Expr::Local { local: read, .. } => reads |= *read == local,
+        sem::Expr::Closure { captures, .. } => {
+            reads |= captures.iter().any(|capture| capture.source == local);
+        }
+        _ => {}
+    });
+    reads
+}
+
 /// Visits `expr` and every expression its own code evaluates, in evaluation
 /// order. Closure bodies are not visited; a constant's value is not either.
 fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {

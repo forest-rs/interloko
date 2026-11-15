@@ -531,8 +531,8 @@ const WHOLE: &str = "define generic whole(x);\n\
 
 #[test]
 fn instance_then_branch_meets_the_tested_class() {
-    // Sem does not refine `<object>` to a scalar class, so only flow typing
-    // knows `x` is an `<integer>` in the then branch.
+    // Flow typing narrows `x` by the test that sem refines it by, so the
+    // read sem gives as an unboxed `<integer>` has that type here too.
     let (module, artifact) = decisions_for(&format!(
         "{WHOLE}define function f(x :: <object>) => <integer>\n  \
          if instance?(x, <integer>) then whole(x) else 0 end\nend;"
@@ -594,6 +594,33 @@ fn limited_instance_tests_narrow_ranges_in_both_branches() {
                     .into()
             ),
         ]
+    );
+}
+
+#[test]
+fn a_limited_test_bounds_arithmetic_on_the_unboxed_local() {
+    // Sem reads `x` as an `<integer>` in the then branch, and flow typing
+    // knows it is an `<i32>` there, so `x + 1` cannot overflow.
+    let (module, artifact) = decisions_for(
+        "define function f(x :: <object>) => <integer>\n  \
+         if instance?(x, <i32>) then x + 1 else 0 end\nend;",
+    );
+    let sem::Expr::If { refinement, .. } = &module.functions[0].body.result else {
+        panic!("expected if");
+    };
+    assert_eq!(
+        refinement.map(|refinement| refinement.kind),
+        Some(sem::ValueKind::I64)
+    );
+    let [overflow] = checks_of(&module, &artifact, "f", TypingCheck::Overflow)
+        .try_into()
+        .expect("one overflow check");
+    assert_eq!(overflow.rule, TypingRule::OverflowImpossible);
+    assert_eq!(type_name(&module, &overflow.actual[0]), "<i32>");
+    assert!(
+        chain(&module, &artifact, &overflow, 0).starts_with("narrowed(s0,then)@"),
+        "{}",
+        chain(&module, &artifact, &overflow, 0)
     );
 }
 
@@ -1185,13 +1212,14 @@ fn type_of_a_narrowed_local_lists_its_narrowed_uses() {
     );
 
     // The same read, selected by its span, is an expression of that type.
+    // Sem refines the local there too, so the read is an unboxed `i64`.
     let at_use = artifact
         .type_of(&module, &TypeSelector::Span(narrowed.span))
         .expect("span report");
     assert_eq!(at_use.subject, TypeSubject::Expression { site: None });
     assert_eq!(at_use.ty, narrowed.ty);
-    assert_eq!(at_use.rep, sem::ValueKind::Any);
-    assert_eq!(type_name(&module, &at_use.declared), "<object>");
+    assert_eq!(at_use.rep, sem::ValueKind::I64);
+    assert_eq!(type_name(&module, &at_use.declared), "<integer>");
 }
 
 #[test]

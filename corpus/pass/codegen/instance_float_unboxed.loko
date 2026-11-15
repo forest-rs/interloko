@@ -1,0 +1,24 @@
+// codegen: proved
+// expect: run 12.5
+// expect: diagnostics 0
+// expect: dump lowered contains unbox <double-float>
+// expect: dump lowered contains f64.mul
+// expect: dump lowered contains unbox <single-float>
+// expect: dump lowered contains f32.mul
+// expect: dump lowered lacks select-method
+
+// `<double-float>` and `<single-float>` tests narrow a boxed `<object>` to
+// `f64` and `f32` the way `<integer>` narrows it to `i64`: the branch
+// unboxes once and computes directly, in the float's own format.
+
+define function scale(x :: <object>) => <double-float>
+  if instance?(x, <double-float>) then x * 2.0 + x else 0.0 end
+end;
+
+define function scale32(x :: <object>) => <single-float>
+  if instance?(x, <single-float>) then x * 2.0f32 + 1.0f32 else 0.0f32 end
+end;
+
+define function main() => <double-float>
+  scale(2.5) + as(<double-float>, scale32(2.0f32)) + scale(1)
+end;

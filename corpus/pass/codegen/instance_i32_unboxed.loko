@@ -1,0 +1,24 @@
+// codegen: proved
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains refinement l0 => integer
+// expect: dump typing contains overflow proved rule=overflow-impossible
+// expect: dump lowered contains = i64.add %r
+// expect: dump lowered contains = i64.mul %r
+// expect: dump lowered lacks add_ovf
+// expect: dump lowered lacks mul_ovf
+// expect: dump lowered lacks select-method
+
+// `<i32>` is a limited `<integer>` type, so `instance?(x, <i32>)` narrows a
+// boxed `x` to an unboxed `<integer>`, not to an `<i32>`: `(x + 1) * 2`
+// still computes as an `<integer>`, as dispatch on the boxed value would,
+// and cannot trap at the `<i32>` bound. Flow typing knows the range, so
+// neither operation can overflow and both lose their checks.
+
+define function double-next(x :: <object>) => <integer>
+  if instance?(x, <i32>) then (x + 1) * 2 else 0 end
+end;
+
+define function main() => <integer>
+  if double-next(4294967296) = 0 then double-next(20) else 0 end
+end;

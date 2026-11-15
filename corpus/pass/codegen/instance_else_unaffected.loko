@@ -1,0 +1,17 @@
+// codegen: proved
+// expect: run 4.5
+// expect: diagnostics 0
+// expect: dump lowered contains i64.add_ovf
+// expect: dump lowered contains select-method
+
+// The narrowing applies to the then branch only. There `x + 1` adds
+// unboxed `i64`s; in the else branch `x` is any `<object>` but an
+// `<integer>`, so the same `x + 1` still dispatches on it.
+
+define function bump(x :: <object>) => <object>
+  if instance?(x, <integer>) then x + 1 else x + 1 end
+end;
+
+define function main() => <double-float>
+  as(<double-float>, bump(1.5)) + as(<double-float>, as(<integer>, bump(1)))
+end;
