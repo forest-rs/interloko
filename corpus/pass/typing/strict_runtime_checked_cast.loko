@@ -3,7 +3,7 @@
 // expect: diagnostics 1
 // expect: diagnostic code typing.cast-runtime-checked
 // expect: dump typing contains config=strict
-// expect: dump typing contains t0 cast checked rule=cast-narrowing
+// expect: dump typing contains s0 cast checked rule=cast-narrowing
 
 // Under the strict preset, casts the runtime must check are reported as
 // warnings; the cast still runs and succeeds.

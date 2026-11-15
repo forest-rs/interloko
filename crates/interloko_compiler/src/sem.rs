@@ -55,6 +55,34 @@ pub struct CaptureId(
     pub u32,
 );
 
+/// Check site identifier within its owning definition.
+///
+/// Every expression that leaves a runtime check has one: generic calls,
+/// casts, instance tests, numeric conversions, and integer arithmetic.
+/// Semantic lowering numbers them densely, in evaluation order, per tree
+/// root: a function, method, or constant body (closures inside it share its
+/// numbering), or a slot initializer. A site id therefore depends only on its
+/// owner's own body, so `(owner definition, site)` names one check across
+/// edits to other definitions. Typing decisions, dispatch-site records, and
+/// runtime blame key on that pair.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct SiteId(
+    /// Zero-based site index within the owner.
+    pub u32,
+);
+
+impl SiteId {
+    /// Placeholder carried until [`assign_check_sites`] numbers the owner.
+    const PENDING: Self = Self(u32::MAX);
+}
+
+impl core::fmt::Display for SiteId {
+    /// Renders the id as `s<index>`, such as `s3`.
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "s{}", self.0)
+    }
+}
+
 /// Stable class identifier within a [`HostMetaRegistry`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct HostClassId(
@@ -947,6 +975,224 @@ impl TypeNames for Module {
     }
 }
 
+/// Numbers the check sites of every tree root in `module`; see [`SiteId`].
+fn assign_check_sites(module: &mut Module) {
+    let Module {
+        classes,
+        methods,
+        functions,
+        closures,
+        constants,
+        ..
+    } = module;
+    let bodies = functions
+        .iter_mut()
+        .map(|function| &mut function.body)
+        .chain(methods.iter_mut().map(|method| &mut method.body));
+    for body in bodies {
+        SiteNumbering::new(closures).block(body);
+    }
+    for constant in constants {
+        SiteNumbering::new(closures).expr(&mut constant.value);
+    }
+    for class in classes {
+        let initializers = class
+            .direct_slots
+            .iter_mut()
+            .map(|slot| &mut slot.init_value)
+            .chain(
+                class
+                    .effective_slots
+                    .iter_mut()
+                    .map(|slot| &mut slot.init_value),
+            );
+        for value in initializers.flatten() {
+            SiteNumbering::new(closures).expr(value);
+        }
+    }
+}
+
+/// Numbers check sites in evaluation order: operands before the check.
+struct SiteNumbering<'a> {
+    closures: &'a mut [Closure],
+    next: u32,
+}
+
+impl<'a> SiteNumbering<'a> {
+    fn new(closures: &'a mut [Closure]) -> Self {
+        Self { closures, next: 0 }
+    }
+
+    fn take(&mut self) -> SiteId {
+        let site = SiteId(self.next);
+        self.next = self.next.saturating_add(1);
+        site
+    }
+
+    fn block(&mut self, block: &mut Block) {
+        for binding in &mut block.lets {
+            self.expr(&mut binding.value);
+        }
+        self.expr(&mut block.result);
+    }
+
+    fn exprs(&mut self, exprs: &mut [Expr]) {
+        for expr in exprs {
+            self.expr(expr);
+        }
+    }
+
+    fn expr(&mut self, expr: &mut Expr) {
+        match expr {
+            Expr::GenericCall { args, site, .. } => {
+                self.exprs(args);
+                *site = self.take();
+            }
+            Expr::Cast { value, site, .. }
+            | Expr::InstanceOf { value, site, .. }
+            | Expr::InstanceOfLimited { value, site, .. }
+            | Expr::Convert { value, site, .. } => {
+                self.expr(value);
+                *site = self.take();
+            }
+            Expr::Binary {
+                kind,
+                lhs,
+                rhs,
+                site,
+                ..
+            } => {
+                self.expr(lhs);
+                self.expr(rhs);
+                *site = (!kind.is_float()).then(|| self.take());
+            }
+            Expr::Negate {
+                kind, value, site, ..
+            } => {
+                self.expr(value);
+                *site = (!kind.is_float()).then(|| self.take());
+            }
+            Expr::Closure { closure, .. } => {
+                // The body moves out while it is numbered, since nested
+                // closures are numbered through the same table.
+                let index = closure.0 as usize;
+                let Some(body) = self
+                    .closures
+                    .get_mut(index)
+                    .map(|closure| core::mem::replace(&mut closure.body, Block::placeholder()))
+                else {
+                    return;
+                };
+                let mut body = body;
+                self.block(&mut body);
+                if let Some(closure) = self.closures.get_mut(index) {
+                    closure.body = body;
+                }
+            }
+            Expr::MakeObject {
+                class,
+                init_args,
+                fields,
+                ..
+            } => {
+                self.expr(class);
+                for field in fields.iter_mut() {
+                    self.expr(&mut field.value);
+                }
+                // Explicit arguments are recorded twice; keep the recorded
+                // copy identical to the evaluated field.
+                for arg in init_args {
+                    if let Some(field) = fields.iter().find(|field| {
+                        field.source == FieldInitSource::Explicit && field.slot == arg.slot
+                    }) {
+                        arg.value = field.value.clone();
+                    }
+                }
+            }
+            Expr::VectorLiteral {
+                elements: items, ..
+            }
+            | Expr::Values { values: items, .. }
+            | Expr::IntrinsicCall { args: items, .. }
+            | Expr::HostCall { args: items, .. }
+            | Expr::DirectCall { args: items, .. }
+            | Expr::FloatCall { args: items, .. } => self.exprs(items),
+            Expr::CallableCall { callable, args, .. } => {
+                self.expr(callable);
+                self.exprs(args);
+            }
+            Expr::Signal {
+                condition: inner, ..
+            }
+            | Expr::ClassOf { object: inner, .. }
+            | Expr::AccessorCall {
+                receiver: inner, ..
+            } => self.expr(inner),
+            Expr::SlotWrite {
+                receiver, value, ..
+            } => {
+                self.expr(receiver);
+                self.expr(value);
+            }
+            Expr::Compare { lhs, rhs, .. }
+            | Expr::MixedCompare { lhs, rhs, .. }
+            | Expr::ValueEqual { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expr(condition);
+                self.expr(then_branch);
+                self.expr(else_branch);
+            }
+            Expr::Handle { body, restart, .. } => {
+                self.expr(body);
+                if let Some(guard) = &mut restart.guard {
+                    self.expr(guard);
+                }
+                self.expr(&mut restart.body);
+            }
+            Expr::Block { body, cleanup, .. } => {
+                self.block(body);
+                if let Some(cleanup) = cleanup {
+                    self.block(cleanup);
+                }
+            }
+            Expr::ConstI64 { .. }
+            | Expr::ConstF64 { .. }
+            | Expr::Const32 { .. }
+            | Expr::ConstBool { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::SymbolLiteral { .. }
+            | Expr::Local { .. }
+            | Expr::Capture { .. }
+            | Expr::ConstantRef { .. }
+            | Expr::ClassObject { .. }
+            | Expr::KnownCallable { .. }
+            | Expr::GenericFunctionObject { .. }
+            | Expr::Error { .. } => {}
+        }
+    }
+}
+
+impl Block {
+    /// An empty block standing in for one that is temporarily moved out.
+    const fn placeholder() -> Self {
+        Self {
+            lets: Vec::new(),
+            result: Expr::Error {
+                span: Span { start: 0, end: 0 },
+            },
+            span: Span { start: 0, end: 0 },
+        }
+    }
+}
+
 /// Returns whether instances of `class` are unboxed scalars: `<number>` and
 /// every numeric class below it.
 fn is_scalar_value_class_in(classes: &[Class], class: ClassId) -> bool {
@@ -1092,6 +1338,7 @@ fn numeric_method_body(
         promotion::NumericOperator::Arithmetic(op) => {
             match promotion::arithmetic(op, lhs_kind, rhs_kind) {
                 promotion::ArithmeticRule::Promote { kind } => Expr::Binary {
+                    site: None,
                     op,
                     kind,
                     lhs: Box::new(promote_operand(lhs, lhs_kind, kind)),
@@ -1112,6 +1359,7 @@ fn numeric_method_body(
 fn negate_number(value: Expr, kind: NumericKind, span: Span) -> Expr {
     let to = promotion::negation(kind);
     Expr::Negate {
+        site: None,
         kind: to,
         value: Box::new(promote_operand(value, kind, to)),
         span,
@@ -1166,6 +1414,7 @@ fn promote_operand(operand: Expr, from: NumericKind, to: NumericKind) -> Expr {
     }
     let span = operand.span();
     Expr::Convert {
+        site: SiteId::PENDING,
         to,
         value: Box::new(operand),
         span,
@@ -2327,6 +2576,8 @@ pub enum Expr {
         generic: GenericFunctionId,
         /// Argument expressions.
         args: Vec<Expr>,
+        /// Dispatch check site.
+        site: SiteId,
         /// Source span.
         span: Span,
     },
@@ -2373,6 +2624,8 @@ pub enum Expr {
         value: Box<Expr>,
         /// Target class.
         class: ClassId,
+        /// Instance test site.
+        site: SiteId,
         /// Source span.
         span: Span,
     },
@@ -2383,6 +2636,8 @@ pub enum Expr {
         value: Box<Expr>,
         /// Target type.
         limited: LimitedInteger,
+        /// Instance test site.
+        site: SiteId,
         /// Source span.
         span: Span,
     },
@@ -2392,6 +2647,8 @@ pub enum Expr {
         value: Box<Expr>,
         /// Target class.
         class: ClassId,
+        /// Cast check site.
+        site: SiteId,
         /// Source span.
         span: Span,
     },
@@ -2450,6 +2707,9 @@ pub enum Expr {
         lhs: Box<Expr>,
         /// Right operand.
         rhs: Box<Expr>,
+        /// Check site of integer arithmetic, which can overflow; `None` for
+        /// float arithmetic, which cannot trap.
+        site: Option<SiteId>,
         /// Source span.
         span: Span,
     },
@@ -2495,6 +2755,8 @@ pub enum Expr {
         to: NumericKind,
         /// Converted operand.
         value: Box<Expr>,
+        /// Conversion check site.
+        site: SiteId,
         /// Source span.
         span: Span,
     },
@@ -2516,6 +2778,9 @@ pub enum Expr {
         kind: NumericKind,
         /// Negated operand.
         value: Box<Expr>,
+        /// Check site of integer negation, which can overflow; `None` for
+        /// float negation.
+        site: Option<SiteId>,
         /// Source span.
         span: Span,
     },
@@ -3807,6 +4072,7 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         Expr::GenericCall {
+            site: SiteId::PENDING,
             generic: self.numeric_generic(operator),
             args,
             span,
@@ -4358,7 +4624,7 @@ impl Lowering {
             })
             .collect();
 
-        Module {
+        let mut lowered = Module {
             source_file: module.source_file,
             classes: self.classes.clone(),
             generics: self.generics.clone(),
@@ -4368,7 +4634,11 @@ impl Lowering {
             constants: self.constants.clone(),
             host_functions: self.host_functions.clone(),
             diagnostics: self.diagnostics.clone(),
-        }
+        };
+        // Numbered once the bodies are final, so the result-inference
+        // fixpoint above cannot shift them.
+        assign_check_sites(&mut lowered);
+        lowered
     }
 
     fn infer_open_result_signatures(
@@ -5364,6 +5634,7 @@ impl Lowering {
                             }
                         }
                         return Expr::GenericCall {
+                            site: SiteId::PENDING,
                             generic: symbol.id,
                             args: lowered_args,
                             span: *span,
@@ -5470,6 +5741,7 @@ impl Lowering {
                     }
                 };
                 Expr::Binary {
+                    site: None,
                     op,
                     kind,
                     lhs: Box::new(promote_operand(lhs, lhs_kind, kind)),
@@ -6383,6 +6655,7 @@ impl Lowering {
         };
         match result_kinds {
             [narrow @ (ValueKind::I32 | ValueKind::U32)] => Expr::Convert {
+                site: SiteId::PENDING,
                 to: NumericKind::of(*narrow).unwrap_or(NumericKind::Integer),
                 value: Box::new(call(vec![ValueKind::I64])),
                 span,
@@ -6863,6 +7136,7 @@ impl Lowering {
             }
         }
         Expr::Binary {
+            site: None,
             op,
             kind,
             lhs: Box::new(promote_operand(lhs, lhs_numeric, kind)),
@@ -6894,6 +7168,7 @@ impl Lowering {
                 ) =>
             {
                 Expr::Binary {
+                    site: None,
                     op,
                     kind: lhs_kind,
                     lhs: Box::new(lhs),
@@ -7010,6 +7285,7 @@ impl Lowering {
         if let Some(limited) = LimitedInteger::from_name(class_name) {
             return match self.lower_instance_of(ctx, value, "<integer>", span) {
                 Expr::InstanceOf { value, .. } => Expr::InstanceOfLimited {
+                    site: SiteId::PENDING,
                     value,
                     limited,
                     span,
@@ -7066,6 +7342,7 @@ impl Lowering {
             );
         }
         Expr::InstanceOf {
+            site: SiteId::PENDING,
             value: Box::new(value),
             class: class_id,
             span,
@@ -7120,6 +7397,7 @@ impl Lowering {
             }
         };
         Expr::Convert {
+            site: SiteId::PENDING,
             to,
             value: Box::new(value),
             span,
@@ -7140,6 +7418,7 @@ impl Lowering {
             && from != to
         {
             return Expr::Convert {
+                site: SiteId::PENDING,
                 to,
                 value: Box::new(value),
                 span,
@@ -7185,6 +7464,7 @@ impl Lowering {
             );
         }
         Expr::Cast {
+            site: SiteId::PENDING,
             value: Box::new(value),
             class: class_id,
             span,
@@ -7416,6 +7696,7 @@ impl Lowering {
             return Expr::Error { span };
         };
         Expr::GenericCall {
+            site: SiteId::PENDING,
             generic: setter.id,
             args: vec![value, receiver],
             span,
@@ -8427,6 +8708,121 @@ mod tests {
         let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         lower(&ast)
+    }
+
+    /// Check-site ids in `tree`. Every site field follows its operands, so
+    /// `Debug` lists them in evaluation order.
+    fn sites(tree: &impl core::fmt::Debug) -> Vec<u32> {
+        let text = format!("{tree:?}");
+        text.split("SiteId(")
+            .skip(1)
+            .map(|rest| rest[..rest.find(')').expect("id")].parse().expect("id"))
+            .collect()
+    }
+
+    /// Closures created directly or transitively in `tree`, in order.
+    fn closure_ids(tree: &impl core::fmt::Debug) -> Vec<usize> {
+        let text = format!("{tree:?}");
+        text.split("closure: ClosureId(")
+            .skip(1)
+            .map(|rest| rest[..rest.find(')').expect("id")].parse().expect("id"))
+            .collect()
+    }
+
+    const SITES: &str = "define class <shape> (<object>)\nend;\n\
+        define generic area(x);\n\
+        define method area(s :: <shape>) => <integer>\n  1\nend;\n\
+        define function first(s :: <shape>, n :: <integer>) => <integer>\n  \
+        let a = area(s) + n;\n  \
+        let f :: <callable> = function () => <integer>\n    area(as(<shape>, s)) + 1\n  end;\n  \
+        a - area(s)\nend;\n";
+
+    fn function<'a>(module: &'a Module, name: &str) -> &'a Function {
+        module
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .expect("function")
+    }
+
+    #[test]
+    fn check_sites_are_dense_per_owner_and_shared_with_closures() {
+        let module = lower_source(&format!(
+            "{SITES}define function second(s :: <shape>) => <integer>\n  area(s)\nend;"
+        ));
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let first = function(&module, "first");
+        // `area(s)` and `+`, then the closure's cast, `area` and `+`, then
+        // `area(s)` and `-`.
+        assert_eq!(sites(&first.body), [0, 1, 5, 6]);
+        let closures = closure_ids(&first.body);
+        assert_eq!(closures.len(), 1);
+        assert_eq!(sites(&module.closures[closures[0]].body), [2, 3, 4]);
+        assert_eq!(sites(&function(&module, "second").body), [0]);
+        assert!(sites(&module.methods[0].body).is_empty());
+        let Expr::Binary { site, .. } = &first.body.result else {
+            panic!("binary result");
+        };
+        assert_eq!(*site, Some(SiteId(6)));
+        assert_eq!(SiteId(6).to_string(), "s6");
+    }
+
+    #[test]
+    fn check_sites_survive_edits_to_other_definitions() {
+        let numbering = |module: &Module| {
+            let first = function(module, "first");
+            let closures = closure_ids(&first.body)
+                .into_iter()
+                .map(|closure| sites(&module.closures[closure].body))
+                .collect::<Vec<_>>();
+            (sites(&first.body), closures)
+        };
+        let before = lower_source(&format!(
+            "{SITES}define function second(s :: <shape>) => <integer>\n  area(s)\nend;"
+        ));
+        // A definition with checks and a closure is added before `first`,
+        // and `second` gains checks.
+        let after = lower_source(&format!(
+            "define function zeroth(n :: <integer>) => <integer>\n  \
+             let g :: <callable> = function () => <integer>\n    n * 2\n  end;\n  \
+             -n\nend;\n\
+             {SITES}define function second(s :: <shape>) => <integer>\n  \
+             area(s) + area(s) * 3\nend;"
+        ));
+        assert!(after.diagnostics.is_empty(), "{:?}", after.diagnostics);
+        assert_eq!(numbering(&before), numbering(&after));
+        assert_eq!(sites(&function(&after, "zeroth").body), [1]);
+        assert_eq!(sites(&function(&after, "second").body), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn check_sites_are_numbered_after_result_inference() {
+        // `helper` has an open result, so its callers are lowered again
+        // once its result is inferred.
+        let source = "define function helper(n :: <integer>)\n  n + 1\nend;\n\
+             define function main() => <integer>\n  helper(2) + helper(3)\nend;";
+        let module = lower_source(source);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(sites(&function(&module, "helper").body), [0]);
+        assert_eq!(sites(&function(&module, "main").body), [0]);
+        assert_eq!(module, lower_source(source));
+        // Slot initializers and constants are numbered as their own roots.
+        let module = lower_source(
+            "define constant $k :: <integer> = 1 + 2 * 3;\n\
+             define class <box> (<object>)\n  slot size :: <integer>, init-value: 4 - 5;\nend;\n\
+             define function main() => <integer>\n  $k + make(<box>).size\nend;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(sites(&module.constants[0].value), [0, 1]);
+        let class = module
+            .classes
+            .iter()
+            .find(|class| class.name == "<box>")
+            .expect("box");
+        assert_eq!(sites(&class.direct_slots[0].init_value), [0]);
+        assert_eq!(sites(&class.effective_slots[0].init_value), [0]);
+        // The default copied into `make` is numbered with `main`.
+        assert_eq!(sites(&function(&module, "main").body), [0, 1]);
     }
 
     #[test]

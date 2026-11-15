@@ -163,8 +163,10 @@ introduced it. Generic and method records include the dispatch applicability
 summary used by the lowered dispatcher.
 
 Dispatch sites are exposed as compiler-generated EOP objects with IDs such as
-`dispatch:d0`. A dispatch-site explanation names the enclosing function or
-method, source span, generic contract, static argument kind, applicable methods
+`dispatch:d0`. A dispatch-site explanation names the enclosing function,
+method, or constant and the call's check site within it (see
+[`eop_workbench.md`](eop_workbench.md#dispatch-sites)), source span, generic
+contract, static argument kind, applicable methods
 in specificity order, rejected methods and reasons, the generated dispatcher
 function, and the related method lookup/dispatcher/lowered/tape artifact keys.
 This is still an explanation of the current single-argument nominal dispatcher,

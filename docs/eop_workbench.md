@@ -32,6 +32,9 @@ Typical IDs include:
 - `function:f0`
 - `constant:k0`
 - `dispatch:d0`
+- `typing-config:session`
+- `typing:<definition-id>:s0` for the typing decision at check site `s0` of
+  a definition
 - `runtime-class:c0` for the root runtime layout row
 - `runtime-class:c1`
 - `runtime-slot:c1.s0`
@@ -157,6 +160,19 @@ The same explanation is available through EOP:
 cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0
 cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/inherited_dispatch.loko dispatch:d0 show-dispatch
 ```
+
+Each record names its call by owner definition and check site, as in
+`owner: function main definition=def… site=s1`. Semantic lowering numbers
+every expression that leaves a runtime check (generic calls, casts, instance
+tests, numeric conversions, and integer arithmetic) densely within its
+function, method, or constant, in evaluation order; closures share their
+enclosing definition's numbering, and `dump sem` shows each as `site=sN`. A
+site depends only on its own definition's body, so editing another
+definition never renumbers it, while `dispatch:dN` is a module-wide index
+that can shift. Typing decisions are keyed the same way
+(`typing:<definition-id>:sN`), and a dispatch decision links to the record
+with the same owner and site, so two calls that share a source span still
+link correctly.
 
 The explanation is read-only. It describes the current one-argument nominal
 dispatch model; it does not imply sealed optimization, method combination,

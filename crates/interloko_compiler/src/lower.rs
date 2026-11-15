@@ -3582,6 +3582,7 @@ impl<'module> BodyLowering<'module> {
                 generic,
                 args,
                 span,
+                ..
             } => {
                 let generic_info = self
                     .module
@@ -3647,7 +3648,9 @@ impl<'module> BodyLowering<'module> {
                 }
                 Ok(result)
             }
-            sem::Expr::InstanceOf { value, class, span } => {
+            sem::Expr::InstanceOf {
+                value, class, span, ..
+            } => {
                 let value = self.lower_expr(value)?;
                 if is_unboxed_number(value.kind) {
                     let result = self.alloc(ValueKind::Bool);
@@ -3683,11 +3686,14 @@ impl<'module> BodyLowering<'module> {
                 value,
                 limited,
                 span,
+                ..
             } => {
                 let value = self.lower_expr(value)?;
                 Ok(self.lower_limited_membership(value, *limited, *span))
             }
-            sem::Expr::Cast { value, class, span } => {
+            sem::Expr::Cast {
+                value, class, span, ..
+            } => {
                 let value = self.lower_expr(value)?;
                 if *class == sem::OBJECT_CLASS_ID {
                     return self.box_any(value, *span);
@@ -3810,6 +3816,7 @@ impl<'module> BodyLowering<'module> {
                 lhs,
                 rhs,
                 span,
+                ..
             } => {
                 // Sem rejects constant shift counts outside 0..=31.
                 let constant_count = matches!(**rhs, sem::Expr::Const32 { .. });
@@ -3880,11 +3887,15 @@ impl<'module> BodyLowering<'module> {
                 args,
                 span,
             } => self.lower_float_call(*builtin, args, *span),
-            sem::Expr::Convert { to, value, span } => {
+            sem::Expr::Convert {
+                to, value, span, ..
+            } => {
                 let value = self.lower_expr(value)?;
                 self.convert_number(value, *to, *span)
             }
-            sem::Expr::Negate { kind, value, span } => {
+            sem::Expr::Negate {
+                kind, value, span, ..
+            } => {
                 let value = self.lower_expr(value)?;
                 match kind {
                     sem::NumericKind::Integer => {
@@ -4095,6 +4106,7 @@ impl<'module> BodyLowering<'module> {
                 generic,
                 args,
                 span,
+                ..
             } => {
                 let generic_info = self
                     .module
