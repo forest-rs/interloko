@@ -1,0 +1,14 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 1.5f32 is not of type <integer> at typing:def
+// expect: diagnostics 0
+
+// A `<single-float>` converts to an integer through its exact binary64
+// widening, but a failure reports the value as it was given.
+
+define function whole(x :: <single-float>) => <integer>
+  as(<integer>, x)
+end;
+
+define function main() => <integer>
+  whole(1.5f32)
+end;

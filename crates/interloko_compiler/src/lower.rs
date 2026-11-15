@@ -22,6 +22,28 @@
 //! recorded in [`check_codegen`](crate::lower::Module::check_codegen).
 //! Why the facts hold in code that may run under newer code units is in the
 //! `facts` submodule's documentation.
+//!
+//! # Failing checks
+//!
+//! A runtime type check that fails signals a `<type-error>` rather than
+//! trapping. Each check carries the
+//! [`TypeErrorSite`](interloko_runtime::control::TypeErrorSite) it signals:
+//! its kind (the stable code), the expected type, and its site, which is
+//! the typing decision id `typing:<owner>:s<n>` when typing classifies the
+//! check. Host-call checks (casts and unboxing) carry it on their
+//! instruction, and tape emission builds the failing path around the call,
+//! adding only a jump to the passing path. Checks lowering tests itself
+//! branch to a [`SignalTypeError`](crate::lower::Instr::SignalTypeError):
+//! overflow and shift-count checks already branched to a trap, while a
+//! limited-integer conversion now tests the range (three instructions and a
+//! branch, where a trapping conversion was one) and an exact float
+//! conversion saturates before it compares.
+//!
+//! A `use-value` restart continues the check with a replacement that
+//! passes it: a scalar result's register type is all such a check
+//! establishes, and a replacement object is checked again. Proved checks
+//! have no failing path, which is why flow typing types a check that may
+//! fail by its expected type rather than by its operand.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -38,9 +60,10 @@ use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
 use crate::typing;
+use interloko_model::condition::TypeErrorKind;
 use interloko_runtime::RuntimeLayout;
 use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
-use interloko_runtime::control::{RestartDescriptor, RestartParameter};
+use interloko_runtime::control::{RestartDescriptor, RestartParameter, TypeErrorSite};
 
 mod facts;
 
@@ -377,17 +400,14 @@ pub enum RuntimeOp {
 /// Condition that compiled Loko code signals with an explicit tape `trap`.
 ///
 /// The tape carries [`LokoTrap::code`] as its trap code; runtime reporting
-/// recovers the condition with [`LokoTrap::from_code`].
+/// recovers the condition with [`LokoTrap::from_code`]. Failed runtime type
+/// checks do not trap: they signal a `<type-error>` (see
+/// [`Instr::SignalTypeError`]). The codes those checks used to trap with,
+/// 2 to 4, are retired rather than reused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum LokoTrap {
     /// A generic function call matched no applicable method.
     NoApplicableMethod,
-    /// `as(<integer>, x)` received a float with a fractional part.
-    InexactFloatToInteger,
-    /// `<integer>` arithmetic overflowed the 64-bit fixnum range.
-    IntegerOverflow,
-    /// A `shift-left` or `shift-right` count was outside 0..=31.
-    ShiftCountOutOfRange,
     /// `make` on a class value named no class the call can construct: not
     /// the call's static bound nor one of its subclasses.
     MakeClassOutsideBound,
@@ -400,9 +420,6 @@ impl LokoTrap {
     /// Every Loko trap in code order.
     pub const ALL: &'static [Self] = &[
         Self::NoApplicableMethod,
-        Self::InexactFloatToInteger,
-        Self::IntegerOverflow,
-        Self::ShiftCountOutOfRange,
         Self::MakeClassOutsideBound,
         Self::MakeMissingInitKeyword,
     ];
@@ -412,9 +429,6 @@ impl LokoTrap {
     pub const fn code(self) -> u32 {
         match self {
             Self::NoApplicableMethod => 1,
-            Self::InexactFloatToInteger => 2,
-            Self::IntegerOverflow => 3,
-            Self::ShiftCountOutOfRange => 4,
             Self::MakeClassOutsideBound => 5,
             Self::MakeMissingInitKeyword => 6,
         }
@@ -425,9 +439,6 @@ impl LokoTrap {
     pub const fn from_code(code: u32) -> Option<Self> {
         match code {
             1 => Some(Self::NoApplicableMethod),
-            2 => Some(Self::InexactFloatToInteger),
-            3 => Some(Self::IntegerOverflow),
-            4 => Some(Self::ShiftCountOutOfRange),
             5 => Some(Self::MakeClassOutsideBound),
             6 => Some(Self::MakeMissingInitKeyword),
             _ => None,
@@ -439,9 +450,6 @@ impl LokoTrap {
     pub const fn description(self) -> &'static str {
         match self {
             Self::NoApplicableMethod => "no applicable method",
-            Self::InexactFloatToInteger => "inexact float to integer conversion",
-            Self::IntegerOverflow => "integer overflow",
-            Self::ShiftCountOutOfRange => "shift count out of range",
             Self::MakeClassOutsideBound => "make on a class outside the call's bound",
             Self::MakeMissingInitKeyword => "make on a class needing a missing init keyword",
         }
@@ -451,10 +459,7 @@ impl LokoTrap {
     #[must_use]
     pub const fn diagnostic_code(self) -> DiagnosticCode {
         match self {
-            Self::IntegerOverflow => DiagnosticCode::RuntimeIntegerOverflow,
             Self::NoApplicableMethod
-            | Self::InexactFloatToInteger
-            | Self::ShiftCountOutOfRange
             | Self::MakeClassOutsideBound
             | Self::MakeMissingInitKeyword => DiagnosticCode::RuntimeTrap,
         }
@@ -645,8 +650,6 @@ pub enum Num32UnaryOp {
     I32ToI64,
     /// `u32.to_i64`: Zero extension; exact.
     U32ToI64,
-    /// `i64.to_i32`: Narrowing; traps unless the value fits.
-    I64ToI32,
     /// `i64.to_i32_wrap`: Keeps the low 32 bits; lowering emits it only
     /// where typing proved the value fits.
     I64ToI32Wrap,
@@ -661,12 +664,6 @@ pub enum Num32UnaryOp {
     /// `u32.to_i32_wrap`: Reinterprets the bits; lowering emits it only
     /// where typing proved the value is at most `i32::MAX`.
     U32ToI32Wrap,
-    /// `u64.to_u32`: Narrowing; traps unless the value fits.
-    U64ToU32,
-    /// `i32.to_u32`: Sign change; traps on a negative value.
-    I32ToU32,
-    /// `u32.to_i32`: Sign change; traps above `i32::MAX`.
-    U32ToI32,
     /// `f32.to_f64`: Widening; exact.
     F32ToF64,
     /// `f64.to_f32`: Narrowing; rounds to nearest, ties to even.
@@ -675,10 +672,12 @@ pub enum Num32UnaryOp {
     F32ToI32,
     /// `f32.to_u32`: Truncation; traps on NaN, infinities and out-of-range values.
     F32ToU32,
-    /// `f64.to_i32`: Truncation; traps on NaN, infinities and out-of-range values.
-    F64ToI32,
-    /// `f64.to_u32`: Truncation; traps on NaN, infinities and out-of-range values.
-    F64ToU32,
+    /// `f64.to_i32_sat`: Truncation that saturates out-of-range values and
+    /// maps NaN to zero; never traps.
+    F64ToI32Sat,
+    /// `f64.to_u32_sat`: Truncation that saturates out-of-range values and
+    /// maps NaN to zero; never traps.
+    F64ToU32Sat,
     /// `i32.to_f32`: Rounds to nearest, ties to even.
     I32ToF32,
     /// `u32.to_f32`: Rounds to nearest, ties to even.
@@ -705,21 +704,17 @@ impl Num32UnaryOp {
             Self::F32Sqrt => "f32.sqrt",
             Self::I32ToI64 => "i32.to_i64",
             Self::U32ToI64 => "u32.to_i64",
-            Self::I64ToI32 => "i64.to_i32",
             Self::I64ToI32Wrap => "i64.to_i32_wrap",
             Self::I64ToU64Wrap => "i64.to_u64_wrap",
             Self::U64ToU32Wrap => "u64.to_u32_wrap",
             Self::I32ToU32Wrap => "i32.to_u32_wrap",
             Self::U32ToI32Wrap => "u32.to_i32_wrap",
-            Self::U64ToU32 => "u64.to_u32",
-            Self::I32ToU32 => "i32.to_u32",
-            Self::U32ToI32 => "u32.to_i32",
             Self::F32ToF64 => "f32.to_f64",
             Self::F64ToF32 => "f64.to_f32",
             Self::F32ToI32 => "f32.to_i32",
             Self::F32ToU32 => "f32.to_u32",
-            Self::F64ToI32 => "f64.to_i32",
-            Self::F64ToU32 => "f64.to_u32",
+            Self::F64ToI32Sat => "f64.to_i32_sat",
+            Self::F64ToU32Sat => "f64.to_u32_sat",
             Self::I32ToF32 => "i32.to_f32",
             Self::U32ToF32 => "u32.to_f32",
             Self::I64ToF32 => "i64.to_f32",
@@ -1247,6 +1242,16 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Truncates a float toward zero to an integer, saturating values
+    /// outside the `i64` range and mapping NaN to zero; never traps.
+    F64ToI64Sat {
+        /// Destination register.
+        dst: Reg,
+        /// Float operand register.
+        src: Reg,
+        /// Source span.
+        span: Span,
+    },
     /// Signed integer comparison.
     I64Compare {
         /// Destination register.
@@ -1405,7 +1410,9 @@ pub enum Instr {
         span: Span,
     },
     /// Runtime checked unboxing of an integer or float from a boxed top
-    /// `<object>` value; traps unless the value is an instance of `class`.
+    /// `<object>` value. Unless the value is an instance of `class`, it
+    /// signals `type_error`, and a `use-value` restart supplies the
+    /// unboxed result.
     UnboxValue {
         /// Destination register.
         dst: Reg,
@@ -1415,6 +1422,8 @@ pub enum Instr {
         class: sem::ClassId,
         /// Unboxed result kind, `i64` or `f64`.
         kind: ValueKind,
+        /// The `<type-error>` a failed check signals.
+        type_error: Box<TypeErrorSite>,
         /// Source span.
         span: Span,
     },
@@ -1432,6 +1441,10 @@ pub enum Instr {
         span: Span,
     },
     /// Runtime checked cast from top `<object>` to a nominal object.
+    ///
+    /// Unless the value is an instance of `class`, it signals `type_error`.
+    /// A `use-value` restart supplies a replacement object, which the cast
+    /// checks again, signalling again until one passes.
     CastObject {
         /// Destination register.
         dst: Reg,
@@ -1441,11 +1454,13 @@ pub enum Instr {
         input: ValueKind,
         /// Target class.
         class: sem::ClassId,
+        /// The `<type-error>` a failed check signals.
+        type_error: Box<TypeErrorSite>,
         /// Source span.
         span: Span,
     },
     /// Runtime checked cast to a class object naming `bound` or one of its
-    /// subclasses, trapping as a failed [`Self::CastObject`] does.
+    /// subclasses, failing as a [`Self::CastObject`] does.
     CastClassObject {
         /// Destination register.
         dst: Reg,
@@ -1455,6 +1470,8 @@ pub enum Instr {
         input: ValueKind,
         /// Class the value must name, or name a subclass of.
         bound: sem::ClassId,
+        /// The `<type-error>` a failed check signals.
+        type_error: Box<TypeErrorSite>,
         /// Source span.
         span: Span,
     },
@@ -1507,6 +1524,25 @@ pub enum Instr {
     Trap {
         /// Condition being signalled.
         trap: LokoTrap,
+        /// Source span.
+        span: Span,
+    },
+    /// Signals the `<type-error>` of a check that failed on `values`, then
+    /// continues at `resume` with the value a `use-value` restart supplies
+    /// in `dst`. Ends its block.
+    ///
+    /// Lowering emits this for checks it tests itself (overflow, ranges,
+    /// shift counts) when `dst`'s register type is all the check
+    /// establishes, so the replacement needs no check of its own.
+    SignalTypeError {
+        /// Reg receiving the replacement.
+        dst: Reg,
+        /// The rejected values: one value, or an operation's operands.
+        values: Vec<Reg>,
+        /// The `<type-error>` to signal.
+        type_error: Box<TypeErrorSite>,
+        /// Where execution continues with the replacement.
+        resume: LabelId,
         /// Source span.
         span: Span,
     },
@@ -1854,11 +1890,8 @@ impl<'module> Lowering<'module> {
             module,
             ids,
             facts,
-            closure_owners: if facts.is_empty() {
-                Vec::new()
-            } else {
-                facts::closure_owners(module)
-            },
+            // Closure sites are named by their owner under either policy.
+            closure_owners: facts::closure_owners(module),
         })
     }
 
@@ -2068,19 +2101,28 @@ impl<'module> Lowering<'module> {
         let mut payload = vec![token];
         // Exit thunks are shared by every block with the same result kinds,
         // so their checks belong to no one body's sites and always stay.
-        for (value, kind) in values.iter().zip(&kinds) {
+        let name = format!("exit#{}", thunk.signature.0);
+        for (index, (value, kind)) in values.iter().zip(&kinds).enumerate() {
             let Some(target) = entry_target(*kind) else {
                 payload.push(*value);
                 continue;
             };
             let checked = register_at(register_kinds.len());
             register_kinds.push(*kind);
-            checks.push(entry_check(target, checked, *value, *kind, span));
+            checks.push(entry_check(
+                self.module,
+                target,
+                checked,
+                *value,
+                *kind,
+                entry_site_name(&name, index),
+                span,
+            ));
             payload.push(checked);
         }
         Ok(Function {
             id: thunk.function,
-            name: format!("exit#{}", thunk.signature.0),
+            name,
             kind: FunctionKind::ExitThunk {
                 signature: thunk.signature,
             },
@@ -2174,6 +2216,9 @@ impl<'module> Lowering<'module> {
         }
 
         let mut body = BodyLowering::for_dispatcher(self.module, &self.ids, generic);
+        // Typing classifies none of a dispatcher's checks; they are named
+        // by the generic and their span.
+        body.site_owner = Some(generic.definition);
         let rets = self.value_kinds(&generic.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_dispatcher(generic)?;
@@ -2412,9 +2457,25 @@ impl<'module> Lowering<'module> {
                     });
                     continue;
                 }
+                let site = match &spec.entry_sites {
+                    Some((owner, sites)) => check_site_name(
+                        Some(*owner),
+                        sites.get(index).copied().flatten(),
+                        spec.span,
+                    ),
+                    None => entry_site_name(&spec.name, index),
+                };
                 let checked = register_at(register_kinds.len());
                 register_kinds.push(*kind);
-                instructions.push(entry_check(target, checked, *arg, *kind, spec.span));
+                instructions.push(entry_check(
+                    self.module,
+                    target,
+                    checked,
+                    *arg,
+                    *kind,
+                    site,
+                    spec.span,
+                ));
                 *arg = checked;
             }
         }
@@ -3066,6 +3127,11 @@ struct BodyLowering<'module> {
     /// Definition whose typing decides the sites being lowered: the body's
     /// own definition, or a constant's while its value is lowered inline.
     owner: Option<DefinitionId>,
+    /// Definition whose sites the checks being lowered are, which names
+    /// them in the `<type-error>`s they signal: [`Self::owner`], except in
+    /// a numeric method's body inlined at a send, whose sites are the
+    /// method's although its typing does not apply there.
+    site_owner: Option<DefinitionId>,
     /// Sites a typing fact changed, in lowering order.
     checks: Vec<CheckCodegenRecord>,
     /// The closure whose body this is, which names its locals' and
@@ -3155,9 +3221,20 @@ impl<'module> BodyLowering<'module> {
                 self.record(site, CheckCodegen::Elided);
                 continue;
             }
+            let name = match (self.site_owner, site) {
+                (Some(_), Some(_)) => check_site_name(self.site_owner, site, closure.span),
+                _ => entry_site_name(&format!("closure#{}", closure.id.0), index),
+            };
             let checked = self.alloc(kind);
-            self.instructions
-                .push(entry_check(target, checked.reg, reg, kind, closure.span));
+            self.instructions.push(entry_check(
+                self.module,
+                target,
+                checked.reg,
+                reg,
+                kind,
+                name,
+                closure.span,
+            ));
             self.set_local(local_id, checked)?;
         }
         Ok(())
@@ -3195,6 +3272,7 @@ impl<'module> BodyLowering<'module> {
             next_label: 0,
             facts: None,
             owner: None,
+            site_owner: None,
             checks: Vec::new(),
             closure: None,
             unboxed_locals: Vec::new(),
@@ -3222,6 +3300,7 @@ impl<'module> BodyLowering<'module> {
             next_label: 0,
             facts: None,
             owner: None,
+            site_owner: None,
             checks: Vec::new(),
             closure: None,
             unboxed_locals: Vec::new(),
@@ -3236,7 +3315,26 @@ impl<'module> BodyLowering<'module> {
     ) -> Self {
         self.facts = Some(facts);
         self.owner = owner;
+        self.site_owner = owner;
         self
+    }
+
+    /// The `<type-error>` a failing check of `kind` signals: at `site` of
+    /// the current site owner, or, for a check typing does not classify, at
+    /// `span` in it.
+    fn type_error(
+        &self,
+        kind: TypeErrorKind,
+        expected: String,
+        site: Option<sem::SiteId>,
+        span: Span,
+    ) -> Box<TypeErrorSite> {
+        type_error_site(
+            kind,
+            expected,
+            check_site_name(self.site_owner, site, span),
+            span,
+        )
     }
 
     /// The typing decision for `site` in the current owner, if lowering may
@@ -4149,8 +4247,10 @@ impl<'module> BodyLowering<'module> {
                 self.active_constants.push(*constant);
                 // The value's check sites are the constant's own.
                 let owner = self.owner.replace(constant_info.definition);
+                let site_owner = self.site_owner.replace(constant_info.definition);
                 let lowered = self.lower_expr(&value);
                 self.owner = owner;
+                self.site_owner = site_owner;
                 self.active_constants.pop();
                 self.coerce_value(lowered?, expected, *span)
             }
@@ -4395,7 +4495,13 @@ impl<'module> BodyLowering<'module> {
                 if value.kind == ValueKind::Any
                     && let Some(kind) = scalar_kind_for_class(self.module, *class)
                 {
-                    return Ok(self.unbox(value, *class, kind, *span));
+                    let type_error = self.type_error(
+                        TypeErrorKind::Cast,
+                        class_expected(self.module, *class),
+                        Some(*site),
+                        *span,
+                    );
+                    return Ok(self.unbox(value, *class, kind, type_error, *span));
                 }
                 // A static upcast needs no check, but the value now has the
                 // cast's class, as semantic analysis says: joins compare it.
@@ -4417,12 +4523,19 @@ impl<'module> BodyLowering<'module> {
                         ..value
                     });
                 }
+                let type_error = self.type_error(
+                    TypeErrorKind::Cast,
+                    class_expected(self.module, *class),
+                    Some(*site),
+                    *span,
+                );
                 let result = self.alloc(ValueKind::Object(Some(*class)));
                 self.instructions.push(Instr::CastObject {
                     dst: result.reg,
                     value: value.reg,
                     input: value.kind,
                     class: *class,
+                    type_error,
                     span: *span,
                 });
                 Ok(result)
@@ -4533,7 +4646,17 @@ impl<'module> BodyLowering<'module> {
                     if op.is_shift() && !constant_count {
                         match unchecked {
                             Some(site) => self.record(site, CheckCodegen::Elided),
-                            None => self.lower_shift_count_check(*kind, rhs.reg, *span),
+                            None => {
+                                let type_error = self.type_error(
+                                    TypeErrorKind::Range,
+                                    shift_count_expected(self.module),
+                                    *site,
+                                    *span,
+                                );
+                                return self.lower_checked_shift(
+                                    *op, *kind, lhs, rhs.reg, type_error, *span,
+                                );
+                            }
                         }
                     }
                     return self.lower_bit_operation(*op, *kind, lhs, rhs.reg, *span);
@@ -4553,7 +4676,15 @@ impl<'module> BodyLowering<'module> {
                                 self.lower_unchecked_integer_arith(op, lhs.reg, rhs.reg, *span)
                             );
                         }
-                        Ok(self.lower_checked_integer_arith(op, lhs.reg, rhs.reg, *span))
+                        let type_error = self.overflow_error(ValueKind::I64, *site, *span);
+                        Ok(self.lower_checked_integer_arith(
+                            op,
+                            lhs.reg,
+                            rhs.reg,
+                            vec![lhs.reg, rhs.reg],
+                            type_error,
+                            *span,
+                        ))
                     }
                     sem::NumericKind::Float => {
                         let op = match op {
@@ -4607,7 +4738,11 @@ impl<'module> BodyLowering<'module> {
                             (sem::BinaryOp::Mul, true) => Num32CheckedOp::U32MulOvf,
                             _ => return Err(not_arithmetic()),
                         };
-                        Ok(self.lower_checked_num32_arith(op, lhs, rhs.reg, *span))
+                        let type_error = self.overflow_error(lhs.kind, *site, *span);
+                        let operands = vec![lhs.reg, rhs.reg];
+                        Ok(self.lower_checked_num32_arith(
+                            op, lhs, rhs.reg, operands, type_error, *span,
+                        ))
                     }
                 }
             }
@@ -4629,7 +4764,7 @@ impl<'module> BodyLowering<'module> {
                     self.record(*site, CheckCodegen::Specialized);
                     return Ok(converted);
                 }
-                self.convert_number(value, *to, *span)
+                self.convert_number(value, *to, Some(*site), *span)
             }
             sem::Expr::Negate {
                 kind,
@@ -4658,10 +4793,13 @@ impl<'module> BodyLowering<'module> {
                                 *span,
                             ));
                         }
+                        let type_error = self.overflow_error(ValueKind::I64, *site, *span);
                         Ok(self.lower_checked_integer_arith(
                             I64ArithOp::Sub,
                             zero.reg,
                             value.reg,
+                            vec![value.reg],
+                            type_error,
                             *span,
                         ))
                     }
@@ -4699,10 +4837,13 @@ impl<'module> BodyLowering<'module> {
                                 *span,
                             ));
                         }
+                        let type_error = self.overflow_error(ValueKind::I32, *site, *span);
                         Ok(self.lower_checked_num32_arith(
                             Num32CheckedOp::I32SubOvf,
                             zero,
                             value.reg,
+                            vec![value.reg],
+                            type_error,
                             *span,
                         ))
                     }
@@ -5052,7 +5193,10 @@ impl<'module> BodyLowering<'module> {
         }
         let class = scalar_concrete_class(self.module, kind)
             .ok_or_else(|| invalid_semantic("refined scalar kind has no class"))?;
-        let unboxed = self.unbox(boxed, class, kind, span);
+        // The test that refined the local proved the class, so this cannot
+        // fail.
+        let type_error = self.coercion_error(class_expected(self.module, class), span);
+        let unboxed = self.unbox(boxed, class, kind, type_error, span);
         self.unboxed_locals.push((unboxed.reg, boxed.reg));
         self.local_regs[index] = Some(unboxed);
         Ok(Some((refinement.local, boxed)))
@@ -5979,8 +6123,9 @@ impl<'module> BodyLowering<'module> {
         let locals = core::mem::replace(&mut self.source_locals, &method.locals);
         let regs = core::mem::replace(&mut self.local_regs, vec![None; method.locals.len()]);
         // The method's own checks are decided by its typing, which knows
-        // nothing of this call; they stay.
+        // nothing of this call; they stay, and stay the method's sites.
         let owner = self.owner.take();
+        let site_owner = self.site_owner.replace(method.definition);
         let result = (|| {
             for (param, value) in bound {
                 self.set_local(param, value)?;
@@ -5990,6 +6135,7 @@ impl<'module> BodyLowering<'module> {
         self.source_locals = locals;
         self.local_regs = regs;
         self.owner = owner;
+        self.site_owner = site_owner;
         result.map(Some)
     }
 
@@ -6054,12 +6200,14 @@ impl<'module> BodyLowering<'module> {
             (value.kind, expected)
             && self.module.classes_may_overlap(actual, expected_class)
         {
+            let type_error = self.coercion_error(class_expected(self.module, expected_class), span);
             let casted = self.alloc(expected);
             self.instructions.push(Instr::CastObject {
                 dst: casted.reg,
                 value: value.reg,
                 input: value.kind,
                 class: expected_class,
+                type_error,
                 span,
             });
             return Ok(casted);
@@ -6102,13 +6250,20 @@ impl<'module> BodyLowering<'module> {
             && matches!(expected, ValueKind::I32 | ValueKind::U32)
             && let Some(class) = scalar_concrete_class(self.module, expected)
         {
-            let integer = self.unbox(value, class, ValueKind::I64, span);
-            return Ok(self.narrow_integer(integer, expected, span));
+            let type_error = self.coercion_error(class_expected(self.module, class), span);
+            let integer = self.unbox(value, class, ValueKind::I64, type_error, span);
+            let type_error = Box::new(TypeErrorSite {
+                kind: TypeErrorKind::Range,
+                expected: kind_expected(expected),
+                ..*self.coercion_error(String::new(), span)
+            });
+            return Ok(self.narrow_integer(integer, expected, type_error, span));
         }
         if value.kind == ValueKind::Any
             && let Some(class) = scalar_concrete_class(self.module, expected)
         {
-            return Ok(self.unbox(value, class, expected, span));
+            let type_error = self.coercion_error(class_expected(self.module, class), span);
+            return Ok(self.unbox(value, class, expected, type_error, span));
         }
         // A class object of a narrower bound already names a class within
         // the wider one; any other value, such as a dispatched argument a
@@ -6128,12 +6283,14 @@ impl<'module> BodyLowering<'module> {
                 ValueKind::Any | ValueKind::Object(_) | ValueKind::ClassObject(_)
             )
         {
+            let type_error = self.coercion_error(class_object_expected(self.module, bound), span);
             let casted = self.alloc(expected);
             self.instructions.push(Instr::CastClassObject {
                 dst: casted.reg,
                 value: value.reg,
                 input: value.kind,
                 bound,
+                type_error,
                 span,
             });
             return Ok(casted);
@@ -6141,12 +6298,14 @@ impl<'module> BodyLowering<'module> {
         if matches!(value.kind, ValueKind::Any | ValueKind::Object(None))
             && let ValueKind::Object(Some(class)) = expected
         {
+            let type_error = self.coercion_error(class_expected(self.module, class), span);
             let casted = self.alloc(expected);
             self.instructions.push(Instr::CastObject {
                 dst: casted.reg,
                 value: value.reg,
                 input: value.kind,
                 class,
+                type_error,
                 span,
             });
             return Ok(casted);
@@ -6156,13 +6315,28 @@ impl<'module> BodyLowering<'module> {
         ))
     }
 
-    fn unbox(&mut self, value: Value, class: sem::ClassId, kind: ValueKind, span: Span) -> Value {
+    /// The `<type-error>` a check that coerces a value to what its context
+    /// takes signals. Typing classifies no such check, so it is named by
+    /// its span.
+    fn coercion_error(&self, expected: String, span: Span) -> Box<TypeErrorSite> {
+        self.type_error(TypeErrorKind::Cast, expected, None, span)
+    }
+
+    fn unbox(
+        &mut self,
+        value: Value,
+        class: sem::ClassId,
+        kind: ValueKind,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) -> Value {
         let result = self.alloc(kind);
         self.instructions.push(Instr::UnboxValue {
             dst: result.reg,
             value: value.reg,
             class,
             kind,
+            type_error,
             span,
         });
         result
@@ -6297,7 +6471,10 @@ impl<'module> BodyLowering<'module> {
                     },
                     Instr::Label { label: check },
                 ]);
-                let integer = self.unbox(value, integer_class, ValueKind::I64, span);
+                // The `instance?` test just passed, so this cannot fail.
+                let type_error =
+                    self.coercion_error(class_expected(self.module, integer_class), span);
+                let integer = self.unbox(value, integer_class, ValueKind::I64, type_error, span);
                 let inside = self.lower_integer_in_range(integer, limited, span);
                 self.instructions.extend([
                     Instr::Move {
@@ -6430,10 +6607,19 @@ impl<'module> BodyLowering<'module> {
         Ok(self.num32_binary(op, lhs.reg, rhs, lhs.kind, span))
     }
 
-    /// Traps unless a shift count is in 0..=31. The tape masks counts with
-    /// `& 31`; Loko never relies on that, so `shift-left(x, 32)` cannot
-    /// quietly mean `x`.
-    fn lower_shift_count_check(&mut self, kind: sem::NumericKind, count: Reg, span: Span) {
+    /// Lowers a shift whose count is checked: unless the count is in
+    /// 0..=31 it signals `type_error`, and a `use-value` restart supplies
+    /// the shift's result. The tape masks counts with `& 31`; Loko never
+    /// relies on that, so `shift-left(x, 32)` cannot quietly mean `x`.
+    fn lower_checked_shift(
+        &mut self,
+        op: sem::BinaryOp,
+        kind: sem::NumericKind,
+        lhs: Value,
+        count: Reg,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) -> Result<Value, LowerError> {
         let (count_kind, limit, below) = if kind == sem::NumericKind::U32 {
             (ValueKind::U32, sem::Number32::U32(32), Num32BinaryOp::U32Lt)
         } else {
@@ -6446,7 +6632,7 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         let in_range = self.num32_binary(below, count, bound.reg, ValueKind::Bool, span);
-        let [check_low, outside, done] = core::array::from_fn(|_| self.alloc_label());
+        let [check_low, outside, shift, done] = core::array::from_fn(|_| self.alloc_label());
         self.instructions.push(Instr::Branch {
             cond: in_range.reg,
             then_label: check_low,
@@ -6469,19 +6655,28 @@ impl<'module> BodyLowering<'module> {
             );
             self.instructions.push(Instr::Branch {
                 cond: non_negative.reg,
-                then_label: done,
+                then_label: shift,
                 else_label: outside,
                 span,
             });
         } else {
-            self.instructions.push(Instr::Jump { label: done, span });
+            self.instructions.push(Instr::Jump { label: shift, span });
         }
-        self.instructions.push(Instr::Label { label: outside });
-        self.instructions.push(Instr::Trap {
-            trap: LokoTrap::ShiftCountOutOfRange,
-            span,
-        });
-        self.instructions.push(Instr::Label { label: done });
+        self.instructions.push(Instr::Label { label: shift });
+        let result = self.lower_bit_operation(op, kind, lhs, count, span)?;
+        self.instructions.extend([
+            Instr::Jump { label: done, span },
+            Instr::Label { label: outside },
+            Instr::SignalTypeError {
+                dst: result.reg,
+                values: vec![count],
+                type_error,
+                resume: done,
+                span,
+            },
+            Instr::Label { label: done },
+        ]);
+        Ok(result)
     }
 
     /// Emits one `0xFD` instruction with two operands.
@@ -6505,13 +6700,15 @@ impl<'module> BodyLowering<'module> {
     }
 
     /// Lowers checked `<i32>` or `<u32>` arithmetic: the overflow-reporting
-    /// instruction, then the same overflow trap as `<integer>` arithmetic,
-    /// because a limited type promises its range.
+    /// instruction, then the same overflow signal as `<integer>`
+    /// arithmetic, because a limited type promises its range.
     fn lower_checked_num32_arith(
         &mut self,
         op: Num32CheckedOp,
         lhs: Value,
         rhs: Reg,
+        operands: Vec<Reg>,
+        type_error: Box<TypeErrorSite>,
         span: Span,
     ) -> Value {
         let result = self.alloc(lhs.kind);
@@ -6524,35 +6721,24 @@ impl<'module> BodyLowering<'module> {
             rhs,
             span,
         });
-        let overflowed = self.alloc_label();
-        let done = self.alloc_label();
-        self.instructions.push(Instr::Branch {
-            cond: overflow.reg,
-            then_label: overflowed,
-            else_label: done,
-            span,
-        });
-        self.instructions.push(Instr::Label { label: overflowed });
-        self.instructions.push(Instr::Trap {
-            trap: LokoTrap::IntegerOverflow,
-            span,
-        });
-        self.instructions.push(Instr::Label { label: done });
+        self.signal_on_overflow(overflow.reg, result.reg, operands, type_error, span);
         result
     }
 
-    /// Converts a number to `to`.
+    /// Converts a number to `to`; `site` is the conversion's check site.
     ///
     /// Widening (`<i32>` or `<u32>` to `<integer>`, `<single-float>` to
     /// `<double-float>`) is exact. Integer to float rounds to nearest, ties
     /// to even, once. Binary64 to binary32 rounds the same way. Narrowing an
-    /// integer traps unless the value is in range, and float to integer is
-    /// exact: it traps unless the float is integral and in range, so
-    /// rounding is always an explicit `round`/`floor`/... choice.
+    /// integer signals a `<type-error>` unless the value is in range, and
+    /// float to integer is exact: it signals unless the float is integral
+    /// and in range, so rounding is always an explicit `round`/`floor`/...
+    /// choice. A `use-value` restart supplies the converted value.
     fn convert_number(
         &mut self,
         value: Value,
         to: sem::NumericKind,
+        site: Option<sem::SiteId>,
         span: Span,
     ) -> Result<Value, LowerError> {
         use sem::NumericKind as N;
@@ -6566,13 +6752,29 @@ impl<'module> BodyLowering<'module> {
         };
         let unary =
             |this: &mut Self, op, value: Value, kind| this.num32_unary(op, value.reg, kind, span);
+        let range_error = |this: &Self, to: ValueKind| {
+            this.type_error(TypeErrorKind::Range, kind_expected(to), site, span)
+        };
         Ok(match (from, to) {
             (from, to) if from == to => value,
             (N::I32 | N::U32, N::Integer) => self.widen_integer(value, span),
-            (N::Integer, N::I32) => self.narrow_integer(value, ValueKind::I32, span),
-            (N::Integer, N::U32) => self.narrow_integer(value, ValueKind::U32, span),
-            (N::I32, N::U32) => unary(self, Num32UnaryOp::I32ToU32, value, ValueKind::U32),
-            (N::U32, N::I32) => unary(self, Num32UnaryOp::U32ToI32, value, ValueKind::I32),
+            (N::Integer, N::I32) => {
+                let type_error = range_error(self, ValueKind::I32);
+                self.narrow_integer(value, ValueKind::I32, type_error, span)
+            }
+            (N::Integer, N::U32) => {
+                let type_error = range_error(self, ValueKind::U32);
+                self.narrow_integer(value, ValueKind::U32, type_error, span)
+            }
+            (N::I32, N::U32) | (N::U32, N::I32) => {
+                let to = if to == N::U32 {
+                    ValueKind::U32
+                } else {
+                    ValueKind::I32
+                };
+                let type_error = range_error(self, to);
+                self.change_sign(value, to, type_error, span)
+            }
             (N::Integer, N::Float) => {
                 let result = self.alloc(ValueKind::F64);
                 self.instructions.push(Instr::I64ToF64 {
@@ -6597,12 +6799,20 @@ impl<'module> BodyLowering<'module> {
             }
             // Binary32 widens to binary64 exactly, so one exact path serves
             // both float formats.
-            (N::SingleFloat, N::Integer | N::I32 | N::U32) => {
-                let wide = unary(self, Num32UnaryOp::F32ToF64, value, ValueKind::F64);
-                self.lower_exact_float_to_integer(wide, to, span)
-            }
-            (N::Float, N::Integer | N::I32 | N::U32) => {
-                self.lower_exact_float_to_integer(value, to, span)
+            (N::SingleFloat | N::Float, N::Integer | N::I32 | N::U32) => {
+                let expected = match to {
+                    N::I32 => ValueKind::I32,
+                    N::U32 => ValueKind::U32,
+                    _ => ValueKind::I64,
+                };
+                let type_error = range_error(self, expected);
+                // A failure reports the value as given, not its widening.
+                let wide = if from == N::SingleFloat {
+                    unary(self, Num32UnaryOp::F32ToF64, value, ValueKind::F64)
+                } else {
+                    value
+                };
+                self.lower_exact_float_to_integer(wide, value.reg, to, type_error, span)
             }
             (from, to) => {
                 return Err(invalid_semantic(&alloc::format!(
@@ -6653,16 +6863,109 @@ impl<'module> BodyLowering<'module> {
         self.num32_unary(op, value.reg, ValueKind::I64, span)
     }
 
-    /// Narrows an `<integer>` to `<i32>` or `<u32>`, trapping unless the
-    /// value is in the type's range.
-    fn narrow_integer(&mut self, value: Value, to: ValueKind, span: Span) -> Value {
-        if to == ValueKind::I32 {
-            return self.num32_unary(Num32UnaryOp::I64ToI32, value.reg, ValueKind::I32, span);
-        }
-        // A negative `i64` reinterprets as an unsigned value of at least
-        // 2^63, which `u64.to_u32` rejects like any other out-of-range one.
-        let bits = self.num32_unary(Num32UnaryOp::I64ToU64Wrap, value.reg, ValueKind::U64, span);
-        self.num32_unary(Num32UnaryOp::U64ToU32, bits.reg, ValueKind::U32, span)
+    /// Narrows an `<integer>` to `<i32>` or `<u32>`, signalling
+    /// `type_error` unless the value is in the type's range.
+    ///
+    /// The low 32 bits are the result exactly when widening them back
+    /// gives the value again, so the test costs three instructions and a
+    /// branch where a trapping conversion took one.
+    fn narrow_integer(
+        &mut self,
+        value: Value,
+        to: ValueKind,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) -> Value {
+        let (narrow, back) = if to == ValueKind::I32 {
+            let narrow =
+                self.num32_unary(Num32UnaryOp::I64ToI32Wrap, value.reg, ValueKind::I32, span);
+            let back = self.num32_unary(Num32UnaryOp::I32ToI64, narrow.reg, ValueKind::I64, span);
+            (narrow, back)
+        } else {
+            let bits =
+                self.num32_unary(Num32UnaryOp::I64ToU64Wrap, value.reg, ValueKind::U64, span);
+            let narrow =
+                self.num32_unary(Num32UnaryOp::U64ToU32Wrap, bits.reg, ValueKind::U32, span);
+            let back = self.num32_unary(Num32UnaryOp::U32ToI64, narrow.reg, ValueKind::I64, span);
+            (narrow, back)
+        };
+        let fits = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::I64Compare {
+            dst: fits.reg,
+            op: sem::CompareOp::Eq,
+            lhs: back.reg,
+            rhs: value.reg,
+            span,
+        });
+        self.check_or_signal(fits.reg, narrow.reg, vec![value.reg], type_error, span);
+        narrow
+    }
+
+    /// Converts between `<i32>` and `<u32>`, signalling `type_error` unless
+    /// the value is in `to`'s range: non-negative either way.
+    fn change_sign(
+        &mut self,
+        value: Value,
+        to: ValueKind,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) -> Value {
+        let (converted, signed) = if to == ValueKind::U32 {
+            let converted =
+                self.num32_unary(Num32UnaryOp::I32ToU32Wrap, value.reg, ValueKind::U32, span);
+            (converted, value)
+        } else {
+            let converted =
+                self.num32_unary(Num32UnaryOp::U32ToI32Wrap, value.reg, ValueKind::I32, span);
+            (converted, converted)
+        };
+        let zero = self.alloc(ValueKind::I32);
+        self.instructions.push(Instr::Const32 {
+            dst: zero.reg,
+            value: sem::Number32::I32(0),
+            span,
+        });
+        let fits = self.num32_binary(
+            Num32BinaryOp::I32Ge,
+            signed.reg,
+            zero.reg,
+            ValueKind::Bool,
+            span,
+        );
+        self.check_or_signal(fits.reg, converted.reg, vec![value.reg], type_error, span);
+        converted
+    }
+
+    /// Branches on `passed`: on to the code that follows when it holds, and
+    /// otherwise to signal `type_error` for `values`, whose `use-value`
+    /// restart supplies `result` before the code that follows.
+    fn check_or_signal(
+        &mut self,
+        passed: Reg,
+        result: Reg,
+        values: Vec<Reg>,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) {
+        let failed = self.alloc_label();
+        let done = self.alloc_label();
+        self.instructions.extend([
+            Instr::Branch {
+                cond: passed,
+                then_label: done,
+                else_label: failed,
+                span,
+            },
+            Instr::Label { label: failed },
+            Instr::SignalTypeError {
+                dst: result,
+                values,
+                type_error,
+                resume: done,
+                span,
+            },
+            Instr::Label { label: done },
+        ]);
     }
 
     fn alloc(&mut self, kind: ValueKind) -> Value {
@@ -6868,34 +7171,41 @@ impl<'module> BodyLowering<'module> {
     }
 
     /// Lowers an exact binary64-to-integer conversion such as
-    /// `as(<integer>, x)`: `f64.to_i64` (or `f64.to_i32`/`f64.to_u32`)
-    /// truncates and traps on NaN, infinities, and out-of-range values;
-    /// converting back and comparing then traps on any fractional part, so
-    /// only integral floats convert.
+    /// `as(<integer>, x)`, signalling `type_error` unless `x` is integral
+    /// and in range.
+    ///
+    /// The saturating truncation (`f64.to_i64_sat`, or `f64.to_i32_sat` /
+    /// `f64.to_u32_sat`) never traps: NaN becomes zero and out-of-range
+    /// values the nearest bound. Converting back and comparing then fails
+    /// for NaN, infinities, fractions and every saturated value except one:
+    /// `2^63` saturates to `i64::MAX`, which converts back to `2^63`, so a
+    /// conversion to `<integer>` also checks the float is below it.
     fn lower_exact_float_to_integer(
         &mut self,
         value: Value,
+        reported: Reg,
         to: sem::NumericKind,
+        type_error: Box<TypeErrorSite>,
         span: Span,
     ) -> Value {
         let (result, round_trip) = match to {
             sem::NumericKind::I32 => {
                 let result =
-                    self.num32_unary(Num32UnaryOp::F64ToI32, value.reg, ValueKind::I32, span);
+                    self.num32_unary(Num32UnaryOp::F64ToI32Sat, value.reg, ValueKind::I32, span);
                 let back =
                     self.num32_unary(Num32UnaryOp::I32ToF64, result.reg, ValueKind::F64, span);
                 (result, back)
             }
             sem::NumericKind::U32 => {
                 let result =
-                    self.num32_unary(Num32UnaryOp::F64ToU32, value.reg, ValueKind::U32, span);
+                    self.num32_unary(Num32UnaryOp::F64ToU32Sat, value.reg, ValueKind::U32, span);
                 let back =
                     self.num32_unary(Num32UnaryOp::U32ToF64, result.reg, ValueKind::F64, span);
                 (result, back)
             }
             _ => {
                 let result = self.alloc(ValueKind::I64);
-                self.instructions.push(Instr::F64ToI64 {
+                self.instructions.push(Instr::F64ToI64Sat {
                     dst: result.reg,
                     src: value.reg,
                     span,
@@ -6917,20 +7227,51 @@ impl<'module> BodyLowering<'module> {
             rhs: value.reg,
             span,
         });
-        let done = self.alloc_label();
-        let inexact = self.alloc_label();
-        self.instructions.push(Instr::Branch {
-            cond: exact.reg,
-            then_label: done,
-            else_label: inexact,
-            span,
-        });
-        self.instructions.push(Instr::Label { label: inexact });
-        self.instructions.push(Instr::Trap {
-            trap: LokoTrap::InexactFloatToInteger,
-            span,
-        });
-        self.instructions.push(Instr::Label { label: done });
+        let passed = if matches!(to, sem::NumericKind::I32 | sem::NumericKind::U32) {
+            exact
+        } else {
+            let [below_top, failed, done] = core::array::from_fn(|_| self.alloc_label());
+            let top = self.alloc(ValueKind::F64);
+            let below = self.alloc(ValueKind::Bool);
+            self.instructions.extend([
+                Instr::Branch {
+                    cond: exact.reg,
+                    then_label: below_top,
+                    else_label: failed,
+                    span,
+                },
+                Instr::Label { label: below_top },
+                Instr::ConstF64 {
+                    dst: top.reg,
+                    value: sem::FloatBits::from_f64(9_223_372_036_854_775_808.0),
+                    span,
+                },
+                Instr::F64Compare {
+                    dst: below.reg,
+                    op: sem::CompareOp::Lt,
+                    lhs: value.reg,
+                    rhs: top.reg,
+                    span,
+                },
+                Instr::Branch {
+                    cond: below.reg,
+                    then_label: done,
+                    else_label: failed,
+                    span,
+                },
+                Instr::Label { label: failed },
+                Instr::SignalTypeError {
+                    dst: result.reg,
+                    values: vec![reported],
+                    type_error,
+                    resume: done,
+                    span,
+                },
+                Instr::Label { label: done },
+            ]);
+            return result;
+        };
+        self.check_or_signal(passed.reg, result.reg, vec![reported], type_error, span);
         result
     }
 
@@ -7105,12 +7446,14 @@ impl<'module> BodyLowering<'module> {
     }
 
     /// Lowers fixnum `lhs op rhs`: the overflow-reporting tape instruction,
-    /// then a branch to [`Self::lower_integer_overflow`] when it overflowed.
+    /// then [`Self::signal_on_overflow`], reporting `operands`.
     fn lower_checked_integer_arith(
         &mut self,
         op: I64ArithOp,
         lhs: Reg,
         rhs: Reg,
+        operands: Vec<Reg>,
+        type_error: Box<TypeErrorSite>,
         span: Span,
     ) -> Value {
         let result = self.alloc(ValueKind::I64);
@@ -7123,17 +7466,7 @@ impl<'module> BodyLowering<'module> {
             rhs,
             span,
         });
-        let overflowed = self.alloc_label();
-        let done = self.alloc_label();
-        self.instructions.push(Instr::Branch {
-            cond: overflow.reg,
-            then_label: overflowed,
-            else_label: done,
-            span,
-        });
-        self.instructions.push(Instr::Label { label: overflowed });
-        self.lower_integer_overflow(span);
-        self.instructions.push(Instr::Label { label: done });
+        self.signal_on_overflow(overflow.reg, result.reg, operands, type_error, span);
         result
     }
 
@@ -7156,16 +7489,51 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
-    /// Emits what happens when fixnum arithmetic overflows `i64`.
+    /// Emits what happens when checked integer arithmetic overflows: when
+    /// `overflowed` holds, it signals `type_error` for `operands`, and a
+    /// `use-value` restart supplies `result`.
     ///
-    /// This is the single overflow target for `<integer>` arithmetic. It
-    /// traps with [`LokoTrap::IntegerOverflow`] until `<integer>` gains
-    /// bignum promotion, which replaces this trap.
-    fn lower_integer_overflow(&mut self, span: Span) {
-        self.instructions.push(Instr::Trap {
-            trap: LokoTrap::IntegerOverflow,
-            span,
-        });
+    /// This is the single overflow target for integer arithmetic. Bignum
+    /// promotion will replace it for `<integer>`, whose results then always
+    /// fit.
+    fn signal_on_overflow(
+        &mut self,
+        overflowed: Reg,
+        result: Reg,
+        operands: Vec<Reg>,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) {
+        let failed = self.alloc_label();
+        let done = self.alloc_label();
+        self.instructions.extend([
+            Instr::Branch {
+                cond: overflowed,
+                then_label: failed,
+                else_label: done,
+                span,
+            },
+            Instr::Label { label: failed },
+            Instr::SignalTypeError {
+                dst: result,
+                values: operands,
+                type_error,
+                resume: done,
+                span,
+            },
+            Instr::Label { label: done },
+        ]);
+    }
+
+    /// The `<type-error>` integer arithmetic whose result has kind `kind`
+    /// signals when it overflows.
+    fn overflow_error(
+        &self,
+        kind: ValueKind,
+        site: Option<sem::SiteId>,
+        span: Span,
+    ) -> Box<TypeErrorSite> {
+        self.type_error(TypeErrorKind::Overflow, kind_expected(kind), site, span)
     }
 
     fn alloc_label(&mut self) -> LabelId {
@@ -7496,6 +7864,68 @@ fn shares_register_type(lhs: ValueKind, rhs: ValueKind) -> bool {
     }
 }
 
+/// Builds the `<type-error>` site a failing check signals.
+fn type_error_site(
+    kind: TypeErrorKind,
+    expected: String,
+    site: String,
+    span: Span,
+) -> Box<TypeErrorSite> {
+    Box::new(TypeErrorSite {
+        kind,
+        expected,
+        site,
+        span: span.start..span.end,
+    })
+}
+
+/// Names where a check is for the `<type-error>` it signals: the EOP id of
+/// its typing decision, `typing:<owner>:s<n>`, when typing classifies it,
+/// and otherwise `check:<owner>@<start>..<end>`, by its owner and span.
+fn check_site_name(owner: Option<DefinitionId>, site: Option<sem::SiteId>, span: Span) -> String {
+    match (owner, site) {
+        (Some(owner), Some(site)) => format!("typing:{owner}:{site}"),
+        (Some(owner), None) => format!("check:{owner}@{}..{}", span.start, span.end),
+        (None, _) => format!("check@{}..{}", span.start, span.end),
+    }
+}
+
+/// The expected type of a check that a value is an instance of `class`.
+fn class_expected(module: &sem::Module, class: sem::ClassId) -> String {
+    typing::expectation_label(module, &typing::TypingExpectation::Class(class))
+}
+
+/// The expected type of a check that a value is a class object naming
+/// `bound` or one of its subclasses: Dylan's `subclass(<bound>)`.
+fn class_object_expected(module: &sem::Module, bound: sem::ClassId) -> String {
+    format!("subclass({})", class_expected(module, bound))
+}
+
+/// The expected type of a check whose result has register kind `kind`:
+/// `<integer>`, `<i32>`, `<u32>`, or a float class.
+fn kind_expected(kind: ValueKind) -> String {
+    match kind {
+        ValueKind::I32 => sem::LimitedInteger::I32.name(),
+        ValueKind::U32 => sem::LimitedInteger::U32.name(),
+        ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat.name(),
+        ValueKind::F32 => sem::BuiltinValueClass::SingleFloat.name(),
+        _ => sem::BuiltinValueClass::Integer.name(),
+    }
+    .into()
+}
+
+/// The expected type of a shift count: `limited(<integer>, min: 0, max: 31)`.
+fn shift_count_expected(module: &sem::Module) -> String {
+    let counts = interloko_model::types::Type::of(
+        interloko_model::types::Atom::Integer(interloko_model::types::IntRange {
+            min: Some(0),
+            max: Some(31),
+        }),
+        module,
+    );
+    typing::type_name(module, &counts)
+}
+
 /// Returns what a callable's indirect entry must check a `kind` parameter
 /// is, if anything; see [`sem::EntryCheck`].
 ///
@@ -7517,12 +7947,15 @@ fn entry_target(kind: ValueKind) -> Option<sem::EntryTarget> {
 }
 
 /// The instruction checking that `value`, of `kind`, is what `target`
-/// requires, into `dst`.
-const fn entry_check(
+/// requires, into `dst`. A failure signals a [`TypeErrorKind::Entry`] error
+/// at `site`.
+fn entry_check(
+    module: &sem::Module,
     target: sem::EntryTarget,
     dst: Reg,
     value: Reg,
     kind: ValueKind,
+    site: String,
     span: Span,
 ) -> Instr {
     match target {
@@ -7531,6 +7964,12 @@ const fn entry_check(
             value,
             input: kind,
             class,
+            type_error: type_error_site(
+                TypeErrorKind::Entry,
+                class_expected(module, class),
+                site,
+                span,
+            ),
             span,
         },
         sem::EntryTarget::ClassObject(bound) => Instr::CastClassObject {
@@ -7538,9 +7977,22 @@ const fn entry_check(
             value,
             input: kind,
             bound,
+            type_error: type_error_site(
+                TypeErrorKind::Entry,
+                class_object_expected(module, bound),
+                site,
+                span,
+            ),
             span,
         },
     }
+}
+
+/// Names an entry check typing does not classify: source parameter `index`
+/// (counting from zero, without a closure's environment) of the lowered
+/// function `function`, as `entry:<function>:<index>`.
+fn entry_site_name(function: &str, index: usize) -> String {
+    format!("entry:{function}:{index}")
 }
 
 /// Copies a numeric method's body (see [`sem::MethodOrigin::Numeric`]) with
@@ -7963,6 +8415,10 @@ impl Module {
                 write!(f, "  %{dst} = f64.to_i64 %{src}")?;
                 fmt_span(f, *span)
             }
+            Instr::F64ToI64Sat { dst, src, span } => {
+                write!(f, "  {dst} = f64.to_i64_sat {src}")?;
+                fmt_span(f, *span)
+            }
             Instr::F64Compare {
                 dst,
                 op,
@@ -8138,12 +8594,14 @@ impl Module {
                 value,
                 class,
                 kind,
+                type_error,
                 span,
             } => {
                 write!(f, "  %{dst} = unbox ")?;
                 self.fmt_class(f, *class)?;
                 write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *kind)?;
+                fmt_type_error(f, type_error)?;
                 fmt_span(f, *span)
             }
             Instr::InstanceOf {
@@ -8164,12 +8622,14 @@ impl Module {
                 value,
                 input,
                 class,
+                type_error,
                 span,
             } => {
                 write!(f, "  %{dst} = as ")?;
                 self.fmt_class(f, *class)?;
                 write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *input)?;
+                fmt_type_error(f, type_error)?;
                 fmt_span(f, *span)
             }
             Instr::CastClassObject {
@@ -8177,12 +8637,14 @@ impl Module {
                 value,
                 input,
                 bound,
+                type_error,
                 span,
             } => {
                 write!(f, "  %{dst} = as class ")?;
                 self.fmt_class(f, *bound)?;
                 write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *input)?;
+                fmt_type_error(f, type_error)?;
                 fmt_span(f, *span)
             }
             Instr::EqU64 {
@@ -8218,6 +8680,29 @@ impl Module {
             }
             Instr::Trap { trap, span } => {
                 write!(f, "  trap {} ({})", trap.code(), trap.description())?;
+                fmt_span(f, *span)
+            }
+            Instr::SignalTypeError {
+                dst,
+                values,
+                type_error,
+                resume,
+                span,
+            } => {
+                write!(
+                    f,
+                    "  {dst} = signal {} {} at {} (",
+                    type_error.kind.code(),
+                    type_error.expected,
+                    type_error.site
+                )?;
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{value}")?;
+                }
+                write!(f, ") -> {resume}")?;
                 fmt_span(f, *span)
             }
             Instr::PushHandler {
@@ -8437,6 +8922,18 @@ impl Module {
     }
 }
 
+/// Writes what a failing check signals, as ` else type-error.cast <circle>
+/// at typing:def…:s0`.
+fn fmt_type_error(f: &mut fmt::Formatter<'_>, type_error: &TypeErrorSite) -> fmt::Result {
+    write!(
+        f,
+        " else {} {} at {}",
+        type_error.kind.code(),
+        type_error.expected,
+        type_error.site
+    )
+}
+
 fn fmt_span(f: &mut fmt::Formatter<'_>, span: Span) -> fmt::Result {
     if span.is_empty() {
         writeln!(f)
@@ -8512,7 +9009,7 @@ mod tests {
         assert!(dump.contains("local l2 c = %r3: i64"));
         assert!(dump.contains("%r3, %r4 = i64.add_ovf %r1, %r2"));
         assert!(dump.contains("br %r4, bb1, bb2"));
-        assert!(dump.contains("trap 3 (integer overflow)"));
+        assert!(dump.contains("signal type-error.overflow <integer> at typing:def"));
         assert!(dump.contains("call l0(%r1, %r2)"));
     }
 

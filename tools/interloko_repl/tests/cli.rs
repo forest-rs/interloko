@@ -927,9 +927,11 @@ fn codegen_command_shows_and_sets_the_policy() {
          :codegen off\n\
          :dump lowered\n\
          boom()\n\
+         :restart abort\n\
          :codegen proved\n\
          :dump lowered\n\
          boom()\n\
+         :restart abort\n\
          :codegen off\n\
          :reset\n\
          :codegen\n\
@@ -950,16 +952,24 @@ fn codegen_command_shows_and_sets_the_policy() {
     assert!(sections[3].starts_with("off\nreset\n"), "{stdout}");
     assert_eq!(sections[4], "off\n", "{stdout}");
 
-    // The same outcome under both policies.
+    // The same outcome under both policies: the overflow signals a
+    // `<type-error>`, which breaks, and the break is aborted.
+    assert_eq!(
+        stdout
+            .matches("break [1]: no handler for <type-error>")
+            .count(),
+        2,
+        "{stdout}"
+    );
     let errors: Vec<&str> = stderr
         .lines()
-        .filter(|line| line.starts_with("runtime error:"))
+        .filter(|line| line.starts_with("! runtime error:") || line.starts_with("runtime error:"))
         .collect();
     assert_eq!(errors.len(), 2, "{stderr}");
     assert!(
         errors
             .iter()
-            .all(|line| line.contains("runtime trap: integer overflow")),
+            .all(|line| line.contains("aborted by the condition chooser")),
         "{stderr}"
     );
     assert!(

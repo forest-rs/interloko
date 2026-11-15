@@ -1,0 +1,27 @@
+// expect: runtime code type-error.entry
+// expect: run reports type-error.entry: {<square>} is not of type <circle> at entry:exit#
+// expect: diagnostics 0
+
+// An exit procedure is shared by every block with its result kinds, so its
+// value check belongs to no typing decision. Its site names the exit
+// procedure and the value's position instead.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function deliver(f :: <callable>, s :: <square>) => <circle>
+  apply(f, s)
+end;
+
+define function main() => <integer>
+  let c :: <circle> = block (done)
+    let ignored = deliver(done, make(<square>, side: 9));
+    make(<circle>, radius: 1)
+  end;
+  c.radius
+end;

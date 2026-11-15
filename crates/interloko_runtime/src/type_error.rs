@@ -47,7 +47,17 @@ impl TypeErrorReport {
 }
 
 impl core::fmt::Display for TypeErrorReport {
+    /// Writes `type-error.cast: {<square>} is not of type <circle> at
+    /// typing:def…:s0`, or for an overflow, whose value is its operands,
+    /// `type-error.overflow: <integer> arithmetic on #[…] overflows at …`.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.kind() == Some(TypeErrorKind::Overflow) {
+            return write!(
+                formatter,
+                "{}: {} arithmetic on {} overflows at {}",
+                self.code, self.expected, self.value, self.site
+            );
+        }
         write!(
             formatter,
             "{}: {} is not of type {} at {}",
@@ -128,6 +138,13 @@ impl InterlokoHost {
             site: text(TypeErrorSlot::Site)?,
             value: self.describe_value(ValueRef::from_value(&slot(TypeErrorSlot::Value)?)),
         })
+    }
+
+    /// The runtime class of `value`, boxed or not: what `object-class`
+    /// answers, so a chooser can pick a replacement of the right class.
+    #[must_use]
+    pub fn value_class(&self, value: &Value) -> Option<ClassId> {
+        self.class_of_any(ValueRef::from_value(value)).ok()
     }
 
     /// Writes `value` for a report: Loko literal text for numbers,

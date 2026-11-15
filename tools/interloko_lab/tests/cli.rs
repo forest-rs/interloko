@@ -1387,20 +1387,24 @@ fn codegen_option_selects_the_policy_for_every_command() {
     let source = fixture("inlined_overflow.loko");
     let path = source.to_str().expect("fixture path should be utf8");
 
-    // `off` keeps the send; the overflow traps inside the `+` method.
+    // `off` keeps the send; the overflow signals inside the `+` method.
+    let signal = "host-call interloko.condition.type_error args=(9223372036854775807, 1, ";
     let off = run_lab(&["trace", "--codegen", "off", path]);
     assert!(off.contains("+#dispatch"), "{off}");
     assert!(
-        off.contains("outcome: trapped: trap(3) at +#method0@"),
+        off.lines()
+            .any(|line| line.contains(signal) && line.contains(" at +#method0@")),
         "{off}"
     );
 
-    // `proved` runs the method inline, so the trap names `main` and the
-    // call's source position instead of the built-in method.
+    // `proved` runs the method inline, so the signal comes from `main` at
+    // the call's source position instead of the built-in method.
     let proved = run_lab(&["trace", "--codegen=proved", path]);
     assert!(!proved.contains("+#dispatch"), "{proved}");
     assert!(
-        proved.contains("outcome: trapped: trap(3) at main@") && proved.contains(" (7:17)\n"),
+        proved.lines().any(|line| line.contains(signal)
+            && line.contains(" at main@")
+            && line.ends_with(" (8:17)")),
         "{proved}"
     );
 
@@ -1408,7 +1412,10 @@ fn codegen_option_selects_the_policy_for_every_command() {
     for policy in ["off", "proved"] {
         let stderr = run_lab_failure(&["--codegen", policy, "run", path]);
         assert!(
-            stderr.starts_with("runtime failed: runtime trap: integer overflow"),
+            stderr.starts_with(
+                "runtime failed: unhandled condition <type-error>: type-error.overflow: \
+                 <integer> arithmetic on #[9223372036854775807, 1] overflows at typing:def"
+            ),
             "{policy}: {stderr}"
         );
     }

@@ -1,0 +1,20 @@
+// expect: run 2
+// expect: diagnostics 0
+// expect: dump lowered lacks type-error
+
+// `instance?` is a test, not a check: a value of another class makes it
+// false, and nothing is signalled.
+
+define class <circle> (<object>)
+end;
+
+define class <square> (<object>)
+end;
+
+define function kind(o :: <object>) => <integer>
+  if instance?(o, <circle>) then 1 else 2 end
+end;
+
+define function main() => <integer>
+  kind(make(<square>))
+end;

@@ -3,10 +3,10 @@
 // expect: diagnostics 0
 // expect: dump typing contains overflow proved rule=shift-count-in-range
 // expect: dump eop contains codegen=elided
-// expect: dump lowered lacks shift count
+// expect: dump lowered lacks signal type-error.range
 
 // `n` is 1, 2 or 3 here, so the shift count is in range and the count check
-// that traps outside 0..=31 is not emitted.
+// that signals outside 0..=31 is not emitted.
 
 define function scale(x :: <i32>, n :: <i32>) => <i32>
   if n < 1i32 then x else if n > 3i32 then x else shift-left(x, n) end end

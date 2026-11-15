@@ -1,0 +1,15 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 5000000000 is not of type <i32> at typing:def
+// expect: diagnostics 0
+// expect: dump lowered contains signal type-error.range <i32> at typing:def
+
+// Converting an `<integer>` to `<i32>` tests the value against the range
+// and signals a `<type-error>` when it is outside.
+
+define function narrow(n :: <integer>) => <i32>
+  as(<i32>, n)
+end;
+
+define function main() => <i32>
+  narrow(5000000000)
+end;

@@ -1,9 +1,9 @@
-// expect: runtime code runtime.trap
+// expect: runtime code type-error.range
 // expect: diagnostics 1
 // expect: diagnostic code typing.range-always-outside
 
-// `-1` is an `<integer>` but not a `<u32>`, so converting it traps rather
-// than wrapping.
+// `-1` is an `<integer>` but not a `<u32>`, so converting it signals a
+// `<type-error>` rather than wrapping.
 define function main() => <u32>
   let n = -1;
   as(<u32>, n)

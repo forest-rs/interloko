@@ -1,0 +1,28 @@
+// expect: runtime code type-error.entry
+// expect: run reports type-error.entry: {<square>} is not of type <circle> at typing:def
+// expect: diagnostics 0
+
+// A function used as a value checks the classes of its parameters where it
+// is entered, since a caller holding an untyped `<callable>` may pass
+// anything. That check fails with `type-error.entry`, at the entry check's
+// typing site.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function call-with(f :: <callable>, s :: <square>) => <integer>
+  apply(f, s)
+end;
+
+define function main() => <integer>
+  call-with(radius-of, make(<square>, side: 7))
+end;

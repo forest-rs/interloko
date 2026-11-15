@@ -109,11 +109,6 @@ impl<'a> TypingFacts<'a> {
         Self { owners }
     }
 
-    /// Whether there is no fact to act on.
-    pub(super) fn is_empty(&self) -> bool {
-        self.owners.is_empty()
-    }
-
     /// The decision for `site` of `owner`, if lowering may act on one.
     pub(super) fn decision(
         &self,

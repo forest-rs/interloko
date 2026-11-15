@@ -1,4 +1,4 @@
-// expect: runtime code runtime.integer-overflow
+// expect: runtime code type-error.overflow
 // expect: diagnostics 1
 // expect: diagnostic code typing.overflow-certain
 // expect: dump lowered contains u32.sub_ovf

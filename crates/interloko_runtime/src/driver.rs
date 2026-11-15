@@ -686,13 +686,12 @@ impl Driver {
                 self.step(pending)
             }
             (CONDITION_TYPE_ERROR, [values @ .., Value::U64(site)]) if !values.is_empty() => {
-                let unit = pending.unit();
+                let location = pending.location();
                 let site = usize::try_from(*site).ok().and_then(|index| {
                     self.units
-                        .get(unit)?
+                        .get(location.unit)?
                         .control
-                        .type_errors
-                        .get(index)
+                        .type_error(location.func, index)
                         .cloned()
                 });
                 let Some(site) = site else {

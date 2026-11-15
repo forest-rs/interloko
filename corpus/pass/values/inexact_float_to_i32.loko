@@ -1,6 +1,6 @@
-// expect: runtime code runtime.trap
+// expect: runtime code type-error.range
 // expect: diagnostics 0
-// expect: dump lowered contains trap 2 (inexact float to integer conversion)
+// expect: dump lowered contains signal type-error.range
 
 define function main() => <i32>
   as(<i32>, 2.5f32)

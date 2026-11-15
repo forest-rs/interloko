@@ -1,0 +1,16 @@
+// expect: run -1i32
+// expect: diagnostics 0
+
+// A handler can turn a failed conversion into a sentinel.
+
+define function narrow(n :: <integer>) => <i32>
+  handle
+    as(<i32>, n)
+  with restart e :: <type-error>
+    -1i32
+  end
+end;
+
+define function main() => <i32>
+  narrow(5000000000)
+end;

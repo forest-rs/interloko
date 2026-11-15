@@ -44,6 +44,10 @@ use crate::{ast, lower, sem, tape, typing};
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
 use interloko_model::contract::Contract;
+/// What an unhandled `<type-error>` reports, in
+/// [`RuntimeResult::UnhandledCondition`] and
+/// [`FunctionCallError::UnhandledCondition`].
+pub use interloko_runtime::TypeErrorReport;
 use interloko_runtime::chooser::{ConditionChooser, ReportUnhandled};
 use interloko_runtime::code::CodeUnit;
 use interloko_runtime::control::ControlFault;
@@ -166,6 +170,10 @@ pub enum RuntimeResult {
     UnhandledCondition {
         /// Source name of the condition's class.
         class: String,
+        /// What the condition reports when it is a `<type-error>`, such as
+        /// one a failed runtime check signalled. Its code is the outcome's
+        /// code.
+        type_error: Option<alloc::boxed::Box<TypeErrorReport>>,
     },
     /// A block exit procedure was called after its block had returned.
     ExpiredExit,
@@ -179,9 +187,11 @@ pub enum RuntimeResult {
 }
 
 impl RuntimeResult {
-    /// Stable code for non-successful runtime/session outcomes.
+    /// Stable code for non-successful runtime/session outcomes. An
+    /// unhandled `<type-error>` ends the run with its own code, such as
+    /// `type-error.cast`.
     #[must_use]
-    pub const fn code(&self) -> Option<DiagnosticCode> {
+    pub fn code(&self) -> Option<DiagnosticCode> {
         match self {
             Self::Returned(_) => None,
             Self::MissingMain => Some(DiagnosticCode::RuntimeMissingMain),
@@ -189,7 +199,12 @@ impl RuntimeResult {
             Self::Trap { trap } => Some(trap_code(trap)),
             Self::HostFunctionFailed { .. } => Some(DiagnosticCode::RuntimeHostFunctionFailed),
             Self::UnsupportedResult { .. } => Some(DiagnosticCode::RuntimeUnsupportedResult),
-            Self::UnhandledCondition { .. } => Some(DiagnosticCode::RuntimeUnhandledCondition),
+            Self::UnhandledCondition { type_error, .. } => {
+                Some(type_error.as_ref().and_then(|report| report.kind()).map_or(
+                    DiagnosticCode::RuntimeUnhandledCondition,
+                    DiagnosticCode::from,
+                ))
+            }
             Self::ExpiredExit => Some(DiagnosticCode::RuntimeExpiredExit),
             Self::Aborted => Some(DiagnosticCode::RuntimeAborted),
             Self::Failed { .. } => Some(DiagnosticCode::RuntimeFailed),
@@ -222,8 +237,12 @@ impl fmt::Display for RuntimeResult {
                     "main result {declared} is not one supported scalar"
                 )
             }
-            Self::UnhandledCondition { class } => {
-                write!(formatter, "unhandled condition {class}")
+            Self::UnhandledCondition { class, type_error } => {
+                write!(formatter, "unhandled condition {class}")?;
+                match type_error {
+                    Some(report) => write!(formatter, ": {report}"),
+                    None => Ok(()),
+                }
             }
             Self::ExpiredExit => formatter.write_str("block exit called after its block returned"),
             Self::Aborted => formatter.write_str("aborted by the condition chooser"),
@@ -603,6 +622,8 @@ pub enum FunctionCallError {
     UnhandledCondition {
         /// Source name of the condition's class.
         class: String,
+        /// What the condition reports when it is a `<type-error>`.
+        type_error: Option<alloc::boxed::Box<TypeErrorReport>>,
         /// Partial trace captured up to the signal, when requested.
         trace: Option<ExecutionTrace>,
     },
@@ -678,8 +699,14 @@ impl fmt::Display for FunctionCallError {
                 formatter.write_str("the runtime image was built for a different runtime layout")
             }
             Self::Link { error } => write!(formatter, "cannot link the program: {error}"),
-            Self::UnhandledCondition { class, .. } => {
-                write!(formatter, "unhandled condition {class}")
+            Self::UnhandledCondition {
+                class, type_error, ..
+            } => {
+                write!(formatter, "unhandled condition {class}")?;
+                match type_error {
+                    Some(report) => write!(formatter, ": {report}"),
+                    None => Ok(()),
+                }
             }
             Self::ExpiredExit { .. } => {
                 formatter.write_str("block exit called after its block returned")
@@ -6166,9 +6193,14 @@ fn runtime_result_for_main_error(
             (RuntimeResult::MainHasParameters, None)
         }
         FunctionCallError::Trap { trap, trace } => (RuntimeResult::Trap { trap: *trap }, trace),
-        FunctionCallError::UnhandledCondition { class, trace } => {
-            (RuntimeResult::UnhandledCondition { class }, trace)
-        }
+        FunctionCallError::UnhandledCondition {
+            class,
+            type_error,
+            trace,
+        } => (
+            RuntimeResult::UnhandledCondition { class, type_error },
+            trace,
+        ),
         FunctionCallError::ExpiredExit { trace } => (RuntimeResult::ExpiredExit, trace),
         FunctionCallError::Aborted { trace } => (RuntimeResult::Aborted, trace),
         FunctionCallError::RuntimeFailed { detail, trace } => {
@@ -6381,14 +6413,27 @@ fn run_turn_body<'a>(
                 });
             }
             return Err(match failure {
+                // The condition belongs to the call's turn, which is still
+                // open, so a failed check's `<type-error>` can be read
+                // before it aborts. One the program signalled itself is an
+                // ordinary unhandled condition.
                 RunFailure::Control {
-                    fault: ControlFault::UnhandledCondition { class, .. },
+                    fault:
+                        ControlFault::UnhandledCondition {
+                            class,
+                            condition,
+                            failed_check,
+                        },
                     ..
                 } => FunctionCallError::UnhandledCondition {
                     class: tape
                         .runtime()
                         .class(class)
                         .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone()),
+                    type_error: failed_check
+                        .then(|| host.type_error_report(condition))
+                        .flatten()
+                        .map(alloc::boxed::Box::new),
                     trace,
                 },
                 RunFailure::Control {
@@ -6514,6 +6559,10 @@ impl<'a> SharedFunctionCallHost<'a> {
 
     fn failure(&self) -> Option<(String, HostFunctionFailure)> {
         self.0.borrow().failure.clone()
+    }
+
+    fn type_error_report(&self, condition: execution_tape::value::Obj) -> Option<TypeErrorReport> {
+        self.0.borrow().runtime.type_error_report(condition)
     }
 }
 
@@ -16274,7 +16323,7 @@ mod tests {
     }
 
     #[test]
-    fn float_to_integer_conversion_is_exact_or_traps() {
+    fn float_to_integer_conversion_is_exact_or_signals() {
         let artifacts = CompilerSession::compile_source(
             "convert.loko",
             "define function to-integer(x :: <double-float>) => <integer>\n  as(<integer>, x)\nend;",
@@ -16291,10 +16340,25 @@ mod tests {
                 "{input} should convert to {expected}"
             );
         }
-        for input in [2.5, -0.5, f64::NAN, f64::INFINITY, 9.223372036854776e18] {
+        // 2^63 saturates to `i64::MAX`, which converts back to 2^63.
+        for input in [
+            2.5,
+            -0.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            9.223372036854776e18,
+            -9.223372036854778e18,
+        ] {
             assert!(
-                matches!(convert(input), Err(FunctionCallError::Trap { .. })),
-                "{input} should trap"
+                matches!(
+                    convert(input),
+                    Err(FunctionCallError::UnhandledCondition {
+                        type_error: Some(ref report),
+                        ..
+                    }) if report.code == "type-error.range" && report.expected == "<integer>"
+                ),
+                "{input} should signal a range type error"
             );
         }
     }
@@ -16339,10 +16403,14 @@ mod tests {
             ("mul", &[1 << 32, 1 << 31][..]),
             ("neg", &[i64::MIN][..]),
         ] {
-            let Err(FunctionCallError::Trap { trap, .. }) = call(name, args) else {
-                panic!("{name}{args:?} should trap");
+            let Err(FunctionCallError::UnhandledCondition {
+                type_error: Some(report),
+                ..
+            }) = call(name, args)
+            else {
+                panic!("{name}{args:?} should signal an overflow");
             };
-            assert_eq!(loko_trap(&trap), Some(lower::LokoTrap::IntegerOverflow));
+            assert_eq!(report.code, "type-error.overflow");
         }
     }
 
@@ -16472,8 +16540,11 @@ mod tests {
         if text = \"abcd\" then 4 else 0 end\nend;\n\
         define function tag(n :: <integer>) => <boolean>\n  \
         if n = 0 then #ready = #ready else #other = #other end\nend;\n\
+        define generic poke(x);\n\
+        define method poke(x :: <integer>) => <integer>\n  x\nend;\n\
         define function tag-then-trap(n :: <integer>) => <integer>\n  \
-        if #fresh = #fresh then n + 9223372036854775807 else 0 end\nend;";
+        if #fresh = #fresh then \
+        poke(if n = 0 then as(<object>, n) else as(<object>, #other) end) else 0 end\nend;";
 
     #[test]
     fn runtime_turns_keep_the_heap_flat() {
@@ -16673,10 +16744,13 @@ mod tests {
             RuntimeMode::RunMain,
         );
         let result = artifacts.runtime_result.expect("main should run");
-        assert_eq!(result.code(), Some(DiagnosticCode::RuntimeIntegerOverflow));
+        assert_eq!(result.code(), Some(DiagnosticCode::TypeErrorOverflow));
         let rendered = result.to_string();
         assert!(
-            rendered.starts_with("runtime trap: integer overflow (trap at "),
+            rendered.starts_with(
+                "unhandled condition <type-error>: type-error.overflow: <integer> arithmetic \
+                 on #[9223372036854775807, 1] overflows at typing:def"
+            ),
             "{rendered}"
         );
     }
@@ -16695,10 +16769,17 @@ mod tests {
             run_scalar(&artifacts, "from-float").ok(),
             Some(FunctionValue::Float(7.5))
         );
-        assert!(matches!(
-            run_scalar(&artifacts, "from-integer"),
-            Err(FunctionCallError::Trap { .. })
-        ));
+        let Err(FunctionCallError::UnhandledCondition {
+            type_error: Some(report),
+            ..
+        }) = run_scalar(&artifacts, "from-integer")
+        else {
+            panic!("unboxing an integer as a float signals a type error");
+        };
+        assert_eq!(report.code, "type-error.cast");
+        assert_eq!(report.expected, "<double-float>");
+        assert_eq!(report.value, "7");
+        assert!(report.site.starts_with("typing:def"), "{}", report.site);
     }
 
     struct CelsiusHandler;
@@ -20573,6 +20654,7 @@ end;
     }
 
     use alloc::vec;
+    use interloko_model::condition::TypeErrorKind;
     use interloko_model::contract::{Contract, ContractBreak, ContractPosition};
     use interloko_runtime::chooser::{Choice, OfferedRestart, UnhandledCondition};
 
@@ -20605,6 +20687,209 @@ end;
                 },
             )
             .map(|outcome| outcome.value)
+    }
+
+    const SHAPE_CAST: &str = "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define class <square> (<shape>)\n  slot side :: <integer>;\nend;\n\
+         define function radius-of(s :: <shape>) => <integer>\n  as(<circle>, s).radius\nend;\n\
+         define function main() => <integer>\n  \
+         let spare :: <circle> = make(<circle>, radius: 5);\n  \
+         let wrong :: <square> = make(<square>, side: 2);\n  \
+         radius-of(wrong) + spare.radius\nend;";
+
+    /// The first value of `class` in a suspended frame's registers.
+    fn register_of_class(condition: &UnhandledCondition<'_>, class: &str) -> Value {
+        let class = condition.runtime.layout().class_id(class).expect("class");
+        condition
+            .frames
+            .iter()
+            .flat_map(|frame| &frame.registers)
+            .map(|register| register.value.clone())
+            .find(|value| condition.runtime.value_class(value) == Some(class))
+            .expect("a frame holds a value of the class")
+    }
+
+    #[test]
+    fn a_failed_cast_signals_a_type_error_and_checks_its_replacement() {
+        let artifacts =
+            CompilerSession::compile_source("cast.loko", SHAPE_CAST, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut reports = Vec::new();
+            // A `<square>` is no better than the value that failed, so the
+            // cast signals again; the `<circle>` passes.
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                assert!(condition.restarts.iter().any(|restart| matches!(
+                    restart,
+                    OfferedRestart::UseValue { types } if *types == [runtime::object_type()]
+                )));
+                let replacement = if reports.is_empty() {
+                    "<square>"
+                } else {
+                    "<circle>"
+                };
+                reports.push(report);
+                Choice::UseValue(vec![register_of_class(condition, replacement)])
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(10), "{policy:?}");
+            let [first, second] = reports.as_slice() else {
+                panic!("{policy:?}: {reports:?}");
+            };
+            assert_eq!(first.code, "type-error.cast");
+            assert_eq!(first.expected, "<circle>");
+            assert_eq!(first.value, "{<square>}");
+            let function = artifacts
+                .sem
+                .functions
+                .iter()
+                .find(|function| function.name == "radius-of")
+                .expect("radius-of");
+            let decision = artifacts
+                .typing
+                .decisions()
+                .find(|decision| decision.owner == function.definition)
+                .expect("the cast's decision");
+            assert_eq!(first.site, typing_decision_object_id(decision));
+            // The bad replacement is reported at the same site.
+            assert_eq!(second, first);
+        }
+    }
+
+    #[test]
+    fn a_comparison_does_not_narrow_through_a_conversion_that_may_fail() {
+        // When `as(<i32>, n)` fails, `use-value` supplies the `7i32` the
+        // comparison sees, so the then branch says nothing about `n`. Had
+        // typing narrowed `n` to 7 there, `codegen: proved` would add without
+        // an overflow check.
+        let mut sources = Vec::new();
+        for test in [
+            "as(<i32>, n) = 7i32",
+            "as(<i32>, n) < 8i32",
+            "7u32 = as(<u32>, n)",
+        ] {
+            sources.push(format!(
+                "define function pick(n :: <integer>) => <integer>\n  \
+                 if {test} then n + 9223372036854775000 else 0 end\nend;\n\
+                 define function main() => <integer>\n  pick(4294967303)\nend;"
+            ));
+        }
+        for source in &sources {
+            let artifacts =
+                CompilerSession::compile_source("narrow.loko", source, RuntimeMode::CompileOnly);
+            assert_eq!(artifacts.diagnostics, Vec::new(), "{source}");
+            let mut outcomes = Vec::new();
+            for policy in lower::CodegenPolicy::ALL {
+                let artifacts = artifacts.with_codegen_policy(*policy);
+                let mut codes = Vec::new();
+                let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                    let report = condition.type_error().expect("a type error");
+                    let choice = match report.kind() {
+                        Some(TypeErrorKind::Range) => {
+                            match condition.restarts.iter().find_map(|restart| match restart {
+                                OfferedRestart::UseValue { types } => Some(types.to_vec()),
+                                _ => None,
+                            }) {
+                                Some(types)
+                                    if types == [execution_tape::program::ValueType::U32] =>
+                                {
+                                    Choice::UseValue(vec![Value::U32(7)])
+                                }
+                                _ => Choice::UseValue(vec![Value::I32(7)]),
+                            }
+                        }
+                        _ => Choice::UseValue(vec![Value::I64(-1)]),
+                    };
+                    codes.push(report.code);
+                    choice
+                });
+                let value = call_with_chooser(&artifacts, &mut chooser).expect("resumes");
+                outcomes.push((codes, value));
+            }
+            assert_eq!(
+                outcomes[0],
+                (
+                    vec![
+                        String::from("type-error.range"),
+                        String::from("type-error.overflow")
+                    ],
+                    FunctionValue::Integer(-1)
+                ),
+                "{source}"
+            );
+            assert_eq!(outcomes[0], outcomes[1], "{source}");
+        }
+    }
+
+    #[test]
+    fn a_type_error_the_program_signals_is_an_ordinary_condition() {
+        // It has a failed check's slots, but no check signalled it: its
+        // `use-value` is what the `signal` returns, and an unhandled one
+        // ends the run as any unhandled condition does.
+        let artifacts = CompilerSession::compile_source(
+            "mine.loko",
+            "define function main() => <integer>\n  \
+             signal(make(<type-error>, value: 1, expected-type: \"<string>\", \
+             site: \"mine\", code: \"type-error.cast\"))\nend;",
+            RuntimeMode::RunMain,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let result = artifacts.runtime_result.as_ref().expect("main ran");
+        assert_eq!(
+            result.code(),
+            Some(DiagnosticCode::RuntimeUnhandledCondition)
+        );
+        assert_eq!(result.to_string(), "unhandled condition <type-error>");
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            assert!(!condition.failed_check);
+            assert_eq!(condition.type_error(), None);
+            Choice::UseValue(vec![Value::I64(5)])
+        });
+        assert_eq!(
+            call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes"),
+            FunctionValue::Integer(5)
+        );
+    }
+
+    #[test]
+    fn failed_range_and_overflow_checks_resume_with_the_supplied_result() {
+        let artifacts = CompilerSession::compile_source(
+            "scalar.loko",
+            "define function narrow(n :: <integer>) => <i32>\n  as(<i32>, n)\nend;\n\
+             define function sum(a :: <integer>, b :: <integer>) => <integer>\n  a + b\nend;\n\
+             define function main() => <integer>\n  \
+             as(<integer>, narrow(5000000000)) + sum(9223372036854775807, 1)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut codes = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                let choice = match report.kind() {
+                    Some(TypeErrorKind::Range) => {
+                        assert_eq!(report.value, "5000000000");
+                        assert_eq!(report.expected, "<i32>");
+                        Choice::UseValue(vec![Value::I32(7)])
+                    }
+                    Some(TypeErrorKind::Overflow) => {
+                        assert_eq!(report.value, "#[9223372036854775807, 1]");
+                        assert_eq!(report.expected, "<integer>");
+                        Choice::UseValue(vec![Value::I64(35)])
+                    }
+                    kind => panic!("unexpected {kind:?}"),
+                };
+                codes.push(report.code);
+                choice
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(42), "{policy:?}");
+            assert_eq!(codes, ["type-error.range", "type-error.overflow"]);
+        }
     }
 
     #[test]
@@ -20871,6 +21156,63 @@ end;
                 _ => Choice::Unhandled,
             }
         }
+    }
+
+    #[test]
+    fn new_checks_and_exits_elsewhere_leave_suspended_code_unchanged() {
+        // Each function numbers its own `<type-error>` sites, and the
+        // signatures and tags they use are declared in a fixed order ahead
+        // of the program's own exit tags, so adding checks to `main`, which
+        // comes first, and an exit procedure leaves `pause` and `measure`
+        // the same bytecode: their frames run code nothing superseded.
+        let source = |main: &str, tail: &str| {
+            format!(
+                "define class <oops> (<object>)\nend;\n\
+                 define function main() => <integer>\n  {main}\nend;\n\
+                 define function pause(n :: <integer>) => <integer>\n  signal(make(<oops>))\nend;\n\
+                 define function measure(n :: <integer>) => <integer>\n  pause(n) + n\nend;\n{tail}"
+            )
+        };
+        let compile = |main: &str, tail: &str| {
+            let artifacts = CompilerSession::compile_source(
+                "checks.loko",
+                &source(main, tail),
+                RuntimeMode::CompileOnly,
+            );
+            assert_eq!(artifacts.diagnostics, Vec::new());
+            artifacts
+        };
+        let before = compile("measure(1)", "");
+        // The edit also adds an exit procedure that escapes its block, which
+        // declares a new exit tag.
+        let after = compile(
+            "measure(1) + as(<integer>, as(<object>, 2))",
+            "define function make-exit() => <callable>\n  block (out)\n    out\n  end\nend;",
+        );
+        let mut asked = 0;
+        let mut superseded = Vec::new();
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            if asked == 1 {
+                return Choice::Install(after.code_unit().expect("tape"));
+            }
+            superseded = condition
+                .frames
+                .iter()
+                .map(|frame| (frame_name(&[&after], frame), frame.code.superseded))
+                .collect();
+            Choice::UseValue(vec![Value::I64(0)])
+        });
+        let value = call_with_chooser(&before, &mut chooser).expect("use-value resumes");
+        assert_eq!(value, FunctionValue::Integer(1));
+        assert_eq!(
+            superseded,
+            vec![
+                ("pause".into(), false),
+                ("measure".into(), false),
+                ("main".into(), true),
+            ]
+        );
     }
 
     #[test]
@@ -21949,7 +22291,10 @@ end;
 
     const PARKED_PROGRAM: &str = "define class <problem> (<object>)\nend;\n\
          define function one() => <integer>\n  1\nend;\n\
-         define function overflow(n :: <integer>) => <integer>\n  n + 9223372036854775807\nend;\n\
+         define generic poke(x);\n\
+         define method poke(x :: <integer>) => <integer>\n  x\nend;\n\
+         define function no-method(n :: <integer>) => <integer>\n  \
+         poke(if n = 0 then as(<object>, n) else as(<object>, #other) end)\nend;\n\
          define function risky() => <integer>\n  signal(make(<problem>))\nend;\n\
          define function make-exit() => <callable>\n  block (out)\n    out\n  end\nend;\n\
          define function expired() => <integer>\n  \
@@ -21996,7 +22341,7 @@ end;
         // A trap, an abort and an unhandled condition each end their call
         // and leave the VM as reusable as a fresh one.
         let trapped =
-            runtime.call_function(&artifacts, "overflow", &[FunctionValue::Integer(1)], None);
+            runtime.call_function(&artifacts, "no-method", &[FunctionValue::Integer(1)], None);
         assert!(matches!(trapped, Err(FunctionCallError::Trap { .. })));
         assert_parked_fresh(&runtime, &artifacts);
         let mut abort = Scripted(|_: &UnhandledCondition<'_>| Choice::Abort);

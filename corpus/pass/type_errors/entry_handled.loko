@@ -1,0 +1,29 @@
+// expect: run 4
+// expect: diagnostics 0
+
+// The caller of an untyped `<callable>` can handle the entry check's
+// `<type-error>` like any other.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function call-with(f :: <callable>, s :: <square>) => <integer>
+  handle
+    apply(f, s)
+  with restart e :: <type-error>
+    if e.type-error-code = "type-error.entry" then 4 else 0 end
+  end
+end;
+
+define function main() => <integer>
+  call-with(radius-of, make(<square>, side: 7))
+end;
