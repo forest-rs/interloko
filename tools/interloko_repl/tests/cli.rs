@@ -1001,3 +1001,106 @@ fn codegen_policy_defaults_to_proved() {
     assert!(stderr.is_empty(), "{stderr}");
     assert_eq!(stdout, "codegen proved\n");
 }
+
+const SHAPES: &str = "\
+define class <shape> (<object>)
+end;
+define class <circle> (<shape>)
+end;
+define generic area(x);
+define method area(c :: <circle>)
+  7
+end;
+define function measure(s :: <shape>)
+  let bonus = if instance?(s, <circle>) then 1 else 0 end;
+  area(s) + bonus
+end;
+";
+
+/// The `binding:` id of `measure`'s parameter, found from `:eop` as a user
+/// or agent would.
+fn shapes_param_id() -> String {
+    let (stdout, _) = run_repl(&format!("{SHAPES}:eop\n:quit\n"));
+    stdout
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("object "))
+        .find(|id| id.starts_with("binding:") && id.ends_with(":s"))
+        .expect("binding object for s")
+        .to_string()
+}
+
+#[test]
+fn annotate_previews_then_edits_the_buffer_and_reports_the_delta() {
+    let id = shapes_param_id();
+    let (stdout, stderr) = run_repl(&format!(
+        "{SHAPES}\
+         :annotate --dry-run {id} <circle>\n\
+         :source\n\
+         :annotate {id} <circle>\n\
+         :source\n\
+         measure(make(<circle>))\n\
+         :annotate {id} <integer>\n\
+         :annotate {id} <circle> = 3\n\
+         :invoke {id} preview-annotation <shape>\n\
+         :quit\n"
+    ));
+
+    assert!(
+        stdout.contains(&format!("would annotate {id} <circle> (was <shape>)")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("instance verdict=checked->proved codegen=kept->elided"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("annotated {id} <circle> (was <shape>)")),
+        "{stdout}"
+    );
+    let sources: Vec<&str> = stdout.split("source repl.loko").collect();
+    assert_eq!(sources.len(), 3, "{stdout}");
+    assert!(sources[1].contains("measure(s :: <shape>)"), "{stdout}");
+    assert!(sources[2].contains("measure(s :: <circle>)"), "{stdout}");
+    assert!(stdout.lines().any(|line| line == "8"), "{stdout}");
+    assert!(
+        stderr.contains("error: annotation rejected: semantic failure"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("error: annotation rejected: `<circle> = 3` is not a type annotation"),
+        "{stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("would annotate {id} <shape> (was <circle>)")),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn typing_command_shows_and_sets_the_policy_and_survives_reset() {
+    let (stdout, stderr) = run_repl(&format!(
+        "{SHAPES}\
+         :typing\n\
+         :typing strict\n\
+         :typing loud\n\
+         :reset\n\
+         :typing\n\
+         :invoke typing-config:session set-typing-policy soft\n\
+         :quit\n"
+    ));
+    assert!(stdout.contains("typing soft\n"), "{stdout}");
+    assert!(stdout.contains("typing strict\n"), "{stdout}");
+    assert!(
+        stdout.contains("dispatch verdict=checked codegen=kept severity=silent->warning"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("reset\ntyping strict\n"), "{stdout}");
+    assert!(
+        stdout.contains("reset\ntyping strict\ntyping soft\ntyping delta: changed=0"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("error: `loud` is neither a typing preset"),
+        "{stderr}"
+    );
+}

@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use interloko_compiler::annotation::AnnotationTarget;
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
 use interloko_compiler::grammar_frontend;
 use interloko_compiler::identity::{ArtifactKey, SourceFileId};
@@ -17,10 +18,11 @@ use interloko_compiler::sem;
 use interloko_compiler::session::{
     CallServices, DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject,
     EnvironmentOrigin, FunctionCallError, FunctionCallOutcome, FunctionValue,
-    IncrementalCompilerSession, RuntimeMode, SessionArtifacts, SessionRuntime, TopLevelFormKind,
-    TopLevelFormSpan, TurnStats,
+    IncrementalCompilerSession, MutationError, RuntimeMode, SessionArtifacts, SessionRuntime,
+    TopLevelFormKind, TopLevelFormSpan, TurnStats,
 };
 use interloko_compiler::syntax::{self, TokenKind};
+use interloko_compiler::typing::{self, TypingConfig};
 use interloko_diagnostics::{DiagnosticCatalog, DiagnosticRenderer};
 use nu_ansi_term::{Color, Style as AnsiStyle};
 use reedline::{
@@ -49,6 +51,7 @@ const COMMANDS: &[&str] = &[
     ":reset",
     ":clear",
     ":codegen",
+    ":typing",
     ":cancel",
     ":clear-pending",
     ":pending",
@@ -63,6 +66,7 @@ const COMMANDS: &[&str] = &[
     ":show-form",
     ":drop-form",
     ":invoke",
+    ":annotate",
     ":frames",
 ];
 const DUMP_STAGES: &[&str] = &[
@@ -343,6 +347,8 @@ impl Repl {
                 writeln!(stdout, "cleared")?;
             }
             ":codegen" => self.codegen_command(&args, stdout, stderr)?,
+            ":typing" => self.typing_command(&args, stdout, stderr)?,
+            ":annotate" => self.annotate_command(&args, stdout, stderr)?,
             ":cancel" | ":clear-pending" => {
                 if self.cancel_pending_definition() {
                     writeln!(stdout, "cancelled pending definition")?;
@@ -999,10 +1005,50 @@ impl Repl {
         W: Write,
         E: Write,
     {
-        let Some((id, affordance)) = object_id_and_affordance(args, stderr)? else {
+        let Some((id, affordance, extra)) = object_id_and_affordance(args, stderr)? else {
             return Ok(());
         };
         let artifacts = self.ensure_artifacts(stderr)?;
+        if let Some(adjustment) = EnvironmentAffordance::from_name(&affordance).filter(|name| {
+            matches!(
+                name,
+                EnvironmentAffordance::Annotate
+                    | EnvironmentAffordance::PreviewAnnotation
+                    | EnvironmentAffordance::SetTypingPolicy
+                    | EnvironmentAffordance::SetCodegenPolicy
+            )
+        }) {
+            let Some(object) = find_object(&artifacts, &id) else {
+                writeln!(stderr, "error: unknown object `{id}`")?;
+                return Ok(());
+            };
+            if !object.affordances.contains(adjustment) {
+                writeln!(
+                    stderr,
+                    "error: object `{id}` does not expose affordance `{affordance}`"
+                )?;
+                return Ok(());
+            }
+            return match adjustment {
+                EnvironmentAffordance::SetTypingPolicy => {
+                    self.typing_command(&extra, stdout, stderr)
+                }
+                EnvironmentAffordance::SetCodegenPolicy => {
+                    self.set_codegen_policy_with_delta(&extra, stdout, stderr)
+                }
+                _ if extra.is_empty() => {
+                    writeln!(stderr, "usage: :invoke {id} {affordance} <type>")?;
+                    Ok(())
+                }
+                _ => self.annotate(
+                    &id,
+                    &extra.join(" "),
+                    adjustment == EnvironmentAffordance::PreviewAnnotation,
+                    stdout,
+                    stderr,
+                ),
+            };
+        }
         match self.resolve_repl_object_reference(&artifacts, &id) {
             ReplObjectReference::Form(entry) => match affordance.as_str() {
                 "inspect" => {
@@ -1299,6 +1345,16 @@ impl Repl {
                 "error: mutating affordance `{}` is not executable by interloko_repl in this slice",
                 affordance.as_str()
             )?,
+            EnvironmentAffordance::Annotate
+            | EnvironmentAffordance::PreviewAnnotation
+            | EnvironmentAffordance::SetTypingPolicy
+            | EnvironmentAffordance::SetCodegenPolicy => writeln!(
+                stderr,
+                "error: affordance `{}` takes arguments; use :invoke {} {} <args>",
+                affordance.as_str(),
+                object.id.as_str(),
+                affordance.as_str()
+            )?,
             EnvironmentAffordance::Diff => writeln!(
                 stderr,
                 "error: affordance `{}` needs a second source version and is not executable by interloko_repl in this slice",
@@ -1451,6 +1507,186 @@ impl Repl {
         Ok(())
     }
 
+    /// `set-codegen-policy` on `typing-config:session`: `:codegen` that also
+    /// reports which decisions' codegen the change moves.
+    fn set_codegen_policy_with_delta<W, E>(
+        &mut self,
+        args: &[&str],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let [label] = args else {
+            writeln!(
+                stderr,
+                "usage: :invoke typing-config:session set-codegen-policy {}",
+                codegen_policy_labels()
+            )?;
+            return Ok(());
+        };
+        let Some(policy) = CodegenPolicy::from_label(label) else {
+            writeln!(
+                stderr,
+                "error: unknown codegen policy `{label}`; expected {}",
+                codegen_policy_labels()
+            )?;
+            return Ok(());
+        };
+        let before = self.ensure_artifacts(stderr)?;
+        self.set_codegen_policy(policy)?;
+        let after = self.ensure_artifacts(stderr)?;
+        writeln!(stdout, "codegen {}", policy.as_str())?;
+        write!(stdout, "{}", before.typing_delta(&after).render())?;
+        Ok(())
+    }
+
+    /// Shows the typing policy, or changes it and reports which decisions'
+    /// severities moved. Like the codegen policy it is a session input: it
+    /// is kept across `:reset` and recorded in no mutation log.
+    fn typing_command<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let current = self.session.typing_config();
+        if args.is_empty() {
+            writeln!(stdout, "typing {}", typing::config_label(current))?;
+            return Ok(());
+        }
+        let config = match current.apply_spec(&args.join(" ")) {
+            Ok(config) => config,
+            Err(error) => {
+                writeln!(stderr, "error: {error}")?;
+                return Ok(());
+            }
+        };
+        if config == current {
+            writeln!(stdout, "typing {}", typing::config_label(current))?;
+            return Ok(());
+        }
+        let before = self.ensure_artifacts(stderr)?;
+        self.session.set_typing_config(config);
+        self.restore_accepted_cache()?;
+        let after = self.ensure_artifacts(stderr)?;
+        writeln!(stdout, "typing {}", typing::config_label(config))?;
+        write!(stdout, "{}", before.typing_delta(&after).render())?;
+        Ok(())
+    }
+
+    /// `:annotate [--dry-run] <binding:...|result:...> <type>`.
+    fn annotate_command<W, E>(
+        &mut self,
+        args: &[&str],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let dry_run = args.contains(&"--dry-run");
+        let rest: Vec<&str> = args
+            .iter()
+            .copied()
+            .filter(|arg| *arg != "--dry-run")
+            .collect();
+        let [target, type_words @ ..] = rest.as_slice() else {
+            writeln!(
+                stderr,
+                "usage: :annotate [--dry-run] <binding:...|result:...> <type>"
+            )?;
+            return Ok(());
+        };
+        if type_words.is_empty() {
+            writeln!(
+                stderr,
+                "usage: :annotate [--dry-run] <binding:...|result:...> <type>"
+            )?;
+            return Ok(());
+        }
+        self.annotate(target, &type_words.join(" "), dry_run, stdout, stderr)
+    }
+
+    /// Writes `type_source` as `target`'s annotation in the accepted
+    /// buffer, or with `dry_run` only reports what it would change. The
+    /// edit goes through the same candidate-and-accept path as any other
+    /// buffer change.
+    fn annotate<W, E>(
+        &mut self,
+        target: &str,
+        type_source: &str,
+        dry_run: bool,
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(parsed) = AnnotationTarget::parse(target) else {
+            writeln!(
+                stderr,
+                "error: `{target}` is not a binding:<definition>:<name> or result:<definition> id"
+            )?;
+            return Ok(());
+        };
+        let artifacts = self.ensure_artifacts(stderr)?;
+        let preview = match artifacts.preview_annotation(&parsed, type_source) {
+            Ok(preview) => preview,
+            Err(error) => {
+                writeln!(
+                    stderr,
+                    "error: annotation rejected: {}",
+                    annotation_error_summary(&error)
+                )?;
+                if let MutationError::ParseFailed { diagnostics }
+                | MutationError::SemanticFailed { diagnostics } = &error
+                {
+                    self.print_diagnostics(diagnostics, stderr)?;
+                }
+                return Ok(());
+            }
+        };
+        let annotation = preview.edit.text.trim_start_matches([' ', ':', '=', '>']);
+        if dry_run {
+            writeln!(
+                stdout,
+                "would annotate {} {annotation} (was {})",
+                preview.target,
+                preview.previous.as_deref().unwrap_or("inferred")
+            )?;
+            write!(stdout, "{}", preview.delta.render())?;
+            return Ok(());
+        }
+        let Some(candidate_source) = preview.edit.apply(&self.source_buffer.rendered_source())
+        else {
+            writeln!(stderr, "error: the annotation no longer fits the buffer")?;
+            return Ok(());
+        };
+        let artifacts = self.compile_source(candidate_source, stderr, false)?;
+        if artifacts.has_errors() {
+            self.restore_accepted_cache()?;
+            return Ok(());
+        }
+        let mut candidate_buffer = self.source_buffer.clone();
+        candidate_buffer
+            .rebuild_from_form_spans(&artifacts.syntax.source, &artifacts.top_level_forms());
+        self.source_buffer = candidate_buffer;
+        self.last_artifacts = Some(artifacts);
+        self.dirty = true;
+        writeln!(
+            stdout,
+            "annotated {} {annotation} (was {})",
+            preview.annotated,
+            preview.previous.as_deref().unwrap_or("inferred")
+        )?;
+        write!(stdout, "{}", preview.delta.render())?;
+        Ok(())
+    }
+
     fn set_codegen_policy(&mut self, policy: CodegenPolicy) -> Result<()> {
         if policy == self.session.codegen_policy() {
             return Ok(());
@@ -1464,6 +1700,7 @@ impl Repl {
 
     fn reset(&mut self) {
         let codegen_policy = self.session.codegen_policy();
+        let typing_config = self.session.typing_config();
         self.source_buffer.clear();
         self.pending_definition.clear();
         self.last_artifacts = None;
@@ -1474,6 +1711,7 @@ impl Repl {
         self.dirty = false;
         self.session = IncrementalCompilerSession::new();
         self.session.set_codegen_policy(codegen_policy);
+        self.session.set_typing_config(typing_config);
         self.session
             .add_source_with_id(self.source_file, SOURCE_NAME, "");
     }
@@ -1960,14 +2198,49 @@ where
     }
 }
 
-fn object_id_and_affordance<E>(args: &[&str], stderr: &mut E) -> Result<Option<(String, String)>>
+/// Splits `:invoke` arguments into the object, the affordance, and the
+/// affordance's own arguments, which only the typing adjustments take.
+fn annotation_error_summary(error: &MutationError) -> String {
+    match error {
+        MutationError::ParseFailed { diagnostics } => {
+            format!("parse failure ({} new diagnostics)", diagnostics.len())
+        }
+        MutationError::SemanticFailed { diagnostics } => {
+            format!("semantic failure ({} new diagnostics)", diagnostics.len())
+        }
+        MutationError::UnknownAnnotationTarget { target } => {
+            format!("no binding or result `{target}` in the current source")
+        }
+        MutationError::InvalidTypeSource { type_source } => {
+            format!("`{type_source}` is not a type annotation")
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+fn object_id_and_affordance<'a, E>(
+    args: &[&'a str],
+    stderr: &mut E,
+) -> Result<Option<(String, String, Vec<&'a str>)>>
 where
     E: Write,
 {
     match args {
-        [id, affordance] => Ok(Some(((*id).to_string(), (*affordance).to_string()))),
+        [id, affordance, extra @ ..]
+            if extra.is_empty()
+                || matches!(
+                    *affordance,
+                    "annotate" | "preview-annotation" | "set-typing-policy" | "set-codegen-policy"
+                ) =>
+        {
+            Ok(Some((
+                (*id).to_string(),
+                (*affordance).to_string(),
+                extra.to_vec(),
+            )))
+        }
         _ => {
-            writeln!(stderr, "usage: :invoke <object-id> <affordance>")?;
+            writeln!(stderr, "usage: :invoke <object-id> <affordance> [args...]")?;
             Ok(None)
         }
     }
@@ -3053,11 +3326,15 @@ fn help_text() -> &'static str {
   :write <file>                 write rendered accepted source to a Loko source file
   :reload                       reload the last loaded source file
   :reset                        clear accepted source and cached artifacts;
-                                keeps the codegen policy
+                                keeps the codegen and typing policies
   :clear                        alias for :reset
   :codegen [off|proved]         show or set the codegen policy: `proved` (the
                                 default) acts on what soft typing proved, `off`
                                 keeps every runtime check
+  :typing [preset|check.verdict=severity...]
+                                show or set the typing policy (soft, silent,
+                                strict, or settings such as cast.checked=warning)
+                                and report the decisions whose severity moved
   :cancel                       cancel a pending multiline definition
   :clear-pending                alias for :cancel
   :pending                      show pending multiline definition
@@ -3073,7 +3350,13 @@ inspection:
   :affordances <object-id|name>
   :show-form <form-id>
   :drop-form <form-id>
-  :invoke <object-id> <affordance>"
+  :invoke <object-id> <affordance> [args...]
+
+typing:
+  :annotate [--dry-run] <binding:...|result:...> <type>
+                                write a type annotation and report the typing
+                                decisions it changes; --dry-run only reports
+  :invoke typing-config:session set-typing-policy|set-codegen-policy <args>"
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3394,6 +3677,10 @@ impl Completer for InterlokoCompleter {
                 ":codegen" => CodegenPolicy::ALL
                     .iter()
                     .map(|policy| policy.as_str().to_string())
+                    .collect(),
+                ":typing" => TypingConfig::PRESETS
+                    .iter()
+                    .map(|preset| (*preset).to_string())
                     .collect(),
                 ":dispatch" => self
                     .state

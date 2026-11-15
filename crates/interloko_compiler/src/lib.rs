@@ -11,6 +11,7 @@ extern crate alloc;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 
+pub mod annotation;
 /// Surface AST produced from the CST.
 pub mod ast;
 /// Shared diagnostic types.

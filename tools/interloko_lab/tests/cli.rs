@@ -1457,3 +1457,167 @@ fn codegen_option_rejects_unknown_missing_and_repeated_policies() {
         "{repeated}"
     );
 }
+
+/// The `binding:` id of parameter `s`, discovered the way an agent would:
+/// from the `eop` listing, since definition ids depend on the file path.
+fn measure_param_id(path: &str) -> String {
+    let eop = run_lab(&["eop", path]);
+    eop.lines()
+        .filter_map(|line| line.trim().strip_prefix("object "))
+        .find(|id| id.starts_with("binding:") && id.ends_with(":s"))
+        .expect("binding object for s")
+        .to_string()
+}
+
+#[test]
+fn eop_projects_annotation_targets_with_their_declarations() {
+    let path = fixture("annotate_shapes.loko");
+    let path = path.to_str().expect("fixture path should be utf8");
+    let id = measure_param_id(path);
+    let inspect = run_lab(&["inspect", path, &id]);
+    assert!(
+        inspect.contains("role=param declared=written annotation=<shape>"),
+        "{inspect}"
+    );
+    let affordances = run_lab(&["affordances", path, &id]);
+    for name in ["show-types", "annotate", "preview-annotation"] {
+        assert!(affordances.contains(name), "{affordances}");
+    }
+    let types = run_lab(&["invoke-affordance", path, &id, "show-types"]);
+    assert!(types.contains("declared: <shape> written"), "{types}");
+    let local = id.replace(":s", ":bonus");
+    let types = run_lab(&["invoke-affordance", path, &local, "show-types"]);
+    assert!(types.contains("declared: <integer> inferred"), "{types}");
+    let dump = run_lab(&["dump", path, "--stage", "types"]);
+    assert!(
+        dump.contains(&format!("annotation=written id={id}")),
+        "{dump}"
+    );
+}
+
+#[test]
+fn annotate_reports_the_verdict_delta_it_buys() {
+    let path = fixture("annotate_shapes.loko");
+    let path = path.to_str().expect("fixture path should be utf8");
+    let id = measure_param_id(path);
+
+    let preview = run_lab(&["annotate", path, &id, "<circle>", "--dry-run"]);
+    assert!(
+        preview.starts_with(&format!(
+            "preview annotate target={id} annotation=<circle> previous=<shape> (not applied)"
+        )),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("instance verdict=checked->proved codegen=kept->elided"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("dispatch verdict=checked->proved codegen=kept"),
+        "{preview}"
+    );
+
+    let applied = run_lab(&["annotate", path, &id, "<circle>"]);
+    let first = applied.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("applied annotate mutation_id=0")
+            && first.contains("log_size=1")
+            && first.contains("strategy=full-candidate-rebuild"),
+        "{applied}"
+    );
+    // The applied delta is the preview's.
+    assert_eq!(
+        applied.lines().skip(1).collect::<Vec<_>>(),
+        preview.lines().skip(1).collect::<Vec<_>>()
+    );
+
+    let invoked = run_lab(&[
+        "invoke-affordance",
+        path,
+        &id,
+        "preview-annotation",
+        "--type",
+        "<circle>",
+    ]);
+    assert_eq!(invoked, preview);
+}
+
+#[test]
+fn annotate_rejects_wrong_annotations() {
+    let path = fixture("annotate_shapes.loko");
+    let path = path.to_str().expect("fixture path should be utf8");
+    let id = measure_param_id(path);
+    let stderr = run_lab_failure(&["annotate", path, &id, "<integer>"]);
+    assert!(
+        stderr.contains("annotate mutation failed: semantic failure"),
+        "{stderr}"
+    );
+    let stderr = run_lab_failure(&["annotate", path, &id, "<integer>", "=", "3"]);
+    assert!(stderr.contains("is not a type annotation"), "{stderr}");
+    let stderr = run_lab_failure(&[
+        "annotate",
+        path,
+        "binding:def0000000000000000:s",
+        "<circle>",
+    ]);
+    assert!(
+        stderr.contains("unknown object") || stderr.contains("binding:def0000000000000000:s"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn typing_config_affordances_report_policy_deltas() {
+    let path = fixture("annotate_shapes.loko");
+    let path = path.to_str().expect("fixture path should be utf8");
+    let affordances = run_lab(&["affordances", path, "typing-config:session"]);
+    assert!(affordances.contains("set-typing-policy"), "{affordances}");
+    assert!(affordances.contains("set-codegen-policy"), "{affordances}");
+
+    let (stdout, stderr) = run_lab_success(&[
+        "invoke-affordance",
+        path,
+        "typing-config:session",
+        "set-typing-policy",
+        "soft",
+        "dispatch.checked=warning",
+    ]);
+    assert!(
+        stdout.starts_with("typing policy soft -> custom"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("dispatch verdict=checked codegen=kept severity=silent->warning"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("typing.dispatch-runtime-checked"),
+        "{stderr}"
+    );
+
+    let stderr = run_lab_failure(&[
+        "invoke-affordance",
+        path,
+        "typing-config:session",
+        "set-typing-policy",
+        "loud",
+    ]);
+    assert!(
+        stderr.contains("`loud` is neither a typing preset"),
+        "{stderr}"
+    );
+
+    let proved = fixture("inlined_overflow.loko");
+    let stdout = run_lab(&[
+        "invoke-affordance",
+        proved.to_str().expect("fixture path should be utf8"),
+        "typing-config:session",
+        "set-codegen-policy",
+        "off",
+    ]);
+    assert!(
+        stdout.starts_with("codegen policy proved -> off"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("codegen=inlined->kept"), "{stdout}");
+}

@@ -3,9 +3,11 @@
 ## Overview
 
 Most EOP affordances are read-only: they project compiler facts as
-inspectable records. This slice adds the first *executable* mutation
-affordance, `add-method`, which inserts a new method into an existing
-generic in a running compiler+runtime session.
+inspectable records. The executable mutation affordances are `add-method`,
+which inserts a new method into an existing generic in a running
+compiler+runtime session, and `annotate`, which writes a type annotation on
+a binding or result and reports what typing it changed (see
+[Annotate](#annotate)).
 
 The mutation is the first proof that the EOP record surface is a real
 protocol substrate and not only an inspection surface. Future mutation
@@ -25,7 +27,7 @@ This slice explicitly does not own:
 
 - persistent images, on-disk session storage, or any session
   serialization format. Mutations are in-memory only;
-- mutation affordances other than `add-method`. No
+- mutation affordances other than `add-method` and `annotate`. No
   `retract-method`, `edit-body`, `define-class`, or `redefine-class`;
 - object migration, slot reshape, generic-signature change, or any
   class-graph mutation;
@@ -56,13 +58,22 @@ pub enum SessionMutation {
         generic: sem::GenericFunctionId,
         method_source: String,
     },
+    Annotate {
+        target: AnnotationTarget,
+        type_source: String,
+    },
 }
 
 pub struct MutationOutcome {
     pub mutation_id: u32,
-    pub inserted_method: sem::MethodId,
+    pub effect: MutationEffect,
     pub affected_artifacts: Vec<QueryArtifact>,
     pub recompute_strategy: RecomputeStrategy,
+}
+
+pub enum MutationEffect {
+    InsertedMethod(sem::MethodId),
+    Annotated(Box<AnnotationOutcome>),
 }
 
 pub enum RecomputeStrategy {
@@ -77,6 +88,9 @@ pub enum MutationError {
     SemanticFailed { diagnostics: Vec<Diagnostic> },
     DuplicateSpecializer { existing_method, specializers },
     RuntimeValidationFailed { error: RuntimeLayoutError },
+    SealedGeneric { generic },
+    UnknownAnnotationTarget { target: AnnotationTarget },
+    InvalidTypeSource { type_source: String },
 }
 
 impl SessionArtifacts {
@@ -93,7 +107,7 @@ mutation request is structured before semantic validation runs.
 
 ## Validation order
 
-`apply_mutation` runs these checks in order. Each check produces a
+For `add-method`, `apply_mutation` runs these checks in order. Each check produces a
 specific `MutationError` variant so the affordance does not collapse
 distinct failure modes into a generic compile failure.
 
@@ -131,10 +145,10 @@ source-origin methods. The only externally observable difference is the
 origin marker exposed in workbench projections.
 
 Provenance is computed from the mutation log, not from method-count
-arithmetic. The log entry's `outcome.inserted_method` names the sem
-method id that the mutation introduced; the candidate-and-swap retag
+arithmetic. An add-method entry's `outcome.inserted_method()` names the
+sem method id that the mutation introduced; the candidate-and-swap retag
 walks the log on every rebuild and reasserts
-`MethodOrigin::Session { sequence: entry.mutation_id }` for each
+`MethodOrigin::Session { sequence: entry.mutation_id }` for each such
 entry, so an earlier inserted method does not silently revert to
 `Source` when a later mutation rebuilds the candidate from the
 appended source.
@@ -179,6 +193,10 @@ object mutation:m0
   inspection: mutation-id=0 request=add-method target=<area>
               inserted=<method-id> affected-artifacts=13
               strategy=full-candidate-rebuild
+object mutation:m1
+  inspection: mutation-id=1 request=annotate target=binding:def…:s
+              annotation=<circle> previous=<shape> changed-decisions=2
+              affected-artifacts=14 strategy=full-candidate-rebuild
 ```
 
 The `transient-in-memory` storage label is the contract: the log lives
@@ -256,18 +274,22 @@ that point would fail with `TargetOutOfRange { target: 1 }` because
 id 1 is no longer in the log.
 
 `compose_source_from_log` is the source-side rebuild seed: it takes
-the pristine base and an iterator of `&SessionMutation` requests and
-deterministically produces the composed source text. The helper is
-deliberately request-only and does not see ids, so the future
-replay-against-changed-base slice can supply its own
-`AppliedMutation` set without inferring ids from log position.
+the pristine base and a slice of applied entries and deterministically
+produces the composed source text. An add-method entry appends its method
+source; an annotate entry applies the edit its outcome recorded, whose span
+is in the coordinates of the source composed before it. Recorded edits are
+exact only against the base they were made on, which is why replay against
+a changed base does not compose: it applies each request again, resolving
+annotation targets by their stable ids. The helper does not use ids.
 
 Rewind reuses the same candidate-and-swap discipline as
 `apply_mutation`: a candidate is built and validated; on success the
 swap is atomic; on failure the live session is unchanged. The
 candidate composition shares the internal
-`compose_source_from_log(pristine, requests)` helper, which is also
-the seed for the future replay-against-changed-base slice.
+`compose_source_from_log(pristine, entries)` helper with the apply path.
+An annotate entry whose recorded edit does not fit the composed source
+fails with `RewindError::CompositionFailed`; like a layout failure, that
+signals a bug rather than an ordinary failure mode.
 
 Rewind is not exposed through `interloko_lab` in this slice. The lab
 is stateless per invocation, so a standalone rewind has no useful CLI
@@ -332,18 +354,20 @@ the new mutation is older than the replayed history.
 module, and tape are all byte-for-byte unchanged regardless of replay
 outcome. The `ReplayOutcome::artifacts` field is the only new state.
 
-The internal `compose_source_from_log(pristine, requests)` helper —
-the one rewind already uses — is the source-side machinery here too.
-Its deliberate request-only signature (no `AppliedMutation`, no ids
-in its input) is the structural reason replay can supply any pristine
-without inferring ids from log position.
+Replay does not compose recorded source edits: it applies each request
+to the new base through `apply_mutation`'s own path, so an add-method
+appends to the new base and an annotate finds its target there by stable
+id (`binding:<definition>:<name>`), which survives edits to other
+definitions.
 
 Concrete failure modes today are the ordinary apply-time
 [`MutationError`] variants: `UnknownGeneric` when the target generic
 no longer resolves at the original id; `GenericNameMismatch` when an
 id now points at a different-named generic; `SemanticFailed` when a
 specializer class is gone; `DuplicateSpecializer` when the new base
-already defines the method the mutation was adding; and so on. The
+already defines the method the mutation was adding;
+`UnknownAnnotationTarget` when the new base no longer binds the
+annotated name in that definition; and so on. The
 slice does not try to "rebind by name" when ids drift; that would
 be a different (and richer) contract.
 
@@ -377,14 +401,17 @@ pub struct SessionTranscript {
 
 pub struct TranscriptEvent {
     pub mutation_id: u32,
-    pub kind: TranscriptEventKind,
-    pub generic_name: String,
-    pub generic_id_hint: u32,
-    pub source: String,
+    pub payload: TranscriptEventPayload,
+}
+
+pub enum TranscriptEventPayload {
+    AddMethod { generic_name: String, generic_id_hint: u32, source: String },
+    Annotate { target: AnnotationTarget, type_source: String },
 }
 
 pub enum TranscriptEventKind {
     AddMethod,
+    Annotate,
 }
 
 impl SessionArtifacts {
@@ -411,18 +438,26 @@ session.iloko/
   mutations/
     000000-add-method.loko
     000002-add-method.loko
+    000003-annotate.loko
 ```
 
 `transcript.toml` is the manifest: `format_version`, `source_file_name`,
 `next_mutation_id`, and one `[[events]]` table per mutation carrying
-`mutation_id`, `kind`, `generic_name`, `generic_id_hint`, and a
-relative `source` path. `base.loko` is the pristine source text.
-Each event's source file under `mutations/` is the full Loko clause
-applied by that mutation; the `NNNNNN-<kind>.loko` filename pattern
-preserves stable session event ids and any gaps left by rewind.
+`mutation_id`, `kind`, and a relative `source` path, plus
+`generic_name` and `generic_id_hint` for an add-method event or `target`
+(the annotation target id) for an annotate event. `base.loko` is the
+pristine source text. Each event's source file under `mutations/` is the
+full Loko clause an add-method applied, or the type an annotate wrote;
+the `NNNNNN-<kind>.loko` filename pattern preserves stable session event
+ids and any gaps left by rewind. Annotate events left `format_version` at
+1: add-method entries read and write exactly as before, and a build that
+predates annotate rejects an annotate event as `UnknownEventKind`. An
+event missing its kind's fields, or with a `target` that is not a target
+id, fails `open` with `InvalidEventFields`.
 
-**Strict replay only on restore.** `generic_id_hint` is used verbatim
-as the request's `GenericFunctionId`. `generic_name` is recorded for
+**Strict replay only on restore.** An annotate event's `target` resolves
+by its stable id against the base, as replay does. `generic_id_hint` is
+used verbatim as the request's `GenericFunctionId`. `generic_name` is recorded for
 human inspection and future conflict-handling slices, but this slice
 does not rebind by name when ids drift between save and open. If
 the base source's sem has reordered generic ids since save, restore
@@ -515,6 +550,48 @@ CLI and EOP wording must not claim cache reuse. The word "reused" is
 reserved for a future `RecomputeStrategy::IncrementalReuse` variant that
 will actually deliver it through `IncrementalCompilerSession::apply_mutation`.
 
+## Annotate
+
+`SessionMutation::Annotate { target, type_source }` writes `type_source`
+as the type annotation of `target`, a stable binding or result id
+(`binding:<definition>:<name>[#<n>]` or `result:<definition>`; see
+[`eop_workbench.md`](eop_workbench.md#annotation-targets)). It reuses
+add-method's candidate-and-swap flow, checking in order:
+
+1. `type_source` lexes as a type: type names, `class`, `callable`,
+   parentheses, commas, and `=>` (`InvalidTypeSource`).
+2. The target names a parameter, `let` binding, closure parameter,
+   result, or constant value in the current source
+   (`UnknownAnnotationTarget`).
+3. The edited source compiles without new errors (`ParseFailed`,
+   `SemanticFailed`). A type callers or the body violate, or a class
+   that does not exist, fails here; new warnings do not.
+4. The candidate defines the same classes, generics, functions, methods,
+   and constants, and the target reads back with exactly the requested
+   type (`InvalidTypeSource`), so text that smuggles in more than a type
+   cannot change anything else.
+5. The candidate runtime layout validates (`RuntimeValidationFailed`).
+
+The outcome's `MutationEffect::Annotated` carries an `AnnotationOutcome`:
+the requested target; `annotated`, the target in the edited source (it
+differs only when annotating a method parameter changed the method's
+specializers, and so its definition id); the annotation it replaced, if
+any; the `SourceEdit` it made; and the `TypingDelta` comparing every
+typing decision before and after.
+`SessionArtifacts::preview_annotation(target, type_source)` returns the
+same `AnnotationOutcome` without swapping, logging, or using a mutation id.
+
+Affected artifacts are computed as for add-method, from the annotated
+definition's `DefinitionSem`: a changed parameter or result type changes
+the definition's contract, which reaches the typing of its callers; an
+annotation that leaves the contract alone (a `let`) stops there.
+
+Policies are not mutations: `set-typing-policy` and `set-codegen-policy`
+(and `Session::set_typing_config`, `Session::set_codegen_policy`, the
+REPL's `:typing` and `:codegen`) change session inputs that every compile,
+rewind, and replay uses, and add no log entry. See
+[`eop_workbench.md`](eop_workbench.md#policies) for why.
+
 ## Workbench use
 
 ```sh
@@ -531,12 +608,22 @@ Outcome line:
 applied add-method mutation_id=0 inserted_method=m1 affected_artifacts=20 strategy=full-candidate-rebuild log_size=1
 ```
 
+An annotation reports the same line shape followed by its delta:
+
+```text
+applied annotate mutation_id=0 target=binding:def…:s annotation=<circle> previous=<shape> affected_artifacts=14 strategy=full-candidate-rebuild log_size=1
+typing delta: changed=2 added=0 removed=0 unchanged=1
+...
+```
+
 Failure paths print structured rejection messages, for example:
 
 ```text
 add-method mutation failed: specializer vector duplicates existing method m0
 add-method mutation failed: parse failure (3 new diagnostics)
 add-method mutation failed: unknown generic id g99
+annotate mutation failed: semantic failure (3 new diagnostics)
+annotate mutation failed: `<integer> = 3` is not a type annotation
 ```
 
 ## Code under suspended frames

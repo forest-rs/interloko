@@ -61,6 +61,16 @@ traces come from the existing compiler/runtime interface.
   runtime check, for debugging), source replacement keeps it, and
   `set_codegen_policy` lowers the accepted revision again under another one
   as a revision-checked edit that keeps its source and mutation log.
+- The typing configuration sets the severity each soft typing verdict is
+  reported at. `set_typing_config` changes it as a revision-checked edit that
+  keeps source, code and mutation log, and source replacement keeps it. Like
+  the codegen policy it is a session input, not a mutation: rewind does not
+  undo it. The result must still be accepted, so a configuration that turns a
+  decision into a diagnostic is rejected.
+- `SessionMutation::Annotate` writes a type annotation on a binding or result
+  named by a stable `binding:` or `result:` id and reports which typing
+  decisions it changed; `preview_annotation` reports the same without
+  changing the session.
 - Construction uses the compiler's builtin grammar environment. Custom staged
   grammar registry injection is not exposed by this initial session wrapper.
 - Filesystem, transport, UI, document composition and execution scheduling belong
