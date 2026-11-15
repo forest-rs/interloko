@@ -1282,12 +1282,8 @@ impl<'a> FunctionEmitter<'a> {
                     lower::Num32UnaryOp::I32ToI64 => self.asm.i32_to_i64(dst, src),
                     lower::Num32UnaryOp::U32ToI64 => self.asm.u32_to_i64(dst, src),
                     lower::Num32UnaryOp::I64ToI32Wrap => self.asm.i64_to_i32_wrap(dst, src),
-                    lower::Num32UnaryOp::I64ToU64Wrap => self.asm.i64_to_u64_wrap(dst, src),
-                    lower::Num32UnaryOp::U64ToU32Wrap => self.asm.u64_to_u32_wrap(dst, src),
                     lower::Num32UnaryOp::I32ToU32Wrap => self.asm.i32_to_u32_wrap(dst, src),
                     lower::Num32UnaryOp::U32ToI32Wrap => self.asm.u32_to_i32_wrap(dst, src),
-                    lower::Num32UnaryOp::F64ToI32Sat => self.asm.f64_to_i32_sat(dst, src),
-                    lower::Num32UnaryOp::F64ToU32Sat => self.asm.f64_to_u32_sat(dst, src),
                     lower::Num32UnaryOp::F32ToF64 => self.asm.f32_to_f64(dst, src),
                     lower::Num32UnaryOp::F64ToF32 => self.asm.f64_to_f32(dst, src),
                     lower::Num32UnaryOp::F32ToI32 => self.asm.f32_to_i32(dst, src),
@@ -1367,6 +1363,45 @@ impl<'a> FunctionEmitter<'a> {
                     lower::Num32CheckedOp::U32AddOvf => self.asm.u32_add_ovf(dst, overflow, a, b),
                     lower::Num32CheckedOp::U32SubOvf => self.asm.u32_sub_ovf(dst, overflow, a, b),
                     lower::Num32CheckedOp::U32MulOvf => self.asm.u32_mul_ovf(dst, overflow, a, b),
+                };
+            }
+            lower::Instr::ConvertChecked {
+                dst,
+                inexact,
+                op,
+                src,
+                span,
+            } => {
+                self.set_span(*span);
+                let (dst, inexact, a) = (*dst, *inexact, *src);
+                match op {
+                    lower::ConvertCheckedOp::I64ToI32Ovf => {
+                        self.asm.i64_to_i32_ovf(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::I64ToU32Ovf => {
+                        self.asm.i64_to_u32_ovf(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::I32ToU32Ovf => {
+                        self.asm.i32_to_u32_ovf(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::U32ToI32Ovf => {
+                        self.asm.u32_to_i32_ovf(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::F32ToI32Exact => {
+                        self.asm.f32_to_i32_exact(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::F32ToU32Exact => {
+                        self.asm.f32_to_u32_exact(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::F64ToI32Exact => {
+                        self.asm.f64_to_i32_exact(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::F64ToU32Exact => {
+                        self.asm.f64_to_u32_exact(dst, inexact, a)
+                    }
+                    lower::ConvertCheckedOp::F64ToI64Exact => {
+                        self.asm.f64_to_i64_exact(dst, inexact, a)
+                    }
                 };
             }
             lower::Instr::ConstBool { dst, value, span } => {
@@ -1580,10 +1615,6 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::F64ToI64 { dst, src, span } => {
                 self.set_span(*span);
                 self.asm.f64_to_i64(*dst, *src);
-            }
-            lower::Instr::F64ToI64Sat { dst, src, span } => {
-                self.set_span(*span);
-                self.asm.f64_to_i64_sat(*dst, *src);
             }
             lower::Instr::F64Compare {
                 dst,

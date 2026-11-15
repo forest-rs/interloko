@@ -1,8 +1,8 @@
 // expect: run 40000u32
 // expect: diagnostics 0
 // expect: dump lowered contains i64.to_i32
-// expect: dump lowered contains u64.to_u32
-// expect: dump lowered contains f64.to_i32
+// expect: dump lowered contains i64.to_u32_ovf
+// expect: dump lowered contains f64.to_i32_exact
 // expect: dump lowered contains i32.to_u32
 // expect: dump tape contains u32.to_i64
 

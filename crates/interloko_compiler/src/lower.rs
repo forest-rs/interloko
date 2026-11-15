@@ -660,11 +660,6 @@ pub enum Num32UnaryOp {
     /// `i64.to_i32_wrap`: Keeps the low 32 bits; lowering emits it only
     /// where typing proved the value fits.
     I64ToI32Wrap,
-    /// `i64.to_u64_wrap`: Reinterprets the bits as unsigned.
-    I64ToU64Wrap,
-    /// `u64.to_u32_wrap`: Keeps the low 32 bits; lowering emits it only
-    /// where typing proved the value fits.
-    U64ToU32Wrap,
     /// `i32.to_u32_wrap`: Reinterprets the bits; lowering emits it only
     /// where typing proved the value is not negative.
     I32ToU32Wrap,
@@ -679,12 +674,6 @@ pub enum Num32UnaryOp {
     F32ToI32,
     /// `f32.to_u32`: Truncation; traps on NaN, infinities and out-of-range values.
     F32ToU32,
-    /// `f64.to_i32_sat`: Truncation that saturates out-of-range values and
-    /// maps NaN to zero; never traps.
-    F64ToI32Sat,
-    /// `f64.to_u32_sat`: Truncation that saturates out-of-range values and
-    /// maps NaN to zero; never traps.
-    F64ToU32Sat,
     /// `i32.to_f32`: Rounds to nearest, ties to even.
     I32ToF32,
     /// `u32.to_f32`: Rounds to nearest, ties to even.
@@ -712,16 +701,12 @@ impl Num32UnaryOp {
             Self::I32ToI64 => "i32.to_i64",
             Self::U32ToI64 => "u32.to_i64",
             Self::I64ToI32Wrap => "i64.to_i32_wrap",
-            Self::I64ToU64Wrap => "i64.to_u64_wrap",
-            Self::U64ToU32Wrap => "u64.to_u32_wrap",
             Self::I32ToU32Wrap => "i32.to_u32_wrap",
             Self::U32ToI32Wrap => "u32.to_i32_wrap",
             Self::F32ToF64 => "f32.to_f64",
             Self::F64ToF32 => "f64.to_f32",
             Self::F32ToI32 => "f32.to_i32",
             Self::F32ToU32 => "f32.to_u32",
-            Self::F64ToI32Sat => "f64.to_i32_sat",
-            Self::F64ToU32Sat => "f64.to_u32_sat",
             Self::I32ToF32 => "i32.to_f32",
             Self::U32ToF32 => "u32.to_f32",
             Self::I64ToF32 => "i64.to_f32",
@@ -896,6 +881,68 @@ impl Num32CheckedOp {
     }
 }
 
+/// Non-trapping numeric conversion of `execution_tape`'s `0xFD` prefix that
+/// writes the converted value and whether the conversion was inexact.
+///
+/// Integer narrowing keeps the low bits (or reinterprets them) when the value
+/// does not fit; float-to-integer conversion writes the saturating
+/// truncation and reports NaN, infinities, fractions and out-of-range values
+/// as inexact.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ConvertCheckedOp {
+    /// `i64.to_i32_ovf`: Narrowing, inexact outside `i32`.
+    I64ToI32Ovf,
+    /// `i64.to_u32_ovf`: Narrowing, inexact outside `u32`.
+    I64ToU32Ovf,
+    /// `i32.to_u32_ovf`: Reinterpretation, inexact for negative values.
+    I32ToU32Ovf,
+    /// `u32.to_i32_ovf`: Reinterpretation, inexact above `i32::MAX`.
+    U32ToI32Ovf,
+    /// `f32.to_i32_exact`: Inexact unless the float is an integral `i32`.
+    F32ToI32Exact,
+    /// `f32.to_u32_exact`: Inexact unless the float is an integral `u32`.
+    F32ToU32Exact,
+    /// `f64.to_i32_exact`: Inexact unless the float is an integral `i32`.
+    F64ToI32Exact,
+    /// `f64.to_u32_exact`: Inexact unless the float is an integral `u32`.
+    F64ToU32Exact,
+    /// `f64.to_i64_exact`: Inexact unless the float is an integral `i64`;
+    /// `2^63` is inexact.
+    F64ToI64Exact,
+}
+
+impl ConvertCheckedOp {
+    /// Returns the `execution_tape` mnemonic used in lowered dumps.
+    #[must_use]
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::I64ToI32Ovf => "i64.to_i32_ovf",
+            Self::I64ToU32Ovf => "i64.to_u32_ovf",
+            Self::I32ToU32Ovf => "i32.to_u32_ovf",
+            Self::U32ToI32Ovf => "u32.to_i32_ovf",
+            Self::F32ToI32Exact => "f32.to_i32_exact",
+            Self::F32ToU32Exact => "f32.to_u32_exact",
+            Self::F64ToI32Exact => "f64.to_i32_exact",
+            Self::F64ToU32Exact => "f64.to_u32_exact",
+            Self::F64ToI64Exact => "f64.to_i64_exact",
+        }
+    }
+
+    /// The kind of the converted value.
+    #[must_use]
+    pub const fn result_kind(self) -> ValueKind {
+        match self {
+            Self::I64ToI32Ovf | Self::U32ToI32Ovf | Self::F32ToI32Exact | Self::F64ToI32Exact => {
+                ValueKind::I32
+            }
+            Self::I64ToU32Ovf | Self::I32ToU32Ovf | Self::F32ToU32Exact | Self::F64ToU32Exact => {
+                ValueKind::U32
+            }
+            Self::F64ToI64Exact => ValueKind::I64,
+        }
+    }
+}
+
 /// A lowered function signature and body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
@@ -1031,6 +1078,20 @@ pub enum Instr {
         lhs: Reg,
         /// Right operand register.
         rhs: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// Numeric conversion writing the converted value and whether it was
+    /// inexact, so a range or exactness check is one branch on the flag.
+    ConvertChecked {
+        /// Destination register for the converted value.
+        dst: Reg,
+        /// Destination `bool` register set when the conversion was inexact.
+        inexact: Reg,
+        /// Operation.
+        op: ConvertCheckedOp,
+        /// Operand register.
+        src: Reg,
         /// Source span.
         span: Span,
     },
@@ -1242,16 +1303,6 @@ pub enum Instr {
     /// Truncates a float toward zero to an integer; traps on NaN, infinities,
     /// and values outside the `i64` range.
     F64ToI64 {
-        /// Destination register.
-        dst: Reg,
-        /// Float operand register.
-        src: Reg,
-        /// Source span.
-        span: Span,
-    },
-    /// Truncates a float toward zero to an integer, saturating values
-    /// outside the `i64` range and mapping NaN to zero; never traps.
-    F64ToI64Sat {
         /// Destination register.
         dst: Reg,
         /// Float operand register.
@@ -6704,48 +6755,34 @@ impl<'module> BodyLowering<'module> {
         type_error: Box<TypeErrorSite>,
         span: Span,
     ) -> Result<Value, LowerError> {
-        let (count_kind, limit, below) = if kind == sem::NumericKind::U32 {
-            (ValueKind::U32, sem::Number32::U32(32), Num32BinaryOp::U32Lt)
+        // Reading an `i32` count as `u32` sends negative counts above 31, so
+        // one unsigned comparison tests both bounds.
+        let unsigned = if kind == sem::NumericKind::U32 {
+            count
         } else {
-            (ValueKind::I32, sem::Number32::I32(32), Num32BinaryOp::I32Lt)
+            self.num32_unary(Num32UnaryOp::I32ToU32Wrap, count, ValueKind::U32, span)
+                .reg
         };
-        let bound = self.alloc(count_kind);
+        let bound = self.alloc(ValueKind::U32);
         self.instructions.push(Instr::Const32 {
             dst: bound.reg,
-            value: limit,
+            value: sem::Number32::U32(32),
             span,
         });
-        let in_range = self.num32_binary(below, count, bound.reg, ValueKind::Bool, span);
-        let [check_low, outside, shift, done] = core::array::from_fn(|_| self.alloc_label());
+        let in_range = self.num32_binary(
+            Num32BinaryOp::U32Lt,
+            unsigned,
+            bound.reg,
+            ValueKind::Bool,
+            span,
+        );
+        let [outside, shift, done] = core::array::from_fn(|_| self.alloc_label());
         self.instructions.push(Instr::Branch {
             cond: in_range.reg,
-            then_label: check_low,
+            then_label: shift,
             else_label: outside,
             span,
         });
-        self.instructions.push(Instr::Label { label: check_low });
-        if kind == sem::NumericKind::I32 {
-            self.instructions.push(Instr::Const32 {
-                dst: bound.reg,
-                value: sem::Number32::I32(0),
-                span,
-            });
-            let non_negative = self.num32_binary(
-                Num32BinaryOp::I32Ge,
-                count,
-                bound.reg,
-                ValueKind::Bool,
-                span,
-            );
-            self.instructions.push(Instr::Branch {
-                cond: non_negative.reg,
-                then_label: shift,
-                else_label: outside,
-                span,
-            });
-        } else {
-            self.instructions.push(Instr::Jump { label: shift, span });
-        }
         self.instructions.push(Instr::Label { label: shift });
         let result = self.lower_bit_operation(op, kind, lhs, count, span)?;
         self.instructions.extend([
@@ -6805,8 +6842,23 @@ impl<'module> BodyLowering<'module> {
             rhs,
             span,
         });
-        self.signal_on_overflow(overflow.reg, result.reg, operands, type_error, span);
+        self.signal_if(overflow.reg, result.reg, operands, type_error, span);
         result
+    }
+
+    /// Emits the checked conversion `op` of `src`, returning the converted
+    /// value and the register of its inexact flag.
+    fn convert_checked(&mut self, op: ConvertCheckedOp, src: Reg, span: Span) -> (Value, Reg) {
+        let result = self.alloc(op.result_kind());
+        let inexact = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::ConvertChecked {
+            dst: result.reg,
+            inexact: inexact.reg,
+            op,
+            src,
+            span,
+        });
+        (result, inexact.reg)
     }
 
     /// Converts a number to `to`; `site` is the conversion's check site.
@@ -6881,8 +6933,6 @@ impl<'module> BodyLowering<'module> {
             (N::Float, N::SingleFloat) => {
                 unary(self, Num32UnaryOp::F64ToF32, value, ValueKind::F32)
             }
-            // Binary32 widens to binary64 exactly, so one exact path serves
-            // both float formats.
             (N::SingleFloat | N::Float, N::Integer | N::I32 | N::U32) => {
                 let expected = match to {
                     N::I32 => ValueKind::I32,
@@ -6890,13 +6940,7 @@ impl<'module> BodyLowering<'module> {
                     _ => ValueKind::I64,
                 };
                 let type_error = range_error(self, expected);
-                // A failure reports the value as given, not its widening.
-                let wide = if from == N::SingleFloat {
-                    unary(self, Num32UnaryOp::F32ToF64, value, ValueKind::F64)
-                } else {
-                    value
-                };
-                self.lower_exact_float_to_integer(wide, value.reg, to, type_error, span)
+                self.lower_exact_float_to_integer(value, to, type_error, span)
             }
             (from, to) => {
                 return Err(invalid_semantic(&alloc::format!(
@@ -6924,9 +6968,10 @@ impl<'module> BodyLowering<'module> {
             (ValueKind::I64, N::I32) => {
                 unary(self, Num32UnaryOp::I64ToI32Wrap, value, ValueKind::I32)
             }
+            // The inexact flag is known clear, so it is left unread.
             (ValueKind::I64, N::U32) => {
-                let bits = unary(self, Num32UnaryOp::I64ToU64Wrap, value, ValueKind::U64);
-                unary(self, Num32UnaryOp::U64ToU32Wrap, bits, ValueKind::U32)
+                self.convert_checked(ConvertCheckedOp::I64ToU32Ovf, value.reg, span)
+                    .0
             }
             (ValueKind::I32, N::U32) => {
                 unary(self, Num32UnaryOp::I32ToU32Wrap, value, ValueKind::U32)
@@ -6949,10 +6994,6 @@ impl<'module> BodyLowering<'module> {
 
     /// Narrows an `<integer>` to `<i32>` or `<u32>`, signalling
     /// `type_error` unless the value is in the type's range.
-    ///
-    /// The low 32 bits are the result exactly when widening them back
-    /// gives the value again, so the test costs three instructions and a
-    /// branch where a trapping conversion took one.
     fn narrow_integer(
         &mut self,
         value: Value,
@@ -6960,28 +7001,13 @@ impl<'module> BodyLowering<'module> {
         type_error: Box<TypeErrorSite>,
         span: Span,
     ) -> Value {
-        let (narrow, back) = if to == ValueKind::I32 {
-            let narrow =
-                self.num32_unary(Num32UnaryOp::I64ToI32Wrap, value.reg, ValueKind::I32, span);
-            let back = self.num32_unary(Num32UnaryOp::I32ToI64, narrow.reg, ValueKind::I64, span);
-            (narrow, back)
+        let op = if to == ValueKind::I32 {
+            ConvertCheckedOp::I64ToI32Ovf
         } else {
-            let bits =
-                self.num32_unary(Num32UnaryOp::I64ToU64Wrap, value.reg, ValueKind::U64, span);
-            let narrow =
-                self.num32_unary(Num32UnaryOp::U64ToU32Wrap, bits.reg, ValueKind::U32, span);
-            let back = self.num32_unary(Num32UnaryOp::U32ToI64, narrow.reg, ValueKind::I64, span);
-            (narrow, back)
+            ConvertCheckedOp::I64ToU32Ovf
         };
-        let fits = self.alloc(ValueKind::Bool);
-        self.instructions.push(Instr::I64Compare {
-            dst: fits.reg,
-            op: sem::CompareOp::Eq,
-            lhs: back.reg,
-            rhs: value.reg,
-            span,
-        });
-        self.check_or_signal(fits.reg, narrow.reg, vec![value.reg], type_error, span);
+        let (narrow, inexact) = self.convert_checked(op, value.reg, span);
+        self.signal_if(inexact, narrow.reg, vec![value.reg], type_error, span);
         narrow
     }
 
@@ -6994,62 +7020,14 @@ impl<'module> BodyLowering<'module> {
         type_error: Box<TypeErrorSite>,
         span: Span,
     ) -> Value {
-        let (converted, signed) = if to == ValueKind::U32 {
-            let converted =
-                self.num32_unary(Num32UnaryOp::I32ToU32Wrap, value.reg, ValueKind::U32, span);
-            (converted, value)
+        let op = if to == ValueKind::U32 {
+            ConvertCheckedOp::I32ToU32Ovf
         } else {
-            let converted =
-                self.num32_unary(Num32UnaryOp::U32ToI32Wrap, value.reg, ValueKind::I32, span);
-            (converted, converted)
+            ConvertCheckedOp::U32ToI32Ovf
         };
-        let zero = self.alloc(ValueKind::I32);
-        self.instructions.push(Instr::Const32 {
-            dst: zero.reg,
-            value: sem::Number32::I32(0),
-            span,
-        });
-        let fits = self.num32_binary(
-            Num32BinaryOp::I32Ge,
-            signed.reg,
-            zero.reg,
-            ValueKind::Bool,
-            span,
-        );
-        self.check_or_signal(fits.reg, converted.reg, vec![value.reg], type_error, span);
+        let (converted, inexact) = self.convert_checked(op, value.reg, span);
+        self.signal_if(inexact, converted.reg, vec![value.reg], type_error, span);
         converted
-    }
-
-    /// Branches on `passed`: on to the code that follows when it holds, and
-    /// otherwise to signal `type_error` for `values`, whose `use-value`
-    /// restart supplies `result` before the code that follows.
-    fn check_or_signal(
-        &mut self,
-        passed: Reg,
-        result: Reg,
-        values: Vec<Reg>,
-        type_error: Box<TypeErrorSite>,
-        span: Span,
-    ) {
-        let failed = self.alloc_label();
-        let done = self.alloc_label();
-        self.instructions.extend([
-            Instr::Branch {
-                cond: passed,
-                then_label: done,
-                else_label: failed,
-                span,
-            },
-            Instr::Label { label: failed },
-            Instr::SignalTypeError {
-                dst: result,
-                values,
-                type_error,
-                resume: done,
-                span,
-            },
-            Instr::Label { label: done },
-        ]);
     }
 
     fn alloc(&mut self, kind: ValueKind) -> Value {
@@ -7254,108 +7232,36 @@ impl<'module> BodyLowering<'module> {
         }
     }
 
-    /// Lowers an exact binary64-to-integer conversion such as
+    /// Lowers an exact float-to-integer conversion such as
     /// `as(<integer>, x)`, signalling `type_error` unless `x` is integral
-    /// and in range.
+    /// and in `to`'s range. A failure reports `x` as given, so a
+    /// `<single-float>` reports itself rather than its widening.
     ///
-    /// The saturating truncation (`f64.to_i64_sat`, or `f64.to_i32_sat` /
-    /// `f64.to_u32_sat`) never traps: NaN becomes zero and out-of-range
-    /// values the nearest bound. Converting back and comparing then fails
-    /// for NaN, infinities, fractions and every saturated value except one:
-    /// `2^63` saturates to `i64::MAX`, which converts back to `2^63`, so a
-    /// conversion to `<integer>` also checks the float is below it.
+    /// Binary32 converts to `<i32>` and `<u32>` directly; to `<integer>` it
+    /// first widens to binary64, which is exact.
     fn lower_exact_float_to_integer(
         &mut self,
         value: Value,
-        reported: Reg,
         to: sem::NumericKind,
         type_error: Box<TypeErrorSite>,
         span: Span,
     ) -> Value {
-        let (result, round_trip) = match to {
-            sem::NumericKind::I32 => {
-                let result =
-                    self.num32_unary(Num32UnaryOp::F64ToI32Sat, value.reg, ValueKind::I32, span);
-                let back =
-                    self.num32_unary(Num32UnaryOp::I32ToF64, result.reg, ValueKind::F64, span);
-                (result, back)
+        use sem::NumericKind as N;
+        let single = value.kind == ValueKind::F32;
+        let (operand, op) = match to {
+            N::I32 if single => (value.reg, ConvertCheckedOp::F32ToI32Exact),
+            N::U32 if single => (value.reg, ConvertCheckedOp::F32ToU32Exact),
+            N::I32 => (value.reg, ConvertCheckedOp::F64ToI32Exact),
+            N::U32 => (value.reg, ConvertCheckedOp::F64ToU32Exact),
+            _ if single => {
+                let wide =
+                    self.num32_unary(Num32UnaryOp::F32ToF64, value.reg, ValueKind::F64, span);
+                (wide.reg, ConvertCheckedOp::F64ToI64Exact)
             }
-            sem::NumericKind::U32 => {
-                let result =
-                    self.num32_unary(Num32UnaryOp::F64ToU32Sat, value.reg, ValueKind::U32, span);
-                let back =
-                    self.num32_unary(Num32UnaryOp::U32ToF64, result.reg, ValueKind::F64, span);
-                (result, back)
-            }
-            _ => {
-                let result = self.alloc(ValueKind::I64);
-                self.instructions.push(Instr::F64ToI64Sat {
-                    dst: result.reg,
-                    src: value.reg,
-                    span,
-                });
-                let round_trip = self.alloc(ValueKind::F64);
-                self.instructions.push(Instr::I64ToF64 {
-                    dst: round_trip.reg,
-                    src: result.reg,
-                    span,
-                });
-                (result, round_trip)
-            }
+            _ => (value.reg, ConvertCheckedOp::F64ToI64Exact),
         };
-        let exact = self.alloc(ValueKind::Bool);
-        self.instructions.push(Instr::F64Compare {
-            dst: exact.reg,
-            op: sem::CompareOp::Eq,
-            lhs: round_trip.reg,
-            rhs: value.reg,
-            span,
-        });
-        let passed = if matches!(to, sem::NumericKind::I32 | sem::NumericKind::U32) {
-            exact
-        } else {
-            let [below_top, failed, done] = core::array::from_fn(|_| self.alloc_label());
-            let top = self.alloc(ValueKind::F64);
-            let below = self.alloc(ValueKind::Bool);
-            self.instructions.extend([
-                Instr::Branch {
-                    cond: exact.reg,
-                    then_label: below_top,
-                    else_label: failed,
-                    span,
-                },
-                Instr::Label { label: below_top },
-                Instr::ConstF64 {
-                    dst: top.reg,
-                    value: sem::FloatBits::from_f64(9_223_372_036_854_775_808.0),
-                    span,
-                },
-                Instr::F64Compare {
-                    dst: below.reg,
-                    op: sem::CompareOp::Lt,
-                    lhs: value.reg,
-                    rhs: top.reg,
-                    span,
-                },
-                Instr::Branch {
-                    cond: below.reg,
-                    then_label: done,
-                    else_label: failed,
-                    span,
-                },
-                Instr::Label { label: failed },
-                Instr::SignalTypeError {
-                    dst: result.reg,
-                    values: vec![reported],
-                    type_error,
-                    resume: done,
-                    span,
-                },
-                Instr::Label { label: done },
-            ]);
-            return result;
-        };
-        self.check_or_signal(passed.reg, result.reg, vec![reported], type_error, span);
+        let (result, inexact) = self.convert_checked(op, operand, span);
+        self.signal_if(inexact, result.reg, vec![value.reg], type_error, span);
         result
     }
 
@@ -7530,7 +7436,7 @@ impl<'module> BodyLowering<'module> {
     }
 
     /// Lowers fixnum `lhs op rhs`: the overflow-reporting tape instruction,
-    /// then [`Self::signal_on_overflow`], reporting `operands`.
+    /// then [`Self::signal_if`], reporting `operands`.
     fn lower_checked_integer_arith(
         &mut self,
         op: I64ArithOp,
@@ -7550,7 +7456,7 @@ impl<'module> BodyLowering<'module> {
             rhs,
             span,
         });
-        self.signal_on_overflow(overflow.reg, result.reg, operands, type_error, span);
+        self.signal_if(overflow.reg, result.reg, operands, type_error, span);
         result
     }
 
@@ -7573,34 +7479,34 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
-    /// Emits what happens when checked integer arithmetic overflows: when
-    /// `overflowed` holds, it signals `type_error` for `operands`, and a
-    /// `use-value` restart supplies `result`.
+    /// Branches on `failed`: when it holds, signals `type_error` for
+    /// `values`, whose `use-value` restart supplies `result`; otherwise on
+    /// to the code that follows.
     ///
-    /// This is the single overflow target for integer arithmetic. Bignum
-    /// promotion will replace it for `<integer>`, whose results then always
-    /// fit.
-    fn signal_on_overflow(
+    /// This is the single failure target for overflowing integer arithmetic
+    /// and for inexact conversions. Bignum promotion will replace it for
+    /// `<integer>` arithmetic, whose results then always fit.
+    fn signal_if(
         &mut self,
-        overflowed: Reg,
+        failed: Reg,
         result: Reg,
-        operands: Vec<Reg>,
+        values: Vec<Reg>,
         type_error: Box<TypeErrorSite>,
         span: Span,
     ) {
-        let failed = self.alloc_label();
+        let signal = self.alloc_label();
         let done = self.alloc_label();
         self.instructions.extend([
             Instr::Branch {
-                cond: overflowed,
-                then_label: failed,
+                cond: failed,
+                then_label: signal,
                 else_label: done,
                 span,
             },
-            Instr::Label { label: failed },
+            Instr::Label { label: signal },
             Instr::SignalTypeError {
                 dst: result,
-                values: operands,
+                values,
                 type_error,
                 resume: done,
                 span,
@@ -8349,6 +8255,16 @@ impl Module {
                 )?;
                 fmt_span(f, *span)
             }
+            Instr::ConvertChecked {
+                dst,
+                inexact,
+                op,
+                src,
+                span,
+            } => {
+                write!(f, "  %{dst}, %{inexact} = {} %{src}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
             Instr::ConstBool { dst, value, span } => {
                 write!(f, "  %{dst} = const.bool {value}")?;
                 fmt_span(f, *span)
@@ -8497,10 +8413,6 @@ impl Module {
             }
             Instr::F64ToI64 { dst, src, span } => {
                 write!(f, "  %{dst} = f64.to_i64 %{src}")?;
-                fmt_span(f, *span)
-            }
-            Instr::F64ToI64Sat { dst, src, span } => {
-                write!(f, "  {dst} = f64.to_i64_sat {src}")?;
                 fmt_span(f, *span)
             }
             Instr::F64Compare {

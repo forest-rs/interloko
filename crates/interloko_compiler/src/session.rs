@@ -20945,6 +20945,77 @@ end;
     }
 
     #[test]
+    fn failed_conversions_report_their_operand_and_resume_with_the_supplied_result() {
+        // Each conversion and shift count fails once; every report names the
+        // operand as given and `use-value` supplies the result in its place.
+        let artifacts = CompilerSession::compile_source(
+            "convert.loko",
+            "define function to-u32(n :: <integer>) => <u32>\n  as(<u32>, n)\nend;\n\
+             define function to-i32(n :: <u32>) => <i32>\n  as(<i32>, n)\nend;\n\
+             define function flip(n :: <i32>) => <u32>\n  as(<u32>, n)\nend;\n\
+             define function single(x :: <single-float>) => <u32>\n  as(<u32>, x)\nend;\n\
+             define function whole(x :: <double-float>) => <integer>\n  as(<integer>, x)\nend;\n\
+             define function shl(x :: <i32>, n :: <i32>) => <i32>\n  shift-left(x, n)\nend;\n\
+             define function narrow(n :: <integer>) => <i32>\n  as(<i32>, n)\nend;\n\
+             define function signed(x :: <double-float>) => <i32>\n  as(<i32>, x)\nend;\n\
+             define function unsigned(x :: <double-float>) => <u32>\n  as(<u32>, x)\nend;\n\
+             define function main() => <integer>\n  \
+             as(<integer>, narrow(5000000000)) + as(<integer>, signed(2.5))\n    \
+             + as(<integer>, unsigned(-1.0))\n    \
+             + as(<integer>, to-u32(-1)) + as(<integer>, to-i32(4294967295u32))\n    \
+             + as(<integer>, flip(-5i32)) + as(<integer>, single(1.5f32))\n    \
+             + whole(9223372036854775808.0) + whole(-0.0)\n    \
+             + as(<integer>, shl(1i32, -1i32)) + as(<integer>, shl(1i32, 32i32))\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut reports = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                let types = condition.restarts.iter().find_map(|restart| match restart {
+                    OfferedRestart::UseValue { types } => Some(types.to_vec()),
+                    _ => None,
+                });
+                let replacement = match types.as_deref() {
+                    Some([execution_tape::program::ValueType::U32]) => Value::U32(1),
+                    Some([execution_tape::program::ValueType::I32]) => Value::I32(2),
+                    _ => Value::I64(4),
+                };
+                reports.push((report.code, report.value, report.expected));
+                Choice::UseValue(vec![replacement])
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(18), "{policy:?}");
+            let count = "limited(<integer>, min: 0, max: 31)";
+            let range = |value: &str, expected: &str| {
+                (
+                    String::from("type-error.range"),
+                    String::from(value),
+                    String::from(expected),
+                )
+            };
+            assert_eq!(
+                reports,
+                [
+                    range("5000000000", "<i32>"),
+                    range("2.5", "<i32>"),
+                    range("-1.0", "<u32>"),
+                    range("-1", "<u32>"),
+                    range("4294967295", "<i32>"),
+                    range("-5", "<u32>"),
+                    range("1.5f32", "<u32>"),
+                    range("9.223372036854776e18", "<integer>"),
+                    range("-1", count),
+                    range("32", count),
+                ],
+                "{policy:?}"
+            );
+        }
+    }
+
+    #[test]
     fn chooser_sees_the_suspended_signal_and_resumes_it_with_use_value() {
         let artifacts = CompilerSession::compile_source(
             "sample.loko",
