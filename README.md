@@ -105,8 +105,8 @@ The current slices include:
 - function definitions, locals, arithmetic, booleans, conditionals, and calls;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
   `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`);
-- `<integer>` arithmetic on 64-bit fixnums that traps with
-  `runtime.integer-overflow` instead of wrapping when `+`, `-`, `*`, or
+- `<integer>` arithmetic on 64-bit fixnums that signals a `<type-error>`
+  (`type-error.overflow`) instead of wrapping when `+`, `-`, `*`, or
   negation leaves the 64-bit range (bignum promotion is planned);
 - immutable top-level constants named in the Dylan style, such as
   `define constant $answer :: <integer> = 42;`;
@@ -147,24 +147,32 @@ The current slices include:
   live in slots, cross `<object>` (a `<single-float>` keeps its format), and
   travel as `FunctionValue::I32`/`U32`/`SingleFloat` through typed calls and
   host functions. Arithmetic follows `promotion.rs`: one limited type stays
-  in it, checked (`runtime.integer-overflow` when a result leaves the
+  in it, checked (`type-error.overflow` when a result leaves the
   range), mixed integer types compute as `<integer>`, floats are contagious
   to the widest format (`single + double` is a double, `integer + single`
   a single), and comparisons are exact across all of them. Statically typed
   operands compile to the `i32`/`u32`/`f32` instructions directly;
   `<object>` operands dispatch through the same numeric generics.
   `as(<u32>, x)` and friends convert exactly between every numeric type
-  (out-of-range integers and non-integral floats trap), and
+  (out-of-range integers and non-integral floats signal
+  `type-error.range`), and
   `instance?(x, <u32>)` tests for an `<integer>` in the range. Wrapping is
   only ever explicit: `+%`, `-%` and `*%` compute modulo 2^32 on two
   operands of one fixed-width type. `logand`, `logior` and `logxor` are
   exact on every integer type, and `shift-left`/`shift-right` shift an
-  `<i32>` or `<u32>` by 0 to 31 bits (other counts are rejected or trap).
+  `<i32>` or `<u32>` by 0 to 31 bits (other counts are rejected or
+  signal).
   The float library takes single-floats too, inline in binary32 where the
   tape has an instruction and through the binary64 library (rounded once
   back) otherwise;
 - simple strings, symbols, keywords, and immutable vectors;
-- recoverable condition/restart forms;
+- recoverable condition/restart forms, with `<condition>`, `<error>` and
+  `<type-error>` defined by the kernel: a runtime check that fails (a cast,
+  an untyped callable's argument, a range, an overflow) signals a
+  `<type-error>` naming the value, the expected type, the check's typing
+  decision and a stable `type-error.*` code, and its `use-value` restart
+  continues with a replacement of the expected type (an object a failed
+  cast checks again);
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
 - embedding-declared scalar host functions with typed integer, float,
   32-bit, boolean, and string arguments/results, EOP discovery, and a handler-aware call surface;
@@ -262,8 +270,8 @@ choose whether lowering acts on what soft typing proved (the default,
 `proved`) or keeps every runtime check (`off`, for debugging the unoptimized
 machinery); the REPL's `:codegen [off|proved]` shows or sets the same policy.
 Results and runtime outcome codes are the same under both; traces show fewer
-sends under `proved`, and a trap in inlined numeric code is reported at the
-call. See [Codegen Policy](docs/eop_workbench.md#codegen-policy).
+sends under `proved`, and a failed check in inlined numeric code signals
+from the call. See [Codegen Policy](docs/eop_workbench.md#codegen-policy).
 
 Diagnostics can be rendered with the bundled catalogs or a custom catalog:
 

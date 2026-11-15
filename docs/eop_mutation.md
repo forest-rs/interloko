@@ -692,6 +692,30 @@ lowered under the session's current policy, which cannot change while the
 break waits; the frames it lists are the same under either policy unless a
 send in them was inlined, which leaves no frame of its own.
 
+A check that is kept can fail, and a failed check signals a `<type-error>`
+whose `use-value` restart continues the code after it with a replacement
+(see [`eop_workbench.md`](eop_workbench.md)). Proved facts survive that
+because typing never derives one from a check that may fail beyond what
+the check itself establishes: a cast that may fail has its target's type,
+not its operand's narrower one, and a conversion or arithmetic result
+that may fail has its whole type. The replacement is checked to have that
+type (a cast checks a replacement object again), so a fact downstream of
+the check holds for it as for the value that passed. A check that must
+fail does not make the code after it unreachable for typing, since a
+replacement reaches it.
+
+A frame counts as superseded when its definition's newest code differs
+in signature or bytecode, so an edit elsewhere should leave unchanged
+functions byte-identical. For runtime checks that holds: each function
+numbers its own `<type-error>` sites, the condition tags failing checks
+resume through and the check-failed tag come first among control tags in a
+fixed order, and their request signatures come last among control
+signatures. Adding or removing checks, or adding an exit procedure (whose
+tag comes after them), renumbers nothing an unchanged function refers to.
+What can still renumber it: adding or removing a source function or method
+before it (function ids are in source order), and a program's first signal
+with a new result type, whose condition tag shifts the exit tags after it.
+
 A callable value carries more than its type: code that applies it relies
 on a signature, either a declared `callable(<integer>) => <circle>` type
 or, for a value sem knows to be a particular function, generic or

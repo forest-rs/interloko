@@ -1893,8 +1893,8 @@ impl<'a> Analysis<'a> {
         self.arithmetic(env, kind, interval, vec![lhs, rhs], site, span, bound)
     }
 
-    /// Records the overflow check of a trapping integer operation whose
-    /// exact result is in `interval`, and returns the values that pass it.
+    /// Records the overflow check of a checked integer operation whose
+    /// exact result is in `interval`, and returns the values it yields.
     #[expect(
         clippy::too_many_arguments,
         reason = "the operands, site, and kind bound of one arithmetic check"

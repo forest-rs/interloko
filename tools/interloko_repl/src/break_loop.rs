@@ -147,6 +147,13 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
             class_name(condition),
             condition.frames.len()
         )?;
+        if let Some(report) = condition.type_error() {
+            writeln!(
+                self.stdout,
+                "type error: code={} expected={} value={} site={}",
+                report.code, report.expected, report.value, report.site
+            )?;
+        }
         self.print_frames(condition)?;
         self.print_restarts(condition)?;
         writeln!(
@@ -167,7 +174,11 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
     fn print_restarts(&mut self, condition: &UnhandledCondition<'_>) -> Result<()> {
         writeln!(self.stdout, "restarts:")?;
         for (index, restart) in condition.restarts.iter().enumerate() {
-            writeln!(self.stdout, "  restart:{index} {}", restart_line(restart))?;
+            writeln!(
+                self.stdout,
+                "  restart:{index} {}",
+                restart_line(condition, restart)
+            )?;
         }
         Ok(())
     }
@@ -270,7 +281,7 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
                     writeln!(
                         self.stderr,
                         "error: use-value expects {}, got {literal}; break [1] is still waiting",
-                        types_label(types)
+                        use_value_label(condition, types)
                     )?;
                     None
                 }
@@ -318,7 +329,7 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
                 writeln!(
                     self.stderr,
                     "error: wrong arguments for {}",
-                    restart_line(restart)
+                    restart_line(condition, restart)
                 )?;
                 None
             }
@@ -382,11 +393,21 @@ fn restart_name(restart: &OfferedRestart<'_>) -> String {
     }
 }
 
-fn restart_line(restart: &OfferedRestart<'_>) -> String {
+fn restart_line(condition: &UnhandledCondition<'_>, restart: &OfferedRestart<'_>) -> String {
     match restart {
         OfferedRestart::Handler { descriptor, .. } => {
             format!("{}()  the handle site's recovery", descriptor.name)
         }
+        OfferedRestart::UseValue {
+            types: types @ [ValueType::Obj(_)],
+        } if condition.failed_check => format!(
+            "use-value({})  the cast continues with this object, checked again",
+            use_value_label(condition, types)
+        ),
+        OfferedRestart::UseValue { types } if condition.failed_check => format!(
+            "use-value({})  the checked operation produces this value instead",
+            types_label(types)
+        ),
         OfferedRestart::UseValue { types } => format!(
             "use-value({})  the signal returns the value",
             types_label(types)
@@ -395,6 +416,16 @@ fn restart_line(restart: &OfferedRestart<'_>) -> String {
             "retry(frame)  call a frame's function again, with current definitions".into()
         }
         OfferedRestart::Abort => "abort()  unwind to top level, running cleanups".into(),
+    }
+}
+
+/// What a `use-value` takes: the signal's result types, except that an
+/// object replacing a failed cast's value must have the class the check
+/// expects, which the type error names.
+fn use_value_label(condition: &UnhandledCondition<'_>, types: &[ValueType]) -> String {
+    match (types, condition.type_error()) {
+        ([ValueType::Obj(_)], Some(report)) => report.expected,
+        _ => types_label(types),
     }
 }
 
