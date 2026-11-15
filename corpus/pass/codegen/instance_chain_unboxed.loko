@@ -1,0 +1,25 @@
+// codegen: proved
+// expect: run 48
+// expect: diagnostics 0
+// expect: dump typing contains because=dispatched(s1)
+// expect: dump lowered lacks select-method
+// expect: dump eop contains codegen=inlined
+
+// Two chains stay unboxed from end to end. After `instance?(x, <integer>)`
+// the chain is `i64` arithmetic on the unboxed `x`. Without a test, typing
+// still knows `as(<object>, d) + 1` runs the built-in `<integer> + <integer>`
+// method and gives its result the method's `<integer>`, so the second `+`
+// is proved too: both run inline, and the sum passes from one to the next,
+// and on to the cast, without a box in between.
+
+define function chain(x :: <object>) => <integer>
+  if instance?(x, <integer>) then ((x + 1) * 2) - x else 0 end
+end;
+
+define function sends(d :: <integer>) => <integer>
+  as(<integer>, (as(<object>, d) + 1) + 2)
+end;
+
+define function main() => <integer>
+  chain(4) + sends(39)
+end;

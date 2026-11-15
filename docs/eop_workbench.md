@@ -287,7 +287,9 @@ observe:
   for an inlined `+`), and the driver's `ControlStats::sends` and
   `send_cache_hits` count fewer sends. Dispatch-site records (`dispatch:dN`)
   still describe every send in the source; the decision's `codegen=inlined`
-  says the run makes no dispatch there.
+  says the run makes no dispatch there. Typing gives an inlined send's
+  result its method's class, so in a chain such as `(x + 1) + 2` on a boxed
+  `x` every send is inlined and the sums stay unboxed until the chain ends.
 - **Trap locations.** A trap inside inlined numeric code, such as the
   overflow check the inlined `+` keeps, is raised by the caller's code at
   the call's span. Under `off` the same overflow traps inside the built-in
