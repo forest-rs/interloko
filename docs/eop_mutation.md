@@ -532,6 +532,59 @@ add-method mutation failed: parse failure (3 new diagnostics)
 add-method mutation failed: unknown generic id g99
 ```
 
+## Code under suspended frames
+
+Everything above changes a session between runs. A run can also take new
+code while it is suspended: when a condition goes unhandled, the chooser
+(the REPL break loop, a scripted chooser) may install a recompiled program
+as a new code unit and then retry a frame with it. The runtime keeps every
+unit it installed, so each frame finishes the code it entered, while
+generic sends from any frame go to the newest unit's methods and a retried
+frame calls the newest version of its function or method
+(`interloko_runtime::code`).
+
+The suspended frames were compiled against the old definitions, and
+compiled code trusts the types its compiler resolved without checking
+them: a send to a generic inferred to return `<circle>` reads the result's
+slots as a `<circle>`'s, and a function declared to take `s :: <circle>`
+reads `s` the same way. Tape signatures erase both to `object`, so each
+code unit also carries the type *contract* of every generic, method and
+function (`interloko_model::contract::Contract`). A contract comes from
+`sem::Module::contract`: declared types, or the value kinds sem inferred
+and lowering trusts, such as an open generic's result inferred from its
+methods. A method's results are its generic's, since only that generic's
+sends and dispatcher call it. Contracts never come from the soft typing
+pass or any finer reading of a body, so a body edit changes a contract
+only when it changes what callers were compiled to trust.
+
+Newer code may stand in for older code that live frames were compiled
+against only when its contract keeps the older one's promise: each
+parameter may *widen* (accept at least what callers pass) and each result
+may *narrow* (return only what callers expect). Anything else is refused,
+as a layout change is:
+
+- **Install.** A unit installed while frames are suspended must keep the
+  runtime layout, and every generic must keep its tape signature and keep
+  its contract's promise, because old frames send to its newest methods.
+  Functions and methods are not checked here: direct calls stay within
+  the caller's unit, and methods are reached only through their generic.
+  A refused unit is not installed; the chooser is asked again with the
+  reason (`UnhandledCondition::refused`), and the REPL reports that the
+  edit applies to new runs only.
+- **Retry.** A retry passes the frame's own arguments to the newest code
+  and returns its results to the frame's old caller. A frame whose
+  function or method changed its signature, or broke its contract, is not
+  retryable (`FrameCode::retry_refusal`); choosing it anyway is an invalid
+  choice. The REPL lists the reason beside the frame and refuses `retry`
+  with it, leaving the break waiting.
+
+The check applies only where code compiled against one unit can reach
+another's definitions, which is within one run. A run starts from a
+single unit and compares nothing with units from earlier runs, so
+recompiling with no suspended frames, and running again, accepts any
+change. Callable types do not carry signatures yet, so a contract does not
+constrain a callable value's parameters or results.
+
 ## Deferred
 
 Subsequent slices may add:

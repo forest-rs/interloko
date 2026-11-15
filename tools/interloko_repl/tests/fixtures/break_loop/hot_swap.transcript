@@ -9,7 +9,8 @@
 // replaced. `retry frame:1` unwinds to the `shade` call and makes it again
 // with the new method, so `main` returns 1.0 + 0.5 + 0.0 while `pixel`,
 // `render` and `main` finish on the code they started with. A new run takes
-// the new code from the start.
+// the new code from the start. The last scenario shows the edits the break
+// loop refuses because suspended frames rely on the old definitions.
 //
 // Format: see `tests/support/transcript.rs`.
 
@@ -108,4 +109,59 @@ choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
 ! runtime error: aborted by the condition chooser
 > :frames
 no suspended computation
+> :quit
+
+// Suspended frames were compiled against the definitions they started
+// with, so an edit must keep what they rely on. `shapes.loko`'s `main` reads
+// `make-shape`'s result as a `<circle>` and `measure` reads its parameter
+// as one. Editing `main` keeps its contract (`() => <integer>`) and installs.
+// Retyping `measure`'s parameter installs too, since functions are called
+// directly within their unit, but retrying the old `measure` frame would
+// hand its `<circle>` to the new body, so that retry is refused. Making
+// `make-shape` return a `<square>` is refused outright: old frames send to
+// the newest methods. Both refusals leave the break waiting, and the old
+// frames finish on their own code: 10 + 3. A new run takes every edit.
+
+=== repl: an edit that breaks what suspended frames rely on is refused
+
+> :load tests/fixtures/break_loop/shapes.loko
+loaded tests/fixtures/break_loop/shapes.loko (8 forms)
+> :run main
+break [1]: no handler for <oops>; 3 frames suspended, nothing unwound
+frames (innermost first):
+  frame:0 pause  u0:f0
+  frame:1 measure  u0:f1
+  frame:2 main  u0:f2
+restarts:
+  restart:0 use-value(<integer>)  the signal returns the value
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :edit form:f7
+editing form:f7; enter a replacement definition
+> define function main() => <integer>
+>   0
+> end;
+installed the edit as a new code unit; still running replaced code:
+  frame:2 main  u0:f2  superseded by u1:f2
+> :edit form:f6
+editing form:f6; enter a replacement definition
+> define function measure(s :: <square>) => <integer>
+>   s.side
+> end;
+installed the edit as a new code unit; still running replaced code:
+  frame:1 measure  u0:f1  superseded by u2:f1  (cannot retry: measure would take <square> as argument 1 where callers pass <circle>)
+  frame:2 main  u0:f2  superseded by u2:f2
+> :restart retry frame:1
+! error: frame:1 cannot be retried with the edited code: measure would take <square> as argument 1 where callers pass <circle>; break [1] is still waiting
+> :edit form:f4
+editing form:f4; enter a replacement definition
+> define method make-shape(n :: <integer>)
+>   make(<square>, side: n)
+> end;
+! error: the edit is accepted for new runs but not installed here: cannot replace running code: make-shape would return <square> as result 1 where callers expect <circle>
+> :restart use-value 10
+13
+> :run main
+0
 > :quit
