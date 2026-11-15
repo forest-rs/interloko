@@ -1522,9 +1522,15 @@ impl<'module> Lowering<'module> {
             });
             next = next.saturating_add(1);
         }
+        // Thunks are emitted in function and generic id order, so their ids
+        // are assigned in that order too, not in order of first use.
+        let mut used_functions = callable_uses.functions;
+        used_functions.sort_unstable_by_key(|function| function.0);
+        let mut used_generics = callable_uses.generics;
+        used_generics.sort_unstable_by_key(|generic| generic.0);
         ids.function_closure_thunks
             .resize(module.functions.len(), None);
-        for function in callable_uses.functions {
+        for function in used_functions {
             let slot = ids
                 .function_closure_thunks
                 .get_mut(function.0 as usize)
@@ -1536,7 +1542,7 @@ impl<'module> Lowering<'module> {
         }
         ids.generic_closure_thunks
             .resize(module.generics.len(), None);
-        for generic in callable_uses.generics {
+        for generic in used_generics {
             let slot = ids
                 .generic_closure_thunks
                 .get_mut(generic.0 as usize)
