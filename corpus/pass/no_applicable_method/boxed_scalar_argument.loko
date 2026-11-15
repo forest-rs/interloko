@@ -1,0 +1,22 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: run reports no method of area applies to (<integer>), called with (5)
+// expect: diagnostics 1
+// expect: diagnostic code typing.dispatch-no-applicable-method
+// expect: dump lowered contains = unbox object
+
+// `area`'s only method specializes on a class, so its dispatcher takes
+// runtime objects. A boxed `<object>` argument is unboxed at the send; one
+// that holds a number finds no method there and signals.
+
+define class <circle> (<object>)
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  7
+end;
+
+define function main()
+  area(as(<object>, 5))
+end;
