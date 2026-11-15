@@ -51,10 +51,12 @@ use facts::TypingFacts;
 /// `Off` does.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub enum CodegenPolicy {
-    /// Lowering ignores typing facts and keeps every runtime check.
-    #[default]
+    /// Lowering ignores typing facts and keeps every runtime check, so the
+    /// generated code is what it would be without typing.
     Off,
     /// Lowering may drop or specialize runtime checks that typing proved.
+    /// The default: results and runtime outcome codes are those of `Off`.
+    #[default]
     Proved,
 }
 

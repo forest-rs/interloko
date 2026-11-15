@@ -171,6 +171,9 @@ The current slices include:
 - read-only grammar MOP inspection plus trusted staged grammar adapters;
 - structured EOP records for environment/workbench objects and affordances;
 - explicit host-backed class/slot metadata for Rust interop experiments;
+- soft typing that classifies every runtime check, and lowering that, under
+  the default `proved` codegen policy, drops or specializes the checks it
+  proved (a numeric send typing resolved runs its method inline);
 - compiler sessions, incremental artifacts, cache reports, and stage dumps;
 - structured diagnostics rendered through MessageFormat 2 catalogs.
 
@@ -255,8 +258,12 @@ cargo run -p interloko_lab -- diff <before.loko> <after.loko>
 ```
 
 Every command takes `--codegen off|proved`, anywhere in its arguments, to
-choose whether lowering acts on what soft typing proved; the REPL's
-`:codegen [off|proved]` shows or sets the same policy.
+choose whether lowering acts on what soft typing proved (the default,
+`proved`) or keeps every runtime check (`off`, for debugging the unoptimized
+machinery); the REPL's `:codegen [off|proved]` shows or sets the same policy.
+Results and runtime outcome codes are the same under both; traces show fewer
+sends under `proved`, and a trap in inlined numeric code is reported at the
+call. See [Codegen Policy](docs/eop_workbench.md#codegen-policy).
 
 Diagnostics can be rendered with the bundled catalogs or a custom catalog:
 

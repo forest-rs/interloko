@@ -38,7 +38,8 @@ Supported expectations:
   session (default `soft`). Typing findings are advisory diagnostics and are
   counted by `diagnostics N`.
 - `// codegen: off|proved`: select the codegen policy the expectations are
-  checked under (default `off`). Under `proved`, lowering drops or specializes
+  checked under (default `proved`, the compiler's default). Use `off` for a
+  case about the code lowering emits without typing facts. Under `proved`, lowering drops or specializes
   the runtime checks soft typing proved; `corpus/pass/codegen` shows each kind.
   Whatever the header says, every case that runs `main` also runs under the
   other policy, and the check fails unless both runs end the same way: the

@@ -57,7 +57,8 @@ traces come from the existing compiler/runtime interface.
   retained here.
 - The codegen policy decides whether lowering acts on what soft typing
   proved. `with_codegen_policy` chooses it at construction (the other
-  constructors use the compiler's default), source replacement keeps it, and
+  constructors use the compiler's default, `Proved`; `Off` keeps every
+  runtime check, for debugging), source replacement keeps it, and
   `set_codegen_policy` lowers the accepted revision again under another one
   as a revision-checked edit that keeps its source and mutation log.
 - Construction uses the compiler's builtin grammar environment. Custom staged

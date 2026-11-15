@@ -6,14 +6,17 @@
 // expect: dump typing contains actual=<u32>
 // expect: dump typing contains cast checked rule=cast-narrowing
 // expect: dump lowered contains f32.add
-// expect: dump lowered contains i32.add_ovf
+// expect: dump lowered contains = i32.add %r
+// expect: dump lowered lacks i32.add_ovf
 
 // Soft typing knows the 32-bit kinds' types: a `<single-float>` is
 // exactly that class, and an `<i32>` or `<u32>` value is an `<integer>` in
 // that range. Dispatch on them is proved, while an `<object>` unboxed as
 // `<u32>` still needs its runtime check. Statically typed arithmetic
-// compiles to the 32-bit instructions directly. (Flow typing knows `step`
-// is exactly 7, so `weigh` takes the `<i32>` through a parameter.)
+// compiles to the 32-bit instructions directly, and `3i32 + 4`, which
+// typing proves cannot overflow, without its overflow check. (Flow typing
+// knows `step` is exactly 7, so `weigh` takes the `<i32>` through a
+// parameter.)
 define generic weight(x);
 
 define method weight(x :: <single-float>) => <integer>

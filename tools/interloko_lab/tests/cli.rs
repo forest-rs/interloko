@@ -1375,7 +1375,7 @@ fn show_types_and_contract_dependents_explain_flow_types() {
         "{explanation}"
     );
     assert!(
-        explanation.contains("codegen: kept (policy off)\n"),
+        explanation.contains("codegen: kept (policy proved)\n"),
         "{explanation}"
     );
     let record = run_lab(&["inspect", path, &decision]);
@@ -1419,6 +1419,8 @@ fn codegen_option_selects_the_policy_for_every_command() {
     assert!(lowered.contains("select-method"), "{lowered}");
     let lowered = run_lab(&["dump", path, "--stage", "lowered", "--codegen", "proved"]);
     assert!(!lowered.contains("select-method"), "{lowered}");
+    // `proved` is the default.
+    assert_eq!(run_lab(&["dump", path, "--stage", "lowered"]), lowered);
     for policy in ["off", "proved"] {
         let config = run_lab(&[
             "inspect",

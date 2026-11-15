@@ -176,6 +176,10 @@ define function answer() => <integer> step(999) + 2 end;";
             .count()
     };
 
+    assert_eq!(
+        Session::new("sum.loko", SUM).unwrap().codegen_policy(),
+        CodegenPolicy::Proved
+    );
     let mut session =
         Session::with_codegen_policy("sum.loko", SUM, HostMetaRegistry::new(), CodegenPolicy::Off)
             .unwrap();

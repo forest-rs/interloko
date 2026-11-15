@@ -3278,7 +3278,7 @@ impl CompilerSession {
             files: Vec::new(),
             grammar_registry,
             typing_config: typing::TypingConfig::soft(),
-            codegen_policy: lower::CodegenPolicy::Off,
+            codegen_policy: lower::CodegenPolicy::Proved,
         }
     }
 
@@ -3561,7 +3561,7 @@ impl IncrementalCompilerSession {
             files: Vec::new(),
             grammar_registry,
             typing_config: typing::TypingConfig::soft(),
-            codegen_policy: lower::CodegenPolicy::Off,
+            codegen_policy: lower::CodegenPolicy::Proved,
         }
     }
 
@@ -15366,7 +15366,8 @@ mod tests {
             .explain_typing(decision.id.as_str())
             .expect("decision explanation");
         assert!(explanation.contains(&format!("depends-on: {contract_id}\n")));
-        assert!(explanation.contains("codegen: kept (policy off)\n"));
+        // A checked dispatch keeps its check under the default policy too.
+        assert!(explanation.contains("codegen: kept (policy proved)\n"));
 
         let contract = eop_object(&objects, &contract_id);
         assert_eq!(contract.kind, EnvironmentKind::Contract);
@@ -18278,7 +18279,7 @@ mod tests {
     #[test]
     fn session_inputs_reach_only_their_dependents() {
         let mut session = IncrementalCompilerSession::new();
-        assert_eq!(session.codegen_policy(), lower::CodegenPolicy::Off);
+        assert_eq!(session.codegen_policy(), lower::CodegenPolicy::Proved);
         let id = session.add_source("pick.loko", PICK_SHAPE);
         let _ = session
             .compile(id, RuntimeMode::CompileOnly)
@@ -18300,14 +18301,11 @@ mod tests {
         }
 
         // A codegen policy change lowers again, from the recorded typing.
-        session.set_codegen_policy(lower::CodegenPolicy::Proved);
+        session.set_codegen_policy(lower::CodegenPolicy::Off);
         let policy = session
             .compile(id, RuntimeMode::CompileOnly)
             .expect("source exists");
-        assert_eq!(
-            policy.artifacts.codegen_policy(),
-            lower::CodegenPolicy::Proved
-        );
+        assert_eq!(policy.artifacts.codegen_policy(), lower::CodegenPolicy::Off);
         assert!(policy.dependency_edges().iter().any(|edge| {
             edge.dependent == QueryArtifact::LoweredModule
                 && edge.dependency == QueryArtifact::CodegenPolicy
@@ -18337,6 +18335,7 @@ mod tests {
     #[test]
     fn a_codegen_policy_change_lowers_and_runs_the_new_code() {
         let mut session = IncrementalCompilerSession::new();
+        session.set_codegen_policy(lower::CodegenPolicy::Off);
         let id = session.add_source("sum.loko", SMALL_SUM);
         let off = session
             .compile(id, RuntimeMode::RunMain)
