@@ -62,6 +62,7 @@ use crate::sem;
 use crate::syntax::Span;
 use crate::typing;
 use interloko_model::condition::TypeErrorKind;
+use interloko_model::types::IntRange;
 use interloko_runtime::RuntimeLayout;
 use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
 use interloko_runtime::control::{RestartDescriptor, RestartParameter, TypeErrorSite};
@@ -1827,6 +1828,9 @@ struct KnownCallableThunk<'a> {
     callable: sem::KnownCallable,
     target: FunctionId,
     call_params: &'a [ValueKind],
+    /// Ranges of `limited(<integer>, ...)` parameters, parallel to
+    /// `call_params`, which the thunk checks.
+    param_ranges: &'a [Option<IntRange>],
     /// The definition numbering the thunk's entry checks and, per
     /// parameter, the site of its check; checks without one always stay.
     entry_sites: Option<(DefinitionId, Vec<Option<sem::SiteId>>)>,
@@ -2177,6 +2181,7 @@ impl<'module> Lowering<'module> {
         // An exit procedure is a first-class callable, so whoever invokes it
         // may not know the block's result classes.
         let mut checks = Vec::new();
+        let mut next_label = 0;
         let mut payload = vec![token];
         // Exit thunks are shared by every block with the same result kinds,
         // so their checks belong to no one body's sites and always stay.
@@ -2186,18 +2191,20 @@ impl<'module> Lowering<'module> {
                 payload.push(*value);
                 continue;
             };
-            let checked = register_at(register_kinds.len());
-            register_kinds.push(*kind);
-            checks.push(entry_check(
+            let mut code = CodeBuffer {
+                register_kinds: &mut register_kinds,
+                next_label: &mut next_label,
+                instructions: &mut checks,
+            };
+            payload.push(entry_check(
                 self.module,
+                &mut code,
                 target,
-                checked,
                 *value,
                 *kind,
                 entry_site_name(&name, index),
                 span,
             ));
-            payload.push(checked);
         }
         Ok(Function {
             id: thunk.function,
@@ -2401,6 +2408,7 @@ impl<'module> Lowering<'module> {
                 callable: sem::KnownCallable::DirectFunction(function.id),
                 target,
                 call_params: &params,
+                param_ranges: &function.param_ranges,
                 entry_sites: Some((function.definition, sites)),
                 rets: self.value_kinds(&function.result_kinds)?,
                 span: function.span,
@@ -2431,6 +2439,7 @@ impl<'module> Lowering<'module> {
                 callable: sem::KnownCallable::GenericFunction(generic.id),
                 target,
                 call_params: &params,
+                param_ranges: &generic.param_ranges,
                 entry_sites: None,
                 rets: self.value_kinds(&generic.result_kinds)?,
                 span: generic.span,
@@ -2466,6 +2475,7 @@ impl<'module> Lowering<'module> {
                 },
                 target: accessor.function,
                 call_params: &params,
+                param_ranges: &[None],
                 entry_sites: None,
                 rets: vec![self.value_kind(slot.kind)?],
                 span: slot.span,
@@ -2514,49 +2524,47 @@ impl<'module> Lowering<'module> {
             .chain(spec.rets.iter().copied())
             .collect::<Vec<_>>();
         // The thunk is the callable's indirect entry, so it checks the
-        // parameter classes its target relies on, unless typing proved one.
-        // A generic's dispatch already checks every argument's class.
+        // parameter types its target relies on, unless typing proved one.
+        // A generic's dispatch already checks every argument's class, but
+        // not a limited parameter's range, which its sends check.
         let mut instructions = Vec::new();
-        if !matches!(spec.callable, sem::KnownCallable::GenericFunction(_)) {
-            for (index, (arg, kind)) in call_args.iter_mut().zip(spec.call_params).enumerate() {
-                let Some(target) = entry_target(*kind) else {
-                    continue;
-                };
-                if let Some((owner, sites)) = &spec.entry_sites
-                    && let Some(site) = sites.get(index).copied().flatten()
-                    && self
-                        .facts
-                        .decision(Some(*owner), site)
-                        .is_some_and(|decision| decision.verdict == typing::TypingVerdict::Proved)
-                {
-                    checks.push(CheckCodegenRecord {
-                        owner: *owner,
-                        site,
-                        codegen: CheckCodegen::Elided,
-                    });
-                    continue;
-                }
-                let site = match &spec.entry_sites {
-                    Some((owner, sites)) => check_site_name(
-                        Some(*owner),
-                        sites.get(index).copied().flatten(),
-                        spec.span,
-                    ),
-                    None => entry_site_name(&spec.name, index),
-                };
-                let checked = register_at(register_kinds.len());
-                register_kinds.push(*kind);
-                instructions.push(entry_check(
-                    self.module,
-                    target,
-                    checked,
-                    *arg,
-                    *kind,
+        let mut next_label = 0;
+        let sends = matches!(spec.callable, sem::KnownCallable::GenericFunction(_));
+        for (index, (arg, kind)) in call_args.iter_mut().zip(spec.call_params).enumerate() {
+            let target = match spec.param_ranges.get(index).copied().flatten() {
+                Some(range) if *kind == ValueKind::I64 => sem::EntryTarget::Range(range),
+                _ if sends => continue,
+                _ => match entry_target(*kind) {
+                    Some(target) => target,
+                    None => continue,
+                },
+            };
+            if let Some((owner, sites)) = &spec.entry_sites
+                && let Some(site) = sites.get(index).copied().flatten()
+                && self
+                    .facts
+                    .decision(Some(*owner), site)
+                    .is_some_and(|decision| decision.verdict == typing::TypingVerdict::Proved)
+            {
+                checks.push(CheckCodegenRecord {
+                    owner: *owner,
                     site,
-                    spec.span,
-                ));
-                *arg = checked;
+                    codegen: CheckCodegen::Elided,
+                });
+                continue;
             }
+            let site = match &spec.entry_sites {
+                Some((owner, sites)) => {
+                    check_site_name(Some(*owner), sites.get(index).copied().flatten(), spec.span)
+                }
+                None => entry_site_name(&spec.name, index),
+            };
+            let mut code = CodeBuffer {
+                register_kinds: &mut register_kinds,
+                next_label: &mut next_label,
+                instructions: &mut instructions,
+            };
+            *arg = entry_check(self.module, &mut code, target, *arg, *kind, site, spec.span);
         }
         let call = match spec.callable {
             // A first-class generic sends like a call site.
@@ -2854,7 +2862,9 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(receiver, uses);
             collect_known_callable_uses_in_expr(value, uses);
         }
-        sem::Expr::Negate { value, .. } | sem::Expr::Convert { value, .. } => {
+        sem::Expr::Negate { value, .. }
+        | sem::Expr::Convert { value, .. }
+        | sem::Expr::CheckRange { value, .. } => {
             collect_known_callable_uses_in_expr(value, uses);
         }
         sem::Expr::FloatCall { args, .. } => {
@@ -3282,12 +3292,16 @@ impl<'module> BodyLowering<'module> {
 
     /// Checks a closure's parameters on entry, unless typing proved a check:
     /// a closure is only ever entered through `call.indirect`, whose caller
-    /// may not know its parameter classes; see [`entry_target`].
+    /// may not know its parameter classes or ranges; see [`entry_target`].
     fn check_closure_entry(&mut self, closure: &sem::Closure) -> Result<(), LowerError> {
         for (index, local_id) in closure.params.iter().copied().enumerate() {
             let (reg, kind) = (self.params[index + 1].reg, self.params[index + 1].kind);
-            let Some(target) = entry_target(kind) else {
-                continue;
+            let target = match closure.param_ranges.get(index).copied().flatten() {
+                Some(range) if kind == ValueKind::I64 => sem::EntryTarget::Range(range),
+                _ => match entry_target(kind) {
+                    Some(target) => target,
+                    None => continue,
+                },
             };
             let site = closure
                 .entry_checks
@@ -3304,17 +3318,25 @@ impl<'module> BodyLowering<'module> {
                 (Some(_), Some(_)) => check_site_name(self.site_owner, site, closure.span),
                 _ => entry_site_name(&format!("closure#{}", closure.id.0), index),
             };
-            let checked = self.alloc(kind);
-            self.instructions.push(entry_check(
-                self.module,
+            let module = self.module;
+            let checked = entry_check(
+                module,
+                &mut self.code(),
                 target,
-                checked.reg,
                 reg,
                 kind,
                 name,
                 closure.span,
-            ));
-            self.set_local(local_id, checked)?;
+            );
+            self.next_reg = register_at(self.register_kinds.len());
+            self.set_local(
+                local_id,
+                Value {
+                    reg: checked,
+                    kind,
+                    reachable: true,
+                },
+            )?;
         }
         Ok(())
     }
@@ -4592,7 +4614,7 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::InstanceOfLimited {
                 value,
-                limited,
+                range,
                 site,
                 span,
             } => {
@@ -4600,7 +4622,7 @@ impl<'module> BodyLowering<'module> {
                 if let Some(outcome) = self.decided_test(*site) {
                     return Ok(self.decided_test_value(*site, outcome, *span));
                 }
-                Ok(self.lower_limited_membership(value, *limited, *span))
+                Ok(self.lower_limited_membership(value, *range, *span))
             }
             sem::Expr::Cast {
                 value,
@@ -4783,7 +4805,7 @@ impl<'module> BodyLowering<'module> {
                             None => {
                                 let type_error = self.type_error(
                                     TypeErrorKind::Range,
-                                    shift_count_expected(self.module),
+                                    shift_count_expected(),
                                     *site,
                                     *span,
                                 );
@@ -4899,6 +4921,29 @@ impl<'module> BodyLowering<'module> {
                     return Ok(converted);
                 }
                 self.convert_number(value, *to, Some(*site), *span)
+            }
+            sem::Expr::CheckRange {
+                value,
+                range,
+                site,
+                span,
+            } => {
+                let value = self.lower_expr(value)?;
+                let value = match value.kind {
+                    ValueKind::I32 | ValueKind::U32 => self.widen_integer(value, *span),
+                    _ => value,
+                };
+                if self.proved(*site) {
+                    self.record(*site, CheckCodegen::Elided);
+                    return Ok(value);
+                }
+                let type_error = self.type_error(
+                    TypeErrorKind::Range,
+                    range_expected(*range),
+                    Some(*site),
+                    *span,
+                );
+                Ok(self.lower_range_check(value, *range, type_error, *span))
             }
             sem::Expr::Negate {
                 kind,
@@ -6530,14 +6575,9 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
-    /// Lowers `instance?(value, <i32>)` or `<u32>`: whether the value is an
-    /// `<integer>` in the limited type's range.
-    fn lower_limited_membership(
-        &mut self,
-        value: Value,
-        limited: sem::LimitedInteger,
-        span: Span,
-    ) -> Value {
+    /// Lowers `instance?(value, <i32>)`, `<u32>` or another limited integer
+    /// type: whether the value is an `<integer>` in the type's range.
+    fn lower_limited_membership(&mut self, value: Value, range: IntRange, span: Span) -> Value {
         let const_bool = |this: &mut Self, value| {
             let result = this.alloc(ValueKind::Bool);
             this.instructions.push(Instr::ConstBool {
@@ -6559,10 +6599,10 @@ impl<'module> BodyLowering<'module> {
             });
             constant
         };
-        match (value.kind, limited) {
-            (ValueKind::I32, sem::LimitedInteger::I32)
-            | (ValueKind::U32, sem::LimitedInteger::U32) => const_bool(self, true),
-            (ValueKind::I32, sem::LimitedInteger::U32) => {
+        match (value.kind, range.limited()) {
+            (ValueKind::I32, _) if range.includes(IntRange::I32) => const_bool(self, true),
+            (ValueKind::U32, _) if range.includes(IntRange::U32) => const_bool(self, true),
+            (ValueKind::I32, Some(sem::LimitedInteger::U32)) => {
                 let zero = const32(self, sem::Number32::I32(0));
                 self.num32_binary(
                     Num32BinaryOp::I32Ge,
@@ -6572,7 +6612,7 @@ impl<'module> BodyLowering<'module> {
                     span,
                 )
             }
-            (ValueKind::U32, sem::LimitedInteger::I32) => {
+            (ValueKind::U32, Some(sem::LimitedInteger::I32)) => {
                 let max = const32(self, sem::Number32::U32(i32::MAX.cast_unsigned()));
                 self.num32_binary(
                     Num32BinaryOp::U32Le,
@@ -6582,8 +6622,12 @@ impl<'module> BodyLowering<'module> {
                     span,
                 )
             }
-            (ValueKind::I64, limited) => self.lower_integer_in_range(value, limited, span),
-            (ValueKind::Any, limited) => {
+            (ValueKind::I32 | ValueKind::U32, _) => {
+                let integer = self.widen_integer(value, span);
+                self.lower_integer_in_range(integer, range, span)
+            }
+            (ValueKind::I64, _) => self.lower_integer_in_range(value, range, span),
+            (ValueKind::Any, _) => {
                 // Test the class first: only an `<integer>` unboxes.
                 let result = self.alloc(ValueKind::Bool);
                 let is_integer = self.alloc(ValueKind::Bool);
@@ -6610,7 +6654,7 @@ impl<'module> BodyLowering<'module> {
                 let type_error =
                     self.coercion_error(class_expected(self.module, integer_class), span);
                 let integer = self.unbox(value, integer_class, ValueKind::I64, type_error, span);
-                let inside = self.lower_integer_in_range(integer, limited, span);
+                let inside = self.lower_integer_in_range(integer, range, span);
                 self.instructions.extend([
                     Instr::Move {
                         dst: result.reg,
@@ -6634,52 +6678,87 @@ impl<'module> BodyLowering<'module> {
         }
     }
 
-    /// Tests whether an `<integer>` lies in a limited type's range.
-    fn lower_integer_in_range(
-        &mut self,
-        value: Value,
-        limited: sem::LimitedInteger,
-        span: Span,
-    ) -> Value {
+    /// Tests whether an `<integer>` lies in a limited type's range: one
+    /// comparison per bound, the second only when the first holds.
+    fn lower_integer_in_range(&mut self, value: Value, range: IntRange, span: Span) -> Value {
         let result = self.alloc(ValueKind::Bool);
-        let bound = self.alloc(ValueKind::I64);
-        let [above_min, done] = core::array::from_fn(|_| self.alloc_label());
+        let done = self.alloc_label();
+        let bounds = [
+            range.min.map(|min| (min, sem::CompareOp::Ge)),
+            range.max.map(|max| (max, sem::CompareOp::Le)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if bounds.is_empty() {
+            self.instructions.push(Instr::ConstBool {
+                dst: result.reg,
+                value: true,
+                span,
+            });
+        }
+        for (index, (bound, op)) in bounds.iter().copied().enumerate() {
+            let constant = self.alloc(ValueKind::I64);
+            self.instructions.extend([
+                Instr::ConstI64 {
+                    dst: constant.reg,
+                    value: bound,
+                    span,
+                },
+                Instr::I64Compare {
+                    dst: result.reg,
+                    op,
+                    lhs: value.reg,
+                    rhs: constant.reg,
+                    span,
+                },
+            ]);
+            if index + 1 < bounds.len() {
+                let next = self.alloc_label();
+                self.instructions.extend([
+                    Instr::Branch {
+                        cond: result.reg,
+                        then_label: next,
+                        else_label: done,
+                        span,
+                    },
+                    Instr::Label { label: next },
+                ]);
+            }
+        }
         self.instructions.extend([
-            Instr::ConstI64 {
-                dst: bound.reg,
-                value: limited.min(),
-                span,
-            },
-            Instr::I64Compare {
-                dst: result.reg,
-                op: sem::CompareOp::Ge,
-                lhs: value.reg,
-                rhs: bound.reg,
-                span,
-            },
-            Instr::Branch {
-                cond: result.reg,
-                then_label: above_min,
-                else_label: done,
-                span,
-            },
-            Instr::Label { label: above_min },
-            Instr::ConstI64 {
-                dst: bound.reg,
-                value: limited.max(),
-                span,
-            },
-            Instr::I64Compare {
-                dst: result.reg,
-                op: sem::CompareOp::Le,
-                lhs: value.reg,
-                rhs: bound.reg,
-                span,
-            },
             Instr::Jump { label: done, span },
             Instr::Label { label: done },
         ]);
         result
+    }
+
+    /// Checks that the `<integer>` `value` is in a limited type's `range`;
+    /// see [`CodeBuffer::range_check`].
+    fn lower_range_check(
+        &mut self,
+        value: Value,
+        range: IntRange,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) -> Value {
+        let checked = self.code().range_check(value.reg, range, type_error, span);
+        self.next_reg = register_at(self.register_kinds.len());
+        Value {
+            reg: checked,
+            kind: ValueKind::I64,
+            reachable: true,
+        }
+    }
+
+    /// This body's registers, labels and instructions, to emit code shared
+    /// with functions lowered without a body.
+    fn code(&mut self) -> CodeBuffer<'_> {
+        CodeBuffer {
+            register_kinds: &mut self.register_kinds,
+            next_label: &mut self.next_label,
+            instructions: &mut self.instructions,
+        }
     }
 
     /// Lowers a wrapping operator (`+%`, `-%`, `*%`) or a bitwise function
@@ -7905,15 +7984,132 @@ fn kind_expected(kind: ValueKind) -> String {
 }
 
 /// The expected type of a shift count: `limited(<integer>, min: 0, max: 31)`.
-fn shift_count_expected(module: &sem::Module) -> String {
-    let counts = interloko_model::types::Type::of(
-        interloko_model::types::Atom::Integer(interloko_model::types::IntRange {
-            min: Some(0),
-            max: Some(31),
-        }),
-        module,
-    );
-    typing::type_name(module, &counts)
+fn shift_count_expected() -> String {
+    range_expected(IntRange {
+        min: Some(0),
+        max: Some(31),
+    })
+}
+
+/// The expected type of a check that an `<integer>` is in `range`, such as
+/// `limited(<integer>, min: 0, max: 255)`: spelled out even when it equals
+/// `<i32>`'s, since the checked value is an `<integer>`.
+fn range_expected(range: IntRange) -> String {
+    sem::limited_type_name(range)
+}
+
+/// The registers, labels and instructions of a function being lowered, for
+/// code emitted both into bodies and into functions built without one,
+/// such as thunks.
+struct CodeBuffer<'a> {
+    /// Kinds of r1 onward; a new register is the next one.
+    register_kinds: &'a mut Vec<ValueKind>,
+    /// The next unused label.
+    next_label: &'a mut u32,
+    /// The instructions so far.
+    instructions: &'a mut Vec<Instr>,
+}
+
+impl CodeBuffer<'_> {
+    fn alloc(&mut self, kind: ValueKind) -> Reg {
+        let reg = register_at(self.register_kinds.len());
+        self.register_kinds.push(kind);
+        reg
+    }
+
+    fn label(&mut self) -> LabelId {
+        let label = LabelId(*self.next_label);
+        *self.next_label = self.next_label.saturating_add(1);
+        label
+    }
+
+    /// Branches to `inside` when the `<integer>` in `value` is in `range`
+    /// and to `outside` otherwise: one comparison and branch per bound.
+    fn branch_on_range(
+        &mut self,
+        value: Reg,
+        range: IntRange,
+        inside: LabelId,
+        outside: LabelId,
+        span: Span,
+    ) {
+        let bounds = [
+            range.min.map(|min| (min, sem::CompareOp::Ge)),
+            range.max.map(|max| (max, sem::CompareOp::Le)),
+        ];
+        for (bound, op) in bounds.into_iter().flatten() {
+            let constant = self.alloc(ValueKind::I64);
+            let holds = self.alloc(ValueKind::Bool);
+            let next = self.label();
+            self.instructions.extend([
+                Instr::ConstI64 {
+                    dst: constant,
+                    value: bound,
+                    span,
+                },
+                Instr::I64Compare {
+                    dst: holds,
+                    op,
+                    lhs: value,
+                    rhs: constant,
+                    span,
+                },
+                Instr::Branch {
+                    cond: holds,
+                    then_label: next,
+                    else_label: outside,
+                    span,
+                },
+                Instr::Label { label: next },
+            ]);
+        }
+        self.instructions.push(Instr::Jump {
+            label: inside,
+            span,
+        });
+    }
+
+    /// Checks that the `<integer>` in `value` is in a limited type's
+    /// `range`, signalling `type_error` when it is not, and returns the
+    /// register of the checked value.
+    ///
+    /// The check works on a copy of the value, so an operand that is a
+    /// local's register keeps its value. A `use-value` replacement is
+    /// written to the copy and the signal resumes at the test: unlike
+    /// `<i32>`, whose register type establishes the range, an `<integer>`
+    /// replacement may be outside it, so a bad one signals again.
+    fn range_check(
+        &mut self,
+        value: Reg,
+        range: IntRange,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) -> Reg {
+        let checked = self.alloc(ValueKind::I64);
+        let [test, outside, inside] = core::array::from_fn(|_| self.label());
+        self.instructions.extend([
+            Instr::Move {
+                dst: checked,
+                src: value,
+                span,
+            },
+            Instr::Jump { label: test, span },
+            Instr::Label { label: test },
+        ]);
+        self.branch_on_range(checked, range, inside, outside, span);
+        self.instructions.extend([
+            Instr::Label { label: outside },
+            Instr::SignalTypeError {
+                dst: checked,
+                values: vec![checked],
+                type_error,
+                resume: test,
+                span,
+            },
+            Instr::Label { label: inside },
+        ]);
+        checked
+    }
 }
 
 /// Returns what a callable's indirect entry must check a `kind` parameter
@@ -7936,45 +8132,59 @@ fn entry_target(kind: ValueKind) -> Option<sem::EntryTarget> {
     }
 }
 
-/// The instruction checking that `value`, of `kind`, is what `target`
-/// requires, into `dst`. A failure signals a [`TypeErrorKind::Entry`] error
-/// at `site`.
+/// Emits the check that `value`, of `kind`, is what `target` requires into
+/// `code` and returns the register of the checked value. A class check
+/// failing signals a [`TypeErrorKind::Entry`] error at `site`, and a range
+/// check a [`TypeErrorKind::Range`] one, whose replacement is checked again.
 fn entry_check(
     module: &sem::Module,
+    code: &mut CodeBuffer<'_>,
     target: sem::EntryTarget,
-    dst: Reg,
     value: Reg,
     kind: ValueKind,
     site: String,
     span: Span,
-) -> Instr {
+) -> Reg {
     match target {
-        sem::EntryTarget::Instance(class) => Instr::CastObject {
-            dst,
-            value,
-            input: kind,
-            class,
-            type_error: type_error_site(
-                TypeErrorKind::Entry,
-                class_expected(module, class),
-                site,
+        sem::EntryTarget::Range(range) => {
+            let type_error =
+                type_error_site(TypeErrorKind::Range, range_expected(range), site, span);
+            code.range_check(value, range, type_error, span)
+        }
+        sem::EntryTarget::Instance(class) => {
+            let dst = code.alloc(kind);
+            code.instructions.push(Instr::CastObject {
+                dst,
+                value,
+                input: kind,
+                class,
+                type_error: type_error_site(
+                    TypeErrorKind::Entry,
+                    class_expected(module, class),
+                    site,
+                    span,
+                ),
                 span,
-            ),
-            span,
-        },
-        sem::EntryTarget::ClassObject(bound) => Instr::CastClassObject {
-            dst,
-            value,
-            input: kind,
-            bound,
-            type_error: type_error_site(
-                TypeErrorKind::Entry,
-                class_object_expected(module, bound),
-                site,
+            });
+            dst
+        }
+        sem::EntryTarget::ClassObject(bound) => {
+            let dst = code.alloc(kind);
+            code.instructions.push(Instr::CastClassObject {
+                dst,
+                value,
+                input: kind,
+                bound,
+                type_error: type_error_site(
+                    TypeErrorKind::Entry,
+                    class_object_expected(module, bound),
+                    site,
+                    span,
+                ),
                 span,
-            ),
-            span,
-        },
+            });
+            dst
+        }
     }
 }
 

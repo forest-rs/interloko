@@ -276,7 +276,8 @@ pub(super) fn for_each_site(expr: &sem::Expr, visit: &mut impl FnMut(SiteId)) {
             | sem::Expr::Cast { site, .. }
             | sem::Expr::InstanceOf { site, .. }
             | sem::Expr::InstanceOfLimited { site, .. }
-            | sem::Expr::Convert { site, .. } => Some(*site),
+            | sem::Expr::Convert { site, .. }
+            | sem::Expr::CheckRange { site, .. } => Some(*site),
             sem::Expr::Binary { site, .. } | sem::Expr::Negate { site, .. } => *site,
             _ => None,
         };
@@ -325,6 +326,7 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
             }
         }
         E::Convert { value: inner, .. }
+        | E::CheckRange { value: inner, .. }
         | E::Negate { value: inner, .. }
         | E::Signal {
             condition: inner, ..

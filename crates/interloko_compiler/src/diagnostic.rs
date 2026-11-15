@@ -156,6 +156,14 @@ pub enum DiagnosticCode {
     AbstractNumericTypeUnsupported,
     /// A method specializes on a limited type its generic does not declare.
     LimitedTypeSpecializer,
+    /// `limited(...)` limits a type other than `<integer>`.
+    LimitedTypeBase,
+    /// `limited(...)` has an option other than one `min:` and one `max:`.
+    LimitedTypeOption,
+    /// A `limited(...)` bound is not an `<integer>` literal.
+    LimitedTypeBound,
+    /// A `limited(...)` type's `min:` is above its `max:`, so no value has it.
+    EmptyLimitedType,
     /// A method specializes a limited-type generic parameter on a class instead of restating the limited type.
     LimitedParameterSpecializer,
     /// A comparison operand is not a number.
@@ -352,6 +360,10 @@ impl DiagnosticCode {
         Self::ShiftCountOutOfRange,
         Self::AbstractNumericTypeUnsupported,
         Self::LimitedTypeSpecializer,
+        Self::LimitedTypeBase,
+        Self::LimitedTypeOption,
+        Self::LimitedTypeBound,
+        Self::EmptyLimitedType,
         Self::LimitedParameterSpecializer,
         Self::ComparisonOperandTypeMismatch,
         Self::ApplyArityMismatch,
@@ -479,6 +491,10 @@ impl DiagnosticCode {
             Self::ShiftCountOutOfRange => "sem.shift-count-out-of-range",
             Self::AbstractNumericTypeUnsupported => "sem.abstract-numeric-type-unsupported",
             Self::LimitedTypeSpecializer => "sem.limited-type-specializer",
+            Self::LimitedTypeBase => "sem.limited-type-base",
+            Self::LimitedTypeOption => "sem.limited-type-option",
+            Self::LimitedTypeBound => "sem.limited-type-bound",
+            Self::EmptyLimitedType => "sem.empty-limited-type",
             Self::LimitedParameterSpecializer => "sem.limited-parameter-specializer",
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
@@ -607,6 +623,10 @@ impl DiagnosticCode {
             "sem.shift-count-out-of-range" => Self::ShiftCountOutOfRange,
             "sem.abstract-numeric-type-unsupported" => Self::AbstractNumericTypeUnsupported,
             "sem.limited-type-specializer" => Self::LimitedTypeSpecializer,
+            "sem.limited-type-base" => Self::LimitedTypeBase,
+            "sem.limited-type-option" => Self::LimitedTypeOption,
+            "sem.limited-type-bound" => Self::LimitedTypeBound,
+            "sem.empty-limited-type" => Self::EmptyLimitedType,
             "sem.limited-parameter-specializer" => Self::LimitedParameterSpecializer,
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,

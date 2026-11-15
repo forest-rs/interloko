@@ -281,8 +281,9 @@ impl AnnotationSite {
 }
 
 /// Whether `type_source` lexes as a type annotation: type names, `class`,
-/// `callable`, parentheses, commas and `=>`, and nothing else. Whether it
-/// names real classes is for the compiler to say.
+/// `callable`, `limited` with its `min:` and `max:` integer bounds,
+/// parentheses, commas and `=>`, and nothing else. Whether it names real
+/// classes is for the compiler to say.
 #[must_use]
 pub fn is_type_source(type_source: &str) -> bool {
     let tokens = significant_tokens(type_source);
@@ -294,8 +295,14 @@ pub fn is_type_source(type_source: &str) -> bool {
             | TokenKind::LParen
             | TokenKind::RParen
             | TokenKind::Comma
-            | TokenKind::Arrow => true,
-            TokenKind::Ident => token.text(type_source) == "callable",
+            | TokenKind::Arrow
+            | TokenKind::Colon
+            | TokenKind::Minus
+            | TokenKind::Number => true,
+            TokenKind::Ident => matches!(
+                token.text(type_source),
+                "callable" | "limited" | "min" | "max"
+            ),
             _ => false,
         })
 }
@@ -368,10 +375,12 @@ pub fn annotation_sites(tree: &SyntaxTree, module: &ast::Module) -> Vec<Annotati
         let mut binders = Vec::new();
         collect_expr(&constant.value, &mut binders);
         push_binders(&finder, constant.definition, binders, &mut sites);
-        let written = constant
-            .type_annotation
-            .as_ref()
-            .map(|annotation| (finder.text(annotation.span).to_string(), annotation.span));
+        let written = constant.type_annotation.as_ref().map(|annotation| {
+            (
+                finder.text(annotation.span()).to_string(),
+                annotation.span(),
+            )
+        });
         let insert = finder
             .constant_name(constant.span, &constant.name)
             .map(|name| (name.end, " :: "));
@@ -407,10 +416,7 @@ impl Binder {
             name: param.name.clone(),
             span: param.span,
             role,
-            written: param
-                .type_annotation
-                .as_ref()
-                .map(|annotation| annotation.span),
+            written: param.type_annotation.as_ref().map(ast::TypeExpr::span),
         }
     }
 
@@ -419,10 +425,7 @@ impl Binder {
             name: binding.name.clone(),
             span: binding.span,
             role: AnnotationRole::Local,
-            written: binding
-                .type_annotation
-                .as_ref()
-                .map(|annotation| annotation.span),
+            written: binding.type_annotation.as_ref().map(ast::TypeExpr::span),
         }
     }
 }
@@ -982,6 +985,7 @@ mod tests {
             " class <shape> ",
             "callable(<integer>) => <circle>",
             "(<integer>, <integer>)",
+            "limited(<integer>, min: -1, max: 255)",
         ] {
             assert!(is_type_source(good), "{good}");
         }
@@ -992,6 +996,7 @@ mod tests {
             "<integer>; define",
             "callable",
             "1",
+            "limited(<integer>, min: n)",
         ] {
             assert!(!is_type_source(bad), "{bad}");
         }

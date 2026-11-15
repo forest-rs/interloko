@@ -569,6 +569,20 @@ pub enum FunctionCallError {
         /// Supplied scalar category.
         actual: FunctionValueKind,
     },
+    /// An integer argument is outside its parameter's
+    /// `limited(<integer>, ...)` range, which the function's body assumes:
+    /// a Loko caller checks the argument, and so does the host's entry.
+    ArgumentOutOfRange {
+        /// Requested function name.
+        name: String,
+        /// Zero-based argument position.
+        index: usize,
+        /// Declared parameter type, such as
+        /// `limited(<integer>, min: 0, max: 255)`.
+        expected: String,
+        /// Supplied integer.
+        value: i64,
+    },
     /// A valid scalar argument could not be represented in the runtime host.
     ArgumentMaterializationFailed {
         /// Zero-based argument position.
@@ -677,6 +691,15 @@ impl fmt::Display for FunctionCallError {
             } => write!(
                 formatter,
                 "function `{name}` argument {index} expects {expected}, received {actual}"
+            ),
+            Self::ArgumentOutOfRange {
+                name,
+                index,
+                expected,
+                value,
+            } => write!(
+                formatter,
+                "function `{name}` argument {index} expects {expected}, received {value}"
             ),
             Self::ArgumentMaterializationFailed { index, kind } => write!(
                 formatter,
@@ -5303,7 +5326,9 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner, receiver, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
-        sem::Expr::Negate { value, .. } | sem::Expr::Convert { value, .. } => {
+        sem::Expr::Negate { value, .. }
+        | sem::Expr::Convert { value, .. }
+        | sem::Expr::CheckRange { value, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
         sem::Expr::FloatCall { args, .. } => {
@@ -5991,9 +6016,13 @@ fn generic_contract_label(module: &sem::Module, generic_id: sem::GenericFunction
                 .params
                 .iter()
                 .zip(&generic.param_kinds)
-                .map(|(name, kind)| match kind {
-                    Some(kind) => format!("{name}:{}", sem_kind_label(module, *kind)),
-                    None => format!("{name}:untyped"),
+                .zip(&generic.param_ranges)
+                .map(|((name, kind), range)| match (kind, range) {
+                    (Some(_), Some(range)) => {
+                        format!("{name}:{}", sem::limited_type_name(*range))
+                    }
+                    (Some(kind), None) => format!("{name}:{}", sem_kind_label(module, *kind)),
+                    (None, _) => format!("{name}:untyped"),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -6233,6 +6262,7 @@ fn runtime_result_for_main_error(
         }
         FunctionCallError::ArgumentCountMismatch { .. }
         | FunctionCallError::ArgumentTypeMismatch { .. }
+        | FunctionCallError::ArgumentOutOfRange { .. }
         | FunctionCallError::ArgumentMaterializationFailed { .. } => {
             (RuntimeResult::MainHasParameters, None)
         }
@@ -6397,6 +6427,20 @@ fn run_turn_body<'a>(
         .zip(function.param_kinds.iter().copied())
         .enumerate()
     {
+        // The body assumes a limited parameter's range, so the host's
+        // entry checks it as a Loko caller would.
+        if let (FunctionValue::Integer(value), Some(range)) = (
+            argument,
+            function.param_ranges.get(index).copied().flatten(),
+        ) && !range.contains(*value)
+        {
+            return Err(FunctionCallError::ArgumentOutOfRange {
+                name: function_name.to_string(),
+                index,
+                expected: sem::limited_type_name(range),
+                value: *value,
+            });
+        }
         let value = match (argument, expected) {
             (FunctionValue::Integer(value), sem::ValueKind::I64) => Value::I64(*value),
             (FunctionValue::Float(value), sem::ValueKind::F64) => Value::F64(*value),
@@ -7165,7 +7209,10 @@ fn dump_ast(module: &ast::Module) -> String {
         let params = method
             .params
             .iter()
-            .map(|param| format!("{} :: {}", param.name, param.class_name))
+            .map(|param| match &param.specializer {
+                Some(specializer) => format!("{} :: {specializer}", param.name),
+                None => format!("{} :: ", param.name),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(
@@ -7216,7 +7263,17 @@ fn dump_function_param(param: &ast::FunctionParam) -> String {
     )
 }
 
-fn dump_type_annotation(annotation: &ast::TypeAnnotation) -> String {
+/// Names the values an `instance?` test of a limited integer type admits:
+/// `<i32>` and `<u32>` by name, which the test cannot tell apart from an
+/// equal `limited(<integer>, ...)`.
+fn range_test_name(range: interloko_model::types::IntRange) -> String {
+    range.limited().map_or_else(
+        || sem::limited_type_name(range),
+        |limited| limited.name().into(),
+    )
+}
+
+fn dump_type_annotation(annotation: &ast::TypeExpr) -> String {
     annotation.to_string()
 }
 
@@ -7312,21 +7369,15 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             let _ = writeln!(out, "{id} class-name {class_name}");
         }
         ast::Expr::InstanceOf {
-            id,
-            value,
-            class_name,
-            ..
+            id, value, target, ..
         } => {
-            let _ = writeln!(out, "{id} instance? {class_name}");
+            let _ = writeln!(out, "{id} instance? {target}");
             dump_ast_expr(out, value, indent + 2);
         }
         ast::Expr::Cast {
-            id,
-            class_name,
-            value,
-            ..
+            id, target, value, ..
         } => {
-            let _ = writeln!(out, "{id} as {class_name}");
+            let _ = writeln!(out, "{id} as {target}");
             dump_ast_expr(out, value, indent + 2);
         }
         ast::Expr::Call {
@@ -12905,12 +12956,9 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::InstanceOfLimited {
-            value,
-            limited,
-            site,
-            ..
+            value, range, site, ..
         } => {
-            let _ = writeln!(out, "instance? {} site={site}", limited.name());
+            let _ = writeln!(out, "instance? {} site={site}", range_test_name(*range));
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::Cast {
@@ -13056,6 +13104,12 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             to, value, site, ..
         } => {
             let _ = writeln!(out, "convert to {} site={site}", numeric_kind_label(*to));
+            dump_sem_expr(out, value, indent + 2);
+        }
+        sem::Expr::CheckRange {
+            value, range, site, ..
+        } => {
+            let _ = writeln!(out, "check {} site={site}", sem::limited_type_name(*range));
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::FloatCall { builtin, args, .. } => {
@@ -13605,9 +13659,10 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     .direct_slots
                     .iter()
                     .map(|slot| format!(
-                        "{}={}:{}:accessor={}:{}:{}:{}:{}:{}",
+                        "{}={}{}:{}:accessor={}:{}:{}:{}:{}:{}",
                         slot.name,
                         sem_kind_fingerprint(module, slot.kind),
+                        range_fingerprint(slot.range),
                         sem_slot_origin_label(slot.origin),
                         slot.accessor.definition.raw(),
                         slot.init_keyword,
@@ -13622,9 +13677,10 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     .effective_slots
                     .iter()
                     .map(|slot| format!(
-                        "{}={}:{}:source=c{}.s{}:accessor={}:{}:{}:{}:{}:{}",
+                        "{}={}{}:{}:source=c{}.s{}:accessor={}:{}:{}:{}:{}:{}",
                         slot.name,
                         sem_kind_fingerprint(module, slot.kind),
+                        range_fingerprint(slot.range),
                         sem_slot_origin_label(slot.origin),
                         slot.source_class.0,
                         slot.source_slot.0,
@@ -13647,10 +13703,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                     name: format!("{}.{}", class.name, slot.name),
                 },
                 fingerprint: format!(
-                    "slot:{}:{}:{}:{}:accessor={}:{}:{}:{}:{}:{}",
+                    "slot:{}:{}:{}{}:{}:accessor={}:{}:{}:{}:{}:{}",
                     class.name,
                     slot.name,
                     sem_kind_fingerprint(module, slot.kind),
+                    range_fingerprint(slot.range),
                     sem_slot_origin_label(slot.origin),
                     slot.accessor.definition.raw(),
                     slot.init_keyword,
@@ -13778,14 +13835,37 @@ fn method_definition_fingerprint(module: &sem::Module, method: &sem::Method) -> 
         .get(method.generic.0 as usize)
         .map_or("?", |generic| generic.name.as_str());
     let specializers = sem_specializer_vector_label(module, &method.specializers);
+    // A method assumes its generic's parameter ranges and checks its result
+    // ranges, which may be its generic's rather than its own source's.
+    let ranges = method
+        .params
+        .iter()
+        .map(|param| {
+            range_fingerprint(
+                method
+                    .locals
+                    .get(param.0 as usize)
+                    .and_then(|local| local.range),
+            )
+        })
+        .chain(method.result_ranges.iter().copied().map(range_fingerprint))
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "method:{generic}:{specializers}:{}:{}",
+        "method:{generic}:{specializers}:{}:ranges={ranges}:{}",
         method.return_annotation.as_ref().map_or_else(
             || "inferred".into(),
             |kinds| sem_kind_list_fingerprint(module, kinds)
         ),
         fingerprint_sem_block(module, &method.body)
     )
+}
+
+/// A declared limited range as it shows in a fingerprint: empty for none.
+fn range_fingerprint(range: Option<interloko_model::types::IntRange>) -> String {
+    range.map_or_else(String::new, |range| {
+        format!("@{}", sem::limited_type_name(range))
+    })
 }
 
 /// A function's signature, body, and contract, whose open results binding
@@ -13841,9 +13921,10 @@ fn contract_fingerprint(module: &sem::Module, definition: DefinitionId) -> Strin
             .find(|slot| slot.definition == definition || slot.accessor.definition == definition)
         {
             return format!(
-                "slot:{}:{}:{}",
+                "slot:{}:{}{}:{}",
                 class.definition.raw(),
                 sem_kind_fingerprint(module, slot.kind),
+                range_fingerprint(slot.range),
                 sem_slot_mutability_label(slot.mutability)
             );
         }
@@ -14157,8 +14238,8 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
-        sem::Expr::InstanceOfLimited { value, limited, .. } => {
-            let _ = write!(out, "instance?({}:", limited.name());
+        sem::Expr::InstanceOfLimited { value, range, .. } => {
+            let _ = write!(out, "instance?({}:", range_test_name(*range));
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
@@ -14320,6 +14401,11 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         }
         sem::Expr::Convert { to, value, .. } => {
             let _ = write!(out, "convert({}:", numeric_kind_label(*to));
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::CheckRange { value, range, .. } => {
+            let _ = write!(out, "check({}:", sem::limited_type_name(*range));
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
@@ -18877,6 +18963,81 @@ mod tests {
     }
 
     #[test]
+    fn a_range_only_edit_reports_what_assumed_the_range() {
+        const RANGES: &str = "define class <dial> (<object>)\n  \
+            slot level :: limited(<integer>, min: 1, max: 3), init-value: 1;\nend;\n\
+            define generic scale(n :: limited(<integer>, min: 0, max: 9));\n\
+            define method scale(n :: <integer>)\n  n\nend;\n\
+            define function main()\n  scale(3) + make(<dial>).level\nend;\n\
+            define function quiet()\n  1\nend;";
+        let edit = |edited: &str| {
+            let mut session = IncrementalCompilerSession::new();
+            let id = session.add_source("ranges.loko", RANGES);
+            let first = session
+                .compile(id, RuntimeMode::CompileOnly)
+                .expect("source was just added");
+            assert!(first.artifacts.diagnostics.is_empty());
+            let update = session
+                .edit_and_compile(id, edited, RuntimeMode::CompileOnly)
+                .expect("source exists");
+            assert!(!update.artifacts.has_errors());
+            update
+        };
+        let changed = |update: &IncrementalUpdate| {
+            let mut names = update
+                .diff
+                .as_ref()
+                .expect("a diff")
+                .changed
+                .iter()
+                .map(|change| change.definition.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+
+        // Widening the slot changes the slot, its class and every reader.
+        let update = edit(&RANGES.replace("min: 1, max: 3)", "min: 1, max: 5)"));
+        assert!(
+            changed(&update).contains(&"<dial>.level".to_string()),
+            "{:?}",
+            changed(&update)
+        );
+        let slot = update
+            .artifacts
+            .sem
+            .classes
+            .iter()
+            .find(|class| class.name == "<dial>")
+            .expect("dial")
+            .direct_slots[0]
+            .definition;
+        let affected = |update: &IncrementalUpdate, artifact| {
+            cache_report(update, artifact).is_some_and(|report| report.affected)
+        };
+        assert!(affected(&update, QueryArtifact::Contract(slot)));
+        let main = function_definition(&update.artifacts, "main");
+        assert!(affected(&update, QueryArtifact::DefinitionTyping(main)));
+
+        // Widening the generic's parameter changes what its method assumes.
+        let update = edit(&RANGES.replace("min: 0, max: 9)", "min: 0, max: 99)"));
+        let method = update
+            .artifacts
+            .sem
+            .methods
+            .iter()
+            .find(|method| method.origin == sem::MethodOrigin::Source)
+            .expect("scale's method")
+            .definition;
+        assert!(affected(&update, QueryArtifact::DefinitionTyping(method)));
+        assert!(affected(&update, QueryArtifact::MethodLowering(method)));
+        let main = function_definition(&update.artifacts, "main");
+        let quiet = function_definition(&update.artifacts, "quiet");
+        assert!(affected(&update, QueryArtifact::DefinitionTyping(main)));
+        assert!(!affected(&update, QueryArtifact::DefinitionTyping(quiet)));
+    }
+
+    #[test]
     fn adding_a_method_retypes_every_sender_of_its_generic() {
         let update = edit_pick_shape(&format!(
             "{PICK_SHAPE}\ndefine method area(s :: <square>)\n  4\nend;"
@@ -21015,6 +21176,247 @@ end;
         }
     }
 
+    /// `byte` takes and `low` returns a `limited(<integer>, ...)`; `main`
+    /// passes `feed`'s argument on, so typing cannot prove the checks.
+    const LIMITED: &str = "define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>\n  n\nend;\n\
+         define function low(n :: <integer>) => limited(<integer>, max: 9)\n  n\nend;\n\
+         define generic send(n :: limited(<integer>, min: 0));\n\
+         define method send(n :: <integer>)\n  n\nend;\n\
+         define class <holder> (<object>)\n  slot level :: limited(<integer>, min: 1, max: 3), init-value: 1;\nend;\n\
+         define function main() => <integer>\n  feed(300)\nend;";
+
+    /// The `<type-error>` reports of running `source`'s `main` under
+    /// `policy`, with the `<integer>`s `replacements` supplied in turn by
+    /// `use-value`, and the value `main` returns.
+    fn run_limited(
+        artifacts: &SessionArtifacts,
+        policy: lower::CodegenPolicy,
+        replacements: &[i64],
+    ) -> (Vec<runtime::TypeErrorReport>, FunctionValue) {
+        let artifacts = artifacts.with_codegen_policy(policy);
+        let mut reports = Vec::new();
+        let mut replacements = replacements.iter().copied();
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            reports.push(condition.type_error().expect("a type error"));
+            let replacement = replacements.next().expect("a replacement for each signal");
+            Choice::UseValue(vec![Value::I64(replacement)])
+        });
+        let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+        (reports, value)
+    }
+
+    #[test]
+    fn limited_checks_resume_with_a_replacement_they_check_again() {
+        // Each use passes `feed`'s 300 where a limited type is expected: the
+        // caller checks an argument, a binding, a send, a slot value and a
+        // slot write, and `low` checks its result. The first replacement is
+        // out of range too, so the same check signals again with it; the
+        // second, 2, passes.
+        let byte = "limited(<integer>, min: 0, max: 255)";
+        let level = "limited(<integer>, min: 1, max: 3)";
+        let uses = [
+            ("byte(x)", byte, "feed", "300", -7),
+            (
+                "let y :: limited(<integer>, min: 0, max: 255) = x;\n  y",
+                byte,
+                "feed",
+                "300",
+                -7,
+            ),
+            (
+                "send(x - 400)",
+                "limited(<integer>, min: 0)",
+                "feed",
+                "-100",
+                -7,
+            ),
+            ("make(<holder>, level: x).level", level, "feed", "300", -7),
+            (
+                "let h = make(<holder>);\n  h.level := x",
+                level,
+                "feed",
+                "300",
+                -7,
+            ),
+            ("low(x)", "limited(<integer>, max: 9)", "low", "300", 1000),
+        ];
+        for (body, expected, owner, value, bad) in uses {
+            let source = format!(
+                "{LIMITED}\ndefine function feed(x :: <integer>) => <integer>\n  {body}\nend;"
+            );
+            let artifacts =
+                CompilerSession::compile_source("limited.loko", &source, RuntimeMode::CompileOnly);
+            assert_eq!(artifacts.diagnostics, Vec::new(), "{body}");
+            let owner = function_definition(&artifacts, owner);
+            let decision = artifacts
+                .typing
+                .decisions()
+                .find(|decision| {
+                    decision.owner == owner
+                        && decision.check == typing::TypingCheck::Range
+                        && decision.verdict == typing::TypingVerdict::Checked
+                })
+                .unwrap_or_else(|| panic!("{body}: a checked range decision"));
+            let site = typing_decision_object_id(decision);
+            for policy in lower::CodegenPolicy::ALL {
+                let (reports, result) = run_limited(&artifacts, *policy, &[bad, 2]);
+                assert_eq!(result, FunctionValue::Integer(2), "{body} {policy:?}");
+                let bad = bad.to_string();
+                let shown = reports
+                    .iter()
+                    .map(|report| {
+                        (
+                            report.code.as_str(),
+                            report.value.as_str(),
+                            report.expected.as_str(),
+                            report.site.as_str(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    shown,
+                    [
+                        ("type-error.range", value, expected, site.as_str()),
+                        ("type-error.range", bad.as_str(), expected, site.as_str()),
+                    ],
+                    "{body} {policy:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_class_setter_checks_its_own_slot_range() {
+        // Classes that declare a slot of one name share its setter generic,
+        // whose send checks a range only if every such slot declares it; each
+        // class's setter method checks what the send did not, and a send's
+        // result is only known to be in the hull of the slots' ranges.
+        let digit = "define function digit(n :: limited(<integer>, min: 0, max: 9)) => <integer>\n  n\nend;\n";
+        let knob = |range: &str| {
+            format!(
+                "define class <knob> (<object>)\n  slot level :: {range}, init-value: 1;\nend;\n"
+            )
+        };
+        let dial = "define class <dial> (<object>)\n  slot level :: limited(<integer>, min: 1, max: 3), init-value: 1;\nend;\n";
+        let user_generic = "define generic level-setter(v :: <integer>, o);\n";
+        let wide = "limited(<integer>, min: 0, max: 1000)";
+        let cases = [
+            // The dial's setter refuses 100, in either class order and with
+            // the user's own setter generic.
+            (
+                format!("{}{dial}", knob("<integer>")),
+                "let d = make(<dial>);\n  let w = level-setter(100, d);\n  digit(d.level)",
+                "100",
+            ),
+            (
+                format!("{dial}{}", knob("<integer>")),
+                "let d = make(<dial>);\n  let w = level-setter(100, d);\n  digit(d.level)",
+                "100",
+            ),
+            (
+                format!("{user_generic}{dial}"),
+                "let d = make(<dial>);\n  let w = level-setter(100, d);\n  digit(d.level)",
+                "100",
+            ),
+            // The knob takes 500, which `digit` then refuses: the send's
+            // result is not in the dial's range.
+            (
+                format!("{dial}{}", knob(wide)),
+                "let k = make(<knob>);\n  let w = k.level := 500;\n  digit(w)",
+                "500",
+            ),
+            (
+                format!("{}{dial}", knob(wide)),
+                "let k = make(<knob>);\n  let w = level-setter(500, k);\n  digit(w)",
+                "500",
+            ),
+        ];
+        for (classes, body, refused) in cases {
+            let source =
+                format!("{digit}{classes}define function main() => <integer>\n  {body}\nend;");
+            let artifacts =
+                CompilerSession::compile_source("setters.loko", &source, RuntimeMode::CompileOnly);
+            assert_eq!(artifacts.diagnostics, Vec::new(), "{source}");
+            for policy in lower::CodegenPolicy::ALL {
+                let (reports, value) = run_limited(&artifacts, *policy, &[2]);
+                assert_eq!(value, FunctionValue::Integer(2), "{source} {policy:?}");
+                let values = reports
+                    .iter()
+                    .map(|report| report.value.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(values, [refused], "{source} {policy:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn indirect_and_host_calls_check_limited_parameters_too() {
+        // A callable value's caller cannot see `byte`'s range, so `byte`'s
+        // indirect entry checks it, and so do a closure's and a first-class
+        // generic's, which no body numbers.
+        for (call, owner, value) in [
+            ("apply(byte, x)", Some("byte"), "300"),
+            (
+                "let f :: <callable> = byte;\n  apply(f, x) + 0",
+                Some("byte"),
+                "300",
+            ),
+            (
+                "apply(function (n :: limited(<integer>, max: 9)) n end, x) + 0",
+                Some("feed"),
+                "300",
+            ),
+            ("apply(send, x - 400)", None, "-100"),
+        ] {
+            let source = format!(
+                "{LIMITED}\ndefine function feed(x :: <integer>) => <integer>\n  {call}\nend;"
+            );
+            let artifacts =
+                CompilerSession::compile_source("limited.loko", &source, RuntimeMode::CompileOnly);
+            assert_eq!(artifacts.diagnostics, Vec::new(), "{call}");
+            let site = owner.map_or_else(
+                || "entry:send#closure:0".to_string(),
+                |owner| format!("typing:{}:", function_definition(&artifacts, owner)),
+            );
+            for policy in lower::CodegenPolicy::ALL {
+                let (reports, result) = run_limited(&artifacts, *policy, &[5]);
+                assert_eq!(result, FunctionValue::Integer(5), "{call} {policy:?}");
+                let [report] = reports.as_slice() else {
+                    panic!("{call} {policy:?}: {reports:?}");
+                };
+                assert_eq!(
+                    (report.code.as_str(), report.value.as_str()),
+                    ("type-error.range", value),
+                    "{call} {policy:?}"
+                );
+                assert!(report.site.starts_with(&site), "{call}: {}", report.site);
+            }
+        }
+        let source =
+            format!("{LIMITED}\ndefine function feed(x :: <integer>) => <integer>\n  x\nend;");
+        let artifacts =
+            CompilerSession::compile_source("limited.loko", &source, RuntimeMode::CompileOnly);
+        // The host's entry checks the range as a Loko caller would.
+        let refused = artifacts
+            .call_function("byte", &[FunctionValue::Integer(256)], None)
+            .expect_err("256 is out of range");
+        assert!(
+            matches!(
+                &refused,
+                FunctionCallError::ArgumentOutOfRange { index: 0, value: 256, expected, .. }
+                    if expected == "limited(<integer>, min: 0, max: 255)"
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            artifacts
+                .call_function("byte", &[FunctionValue::Integer(255)], None)
+                .expect("255 is in range")
+                .value,
+            FunctionValue::Integer(255)
+        );
+    }
+
     #[test]
     fn chooser_sees_the_suspended_signal_and_resumes_it_with_use_value() {
         let artifacts = CompilerSession::compile_source(
@@ -22323,6 +22725,85 @@ end;
         let seen = run_across_an_edit(&old, &new, resume());
         assert_eq!(seen.refused, None);
         assert_eq!(seen.value, Some(FunctionValue::Integer(30)));
+    }
+
+    /// `main` pauses, then sends `scale`, whose generic limits its
+    /// parameter, and calls `digit`, which pauses with a limited parameter.
+    const SCALE: &str = "define class <oops> (<object>)\nend;\n\
+         define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+         define generic scale(n :: limited(<integer>, min: 0, max: 9)) => <integer>;\n\
+         define method scale(n :: <integer>) => <integer>\n  n * 10\nend;\n\
+         define function digit(n :: limited(<integer>, min: 0, max: 9)) => <integer>\n  pause() + n\nend;\n\
+         define function main() => <integer>\n  pause() + scale(3)\nend;";
+
+    #[test]
+    fn install_accepts_a_generic_whose_limited_parameter_widens() {
+        // The old `main` checked 3 against 0..=9; the new methods assume
+        // only 0..=99, which holds for every value it passes.
+        let new = SCALE
+            .replace(
+                "min: 0, max: 9)) => <integer>;",
+                "min: 0, max: 99)) => <integer>;",
+            )
+            .replace("  n * 10\n", "  n * 100\n");
+        let seen = run_across_an_edit(SCALE, &new, resume());
+        assert_eq!(seen.refused, None);
+        assert_eq!(seen.value, Some(FunctionValue::Integer(300)));
+    }
+
+    #[test]
+    fn install_refuses_a_generic_whose_limited_parameter_narrows() {
+        // The new methods would assume 0..=2 of values the old `main` only
+        // checked against 0..=9.
+        let new = SCALE
+            .replace(
+                "min: 0, max: 9)) => <integer>;",
+                "min: 0, max: 2)) => <integer>;",
+            )
+            .replace("pause() + scale(3)", "pause()");
+        let seen = run_across_an_edit(SCALE, &new, resume());
+        assert_eq!(
+            broken_contract(install_mismatch(&seen)),
+            (
+                "scale".into(),
+                ContractPosition::Parameter(0),
+                "limited(<integer>, min: 0, max: 9)".into(),
+                "limited(<integer>, min: 0, max: 2)".into()
+            )
+        );
+        assert_eq!(seen.value, Some(FunctionValue::Integer(30)));
+    }
+
+    #[test]
+    fn a_retry_follows_the_limited_parameter_rule() {
+        let old = SCALE.replace("pause() + scale(3)", "digit(3)");
+        // Widening keeps every argument the frame was called with.
+        let wider = old.replace(
+            "digit(n :: limited(<integer>, min: 0, max: 9))",
+            "digit(n :: limited(<integer>, min: -9, max: 9))",
+        );
+        let seen = run_across_an_edit(&old, &wider, Then::Retry("digit"));
+        assert_eq!((seen.refused, seen.retry_refused), (None, None));
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+        // Narrowing would hand the new body a 3 it assumes is at most 2.
+        let narrower = old
+            .replace(
+                "digit(n :: limited(<integer>, min: 0, max: 9))",
+                "digit(n :: limited(<integer>, min: 0, max: 2))",
+            )
+            .replace("digit(3)", "digit(2)");
+        let seen = run_across_an_edit(&old, &narrower, Then::Retry("digit"));
+        assert_eq!(seen.refused, None, "the edit installs");
+        assert_eq!(
+            broken_contract(seen.retry_refused.as_ref()),
+            (
+                "digit".into(),
+                ContractPosition::Parameter(0),
+                "limited(<integer>, min: 0, max: 9)".into(),
+                "limited(<integer>, min: 0, max: 2)".into()
+            )
+        );
+        assert_eq!(seen.value, None, "the refused retry is an invalid choice");
     }
 
     #[test]
