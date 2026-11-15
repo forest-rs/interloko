@@ -1,0 +1,36 @@
+// Shapes for the last scenario of `hot_swap.transcript`.
+//
+// `make-shape` declares no result type, so the compiler infers it from its
+// one method: `<circle>`. `main` reads the result's `radius` with no class
+// check, trusting that. `measure` declares a `<circle>` parameter and reads
+// it the same way. `pause` signals `<oops>`, which nothing handles, so a run
+// stops in the break loop with `measure` and `main` suspended.
+
+define class <oops> (<object>)
+end;
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define generic make-shape(n :: <integer>);
+
+define method make-shape(n :: <integer>)
+  make(<circle>, radius: n)
+end;
+
+define function pause() => <integer>
+  signal(make(<oops>))
+end;
+
+define function measure(s :: <circle>) => <integer>
+  pause() + s.radius
+end;
+
+define function main() => <integer>
+  measure(make-shape(3))
+end;

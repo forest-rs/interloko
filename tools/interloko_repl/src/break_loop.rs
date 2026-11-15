@@ -7,6 +7,13 @@
 //! one of them chooses. An edited definition is compiled and offered to the
 //! driver as a new code unit, so `retry` can call a frame's function again
 //! with the fixed code while the other frames finish on the code they run.
+//!
+//! The suspended frames were compiled against the old definitions, so the
+//! driver refuses an edit that would break what they rely on: a generic
+//! whose contract changes incompatibly is not installed, and a frame whose
+//! function or method changed its contract cannot be retried. Both
+//! refusals are reported here and leave the break waiting; the edit still
+//! applies to new runs.
 
 use std::fmt::Write as _;
 use std::io::Write;
@@ -270,6 +277,14 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
                     .and_then(|index| index.parse::<usize>().ok())
                     .and_then(|index| condition.frames.get(index));
                 match target {
+                    Some(target) if let Some(refusal) = &target.code.retry_refusal => {
+                        writeln!(
+                            self.stderr,
+                            "error: {frame} cannot be retried with the edited code: {refusal}; \
+                             break [1] is still waiting"
+                        )?;
+                        None
+                    }
                     Some(target) if target.code.is_retryable() => Some(Choice::Retry {
                         frame: target.frame.activation.clone(),
                     }),
@@ -347,6 +362,9 @@ fn frame_line(frame: &FrameSnapshot) -> String {
             "  superseded by u{}:f{}",
             current.unit.0, current.func.0
         );
+    }
+    if let Some(refusal) = &code.retry_refusal {
+        let _ = write!(line, "  (cannot retry: {refusal})");
     }
     line
 }
