@@ -1770,6 +1770,7 @@ fn class_origin_label(origin: ClassOrigin) -> String {
         ClassOrigin::ObjectRoot => "object root".into(),
         ClassOrigin::Native => "native object".into(),
         ClassOrigin::BuiltinValue { kind } => format!("built-in {}", kind.name()),
+        ClassOrigin::Condition { class } => format!("kernel condition {}", class.name()),
         ClassOrigin::HostBacked { host_class } => format!("host-backed class h{}", host_class.0),
     }
 }

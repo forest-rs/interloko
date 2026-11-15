@@ -114,4 +114,8 @@
 "runtime.expired-exit" = "[ps] expired block exit"
 "runtime.aborted" = "[ps] aborted"
 "runtime.failed" = "[ps] runtime failed"
+"type-error.cast" = "[ps] cast type error"
+"type-error.entry" = "[ps] entry type error"
+"type-error.range" = "[ps] range type error"
+"type-error.overflow" = "[ps] overflow type error"
 "session.unknown-source" = "[ps] source file id unknown"
