@@ -1354,6 +1354,9 @@ pub struct SessionArtifacts {
     /// `rewind_to`. Together with the log, this guarantees mutation ids are
     /// never reused: a dropped entry's id is permanently retired.
     next_mutation_id: u32,
+    /// Codegen policy these artifacts were compiled under. Read through
+    /// [`SessionArtifacts::codegen_policy`].
+    codegen_policy: lower::CodegenPolicy,
     invalidation: QueryInvalidation,
     artifact_metrics: Vec<ArtifactMetricEntry>,
 }
@@ -1817,6 +1820,25 @@ impl SessionArtifacts {
         artifacts.typing = typing;
         artifacts.diagnostics = diagnostics;
         artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
+        artifacts
+    }
+
+    /// Returns the codegen policy these artifacts were compiled under.
+    #[must_use]
+    pub const fn codegen_policy(&self) -> lower::CodegenPolicy {
+        self.codegen_policy
+    }
+
+    /// Returns these artifacts recorded under codegen `policy`.
+    ///
+    /// Lowering does not consult the policy yet, so nothing is recompiled:
+    /// the artifact graph gives the policy no dependents.
+    #[must_use]
+    pub fn with_codegen_policy(&self, policy: lower::CodegenPolicy) -> Self {
+        let mut artifacts = self.clone();
+        artifacts.codegen_policy = policy;
+        artifacts.artifact_metrics =
+            build_artifact_metrics(&artifacts, &ArtifactTimingCollector::default());
         artifacts
     }
 
@@ -2572,6 +2594,7 @@ impl SessionArtifacts {
             self.grammar_registry,
             &self.host_registry,
             self.typing.config,
+            self.codegen_policy,
         );
 
         let new_diagnostics: Vec<Diagnostic> = candidate
@@ -2698,12 +2721,37 @@ impl SessionArtifacts {
         // a replay that uses out-of-order historical ids still leaves the
         // counter strictly above the max ever assigned.
         let new_method_definition = new_method.definition;
-        let affected_generic_definition = candidate
-            .sem
-            .generics
-            .get(generic.0 as usize)
-            .map(|g| g.definition)
-            .unwrap_or(new_method.definition);
+
+        // Affected list is the dependency-graph truth, not "what we just
+        // recomputed". The front of the pipeline re-runs because the source
+        // was appended to. From the inserted method on, the graph decides:
+        // its own lookup, lowering, and tape; its generic's dispatcher and
+        // method table; and, because the table changed, the typing of every
+        // definition that sends to the generic. Contracts the method leaves
+        // unchanged stop the drain, so unrelated methods' artifacts are
+        // absent.
+        //
+        // EnvironmentResolution and GrammarStack are derived from the source
+        // file's grammar environment, which is unchanged by an add-method
+        // mutation, so they are not affected.
+        let mut affected_artifacts = Vec::from([
+            QueryArtifact::Source,
+            QueryArtifact::GrammarParse,
+            QueryArtifact::Parse,
+            QueryArtifact::Ast,
+            QueryArtifact::Bind,
+        ]);
+        let drained = candidate.invalidation.clone().changed_with_cutoff(
+            &[QueryArtifact::DefinitionSem(new_method_definition)],
+            |artifact| {
+                artifact_fingerprint(artifact, self) == artifact_fingerprint(artifact, &candidate)
+            },
+        );
+        for artifact in drained {
+            if !affected_artifacts.contains(&artifact) {
+                affected_artifacts.push(artifact);
+            }
+        }
 
         let mut new_artifacts = candidate;
 
@@ -2742,32 +2790,6 @@ impl SessionArtifacts {
         new_artifacts.sem.methods[new_method.id.0 as usize].origin = sem::MethodOrigin::Session {
             sequence: mutation_id,
         };
-
-        // Affected list is the dependency-graph truth, not "what we just
-        // recomputed". The top-level pipeline artifacts genuinely change
-        // because the source was appended; per-method artifacts for the
-        // inserted method are new; the affected generic's dispatcher table
-        // gained a method. Unrelated methods' per-method artifacts and
-        // unrelated generics' dispatchers are intentionally omitted.
-        //
-        // EnvironmentResolution and GrammarStack are derived from the source
-        // file's grammar environment, which is unchanged by an add-method
-        // mutation, so they are not affected.
-        let affected_artifacts = Vec::from([
-            QueryArtifact::Source,
-            QueryArtifact::GrammarParse,
-            QueryArtifact::Parse,
-            QueryArtifact::Ast,
-            QueryArtifact::Bind,
-            QueryArtifact::Diagnostics,
-            QueryArtifact::MethodLookup(new_method_definition),
-            QueryArtifact::MethodLowering(new_method_definition),
-            QueryArtifact::MethodTape(new_method_definition),
-            QueryArtifact::GenericDispatcher(affected_generic_definition),
-            QueryArtifact::LoweredModule,
-            QueryArtifact::TapeProgram,
-            QueryArtifact::RuntimeResult,
-        ]);
 
         *self = new_artifacts;
 
@@ -2847,6 +2869,7 @@ impl SessionArtifacts {
             self.grammar_registry,
             &self.host_registry,
             self.typing.config,
+            self.codegen_policy,
         );
 
         let runtime_layout = runtime_bridge::runtime_layout_from_sem(&candidate.sem);
@@ -2910,6 +2933,7 @@ impl SessionArtifacts {
             self.grammar_registry,
             &self.host_registry,
             self.typing.config,
+            self.codegen_policy,
         );
 
         let mut applied: Vec<AppliedMutation> = Vec::new();
@@ -3045,6 +3069,7 @@ pub struct CompilerSession {
     files: Vec<SourceFile>,
     grammar_registry: GrammarFrontendRegistry,
     typing_config: typing::TypingConfig,
+    codegen_policy: lower::CodegenPolicy,
 }
 
 impl CompilerSession {
@@ -3061,6 +3086,7 @@ impl CompilerSession {
             files: Vec::new(),
             grammar_registry,
             typing_config: typing::TypingConfig::soft(),
+            codegen_policy: lower::CodegenPolicy::Off,
         }
     }
 
@@ -3079,6 +3105,17 @@ impl CompilerSession {
     /// Sets the soft typing configuration used by future compiles.
     pub fn set_typing_config(&mut self, config: typing::TypingConfig) {
         self.typing_config = config;
+    }
+
+    /// Returns the codegen policy used by this session's compiles.
+    #[must_use]
+    pub const fn codegen_policy(&self) -> lower::CodegenPolicy {
+        self.codegen_policy
+    }
+
+    /// Sets the codegen policy used by future compiles.
+    pub fn set_codegen_policy(&mut self, policy: lower::CodegenPolicy) {
+        self.codegen_policy = policy;
     }
 
     /// Adds a named source file and returns its id.
@@ -3149,6 +3186,7 @@ impl CompilerSession {
                 mode,
                 self.grammar_registry,
                 self.typing_config,
+                self.codegen_policy,
             )
         })
     }
@@ -3168,6 +3206,7 @@ impl CompilerSession {
                 self.grammar_registry,
                 registry,
                 self.typing_config,
+                self.codegen_policy,
             )
         })
     }
@@ -3192,6 +3231,7 @@ impl CompilerSession {
             mode,
             grammar_registry,
             typing::TypingConfig::default(),
+            lower::CodegenPolicy::default(),
         )
     }
 
@@ -3312,6 +3352,7 @@ pub struct IncrementalCompilerSession {
     files: Vec<CachedSourceFile>,
     grammar_registry: GrammarFrontendRegistry,
     typing_config: typing::TypingConfig,
+    codegen_policy: lower::CodegenPolicy,
 }
 
 impl IncrementalCompilerSession {
@@ -3328,6 +3369,7 @@ impl IncrementalCompilerSession {
             files: Vec::new(),
             grammar_registry,
             typing_config: typing::TypingConfig::soft(),
+            codegen_policy: lower::CodegenPolicy::Off,
         }
     }
 
@@ -3349,6 +3391,22 @@ impl IncrementalCompilerSession {
     /// from cached decisions; nothing else is recompiled.
     pub fn set_typing_config(&mut self, config: typing::TypingConfig) {
         self.typing_config = config;
+    }
+
+    /// Returns the codegen policy used by this session's compiles.
+    #[must_use]
+    pub const fn codegen_policy(&self) -> lower::CodegenPolicy {
+        self.codegen_policy
+    }
+
+    /// Sets the codegen policy used by future compiles.
+    ///
+    /// The policy is an input separate from the typing configuration. A
+    /// later compile of an unchanged source records the new policy and
+    /// recompiles only what depends on it, which is nothing until lowering
+    /// consults it.
+    pub fn set_codegen_policy(&mut self, policy: lower::CodegenPolicy) {
+        self.codegen_policy = policy;
     }
 
     /// Adds a named source file and returns its stable id.
@@ -3461,14 +3519,15 @@ impl IncrementalCompilerSession {
         let previous_source = previous_artifacts
             .as_ref()
             .map(|artifacts| artifacts.source.clone());
-        let previous_typing_config = previous_artifacts
+        let previous_inputs = previous_artifacts
             .as_ref()
-            .map(|artifacts| artifacts.typing.config);
+            .map(|artifacts| (artifacts.typing.config, artifacts.codegen_policy));
         let artifacts = self.files[index].artifacts_for(
             &source,
             mode,
             self.grammar_registry,
             self.typing_config,
+            self.codegen_policy,
         );
         let diff = previous_artifacts
             .as_ref()
@@ -3477,7 +3536,7 @@ impl IncrementalCompilerSession {
             previous_cache.as_ref(),
             diff.as_ref(),
             previous_source.as_ref(),
-            previous_typing_config,
+            previous_inputs,
             &artifacts,
         );
         let cache = ArtifactCache::from_update(&artifacts, &reports);
@@ -3522,19 +3581,34 @@ impl CachedSourceFile {
         mode: RuntimeMode,
         grammar_registry: GrammarFrontendRegistry,
         typing_config: typing::TypingConfig,
+        codegen_policy: lower::CodegenPolicy,
     ) -> SessionArtifacts {
         if let Some(previous) = &self.artifacts
             && previous.source == *source
             && previous.grammar_registry == grammar_registry
         {
-            if previous.typing.config == typing_config {
+            if previous.typing.config == typing_config && previous.codegen_policy == codegen_policy
+            {
                 return artifacts_for_mode(previous, mode);
             }
-            // Only the reporting policy changed: re-derive typing diagnostics
-            // from the recorded decisions instead of recompiling.
-            return artifacts_for_mode(&previous.with_typing_config(typing_config), mode);
+            // Only session inputs changed: re-derive what depends on them
+            // from the recorded artifacts instead of recompiling.
+            let mut updated = previous.clone();
+            if updated.typing.config != typing_config {
+                updated = updated.with_typing_config(typing_config);
+            }
+            if updated.codegen_policy != codegen_policy {
+                updated = updated.with_codegen_policy(codegen_policy);
+            }
+            return artifacts_for_mode(&updated, mode);
         }
-        compile_file_with_grammar_registry(source, mode, grammar_registry, typing_config)
+        compile_file_with_grammar_registry(
+            source,
+            mode,
+            grammar_registry,
+            typing_config,
+            codegen_policy,
+        )
     }
 }
 
@@ -3965,11 +4039,19 @@ fn cache_reports(
     previous: Option<&ArtifactCache>,
     diff: Option<&SessionDiff>,
     previous_source: Option<&SourceFile>,
-    previous_typing_config: Option<typing::TypingConfig>,
+    previous_inputs: Option<(typing::TypingConfig, lower::CodegenPolicy)>,
     artifacts: &SessionArtifacts,
 ) -> Vec<CacheArtifactReport> {
-    let typing_config_changed =
-        previous_typing_config.is_some_and(|config| config != artifacts.typing.config);
+    // Session inputs reach only what the graph says depends on them.
+    let mut input_affected = Vec::new();
+    if let Some((typing_config, codegen_policy)) = previous_inputs {
+        if typing_config != artifacts.typing.config {
+            input_affected.extend(artifacts.invalidation.clone().typing_config_changed());
+        }
+        if codegen_policy != artifacts.codegen_policy {
+            input_affected.extend(artifacts.invalidation.clone().codegen_policy_changed());
+        }
+    }
     let source_changed =
         previous_source.is_some_and(|source| source.source != artifacts.source.source);
     let grammar_changed = previous_source
@@ -3995,12 +4077,11 @@ fn cache_reports(
                 CacheAction::Recomputed
             };
             let sem_affected = affected.iter().any(|item| item.key == report.key);
-            let retyped =
-                typing_config_changed && artifact_depends_on_typing_config(report.artifact);
-            let affected = sem_affected || forced_by_grammar || retyped;
+            let input_changed = input_affected.contains(&report.artifact);
+            let affected = sem_affected || forced_by_grammar || input_changed;
             let invalidated = previous.is_some()
                 && action == CacheAction::Recomputed
-                && (source_changed || grammar_changed || sem_affected || retyped);
+                && (source_changed || grammar_changed || sem_affected || input_changed);
             let metrics = match action {
                 CacheAction::Reused => ArtifactMetrics::default(),
                 CacheAction::Recomputed => ArtifactMetrics {
@@ -4024,14 +4105,7 @@ fn cache_reports(
 fn artifact_depends_on_grammar(artifact: QueryArtifact) -> bool {
     !matches!(
         artifact,
-        QueryArtifact::Source | QueryArtifact::TypingConfig
-    )
-}
-
-fn artifact_depends_on_typing_config(artifact: QueryArtifact) -> bool {
-    matches!(
-        artifact,
-        QueryArtifact::TypingConfig | QueryArtifact::Typing | QueryArtifact::Diagnostics
+        QueryArtifact::Source | QueryArtifact::TypingConfig | QueryArtifact::CodegenPolicy
     )
 }
 
@@ -4118,6 +4192,21 @@ fn artifact_fingerprint(
                     ));
                 }
             }
+        }
+        QueryArtifact::DefinitionSem(definition) => {
+            builder.mix_str(&definition_sem_fingerprint(&artifacts.sem, definition));
+        }
+        QueryArtifact::Contract(definition) => {
+            builder.mix_str(&contract_fingerprint(&artifacts.sem, definition));
+        }
+        QueryArtifact::MethodTable(generic) => {
+            builder.mix_str(&method_table_fingerprint(&artifacts.sem, generic));
+        }
+        QueryArtifact::ClassCone(class) => {
+            builder.mix_str(&class_cone_fingerprint(&artifacts.sem, class));
+        }
+        QueryArtifact::CodegenPolicy => {
+            builder.mix_str(artifacts.codegen_policy.as_str());
         }
         QueryArtifact::Typing => {
             builder.mix_str(&format!(
@@ -4341,6 +4430,37 @@ fn artifact_work_units(artifact: QueryArtifact, artifacts: &SessionArtifacts) ->
             }),
         QueryArtifact::Typing => usize_to_u64(artifacts.typing.definitions.len())
             .saturating_add(usize_to_u64(artifacts.typing.diagnostics.len())),
+        QueryArtifact::DefinitionSem(definition) => {
+            usize_to_u64(definition_sem_fingerprint(&artifacts.sem, definition).len())
+        }
+        QueryArtifact::Contract(definition) => {
+            usize_to_u64(contract_fingerprint(&artifacts.sem, definition).len())
+        }
+        QueryArtifact::MethodTable(generic) => artifacts
+            .sem
+            .generics
+            .iter()
+            .find(|item| item.definition == generic)
+            .map_or(1, |generic| {
+                usize_to_u64(
+                    artifacts
+                        .sem
+                        .methods
+                        .iter()
+                        .filter(|method| method.generic == generic.id)
+                        .count(),
+                )
+                .saturating_add(1)
+            }),
+        QueryArtifact::ClassCone(class) => artifacts
+            .sem
+            .classes
+            .iter()
+            .find(|item| item.definition == class)
+            .map_or(1, |class| {
+                usize_to_u64(class_cone(&artifacts.sem, class.id).len()).saturating_add(1)
+            }),
+        QueryArtifact::CodegenPolicy => 1,
     }
 }
 
@@ -5197,6 +5317,7 @@ fn compile_file(file: &SourceFile, mode: RuntimeMode) -> SessionArtifacts {
         mode,
         GrammarFrontendRegistry::builtin(),
         typing::TypingConfig::default(),
+        lower::CodegenPolicy::default(),
     )
 }
 
@@ -5205,6 +5326,7 @@ fn compile_file_with_grammar_registry(
     mode: RuntimeMode,
     grammar_registry: GrammarFrontendRegistry,
     typing_config: typing::TypingConfig,
+    codegen_policy: lower::CodegenPolicy,
 ) -> SessionArtifacts {
     compile_file_with_registries(
         file,
@@ -5212,6 +5334,7 @@ fn compile_file_with_grammar_registry(
         grammar_registry,
         &sem::HostMetaRegistry::new(),
         typing_config,
+        codegen_policy,
     )
 }
 
@@ -5226,6 +5349,7 @@ fn compile_file_with_host_registry(
         GrammarFrontendRegistry::builtin(),
         registry,
         typing::TypingConfig::default(),
+        lower::CodegenPolicy::default(),
     )
 }
 
@@ -5235,6 +5359,7 @@ pub(crate) fn compile_file_with_registries(
     grammar_registry: GrammarFrontendRegistry,
     registry: &sem::HostMetaRegistry,
     typing_config: typing::TypingConfig,
+    codegen_policy: lower::CodegenPolicy,
 ) -> SessionArtifacts {
     let mut timings = ArtifactTimingCollector::default();
     let (source, elapsed_nanos) = measure_elapsed(|| file.clone());
@@ -5263,7 +5388,7 @@ pub(crate) fn compile_file_with_registries(
     timings.record(QueryArtifact::Typing, elapsed_nanos);
     let (diagnostics, elapsed_nanos) = measure_elapsed(|| aggregate_diagnostics(&sem, &typing));
     timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
-    let invalidation = QueryInvalidation::for_module(&sem);
+    let invalidation = QueryInvalidation::for_module(&sem, &typing);
 
     let ((lowered, lower_error), elapsed_nanos) = measure_elapsed(|| match lower::lower(&sem) {
         Ok(module) => (Some(module), None),
@@ -5311,6 +5436,7 @@ pub(crate) fn compile_file_with_registries(
         mutations: Vec::new(),
         pristine_source,
         next_mutation_id: 0,
+        codegen_policy,
         invalidation,
         artifact_metrics: Vec::new(),
     };
@@ -12249,7 +12375,7 @@ fn diff_artifacts(before: &SessionArtifacts, after: &SessionArtifacts) -> Sessio
         }
     }
 
-    let affected = affected_artifacts(after, &changed);
+    let affected = affected_artifacts(before, after, &changed);
 
     SessionDiff {
         preserved,
@@ -12258,26 +12384,26 @@ fn diff_artifacts(before: &SessionArtifacts, after: &SessionArtifacts) -> Sessio
     }
 }
 
+/// Query artifacts an edit from `before` to `after` affects.
+///
+/// When every change is to a function, method, generic, or constant that
+/// both versions typed, the drain starts at those definitions' sem output and
+/// stops at each contract, method table, and class cone whose value the edit
+/// left unchanged. Anything else invalidates from the source.
 fn affected_artifacts(
+    before: &SessionArtifacts,
     after: &SessionArtifacts,
     changed: &[DefinitionChange],
 ) -> Vec<ArtifactReport> {
     if changed.is_empty() {
         return Vec::new();
     }
-    let only_modified_methods = changed.iter().all(|change| {
-        change.change == DefinitionChangeKind::Modified
-            && change.definition.kind == DefinitionKind::Method
-    });
-    let mut graph = QueryInvalidation::for_module(&after.sem);
-    let artifacts = if only_modified_methods {
-        let mut artifacts = Vec::new();
-        for change in changed {
-            artifacts.extend(graph.method_definition_changed(change.definition.id));
-        }
-        artifacts
-    } else {
-        graph.source_changed()
+    let mut graph = after.invalidation.clone();
+    let artifacts = match definition_edit_roots(before, after, changed) {
+        Some(roots) => graph.changed_with_cutoff(&roots, |artifact| {
+            artifact_fingerprint(artifact, before) == artifact_fingerprint(artifact, after)
+        }),
+        None => graph.source_changed(),
     };
     let mut reports = Vec::new();
     for artifact in artifacts {
@@ -12290,6 +12416,36 @@ fn affected_artifacts(
         }
     }
     reports
+}
+
+/// The [`QueryArtifact::DefinitionSem`] roots of a definition-local edit, or
+/// `None` when the edit is not one: a class, slot, or removal changed, or
+/// either version's typing did not run, so the graph lacks the edges a
+/// definition-local drain relies on.
+fn definition_edit_roots(
+    before: &SessionArtifacts,
+    after: &SessionArtifacts,
+    changed: &[DefinitionChange],
+) -> Option<Vec<QueryArtifact>> {
+    let typed =
+        |artifacts: &SessionArtifacts| artifacts.typing.status == typing::TypingStatus::Checked;
+    if !typed(before) || !typed(after) {
+        return None;
+    }
+    changed
+        .iter()
+        .map(|change| {
+            let local = matches!(
+                change.definition.kind,
+                DefinitionKind::Function
+                    | DefinitionKind::Method
+                    | DefinitionKind::Generic
+                    | DefinitionKind::Constant
+            );
+            (local && change.change != DefinitionChangeKind::Removed)
+                .then_some(QueryArtifact::DefinitionSem(change.definition.id))
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12380,46 +12536,17 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Generic,
                 name: generic.name.clone(),
             },
-            fingerprint: format!(
-                "generic:{}:{}:{}:{}",
-                generic.name,
-                generic
-                    .param_kinds
-                    .iter()
-                    .map(|kind| kind.map_or_else(
-                        || "untyped".into(),
-                        |kind| sem_kind_fingerprint(module, kind)
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                generic.return_annotation.as_ref().map_or_else(
-                    || "inferred".into(),
-                    |kinds| sem_kind_list_fingerprint(module, kinds)
-                ),
-                generic.arity
-            ),
+            fingerprint: generic_definition_fingerprint(module, generic),
         });
     }
     for method in &module.methods {
-        let generic = module
-            .generics
-            .get(method.generic.0 as usize)
-            .map_or("?", |generic| generic.name.as_str());
-        let specializers = sem_specializer_vector_label(module, &method.specializers);
         definitions.push(DefinitionFingerprint {
             report: DefinitionReport {
                 id: method.definition,
                 kind: DefinitionKind::Method,
-                name: format!("{generic}{specializers}"),
+                name: method_definition_name(module, method),
             },
-            fingerprint: format!(
-                "method:{generic}:{specializers}:{}:{}",
-                method.return_annotation.as_ref().map_or_else(
-                    || "inferred".into(),
-                    |kinds| sem_kind_list_fingerprint(module, kinds)
-                ),
-                fingerprint_sem_block(module, &method.body)
-            ),
+            fingerprint: method_definition_fingerprint(module, method),
         });
     }
     for function in &module.functions {
@@ -12429,25 +12556,221 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Function,
                 name: function.name.clone(),
             },
-            fingerprint: format!(
-                "function:{}:{}:{}:{}:{}",
-                function.name,
-                function.params.len(),
-                function
-                    .param_kinds
-                    .iter()
-                    .map(|kind| sem_kind_fingerprint(module, *kind))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                function.return_annotation.as_ref().map_or_else(
-                    || "inferred".into(),
-                    |kinds| sem_kind_list_fingerprint(module, kinds)
-                ),
-                fingerprint_sem_block(module, &function.body)
-            ),
+            fingerprint: function_definition_fingerprint(module, function),
+        });
+    }
+    for constant in &module.constants {
+        definitions.push(DefinitionFingerprint {
+            report: DefinitionReport {
+                id: constant.definition,
+                kind: DefinitionKind::Constant,
+                name: constant.name.clone(),
+            },
+            fingerprint: constant_definition_fingerprint(module, constant),
         });
     }
     definitions
+}
+
+/// Fingerprint of one definition's sem output, the value of
+/// [`QueryArtifact::DefinitionSem`]. Spans are left out.
+fn definition_sem_fingerprint(module: &sem::Module, definition: DefinitionId) -> String {
+    if let Some(generic) = module
+        .generics
+        .iter()
+        .find(|generic| generic.definition == definition)
+    {
+        return generic_definition_fingerprint(module, generic);
+    }
+    if let Some(method) = module
+        .methods
+        .iter()
+        .find(|method| method.definition == definition)
+    {
+        return method_definition_fingerprint(module, method);
+    }
+    if let Some(function) = module
+        .functions
+        .iter()
+        .find(|function| function.definition == definition)
+    {
+        return function_definition_fingerprint(module, function);
+    }
+    module
+        .constants
+        .iter()
+        .find(|constant| constant.definition == definition)
+        .map_or_else(
+            || "missing-definition".into(),
+            |constant| constant_definition_fingerprint(module, constant),
+        )
+}
+
+/// A generic's declaration and its contract, whose open results binding
+/// infers from the methods.
+fn generic_definition_fingerprint(module: &sem::Module, generic: &sem::GenericFunction) -> String {
+    format!(
+        "generic:{}:{}:{}:{}:contract={:?}",
+        generic.name,
+        generic
+            .param_kinds
+            .iter()
+            .map(|kind| kind.map_or_else(
+                || "untyped".into(),
+                |kind| sem_kind_fingerprint(module, kind)
+            ))
+            .collect::<Vec<_>>()
+            .join(","),
+        generic.return_annotation.as_ref().map_or_else(
+            || "inferred".into(),
+            |kinds| sem_kind_list_fingerprint(module, kinds)
+        ),
+        generic.arity,
+        module.generic_contract(generic)
+    )
+}
+
+fn method_definition_name(module: &sem::Module, method: &sem::Method) -> String {
+    let generic = module
+        .generics
+        .get(method.generic.0 as usize)
+        .map_or("?", |generic| generic.name.as_str());
+    let specializers = sem_specializer_vector_label(module, &method.specializers);
+    format!("{generic}{specializers}")
+}
+
+fn method_definition_fingerprint(module: &sem::Module, method: &sem::Method) -> String {
+    let generic = module
+        .generics
+        .get(method.generic.0 as usize)
+        .map_or("?", |generic| generic.name.as_str());
+    let specializers = sem_specializer_vector_label(module, &method.specializers);
+    format!(
+        "method:{generic}:{specializers}:{}:{}",
+        method.return_annotation.as_ref().map_or_else(
+            || "inferred".into(),
+            |kinds| sem_kind_list_fingerprint(module, kinds)
+        ),
+        fingerprint_sem_block(module, &method.body)
+    )
+}
+
+/// A function's signature, body, and contract, whose open results binding
+/// infers from the body.
+fn function_definition_fingerprint(module: &sem::Module, function: &sem::Function) -> String {
+    format!(
+        "function:{}:{}:{}:{}:{}:contract={:?}",
+        function.name,
+        function.params.len(),
+        function
+            .param_kinds
+            .iter()
+            .map(|kind| sem_kind_fingerprint(module, *kind))
+            .collect::<Vec<_>>()
+            .join(","),
+        function.return_annotation.as_ref().map_or_else(
+            || "inferred".into(),
+            |kinds| sem_kind_list_fingerprint(module, kinds)
+        ),
+        fingerprint_sem_block(module, &function.body),
+        module.function_contract(function)
+    )
+}
+
+fn constant_definition_fingerprint(module: &sem::Module, constant: &sem::Constant) -> String {
+    let mut out = format!(
+        "constant:{}:{}:{:?}:",
+        constant.name,
+        sem_kind_fingerprint(module, constant.result_kind),
+        constant.callable_signature
+    );
+    fingerprint_sem_expr(module, &constant.value, &mut out);
+    out
+}
+
+/// Fingerprint of one definition's contract, the value of
+/// [`QueryArtifact::Contract`].
+fn contract_fingerprint(module: &sem::Module, definition: DefinitionId) -> String {
+    if let Some(contract) = module.contract(definition) {
+        return format!("{contract:?}");
+    }
+    if let Some(constant) = module
+        .constants
+        .iter()
+        .find(|constant| constant.definition == definition)
+    {
+        return format!("constant:{:?}", typing::synthesize(module, &constant.value));
+    }
+    for class in &module.classes {
+        if let Some(slot) = class
+            .direct_slots
+            .iter()
+            .find(|slot| slot.definition == definition || slot.accessor.definition == definition)
+        {
+            return format!(
+                "slot:{}:{}:{}",
+                class.definition.raw(),
+                sem_kind_fingerprint(module, slot.kind),
+                sem_slot_mutability_label(slot.mutability)
+            );
+        }
+    }
+    "missing-contract".into()
+}
+
+/// Fingerprint of a generic's method table, the value of
+/// [`QueryArtifact::MethodTable`]: each method and its specializers.
+fn method_table_fingerprint(module: &sem::Module, generic: DefinitionId) -> String {
+    let Some(generic) = module
+        .generics
+        .iter()
+        .find(|item| item.definition == generic)
+    else {
+        return "missing-method-table".into();
+    };
+    module
+        .methods
+        .iter()
+        .filter(|method| method.generic == generic.id)
+        .map(|method| fingerprint_method_lookup(module, method.definition))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// The classes in a class's cone, ancestors first walked by superclass.
+fn class_cone(module: &sem::Module, class: sem::ClassId) -> Vec<DefinitionId> {
+    let mut cone = Vec::new();
+    for candidate in &module.classes {
+        let mut current = Some(candidate.id);
+        for _ in 0..=module.classes.len() {
+            let Some(id) = current else {
+                break;
+            };
+            if id == class {
+                cone.push(candidate.definition);
+                break;
+            }
+            current = module
+                .classes
+                .get(id.0 as usize)
+                .and_then(|class| class.superclass);
+        }
+    }
+    cone.sort_unstable();
+    cone
+}
+
+/// Fingerprint of a class's cone, the value of [`QueryArtifact::ClassCone`]:
+/// whether the class is closed and which classes the cone holds.
+fn class_cone_fingerprint(module: &sem::Module, class: DefinitionId) -> String {
+    let Some(class) = module.classes.iter().find(|item| item.definition == class) else {
+        return "missing-class".into();
+    };
+    format!(
+        "closed={}:cone={:?}",
+        interloko_model::types::ClassHierarchy::is_closed(module, class.id),
+        class_cone(module, class.id)
+    )
 }
 
 fn slot_init_fingerprint(module: &sem::Module, slot: &sem::Slot) -> String {
@@ -12588,6 +12911,16 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             for capture in captures {
                 let kind = sem_kind_fingerprint(module, capture.kind);
                 let _ = write!(out, "{}:{}:{kind},", capture.id.0, capture.source.0);
+            }
+            // The body belongs to the enclosing definition: typing checks it
+            // in place, and lowering emits it with the definition.
+            if let Some(closure) = module.closures.get(closure.0 as usize) {
+                let _ = write!(
+                    out,
+                    ":params={}:",
+                    sem_kind_list_fingerprint(module, &closure.param_kinds)
+                );
+                out.push_str(&fingerprint_sem_block(module, &closure.body));
             }
             out.push(')');
         }
@@ -16985,6 +17318,268 @@ mod tests {
                 .artifacts
                 .dump_stage(DumpStage::Sem)
                 .contains("mutability=constant")
+        );
+    }
+
+    const PICK_SHAPE: &str = "define class <shape> (<object>)\nend;\n\
+        define class <circle> (<shape>)\nend;\n\
+        define class <square> (<shape>)\nend;\n\
+        define generic area(x);\n\
+        define method area(c :: <circle>)\n  7\nend;\n\
+        define function pick() => <shape>\n  make(<circle>)\nend;\n\
+        define function main()\n  area(pick())\nend;\n\
+        define function other()\n  area(make(<circle>))\nend;\n\
+        define function quiet()\n  1\nend;";
+
+    fn function_definition(artifacts: &SessionArtifacts, name: &str) -> DefinitionId {
+        artifacts
+            .sem
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .map(|function| function.definition)
+            .expect("function should exist")
+    }
+
+    fn edit_pick_shape(edited: &str) -> IncrementalUpdate {
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("pick.loko", PICK_SHAPE);
+        let first = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        assert!(first.artifacts.diagnostics.is_empty());
+        let update = session
+            .edit_and_compile(id, edited, RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert!(!update.artifacts.has_errors());
+        update
+    }
+
+    #[test]
+    fn callee_body_edit_that_keeps_its_contract_leaves_caller_typing_alone() {
+        let update = edit_pick_shape(&PICK_SHAPE.replace(
+            "  make(<circle>)\nend;\ndefine function main",
+            "  let made = make(<circle>);\n  made\nend;\ndefine function main",
+        ));
+        let pick = function_definition(&update.artifacts, "pick");
+        let main = function_definition(&update.artifacts, "main");
+        let diff = update.diff.as_ref().expect("second compile has a diff");
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].definition.id, pick);
+
+        let affected = |artifact| cache_report(&update, artifact).is_some_and(|r| r.affected);
+        assert!(affected(QueryArtifact::DefinitionSem(pick)));
+        assert!(affected(QueryArtifact::DefinitionTyping(pick)));
+        assert!(affected(QueryArtifact::LoweredModule));
+        // The contract was re-derived, kept its value, and stopped the drain.
+        assert!(affected(QueryArtifact::Contract(pick)));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::Contract(pick)),
+            Some(CacheAction::Reused)
+        );
+        assert!(!affected(QueryArtifact::DefinitionTyping(main)));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::DefinitionTyping(main)),
+            Some(CacheAction::Reused)
+        );
+
+        // Definition-local, not a rebuild from the source.
+        assert!(!affected(QueryArtifact::Bind));
+        assert!(update.affected_count() < update.reports.len() / 2);
+        let method = update.artifacts.sem.methods[0].definition;
+        assert!(!affected(QueryArtifact::MethodLowering(method)));
+        assert_eq!(
+            cache_action(&update, QueryArtifact::MethodLowering(method)),
+            Some(CacheAction::Reused)
+        );
+    }
+
+    #[test]
+    fn callee_contract_edit_marks_caller_typing_affected() {
+        let update = edit_pick_shape(&PICK_SHAPE.replace(
+            "define function pick() => <shape>",
+            "define function pick() => <circle>",
+        ));
+        let pick = function_definition(&update.artifacts, "pick");
+        let main = function_definition(&update.artifacts, "main");
+        let other = function_definition(&update.artifacts, "other");
+        let diff = update.diff.as_ref().expect("second compile has a diff");
+        // Only the callee's sem output changed; the caller is reached through
+        // the contract edge alone.
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].definition.id, pick);
+
+        let report = |artifact| cache_report(&update, artifact).expect("artifact report");
+        assert!(report(QueryArtifact::Contract(pick)).affected);
+        assert_eq!(
+            report(QueryArtifact::Contract(pick)).action,
+            CacheAction::Recomputed
+        );
+        assert!(report(QueryArtifact::DefinitionTyping(main)).affected);
+        // The send in `main` is now proved: the decision really changed.
+        assert_eq!(
+            report(QueryArtifact::DefinitionTyping(main)).action,
+            CacheAction::Recomputed
+        );
+        assert!(!report(QueryArtifact::DefinitionTyping(other)).affected);
+        assert!(!report(QueryArtifact::Bind).affected);
+    }
+
+    #[test]
+    fn adding_a_method_retypes_every_sender_of_its_generic() {
+        let update = edit_pick_shape(&format!(
+            "{PICK_SHAPE}\ndefine method area(s :: <square>)\n  4\nend;"
+        ));
+        let area = update.artifacts.sem.generics[0].definition;
+        let affected = |artifact| cache_report(&update, artifact).is_some_and(|r| r.affected);
+        assert!(affected(QueryArtifact::MethodTable(area)));
+        for sender in ["main", "other"] {
+            let sender = function_definition(&update.artifacts, sender);
+            assert!(affected(QueryArtifact::DefinitionTyping(sender)));
+        }
+        for bystander in ["pick", "quiet"] {
+            let bystander = function_definition(&update.artifacts, bystander);
+            assert!(!affected(QueryArtifact::DefinitionTyping(bystander)));
+        }
+        let circle_method = update.artifacts.sem.methods[0].definition;
+        assert!(!affected(QueryArtifact::MethodLowering(circle_method)));
+
+        // The structured mutation reports the same impact.
+        let mut artifacts =
+            CompilerSession::compile_source("pick.loko", PICK_SHAPE, RuntimeMode::CompileOnly);
+        let outcome = artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: generic_id(&artifacts, "area"),
+                method_source: "define method area(s :: <square>)\n  4\nend;".into(),
+            })
+            .expect("mutation should succeed");
+        assert!(
+            outcome
+                .affected_artifacts
+                .contains(&QueryArtifact::MethodTable(area))
+        );
+        for sender in ["main", "other"] {
+            let sender = function_definition(&artifacts, sender);
+            assert!(
+                outcome
+                    .affected_artifacts
+                    .contains(&QueryArtifact::DefinitionTyping(sender))
+            );
+        }
+        for bystander in ["pick", "quiet"] {
+            let bystander = function_definition(&artifacts, bystander);
+            assert!(
+                !outcome
+                    .affected_artifacts
+                    .contains(&QueryArtifact::DefinitionTyping(bystander))
+            );
+        }
+    }
+
+    #[test]
+    fn constant_value_edit_retypes_its_readers() {
+        let source = "define constant limit = 3;\n\
+                      define function main()\n  limit + 1\nend;\n\
+                      define function quiet()\n  1\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("limit.loko", source);
+        let _ = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        let update = session
+            .edit_and_compile(
+                id,
+                &source.replace("limit = 3", "limit = 4"),
+                RuntimeMode::CompileOnly,
+            )
+            .expect("source exists");
+        let limit = update.artifacts.sem.constants[0].definition;
+        let main = function_definition(&update.artifacts, "main");
+        let quiet = function_definition(&update.artifacts, "quiet");
+        let affected = |artifact| cache_report(&update, artifact).is_some_and(|r| r.affected);
+        assert!(affected(QueryArtifact::Contract(limit)));
+        assert!(affected(QueryArtifact::DefinitionTyping(main)));
+        assert!(!affected(QueryArtifact::DefinitionTyping(quiet)));
+        assert!(!affected(QueryArtifact::Bind));
+    }
+
+    #[test]
+    fn closure_body_edit_changes_its_enclosing_definition() {
+        let before = CompilerSession::compile_source(
+            "closure.loko",
+            "define function main()\n  \
+             let f = function (x :: <integer>) => <integer> x + 1 end;\n  apply(f, 2)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        let after = CompilerSession::compile_source(
+            "closure.loko",
+            "define function main()\n  \
+             let f = function (x :: <integer>) => <integer> x + 2 end;\n  apply(f, 2)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert!(!before.has_errors());
+        let main = function_definition(&after, "main");
+        let diff = CompilerSession::diff(&before, &after);
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].definition.id, main);
+        assert!(
+            diff.affected
+                .iter()
+                .any(|report| report.artifact == QueryArtifact::DefinitionTyping(main))
+        );
+    }
+
+    #[test]
+    fn session_inputs_reach_only_their_dependents() {
+        let mut session = IncrementalCompilerSession::new();
+        assert_eq!(session.codegen_policy(), lower::CodegenPolicy::Off);
+        let id = session.add_source("pick.loko", PICK_SHAPE);
+        let _ = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+
+        // A typing configuration change re-derives diagnostics only.
+        session.set_typing_config(typing::TypingConfig::strict());
+        let retyped = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source exists");
+        for untouched in [
+            QueryArtifact::LoweredModule,
+            QueryArtifact::TapeProgram,
+            QueryArtifact::CodegenPolicy,
+        ] {
+            let report = cache_report(&retyped, untouched).expect("artifact report");
+            assert!(!report.affected, "{untouched:?}");
+            assert_eq!(report.action, CacheAction::Reused, "{untouched:?}");
+        }
+
+        // Lowering does not consult the codegen policy yet, so the graph gives
+        // the policy no dependents and a change recompiles nothing else.
+        session.set_codegen_policy(lower::CodegenPolicy::Proved);
+        let policy = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert_eq!(
+            policy.artifacts.codegen_policy(),
+            lower::CodegenPolicy::Proved
+        );
+        assert!(
+            policy
+                .dependency_edges()
+                .iter()
+                .all(|edge| edge.dependency != QueryArtifact::CodegenPolicy)
+        );
+        let report = cache_report(&policy, QueryArtifact::CodegenPolicy).expect("policy report");
+        assert!(report.affected && report.invalidated);
+        assert_eq!(report.action, CacheAction::Recomputed);
+        assert_eq!(policy.affected_count(), 1);
+        assert_eq!(policy.recomputed_count(), 1);
+        let lowered = cache_report(&policy, QueryArtifact::LoweredModule).expect("lowered report");
+        assert!(!lowered.affected);
+        assert_eq!(lowered.action, CacheAction::Reused);
+        assert_eq!(
+            policy.artifacts.typing.config,
+            typing::TypingConfig::strict()
         );
     }
 

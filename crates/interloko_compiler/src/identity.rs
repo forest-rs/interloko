@@ -243,6 +243,16 @@ pub enum ArtifactKind {
     Typing,
     /// Session-owned soft typing configuration input.
     TypingConfig,
+    /// Semantic output of one function, method, generic, or constant.
+    DefinitionSem,
+    /// Type contract of one definition: what code compiled against it trusts.
+    Contract,
+    /// Method set and specializers of one generic.
+    MethodTable,
+    /// Cone of one class: its subclasses and whether it is closed.
+    ClassCone,
+    /// Session-owned codegen policy input.
+    CodegenPolicy,
 }
 
 impl ArtifactKind {
@@ -268,6 +278,11 @@ impl ArtifactKind {
             Self::DefinitionTyping => "definition-typing",
             Self::Typing => "typing",
             Self::TypingConfig => "typing-config",
+            Self::DefinitionSem => "definition-sem",
+            Self::Contract => "contract",
+            Self::MethodTable => "method-table",
+            Self::ClassCone => "class-cone",
+            Self::CodegenPolicy => "codegen-policy",
         }
     }
 
@@ -291,6 +306,11 @@ impl ArtifactKind {
             Self::Typing => 16,
             Self::DefinitionTyping => 17,
             Self::TypingConfig => 18,
+            Self::DefinitionSem => 19,
+            Self::Contract => 20,
+            Self::MethodTable => 21,
+            Self::ClassCone => 22,
+            Self::CodegenPolicy => 23,
         }
     }
 }

@@ -19,6 +19,33 @@ use interloko_runtime::RuntimeLayout;
 use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
 use interloko_runtime::control::{RestartDescriptor, RestartParameter};
 
+/// Whether lowering may act on facts the soft typing pass proved.
+///
+/// This is a session input of its own, separate from
+/// [`crate::typing::TypingConfig`]: the typing configuration only chooses
+/// how loudly decisions are reported, and severities never affect lowering.
+/// Lowering does not read typing facts yet, so every policy currently lowers
+/// the same code.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum CodegenPolicy {
+    /// Lowering ignores typing facts and keeps every runtime check.
+    #[default]
+    Off,
+    /// Lowering may drop or specialize runtime checks that typing proved.
+    Proved,
+}
+
+impl CodegenPolicy {
+    /// Returns the stable label used in dumps and tools.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Proved => "proved",
+        }
+    }
+}
+
 /// Durable function identifier within a lowered module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FunctionId(

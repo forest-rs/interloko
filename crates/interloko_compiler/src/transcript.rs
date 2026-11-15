@@ -458,6 +458,7 @@ impl SessionTranscript {
             grammar_registry,
             host_registry,
             crate::typing::TypingConfig::default(),
+            crate::lower::CodegenPolicy::default(),
         );
 
         let mut applied: Vec<AppliedMutation> = Vec::new();
