@@ -137,13 +137,14 @@ Supported read-only invocations are:
 - `show-typing`
 - `show-types`
 - `show-dependents`
+- `preview-strict`
 - `run`
 
 The `add-method` mutation is now executable through `invoke-affordance` on
 `generic:gN` objects; see [`eop_mutation.md`](eop_mutation.md) for the
 contract. So are the typing adjustments `annotate`, `preview-annotation`,
-`set-typing-policy`, and `set-codegen-policy`; see
-[Adjusting Typing](#adjusting-typing). Other mutation-oriented affordances
+`preview-fix`, `apply-fix`, `set-typing-policy`, and `set-codegen-policy`;
+see [Adjusting Typing](#adjusting-typing). Other mutation-oriented affordances
 such as `edit-body` can appear in records but are intentionally not
 executable by `interloko_lab` in this slice.
 
@@ -293,6 +294,9 @@ whether an adjustment pays off.
 - `set-typing-policy` and `set-codegen-policy` on `typing-config:session`
   change the session's policies.
 
+[Strict Typing](#strict-typing) adds `preview-strict`, and `preview-fix`
+and `apply-fix`, which go through the same annotation path.
+
 ### Annotation Targets
 
 A binding id names a place source can declare a type by definition and name,
@@ -366,11 +370,13 @@ preview annotate target=binding:def…:s annotation=<circle> previous=<shape> (n
 typing delta: changed=2 added=0 removed=0 unchanged=1
   verdicts proved 0->2 checked 3->1 refuted 0->0
   codegen kept 3->2 elided 0->1 specialized 0->0 inlined 0->0 linked 0->0
+  errors 0->0
   typing:def…:s0 instance verdict=checked->proved codegen=kept->elided severity=silent->warning
   typing:def…:s1 dispatch verdict=checked->proved codegen=kept severity=silent
 ```
 
-The second and third lines count every decision before and after. Each
+The second to fourth lines count every decision before and after, the
+fourth those reported as errors, such as strict errors. Each
 change line names the decision after the change, then `old->new` for what
 changed; a decision the change introduced says `added`, one it removed says
 `removed`, with its values. An empty delta (`changed=0 added=0 removed=0`)
@@ -386,8 +392,10 @@ cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/inl
 ```
 
 `set-typing-policy` takes words applied in order: a preset (`soft`,
-`silent`, `strict`) replaces the configuration, and `check.verdict=severity`
-(such as `cast.checked=warning`) changes one setting. It re-derives
+`silent`, `strict`) replaces the configuration, `check.verdict=severity`
+(such as `cast.checked=warning`) changes one setting, and
+`strict.scope=declared|all` and `strict.overflow=runtime|proved` change
+strictness (see [Strict Typing](#strict-typing)). It re-derives
 diagnostics without re-checking, so verdicts and code do not change, only
 severities. `set-codegen-policy off|proved` lowers again, so codegen facets
 change and verdicts do not. Both print the change, the delta, and any new
@@ -414,6 +422,64 @@ In the REPL:
 
 `:annotate` edits the accepted buffer through the same candidate path as
 any other change; `:typing` with no argument shows the policy.
+
+### Strict Typing
+
+A strict definition must prove the checks the compiler inserts into it;
+see the README and `typing.rs` for which checks those are. Each one typing
+leaves to the runtime is a `typing.unproved-*` error, and any check that
+always fails is an error too (see
+[`diagnostics.md`](diagnostics.md#strict-typing)). The EOP ties each error
+to what it reports and to what could fix it:
+
+- A typing finding's `diagnostic:d<n>` object names its decision
+  (`decision=typing:def…:s<n>` in its inspection, `TypingFacet::Finding`
+  typed) and offers `show-typing`, which explains that decision. The
+  decision object's inspection ends `origin=<implicit|explicit|test|entry>
+  strict=<unproved|refuted|none>`, and its `show-typing` says whether the
+  check must be proved and lists the fixes.
+- A strict error lists its fixes, in order, as `fix<n>="..."` in the
+  inspection and `StrictFixOffer`s in the facet: annotate a parameter, test
+  it with `instance?`, seal a class, or write the check as an `as`. A fix
+  that an annotation makes names its target and type
+  (`@binding:def…:n:limited(<integer>, min: 0, max: 9)`), and such an error
+  offers `preview-fix [n]` and `apply-fix [n]` (fix `0` by default). They
+  are `preview-annotation` and `annotate` on that target, so the delta
+  shows which errors the fix resolves (`errors 2->0`, `severity=error->silent`)
+  and applying adds an ordinary `Annotate` entry to the log.
+- `preview-strict` on a function, method, generic, or constant reports
+  what would fail if it were strict, without changing anything: each
+  would-be error with its decision, reasons, and fixes. On a generic it
+  previews each method.
+
+```sh
+cargo run -p interloko_lab -- run tools/interloko_lab/fixtures/strict_digits.loko
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/strict_digits.loko diagnostic:d0 preview-fix
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/strict_digits.loko diagnostic:d0 apply-fix 0
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/strict_digits.loko function:f0 preview-strict
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/annotate_shapes.loko typing-config:session set-typing-policy strict
+```
+
+```text
+diagnostics:
+  Error typing.unproved-range 302..303 function twice is strict (declared), but typing cannot prove that <integer> is within limited(<integer>, min: 0, max: 9) (typing:def…:s0)
+    because declared@265..266 <integer>
+    fix: annotate parameter n as limited(<integer>, min: 0, max: 9)
+    fix: write as(limited(<integer>, min: 0, max: 9), ...) to check deliberately
+```
+
+Strictness is reporting only, and an input of its own: toggling a
+definition's `strict` re-derives the typing diagnostics from the recorded
+decisions (the incremental graph's `strictness` artifact), and so does the
+policy, so nothing is re-typed or lowered again. A strict definition with
+errors still lowers and runs, keeping the checks it could not prove;
+mutations reject an edit that adds errors, and the REPL rejects a form
+that has them. In the REPL:
+
+```text
+:invoke <function:...|method:...|generic:...|constant:...> preview-strict
+:invoke <diagnostic:dN> preview-fix|apply-fix [fix-index]
+```
 
 ## Codegen Policy
 

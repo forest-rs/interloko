@@ -130,6 +130,26 @@ The current slices include:
   with no subclasses is exact, so its sends link. Every such proof records
   the closed-world assumption it relies on, such as `sealed abstract class
   <shape> has exactly direct subclasses {<circle>, <square>}`;
+- opt-in strict typing, the checked end of the progression from loose to
+  sealed code: `define strict function`, `method` or `constant`, and
+  `define strict generic` for every method of a generic, or the `strict`
+  typing policy for every definition at once. A strict definition must
+  prove the checks the compiler inserts into it: every send's dispatch,
+  every range check where a value meets a `limited` declaration, and every
+  cast of a value returned through an untyped `<callable>`. Each one typing
+  leaves to the runtime is an error (`typing.unproved-dispatch`, `-range`,
+  `-cast`) naming its decision, the reasons behind the operand types, and
+  the fixes (annotate a parameter, test with `instance?`, seal a class, or
+  write an `as`), and so is any check that always fails. An explicit
+  `as(<circle>, s)` is how strict code checks deliberately, `instance?`
+  never fails, and overflow stays a runtime check unless the policy says
+  `strict.overflow=proved`, since `<integer>` is held in 64 bits for now.
+  Strictness only changes reporting: a strict definition compiles exactly
+  as it otherwise would, and once its errors are fixed its checks are
+  proved and dropped. A preview reports what would fail before opting in;
+  see [`docs/eop_workbench.md`](docs/eop_workbench.md#strict-typing),
+  and `interloko_corpus strictness` measures how much of the corpus
+  already meets it;
 - a numeric class tower: `<number>` > `<real>`, then `<rational>` >
   `<integer>` and `<float>` > `<double-float>`, where only `<integer>` and
   `<double-float>` are concrete; methods may specialize on any of them, and
