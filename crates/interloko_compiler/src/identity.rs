@@ -253,6 +253,8 @@ pub enum ArtifactKind {
     ClassCone,
     /// Session-owned codegen policy input.
     CodegenPolicy,
+    /// Whether one definition is held to strict typing, and why.
+    Strictness,
 }
 
 impl ArtifactKind {
@@ -283,6 +285,7 @@ impl ArtifactKind {
             Self::MethodTable => "method-table",
             Self::ClassCone => "class-cone",
             Self::CodegenPolicy => "codegen-policy",
+            Self::Strictness => "strictness",
         }
     }
 
@@ -311,6 +314,7 @@ impl ArtifactKind {
             Self::MethodTable => 21,
             Self::ClassCone => 22,
             Self::CodegenPolicy => 23,
+            Self::Strictness => 24,
         }
     }
 }

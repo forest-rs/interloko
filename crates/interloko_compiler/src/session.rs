@@ -5140,6 +5140,9 @@ fn artifact_fingerprint(
         QueryArtifact::CodegenPolicy => {
             builder.mix_str(artifacts.codegen_policy.as_str());
         }
+        QueryArtifact::Strictness(definition) => {
+            builder.mix_str(&strictness_fingerprint(&artifacts.sem, definition));
+        }
         QueryArtifact::Typing => {
             builder.mix_str(&format!(
                 "{:?} {:?}",
@@ -5428,7 +5431,7 @@ fn artifact_work_units(artifact: QueryArtifact, artifacts: &SessionArtifacts) ->
             .map_or(1, |class| {
                 usize_to_u64(class_cone(&artifacts.sem, class.id).len()).saturating_add(1)
             }),
-        QueryArtifact::CodegenPolicy => 1,
+        QueryArtifact::CodegenPolicy | QueryArtifact::Strictness(_) => 1,
     }
 }
 
@@ -14171,20 +14174,33 @@ fn definition_edit_roots(
     if !typed(before) || !typed(after) {
         return None;
     }
-    changed
-        .iter()
-        .map(|change| {
-            let local = matches!(
-                change.definition.kind,
-                DefinitionKind::Function
-                    | DefinitionKind::Method
-                    | DefinitionKind::Generic
-                    | DefinitionKind::Constant
-            );
-            (local && change.change != DefinitionChangeKind::Removed)
-                .then_some(QueryArtifact::DefinitionSem(change.definition.id))
-        })
-        .collect()
+    let mut roots = Vec::new();
+    for change in changed {
+        let local = matches!(
+            change.definition.kind,
+            DefinitionKind::Function
+                | DefinitionKind::Method
+                | DefinitionKind::Generic
+                | DefinitionKind::Constant
+        );
+        if !local || change.change == DefinitionChangeKind::Removed {
+            return None;
+        }
+        let id = change.definition.id;
+        // An edit that only toggles `strict` leaves the sem output alone
+        // and changes only how typing reports.
+        let same = |fingerprint: fn(&sem::Module, DefinitionId) -> String| {
+            change.change == DefinitionChangeKind::Modified
+                && fingerprint(&before.sem, id) == fingerprint(&after.sem, id)
+        };
+        if !same(definition_sem_fingerprint) {
+            roots.push(QueryArtifact::DefinitionSem(id));
+        }
+        if !same(strictness_fingerprint) {
+            roots.push(QueryArtifact::Strictness(id));
+        }
+    }
+    Some(roots)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -14329,6 +14345,48 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
         });
     }
     definitions
+}
+
+/// Fingerprint of whether a definition declares itself strict, the value
+/// of [`QueryArtifact::Strictness`]: its own adjective, and for a method
+/// its generic's. The session's strict scope is the typing configuration's.
+fn strictness_fingerprint(module: &sem::Module, definition: DefinitionId) -> String {
+    let declared = module
+        .functions
+        .iter()
+        .find(|function| function.definition == definition)
+        .map(|function| function.strict)
+        .or_else(|| {
+            module
+                .generics
+                .iter()
+                .find(|generic| generic.definition == definition)
+                .map(|generic| generic.strict)
+        })
+        .or_else(|| {
+            module
+                .constants
+                .iter()
+                .find(|constant| constant.definition == definition)
+                .map(|constant| constant.strict)
+        });
+    if let Some(declared) = declared {
+        return format!("strict={declared}");
+    }
+    module
+        .methods
+        .iter()
+        .find(|method| method.definition == definition)
+        .map_or_else(
+            || "missing-definition".into(),
+            |method| {
+                let generic = module
+                    .generics
+                    .get(method.generic.0 as usize)
+                    .is_some_and(|generic| generic.strict);
+                format!("strict={} generic-strict={generic}", method.strict)
+            },
+        )
 }
 
 /// Fingerprint of one definition's sem output, the value of
@@ -16459,6 +16517,113 @@ mod tests {
             cache_report(&silent, QueryArtifact::TypingConfig).expect("typing config report");
         assert!(config_report.invalidated);
         assert!(config_report.affected);
+    }
+
+    #[test]
+    fn toggling_strictness_re_reports_typing_without_retyping_or_lowering() {
+        // `strict` is padded out in the plain version so spans do not move
+        // and every reuse below is about strictness alone.
+        let plain = "define class <shape> (<object>)\nend;\n\
+            define class <circle> (<shape>)\nend;\n\
+            define generic area(x);\n\
+            define method area(c :: <circle>)\n  7\nend;\n\
+            define        function measure(s :: <shape>)\n  area(s)\nend;\n\
+            define function main()\n  measure(make(<circle>))\nend;";
+        let strict = plain.replace("define        function", "define strict function");
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("strict.loko", plain);
+        let before = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        assert!(before.artifacts.diagnostics.is_empty());
+
+        let update = session
+            .edit_and_compile(id, &strict, RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert_eq!(
+            update
+                .artifacts
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect::<Vec<_>>(),
+            [DiagnosticCode::TypingUnprovedDispatch]
+        );
+        let measure = update.artifacts.sem.functions[0].definition;
+        let main = update.artifacts.sem.functions[1].definition;
+        let affected = update
+            .diff
+            .as_ref()
+            .expect("an edit has a diff")
+            .affected
+            .iter()
+            .map(|report| report.artifact)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            affected,
+            [
+                QueryArtifact::Strictness(measure),
+                QueryArtifact::Typing,
+                QueryArtifact::Diagnostics,
+            ]
+        );
+        for reused in [
+            QueryArtifact::DefinitionSem(measure),
+            QueryArtifact::DefinitionTyping(measure),
+            QueryArtifact::DefinitionTyping(main),
+            QueryArtifact::LoweredModule,
+            QueryArtifact::TapeProgram,
+        ] {
+            assert_eq!(
+                cache_action(&update, reused),
+                Some(CacheAction::Reused),
+                "{reused:?}"
+            );
+        }
+        for recomputed in [
+            QueryArtifact::Strictness(measure),
+            QueryArtifact::Typing,
+            QueryArtifact::Diagnostics,
+        ] {
+            assert_eq!(
+                cache_action(&update, recomputed),
+                Some(CacheAction::Recomputed),
+                "{recomputed:?}"
+            );
+        }
+
+        // The session-wide policy reaches the same diagnostics through the
+        // typing configuration.
+        session.set_typing_config(typing::TypingConfig::strict());
+        let edited = session
+            .edit_and_compile(id, plain, RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert_eq!(edited.artifacts.diagnostics.len(), 1);
+        assert_eq!(
+            edited.artifacts.typing.strictness(measure),
+            Some(typing::StrictSource::Policy)
+        );
+        session.set_typing_config(typing::TypingConfig::soft());
+        let soft = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert!(soft.artifacts.diagnostics.is_empty());
+        for reused in [
+            QueryArtifact::Strictness(measure),
+            QueryArtifact::DefinitionTyping(measure),
+            QueryArtifact::LoweredModule,
+            QueryArtifact::TapeProgram,
+        ] {
+            assert_eq!(
+                cache_action(&soft, reused),
+                Some(CacheAction::Reused),
+                "{reused:?}"
+            );
+        }
+        assert_eq!(
+            cache_action(&soft, QueryArtifact::Diagnostics),
+            Some(CacheAction::Recomputed)
+        );
     }
 
     #[test]

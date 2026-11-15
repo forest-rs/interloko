@@ -2849,6 +2849,7 @@ fn artifact_stage_relation(artifact: QueryArtifact) -> &'static str {
         QueryArtifact::MethodTable(_) => "artifact-stage:method-table",
         QueryArtifact::ClassCone(_) => "artifact-stage:class-cone",
         QueryArtifact::CodegenPolicy => "artifact-stage:codegen-policy",
+        QueryArtifact::Strictness(_) => "artifact-stage:strictness",
     }
 }
 

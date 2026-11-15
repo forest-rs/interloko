@@ -31,6 +31,17 @@
 //! [`QueryArtifact::MethodLowering`] (and, for functions and constants, the
 //! [`QueryArtifact::LoweredModule`]) depends on the contracts its body cites.
 //!
+//! # Strictness edges
+//!
+//! Whether a definition is strict is its own [`QueryArtifact::Strictness`]
+//! input, which only the module [`QueryArtifact::Typing`] result reads:
+//! strictness decides which decisions are reported as errors, never the
+//! decisions themselves or the code. A definition's sem output leaves its
+//! `strict` adjective out, so toggling it reaches the typing diagnostics
+//! and nothing else, and a method's strictness follows its generic's. The
+//! session-wide `strict.scope` is part of the
+//! [`QueryArtifact::TypingConfig`], which reaches the same diagnostics.
+//!
 //! # Codegen policy edges
 //!
 //! The [`QueryArtifact::LoweredModule`] and every method's
@@ -52,6 +63,9 @@
 //! [`QueryArtifact::MethodLowering`]: crate::incremental::QueryArtifact::MethodLowering
 //! [`QueryArtifact::LoweredModule`]: crate::incremental::QueryArtifact::LoweredModule
 //! [`QueryArtifact::CodegenPolicy`]: crate::incremental::QueryArtifact::CodegenPolicy
+//! [`QueryArtifact::Strictness`]: crate::incremental::QueryArtifact::Strictness
+//! [`QueryArtifact::Typing`]: crate::incremental::QueryArtifact::Typing
+//! [`QueryArtifact::TypingConfig`]: crate::incremental::QueryArtifact::TypingConfig
 //! [`CodegenPolicy::Proved`]: crate::lower::CodegenPolicy::Proved
 //! [`CodegenPolicy::Off`]: crate::lower::CodegenPolicy::Off
 
@@ -127,6 +141,11 @@ pub enum QueryArtifact {
     /// ([`crate::lower::CodegenPolicy`]): whether lowering acts on proved
     /// typing facts.
     CodegenPolicy,
+    /// Whether one function, method, generic, or constant is held to strict
+    /// typing: its own `strict` adjective, and for a method its generic's.
+    /// Strictness decides how typing reports, never what it decides or what
+    /// is lowered, so only the module typing result depends on it.
+    Strictness(DefinitionId),
 }
 
 /// A query artifact and its stable external key.
@@ -175,6 +194,7 @@ impl QueryArtifact {
             Self::MethodTable(_) => ArtifactKind::MethodTable,
             Self::ClassCone(_) => ArtifactKind::ClassCone,
             Self::CodegenPolicy => ArtifactKind::CodegenPolicy,
+            Self::Strictness(_) => ArtifactKind::Strictness,
         }
     }
 
@@ -191,7 +211,8 @@ impl QueryArtifact {
             | Self::DefinitionSem(id)
             | Self::Contract(id)
             | Self::MethodTable(id)
-            | Self::ClassCone(id) => Some(id),
+            | Self::ClassCone(id)
+            | Self::Strictness(id) => Some(id),
             Self::Source
             | Self::EnvironmentResolution
             | Self::GrammarStack
@@ -334,6 +355,7 @@ impl QueryInvalidation {
 
         for generic in &module.generics {
             let generic = generic.definition;
+            this.add(QueryArtifact::Strictness(generic), QueryArtifact::Bind);
             this.add(QueryArtifact::DefinitionSem(generic), QueryArtifact::Bind);
             this.add(
                 QueryArtifact::GenericDispatcher(generic),
@@ -388,9 +410,16 @@ impl QueryInvalidation {
                 QueryArtifact::Contract(method),
                 QueryArtifact::DefinitionSem(method),
             );
+            this.add(QueryArtifact::Strictness(method), QueryArtifact::Bind);
+            this.add(QueryArtifact::Typing, QueryArtifact::Strictness(method));
             let Some(generic) = generic else {
                 continue;
             };
+            // A strict generic makes its methods strict.
+            this.add(
+                QueryArtifact::Strictness(method),
+                QueryArtifact::Strictness(generic.definition),
+            );
             this.add(
                 QueryArtifact::GenericDispatcher(generic.definition),
                 QueryArtifact::MethodLookup(method),
@@ -432,6 +461,8 @@ impl QueryInvalidation {
 
         for function in &module.functions {
             let function = function.definition;
+            this.add(QueryArtifact::Strictness(function), QueryArtifact::Bind);
+            this.add(QueryArtifact::Typing, QueryArtifact::Strictness(function));
             this.add(QueryArtifact::DefinitionSem(function), QueryArtifact::Bind);
             this.add(
                 QueryArtifact::LoweredModule,
@@ -445,6 +476,8 @@ impl QueryInvalidation {
 
         for constant in &module.constants {
             let constant = constant.definition;
+            this.add(QueryArtifact::Strictness(constant), QueryArtifact::Bind);
+            this.add(QueryArtifact::Typing, QueryArtifact::Strictness(constant));
             this.add(QueryArtifact::DefinitionSem(constant), QueryArtifact::Bind);
             this.add(
                 QueryArtifact::LoweredModule,
@@ -1047,6 +1080,41 @@ mod tests {
         );
         assert!(!affected.contains(&QueryArtifact::DefinitionTyping(main)));
         assert!(!affected.contains(&QueryArtifact::LoweredModule));
+    }
+
+    #[test]
+    fn strictness_reaches_only_typing_diagnostics_and_follows_the_generic() {
+        let module = lower_source(
+            "define class <circle> (<object>)\nend;\n\
+             define strict generic area(x);\n\
+             define method area(c :: <circle>)\n  1\nend;\n\
+             define function main()\n  area(make(<circle>))\nend;",
+        );
+        let generic = module.generics[0].definition;
+        let method = module.methods[0].definition;
+        let main = module.functions[0].definition;
+        let mut invalidation = graph_under(&module, CodegenPolicy::Proved);
+        let affected =
+            invalidation.changed_with_cutoff(&[QueryArtifact::Strictness(generic)], |_| false);
+        assert_eq!(
+            affected,
+            [
+                QueryArtifact::Strictness(generic),
+                QueryArtifact::Strictness(method),
+                QueryArtifact::Typing,
+                QueryArtifact::Diagnostics
+            ]
+        );
+        let affected =
+            invalidation.changed_with_cutoff(&[QueryArtifact::Strictness(main)], |_| false);
+        assert_eq!(
+            affected,
+            [
+                QueryArtifact::Strictness(main),
+                QueryArtifact::Typing,
+                QueryArtifact::Diagnostics
+            ]
+        );
     }
 
     #[test]
