@@ -705,19 +705,36 @@ the check holds for it as for the value that passed. A check that must
 fail does not make the code after it unreachable for typing, since a
 replacement reaches it.
 
+A send that finds no method is the same: it signals a
+`<no-applicable-method>` whose `use-value` supplies the send's results,
+which the generic's dispatcher checks against the generic's declared
+result types before returning them. Typing gives every send, even one it
+refuted, its generic's result type and narrows none of its arguments, so
+no proved fact assumes a send either finds a method or never returns. A
+linked or inlined send cannot fail: typing proved a method applies to its
+arguments' exact classes, and installs keep the method set.
+
 A frame counts as superseded when its definition's newest code differs
 in signature or bytecode, so an edit elsewhere should leave unchanged
 functions byte-identical. For runtime checks that holds: each function
 numbers its own `<type-error>` sites, the condition tags failing checks
 resume through and the check-failed tag come first among control tags in a
 fixed order, and their request signatures come last among control
-signatures. Adding or removing checks, or adding an exit procedure (whose
-tag comes after them), renumbers nothing an unchanged function refers to.
+signatures. The fixed tags also cover what a dispatcher resumes with after
+a send that finds no method (one object, boxed `<object>`, number, boolean
+or callable, or nothing), and that request's signature is fixed too, so a
+signal with a new result shape elsewhere leaves every dispatcher's
+bytecode alone. Adding or removing checks, or adding an exit procedure
+(whose tag comes after them), renumbers nothing an unchanged function
+refers to.
 Nor do linked sends: a program declares a link for every method of its
 runtime layout, and a link's id is its method's id, so adding or removing a
 send renumbers no link. What can still renumber it: adding or removing a source function or method
 before it (function ids are in source order), and a program's first signal
-with a new result type, whose condition tag shifts the exit tags after it.
+with a new result shape (such as several values), whose condition tag
+shifts the exit tags after it. (Adding a generic, which also renumbers the
+dispatchers after it, changes the layout and so never installs under live
+frames.)
 
 A send whose method typing selected from its arguments' exact classes is
 *linked* under `proved`: it calls the method through the `execution_tape`

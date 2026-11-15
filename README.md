@@ -177,13 +177,16 @@ The current slices include:
   restates or widens its generic's range: unlike Dylan's DRM, methods do
   not dispatch on ranges, so a send's range check is the only one;
 - simple strings, symbols, keywords, and immutable vectors;
-- recoverable condition/restart forms, with `<condition>`, `<error>` and
-  `<type-error>` defined by the kernel: a runtime check that fails (a cast,
-  an untyped callable's argument, a range, an overflow) signals a
-  `<type-error>` naming the value, the expected type, the check's typing
-  decision and a stable `type-error.*` code, and its `use-value` restart
-  continues with a replacement of the expected type (an object a failed
-  cast checks again);
+- recoverable condition/restart forms, with `<condition>`, `<error>`,
+  `<type-error>` and `<no-applicable-method>` defined by the kernel: a
+  runtime check that fails (a cast, an untyped callable's argument, a range,
+  an overflow) signals a `<type-error>` naming the value, the expected
+  type, the check's typing decision and a stable `type-error.*` code, and
+  its `use-value` restart continues with a replacement of the expected type
+  (an object a failed cast checks again); a send that finds no method
+  signals a `<no-applicable-method>` naming the generic and the arguments
+  (`dispatch.no-applicable-method`), whose `use-value` supplies the send's
+  results, checked against the generic's declared result types;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
 - embedding-declared scalar host functions with typed integer, float,
   32-bit, boolean, and string arguments/results, EOP discovery, and a handler-aware call surface;

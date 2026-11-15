@@ -569,6 +569,80 @@ those signal needs every untyped callable call to box its scalars and
 every callable entry and result to check and unbox them, a calling
 convention change for all callable values, so it waits for its own slice.
 
+## Failed Sends
+
+A generic send whose arguments no method accepts signals a
+`<no-applicable-method>`, the kernel class beside `<type-error>` under
+`<error>`, rather than trapping. A program handles it like any condition:
+
+```loko
+handle
+  area(s)
+with restart e :: <no-applicable-method>
+  if generic-function-name(e.no-applicable-method-generic) = "area" then 0 else 1 end
+end
+```
+
+Its slots are `no-applicable-method-generic` (the generic's
+`<generic-function>` metaobject), `no-applicable-method-arguments` (a
+`<vector>` of the arguments in order; a callable argument, which is not an
+`<object>` and never selects a method, appears as the symbol `#<callable>`)
+and `no-applicable-method-code` (`dispatch.no-applicable-method`).
+
+Every send that can fail reaches the generic's dispatcher, which signals:
+a dynamic send asks the runtime, which answers with the dispatcher when its
+table selects nothing; a generic used as a value or through `apply` sends
+the same way; a numeric send that is not inlined is a dynamic send. A
+linked send exists only where typing proved a method applies to the
+arguments' exact classes, and the layout, which no install may change,
+keeps that method applicable, so it cannot fail; an inlined numeric send
+runs a method typing selected. The dispatcher signals after its last method
+fails to match, so a send that finds a method costs what it did. The driver
+counts the sends that fail (`ControlStats::failed_sends`).
+
+An unhandled one suspends with every frame live, the dispatcher innermost
+(`area#dispatch`), and the driver marks it as a failed check's
+(`UnhandledCondition::failed_check`). `UnhandledCondition::no_applicable_method`
+reads the generic's name, the arguments, their classes and the code; the
+REPL break loop prints them and labels `use-value` with the generic's
+declared result types (`CodeUnit::generic_result_types`). Unhandled, it
+ends the run as `dispatch.no-applicable-method`. One the program signals
+again from a handler is ordinary, as a re-signalled `<type-error>` is.
+
+```text
+break [1]: no handler for <no-applicable-method>; 3 frames suspended, nothing unwound
+no applicable method: code=dispatch.no-applicable-method generic=area classes=(<square>) arguments=({<square>})
+restarts:
+  restart:0 use-value(limited(<integer>, min: 0, max: 100))  the send returns this value instead, checked against its generic's result type
+```
+
+`use-value` supplies the send's results, one per generic result, in the
+generic's result kinds; another kind is an invalid choice. The dispatcher
+then checks each one against the generic's declared result type before it
+returns it, as an indirect entry checks an argument: a class or class
+object signals `type-error.entry` and a `limited(<integer>, ...)` range
+`type-error.range`, at the dispatcher's site
+(`check:<generic>@<start>..<end>`), until a replacement passes. A result
+sem knows to be one particular function, generic or accessor (an open
+generic whose methods all return it) has that callable as its only value,
+which no check of a closure could establish, so `use-value` supplies
+nothing for it and the dispatcher returns the callable. Code after the
+send therefore sees results that keep the generic's contract, as it does
+when a method returns.
+
+`retry` re-runs a sending frame (the dispatcher is not retryable: with
+the same arguments and the same methods it would fail again). An edit that
+changes how the sender sends installs while the send waits, and retrying
+the sender's frame runs it. A new method cannot install under a waiting
+send: methods are part of the runtime layout, which every unit of a run
+shares and which linked sends and typing's closed-world facts rely on, so
+the break loop refuses it for this run and the next run finds it.
+
+A send never finds several equally specific methods: a module whose
+methods could be ambiguous for some arguments does not compile
+(`sem.ambiguous-generic-method-dispatch`), so there is no ambiguity
+condition.
+
 ## Explicit Host Projection
 
 The workbench can install an explicit host projection provider from fixture

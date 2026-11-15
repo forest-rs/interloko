@@ -17,13 +17,14 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
+use std::sync::Arc;
 
 use execution_tape::program::ValueType;
 use execution_tape::value::Value;
 use interloko_runtime::chooser::{
     Choice, ConditionChooser, FrameSnapshot, LinkSnapshot, OfferedRestart, UnhandledCondition,
 };
-use interloko_runtime::code::Definition;
+use interloko_runtime::code::{CodeUnit, Definition};
 
 use crate::{
     LineSource, PendingDefinitionState, Repl, ReplError, Result, pending_definition_state,
@@ -39,13 +40,20 @@ pub(crate) struct BreakLoop<'a, W, E> {
     pub(crate) editing: Option<String>,
     /// Whether the last choice installed code the driver has not answered yet.
     pub(crate) installing: bool,
+    /// The newest code the run has installed: the code it started with,
+    /// until an edit installs.
+    running: Option<Arc<CodeUnit>>,
+    /// The code the last choice offered to install.
+    offered: Option<Arc<CodeUnit>>,
     /// Output or compile errors the trait method could not return.
     pub(crate) error: Option<ReplError>,
 }
 
 impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
+    /// A break loop for a run of `running`.
     pub(crate) fn new(
         repl: &'a mut Repl,
+        running: Option<Arc<CodeUnit>>,
         source: &'a mut dyn LineSource,
         stdout: &'a mut W,
         stderr: &'a mut E,
@@ -57,6 +65,8 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
             stderr,
             editing: None,
             installing: false,
+            running,
+            offered: None,
             error: None,
         }
     }
@@ -156,6 +166,16 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
                 report.code, report.expected, report.value, report.site
             )?;
         }
+        if let Some(report) = condition.no_applicable_method() {
+            writeln!(
+                self.stdout,
+                "no applicable method: code={} generic={} classes=({}) arguments=({})",
+                report.code,
+                report.generic,
+                report.argument_classes.join(", "),
+                report.arguments.join(", ")
+            )?;
+        }
         self.print_frames(condition)?;
         self.print_restarts(condition)?;
         writeln!(
@@ -188,16 +208,14 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
     fn print_restarts(&mut self, condition: &UnhandledCondition<'_>) -> Result<()> {
         writeln!(self.stdout, "restarts:")?;
         for (index, restart) in condition.restarts.iter().enumerate() {
-            writeln!(
-                self.stdout,
-                "  restart:{index} {}",
-                restart_line(condition, restart)
-            )?;
+            let line = self.restart_line(condition, restart);
+            writeln!(self.stdout, "  restart:{index} {line}")?;
         }
         Ok(())
     }
 
     fn report_install(&mut self, condition: &UnhandledCondition<'_>) -> Result<()> {
+        let offered = self.offered.take();
         if let Some(refused) = condition.refused {
             writeln!(
                 self.stderr,
@@ -205,6 +223,7 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
             )?;
             return Ok(());
         }
+        self.running = offered.or_else(|| self.running.take());
         let superseded = condition
             .frames
             .iter()
@@ -269,6 +288,7 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
         self.repl.last_artifacts = Some(artifacts);
         self.repl.dirty = true;
         self.editing = None;
+        self.offered = Some(Arc::clone(&code));
         Ok(Some(Choice::Install(code)))
     }
 
@@ -301,7 +321,7 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
                     writeln!(
                         self.stderr,
                         "error: use-value expects {}, got {literal}; break [1] is still waiting",
-                        use_value_label(condition, types)
+                        self.use_value_label(condition, types)
                     )?;
                     None
                 }
@@ -349,7 +369,7 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
                 writeln!(
                     self.stderr,
                     "error: wrong arguments for {}",
-                    restart_line(condition, restart)
+                    self.restart_line(condition, restart)
                 )?;
                 None
             }
@@ -425,39 +445,62 @@ fn restart_name(restart: &OfferedRestart<'_>) -> String {
     }
 }
 
-fn restart_line(condition: &UnhandledCondition<'_>, restart: &OfferedRestart<'_>) -> String {
-    match restart {
-        OfferedRestart::Handler { descriptor, .. } => {
-            format!("{}()  the handle site's recovery", descriptor.name)
+impl<W: Write, E: Write> BreakLoop<'_, W, E> {
+    fn restart_line(
+        &self,
+        condition: &UnhandledCondition<'_>,
+        restart: &OfferedRestart<'_>,
+    ) -> String {
+        match restart {
+            OfferedRestart::Handler { descriptor, .. } => {
+                format!("{}()  the handle site's recovery", descriptor.name)
+            }
+            OfferedRestart::UseValue { types } if condition.no_applicable_method().is_some() => {
+                format!(
+                    "use-value({})  the send returns this value instead, checked against \
+                     its generic's result type",
+                    self.use_value_label(condition, types)
+                )
+            }
+            OfferedRestart::UseValue {
+                types: types @ [ValueType::Obj(_)],
+            } if condition.failed_check => format!(
+                "use-value({})  the cast continues with this object, checked again",
+                self.use_value_label(condition, types)
+            ),
+            OfferedRestart::UseValue { types } if condition.failed_check => format!(
+                "use-value({})  the checked operation produces this value instead",
+                types_label(types)
+            ),
+            OfferedRestart::UseValue { types } => format!(
+                "use-value({})  the signal returns the value",
+                types_label(types)
+            ),
+            OfferedRestart::Retry => {
+                "retry(frame)  call a frame's function again, with current definitions".into()
+            }
+            OfferedRestart::Abort => "abort()  unwind to top level, running cleanups".into(),
         }
-        OfferedRestart::UseValue {
-            types: types @ [ValueType::Obj(_)],
-        } if condition.failed_check => format!(
-            "use-value({})  the cast continues with this object, checked again",
-            use_value_label(condition, types)
-        ),
-        OfferedRestart::UseValue { types } if condition.failed_check => format!(
-            "use-value({})  the checked operation produces this value instead",
-            types_label(types)
-        ),
-        OfferedRestart::UseValue { types } => format!(
-            "use-value({})  the signal returns the value",
-            types_label(types)
-        ),
-        OfferedRestart::Retry => {
-            "retry(frame)  call a frame's function again, with current definitions".into()
-        }
-        OfferedRestart::Abort => "abort()  unwind to top level, running cleanups".into(),
     }
-}
 
-/// What a `use-value` takes: the signal's result types, except that an
-/// object replacing a failed cast's value must have the class the check
-/// expects, which the type error names.
-fn use_value_label(condition: &UnhandledCondition<'_>, types: &[ValueType]) -> String {
-    match (types, condition.type_error()) {
-        ([ValueType::Obj(_)], Some(report)) => report.expected,
-        _ => types_label(types),
+    /// What a `use-value` takes: the signal's result types, except that an
+    /// object replacing a failed cast's value must have the class the check
+    /// expects, which the type error names, and the results of a send that
+    /// found no method must have its generic's declared result types, as
+    /// the run's newest code declares them: a refused edit is not running.
+    fn use_value_label(&self, condition: &UnhandledCondition<'_>, types: &[ValueType]) -> String {
+        if let Some(report) = condition.no_applicable_method()
+            && let Some(results) = self
+                .running
+                .as_ref()
+                .and_then(|code| code.generic_result_types(&report.generic))
+        {
+            return results.join(", ");
+        }
+        match (types, condition.type_error()) {
+            ([ValueType::Obj(_)], Some(report)) => report.expected,
+            _ => types_label(types),
+        }
     }
 }
 

@@ -463,6 +463,31 @@ impl CodeUnit {
         }
     }
 
+    /// The declared result types of the generic named `generic`, written
+    /// with this unit's class names, such as `<circle>` or
+    /// `limited(<integer>, min: 0, max: 9)`: what a `use-value` standing
+    /// in for the results of a send to it that found no applicable method
+    /// must supply, since its dispatcher checks each one against them.
+    ///
+    /// `None` when the unit has no such generic or records no contract for
+    /// it.
+    #[must_use]
+    pub fn generic_result_types(&self, generic: &str) -> Option<Vec<String>> {
+        let index = self
+            .layout
+            .generics
+            .iter()
+            .position(|candidate| candidate.name == generic)?;
+        let contract = self.contracts.generics.get(index)?;
+        Some(
+            contract
+                .results
+                .iter()
+                .map(|result| self.value_name(result))
+                .collect(),
+        )
+    }
+
     fn value_name(&self, value: &ValueContract) -> String {
         alloc::format!("{}", value.display(&self.layout))
     }

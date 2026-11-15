@@ -1,0 +1,30 @@
+// Sends for the no-applicable-method scenario of `hot_swap.transcript`.
+//
+// `area` has a method for `<circle>` only, and promises a result from 0 to
+// 100. `measure` sends it a `<square>`, which no method accepts, so the
+// run stops in the break loop at the send, in `area`'s dispatcher.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define generic area(s :: <shape>) => limited(<integer>, min: 0, max: 100);
+
+define method area(c :: <circle>) => limited(<integer>, min: 0, max: 100)
+  3 * c.radius * c.radius
+end;
+
+define function measure(s :: <shape>) => <integer>
+  area(s) + 1
+end;
+
+define function main() => <integer>
+  measure(make(<square>, side: 2))
+end;

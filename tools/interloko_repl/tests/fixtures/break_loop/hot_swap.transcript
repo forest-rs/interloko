@@ -10,8 +10,9 @@
 // with the new method, so `main` returns 1.0 + 0.5 + 0.0 while `pixel`,
 // `render` and `main` finish on the code they started with. A new run takes
 // the new code from the start. A later scenario shows the edits the break
-// loop refuses because suspended frames rely on the old definitions, and
-// the last one breaks on failed runtime checks.
+// loop refuses because suspended frames rely on the old definitions, later
+// ones break on failed runtime checks, and the last ones on a send that
+// finds no applicable method.
 //
 // Format: see `tests/support/transcript.rs`.
 
@@ -255,4 +256,96 @@ linked sends (oldest unit first):
   u1:link#1 weight(<circle>)  -> method u1:f3
 > :restart use-value 0
 40
+> :quit
+
+// A send that finds no method signals a `<no-applicable-method>`, which
+// breaks like any unhandled condition. Its generic's dispatcher signals it,
+// so the innermost frame is `area#dispatch`, and the break shows the
+// generic and the classes and values of the arguments. `use-value` supplies
+// the send's result, which must keep the generic's promise: 500 is outside
+// `area`'s range, so the dispatcher signals a `<type-error>`, and 4 passes.
+// Editing the sender and retrying its frame works as for any condition.
+
+=== repl: a send that finds no method breaks with its condition
+
+> :load tests/fixtures/break_loop/sends.loko
+loaded tests/fixtures/break_loop/sends.loko (7 forms)
+> :run main
+break [1]: no handler for <no-applicable-method>; 3 frames suspended, nothing unwound
+no applicable method: code=dispatch.no-applicable-method generic=area classes=(<square>) arguments=({<square>})
+frames (innermost first):
+  frame:0 area#dispatch  u0:f5
+  frame:1 measure  u0:f0
+  frame:2 main  u0:f1
+restarts:
+  restart:0 use-value(limited(<integer>, min: 0, max: 100))  the send returns this value instead, checked against its generic's result type
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :restart use-value 500
+break [1]: no handler for <type-error>; 3 frames suspended, nothing unwound
+type error: code=type-error.range expected=limited(<integer>, min: 0, max: 100) value=500 site=check:def8530a2930ccb55e2@462..536
+frames (innermost first):
+  frame:0 area#dispatch  u0:f5
+  frame:1 measure  u0:f0
+  frame:2 main  u0:f1
+restarts:
+  restart:0 use-value(<integer>)  the checked operation produces this value instead
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :restart use-value 4
+5
+> :run main
+break [1]: no handler for <no-applicable-method>; 3 frames suspended, nothing unwound
+no applicable method: code=dispatch.no-applicable-method generic=area classes=(<square>) arguments=({<square>})
+frames (innermost first):
+  frame:0 area#dispatch  u0:f5
+  frame:1 measure  u0:f0
+  frame:2 main  u0:f1
+restarts:
+  restart:0 use-value(limited(<integer>, min: 0, max: 100))  the send returns this value instead, checked against its generic's result type
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :edit form:f5
+editing form:f5; enter a replacement definition
+> define function measure(s :: <shape>) => <integer>
+>   if instance?(s, <circle>) then area(s) + 1 else 0 end
+> end;
+installed the edit as a new code unit; still running replaced code:
+  frame:1 measure  u0:f0  superseded by u1:f0
+> :restart retry frame:1
+0
+> :quit
+
+// Methods are part of the runtime layout, which every code unit of a run
+// shares, so a method added while a send waits cannot be installed under
+// it: the edit is refused for this run and kept for the next one, which
+// finds the new method.
+
+=== repl: a method added under a failed send serves the next run
+
+> :load tests/fixtures/break_loop/sends.loko
+loaded tests/fixtures/break_loop/sends.loko (7 forms)
+> :run main
+break [1]: no handler for <no-applicable-method>; 3 frames suspended, nothing unwound
+no applicable method: code=dispatch.no-applicable-method generic=area classes=(<square>) arguments=({<square>})
+frames (innermost first):
+  frame:0 area#dispatch  u0:f5
+  frame:1 measure  u0:f0
+  frame:2 main  u0:f1
+restarts:
+  restart:0 use-value(limited(<integer>, min: 0, max: 100))  the send returns this value instead, checked against its generic's result type
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> define method area(s :: <square>) => limited(<integer>, min: 0, max: 100)
+>   s.side * s.side
+> end;
+! error: the edit is accepted for new runs but not installed here: cannot replace running code: the runtime layout changed (classes, slots or methods)
+> :restart abort
+! runtime error: aborted by the condition chooser
+> :run main
+5
 > :quit
