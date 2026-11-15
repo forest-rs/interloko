@@ -354,10 +354,11 @@ fn limited_integer_operands_keep_their_range() {
 }
 
 #[test]
-fn a_cast_that_always_fails_leaves_no_values_downstream() {
-    // sem types the cast as `<circle>`; its operand is exactly
-    // `<shape>`, so no value gets through and the dispatch on it is
-    // unreachable rather than refuted.
+fn a_cast_that_always_fails_still_yields_its_target() {
+    // The operand is exactly `<shape>`, so the cast always fails. It
+    // signals a `<type-error>` whose `use-value` restart may supply any
+    // `<circle>`, which the cast checks again, so the dispatch after it
+    // sees a `<circle>` rather than no value at all.
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function main()\n  area(as(<circle>, make(<shape>)))\nend;"
     ));
@@ -366,11 +367,30 @@ fn a_cast_that_always_fails_leaves_no_values_downstream() {
     assert_eq!(decisions[0].check, TypingCheck::Cast);
     assert_eq!(decisions[0].verdict, TypingVerdict::Refuted);
     assert_eq!(decisions[1].check, TypingCheck::Dispatch);
-    assert!(decisions[1].actual[0].is_bottom());
+    assert_eq!(type_name(&module, &decisions[1].actual[0]), "<circle>");
     assert_eq!(decisions[1].verdict, TypingVerdict::Proved);
-    assert_eq!(decisions[1].rule, TypingRule::Unreachable);
-    assert_eq!(type_name(&module, &decisions[1].actual[0]), "type-union()");
+    assert_eq!(decisions[1].rule, TypingRule::DispatchCovered);
     assert_eq!(artifact.diagnostics.len(), 1);
+}
+
+#[test]
+fn a_cast_that_may_fail_forgets_its_operand() {
+    // When the cast passes, its value is the operand's exact `<circle>`
+    // (the join of an exact `<circle>` and an exact `<square>`); when it
+    // fails, a `use-value` restart supplies some other `<circle>`.
+    // Only the target is certain, so the dispatch is not narrowed to the
+    // exact class.
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function pick(s :: <shape>)\n  \
+         area(as(<circle>, if instance?(s, <circle>) then as(<shape>, make(<circle>)) \
+         else as(<shape>, make(<square>)) end))\nend;\n\
+         define function main()\n  0\nend;"
+    ));
+    let [dispatch] = checks_of(&module, &artifact, "pick", TypingCheck::Dispatch)
+        .try_into()
+        .expect("one dispatch");
+    assert_eq!(type_name(&module, &dispatch.actual[0]), "<circle>");
+    assert_eq!(dispatch.selected_method, None);
 }
 
 #[test]
@@ -920,7 +940,7 @@ fn integer_arithmetic_uses_intervals_and_overflow_widens_to_the_kind() {
 }
 
 #[test]
-fn certain_overflow_is_refuted_and_leaves_no_value() {
+fn certain_overflow_is_refuted_and_yields_its_kind() {
     let (module, artifact) = decisions_for(&format!(
         "{WHOLE}define function main() => <integer>\n  \
          let top :: <i32> = 2147483647;\n  whole(top + 1i32)\nend;"
@@ -934,7 +954,10 @@ fn certain_overflow_is_refuted_and_leaves_no_value() {
             TypingRule::OverflowCertain
         )
     );
-    assert_eq!(decisions[1].rule, TypingRule::Unreachable);
+    // The overflow signals a `<type-error>`, and a `use-value` restart may
+    // supply any `<i32>` for the sum, so the dispatch after it is reached.
+    assert_eq!(type_name(&module, &decisions[1].actual[0]), "<i32>");
+    assert_eq!(decisions[1].rule, TypingRule::DispatchCovered);
     let [diagnostic] = artifact.diagnostics.as_slice() else {
         panic!("{:?}", artifact.diagnostics);
     };
@@ -1097,21 +1120,18 @@ fn unreachable_checks_are_never_reported() {
         TypingPolicy::new(TypingSeverity::Silent, TypingSeverity::Warning)
             .with_proved(TypingSeverity::Warning),
     );
+    // The literal condition takes only its else branch, so the dispatch in
+    // the then branch is never reached.
     let module = module(&format!(
         "{SHAPES}define function main() => <integer>\n  \
-         area(as(<circle>, make(<shape>)))\nend;"
+         if #f then area(make(<circle>)) else 0 end\nend;"
     ));
     assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
     let artifact = analyze(&module, config);
     let decisions = main_decisions(&module, &artifact);
-    assert_eq!(decisions[1].rule, TypingRule::Unreachable);
-    assert_eq!(artifact.severity(&decisions[1]), TypingSeverity::Silent);
-    let codes = artifact
-        .diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.code)
-        .collect::<Vec<_>>();
-    assert_eq!(codes, [DiagnosticCode::TypingCastAlwaysFails]);
+    assert_eq!(decisions[0].rule, TypingRule::Unreachable);
+    assert_eq!(artifact.severity(&decisions[0]), TypingSeverity::Silent);
+    assert_eq!(artifact.diagnostics, Vec::new());
 }
 
 #[test]
