@@ -263,9 +263,14 @@ fn closure_env_contract(
     }
 }
 
-fn build_error(error: impl core::fmt::Debug) -> TapeError {
+/// Wraps an `execution_tape` builder or verifier error.
+///
+/// Uses the error's `Display`, which for a verifier rejection renders the
+/// rejected program's function, pc, label, span and instruction, so the
+/// internal-error message says where the emitted code went wrong.
+fn build_error(error: impl core::fmt::Display) -> TapeError {
     TapeError::Build {
-        message: format!("{error:?}"),
+        message: format!("{error}"),
     }
 }
 
@@ -1894,6 +1899,24 @@ mod tests {
             .iter()
             .find(|class| class.name == name)
             .unwrap_or_else(|| panic!("missing runtime class {name}"))
+    }
+
+    #[test]
+    fn verifier_rejection_names_the_function_and_pc() {
+        let mut module = lower_source("define function main()\n  42\nend;");
+        let main = &mut module.functions[0];
+        // Declare a float result for a body that returns an integer, so the
+        // emitted program reaches the verifier and is rejected there.
+        main.ret = lower::ValueKind::F64;
+        main.rets = vec![lower::ValueKind::F64];
+        let Err(TapeError::Build { message }) = emit(&module) else {
+            panic!("a mistyped return should fail verification");
+        };
+        assert!(
+            message.starts_with("verification failed: function #0 \"main\", pc "),
+            "{message}"
+        );
+        assert!(message.contains("declared I64, required F64"), "{message}");
     }
 
     #[test]
