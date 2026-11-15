@@ -9,8 +9,9 @@
 // replaced. `retry frame:1` unwinds to the `shade` call and makes it again
 // with the new method, so `main` returns 1.0 + 0.5 + 0.0 while `pixel`,
 // `render` and `main` finish on the code they started with. A new run takes
-// the new code from the start. The last scenario shows the edits the break
-// loop refuses because suspended frames rely on the old definitions.
+// the new code from the start. A later scenario shows the edits the break
+// loop refuses because suspended frames rely on the old definitions, and
+// the last one breaks on failed runtime checks.
 //
 // Format: see `tests/support/transcript.rs`.
 
@@ -163,5 +164,58 @@ editing form:f4; enter a replacement definition
 > :restart use-value 10
 13
 > :run main
+0
+> :quit
+
+// A failed runtime check signals a `<type-error>`, and an unhandled one
+// breaks like any condition. The break shows what the condition reports:
+// its stable code, the expected type, the rejected value, and the site,
+// here the id of the check's typing decision. `use-value` supplies what
+// the checked conversion produces instead; a value of another type is
+// refused and the break keeps waiting. A cast continues with an object it
+// checks again. A literal cannot
+// name an object, so a failed cast is fixed by editing the definition and
+// retrying its frame instead.
+
+=== repl: a failed check breaks with its type error and continues with use-value
+
+> :load tests/fixtures/break_loop/checks.loko
+loaded tests/fixtures/break_loop/checks.loko (7 forms)
+> :run main
+break [1]: no handler for <type-error>; 2 frames suspended, nothing unwound
+type error: code=type-error.range expected=<i32> value=5000000000 site=typing:def34e752e9bedb7b3c:s0
+frames (innermost first):
+  frame:0 narrow  u0:f0
+  frame:1 main  u0:f2
+restarts:
+  restart:0 use-value(<i32>)  the checked operation produces this value instead
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :restart use-value 7000000000
+! error: use-value expects <i32>, got 7000000000; break [1] is still waiting
+> :restart use-value 41
+42
+> :run cast
+break [1]: no handler for <type-error>; 2 frames suspended, nothing unwound
+type error: code=type-error.cast expected=<circle> value={<square>} site=typing:def18155805decd7818:s0
+frames (innermost first):
+  frame:0 radius-of  u0:f1
+  frame:1 cast  u0:f3
+restarts:
+  restart:0 use-value(<circle>)  the cast continues with this object, checked again
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :restart use-value 3
+! error: use-value expects <circle>, got 3; break [1] is still waiting
+> :edit form:f4
+editing form:f4; enter a replacement definition
+> define function radius-of(s :: <shape>) => <integer>
+>   if instance?(s, <circle>) then as(<circle>, s).radius else 0 end
+> end;
+installed the edit as a new code unit; still running replaced code:
+  frame:0 radius-of  u0:f1  superseded by u1:f1
+> :restart retry frame:0
 0
 > :quit

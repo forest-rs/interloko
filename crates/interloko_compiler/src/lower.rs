@@ -27,10 +27,10 @@
 //!
 //! A runtime type check that fails signals a `<type-error>` rather than
 //! trapping. Each check carries the
-//! [`TypeErrorSite`](interloko_runtime::control::TypeErrorSite) it signals:
-//! its kind (the stable code), the expected type, and its site, which is
-//! the typing decision id `typing:<owner>:s<n>` when typing classifies the
-//! check. Host-call checks (casts and unboxing) carry it on their
+//! [site](interloko_runtime::control::TypeErrorSite) it signals: its kind
+//! (the stable code), the expected type, and its site, which is the typing
+//! decision id `typing:<owner>:s<n>` when typing classifies the check.
+//! Host-call checks (casts and unboxing) carry it on their
 //! instruction, and tape emission builds the failing path around the call,
 //! adding only a jump to the passing path. Checks lowering tests itself
 //! branch to a [`SignalTypeError`](crate::lower::Instr::SignalTypeError):

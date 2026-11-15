@@ -432,27 +432,102 @@ observe:
   says the run makes no dispatch there. Typing gives an inlined send's
   result its method's class, so in a chain such as `(x + 1) + 2` on a boxed
   `x` every send is inlined and the sums stay unboxed until the chain ends.
-- **Trap locations.** A trap inside inlined numeric code, such as the
-  overflow check the inlined `+` keeps, is raised by the caller's code at
-  the call's span. Under `off` the same overflow traps inside the built-in
-  method, whose code has no source of its own:
+- **Failure locations.** A check inside inlined numeric code, such as the
+  overflow check the inlined `+` keeps, signals its `<type-error>` from the
+  caller's code at the call's span. Under `off` the same overflow signals
+  from inside the built-in method, whose code has no source of its own:
 
   ```text
-  off:    outcome: trapped: trap(3) at +#method0@17 (1:1) from +#dispatch@96 (1:1) from main@44 (7:17)
-  proved: outcome: trapped: trap(3) at main@52 (7:17)
+  off:    host-call interloko.condition.type_error args=(9223372036854775807, 1, 0u) ... at +#method0@20 (1:1) from +#dispatch@298 (1:1) from main@44 (8:17)
+  proved: host-call interloko.condition.type_error args=(9223372036854775807, 1, 1u) ... at main@156 (8:17)
   ```
 
-  The one-line run result likewise points into the caller
-  (`runtime trap: integer overflow (trap at u0:f0 pc=52 span=...)`, where
-  `u0:f0` is `main`) instead of the built-in method; `trace` names the
-  function and resolves the span to a line and column.
+  Either way the condition names the same site, the `+` method's typing
+  decision, and the run ends with the same outcome
+  (`type-error.overflow`); `trace` names the signalling function and
+  resolves the span to a line and column.
 - **Lowered and tape dumps** lack the dropped checks: `i64.add` instead of
-  `i64.add_ovf` and its trap branch, no `select-method` for an inlined send,
+  `i64.add_ovf` and its signalling branch, no `select-method` for an inlined send,
   a constant instead of an `instance?` test.
 
 Code lowered under either policy hot-swaps the same way: the install and
 retry checks in [`eop_mutation.md`](eop_mutation.md) protect what proved code
 relies on.
+
+## Runtime Type Errors
+
+A runtime check that fails signals a `<type-error>`
+([`diagnostics.md`](diagnostics.md) lists its codes). The condition is an
+ordinary object of the kernel class `<type-error>`, under `<error>` and
+`<condition>`, and a program handles it like any other:
+
+```loko
+handle
+  as(<circle>, s).radius
+with restart e :: <type-error>
+  if e.type-error-code = "type-error.cast" then 0 else 1 end
+end
+```
+
+Its slots are `type-error-value` (the rejected value, as an `<object>`;
+for an overflow, a vector of the operation's operands),
+`type-error-expected-type` (the printed type, such as `<circle>`, `<i32>`
+or `subclass(<shape>)`), `type-error-site` and `type-error-code`.
+
+The site ties a failure at run time to the static decision: for a check
+typing classified it is the decision's EOP id, so an agent can inspect it
+and see the verdict, the rule, why typing could not prove the check, and
+what codegen did with it:
+
+```sh
+cargo run -p interloko_lab -- run tools/interloko_lab/fixtures/inlined_overflow.loko
+cargo run -p interloko_lab -- inspect tools/interloko_lab/fixtures/inlined_overflow.loko typing:def38917abbcdc0a678:s0
+```
+
+The lowered dump names the same site on every check that can fail
+(`%r5 = as <circle>, %r4: any else type-error.cast <circle> at
+typing:def…:s0`).
+
+An unhandled `<type-error>` suspends like any unhandled condition, with
+every frame live, and goes to the condition chooser
+(`interloko_runtime::chooser`). The driver knows which signals come from a
+failed check (`UnhandledCondition::failed_check`); for those,
+`UnhandledCondition::type_error` reads what the condition reports, and the
+REPL break loop prints it. A `<type-error>` the program makes and signals
+itself is an ordinary condition: no check continues after it, its
+`use-value` is what its `signal` returns, and unhandled it ends the run as
+`runtime.unhandled-condition`.
+
+```text
+break [1]: no handler for <type-error>; 2 frames suspended, nothing unwound
+type error: code=type-error.range expected=<i32> value=5000000000 site=typing:def34e752e9bedb7b3c:s0
+```
+
+The `use-value` restart (`Choice::UseValue`) continues the failed check
+with a replacement. A check whose result is a number takes a replacement
+of that number type, which is all the check establishes (an `<i32>` for a
+conversion to `<i32>`, the result for an overflow or a shift); a value of
+another type is an invalid choice that ends the run, which the break loop
+refuses before choosing it. A failed cast takes an
+object, which the cast checks again: one of the wrong class signals a new
+`<type-error>` at the same site, so code after a check only ever sees a
+value that passed it. `retry` and `abort` work as for any condition. The
+break loop parses literals only, so it can resume a numeric check; a cast
+needs an object, which a programmatic chooser can take from a frame's
+registers (`InterlokoHost::value_class` finds one of the right class).
+
+One mismatch still traps rather than signalling. A call through an
+untyped `<callable>` passes each argument in the register type the call
+site has, and expects its results in the type its context needs. Objects
+and class objects share one register type, so their classes are checked at
+the callee's entry (`type-error.entry`) or on the result (`type-error.cast`).
+Scalars do not: applying a function that takes a `<double-float>` or an
+`<i32>` to an `<integer>`, or one that returns an `<object>` where a
+`<double-float>` is expected, fails the VM's own signature check at the
+call (`runtime.trap`, "type mismatch") before any Loko code runs. Making
+those signal needs every untyped callable call to box its scalars and
+every callable entry and result to check and unbox them, a calling
+convention change for all callable values, so it waits for its own slice.
 
 ## Explicit Host Projection
 

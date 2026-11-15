@@ -3407,10 +3407,11 @@ pub enum Expr {
     /// promotion rules.
     ///
     /// Widening is exact. Integer to float, and binary64 to binary32, round
-    /// to nearest, ties to even. Narrowing an integer traps unless the value
-    /// is in the target's range, and float to integer is exact: it traps
-    /// unless the operand is an integral value in range, so rounding is
-    /// always an explicit `round`/`floor`/... choice.
+    /// to nearest, ties to even. Narrowing an integer signals a
+    /// `<type-error>` unless the value is in the target's range, and float
+    /// to integer is exact: it signals one unless the operand is an
+    /// integral value in range, so rounding is always an explicit
+    /// `round`/`floor`/... choice.
     Convert {
         /// Numeric kind of the result; the operand has another kind.
         to: NumericKind,
@@ -9015,7 +9016,7 @@ impl Lowering {
     /// `f32`. Every value that passes `instance?(x, <integer>)` is an `i64`,
     /// because the runtime has no other `<integer>` representation: a boxed
     /// `<i32>` or `<u32>` is the `<integer>` it denotes, and there are no
-    /// big integers yet (overflow traps where they would begin). When they
+    /// big integers yet (overflow signals where they would begin). When they
     /// arrive, this narrowing must stop at a range that fits `i64`.
     ///
     /// A limited integer test, such as `instance?(x, <i32>)`, narrows to

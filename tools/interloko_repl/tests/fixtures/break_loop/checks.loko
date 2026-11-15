@@ -1,0 +1,33 @@
+// Checks for the type-error scenario of `hot_swap.transcript`.
+//
+// `narrow` converts to `<i32>`, which signals a `<type-error>` when the
+// value is out of range, and `radius-of` casts a `<shape>` to a `<circle>`,
+// which signals one for a `<square>`. Nothing handles them, so a run stops
+// in the break loop at the failed check.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function narrow(n :: <integer>) => <i32>
+  as(<i32>, n)
+end;
+
+define function radius-of(s :: <shape>) => <integer>
+  as(<circle>, s).radius
+end;
+
+define function main() => <integer>
+  as(<integer>, narrow(5000000000)) + 1
+end;
+
+define function cast() => <integer>
+  radius-of(make(<square>, side: 2))
+end;

@@ -106,6 +106,48 @@ diagnostic codes, spans, labels, and args, but not rendered catalog output.
 That keeps incremental reuse stable when a user switches from `en` to
 `pseudo`, or from a built-in catalog to a project-specific override catalog.
 
+## Runtime Type Errors
+
+A runtime check that fails does not trap. It signals a `<type-error>`
+condition, and its stable code follows the same `area.name` scheme, with
+the condition's class as the area. The code names what kind of check
+failed:
+
+| Code | Check |
+| --- | --- |
+| `type-error.cast` | a value is not an instance of the class an `as` (or a boxed `<object>` read as a number) expects |
+| `type-error.entry` | an object argument passed through an untyped `<callable>` is not of its parameter's class, or an exit procedure's value is not of its block's class (a scalar of the wrong representation still traps; see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
+| `type-error.range` | a number is outside a limited type's range: a conversion to `<i32>`/`<u32>`, a float converted to an integer it does not equal, or a shift count outside `0..=31` |
+| `type-error.overflow` | integer arithmetic produced a result its type cannot represent |
+
+`interloko_model::condition::TypeErrorKind` owns the codes, and
+`DiagnosticCode` mirrors them (`DiagnosticCode::TypeErrorCast`, ...). A
+condition carries its code in its `type-error-code` slot, beside the
+rejected value, the printed expected type, and the check's site:
+
+- `typing:<definition>:s<n>`, the EOP id of the typing decision that
+  classified the check, which `interloko_lab inspect` and the workbench
+  resolve;
+- `entry:<function>:<index>` for an entry check typing does not classify:
+  source parameter `index` (from zero) of the lowered function, such as
+  `entry:exit#3:0` for a shared exit procedure's value, `entry:closure#2:0`,
+  or a callable thunk such as `entry:radius#closure:0`;
+- `check:<definition>@<start>..<end>` for a check typing does not
+  classify, by the definition whose code makes it and the check's span,
+  such as a dispatcher coercing an argument it has already selected a
+  method for;
+- `check@<start>..<end>` for the same in generated code no definition
+  owns.
+
+When nothing handles a failed check's `<type-error>`, the run ends with
+the type error's own code rather than `runtime.unhandled-condition`, and
+the rendered outcome adds what it reports (a `<type-error>` the program
+signals itself is an ordinary unhandled condition):
+
+```text
+unhandled condition <type-error>: type-error.cast: {<square>} is not of type <circle> at typing:def…:s0
+```
+
 ## Corpus
 
 The corpus runner supports both forms:
@@ -116,7 +158,8 @@ The corpus runner supports both forms:
 ```
 
 Code expectations are preferred for behavior. String expectations remain useful
-as compatibility checks for the default English catalog.
+as compatibility checks for the default English catalog. A run's outcome is
+matched by its code too, as in `// expect: runtime code type-error.overflow`.
 
 ## Glossary
 

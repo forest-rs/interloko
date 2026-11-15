@@ -1,5 +1,6 @@
 //! REPL scenarios of the break-loop transcripts in
-//! `tests/fixtures/break_loop/`: `hot_swap.transcript`, which passes, and the
+//! `tests/fixtures/break_loop/`: `hot_swap.transcript`, which passes
+//! (including breaks on failed runtime checks), and the
 //! `break_loop.transcript` acceptance target, whose header explains what it
 //! still waits on. The lab scenario of that transcript runs from
 //! `interloko_lab`'s tests.
