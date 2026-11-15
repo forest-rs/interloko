@@ -212,6 +212,28 @@ pub enum DiagnosticCode {
     TypingCastAlwaysFails,
     /// Soft typing: a checked cast relies on the value's runtime class.
     TypingCastRuntimeChecked,
+    /// Soft typing: a generic call always finds an applicable method.
+    TypingDispatchProved,
+    /// Soft typing: a checked cast always succeeds.
+    TypingCastAlwaysSucceeds,
+    /// Soft typing: an `instance?` test is always true.
+    TypingInstanceAlwaysTrue,
+    /// Soft typing: an `instance?` test is decided by the value's runtime class.
+    TypingInstanceRuntimeChecked,
+    /// Soft typing: an `instance?` test is always false.
+    TypingInstanceAlwaysFalse,
+    /// Soft typing: a value is always within a limited integer range.
+    TypingRangeAlwaysWithin,
+    /// Soft typing: whether a value is within a limited integer range is checked at runtime.
+    TypingRangeRuntimeChecked,
+    /// Soft typing: a value is never within a limited integer range.
+    TypingRangeAlwaysOutside,
+    /// Soft typing: an integer operation never traps.
+    TypingOverflowImpossible,
+    /// Soft typing: an integer operation may trap, so its runtime check decides.
+    TypingOverflowRuntimeChecked,
+    /// Soft typing: an integer operation always traps when reached.
+    TypingOverflowCertain,
     /// Lowered IR failed an internal semantic invariant.
     LowerInvalidSemantic,
     /// Lowering stopped because earlier diagnostics exist.
@@ -334,6 +356,17 @@ impl DiagnosticCode {
         Self::TypingDispatchRuntimeChecked,
         Self::TypingCastAlwaysFails,
         Self::TypingCastRuntimeChecked,
+        Self::TypingDispatchProved,
+        Self::TypingCastAlwaysSucceeds,
+        Self::TypingInstanceAlwaysTrue,
+        Self::TypingInstanceRuntimeChecked,
+        Self::TypingInstanceAlwaysFalse,
+        Self::TypingRangeAlwaysWithin,
+        Self::TypingRangeRuntimeChecked,
+        Self::TypingRangeAlwaysOutside,
+        Self::TypingOverflowImpossible,
+        Self::TypingOverflowRuntimeChecked,
+        Self::TypingOverflowCertain,
         Self::LowerInvalidSemantic,
         Self::LowerBlockedByDiagnostics,
         Self::TapeInvalidLowered,
@@ -443,6 +476,17 @@ impl DiagnosticCode {
             Self::TypingDispatchRuntimeChecked => "typing.dispatch-runtime-checked",
             Self::TypingCastAlwaysFails => "typing.cast-always-fails",
             Self::TypingCastRuntimeChecked => "typing.cast-runtime-checked",
+            Self::TypingDispatchProved => "typing.dispatch-proved",
+            Self::TypingCastAlwaysSucceeds => "typing.cast-always-succeeds",
+            Self::TypingInstanceAlwaysTrue => "typing.instance-always-true",
+            Self::TypingInstanceRuntimeChecked => "typing.instance-runtime-checked",
+            Self::TypingInstanceAlwaysFalse => "typing.instance-always-false",
+            Self::TypingRangeAlwaysWithin => "typing.range-always-within",
+            Self::TypingRangeRuntimeChecked => "typing.range-runtime-checked",
+            Self::TypingRangeAlwaysOutside => "typing.range-always-outside",
+            Self::TypingOverflowImpossible => "typing.overflow-impossible",
+            Self::TypingOverflowRuntimeChecked => "typing.overflow-runtime-checked",
+            Self::TypingOverflowCertain => "typing.overflow-certain",
             Self::LowerInvalidSemantic => "lower.invalid-semantic",
             Self::LowerBlockedByDiagnostics => "lower.blocked-by-diagnostics",
             Self::TapeInvalidLowered => "tape.invalid-lowered",
@@ -553,6 +597,17 @@ impl DiagnosticCode {
             "typing.dispatch-runtime-checked" => Self::TypingDispatchRuntimeChecked,
             "typing.cast-always-fails" => Self::TypingCastAlwaysFails,
             "typing.cast-runtime-checked" => Self::TypingCastRuntimeChecked,
+            "typing.dispatch-proved" => Self::TypingDispatchProved,
+            "typing.cast-always-succeeds" => Self::TypingCastAlwaysSucceeds,
+            "typing.instance-always-true" => Self::TypingInstanceAlwaysTrue,
+            "typing.instance-runtime-checked" => Self::TypingInstanceRuntimeChecked,
+            "typing.instance-always-false" => Self::TypingInstanceAlwaysFalse,
+            "typing.range-always-within" => Self::TypingRangeAlwaysWithin,
+            "typing.range-runtime-checked" => Self::TypingRangeRuntimeChecked,
+            "typing.range-always-outside" => Self::TypingRangeAlwaysOutside,
+            "typing.overflow-impossible" => Self::TypingOverflowImpossible,
+            "typing.overflow-runtime-checked" => Self::TypingOverflowRuntimeChecked,
+            "typing.overflow-certain" => Self::TypingOverflowCertain,
             "lower.invalid-semantic" => Self::LowerInvalidSemantic,
             "lower.blocked-by-diagnostics" => Self::LowerBlockedByDiagnostics,
             "tape.invalid-lowered" => Self::TapeInvalidLowered,

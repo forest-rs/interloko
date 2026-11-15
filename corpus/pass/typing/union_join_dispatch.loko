@@ -1,0 +1,38 @@
+// expect: run 34
+// expect: diagnostics 0
+// expect: dump typing contains s0 dispatch proved rule=dispatch-covered
+// expect: dump typing contains actual=type-union(exactly <circle>, exactly <square>)
+// expect: dump typing contains because=joined@
+
+// The argument joins both branches of the `if`; the `<shape>` annotations
+// do not lose the exact classes the locals were bound to. Dispatch is checked per member of the union: each
+// member has a method, so the call is proved.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>) => <integer>
+  3
+end;
+
+define method area(s :: <square>) => <integer>
+  4
+end;
+
+define function pick(round? :: <boolean>) => <integer>
+  let circle :: <shape> = make(<circle>);
+  let square :: <shape> = make(<square>);
+  area(if round? then circle else square end)
+end;
+
+define function main() => <integer>
+  pick(#t) * 10 + pick(#f)
+end;

@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code typing.dispatch-no-applicable-method
-// expect: diagnostic contains no method of `+` can apply to (<point>, <integer>)
+// expect: diagnostic contains no method of `+` can apply to (<point>, singleton(1))
 
 // A user class is not a number: `+` dispatches, and soft typing reports that
 // no numeric method can apply.

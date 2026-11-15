@@ -12,7 +12,8 @@
 // exactly that class, and an `<i32>` or `<u32>` value is an `<integer>` in
 // that range. Dispatch on them is proved, while an `<object>` unboxed as
 // `<u32>` still needs its runtime check. Statically typed arithmetic
-// compiles to the 32-bit instructions directly.
+// compiles to the 32-bit instructions directly. (Flow typing knows `step`
+// is exactly 7, so `weigh` takes the `<i32>` through a parameter.)
 define generic weight(x);
 
 define method weight(x :: <single-float>) => <integer>
@@ -27,8 +28,12 @@ define function frames(x :: <object>) => <u32>
   as(<u32>, x)
 end;
 
+define function weigh(x :: <i32>) => <integer>
+  weight(x)
+end;
+
 define function main() => <integer>
   let gain = 0.5f32 + 0.25;
   let step = 3i32 + 4;
-  weight(gain) + weight(step) + weight(frames(5)) + as(<integer>, step) - 7
+  weight(gain) + weigh(step) + weight(frames(5)) + as(<integer>, step) - 7
 end;

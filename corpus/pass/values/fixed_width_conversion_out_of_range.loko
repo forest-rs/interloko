@@ -1,5 +1,6 @@
 // expect: runtime code runtime.trap
-// expect: diagnostics 0
+// expect: diagnostics 1
+// expect: diagnostic code typing.range-always-outside
 
 // `-1` is an `<integer>` but not a `<u32>`, so converting it traps rather
 // than wrapping.

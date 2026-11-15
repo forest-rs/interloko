@@ -1,5 +1,6 @@
 // expect: run 2.5
-// expect: diagnostics 0
+// expect: diagnostics 1
+// expect: diagnostic code typing.instance-always-true
 // expect: dump lowered contains box.any
 
 define function main() => <double-float>

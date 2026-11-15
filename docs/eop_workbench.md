@@ -172,7 +172,10 @@ definition never renumbers it, while `dispatch:dN` is a module-wide index
 that can shift. Typing decisions are keyed the same way
 (`typing:<definition-id>:sN`), and a dispatch decision links to the record
 with the same owner and site, so two calls that share a source span still
-link correctly.
+link correctly. A typing decision's explanation also lists each operand's
+reason chain, such as
+`because #0: narrowed(s0,then)@… <circle> <- declared@… <shape>`, and the
+closed-world assumptions its verdict relies on.
 
 The explanation is read-only. It describes the current one-argument nominal
 dispatch model; it does not imply sealed optimization, method combination,

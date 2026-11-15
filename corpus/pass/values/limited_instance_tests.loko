@@ -1,9 +1,11 @@
 // expect: run 21
-// expect: diagnostics 0
+// expect: diagnostics 3
+// expect: diagnostic code typing.range-always-outside
 // expect: dump sem contains instance? <u32>
 
 // `instance?(x, <u32>)` asks whether `x` is an `<integer>` in the range;
-// floats never are, whatever their value.
+// floats never are, whatever their value. Soft typing warns about the three
+// literal tests that are always false.
 define function score(x :: <object>) => <integer>
   if instance?(x, <u32>) then 1 else 0 end
 end;

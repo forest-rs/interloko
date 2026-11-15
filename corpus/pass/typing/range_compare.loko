@@ -1,0 +1,20 @@
+// expect: run 42i32
+// expect: diagnostics 0
+// expect: dump typing contains range proved rule=range-within
+// expect: dump typing contains actual=limited(<integer>, min: 0, max: 99)
+// expect: dump typing contains because=narrowed(then)@
+
+// Comparisons with constants narrow an integer local's range in both
+// branches, so the conversion to <i32> is proved in range.
+
+define function bucket(n :: <integer>) => <i32>
+  if n >= 0 then
+    if n < 100 then as(<i32>, n) else 99i32 end
+  else
+    0i32
+  end
+end;
+
+define function main() => <i32>
+  bucket(42)
+end;

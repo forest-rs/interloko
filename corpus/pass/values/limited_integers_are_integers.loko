@@ -1,5 +1,6 @@
 // expect: run "<integer>"
-// expect: diagnostics 0
+// expect: diagnostics 1
+// expect: diagnostic code typing.instance-always-true
 // expect: dump lowered contains i32.to_i64
 // expect: dump lowered contains u32.to_i64
 

@@ -1,0 +1,24 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump typing contains s0 dispatch proved rule=dispatch-covered
+// expect: dump typing contains because=handler-condition(<problem>)
+
+// A handler's condition local has the handler's class, so dispatching on
+// it is proved even though the signalled condition is a subclass.
+
+define class <problem> (<object>)
+  slot code :: <integer>, init-value: 7;
+end;
+
+define class <bad-radius> (<problem>)
+end;
+
+define generic describe(p);
+
+define method describe(p :: <problem>) => <integer>
+  p.code
+end;
+
+define function main() => <integer>
+  handle signal(make(<bad-radius>)) with restart e :: <problem> describe(e) end
+end;
