@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 use interloko_model::types::{Atom, IntRange, Metaobject, Relation, Type, sealed_pieces};
 
 use super::{
-    Assumption, Binding, BindingFact, Branch, ContractSource, Reason, ReasonId, ReasonKind,
-    TypingCheck, TypingDecision, TypingExpectation, TypingRule, TypingVerdict, UseFact, range_type,
-    specializer_type,
+    Assumption, Binding, BindingFact, Branch, CheckOrigin, ContractSource, Reason, ReasonId,
+    ReasonKind, TypingCheck, TypingDecision, TypingExpectation, TypingRule, TypingVerdict, UseFact,
+    range_type, specializer_type,
 };
 use crate::identity::DefinitionId;
 use crate::sem::{
@@ -413,7 +413,7 @@ impl<'a> Analysis<'a> {
             };
             self.record(
                 check.site,
-                check_kind,
+                (check_kind, CheckOrigin::Entry),
                 decided,
                 span,
                 expected,
@@ -910,7 +910,7 @@ impl<'a> Analysis<'a> {
                 assumes.extend(self.sealed_assumptions(&sealed));
                 self.record(
                     *site,
-                    TypingCheck::Instance,
+                    (TypingCheck::Instance, CheckOrigin::Test),
                     decided,
                     *span,
                     TypingExpectation::Class(*class),
@@ -931,7 +931,7 @@ impl<'a> Analysis<'a> {
                 let decided = decide(module, env, &value.ty, &target, RANGE_RULES);
                 self.record(
                     *site,
-                    TypingCheck::Range,
+                    (TypingCheck::Range, CheckOrigin::Test),
                     decided,
                     *span,
                     TypingExpectation::Type(target),
@@ -945,6 +945,7 @@ impl<'a> Analysis<'a> {
                 value,
                 class,
                 site,
+                explicit,
                 span,
             } => {
                 let value = self.eval(env, value);
@@ -969,7 +970,7 @@ impl<'a> Analysis<'a> {
                 }
                 self.record(
                     *site,
-                    TypingCheck::Cast,
+                    (TypingCheck::Cast, CheckOrigin::of(*explicit)),
                     decided,
                     *span,
                     TypingExpectation::Class(*class),
@@ -1112,21 +1113,23 @@ impl<'a> Analysis<'a> {
                 to,
                 value,
                 site,
+                explicit,
                 span,
             } => {
                 let from = NumericKind::of(module.expr_kind(value));
                 let value = self.eval(env, value);
                 let bound = self.bound(expr);
-                self.convert(env, from, *to, value, *site, *span, bound)
+                self.convert(env, from, *to, value, (*site, *explicit), *span, bound)
             }
             E::CheckRange {
                 value,
                 range,
                 site,
+                explicit,
                 span,
             } => {
                 let value = self.eval(env, value);
-                self.check_range(env, value, *range, *site, *span)
+                self.check_range(env, value, *range, (*site, *explicit), *span)
             }
             E::Compare { lhs, rhs, .. }
             | E::MixedCompare { lhs, rhs, .. }
@@ -1717,7 +1720,7 @@ impl<'a> Analysis<'a> {
     fn record(
         &mut self,
         site: SiteId,
-        check: TypingCheck,
+        (check, origin): (TypingCheck, CheckOrigin),
         (verdict, rule): (TypingVerdict, TypingRule),
         span: Span,
         expected: TypingExpectation,
@@ -1735,6 +1738,7 @@ impl<'a> Analysis<'a> {
             owner: self.owner,
             site,
             check,
+            origin,
             verdict,
             rule,
             span,
@@ -1863,7 +1867,7 @@ impl<'a> Analysis<'a> {
             });
         self.record(
             site,
-            TypingCheck::Dispatch,
+            (TypingCheck::Dispatch, CheckOrigin::Implicit),
             decided,
             span,
             TypingExpectation::Dispatch {
@@ -1955,7 +1959,7 @@ impl<'a> Analysis<'a> {
             let from = vec![lhs.reason, rhs.reason];
             self.record(
                 site,
-                TypingCheck::Overflow,
+                (TypingCheck::Overflow, CheckOrigin::Implicit),
                 decided,
                 span,
                 TypingExpectation::Type(counts),
@@ -1977,7 +1981,7 @@ impl<'a> Analysis<'a> {
             let from = vec![lhs.reason, rhs.reason];
             self.record(
                 site,
-                TypingCheck::Overflow,
+                (TypingCheck::Overflow, CheckOrigin::Implicit),
                 decided,
                 span,
                 TypingExpectation::Type(range_type(module, expected_range)),
@@ -2010,7 +2014,7 @@ impl<'a> Analysis<'a> {
             };
             self.record(
                 site,
-                TypingCheck::Overflow,
+                (TypingCheck::Overflow, CheckOrigin::Implicit),
                 decided,
                 span,
                 TypingExpectation::Type(range_type(module, expected_range)),
@@ -2065,7 +2069,7 @@ impl<'a> Analysis<'a> {
         };
         self.record(
             site,
-            TypingCheck::Overflow,
+            (TypingCheck::Overflow, CheckOrigin::Implicit),
             decided,
             span,
             TypingExpectation::Type(range_type(module, expected_range)),
@@ -2098,7 +2102,7 @@ impl<'a> Analysis<'a> {
         from: Option<NumericKind>,
         to: NumericKind,
         value: Fact,
-        site: SiteId,
+        (site, explicit): (SiteId, bool),
         span: Span,
         bound: Type,
     ) -> Fact {
@@ -2129,7 +2133,7 @@ impl<'a> Analysis<'a> {
         let from_reasons = vec![value.reason];
         self.record(
             site,
-            TypingCheck::Range,
+            (TypingCheck::Range, CheckOrigin::of(explicit)),
             decided,
             span,
             TypingExpectation::Type(bound),
@@ -2147,7 +2151,7 @@ impl<'a> Analysis<'a> {
         env: &Env,
         value: Fact,
         range: IntRange,
-        site: SiteId,
+        (site, explicit): (SiteId, bool),
         span: Span,
     ) -> Fact {
         let module = self.module;
@@ -2164,7 +2168,7 @@ impl<'a> Analysis<'a> {
         let from = vec![value.reason];
         self.record(
             site,
-            TypingCheck::Range,
+            (TypingCheck::Range, CheckOrigin::of(explicit)),
             decided,
             span,
             TypingExpectation::Type(target),

@@ -4872,6 +4872,7 @@ impl<'module> BodyLowering<'module> {
                 class,
                 site,
                 span,
+                ..
             } => {
                 // A proved numeric send already has its method's result, so
                 // a cast to that result's class has nothing to unbox.
@@ -5155,6 +5156,7 @@ impl<'module> BodyLowering<'module> {
                 value,
                 site,
                 span,
+                ..
             } => {
                 let value = self.lower_expr(value)?;
                 if self.proved(*site)
@@ -5170,6 +5172,7 @@ impl<'module> BodyLowering<'module> {
                 range,
                 site,
                 span,
+                ..
             } => {
                 let value = self.lower_expr(value)?;
                 let value = match value.kind {
@@ -8532,11 +8535,16 @@ fn respan_numeric_body(expr: &sem::Expr, span: Span) -> Option<sem::Expr> {
             span,
         },
         sem::Expr::Convert {
-            to, value, site, ..
+            to,
+            value,
+            site,
+            explicit,
+            ..
         } => sem::Expr::Convert {
             to: *to,
             value: operand(value)?,
             site: *site,
+            explicit: *explicit,
             span,
         },
         sem::Expr::Binary {
