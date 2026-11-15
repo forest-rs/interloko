@@ -47,13 +47,15 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use super::CodegenPolicy;
+use super::{CheckCodegenRecord, CodegenPolicy};
 use crate::identity::DefinitionId;
 use crate::sem::{self, SiteId};
 use crate::syntax::Span;
 use crate::typing::{
-    Binding, DefinitionTyping, TypingArtifact, TypingDecision, TypingDependency, TypingStatus,
+    self, Assumption, Binding, DefinitionTyping, TypingArtifact, TypingDecision, TypingDependency,
+    TypingStatus,
 };
+use interloko_model::sealing::ClosedWorld;
 use interloko_model::types::Type;
 
 /// Typing decisions lowering may act on, by owner and site.
@@ -123,6 +125,39 @@ impl<'a> TypingFacts<'a> {
         let sites = &self.owners.get(&owner?)?.sites;
         let index = sites.binary_search_by_key(&site, |(site, _)| *site).ok()?;
         sites.get(index).and_then(|(_, decision)| *decision)
+    }
+
+    /// The closed-world assumptions of every decision `records` says
+    /// lowering acted on, as a code unit records them
+    /// ([`crate::typing::closed_world`]), in first-use order. Closed
+    /// built-in classes are left out: no source edit can extend them.
+    pub(super) fn closed_world(
+        &self,
+        module: &sem::Module,
+        records: &[CheckCodegenRecord],
+    ) -> Vec<ClosedWorld> {
+        let mut out = Vec::new();
+        for record in records {
+            let Some(owner) = self.owners.get(&record.owner) else {
+                continue;
+            };
+            let Some(decision) = self.decision(Some(record.owner), record.site) else {
+                continue;
+            };
+            for dependency in owner.typing.dependencies(decision) {
+                let assumption = match dependency {
+                    TypingDependency::Methods(generic) => Assumption::Generic(generic),
+                    TypingDependency::Sealed(class) => Assumption::Sealed(class),
+                    TypingDependency::Class(_) | TypingDependency::Contract(_) => continue,
+                };
+                if let Some(record) = typing::closed_world(module, assumption)
+                    && !out.contains(&record)
+                {
+                    out.push(record);
+                }
+            }
+        }
+        out
     }
 
     /// The type flow typing established for a read of `binding` at `span`

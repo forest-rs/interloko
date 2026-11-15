@@ -33,7 +33,7 @@ use execution_tape::host::{
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 
-use interloko_model::sealing::Sealing;
+use interloko_model::sealing::{ClosedWorld, Sealing};
 use interloko_model::types::{ClassHierarchy, TypeNames};
 use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID,
@@ -1009,6 +1009,53 @@ impl RuntimeLayout {
     #[must_use]
     pub fn class(&self, class: ClassId) -> Option<&RuntimeClass> {
         self.classes.get(class.0 as usize)
+    }
+
+    /// Returns the record this layout makes of the class or generic
+    /// `assumption` names, by source name: for a sealed class, its direct
+    /// subclasses and abstractness here, or `None` when the class is
+    /// missing or open; for a generic, its methods and sealing here, or
+    /// `None` when it is missing. [`crate::code::CodeUnit::check_assumptions`]
+    /// compares the two.
+    #[must_use]
+    pub fn closed_world_like(&self, assumption: &ClosedWorld) -> Option<ClosedWorld> {
+        let mut name = String::new();
+        match assumption {
+            ClosedWorld::SealedClass { class, .. } => {
+                let id = self.class_id(class)?;
+                let runtime = self.class(id)?;
+                if !runtime.sealing.is_sealed() {
+                    return None;
+                }
+                Some(ClosedWorld::SealedClass {
+                    class: runtime.name.clone(),
+                    subclasses: self
+                        .direct_subclasses(id)
+                        .into_iter()
+                        .filter_map(|subclass| Some(self.class(subclass)?.name.clone()))
+                        .collect(),
+                    is_abstract: runtime.is_abstract,
+                })
+            }
+            ClosedWorld::Methods { generic, .. } => {
+                let id = self.generic_id(generic)?;
+                let runtime = self.generic(id)?;
+                let methods = runtime
+                    .methods
+                    .iter()
+                    .map(|method| {
+                        name.clear();
+                        let _ = self.write_method(&mut name, *method);
+                        name.clone()
+                    })
+                    .collect();
+                Some(ClosedWorld::Methods {
+                    generic: runtime.name.clone(),
+                    sealing: runtime.sealing,
+                    methods,
+                })
+            }
+        }
     }
 
     /// Returns the classes whose direct superclass is `class`, in class id

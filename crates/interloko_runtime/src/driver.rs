@@ -1044,12 +1044,17 @@ impl Driver<'_> {
     }
 
     /// Installs `code` while the signal waits, after checking it can take
-    /// over from the newest unit.
+    /// over from the newest unit and keeps the closed-world assumptions of
+    /// every unit whose code may still run: this run's and those earlier
+    /// runs of the same installed code put in place.
     fn install<H: RuntimeHost>(
         &mut self,
         pending: &mut PendingSuspension<'_, '_, H>,
         code: Arc<CodeUnit>,
     ) -> Result<(), LinkError> {
+        for (_, older) in self.linked.iter() {
+            code.check_assumptions(older).map_err(LinkError::Mismatch)?;
+        }
         if let Some(newest) = self.units.newest() {
             code.check_replaces(newest).map_err(LinkError::Mismatch)?;
         }

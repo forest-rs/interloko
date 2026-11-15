@@ -61,6 +61,20 @@
 //! function is refused. A run starts from one unit and checks nothing
 //! against units from earlier runs, so recompiling and running again
 //! accepts any change.
+//!
+//! # Closed-world assumptions
+//!
+//! Code compiled under proved typing may also rely on the closed world:
+//! that a sealed class has exactly its direct subclasses (so a cast past an
+//! `instance?` test is dropped), or that a generic has exactly its methods
+//! (so a send calls its method through a link). Each unit lists those
+//! ([`CodeUnit::assumptions`]), and a unit takes over only when every
+//! assumption of every unit whose code may still run holds in its layout
+//! ([`CodeUnit::check_assumptions`]); a refusal names the assumption, as
+//! [`CodeMismatch::Assumption`]. The layout rule refuses every such change
+//! anyway, since classes and methods are part of the layout; the
+//! assumption says which promise the change would break, and lets the rule
+//! relax for changes nothing relies on.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -72,6 +86,7 @@ use execution_tape::program::{LinkId, ValueType};
 use execution_tape::value::{FuncId, FuncRef, UnitId};
 use execution_tape::verifier::VerifiedProgram;
 use interloko_model::contract::{Contract, ContractBreak, ContractPosition, ValueContract};
+use interloko_model::sealing::ClosedWorld;
 use interloko_model::{ClassId, GenericFunctionId, MethodId};
 
 use crate::RuntimeLayout;
@@ -167,6 +182,11 @@ pub struct CodeUnit {
     /// with no contract here (as in a unit built without any) is checked
     /// by its signature alone.
     pub contracts: Contracts,
+    /// The closed-world assumptions the program's code relies on: sealed
+    /// classes whose direct subclasses it read, and generics whose method
+    /// sets it read, with source names. A newer unit may take over only
+    /// when every one still holds ([`CodeUnit::check_assumptions`]).
+    pub assumptions: Vec<ClosedWorld>,
 }
 
 /// The [`Contract`] of each definition a [`CodeUnit`] implements, as its
@@ -238,6 +258,41 @@ pub enum CodeMismatch {
     /// A definition's contract changed in a way code compiled against the
     /// older one could observe.
     Contract(Box<ContractMismatch>),
+    /// A closed-world assumption code compiled against the older unit relies
+    /// on does not hold in the newer one: a sealed class gained or lost a
+    /// direct subclass, changed its abstractness or was unsealed, or a
+    /// generic gained or lost a method or was unsealed.
+    Assumption(Box<AssumptionMismatch>),
+}
+
+/// A closed-world assumption a newer unit would break; see
+/// [`CodeUnit::check_assumptions`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssumptionMismatch {
+    /// What the older unit's code relies on.
+    pub assumption: ClosedWorld,
+    /// What the newer unit's layout has instead for the same class or
+    /// generic: the record it would make, or `None` when the class or
+    /// generic is missing or, for a sealed class, open.
+    pub now: Option<ClosedWorld>,
+}
+
+impl core::fmt::Display for AssumptionMismatch {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "running code assumes {}", self.assumption)?;
+        match (&self.assumption, &self.now) {
+            (_, Some(now)) => write!(formatter, ", but the new code has {now}"),
+            (ClosedWorld::SealedClass { class, .. }, None) => {
+                write!(
+                    formatter,
+                    ", but the new code leaves {class} open or removes it"
+                )
+            }
+            (ClosedWorld::Methods { generic, .. }, None) => {
+                write!(formatter, ", but the new code removes generic {generic}")
+            }
+        }
+    }
 }
 
 /// A contract change that code compiled against the older contract could
@@ -269,6 +324,7 @@ impl core::fmt::Display for CodeMismatch {
                 )
             }
             Self::Contract(mismatch) => write!(formatter, "{mismatch}"),
+            Self::Assumption(mismatch) => write!(formatter, "{mismatch}"),
         }
     }
 }
@@ -383,17 +439,44 @@ impl CodeUnit {
     /// Checks that this unit can take over from `older` in one run, while
     /// frames running `older` (or units it took over from) are suspended.
     ///
-    /// The layouts must be equal. Every generic must keep its signature and
-    /// keep its contract's promise, because sends from older frames reach
-    /// this unit's methods. Methods and functions are not checked here:
-    /// older frames reach them only by a retry, which the run checks then.
+    /// Every closed-world assumption `older`'s code relies on must still
+    /// hold ([`Self::check_assumptions`]), and the layouts must be equal; a
+    /// layout change that breaks an assumption is reported as the
+    /// assumption it breaks. Every generic must keep its signature and keep
+    /// its contract's promise, because sends from older frames reach this
+    /// unit's methods. Methods and functions are not checked here: older
+    /// frames reach them only by a retry, which the run checks then.
     pub fn check_replaces(&self, older: &Self) -> Result<(), CodeMismatch> {
+        self.check_assumptions(older)?;
         if self.layout != older.layout || self.generics.len() != older.generics.len() {
             return Err(CodeMismatch::Layout);
         }
         for index in 0..self.generics.len() {
             let definition = Definition::Generic(GenericFunctionId(index_u32(index)));
             self.check_takes_over(&definition, older)?;
+        }
+        Ok(())
+    }
+
+    /// Checks that every closed-world assumption `older`'s code relies on
+    /// holds in this unit's layout: each sealed class it read is still
+    /// sealed with the same direct subclasses and abstractness, and each
+    /// generic whose method set it read has the same methods (and is still
+    /// sealed, if it was). Assumptions are compared by source name, so a
+    /// layout that numbers classes differently is judged by what it means.
+    ///
+    /// Code that relies on nothing, such as code lowered without typing
+    /// facts, accepts any closed world; the layout rule in
+    /// [`Self::check_replaces`] still applies.
+    pub fn check_assumptions(&self, older: &Self) -> Result<(), CodeMismatch> {
+        for assumption in &older.assumptions {
+            let now = self.layout.closed_world_like(assumption);
+            if !now.as_ref().is_some_and(|now| keeps(now, assumption)) {
+                return Err(CodeMismatch::Assumption(Box::new(AssumptionMismatch {
+                    assumption: assumption.clone(),
+                    now,
+                })));
+            }
         }
         Ok(())
     }
@@ -634,6 +717,54 @@ impl UnitTable {
     }
 }
 
+/// Whether `now` keeps the promise of `assumed`, the same class or
+/// generic: the same direct subclasses or methods, whatever their order,
+/// the same abstractness, and still sealed where `assumed` is.
+fn keeps(now: &ClosedWorld, assumed: &ClosedWorld) -> bool {
+    let same = |left: &[String], right: &[String]| {
+        let mut left = left.to_vec();
+        let mut right = right.to_vec();
+        left.sort();
+        right.sort();
+        left == right
+    };
+    match (now, assumed) {
+        (
+            ClosedWorld::SealedClass {
+                class,
+                subclasses,
+                is_abstract,
+            },
+            ClosedWorld::SealedClass {
+                class: assumed_class,
+                subclasses: assumed_subclasses,
+                is_abstract: assumed_abstract,
+            },
+        ) => {
+            class == assumed_class
+                && is_abstract == assumed_abstract
+                && same(subclasses, assumed_subclasses)
+        }
+        (
+            ClosedWorld::Methods {
+                generic,
+                sealing,
+                methods,
+            },
+            ClosedWorld::Methods {
+                generic: assumed_generic,
+                sealing: assumed_sealing,
+                methods: assumed_methods,
+            },
+        ) => {
+            generic == assumed_generic
+                && (sealing.is_sealed() || !assumed_sealing.is_sealed())
+                && same(methods, assumed_methods)
+        }
+        _ => false,
+    }
+}
+
 fn index_u32(index: usize) -> u32 {
     u32::try_from(index).unwrap_or(u32::MAX)
 }
@@ -651,6 +782,37 @@ mod tests {
                 .collect(),
             direct: true,
         }
+    }
+
+    #[test]
+    fn an_assumption_is_kept_by_the_same_members_in_any_order() {
+        use alloc::string::ToString;
+        use interloko_model::sealing::Sealing;
+
+        let names = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let shapes = |subclasses: &[&str], is_abstract| ClosedWorld::SealedClass {
+            class: "<shape>".into(),
+            subclasses: names(subclasses),
+            is_abstract,
+        };
+        let assumed = shapes(&["<circle>", "<square>"], true);
+        assert!(keeps(&shapes(&["<square>", "<circle>"], true), &assumed));
+        assert!(!keeps(&shapes(&["<circle>"], true), &assumed));
+        assert!(!keeps(&shapes(&["<circle>", "<square>"], false), &assumed));
+
+        let area = |sealing, methods: &[&str]| ClosedWorld::Methods {
+            generic: "area".into(),
+            sealing,
+            methods: names(methods),
+        };
+        let open = area(Sealing::Open, &["area(<circle>)"]);
+        let sealed = area(Sealing::Sealed, &["area(<circle>)"]);
+        // Sealing an open generic keeps what code assumed of it; unsealing
+        // a sealed one does not.
+        assert!(keeps(&sealed, &open));
+        assert!(!keeps(&open, &sealed));
+        assert!(!keeps(&area(Sealing::Open, &[]), &open));
+        assert!(!keeps(&open, &assumed));
     }
 
     #[test]

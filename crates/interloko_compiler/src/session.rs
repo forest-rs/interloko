@@ -22954,6 +22954,163 @@ end;
         assert_eq!(asked, 4);
     }
 
+    /// A sealed `<shape>` that `side`'s cast relies on: past the
+    /// `instance?` test a `<shape>` can only be a `<square>`, so `proved`
+    /// drops the cast. `pause` signals `<oops>`, giving the chooser a
+    /// suspension in which to install an edit.
+    const SEALED_SWAP: &str = "define class <oops> (<object>)\nend;\n\
+         define sealed abstract class <shape> (<object>)\nend;\n\
+         define sealed class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define sealed class <square> (<shape>)\n  slot side :: <integer>;\nend;\n\
+         define generic area(s :: <shape>) => <integer>;\n\
+         define method area(c :: <circle>) => <integer>\n  c.radius * c.radius\nend;\n\
+         define method area(s :: <square>) => <integer>\n  s.side * s.side\nend;\n\
+         define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+         define function side(s :: <shape>) => <integer>\n  \
+         if instance?(s, <circle>) then 0 else as(<square>, s).side end\nend;\n\
+         define function main() => <integer>\n  \
+         pause() + side(make(<square>, side: 3)) + area(make(<circle>, radius: 2))\nend;";
+
+    /// The refused install's assumption mismatch, if that is why.
+    fn broken_assumption(
+        seen: &AcrossAnEdit,
+    ) -> Option<&interloko_runtime::code::AssumptionMismatch> {
+        match install_mismatch(seen) {
+            Some(interloko_runtime::code::CodeMismatch::Assumption(mismatch)) => Some(mismatch),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_unit_records_the_closed_world_its_proved_code_relies_on() {
+        let proved = compile_under(SEALED_SWAP, lower::CodegenPolicy::Proved);
+        let labels = proved
+            .code_unit()
+            .expect("tape")
+            .assumptions
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            labels.contains(
+                &"sealed abstract class <shape> has exactly direct subclasses {<circle>, <square>}"
+                    .to_string()
+            ),
+            "{labels:?}"
+        );
+        // Code that ignores typing relies on nothing.
+        let off = compile_under(SEALED_SWAP, lower::CodegenPolicy::Off);
+        assert_eq!(off.code_unit().expect("tape").assumptions, Vec::new());
+    }
+
+    #[test]
+    fn install_refuses_a_subclass_that_breaks_a_sealed_assumption() {
+        let old = compile_under(SEALED_SWAP, lower::CodegenPolicy::Proved);
+        let new = compile_under(
+            &SEALED_SWAP.replace(
+                "define generic area",
+                "define class <triangle> (<shape>)\nend;\ndefine generic area",
+            ),
+            lower::CodegenPolicy::Proved,
+        );
+        let seen = run_artifacts_across_an_edit(
+            &old,
+            &new,
+            Then::Choose(Choice::UseValue(vec![Value::I64(0)])),
+        );
+        let mismatch = broken_assumption(&seen).expect("an assumption mismatch");
+        assert_eq!(
+            mismatch.to_string(),
+            "running code assumes sealed abstract class <shape> has exactly direct subclasses \
+             {<circle>, <square>}, but the new code has sealed abstract class <shape> has exactly \
+             direct subclasses {<circle>, <square>, <triangle>}"
+        );
+        // The old code finishes: 0 + 3 + 4.
+        assert_eq!(seen.value, Some(FunctionValue::Integer(7)));
+
+        // Unsealing breaks it too.
+        let unsealed = compile_under(
+            &SEALED_SWAP.replace("define sealed abstract class", "define abstract class"),
+            lower::CodegenPolicy::Proved,
+        );
+        let seen = run_artifacts_across_an_edit(
+            &old,
+            &unsealed,
+            Then::Choose(Choice::UseValue(vec![Value::I64(0)])),
+        );
+        let mismatch = broken_assumption(&seen).expect("an assumption mismatch");
+        assert_eq!(mismatch.now, None);
+        assert!(
+            mismatch
+                .to_string()
+                .ends_with("but the new code leaves <shape> open or removes it")
+        );
+    }
+
+    #[test]
+    fn install_refuses_a_method_that_breaks_an_assumed_method_set() {
+        // `area`'s send on a `<circle>` is linked, relying on its methods.
+        let old = compile_under(SEALED_SWAP, lower::CodegenPolicy::Proved);
+        let new = compile_under(
+            &SEALED_SWAP.replace(
+                "define function pause",
+                "define method area(s :: <shape>) => <integer>\n  0\nend;\ndefine function pause",
+            ),
+            lower::CodegenPolicy::Proved,
+        );
+        let seen = run_artifacts_across_an_edit(
+            &old,
+            &new,
+            Then::Choose(Choice::UseValue(vec![Value::I64(0)])),
+        );
+        let mismatch = broken_assumption(&seen).expect("an assumption mismatch");
+        assert!(
+            mismatch.to_string().starts_with(
+                "running code assumes generic area has exactly methods {area(<circle>), area(<square>)}"
+            ),
+            "{mismatch}"
+        );
+    }
+
+    #[test]
+    fn an_edit_that_breaks_no_relied_on_assumption_is_judged_by_the_layout_alone() {
+        // A body edit keeps the layout and every assumption: it installs,
+        // and the retried `side` runs the new code.
+        let old = compile_under(SEALED_SWAP, lower::CodegenPolicy::Proved);
+        let new = compile_under(
+            &SEALED_SWAP.replace("signal(make(<oops>))", "signal(make(<oops>)) + 0"),
+            lower::CodegenPolicy::Proved,
+        );
+        let seen = run_artifacts_across_an_edit(
+            &old,
+            &new,
+            Then::Choose(Choice::UseValue(vec![Value::I64(0)])),
+        );
+        assert_eq!(seen.refused, None);
+        assert_eq!(seen.value, Some(FunctionValue::Integer(7)));
+
+        // Code that relies on no sealing makes adding a subclass a plain
+        // layout change, which a live install still refuses, by the layout
+        // rule rather than an assumption.
+        let old = compile_under(SEALED_SWAP, lower::CodegenPolicy::Off);
+        let new = compile_under(
+            &SEALED_SWAP.replace(
+                "define generic area",
+                "define class <triangle> (<shape>)\nend;\ndefine generic area",
+            ),
+            lower::CodegenPolicy::Off,
+        );
+        let seen = run_artifacts_across_an_edit(
+            &old,
+            &new,
+            Then::Choose(Choice::UseValue(vec![Value::I64(0)])),
+        );
+        assert_eq!(
+            install_mismatch(&seen),
+            Some(&interloko_runtime::code::CodeMismatch::Layout)
+        );
+    }
+
     #[test]
     fn install_refuses_code_that_changes_the_runtime_layout() {
         let (broken, _) = hot_swap_artifacts();
