@@ -1,0 +1,24 @@
+// `measure` takes any <shape>, so its `instance?` test and its `area` send
+// are decided at run time. Annotating `s :: <circle>` proves both: the test
+// becomes a constant and the send selects one method statically.
+
+define class <shape> (<object>)
+end;
+define class <circle> (<shape>)
+end;
+define class <square> (<shape>)
+end;
+define generic area(x);
+define method area(c :: <circle>)
+  7
+end;
+define method area(q :: <square>)
+  4
+end;
+define function measure(s :: <shape>)
+  let bonus = if instance?(s, <circle>) then 1 else 0 end;
+  area(s) + bonus
+end;
+define function main()
+  measure(make(<circle>))
+end;

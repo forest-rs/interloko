@@ -24,6 +24,7 @@ use super::{
     Binding, DefinitionTyping, Reason, ReasonId, TypingArtifact, TypingDecision, TypingStatus,
     definition_label, run_definition, type_name, write_reason_chain,
 };
+use crate::annotation::DeclarationOrigin;
 use crate::identity::DefinitionId;
 use crate::sem::{self, ClassId, GenericFunctionId, LocalId, SiteId, ValueKind};
 use crate::syntax::Span;
@@ -99,6 +100,12 @@ pub struct TypeReport {
     /// type, or the category sem inferred where none is written. Flow
     /// typing only narrows it, so [`Self::ty`] is always a subtype.
     pub declared: Type,
+    /// Whether a binding's type is written in source or inferred. Typing
+    /// sees only semantic IR, so [`TypingArtifact::type_of`] leaves this
+    /// `None`; [`crate::session::SessionArtifacts::type_of`] fills it from
+    /// the source for parameters and `let` bindings. Always `None` for an
+    /// expression or a closure capture.
+    pub declaration: Option<DeclarationOrigin>,
     /// The reason in [`Self::reasons`] that explains [`Self::ty`].
     pub reason: ReasonId,
     /// The provenance graph of [`Self::reason`] and of every use's reason,
@@ -272,6 +279,18 @@ impl TypingArtifact {
     /// as `use @start..end type`. The definition's result comes last.
     #[must_use]
     pub fn dump_types(&self, module: &sem::Module) -> String {
+        self.dump_types_with(module, &no_type_labels)
+    }
+
+    /// Renders [`Self::dump_types`] with `labels` appended to each
+    /// binding's and result's line, such as source facts the typing pass
+    /// does not see.
+    #[must_use]
+    pub fn dump_types_with(
+        &self,
+        module: &sem::Module,
+        labels: &dyn Fn(TypesAnchor) -> Option<String>,
+    ) -> String {
         let mut out = String::new();
         let _ = writeln!(
             out,
@@ -288,7 +307,7 @@ impl TypingArtifact {
                 .sum::<usize>(),
         );
         for typed in &self.definitions {
-            write_definition_types(&mut out, module, typed);
+            write_definition_types(&mut out, module, typed, labels);
         }
         out
     }
@@ -297,9 +316,21 @@ impl TypingArtifact {
     /// [`Self::dump_types`].
     #[must_use]
     pub fn dump_definition_types(&self, module: &sem::Module, definition: DefinitionId) -> String {
+        self.dump_definition_types_with(module, definition, &no_type_labels)
+    }
+
+    /// Renders [`Self::dump_definition_types`] with `labels` appended, as
+    /// [`Self::dump_types_with`] does.
+    #[must_use]
+    pub fn dump_definition_types_with(
+        &self,
+        module: &sem::Module,
+        definition: DefinitionId,
+        labels: &dyn Fn(TypesAnchor) -> Option<String>,
+    ) -> String {
         let mut out = String::new();
         match self.definition(definition) {
-            Some(typed) => write_definition_types(&mut out, module, typed),
+            Some(typed) => write_definition_types(&mut out, module, typed, labels),
             None => {
                 let _ = writeln!(
                     out,
@@ -313,7 +344,28 @@ impl TypingArtifact {
     }
 }
 
-fn write_definition_types(out: &mut String, module: &sem::Module, typed: &DefinitionTyping) {
+/// What a line of the types dump describes, for the labels a caller
+/// appends to it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TypesAnchor {
+    /// A binding, by the span of its name.
+    Binding(Span),
+    /// A definition's result.
+    Result(DefinitionId),
+}
+
+/// Labels for [`TypingArtifact::dump_types_with`] that append nothing.
+#[must_use]
+pub const fn no_type_labels(_: TypesAnchor) -> Option<String> {
+    None
+}
+
+fn write_definition_types(
+    out: &mut String,
+    module: &sem::Module,
+    typed: &DefinitionTyping,
+    labels: &dyn Fn(TypesAnchor) -> Option<String>,
+) {
     let _ = writeln!(
         out,
         "  definition {} {}",
@@ -347,7 +399,14 @@ fn write_definition_types(out: &mut String, module: &sem::Module, typed: &Defini
                 let _ = write!(out, " declared={}", type_name(module, &declared));
             }
         }
-        let _ = writeln!(out, " because={}", chain(fact.reason));
+        let _ = write!(out, " because={}", chain(fact.reason));
+        if let Some(label) = info
+            .as_ref()
+            .and_then(|info| labels(TypesAnchor::Binding(info.span)))
+        {
+            let _ = write!(out, " {label}");
+        }
+        out.push('\n');
         for read in typed
             .uses
             .iter()
@@ -366,12 +425,16 @@ fn write_definition_types(out: &mut String, module: &sem::Module, typed: &Defini
         }
     }
     if let Some(result) = typed.result.and_then(|id| Some((id, typed.reason(id)?))) {
-        let _ = writeln!(
+        let _ = write!(
             out,
             "    result {} because={}",
             type_name(module, &result.1.ty),
             chain(result.0)
         );
+        if let Some(label) = labels(TypesAnchor::Result(typed.definition)) {
+            let _ = write!(out, " {label}");
+        }
+        out.push('\n');
     }
 }
 
@@ -412,6 +475,7 @@ fn binding_report(
         ty: reason.ty.clone(),
         rep,
         declared: module.kind_type(rep),
+        declaration: None,
         reason: roots.first().copied().unwrap_or(ReasonId(0)),
         reasons,
         uses,
@@ -427,6 +491,7 @@ fn expression_report(module: &sem::Module, typed: &DefinitionTyping, hit: ProbeH
         ty: hit.ty,
         rep: hit.kind,
         declared: module.kind_type(hit.kind),
+        declaration: None,
         reason: roots.first().copied().unwrap_or(ReasonId(0)),
         reasons,
         uses: Vec::new(),

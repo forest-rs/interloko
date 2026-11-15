@@ -125,7 +125,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::Write as _;
+use core::fmt::{self, Write as _};
 
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Type};
 
@@ -139,7 +139,10 @@ use crate::syntax::Span;
 mod flow;
 mod query;
 
-pub use query::{TypeQueryError, TypeReport, TypeSelector, TypeSubject, TypingDependency, UseType};
+pub use query::{
+    TypeQueryError, TypeReport, TypeSelector, TypeSubject, TypesAnchor, TypingDependency, UseType,
+    no_type_labels,
+};
 
 /// Residual runtime check classified by the soft typing pass.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -184,6 +187,15 @@ impl TypingCheck {
             Self::Overflow => "overflow",
         }
     }
+
+    /// Parses a label written by [`Self::as_str`].
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|check| check.as_str() == label)
+    }
 }
 
 /// Static classification of one runtime check.
@@ -212,6 +224,15 @@ impl TypingVerdict {
             Self::Checked => "checked",
             Self::Refuted => "refuted",
         }
+    }
+
+    /// Parses a label written by [`Self::as_str`].
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|verdict| verdict.as_str() == label)
     }
 
     /// Joins the verdicts of two alternatives that may each be taken.
@@ -248,6 +269,14 @@ impl TypingSeverity {
             Self::Warning => "warning",
             Self::Error => "error",
         }
+    }
+
+    /// Parses a label written by [`Self::as_str`].
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        [Self::Silent, Self::Warning, Self::Error]
+            .into_iter()
+            .find(|severity| severity.as_str() == label)
     }
 
     /// Returns the diagnostic severity to emit, or `None` when silent.
@@ -433,6 +462,82 @@ impl TypingConfig {
     #[must_use]
     pub const fn severity(self, check: TypingCheck, verdict: TypingVerdict) -> TypingSeverity {
         self.policy(check).severity(verdict)
+    }
+
+    /// Returns this configuration with one setting changed: one outcome of
+    /// one check now reported at `severity`.
+    #[must_use]
+    pub const fn with_severity(
+        self,
+        check: TypingCheck,
+        verdict: TypingVerdict,
+        severity: TypingSeverity,
+    ) -> Self {
+        let mut policy = self.policy(check);
+        match verdict {
+            TypingVerdict::Proved => policy.proved = severity,
+            TypingVerdict::Checked => policy.checked = severity,
+            TypingVerdict::Refuted => policy.refuted = severity,
+        }
+        self.with_policy(check, policy)
+    }
+
+    /// Returns this configuration changed by `spec`: whitespace-separated
+    /// words, each a preset name (see [`Self::PRESETS`]), which replaces the
+    /// whole configuration, or a `check.verdict=severity` setting such as
+    /// `cast.checked=warning`, applied in order. `strict
+    /// overflow.checked=warning` is the strict preset with checked overflow
+    /// reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first word that is neither, or
+    /// [`TypingConfigError::Empty`] when `spec` has no words.
+    pub fn apply_spec(self, spec: &str) -> Result<Self, TypingConfigError> {
+        let mut config = self;
+        let mut words = spec.split_whitespace().peekable();
+        if words.peek().is_none() {
+            return Err(TypingConfigError::Empty);
+        }
+        for word in words {
+            if let Some(preset) = Self::preset(word) {
+                config = preset;
+                continue;
+            }
+            let invalid = || TypingConfigError::InvalidWord(word.into());
+            let (setting, severity) = word.split_once('=').ok_or_else(invalid)?;
+            let (check, verdict) = setting.split_once('.').ok_or_else(invalid)?;
+            let check = TypingCheck::from_label(check).ok_or_else(invalid)?;
+            let verdict = TypingVerdict::from_label(verdict).ok_or_else(invalid)?;
+            let severity = TypingSeverity::from_label(severity).ok_or_else(invalid)?;
+            config = config.with_severity(check, verdict, severity);
+        }
+        Ok(config)
+    }
+}
+
+/// Why [`TypingConfig::apply_spec`] rejected a specification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypingConfigError {
+    /// The specification has no words.
+    Empty,
+    /// This word is neither a preset nor a `check.verdict=severity`
+    /// setting.
+    InvalidWord(String),
+}
+
+impl fmt::Display for TypingConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => {
+                f.write_str("empty typing policy; expected a preset or check.verdict=severity")
+            }
+            Self::InvalidWord(word) => write!(
+                f,
+                "`{word}` is neither a typing preset ({}) nor check.verdict=severity",
+                TypingConfig::PRESETS.join("|")
+            ),
+        }
     }
 }
 

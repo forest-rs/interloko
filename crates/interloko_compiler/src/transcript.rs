@@ -17,6 +17,7 @@
 //!   mutations/
 //!     000000-add-method.loko
 //!     000002-add-method.loko
+//!     000003-annotate.loko
 //! ```
 //!
 //! The TOML manifest carries `format_version`, `source_file_name`,
@@ -35,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::annotation::AnnotationTarget;
 use crate::grammar_frontend::GrammarFrontendRegistry;
 use crate::sem::{GenericFunctionId, HostMetaRegistry};
 use crate::session::{
@@ -75,21 +77,57 @@ pub struct TranscriptEvent {
     /// Stable session event id from the originating session. Preserved
     /// verbatim across save / open / restore.
     pub mutation_id: u32,
-    /// Mutation kind. Restored as the matching `SessionMutation`
-    /// variant.
-    pub kind: TranscriptEventKind,
-    /// Human-readable generic name resolved in the originating
-    /// session's sem module. Recorded for inspection and future
-    /// conflict handling; **not** used to silently rebind during
-    /// restore in this slice.
-    pub generic_name: String,
-    /// Original `GenericFunctionId` value. Used verbatim by restore
-    /// so the strict-replay semantics produce the same outcomes the
-    /// originating session saw.
-    pub generic_id_hint: u32,
-    /// Mutation source text (a full Loko `define method ...; end;`
-    /// clause for `AddMethod`).
-    pub source: String,
+    /// The mutation. Restored as the matching `SessionMutation` variant.
+    pub payload: TranscriptEventPayload,
+}
+
+impl TranscriptEvent {
+    /// The event's kind.
+    #[must_use]
+    pub const fn kind(&self) -> TranscriptEventKind {
+        match self.payload {
+            TranscriptEventPayload::AddMethod { .. } => TranscriptEventKind::AddMethod,
+            TranscriptEventPayload::Annotate { .. } => TranscriptEventKind::Annotate,
+        }
+    }
+
+    /// The text stored in the event's `mutations/` file: the method source
+    /// of an add-method event, or the type source of an annotate event.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        match &self.payload {
+            TranscriptEventPayload::AddMethod { source, .. } => source,
+            TranscriptEventPayload::Annotate { type_source, .. } => type_source,
+        }
+    }
+}
+
+/// What one persisted mutation event records.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TranscriptEventPayload {
+    /// A [`SessionMutation::AddMethod`].
+    AddMethod {
+        /// Human-readable generic name resolved in the originating
+        /// session's sem module. Recorded for inspection and future
+        /// conflict handling; **not** used to silently rebind during
+        /// restore in this slice.
+        generic_name: String,
+        /// Original `GenericFunctionId` value. Used verbatim by restore
+        /// so the strict-replay semantics produce the same outcomes the
+        /// originating session saw.
+        generic_id_hint: u32,
+        /// The full Loko `define method ...; end;` clause.
+        source: String,
+    },
+    /// A [`SessionMutation::Annotate`].
+    Annotate {
+        /// The annotated binding or result, by its stable id, which
+        /// restore resolves against the base source.
+        target: AnnotationTarget,
+        /// The written type.
+        type_source: String,
+    },
 }
 
 /// Kind tag for a transcript event.
@@ -98,6 +136,8 @@ pub struct TranscriptEvent {
 pub enum TranscriptEventKind {
     /// Corresponds to [`SessionMutation::AddMethod`].
     AddMethod,
+    /// Corresponds to [`SessionMutation::Annotate`].
+    Annotate,
 }
 
 impl TranscriptEventKind {
@@ -107,12 +147,14 @@ impl TranscriptEventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AddMethod => "add-method",
+            Self::Annotate => "annotate",
         }
     }
 
     fn from_str(raw: &str) -> Option<Self> {
         match raw {
             "add-method" => Some(Self::AddMethod),
+            "annotate" => Some(Self::Annotate),
             _ => None,
         }
     }
@@ -200,6 +242,15 @@ pub enum TranscriptLoadError {
         /// Offending mutation id (must be > previous).
         found: u32,
     },
+    /// Manifest event lacks a field its kind requires (`generic_name`
+    /// and `generic_id_hint` for add-method, `target` for annotate), or
+    /// carries an annotate `target` that is not an annotation target id.
+    InvalidEventFields {
+        /// Event whose fields were rejected.
+        mutation_id: u32,
+        /// The missing or malformed field.
+        field: &'static str,
+    },
     /// Manifest's `next_mutation_id` is not strictly greater than the
     /// largest event id. Catches hand-edits that would roll the
     /// counter backward and silently re-enable id reuse on the next
@@ -268,17 +319,28 @@ impl SessionTranscript {
 
         let mut manifest_events = Vec::with_capacity(self.events.len());
         for event in &self.events {
-            let filename = event_filename(event.mutation_id, event.kind);
+            let filename = event_filename(event.mutation_id, event.kind());
             let event_path = mutations_dir.join(&filename);
-            fs::write(&event_path, &event.source).map_err(|error| TranscriptSaveError::Io {
+            fs::write(&event_path, event.source()).map_err(|error| TranscriptSaveError::Io {
                 path: event_path.clone(),
                 error,
             })?;
+            let (generic_name, generic_id_hint, target) = match &event.payload {
+                TranscriptEventPayload::AddMethod {
+                    generic_name,
+                    generic_id_hint,
+                    ..
+                } => (Some(generic_name.clone()), Some(*generic_id_hint), None),
+                TranscriptEventPayload::Annotate { target, .. } => {
+                    (None, None, Some(target.to_string()))
+                }
+            };
             manifest_events.push(ManifestEvent {
                 mutation_id: event.mutation_id,
-                kind: event.kind.as_str().to_string(),
-                generic_name: event.generic_name.clone(),
-                generic_id_hint: event.generic_id_hint,
+                kind: event.kind().as_str().to_string(),
+                generic_name,
+                generic_id_hint,
+                target,
                 source: format!("mutations/{filename}"),
             });
         }
@@ -366,12 +428,29 @@ impl SessionTranscript {
                     found: entry.source,
                 });
             }
+            let missing = |field| TranscriptLoadError::InvalidEventFields {
+                mutation_id: entry.mutation_id,
+                field,
+            };
+            let fields = match kind {
+                TranscriptEventKind::AddMethod => ValidatedFields::AddMethod {
+                    generic_name: entry.generic_name.ok_or_else(|| missing("generic_name"))?,
+                    generic_id_hint: entry
+                        .generic_id_hint
+                        .ok_or_else(|| missing("generic_id_hint"))?,
+                },
+                TranscriptEventKind::Annotate => ValidatedFields::Annotate {
+                    target: entry
+                        .target
+                        .as_deref()
+                        .and_then(AnnotationTarget::parse)
+                        .ok_or_else(|| missing("target"))?,
+                },
+            };
             max_event_id = Some(entry.mutation_id);
             validated.push(ValidatedEvent {
                 mutation_id: entry.mutation_id,
-                kind,
-                generic_name: entry.generic_name,
-                generic_id_hint: entry.generic_id_hint,
+                fields,
                 expected_source,
             });
         }
@@ -408,12 +487,23 @@ impl SessionTranscript {
                     error,
                 },
             })?;
+            let payload = match validated_event.fields {
+                ValidatedFields::AddMethod {
+                    generic_name,
+                    generic_id_hint,
+                } => TranscriptEventPayload::AddMethod {
+                    generic_name,
+                    generic_id_hint,
+                    source,
+                },
+                ValidatedFields::Annotate { target } => TranscriptEventPayload::Annotate {
+                    target,
+                    type_source: source,
+                },
+            };
             events.push(TranscriptEvent {
                 mutation_id: validated_event.mutation_id,
-                kind: validated_event.kind,
-                generic_name: validated_event.generic_name,
-                generic_id_hint: validated_event.generic_id_hint,
-                source,
+                payload,
             });
         }
 
@@ -464,10 +554,21 @@ impl SessionTranscript {
         let mut applied: Vec<AppliedMutation> = Vec::new();
         let mut failed = None;
         for (log_index, event) in self.events.iter().enumerate() {
-            let request = match event.kind {
-                TranscriptEventKind::AddMethod => SessionMutation::AddMethod {
-                    generic: GenericFunctionId(event.generic_id_hint),
-                    method_source: event.source.clone(),
+            let request = match &event.payload {
+                TranscriptEventPayload::AddMethod {
+                    generic_id_hint,
+                    source,
+                    ..
+                } => SessionMutation::AddMethod {
+                    generic: GenericFunctionId(*generic_id_hint),
+                    method_source: source.clone(),
+                },
+                TranscriptEventPayload::Annotate {
+                    target,
+                    type_source,
+                } => SessionMutation::Annotate {
+                    target: target.clone(),
+                    type_source: type_source.clone(),
                 },
             };
             match ephemeral.apply_session_mutation_with_id(request.clone(), event.mutation_id) {
@@ -519,12 +620,23 @@ fn transcript_event_from_applied(
                 .map_or_else(|| "<unresolved>".to_string(), |g| g.name.clone());
             TranscriptEvent {
                 mutation_id: entry.mutation_id,
-                kind: TranscriptEventKind::AddMethod,
-                generic_name,
-                generic_id_hint: generic.0,
-                source: method_source.clone(),
+                payload: TranscriptEventPayload::AddMethod {
+                    generic_name,
+                    generic_id_hint: generic.0,
+                    source: method_source.clone(),
+                },
             }
         }
+        SessionMutation::Annotate {
+            target,
+            type_source,
+        } => TranscriptEvent {
+            mutation_id: entry.mutation_id,
+            payload: TranscriptEventPayload::Annotate {
+                target: target.clone(),
+                type_source: type_source.clone(),
+            },
+        },
     }
 }
 
@@ -541,12 +653,20 @@ struct Manifest {
     events: Vec<ManifestEvent>,
 }
 
+/// One manifest `[[events]]` table. Add-method events carry
+/// `generic_name` and `generic_id_hint`; annotate events carry `target`.
+/// Fields another kind uses are left out, so add-method entries read and
+/// write exactly as before annotate events existed.
 #[derive(Serialize, Deserialize)]
 struct ManifestEvent {
     mutation_id: u32,
     kind: String,
-    generic_name: String,
-    generic_id_hint: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generic_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generic_id_hint: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
     source: String,
 }
 
@@ -557,10 +677,19 @@ struct ManifestEvent {
 /// file.
 struct ValidatedEvent {
     mutation_id: u32,
-    kind: TranscriptEventKind,
-    generic_name: String,
-    generic_id_hint: u32,
+    fields: ValidatedFields,
     expected_source: String,
+}
+
+/// The kind-specific manifest fields of a validated event.
+enum ValidatedFields {
+    AddMethod {
+        generic_name: String,
+        generic_id_hint: u32,
+    },
+    Annotate {
+        target: AnnotationTarget,
+    },
 }
 
 #[cfg(test)]
@@ -659,6 +788,72 @@ end;
             })
             .expect("triangle mutation should succeed");
         artifacts
+    }
+
+    #[test]
+    fn annotate_events_round_trip_and_restore_by_stable_target() {
+        let mut artifacts = fixture();
+        let area = area_generic(&artifacts);
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: area,
+                method_source: SQUARE_METHOD.into(),
+            })
+            .expect("square mutation should succeed");
+        let square = artifacts.ast.methods[1].definition;
+        artifacts
+            .apply_mutation(SessionMutation::Annotate {
+                target: AnnotationTarget::Result { definition: square },
+                type_source: "<integer>".into(),
+            })
+            .expect("annotation should succeed");
+        assert!(
+            artifacts
+                .source
+                .source
+                .contains("area(s :: <square>) => <integer>")
+        );
+
+        let transcript = artifacts.to_transcript();
+        assert_eq!(
+            transcript.events[1].payload,
+            TranscriptEventPayload::Annotate {
+                target: AnnotationTarget::Result { definition: square },
+                type_source: "<integer>".into(),
+            }
+        );
+        let dir = tempdir().expect("tempdir");
+        transcript.save(dir.path()).expect("save should succeed");
+        let manifest = fs::read_to_string(dir.path().join("transcript.toml")).expect("manifest");
+        assert!(manifest.contains(&format!("target = \"result:{square}\"")));
+        assert!(manifest.contains("generic_name = \"area\""));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("mutations/000001-annotate.loko")).expect("event"),
+            "<integer>"
+        );
+
+        let reopened = SessionTranscript::open(dir.path()).expect("open should succeed");
+        assert_eq!(reopened, transcript);
+        let restored =
+            reopened.restore(GrammarFrontendRegistry::builtin(), &HostMetaRegistry::new());
+        assert!(restored.failed.is_none(), "{:?}", restored.failed);
+        assert_eq!(restored.artifacts.source.source, artifacts.source.source);
+        assert_eq!(
+            run_scalar(&restored.artifacts, "score_square").expect("square runs"),
+            FunctionValue::Integer(49)
+        );
+
+        rewrite_manifest(
+            dir.path(),
+            &[(&format!("result:{square}"), "result:nowhere")],
+        );
+        assert!(matches!(
+            SessionTranscript::open(dir.path()),
+            Err(TranscriptLoadError::InvalidEventFields {
+                mutation_id: 1,
+                field: "target"
+            })
+        ));
     }
 
     #[test]

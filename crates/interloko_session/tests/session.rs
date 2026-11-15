@@ -1,11 +1,13 @@
 //! Embedding contracts across accepted edits and explicit host behavior.
 
+use interloko_compiler::annotation::AnnotationTarget;
 use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{HostFunction, HostMetaRegistry, HostValueKind};
 use interloko_compiler::session::{
     DumpStage, ExecutionTraceDetail, FunctionCallError, FunctionValue, HostFunctionFailure,
     HostFunctionHandler, SessionMutation,
 };
+use interloko_compiler::typing::TypingConfig;
 use interloko_session::{Session, SessionError};
 
 const SOURCE: &str = "
@@ -214,4 +216,81 @@ define function answer() => <integer> step(999) + 2 end;";
     session.replace_source(1, SUM).unwrap();
     assert_eq!(session.codegen_policy(), CodegenPolicy::Proved);
     assert_eq!(checked_adds(&session), 1);
+}
+
+#[test]
+fn annotations_are_previewed_then_applied_as_revisioned_mutations() {
+    let mut session = Session::new("typed.loko", SOURCE).unwrap();
+    let definition = session
+        .artifacts()
+        .sem
+        .functions
+        .iter()
+        .find(|function| function.name == "answer")
+        .unwrap()
+        .definition;
+    let target = AnnotationTarget::Result { definition };
+
+    let preview = session.preview_annotation(&target, "<integer>").unwrap();
+    assert_eq!(preview.previous, None);
+    assert_eq!(session.revision(), 0);
+    assert!(session.artifacts().mutations().is_empty());
+
+    let outcome = session
+        .mutate(
+            0,
+            SessionMutation::Annotate {
+                target: target.clone(),
+                type_source: "<integer>".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.annotation(), Some(&preview));
+    assert_eq!(session.revision(), 1);
+    assert!(
+        session
+            .artifacts()
+            .source
+            .source
+            .contains("answer() => <integer>")
+    );
+    assert_eq!(answer(&session), FunctionValue::Integer(0));
+
+    assert!(matches!(
+        session.preview_annotation(&target, "<nowhere>"),
+        Err(SessionError::Mutation(_))
+    ));
+}
+
+#[test]
+fn typing_config_is_a_revisioned_session_input_kept_by_replacement() {
+    let mut session = Session::new("typed.loko", SOURCE).unwrap();
+    assert_eq!(session.typing_config(), TypingConfig::soft());
+    assert_eq!(
+        session.set_typing_config(0, TypingConfig::soft()).unwrap(),
+        0
+    );
+    assert_eq!(
+        session
+            .set_typing_config(0, TypingConfig::silent())
+            .unwrap(),
+        1
+    );
+    assert_eq!(session.typing_config(), TypingConfig::silent());
+
+    // Reporting proved dispatches turns the one in `answer` into a warning,
+    // which the session does not accept.
+    let loud = TypingConfig::silent()
+        .apply_spec("dispatch.proved=warning")
+        .unwrap();
+    assert!(matches!(
+        session.set_typing_config(1, loud),
+        Err(SessionError::Compilation { .. })
+    ));
+    assert_eq!(session.typing_config(), TypingConfig::silent());
+
+    session
+        .replace_source(1, "define function answer() 1 end;")
+        .unwrap();
+    assert_eq!(session.typing_config(), TypingConfig::silent());
 }

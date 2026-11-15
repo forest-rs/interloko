@@ -17,6 +17,10 @@ use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::value::Value;
 use execution_tape::vm::{InvocationOptions, Limits, Trap, TrapInfo, Vm};
 
+use crate::annotation::{
+    self, AnnotationSite, AnnotationTarget, DecisionSnapshot, DeclarationOrigin, SourceEdit,
+    TypingDelta,
+};
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::execution_trace::TraceCapture;
 pub use crate::execution_trace::{
@@ -809,6 +813,11 @@ pub enum EnvironmentKind {
     /// The type contract of a function, generic, or method: what code
     /// compiled against it relies on.
     Contract,
+    /// A parameter or `let` binding that can carry a type annotation.
+    Binding,
+    /// A function's or method's result, or a constant's value, which can
+    /// carry a type annotation.
+    DefinitionResult,
 }
 
 impl EnvironmentKind {
@@ -850,6 +859,8 @@ impl EnvironmentKind {
             Self::TypingConfig => "typing-config",
             Self::TypingDecision => "typing-decision",
             Self::Contract => "contract",
+            Self::Binding => "binding",
+            Self::DefinitionResult => "result",
         }
     }
 }
@@ -1001,6 +1012,17 @@ pub enum EnvironmentAffordance {
     ShowTypes,
     /// Show the typing decisions whose reasons cite a contract.
     ShowDependents,
+    /// Change the session's typing configuration, the severity each typing
+    /// outcome is reported at. A session input, not a source mutation.
+    SetTypingPolicy,
+    /// Change the session's codegen policy. A session input, not a source
+    /// mutation.
+    SetCodegenPolicy,
+    /// Write a type annotation on a binding or result: a source mutation
+    /// that reports which typing decisions it changed.
+    Annotate,
+    /// Report what [`Self::Annotate`] would change without applying it.
+    PreviewAnnotation,
 }
 
 impl EnvironmentAffordance {
@@ -1047,6 +1069,10 @@ impl EnvironmentAffordance {
             Self::ShowTyping,
             Self::ShowTypes,
             Self::ShowDependents,
+            Self::SetTypingPolicy,
+            Self::SetCodegenPolicy,
+            Self::Annotate,
+            Self::PreviewAnnotation,
         ]
     }
 
@@ -1102,6 +1128,10 @@ impl EnvironmentAffordance {
             Self::ShowTyping => "show-typing",
             Self::ShowTypes => "show-types",
             Self::ShowDependents => "show-dependents",
+            Self::SetTypingPolicy => "set-typing-policy",
+            Self::SetCodegenPolicy => "set-codegen-policy",
+            Self::Annotate => "annotate",
+            Self::PreviewAnnotation => "preview-annotation",
         }
     }
 }
@@ -1285,6 +1315,17 @@ pub enum TypingFacet {
         /// Its parameters and results.
         contract: Contract,
     },
+    /// A place a type annotation can be written.
+    Annotation {
+        /// The stable target.
+        target: AnnotationTarget,
+        /// What the target is.
+        role: annotation::AnnotationRole,
+        /// Whether its type is written or inferred.
+        declaration: DeclarationOrigin,
+        /// The written annotation, if any.
+        annotation: Option<String>,
+    },
 }
 
 /// Typed EOP record projected by the session or an explicit host adapter.
@@ -1399,9 +1440,12 @@ pub struct SessionArtifacts {
 
 /// A structured EOP mutation request applied to a [`SessionArtifacts`].
 ///
-/// This slice supports only `AddMethod`. Future slices may extend the enum
-/// with `RetractMethod`, `EditBody`, `DefineClass`, and others; each new
-/// variant should compose cleanly with the existing affordance surface.
+/// Mutations are source edits: each is recorded in the mutation log, and
+/// rewind and replay rebuild from them. Policies (the typing configuration
+/// and the codegen policy) are session inputs, not mutations. Future slices
+/// may extend the enum with `RetractMethod`, `EditBody`, `DefineClass`, and
+/// others; each new variant should compose cleanly with the existing
+/// affordance surface.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionMutation {
@@ -1416,6 +1460,51 @@ pub enum SessionMutation {
         /// Loko `define method ...; end;` source text for the inserted method.
         method_source: String,
     },
+    /// Write `type_source` as the type annotation of `target`, replacing
+    /// any annotation already written there. The edited source is compiled
+    /// as a candidate and swapped in only when it compiles without new
+    /// errors; the outcome reports which typing decisions changed.
+    ///
+    /// Annotating a method parameter changes its specializer, so the method
+    /// handles different calls and its definition id changes with it.
+    Annotate {
+        /// The parameter, `let` binding, or result to annotate.
+        target: AnnotationTarget,
+        /// The type as source would spell it, such as `<integer>`,
+        /// `class <shape>`, `callable(<integer>) => <circle>`, or, for a
+        /// result, `(<integer>, <integer>)`.
+        type_source: String,
+    },
+}
+
+/// What an applied [`SessionMutation`] changed.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MutationEffect {
+    /// [`SessionMutation::AddMethod`] inserted this method. In this slice
+    /// the runtime layout's method id is the same value because the layout
+    /// is derived 1:1 from sem method ordering.
+    InsertedMethod(sem::MethodId),
+    /// [`SessionMutation::Annotate`] wrote an annotation.
+    Annotated(alloc::boxed::Box<AnnotationOutcome>),
+}
+
+/// What an annotation changed, or would change when previewed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotationOutcome {
+    /// The target as requested.
+    pub target: AnnotationTarget,
+    /// The target in the edited source. Differs from [`Self::target`] only
+    /// when annotating a method parameter changed the method's definition
+    /// id.
+    pub annotated: AnnotationTarget,
+    /// The annotation the edit replaced, or `None` when the type was
+    /// inferred.
+    pub previous: Option<String>,
+    /// The source edit, in the coordinates of the source before it.
+    pub edit: SourceEdit,
+    /// Which typing decisions changed verdict, severity, or codegen.
+    pub delta: TypingDelta,
 }
 
 /// Successful outcome of [`SessionArtifacts::apply_mutation`].
@@ -1425,12 +1514,8 @@ pub struct MutationOutcome {
     /// applied. Matches the `sequence` carried by the inserted method's
     /// [`sem::MethodOrigin::Session`].
     pub mutation_id: u32,
-    /// Semantic method id of the inserted method in the post-mutation module.
-    /// In this slice the runtime layout's method id is the same value because
-    /// the layout is derived 1:1 from sem method ordering; a future slice
-    /// that introduces an asymmetry can extend this struct without breaking
-    /// the current contract.
-    pub inserted_method: sem::MethodId,
+    /// What the mutation changed.
+    pub effect: MutationEffect,
     /// Query artifacts that the dependency graph identifies as touched by
     /// this mutation. This is precise impact reporting, not a record of
     /// what was reused from cache; per-method artifacts for unrelated
@@ -1441,6 +1526,26 @@ pub struct MutationOutcome {
     /// actually skips work through the incremental query cache will
     /// introduce additional variants.
     pub recompute_strategy: RecomputeStrategy,
+}
+
+impl MutationOutcome {
+    /// The method an add-method mutation inserted.
+    #[must_use]
+    pub const fn inserted_method(&self) -> Option<sem::MethodId> {
+        match &self.effect {
+            MutationEffect::InsertedMethod(method) => Some(*method),
+            MutationEffect::Annotated(_) => None,
+        }
+    }
+
+    /// What an annotate mutation changed.
+    #[must_use]
+    pub fn annotation(&self) -> Option<&AnnotationOutcome> {
+        match &self.effect {
+            MutationEffect::Annotated(outcome) => Some(outcome),
+            MutationEffect::InsertedMethod(_) => None,
+        }
+    }
 }
 
 /// One successful mutation as recorded in the session's mutation log.
@@ -1542,6 +1647,18 @@ pub enum MutationError {
         /// Target generic id supplied by the caller.
         generic: sem::GenericFunctionId,
     },
+    /// The annotation target names no parameter, `let` binding, or result
+    /// in the current source.
+    UnknownAnnotationTarget {
+        /// Target supplied by the caller.
+        target: AnnotationTarget,
+    },
+    /// The type source is not a type annotation, or the edited source did
+    /// not read it back as the target's whole annotation.
+    InvalidTypeSource {
+        /// Type source supplied by the caller.
+        type_source: String,
+    },
 }
 
 /// Successful outcome of [`SessionArtifacts::rewind_to`].
@@ -1597,6 +1714,10 @@ pub enum RewindError {
         /// Underlying runtime layout error.
         error: RuntimeLayoutError,
     },
+    /// An annotate entry's recorded edit did not fit the source composed
+    /// from the entries before it. Like a layout failure, this signals a
+    /// bug: the log was recorded against this pristine source.
+    CompositionFailed,
 }
 
 /// Result of replaying a mutation log against a new base source.
@@ -1959,22 +2080,64 @@ impl SessionArtifacts {
     ///
     /// Returns a [`typing::TypeQueryError`] when typing did not run or the
     /// selector names nothing typed.
+    ///
+    /// Unlike the typing artifact's query, this one sees the source, so a
+    /// parameter's or `let` binding's report says whether its type is
+    /// written or inferred ([`typing::TypeReport::declaration`]).
     pub fn type_of(
         &self,
         selector: &typing::TypeSelector,
     ) -> Result<typing::TypeReport, typing::TypeQueryError> {
-        self.typing.type_of(&self.sem, selector)
+        let mut report = self.typing.type_of(&self.sem, selector)?;
+        if let typing::TypeSubject::Binding(
+            typing::Binding::Local(_) | typing::Binding::ClosureLocal { .. },
+        ) = report.subject
+        {
+            report.declaration = self
+                .annotation_sites()
+                .iter()
+                .find(|site| {
+                    site.span == report.span
+                        && matches!(site.target, AnnotationTarget::Binding { .. })
+                })
+                .map(AnnotationSite::declaration);
+        }
+        Ok(report)
     }
 
     /// Renders the flow types of a function's, method's, or constant's
     /// parameters, locals, and result, with their reasons, in the format of
     /// [`DumpStage::Types`]. This is the `show-types` affordance.
     ///
-    /// Returns `None` when `id` names no function, method, or constant.
+    /// A `binding:` id renders that binding's type, with its narrowed uses
+    /// and whether its type is written or inferred; a `result:` id renders
+    /// its definition's types. Binding and result lines carry their
+    /// annotation target id and `annotation=written|inferred`.
+    ///
+    /// Returns `None` when `id` names no function, method, constant,
+    /// binding, or result.
     #[must_use]
     pub fn explain_types(&self, id: &str) -> Option<String> {
+        let sites = self.annotation_sites();
+        let labels = |anchor| annotation_label(&sites, anchor);
+        if let Some(target) = AnnotationTarget::parse(id) {
+            let site = sites.iter().find(|site| site.target == target)?;
+            if let AnnotationTarget::Result { definition } = target {
+                return Some(
+                    self.typing
+                        .dump_definition_types_with(&self.sem, definition, &labels),
+                );
+            }
+            return Some(match self.type_of(&typing::TypeSelector::Span(site.span)) {
+                Ok(report) => render_binding_type(&self.sem, site, &report),
+                Err(error) => format!("binding {id}\nuntyped: {error}\n"),
+            });
+        }
         let definition = self.definition_object(id)?;
-        Some(self.typing.dump_definition_types(&self.sem, definition))
+        Some(
+            self.typing
+                .dump_definition_types_with(&self.sem, definition, &labels),
+        )
     }
 
     /// Renders a contract object and the typing decisions whose reasons cite
@@ -2587,7 +2750,11 @@ impl SessionArtifacts {
                 },
             ),
             DumpStage::Typing => self.typing.dump(&self.sem),
-            DumpStage::Types => self.typing.dump_types(&self.sem),
+            DumpStage::Types => {
+                let sites = self.annotation_sites();
+                self.typing
+                    .dump_types_with(&self.sem, &|anchor| annotation_label(&sites, anchor))
+            }
             DumpStage::All => {
                 let mut out = String::new();
                 for stage in [
@@ -2718,9 +2885,13 @@ impl SessionArtifacts {
                 generic,
                 method_source,
             } => self.apply_add_method(*generic, method_source, mutation_id)?,
+            SessionMutation::Annotate {
+                target,
+                type_source,
+            } => self.apply_annotate(target, type_source, mutation_id)?,
         };
         // The mutation log is the single source of truth for provenance.
-        // apply_add_method already swapped in the candidate with the prior
+        // The apply step already swapped in the candidate with the prior
         // log copied forward; this push records the new entry on top so
         // SessionArtifacts::mutations() reflects the application order.
         self.mutations.push(AppliedMutation {
@@ -2766,17 +2937,10 @@ impl SessionArtifacts {
         // source plus the existing log plus the pending request. This keeps
         // `self.source.source` from growing in place: pristine is the
         // rebuild base; the composed text is recomputed every time.
-        let pending_request = SessionMutation::AddMethod {
-            generic,
-            method_source: method_source.to_string(),
-        };
-        let candidate_source_text = compose_source_from_log(
-            &self.pristine_source,
-            self.mutations
-                .iter()
-                .map(|entry| &entry.request)
-                .chain(core::iter::once(&pending_request)),
-        );
+        let mut candidate_source_text =
+            compose_source_from_log(&self.pristine_source, &self.mutations)
+                .ok_or(MutationError::NotAMethodDefinition)?;
+        append_method_source(&mut candidate_source_text, method_source);
         let mut candidate_source_file = self.source.clone();
         candidate_source_file.source = candidate_source_text;
 
@@ -2789,37 +2953,14 @@ impl SessionArtifacts {
             self.codegen_policy,
         );
 
-        let new_diagnostics: Vec<Diagnostic> = candidate
-            .diagnostics
-            .iter()
-            .filter(|diag| diag.is_error())
-            .filter(|diag| {
-                let code = diag.code;
-                let pre_count = pre_mutation_diagnostic_codes
-                    .iter()
-                    .filter(|c| **c == code)
-                    .count();
-                let after_count = candidate
-                    .diagnostics
-                    .iter()
-                    .filter(|d| d.is_error() && d.code == code)
-                    .count();
-                after_count > pre_count
-            })
-            .cloned()
-            .collect();
+        let new_diagnostics = new_error_diagnostics(&pre_mutation_diagnostic_codes, &candidate);
 
         // Parse failures must be reported before structural delta checks,
         // because a malformed mutation source may not produce a new AST method
         // at all.
         let parse_failures: Vec<Diagnostic> = new_diagnostics
             .iter()
-            .filter(|d| {
-                matches!(
-                    d.code,
-                    DiagnosticCode::SyntaxExpectedExpression | DiagnosticCode::SyntaxExpectedToken
-                )
-            })
+            .filter(|d| is_syntax_failure(d.code))
             .cloned()
             .collect();
         if !parse_failures.is_empty() {
@@ -2926,6 +3067,35 @@ impl SessionArtifacts {
         // EnvironmentResolution and GrammarStack are derived from the source
         // file's grammar environment, which is unchanged by an add-method
         // mutation, so they are not affected.
+        let affected_artifacts = self.affected_by(&candidate, new_method_definition);
+        self.swap_in_candidate(candidate, mutation_id);
+        // Tag the freshly inserted method. apply_mutation will push the
+        // matching AppliedMutation onto the log after the swap.
+        self.sem.methods[new_method.id.0 as usize].origin = sem::MethodOrigin::Session {
+            sequence: mutation_id,
+        };
+
+        Ok(MutationOutcome {
+            mutation_id,
+            effect: MutationEffect::InsertedMethod(new_method.id),
+            affected_artifacts,
+            recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
+        })
+    }
+
+    /// The artifacts a candidate changed, starting from `definition`'s
+    /// semantic IR.
+    ///
+    /// The list is the dependency-graph truth, not "what we just
+    /// recomputed". The front of the pipeline re-runs because the source
+    /// changed. From the definition on, the graph decides, and contracts and
+    /// method tables the change leaves unchanged stop the drain, so unrelated
+    /// definitions' artifacts are absent.
+    ///
+    /// EnvironmentResolution and GrammarStack are derived from the source
+    /// file's grammar environment, which no mutation changes, so they are not
+    /// affected.
+    fn affected_by(&self, candidate: &Self, definition: DefinitionId) -> Vec<QueryArtifact> {
         let mut affected_artifacts = Vec::from([
             QueryArtifact::Source,
             QueryArtifact::GrammarParse,
@@ -2934,9 +3104,9 @@ impl SessionArtifacts {
             QueryArtifact::Bind,
         ]);
         let drained = candidate.invalidation.clone().changed_with_cutoff(
-            &[QueryArtifact::DefinitionSem(new_method_definition)],
+            &[QueryArtifact::DefinitionSem(definition)],
             |artifact| {
-                artifact_fingerprint(artifact, self) == artifact_fingerprint(artifact, &candidate)
+                artifact_fingerprint(artifact, self) == artifact_fingerprint(artifact, candidate)
             },
         );
         for artifact in drained {
@@ -2944,53 +3114,221 @@ impl SessionArtifacts {
                 affected_artifacts.push(artifact);
             }
         }
+        affected_artifacts
+    }
 
-        let mut new_artifacts = candidate;
-
+    /// Replaces the live session with an accepted candidate, carrying the
+    /// session's history forward.
+    fn swap_in_candidate(&mut self, mut candidate: Self, mutation_id: u32) {
         // Carry the mutation log forward onto the candidate so the new
         // entry can be appended (in apply_session_mutation_with_id) after
         // the swap.
-        new_artifacts.mutations = self.mutations.clone();
+        candidate.mutations = core::mem::take(&mut self.mutations);
         // Preserve the pristine source across the rebuild. The candidate's
         // pristine_source was initialized to the composed candidate text;
         // the live session's pristine_source is the rebuild base and must
         // not drift.
-        new_artifacts.pristine_source = self.pristine_source.clone();
+        candidate.pristine_source = core::mem::take(&mut self.pristine_source);
         // Advance the stable id counter. apply_session_mutation_with_id
         // appends the new AppliedMutation entry after the swap; the counter
-        // on new_artifacts already accounts for it. max() against
+        // on the candidate already accounts for it. max() against
         // self.next_mutation_id ensures replay's out-of-order ids do not
         // accidentally roll the counter backward.
-        new_artifacts.next_mutation_id = self.next_mutation_id.max(mutation_id.saturating_add(1));
+        candidate.next_mutation_id = self.next_mutation_id.max(mutation_id.saturating_add(1));
+        candidate.retag_session_methods();
+        *self = candidate;
+    }
 
-        // The candidate compile parses prior session-inserted methods out of
-        // the appended source as ordinary source-origin definitions, which
-        // clears their MethodOrigin::Session marker. Restore the marker for
-        // every prior mutation by walking the log directly: each entry's
-        // outcome.inserted_method still points at the same method id in the
-        // recompiled sem module (slot setters move; user methods do not).
-        // Provenance is derived from the log, not from method-count
-        // arithmetic.
-        for entry in &new_artifacts.mutations {
-            let idx = entry.outcome.inserted_method.0 as usize;
-            new_artifacts.sem.methods[idx].origin = sem::MethodOrigin::Session {
-                sequence: entry.mutation_id,
-            };
+    /// Restores [`sem::MethodOrigin::Session`] on every method the log
+    /// inserted.
+    ///
+    /// A rebuild parses prior session-inserted methods out of the composed
+    /// source as ordinary source-origin definitions, which clears their
+    /// marker. Each add-method entry's inserted method still points at the
+    /// same method id in the recompiled sem module (slot setters move; user
+    /// methods do not), so provenance is derived from the log, not from
+    /// method-count arithmetic.
+    fn retag_session_methods(&mut self) {
+        for entry in &self.mutations {
+            if let Some(method) = entry.outcome.inserted_method() {
+                self.sem.methods[method.0 as usize].origin = sem::MethodOrigin::Session {
+                    sequence: entry.mutation_id,
+                };
+            }
         }
-        // Tag the freshly inserted method. apply_mutation will push the
-        // matching AppliedMutation onto the log after the swap.
-        new_artifacts.sem.methods[new_method.id.0 as usize].origin = sem::MethodOrigin::Session {
-            sequence: mutation_id,
-        };
+    }
 
-        *self = new_artifacts;
-
+    fn apply_annotate(
+        &mut self,
+        target: &AnnotationTarget,
+        type_source: &str,
+        mutation_id: u32,
+    ) -> Result<MutationOutcome, MutationError> {
+        let (candidate, outcome) = self.annotation_candidate(target, type_source)?;
+        let affected_artifacts = self.affected_by(&candidate, outcome.annotated.definition());
+        self.swap_in_candidate(candidate, mutation_id);
         Ok(MutationOutcome {
             mutation_id,
-            inserted_method: new_method.id,
+            effect: MutationEffect::Annotated(alloc::boxed::Box::new(outcome)),
             affected_artifacts,
             recompute_strategy: RecomputeStrategy::FullCandidateRebuild,
         })
+    }
+
+    /// Reports what annotating `target` with `type_source` would change,
+    /// without applying it.
+    ///
+    /// This runs the same candidate compile and checks as
+    /// [`SessionMutation::Annotate`], so it fails exactly when applying
+    /// would, and its [`AnnotationOutcome::delta`] is what applying would
+    /// report. The session, its log, and its id counter are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`MutationError`] applying would return.
+    pub fn preview_annotation(
+        &self,
+        target: &AnnotationTarget,
+        type_source: &str,
+    ) -> Result<AnnotationOutcome, MutationError> {
+        self.annotation_candidate(target, type_source)
+            .map(|(_, outcome)| outcome)
+    }
+
+    /// Builds and checks the candidate an annotation would produce.
+    fn annotation_candidate(
+        &self,
+        target: &AnnotationTarget,
+        type_source: &str,
+    ) -> Result<(Self, AnnotationOutcome), MutationError> {
+        let type_source = type_source.trim();
+        let invalid = || MutationError::InvalidTypeSource {
+            type_source: type_source.to_string(),
+        };
+        let unknown = || MutationError::UnknownAnnotationTarget {
+            target: target.clone(),
+        };
+        if !annotation::is_type_source(type_source) {
+            return Err(invalid());
+        }
+        let site = self
+            .annotation_sites()
+            .into_iter()
+            .find(|site| &site.target == target)
+            .ok_or_else(unknown)?;
+        let edit = site.edit(type_source).ok_or_else(unknown)?;
+        let mut candidate_source_file = self.source.clone();
+        candidate_source_file.source = edit.apply(&self.source.source).ok_or_else(unknown)?;
+        let candidate = compile_file_with_registries(
+            &candidate_source_file,
+            RuntimeMode::CompileOnly,
+            self.grammar_registry,
+            &self.host_registry,
+            self.typing.config,
+            self.codegen_policy,
+        );
+
+        let pre_mutation_diagnostic_codes: Vec<DiagnosticCode> = self
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.is_error())
+            .map(|diag| diag.code)
+            .collect();
+        let new_diagnostics = new_error_diagnostics(&pre_mutation_diagnostic_codes, &candidate);
+        let (parse_failures, semantic_failures): (Vec<Diagnostic>, Vec<Diagnostic>) =
+            new_diagnostics
+                .into_iter()
+                .partition(|diag| is_syntax_failure(diag.code));
+        if !parse_failures.is_empty() {
+            return Err(MutationError::ParseFailed {
+                diagnostics: parse_failures,
+            });
+        }
+        if !semantic_failures.is_empty() {
+            return Err(MutationError::SemanticFailed {
+                diagnostics: semantic_failures,
+            });
+        }
+
+        // The edit may change only the one annotation: the same definitions,
+        // in the same order, with the target now carrying exactly the
+        // requested type. A method's definition id follows its specializers,
+        // so definitions are paired by position.
+        let definitions = paired_definitions(&self.ast, &candidate.ast).ok_or_else(invalid)?;
+        let remap = |definition: DefinitionId| {
+            definitions
+                .iter()
+                .find(|(old, _)| *old == definition)
+                .map_or(definition, |(_, new)| *new)
+        };
+        let annotated = target.in_definition(remap(target.definition()));
+        let written = candidate
+            .annotation_sites()
+            .into_iter()
+            .find(|site| site.target == annotated)
+            .and_then(|site| site.written);
+        if !written.is_some_and(|(text, _)| annotation::same_type_source(&text, type_source)) {
+            return Err(invalid());
+        }
+
+        let runtime_layout = runtime_bridge::runtime_layout_from_sem(&candidate.sem);
+        if let Err(error) = runtime_layout.validate() {
+            return Err(MutationError::RuntimeValidationFailed { error });
+        }
+
+        let delta = TypingDelta::between(
+            self.decision_snapshots(),
+            candidate.decision_snapshots(),
+            |owner, span| (remap(owner), edit.map_span(span)),
+        );
+        let outcome = AnnotationOutcome {
+            target: target.clone(),
+            annotated,
+            previous: site.written.map(|(text, _)| text),
+            edit,
+            delta,
+        };
+        Ok((candidate, outcome))
+    }
+
+    /// Returns every place a type annotation can be written: parameters,
+    /// `let` bindings, closure parameters, results, and constant values, in
+    /// definition and source order, each with its stable
+    /// [`AnnotationTarget`] and whether its type is written or inferred.
+    #[must_use]
+    pub fn annotation_sites(&self) -> Vec<AnnotationSite> {
+        annotation::annotation_sites(&self.syntax, &self.ast)
+    }
+
+    /// Every typing decision with its verdict, severity, and codegen, as a
+    /// [`TypingDelta`] compares them.
+    #[must_use]
+    pub fn decision_snapshots(&self) -> Vec<DecisionSnapshot> {
+        self.typing
+            .decisions()
+            .map(|decision| DecisionSnapshot {
+                id: typing_decision_object_id(decision),
+                owner: decision.owner,
+                site: decision.site,
+                check: decision.check,
+                verdict: decision.verdict,
+                severity: self.typing.severity(decision),
+                codegen: self.check_codegen(decision),
+                span: decision.span,
+            })
+            .collect()
+    }
+
+    /// Compares these artifacts' typing decisions with `after`'s, compiled
+    /// from the same source, such as after a typing or codegen policy
+    /// change: verdicts do not change then, but severities and codegen can.
+    #[must_use]
+    pub fn typing_delta(&self, after: &Self) -> TypingDelta {
+        TypingDelta::between(
+            self.decision_snapshots(),
+            after.decision_snapshots(),
+            |owner, span| (owner, span),
+        )
     }
 
     /// Truncates the live mutation log at `target` (or back to pristine when
@@ -3047,11 +3385,9 @@ impl SessionArtifacts {
             });
         }
 
-        let retained_requests = self.mutations[..retained_count]
-            .iter()
-            .map(|entry| &entry.request);
         let composed_source_text =
-            compose_source_from_log(&self.pristine_source, retained_requests);
+            compose_source_from_log(&self.pristine_source, &self.mutations[..retained_count])
+                .ok_or(RewindError::CompositionFailed)?;
         let mut candidate_source_file = self.source.clone();
         candidate_source_file.source = composed_source_text;
 
@@ -3081,12 +3417,7 @@ impl SessionArtifacts {
         // restored from the retained log entry. Same machinery as the
         // apply path; the rebuild has no idea which methods came from
         // mutations without the log.
-        for entry in &new_artifacts.mutations {
-            let idx = entry.outcome.inserted_method.0 as usize;
-            new_artifacts.sem.methods[idx].origin = sem::MethodOrigin::Session {
-                sequence: entry.mutation_id,
-            };
-        }
+        new_artifacts.retag_session_methods();
 
         let dropped: Vec<AppliedMutation> = self.mutations[retained_count..].to_vec();
         *self = new_artifacts;
@@ -3162,26 +3493,101 @@ impl SessionArtifacts {
     }
 }
 
-/// Composes session source by appending each retained mutation's source onto
-/// the pristine base. The format mirrors what `apply_add_method` produced when
-/// it appended in place: a blank line between definitions plus a trailing
-/// newline. The helper is the source-side seed for log-driven rebuilds;
-/// rewind reuses it once the log has been truncated.
-fn compose_source_from_log<'a>(
-    pristine: &str,
-    requests: impl IntoIterator<Item = &'a SessionMutation>,
-) -> String {
+/// Composes session source from the pristine base and applied log entries,
+/// in order: an add-method entry appends its method source, and an annotate
+/// entry applies the edit it recorded, whose span is in the coordinates of
+/// the source composed so far. The helper is the source-side seed for
+/// log-driven rebuilds; the apply path and rewind both use it.
+///
+/// Returns `None` when an annotate entry's edit does not fit, which means
+/// the entries were not applied to this base.
+fn compose_source_from_log(pristine: &str, entries: &[AppliedMutation]) -> Option<String> {
     let mut composed = String::from(pristine);
-    for request in requests {
-        match request {
-            SessionMutation::AddMethod { method_source, .. } => {
-                composed.push_str("\n\n");
-                composed.push_str(method_source.trim());
-                composed.push('\n');
+    for entry in entries {
+        match (&entry.request, &entry.outcome.effect) {
+            (SessionMutation::AddMethod { method_source, .. }, _) => {
+                append_method_source(&mut composed, method_source);
             }
+            (SessionMutation::Annotate { .. }, MutationEffect::Annotated(outcome)) => {
+                composed = outcome.edit.apply(&composed)?;
+            }
+            (SessionMutation::Annotate { .. }, MutationEffect::InsertedMethod(_)) => return None,
         }
     }
-    composed
+    Some(composed)
+}
+
+/// Appends a method's source the way add-method composes it: a blank line
+/// between definitions plus a trailing newline.
+fn append_method_source(composed: &mut String, method_source: &str) {
+    composed.push_str("\n\n");
+    composed.push_str(method_source.trim());
+    composed.push('\n');
+}
+
+/// The candidate's error diagnostics beyond those in `previous` (counted by
+/// code): what a mutation introduced. Advisory warnings never reject a
+/// mutation.
+fn new_error_diagnostics(
+    previous: &[DiagnosticCode],
+    candidate: &SessionArtifacts,
+) -> Vec<Diagnostic> {
+    candidate
+        .diagnostics
+        .iter()
+        .filter(|diag| diag.is_error())
+        .filter(|diag| {
+            let code = diag.code;
+            let pre_count = previous.iter().filter(|c| **c == code).count();
+            let after_count = candidate
+                .diagnostics
+                .iter()
+                .filter(|d| d.is_error() && d.code == code)
+                .count();
+            after_count > pre_count
+        })
+        .cloned()
+        .collect()
+}
+
+const fn is_syntax_failure(code: DiagnosticCode) -> bool {
+    matches!(
+        code,
+        DiagnosticCode::SyntaxExpectedExpression | DiagnosticCode::SyntaxExpectedToken
+    )
+}
+
+/// Pairs the function, method, and constant definitions of two modules by
+/// position, or `None` when the modules do not define the same number of
+/// each kind.
+fn paired_definitions(
+    before: &ast::Module,
+    after: &ast::Module,
+) -> Option<Vec<(DefinitionId, DefinitionId)>> {
+    if before.classes.len() != after.classes.len()
+        || before.generics.len() != after.generics.len()
+        || before.functions.len() != after.functions.len()
+        || before.methods.len() != after.methods.len()
+        || before.constants.len() != after.constants.len()
+    {
+        return None;
+    }
+    let functions = before
+        .functions
+        .iter()
+        .zip(&after.functions)
+        .map(|(old, new)| (old.definition, new.definition));
+    let methods = before
+        .methods
+        .iter()
+        .zip(&after.methods)
+        .map(|(old, new)| (old.definition, new.definition));
+    let constants = before
+        .constants
+        .iter()
+        .zip(&after.constants)
+        .map(|(old, new)| (old.definition, new.definition));
+    Some(functions.chain(methods).chain(constants).collect())
 }
 
 /// Diff between two compiled source versions.
@@ -8688,9 +9094,12 @@ fn dump_environment_object_stage(
                 )
             },
             |definition| {
+                let sites = artifacts.annotation_sites();
                 artifacts
                     .typing
-                    .dump_definition_types(&artifacts.sem, definition)
+                    .dump_definition_types_with(&artifacts.sem, definition, &|anchor| {
+                        annotation_label(&sites, anchor)
+                    })
             },
         ),
         DumpStage::Syntax | DumpStage::Ast => {
@@ -9338,6 +9747,20 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
             TypingFacet::Contract { definition, .. } => {
                 let _ = writeln!(out, "  contract of {definition}");
             }
+            TypingFacet::Annotation {
+                target,
+                role,
+                declaration,
+                annotation,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "  target={target} role={} declared={} annotation={}",
+                    role.as_str(),
+                    declaration.as_str(),
+                    annotation.as_deref().unwrap_or("none")
+                );
+            }
         }
     }
     out
@@ -9551,6 +9974,7 @@ fn project_session_environment(
     }
     project_typing(artifacts, &dispatch_sites, sink);
     project_contracts(artifacts, sink);
+    project_annotation_sites(artifacts, sink);
     for entry in artifacts.mutations() {
         project_environment_mutation(module, sink, entry);
     }
@@ -9757,9 +10181,11 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
                 ],
             );
         }
-        // Contract objects carry their source and artifact facets from
-        // projection.
-        EnvironmentKind::Contract => {}
+        // Contract and annotation objects carry their source and artifact
+        // facets from projection.
+        EnvironmentKind::Contract
+        | EnvironmentKind::Binding
+        | EnvironmentKind::DefinitionResult => {}
         EnvironmentKind::TypingDecision => {
             if let Some(TypingFacet::Decision { decision, .. }) = &object.typing {
                 object.source =
@@ -11150,6 +11576,8 @@ fn project_typing(
             Aff::ShowTyping,
             Aff::ShowDependencies,
             Aff::DumpEop,
+            Aff::SetTypingPolicy,
+            Aff::SetCodegenPolicy,
         ]),
         execution: None,
         inspection: format!(
@@ -11326,6 +11754,131 @@ fn project_contracts(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObj
     }
 }
 
+/// The label a types dump appends to a binding's or result's line: its
+/// annotation target id and whether its type is written or inferred.
+fn annotation_label(sites: &[AnnotationSite], anchor: typing::TypesAnchor) -> Option<String> {
+    let site = sites.iter().find(|site| match (anchor, &site.target) {
+        (typing::TypesAnchor::Binding(span), AnnotationTarget::Binding { .. }) => site.span == span,
+        (typing::TypesAnchor::Result(definition), AnnotationTarget::Result { definition: at }) => {
+            *at == definition
+        }
+        _ => false,
+    })?;
+    Some(format!(
+        "annotation={} id={}",
+        site.declaration().as_str(),
+        site.target
+    ))
+}
+
+/// Renders one binding's type report for `show-types` on a binding object.
+fn render_binding_type(
+    module: &sem::Module,
+    site: &AnnotationSite,
+    report: &typing::TypeReport,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "binding {} {}", site.target, site.role.as_str());
+    let _ = writeln!(
+        out,
+        "type: {} at {}..{}",
+        typing::type_name(module, &report.ty),
+        report.span.start,
+        report.span.end
+    );
+    let _ = writeln!(
+        out,
+        "declared: {} {}",
+        typing::type_name(module, &report.declared),
+        report
+            .declaration
+            .unwrap_or_else(|| site.declaration())
+            .as_str()
+    );
+    if let Some((text, _)) = &site.written {
+        let _ = writeln!(out, "annotation: {text}");
+    }
+    let _ = writeln!(out, "because: {}", report.reason_chain(module));
+    for read in &report.uses {
+        let _ = writeln!(
+            out,
+            "use @{}..{} {} because={}",
+            read.span.start,
+            read.span.end,
+            typing::type_name(module, &read.ty),
+            report.chain(module, read.reason)
+        );
+    }
+    out
+}
+
+/// Projects one object per annotation target: `binding:<definition>:<name>`
+/// for parameters and `let` bindings, `result:<definition>` for results and
+/// constant values.
+fn project_annotation_sites(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
+    use EnvironmentAffordance as Aff;
+
+    let module = &artifacts.sem;
+    for site in artifacts.annotation_sites() {
+        let definition = site.target.definition();
+        let owner = typing::definition_label(module, definition);
+        let (kind, meta_class, title) = match &site.target {
+            AnnotationTarget::Binding { name, .. } => (
+                EnvironmentKind::Binding,
+                "<binding>",
+                format!("{} {name} of {owner}", site.role.as_str()),
+            ),
+            AnnotationTarget::Result { .. } => (
+                EnvironmentKind::DefinitionResult,
+                "<result>",
+                format!("result of {owner}"),
+            ),
+        };
+        let annotation = site.written.as_ref().map(|(text, _)| text.clone());
+        let mut object = environment_object(EnvironmentObjectParts {
+            id: site.target.to_string(),
+            kind,
+            meta_class,
+            origin: EnvironmentOrigin::SourceAuthored,
+            storage: EnvironmentStorage::SourceDefined,
+            title,
+            affordances: Vec::from([
+                Aff::Inspect,
+                Aff::ShowTypes,
+                Aff::Annotate,
+                Aff::PreviewAnnotation,
+                Aff::OpenSource,
+                Aff::DumpEop,
+            ]),
+            execution: None,
+            inspection: format!(
+                "definition={definition} role={} declared={} annotation={} span={}..{}",
+                site.role.as_str(),
+                site.declaration().as_str(),
+                annotation.as_deref().unwrap_or("none"),
+                site.span.start,
+                site.span.end
+            ),
+        });
+        object.source =
+            SourceFacet::new(Some(artifacts.source.id), Some(definition), Some(site.span));
+        object.artifacts = artifact_facet(
+            artifacts.source.id,
+            &[
+                QueryArtifact::Ast,
+                QueryArtifact::DefinitionTyping(definition),
+            ],
+        );
+        object.typing = Some(TypingFacet::Annotation {
+            declaration: site.declaration(),
+            target: site.target,
+            role: site.role,
+            annotation,
+        });
+        sink.emit(object);
+    }
+}
+
 /// Renders contract values as `(<integer>, callable(<integer>) => <circle>)`.
 fn value_contract_list_label(
     module: &sem::Module,
@@ -11476,8 +12029,19 @@ fn project_environment_mutation(
         SessionMutation::AddMethod { generic, .. } => {
             ("add-method", generic_label(module, *generic))
         }
+        SessionMutation::Annotate { target, .. } => ("annotate", target.to_string()),
     };
-    let inserted_label = method_label(module, entry.outcome.inserted_method);
+    let effect_label = match &entry.outcome.effect {
+        MutationEffect::InsertedMethod(method) => {
+            format!("inserted={}", method_label(module, *method))
+        }
+        MutationEffect::Annotated(outcome) => format!(
+            "annotation={} previous={} changed-decisions={}",
+            outcome.edit.text.trim_start_matches([' ', ':', '=', '>']),
+            outcome.previous.as_deref().unwrap_or("none"),
+            outcome.delta.changes.len()
+        ),
+    };
     let strategy_label = match entry.outcome.recompute_strategy {
         RecomputeStrategy::FullCandidateRebuild => "full-candidate-rebuild",
     };
@@ -11491,7 +12055,7 @@ fn project_environment_mutation(
         affordances: Vec::from([Aff::Inspect, Aff::DumpEop]),
         execution: None,
         inspection: format!(
-            "mutation-id={} request={request_label} target={target_label} inserted={inserted_label} affected-artifacts={} strategy={strategy_label}",
+            "mutation-id={} request={request_label} target={target_label} {effect_label} affected-artifacts={} strategy={strategy_label}",
             entry.mutation_id,
             entry.outcome.affected_artifacts.len(),
         ),
@@ -14000,6 +14564,16 @@ mod tests {
             (EnvironmentAffordance::ShowTyping, "show-typing"),
             (EnvironmentAffordance::ShowTypes, "show-types"),
             (EnvironmentAffordance::ShowDependents, "show-dependents"),
+            (EnvironmentAffordance::SetTypingPolicy, "set-typing-policy"),
+            (
+                EnvironmentAffordance::SetCodegenPolicy,
+                "set-codegen-policy",
+            ),
+            (EnvironmentAffordance::Annotate, "annotate"),
+            (
+                EnvironmentAffordance::PreviewAnnotation,
+                "preview-annotation",
+            ),
         ];
 
         let all = EnvironmentAffordance::all();
@@ -18759,7 +19333,7 @@ end;
         );
         assert!(!outcome.affected_artifacts.is_empty());
 
-        let inserted = &artifacts.sem.methods[outcome.inserted_method.0 as usize];
+        let inserted = &artifacts.sem.methods[outcome.inserted_method().unwrap().0 as usize];
         assert_eq!(inserted.generic, area);
         assert!(matches!(
             inserted.origin,
@@ -18892,13 +19466,13 @@ end;
         // re-tagging fix, the first method would silently revert to
         // MethodOrigin::Source because the recompile parses its appended
         // source as ordinary input.
-        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        let square = &artifacts.sem.methods[first.inserted_method().unwrap().0 as usize];
         assert!(
             matches!(square.origin, sem::MethodOrigin::Session { sequence: 0 }),
             "first session method should retain sequence 0, got {:?}",
             square.origin
         );
-        let triangle = &artifacts.sem.methods[second.inserted_method.0 as usize];
+        let triangle = &artifacts.sem.methods[second.inserted_method().unwrap().0 as usize];
         assert!(
             matches!(triangle.origin, sem::MethodOrigin::Session { sequence: 1 }),
             "second session method should carry sequence 1, got {:?}",
@@ -18942,8 +19516,8 @@ end;
         assert_eq!(first_entry.mutation_id, 0);
         assert_eq!(first_entry.outcome.mutation_id, first_outcome.mutation_id);
         assert_eq!(
-            first_entry.outcome.inserted_method,
-            first_outcome.inserted_method
+            first_entry.outcome.inserted_method(),
+            first_outcome.inserted_method()
         );
         match &first_entry.request {
             SessionMutation::AddMethod {
@@ -18953,6 +19527,7 @@ end;
                 assert_eq!(*g, area);
                 assert!(src.contains("<square>"));
             }
+            other => panic!("expected an add-method request, got {other:?}"),
         }
 
         let second_outcome = artifacts
@@ -18966,15 +19541,15 @@ end;
         assert_eq!(entries[1].mutation_id, 1);
         assert_eq!(entries[1].outcome.mutation_id, second_outcome.mutation_id);
         assert_eq!(
-            entries[1].outcome.inserted_method,
-            second_outcome.inserted_method
+            entries[1].outcome.inserted_method(),
+            second_outcome.inserted_method()
         );
         // The first entry survives unchanged across the second
         // candidate-and-swap rebuild.
         assert_eq!(entries[0].mutation_id, 0);
         assert_eq!(
-            entries[0].outcome.inserted_method,
-            first_outcome.inserted_method
+            entries[0].outcome.inserted_method(),
+            first_outcome.inserted_method()
         );
     }
 
@@ -19028,7 +19603,8 @@ end;
                 method_source: MUTATION_SQUARE_METHOD.into(),
             })
             .expect("first mutation should succeed");
-        artifacts.sem.methods[first.inserted_method.0 as usize].origin = sem::MethodOrigin::Source;
+        artifacts.sem.methods[first.inserted_method().unwrap().0 as usize].origin =
+            sem::MethodOrigin::Source;
 
         artifacts
             .apply_mutation(SessionMutation::AddMethod {
@@ -19037,7 +19613,7 @@ end;
             })
             .expect("second mutation should succeed");
 
-        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        let square = &artifacts.sem.methods[first.inserted_method().unwrap().0 as usize];
         assert!(
             matches!(square.origin, sem::MethodOrigin::Session { sequence: 0 }),
             "log-driven retag should restore the tampered origin; got {:?}",
@@ -19130,7 +19706,7 @@ end;
 
         // The first session method survives with its provenance intact.
         assert_eq!(artifacts.mutations().len(), 1);
-        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        let square = &artifacts.sem.methods[first.inserted_method().unwrap().0 as usize];
         assert!(matches!(
             square.origin,
             sem::MethodOrigin::Session { sequence: 0 }
@@ -19274,12 +19850,12 @@ end;
         // Provenance reflects the stable ids: the retained square method
         // still carries Session { 0 } and the new triangle method carries
         // Session { 2 }, not Session { 1 }.
-        let square = &artifacts.sem.methods[first.inserted_method.0 as usize];
+        let square = &artifacts.sem.methods[first.inserted_method().unwrap().0 as usize];
         assert!(matches!(
             square.origin,
             sem::MethodOrigin::Session { sequence: 0 }
         ));
-        let triangle = &artifacts.sem.methods[next.inserted_method.0 as usize];
+        let triangle = &artifacts.sem.methods[next.inserted_method().unwrap().0 as usize];
         assert!(matches!(
             triangle.origin,
             sem::MethodOrigin::Session { sequence: 2 }
@@ -19826,7 +20402,7 @@ end;
             .expect("mutation should succeed");
 
         let new_method_definition =
-            artifacts.sem.methods[outcome.inserted_method.0 as usize].definition;
+            artifacts.sem.methods[outcome.inserted_method().unwrap().0 as usize].definition;
 
         assert!(
             outcome

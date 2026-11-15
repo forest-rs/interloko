@@ -15,14 +15,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use interloko_compiler::annotation::AnnotationTarget;
 use interloko_compiler::diagnostic::Diagnostic;
 use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::HostMetaRegistry;
 use interloko_compiler::session::{
-    CompilerSession, DumpStage, EnvironmentObject, ExecutionTraceDetail, FunctionCallError,
-    FunctionCallOutcome, FunctionValue, HostFunctionHandler, MutationError, MutationOutcome,
-    RewindError, RewindOutcome, RuntimeMode, SessionArtifacts, SessionMutation,
+    AnnotationOutcome, CompilerSession, DumpStage, EnvironmentObject, ExecutionTraceDetail,
+    FunctionCallError, FunctionCallOutcome, FunctionValue, HostFunctionHandler, MutationError,
+    MutationOutcome, RewindError, RewindOutcome, RuntimeMode, SessionArtifacts, SessionMutation,
 };
+use interloko_compiler::typing::TypingConfig;
 
 /// Failure to create or change an accepted session.
 #[derive(Debug)]
@@ -110,7 +112,13 @@ impl Session {
         host_registry: HostMetaRegistry,
         codegen_policy: CodegenPolicy,
     ) -> Result<Self, SessionError> {
-        let artifacts = compile(name, source, &host_registry, codegen_policy)?;
+        let artifacts = compile(
+            name,
+            source,
+            &host_registry,
+            codegen_policy,
+            TypingConfig::default(),
+        )?;
         Ok(Self {
             revision: 0,
             artifacts,
@@ -151,6 +159,52 @@ impl Session {
         Ok(next)
     }
 
+    /// Typing configuration the accepted revision's diagnostics were
+    /// reported under.
+    #[must_use]
+    pub const fn typing_config(&self) -> TypingConfig {
+        self.artifacts.typing.config
+    }
+
+    /// Reports typing outcomes under `config` from now on, re-deriving the
+    /// accepted revision's typing diagnostics, and advances the revision.
+    ///
+    /// Like the codegen policy, the configuration is a session input rather
+    /// than a source edit: source, code and the mutation log are kept, source
+    /// replacement and mutations keep the configuration, and rewind does not
+    /// undo it. Verdicts and generated code do not change, only the severity
+    /// each verdict is reported at; the candidate must still be accepted, so
+    /// a configuration that turns a decision into a diagnostic is rejected.
+    /// Setting the configuration already in use changes nothing and keeps
+    /// the revision.
+    pub fn set_typing_config(
+        &mut self,
+        expected: u64,
+        config: TypingConfig,
+    ) -> Result<u64, SessionError> {
+        let next = self.next_revision(expected)?;
+        if config == self.typing_config() {
+            return Ok(self.revision);
+        }
+        let candidate = accepted(self.artifacts.with_typing_config(config))?;
+        self.artifacts = candidate;
+        self.revision = next;
+        Ok(next)
+    }
+
+    /// Reports what annotating `target` with `type_source` would change in
+    /// the accepted revision, without changing it: the dry run of
+    /// [`SessionMutation::Annotate`].
+    pub fn preview_annotation(
+        &self,
+        target: &AnnotationTarget,
+        type_source: &str,
+    ) -> Result<AnnotationOutcome, SessionError> {
+        self.artifacts
+            .preview_annotation(target, type_source)
+            .map_err(SessionError::Mutation)
+    }
+
     /// Accepted compiler evidence, including source, grammar and artifact facts.
     #[must_use]
     pub const fn artifacts(&self) -> &SessionArtifacts {
@@ -182,7 +236,8 @@ impl Session {
     /// Replacement starts a new source base and clears the previous base's mutation
     /// log. Callers wanting to retain mutations should use the compiler's explicit
     /// replay facilities before choosing which source to publish. The candidate is
-    /// compiled under the session's current codegen policy.
+    /// compiled under the session's current codegen policy and typing
+    /// configuration.
     pub fn replace_source(&mut self, expected: u64, source: &str) -> Result<u64, SessionError> {
         let next = self.next_revision(expected)?;
         let candidate = compile(
@@ -190,6 +245,7 @@ impl Session {
             source,
             &self.host_registry,
             self.codegen_policy(),
+            self.typing_config(),
         )?;
         self.artifacts = candidate;
         self.revision = next;
@@ -197,6 +253,10 @@ impl Session {
     }
 
     /// Applies a domain mutation atomically and advances the accepted revision.
+    ///
+    /// [`SessionMutation::Annotate`] is the typing adjustment: its outcome's
+    /// [`MutationOutcome::annotation`] reports which typing decisions the
+    /// annotation changed.
     pub fn mutate(
         &mut self,
         expected: u64,
@@ -267,9 +327,11 @@ fn compile(
     source: &str,
     host: &HostMetaRegistry,
     codegen_policy: CodegenPolicy,
+    typing_config: TypingConfig,
 ) -> Result<SessionArtifacts, SessionError> {
     let mut compiler = CompilerSession::new();
     compiler.set_codegen_policy(codegen_policy);
+    compiler.set_typing_config(typing_config);
     let file = compiler.add_source(name, source);
     let artifacts = compiler
         .compile_with_host_registry(file, RuntimeMode::CompileOnly, host)

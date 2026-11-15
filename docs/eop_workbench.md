@@ -37,6 +37,11 @@ Typical IDs include:
   a definition
 - `contract:<definition-id>` for the type contract of a function, generic,
   or method
+- `binding:<definition-id>:<name>` for a parameter or `let` binding that can
+  carry a type annotation, with `#<n>` when the name is bound more than once
+  (see [Annotation Targets](#annotation-targets))
+- `result:<definition-id>` for a function's or method's result, or a
+  constant's value
 - `runtime-class:c0` for the root runtime layout row
 - `runtime-class:c1`
 - `runtime-slot:c1.s0`
@@ -136,9 +141,11 @@ Supported read-only invocations are:
 
 The `add-method` mutation is now executable through `invoke-affordance` on
 `generic:gN` objects; see [`eop_mutation.md`](eop_mutation.md) for the
-contract. Other mutation-oriented affordances such as `edit-body` can appear
-in records but are intentionally not executable by `interloko_lab` in this
-slice.
+contract. So are the typing adjustments `annotate`, `preview-annotation`,
+`set-typing-policy`, and `set-codegen-policy`; see
+[Adjusting Typing](#adjusting-typing). Other mutation-oriented affordances
+such as `edit-body` can appear in records but are intentionally not
+executable by `interloko_lab` in this slice.
 
 ## Dispatch Sites
 
@@ -249,6 +256,141 @@ cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/typ
 Dependents are read from the recorded reasons, so they are what the current
 facts rely on rather than a dependency graph; a method's contract is cited by
 nothing, since sends rely on their generic's contract.
+
+## Adjusting Typing
+
+The objects above answer what typing decided. Four affordances change the
+inputs it decides from, and each reports a *verdict delta*: which decisions
+changed verdict, severity, or codegen. That is how a user or agent sees
+whether an adjustment pays off.
+
+- `annotate` and `preview-annotation` on `binding:` and `result:` objects
+  write a type annotation into the source, or report what writing it would
+  change without writing it.
+- `set-typing-policy` and `set-codegen-policy` on `typing-config:session`
+  change the session's policies.
+
+### Annotation Targets
+
+A binding id names a place source can declare a type by definition and name,
+never by sem's local numbering, which shifts when the body changes:
+
+- `binding:<definition-id>:<name>` is the first parameter, closure
+  parameter, or `let` binding named `<name>` in the function, method, or
+  constant `<definition-id>`, in source order;
+- `binding:<definition-id>:<name>#<n>` is the n-th one (from zero), when the
+  name is bound more than once, as in a closure parameter that shadows a
+  local; `#0` is accepted and written without the suffix;
+- `result:<definition-id>` is a function's or method's result, or a
+  constant's value.
+
+Definition ids hash the source file, the definition's kind, and its name (a
+method's also its specializers), so editing another definition, adding a
+definition, or adding a binding of another name leaves a target's id alone.
+Renaming the binding or its definition changes it, and so does annotating a
+method parameter, since that changes the method's specializers. Restart
+condition names and block exits bind names but take no annotation, so they
+are not targets and do not count toward `#<n>`; neither are bindings a
+staged grammar emitted, which have no source of their own to edit.
+
+`eop` lists every target as a `binding` or `result` object. Its inspection
+says whether the type is written or inferred and what is written:
+
+```text
+object binding:def…:s
+  inspection definition=def… role=param declared=written annotation=<shape> span=245..246
+object binding:def…:bonus
+  inspection definition=def… role=local declared=inferred annotation=none span=265..270
+```
+
+Roles are `param`, `method-param`, `closure-param`, `local`, `result`, and
+`constant-value`. `show-types` on a target renders its type, its declared
+type with `written` or `inferred`, and its narrowed uses. `show-types` on a
+definition and `dump --stage types` end each binding and result line with
+`annotation=written|inferred id=<target>`, and
+`SessionArtifacts::type_of` sets `TypeReport::declaration` the same way.
+`SessionArtifacts::annotation_sites` lists the targets for embedders.
+
+### Annotate
+
+```sh
+cargo run -p interloko_lab -- annotate tools/interloko_lab/fixtures/annotate_shapes.loko binding:def…:s '<circle>' --dry-run
+cargo run -p interloko_lab -- annotate tools/interloko_lab/fixtures/annotate_shapes.loko binding:def…:s '<circle>'
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/annotate_shapes.loko binding:def…:s annotate --type '<circle>'
+```
+
+`annotate` is the `SessionMutation::Annotate` mutation: it replaces the
+written annotation, or inserts ` :: <type>` after the name (` => <type>`
+after a parameter list, for a result), compiles the edited source as a
+candidate, and swaps it in only when the candidate has no new errors, the
+same definitions, and the target reads back with exactly the requested type.
+A type that callers violate, a class that does not exist, or text that is
+not a type is rejected and the session is left alone. Annotating a method
+parameter changes the method's specializer, and so which calls it handles;
+the outcome names the method's new target id. See
+[`eop_mutation.md`](eop_mutation.md#annotate) for the log, rewind, and replay.
+
+`preview-annotation` (`annotate --dry-run`) runs the same candidate and
+checks and reports the same delta, without swapping, logging, or using a
+mutation id. It fails exactly when `annotate` would.
+
+The delta matches each decision across the edit by owner, check kind, and
+span, not by site number, since an annotation can add a check (a typed
+`let` casts its value) and renumber the sites after it:
+
+```text
+preview annotate target=binding:def…:s annotation=<circle> previous=<shape> (not applied)
+typing delta: changed=2 added=0 removed=0 unchanged=1
+  verdicts proved 0->2 checked 3->1 refuted 0->0
+  codegen kept 3->2 elided 0->1 specialized 0->0 inlined 0->0
+  typing:def…:s0 instance verdict=checked->proved codegen=kept->elided severity=silent->warning
+  typing:def…:s1 dispatch verdict=checked->proved codegen=kept severity=silent
+```
+
+The second and third lines count every decision before and after. Each
+change line names the decision after the change, then `old->new` for what
+changed; a decision the change introduced says `added`, one it removed says
+`removed`, with its values. An empty delta (`changed=0 added=0 removed=0`)
+means the annotation buys nothing. `TypingDelta` carries the same facts
+typed, as `DecisionChange { before, after }` pairs and tallies.
+
+### Policies
+
+```sh
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/annotate_shapes.loko typing-config:session set-typing-policy strict
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/annotate_shapes.loko typing-config:session set-typing-policy soft dispatch.checked=warning
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/inlined_overflow.loko typing-config:session set-codegen-policy off
+```
+
+`set-typing-policy` takes words applied in order: a preset (`soft`,
+`silent`, `strict`) replaces the configuration, and `check.verdict=severity`
+(such as `cast.checked=warning`) changes one setting. It re-derives
+diagnostics without re-checking, so verdicts and code do not change, only
+severities. `set-codegen-policy off|proved` lowers again, so codegen facets
+change and verdicts do not. Both print the change, the delta, and any new
+diagnostics. The lab is stateless, so the policy lasts for that invocation;
+the REPL keeps it (`:typing` and `:codegen`), as do `Session` and the
+compiler sessions.
+
+Policies are session inputs, not source mutations, so neither affordance
+adds a mutation log entry. The log is a transcript of source edits that
+rewind and replay rebuild from; a policy is applied to every compile the
+session makes, like its grammar and host registries. Rewind and replay keep
+the session's current policies, `:reset` keeps them, and a policy change in
+the log would make rewinding past it silently change how the session
+reports and lowers code.
+
+In the REPL:
+
+```text
+:annotate [--dry-run] <binding:...|result:...> <type>
+:typing [preset|check.verdict=severity ...]
+:invoke <binding:...> annotate|preview-annotation <type>
+:invoke typing-config:session set-typing-policy|set-codegen-policy <args>
+```
+
+`:annotate` edits the accepted buffer through the same candidate path as
+any other change; `:typing` with no argument shows the policy.
 
 ## Codegen Policy
 
