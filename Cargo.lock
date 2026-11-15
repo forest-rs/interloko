@@ -188,7 +188,7 @@ dependencies = [
 [[package]]
 name = "execution_tape"
 version = "0.1.0"
-source = "git+https://github.com/forest-rs/execution?rev=fb18d2440afbe562f3bebbf93c2e6f3cf2218171#fb18d2440afbe562f3bebbf93c2e6f3cf2218171"
+source = "git+https://github.com/forest-rs/execution?rev=a4963de89eb4cab5a753e3b8f3ba1d747006e662#a4963de89eb4cab5a753e3b8f3ba1d747006e662"
 dependencies = [
  "libm",
 ]

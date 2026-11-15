@@ -406,17 +406,13 @@ fn frame_line(frame: &FrameSnapshot) -> String {
     let mut line = format!(
         "{}  u{}:f{}",
         code.name.as_deref().unwrap_or("?"),
-        code.func.unit.0,
-        code.func.func.0
+        code.func.unit,
+        code.func.func
     );
     if code.superseded
         && let Some(current) = code.current
     {
-        let _ = write!(
-            line,
-            "  superseded by u{}:f{}",
-            current.unit.0, current.func.0
-        );
+        let _ = write!(line, "  superseded by u{}:f{}", current.unit, current.func);
     }
     if let Some(refusal) = &code.retry_refusal {
         let _ = write!(line, "  (cannot retry: {refusal})");
@@ -432,7 +428,7 @@ fn link_line(link: &LinkSnapshot) -> String {
     };
     format!(
         "u{}:link#{} {}  -> {target} u{}:f{}",
-        link.unit.0, link.link.0, link.name, link.target.unit.0, link.target.func.0
+        link.unit, link.link.0, link.name, link.target.unit, link.target.func
     )
 }
 

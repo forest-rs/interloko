@@ -3962,8 +3962,14 @@ mod tests {
             ValueType::I64
         ]);
         asm.const_u64(Reg(2), u64::from(slot.0));
-        asm.host_call(Reg(0), host_sig, Reg(0), &[Reg(1), Reg(2)], &[Reg(3)]);
-        asm.ret(Reg(0), &[Reg(3)]);
+        asm.host_call(
+            Reg::EFFECT,
+            host_sig,
+            Reg::EFFECT,
+            &[Reg(1), Reg(2)],
+            &[Reg(3)],
+        );
+        asm.ret(Reg::EFFECT, &[Reg(3)]);
         let entry = builder
             .push_function_checked(
                 asm,
@@ -4024,15 +4030,15 @@ mod tests {
         if let Some(tag) = tag {
             asm.begin_region(&[Catch::Tag(tag, failed)]);
         }
-        asm.host_call(Reg(0), cast, Reg(0), &[Reg(1), Reg(2)], &[Reg(3)]);
+        asm.host_call(Reg::EFFECT, cast, Reg::EFFECT, &[Reg(1), Reg(2)], &[Reg(3)]);
         if tag.is_some() {
             asm.end_region().expect("region closes");
         }
         asm.const_i64(Reg(4), 1);
-        asm.ret(Reg(0), &[Reg(4)]);
+        asm.ret(Reg::EFFECT, &[Reg(4)]);
         asm.place(failed).expect("label");
         asm.const_i64(Reg(4), 0);
-        asm.ret(Reg(0), &[Reg(4)]);
+        asm.ret(Reg::EFFECT, &[Reg(4)]);
         let entry = builder
             .push_function_checked(
                 asm,

@@ -28,9 +28,6 @@ use interloko_runtime::code::{CodeUnit, method_link};
 use interloko_runtime::control::{ControlLayout, TypeErrorSite};
 use interloko_runtime::{self as runtime, RuntimeLayout};
 
-/// The tape effect register, r0, which effectful instructions thread.
-const EFFECT: Reg = Reg(0);
-
 /// A verified tape program emitted from lowered Interloko IR.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TapeModule {
@@ -1439,7 +1436,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_pool(value_reg, value_const);
                 self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[value_reg], &[*dst]);
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[value_reg], &[*dst]);
             }
             lower::Instr::SymbolLiteral {
                 dst, name, span, ..
@@ -1449,7 +1446,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_pool(name_reg, name_const);
                 self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[name_reg], &[*dst]);
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[name_reg], &[*dst]);
             }
             lower::Instr::ConstU64 { dst, value, span } => {
                 self.set_span(*span);
@@ -1533,7 +1530,8 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 };
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, &[*src], &[*dst]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*src], &[*dst]);
             }
             lower::Instr::I64Binary {
                 dst,
@@ -1620,7 +1618,8 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 let sig = self.abi.float_function(*function)?;
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, args, &[*dst]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
             }
             lower::Instr::F64NotEqual {
                 dst,
@@ -1690,8 +1689,13 @@ impl<'a> FunctionEmitter<'a> {
                 ..
             } => {
                 self.set_span(*span);
-                self.asm
-                    .host_call(EFFECT, self.abi.value_eq, EFFECT, &[*lhs, *rhs], &[*dst]);
+                self.asm.host_call(
+                    Reg::EFFECT,
+                    self.abi.value_eq,
+                    Reg::EFFECT,
+                    &[*lhs, *rhs],
+                    &[*dst],
+                );
             }
             lower::Instr::Call {
                 dsts,
@@ -1706,7 +1710,7 @@ impl<'a> FunctionEmitter<'a> {
                     .copied()
                     .ok_or_else(|| invalid_lowered("callee id is out of range"))?;
                 self.set_span(*span);
-                self.asm.call(EFFECT, callee, EFFECT, args, dsts);
+                self.asm.call(Reg::EFFECT, callee, Reg::EFFECT, args, dsts);
             }
             lower::Instr::SelectMethod {
                 dst,
@@ -1728,7 +1732,8 @@ impl<'a> FunctionEmitter<'a> {
                 let mut operands = Vec::with_capacity(args.len() + 1);
                 operands.push(generic_reg);
                 operands.extend(args);
-                self.asm.host_call(EFFECT, sig, EFFECT, &operands, &[*dst]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &operands, &[*dst]);
             }
             lower::Instr::LinkedSend {
                 dsts,
@@ -1739,7 +1744,7 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.set_span(*span);
                 self.asm
-                    .call_link(EFFECT, method_link(*method), EFFECT, args, dsts);
+                    .call_link(Reg::EFFECT, method_link(*method), Reg::EFFECT, args, dsts);
             }
             lower::Instr::CallIndirect {
                 dsts,
@@ -1763,7 +1768,7 @@ impl<'a> FunctionEmitter<'a> {
                     .map_err(build_error)?;
                 self.set_span(*span);
                 self.asm
-                    .call_indirect(EFFECT, sig, *callee, EFFECT, args, dsts);
+                    .call_indirect(Reg::EFFECT, sig, *callee, Reg::EFFECT, args, dsts);
             }
             lower::Instr::MakeObject {
                 dst,
@@ -1780,9 +1785,9 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm.tuple_new(fields_reg, fields);
                 self.asm.host_call(
-                    EFFECT,
+                    Reg::EFFECT,
                     self.abi.make_object,
-                    EFFECT,
+                    Reg::EFFECT,
                     &[class_reg, fields_reg],
                     &[*dst],
                 );
@@ -1798,7 +1803,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.array_new(aggregate, elem, elements);
                 self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[aggregate], &[*dst]);
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[aggregate], &[*dst]);
             }
             lower::Instr::RuntimeCall {
                 dst,
@@ -1809,7 +1814,8 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 let sig = self.abi.runtime_call(*op)?;
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, args, &[*dst]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
             }
             lower::Instr::HostCall {
                 dst,
@@ -1820,7 +1826,8 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 let sig = self.abi.host_function(*function)?;
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, args, &[*dst]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
             }
             lower::Instr::ReadSlot {
                 dst,
@@ -1840,8 +1847,13 @@ impl<'a> FunctionEmitter<'a> {
                 let slot_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(slot_reg, u64::from(slot.0));
-                self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[*receiver, slot_reg], &[*dst]);
+                self.asm.host_call(
+                    Reg::EFFECT,
+                    sig,
+                    Reg::EFFECT,
+                    &[*receiver, slot_reg],
+                    &[*dst],
+                );
             }
             lower::Instr::WriteSlot {
                 dst,
@@ -1862,8 +1874,13 @@ impl<'a> FunctionEmitter<'a> {
                 let slot_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(slot_reg, u64::from(slot.0));
-                self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[*receiver, slot_reg, *value], &[*dst]);
+                self.asm.host_call(
+                    Reg::EFFECT,
+                    sig,
+                    Reg::EFFECT,
+                    &[*receiver, slot_reg, *value],
+                    &[*dst],
+                );
             }
             lower::Instr::ClassOf {
                 dst,
@@ -1877,7 +1894,8 @@ impl<'a> FunctionEmitter<'a> {
                     self.abi.class_of
                 };
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, &[*object], &[*dst]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*object], &[*dst]);
             }
             lower::Instr::UnboxValue {
                 dst,
@@ -1914,7 +1932,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*value, class_reg], &[*dst]);
             }
             lower::Instr::CastObject {
                 dst,
@@ -1977,7 +1995,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             lower::Instr::Return { values, span } => {
                 self.set_span(*span);
-                self.asm.ret(EFFECT, values);
+                self.asm.ret(Reg::EFFECT, values);
             }
             lower::Instr::Trap { trap, span } => {
                 self.set_span(*span);
@@ -2000,23 +2018,29 @@ impl<'a> FunctionEmitter<'a> {
                 match guard {
                     Some(guard) => {
                         self.asm.host_call(
-                            EFFECT,
+                            Reg::EFFECT,
                             guarded,
-                            EFFECT,
+                            Reg::EFFECT,
                             &[descriptor_reg, *guard],
                             &[*dst],
                         );
                     }
                     None => {
-                        self.asm
-                            .host_call(EFFECT, plain, EFFECT, &[descriptor_reg], &[*dst]);
+                        self.asm.host_call(
+                            Reg::EFFECT,
+                            plain,
+                            Reg::EFFECT,
+                            &[descriptor_reg],
+                            &[*dst],
+                        );
                     }
                 }
             }
             lower::Instr::PopBinding { token, span } => {
                 let sig = self.abi.control()?.pop;
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, &[*token], &[]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*token], &[]);
             }
             lower::Instr::Signal {
                 dsts,
@@ -2047,7 +2071,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .begin_region(&[Catch::Tag(check_failed, otherwise)]);
                 self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[*value, class], &[*dst]);
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*value, class], &[*dst]);
                 self.asm
                     .end_region()
                     .ok_or_else(|| invalid_lowered("unbox region is not open"))?;
@@ -2062,8 +2086,13 @@ impl<'a> FunctionEmitter<'a> {
                 let generic_id = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
                 self.asm.const_u64(generic_id, u64::from(generic.0));
-                self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[generic_id, *arguments], &[*dst]);
+                self.asm.host_call(
+                    Reg::EFFECT,
+                    sig,
+                    Reg::EFFECT,
+                    &[generic_id, *arguments],
+                    &[*dst],
+                );
             }
             lower::Instr::SignalTypeError {
                 dst,
@@ -2081,7 +2110,8 @@ impl<'a> FunctionEmitter<'a> {
                 let mut args = values.clone();
                 args.push(site);
                 let sig = self.abi.control()?.type_error_sig(&types)?;
-                self.asm.host_call(EFFECT, sig, EFFECT, &args, &[condition]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &args, &[condition]);
                 let result = self.register_type(*dst)?;
                 self.emit_signal(&[result], &[*dst], condition, *span)?;
                 let resume = self.label(*resume)?;
@@ -2112,17 +2142,19 @@ impl<'a> FunctionEmitter<'a> {
             }
             lower::Instr::Rethrow { exception, span } => {
                 self.set_span(*span);
-                self.asm.throw_ref(EFFECT, *exception);
+                self.asm.throw_ref(Reg::EFFECT, *exception);
             }
             lower::Instr::PushExit { dst, span } => {
                 let sig = self.abi.control()?.push_exit;
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, &[], &[*dst]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[], &[*dst]);
             }
             lower::Instr::CheckExit { token, span } => {
                 let sig = self.abi.control()?.check_exit;
                 self.set_span(*span);
-                self.asm.host_call(EFFECT, sig, EFFECT, &[*token], &[]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*token], &[]);
             }
             lower::Instr::Throw { tag, payload, span } => {
                 let tag = self.abi.tag(*tag)?;
@@ -2179,33 +2211,41 @@ impl<'a> FunctionEmitter<'a> {
         let unwound = self.asm.block(&[escaped]);
         self.set_span(span);
         self.asm
-            .host_call(EFFECT, signal, EFFECT, &[condition], &[pending]);
+            .host_call(Reg::EFFECT, signal, Reg::EFFECT, &[condition], &[pending]);
         // Every block ends in a terminator: control never falls into a label.
         self.asm.jmp(search);
         self.asm.place(search).map_err(build_error)?;
         self.asm.br(pending, run_guard, none);
         self.asm.place(run_guard).map_err(build_error)?;
-        self.asm.host_call(EFFECT, guard, EFFECT, &[], &[closure]);
+        self.asm
+            .host_call(Reg::EFFECT, guard, Reg::EFFECT, &[], &[closure]);
         self.asm.begin_region(&[Catch::AllRef(unwound)]);
         self.asm.call_indirect(
-            EFFECT,
+            Reg::EFFECT,
             guard_call,
             closure,
-            EFFECT,
+            Reg::EFFECT,
             &[condition],
             &[accepted],
         );
         self.asm
             .end_region()
             .ok_or_else(|| invalid_lowered("guard region is not open"))?;
-        self.asm
-            .host_call(EFFECT, guard_result, EFFECT, &[accepted], &[pending]);
+        self.asm.host_call(
+            Reg::EFFECT,
+            guard_result,
+            Reg::EFFECT,
+            &[accepted],
+            &[pending],
+        );
         self.asm.jmp(search);
         self.asm.place(unwound).map_err(build_error)?;
-        self.asm.host_call(EFFECT, guard_unwound, EFFECT, &[], &[]);
-        self.asm.throw_ref(EFFECT, escaped);
+        self.asm
+            .host_call(Reg::EFFECT, guard_unwound, Reg::EFFECT, &[], &[]);
+        self.asm.throw_ref(Reg::EFFECT, escaped);
         self.asm.place(none).map_err(build_error)?;
-        self.asm.suspend(EFFECT, tag, EFFECT, &[condition], dsts);
+        self.asm
+            .suspend(Reg::EFFECT, tag, Reg::EFFECT, &[condition], dsts);
         Ok(())
     }
 
@@ -2267,8 +2307,13 @@ impl<'a> FunctionEmitter<'a> {
         self.set_span(span);
         self.asm.const_u64(class, u64::from(check.class));
         self.asm.begin_region(&[Catch::Tag(check_failed, failed)]);
-        self.asm
-            .host_call(EFFECT, check.sig, EFFECT, &[operand, class], &[dst]);
+        self.asm.host_call(
+            Reg::EFFECT,
+            check.sig,
+            Reg::EFFECT,
+            &[operand, class],
+            &[dst],
+        );
         self.asm
             .end_region()
             .ok_or_else(|| invalid_lowered("check region is not open"))?;
@@ -2278,8 +2323,13 @@ impl<'a> FunctionEmitter<'a> {
         let condition = self.shared_temp(SharedTemp::Condition, runtime::object_type());
         let operand_type = self.register_type(operand)?;
         let report = control.type_error_sig(&[operand_type])?;
-        self.asm
-            .host_call(EFFECT, report, EFFECT, &[operand, site], &[condition]);
+        self.asm.host_call(
+            Reg::EFFECT,
+            report,
+            Reg::EFFECT,
+            &[operand, site],
+            &[condition],
+        );
         let result = self.register_type(dst)?;
         match check.recheck {
             None => {
@@ -2294,17 +2344,22 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm.place(retry).map_err(build_error)?;
                 self.emit_signal(&[result], &[replacement], condition, span)?;
                 self.asm.begin_region(&[Catch::Tag(check_failed, refailed)]);
-                self.asm
-                    .host_call(EFFECT, recheck, EFFECT, &[replacement, class], &[dst]);
+                self.asm.host_call(
+                    Reg::EFFECT,
+                    recheck,
+                    Reg::EFFECT,
+                    &[replacement, class],
+                    &[dst],
+                );
                 self.asm
                     .end_region()
                     .ok_or_else(|| invalid_lowered("recheck region is not open"))?;
                 self.asm.jmp(done);
                 self.asm.place(refailed).map_err(build_error)?;
                 self.asm.host_call(
-                    EFFECT,
+                    Reg::EFFECT,
                     report_again,
-                    EFFECT,
+                    Reg::EFFECT,
                     &[replacement, site],
                     &[condition],
                 );
@@ -2346,9 +2401,7 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn set_span(&mut self, span: Span) {
-        if let Some(span_id) = span_id(span) {
-            self.asm.span(span_id);
-        }
+        self.asm.span(span_id(span));
     }
 
     fn instance_sig(&self, kind: lower::ValueKind) -> Result<HostSigId, TapeError> {
@@ -2436,9 +2489,9 @@ fn invalid_lowered(message: &str) -> TapeError {
 }
 
 /// Encodes a source span as its start offset plus one; span ids are non-zero.
-fn span_id(span: Span) -> Option<SpanId> {
+fn span_id(span: Span) -> SpanId {
     let start = u64::try_from(span.start).unwrap_or(u64::MAX - 1);
-    SpanId::try_from(start.saturating_add(1)).ok()
+    SpanId::new(start.saturating_add(1))
 }
 
 /// Recovers the source start offset encoded by [`span_id`].
@@ -2565,7 +2618,7 @@ mod tests {
 
         assert_eq!(
             program
-                .function_arg_types(&program.functions[1])
+                .function_arg_types(program.function(FuncId(1)).expect("callit"))
                 .expect("callit args should decode"),
             &[ValueType::Closure],
         );
