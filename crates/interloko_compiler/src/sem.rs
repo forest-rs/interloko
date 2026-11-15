@@ -3216,6 +3216,30 @@ impl GenericSymbol {
     }
 }
 
+/// How one result of an untyped callable call is checked back to the kind its
+/// call site expects.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum UntypedResultCheck {
+    /// The tape's register type already establishes the kind.
+    Trusted(ValueKind),
+    /// An `<integer>` result is converted, with a range check, to a limited
+    /// integer.
+    Convert(NumericKind),
+    /// An object result is cast to the class.
+    Cast(ClassId),
+}
+
+impl UntypedResultCheck {
+    /// Returns the kind the call itself produces, before the check.
+    fn wire_kind(&self) -> ValueKind {
+        match *self {
+            Self::Trusted(kind) => kind,
+            Self::Convert(_) => ValueKind::I64,
+            Self::Cast(_) => ValueKind::Object(OBJECT_CLASS_ID),
+        }
+    }
+}
+
 struct FunctionContext {
     locals: Vec<Local>,
     visible_locals: Vec<bool>,
@@ -5375,7 +5399,9 @@ impl Lowering {
                     );
                     let actual_kinds = self.expr_kinds(&value);
                     let actual_callable_sigs = self.expr_result_callable_signatures(&value);
-                    if bindings.len() != actual_kinds.len() {
+                    if bindings.len() != actual_kinds.len()
+                        && !result_kinds_contain_error(&actual_kinds)
+                    {
                         ctx.diagnostics.push(
                             Diagnostic::error(
                                 local.value.span(),
@@ -6856,9 +6882,16 @@ impl Lowering {
             );
             return Expr::Error { span };
         };
-        // An untyped callable's register kinds come from the call site, so
-        // limited integers cross it as the `<integer>`s they are: arguments
-        // widen, and a limited result is checked back into range.
+        // An untyped callable's register kinds come from the call site, and
+        // nothing about the callee backs them: the registers only carry
+        // `object`, so a `<square>` arrives where the context wants a
+        // `<circle>`. Each result therefore crosses at the widest kind its
+        // register can carry and is checked back to the context's kind: a
+        // limited integer by a range conversion, a class by a cast. Both are
+        // ordinary check sites, so soft typing sees (and may later prove)
+        // them. Arguments go at the caller's kinds, limited integers widened;
+        // the callee's indirect entry checks the parameter classes it relies
+        // on, since only it knows them.
         let as_integer = |kind: ValueKind| match kind {
             ValueKind::I32 | ValueKind::U32 => ValueKind::I64,
             kind => kind,
@@ -6867,23 +6900,82 @@ impl Lowering {
             .iter()
             .map(|arg| as_integer(self.expr_kind(arg)))
             .collect::<Vec<_>>();
-        let call = |result_kinds: Vec<ValueKind>| Expr::CallableCall {
+        let checks = result_kinds
+            .iter()
+            .map(|kind| self.untyped_result_check(*kind))
+            .collect::<Option<Vec<_>>>();
+        let checks = match checks {
+            Some(checks)
+                if result_kinds.len() == 1
+                    || checks
+                        .iter()
+                        .all(|check| matches!(check, UntypedResultCheck::Trusted(_))) =>
+            {
+                checks
+            }
+            _ => {
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::UncheckedCallableResult).with_arg(
+                        DiagnosticArg::text("expected", self.result_kinds_name(result_kinds)),
+                    ),
+                );
+                return Expr::Error { span };
+            }
+        };
+        let wire_kinds = checks.iter().map(UntypedResultCheck::wire_kind).collect();
+        let call = Expr::CallableCall {
             callable: Box::new(target),
             args,
             arg_kinds,
             result_callable_sigs: vec![None; result_kinds.len()],
-            result_kinds,
+            result_kinds: wire_kinds,
             span,
         };
-        match result_kinds {
-            [narrow @ (ValueKind::I32 | ValueKind::U32)] => Expr::Convert {
+        match checks.as_slice() {
+            [UntypedResultCheck::Convert(to)] => Expr::Convert {
                 site: SiteId::PENDING,
-                to: NumericKind::of(*narrow).unwrap_or(NumericKind::Integer),
-                value: Box::new(call(vec![ValueKind::I64])),
+                to: *to,
+                value: Box::new(call),
                 span,
             },
-            _ => call(result_kinds.iter().copied().map(as_integer).collect()),
+            [UntypedResultCheck::Cast(class)] => Expr::Cast {
+                value: Box::new(call),
+                class: *class,
+                site: SiteId::PENDING,
+                span,
+            },
+            _ => call,
         }
+    }
+
+    /// Returns how one result of an untyped callable call reaches the call
+    /// site's `kind`, or `None` when no runtime check can establish it.
+    ///
+    /// Unboxed numbers, booleans, `<object>` and callables are register
+    /// types the tape itself enforces at the call. Every class shares the
+    /// `object` register type, so a class result arrives as any object and
+    /// is cast. Metaobject kinds name one class, generic, method or slot,
+    /// which no cast can check.
+    fn untyped_result_check(&self, kind: ValueKind) -> Option<UntypedResultCheck> {
+        Some(match kind {
+            ValueKind::I32 | ValueKind::U32 => {
+                UntypedResultCheck::Convert(NumericKind::of(kind).unwrap_or(NumericKind::Integer))
+            }
+            ValueKind::Object(class)
+            | ValueKind::String(class)
+            | ValueKind::Symbol(class)
+            | ValueKind::Vector(class)
+                if class != OBJECT_CLASS_ID =>
+            {
+                UntypedResultCheck::Cast(class)
+            }
+            ValueKind::ClassObject(_)
+            | ValueKind::GenericFunctionObject(_)
+            | ValueKind::MethodObject(_)
+            | ValueKind::SlotDescriptorObject { .. }
+            | ValueKind::KnownCallable(_) => return None,
+            kind => UntypedResultCheck::Trusted(kind),
+        })
     }
 
     fn generic_callable_arg_kind(&self, generic: GenericFunctionId, index: usize) -> ValueKind {

@@ -160,6 +160,9 @@ pub enum DiagnosticCode {
     ApplyArityMismatch,
     /// `apply` target is not a known callable.
     ApplyTargetTypeMismatch,
+    /// An untyped callable's results cannot be checked at runtime as the kinds
+    /// its call site expects.
+    UncheckedCallableResult,
     /// A signal expression is not a known condition object.
     SignalConditionTypeMismatch,
     /// A handle body and restart handler have incompatible result kinds.
@@ -330,6 +333,7 @@ impl DiagnosticCode {
         Self::ComparisonOperandTypeMismatch,
         Self::ApplyArityMismatch,
         Self::ApplyTargetTypeMismatch,
+        Self::UncheckedCallableResult,
         Self::SignalConditionTypeMismatch,
         Self::HandleRestartResultMismatch,
         Self::BlockExitResultMismatch,
@@ -450,6 +454,7 @@ impl DiagnosticCode {
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
+            Self::UncheckedCallableResult => "sem.unchecked-callable-result",
             Self::SignalConditionTypeMismatch => "sem.signal-condition-type-mismatch",
             Self::HandleRestartResultMismatch => "sem.handle-restart-result-mismatch",
             Self::BlockExitResultMismatch => "sem.block-exit-result-mismatch",
@@ -571,6 +576,7 @@ impl DiagnosticCode {
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,
+            "sem.unchecked-callable-result" => Self::UncheckedCallableResult,
             "sem.signal-condition-type-mismatch" => Self::SignalConditionTypeMismatch,
             "sem.handle-restart-result-mismatch" => Self::HandleRestartResultMismatch,
             "sem.block-exit-result-mismatch" => Self::BlockExitResultMismatch,

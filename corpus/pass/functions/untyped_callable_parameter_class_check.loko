@@ -1,0 +1,29 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains callable thunk DirectFunction
+// expect: dump lowered contains as <circle>
+
+// A caller applying an untyped `<callable>` cannot know the classes its
+// callee relies on, so the function's callable thunk (its only indirect
+// entry) checks them. `radius-of` is handed a `<square>` and the check fails
+// instead of the body reading `side` as `radius`.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function call-with(f :: <callable>, s :: <square>) => <integer>
+  apply(f, s)
+end;
+
+define function main()
+  call-with(radius-of, make(<square>, side: 7))
+end;

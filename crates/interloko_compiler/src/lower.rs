@@ -1772,9 +1772,27 @@ impl<'module> Lowering<'module> {
         let mut register_kinds = vec![ValueKind::Aggregate];
         register_kinds.extend(kinds.iter().copied());
         register_kinds.push(ValueKind::U64);
-        let mut payload = vec![token];
-        payload.extend(values.iter().copied());
         let span = Span::new(0, 0);
+        // An exit procedure is a first-class callable, so whoever invokes it
+        // may not know the block's result classes.
+        let mut checks = Vec::new();
+        let mut payload = vec![token];
+        for (value, kind) in values.iter().zip(&kinds) {
+            let Some(class) = entry_check_class(*kind) else {
+                payload.push(*value);
+                continue;
+            };
+            register_kinds.push(*kind);
+            let checked = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
+            checks.push(Instr::CastObject {
+                dst: checked,
+                value: *value,
+                input: *kind,
+                class,
+                span,
+            });
+            payload.push(checked);
+        }
         Ok(Function {
             id: thunk.function,
             name: format!("exit#{}", thunk.signature.0),
@@ -1786,7 +1804,7 @@ impl<'module> Lowering<'module> {
             rets: kinds,
             register_kinds,
             locals: Vec::new(),
-            instructions: vec![
+            instructions: [
                 Instr::CaptureGet {
                     dst: token,
                     env,
@@ -1795,12 +1813,15 @@ impl<'module> Lowering<'module> {
                     span,
                 },
                 Instr::CheckExit { token, span },
-                Instr::Throw {
-                    tag: ControlTag::Exit(thunk.signature),
-                    payload,
-                    span,
-                },
-            ],
+            ]
+            .into_iter()
+            .chain(checks)
+            .chain([Instr::Throw {
+                tag: ControlTag::Exit(thunk.signature),
+                payload,
+                span,
+            }])
+            .collect(),
             span,
         })
     }
@@ -2029,7 +2050,7 @@ impl<'module> Lowering<'module> {
                     reg: input_register(index + 1),
                 }),
         );
-        let call_args = (0..spec.call_params.len())
+        let mut call_args = (0..spec.call_params.len())
             .map(|index| input_register(index + 1))
             .collect::<Vec<_>>();
         let results = spec
@@ -2044,6 +2065,27 @@ impl<'module> Lowering<'module> {
             .map(|param| param.kind)
             .chain(spec.rets.iter().copied())
             .collect::<Vec<_>>();
+        // The thunk is the callable's indirect entry, so it checks the
+        // parameter classes its target relies on. A generic's dispatch
+        // already checks every argument's class.
+        let mut instructions = Vec::new();
+        if !matches!(spec.callable, sem::KnownCallable::GenericFunction(_)) {
+            for (arg, kind) in call_args.iter_mut().zip(spec.call_params) {
+                let Some(class) = entry_check_class(*kind) else {
+                    continue;
+                };
+                register_kinds.push(*kind);
+                let checked = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
+                instructions.push(Instr::CastObject {
+                    dst: checked,
+                    value: *arg,
+                    input: *kind,
+                    class,
+                    span: spec.span,
+                });
+                *arg = checked;
+            }
+        }
         let call = match spec.callable {
             // A first-class generic sends like a call site.
             sem::KnownCallable::GenericFunction(generic) => {
@@ -2074,7 +2116,7 @@ impl<'module> Lowering<'module> {
                 span: spec.span,
             }],
         };
-        let mut instructions = call;
+        instructions.extend(call);
         instructions.push(Instr::Return {
             values: results,
             span: spec.span,
@@ -2659,6 +2701,23 @@ impl<'module> BodyLowering<'module> {
             this.bind_param(closure.locals.get(local_id.0 as usize), local_id, reg)?;
         }
         this.next_reg = next_after_inputs(closure.params.len() + 1);
+        // A closure is only ever entered through `call.indirect`, whose
+        // caller may not know its parameter classes; see `entry_check_class`.
+        for (index, local_id) in closure.params.iter().copied().enumerate() {
+            let (reg, kind) = (this.params[index + 1].reg, this.params[index + 1].kind);
+            let Some(class) = entry_check_class(kind) else {
+                continue;
+            };
+            let checked = this.alloc(kind);
+            this.instructions.push(Instr::CastObject {
+                dst: checked.reg,
+                value: reg,
+                input: kind,
+                class,
+                span: closure.span,
+            });
+            this.set_local(local_id, checked)?;
+        }
         Ok(this)
     }
 
@@ -6279,6 +6338,22 @@ fn sorted_methods<'module>(
         }
     });
     methods
+}
+
+/// Returns the class a callable's indirect entry must check a `kind`
+/// parameter against, if any.
+///
+/// A `call.indirect` caller holding an untyped `<callable>` supplies whatever
+/// classes it has, and the tape's `object` register type erases them, so an
+/// entry that may be called that way (a callable thunk, a closure, an exit
+/// procedure) checks each object parameter narrower than `<object>` before
+/// its body relies on the class. Unboxed numbers, booleans and callables are
+/// distinct register types the tape checks itself.
+fn entry_check_class(kind: ValueKind) -> Option<sem::ClassId> {
+    match kind {
+        ValueKind::Object(Some(class)) if class != sem::OBJECT_CLASS_ID => Some(class),
+        _ => None,
+    }
 }
 
 fn input_register(index: usize) -> Register {

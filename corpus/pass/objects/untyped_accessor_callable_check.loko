@@ -1,0 +1,23 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains radius#closure
+// expect: dump lowered contains as <circle>
+
+// A slot accessor taken as a value reads its slot at a fixed offset, so its
+// callable thunk checks the receiver's class first.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function call-with(f :: <callable>, s :: <square>) => <integer>
+  apply(f, s)
+end;
+
+define function main()
+  call-with(radius, make(<square>, side: 7))
+end;

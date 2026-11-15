@@ -1,0 +1,31 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump sem contains callable-call result=object(c0)
+// expect: dump lowered contains as <circle>
+// expect: dump typing contains s0 cast checked rule=cast-narrowing
+
+// An untyped `<callable>` promises nothing about its result, and every class
+// shares one register type, so the `<circle>` the context wants is a cast
+// on whatever object comes back. Here the callable returns a `<square>`:
+// the cast fails rather than reading its `side` as a `radius`.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function square-of(x :: <integer>) => <square>
+  make(<square>, side: x)
+end;
+
+define function radius-via(f :: <callable>, x :: <integer>) => <integer>
+  let r :: <circle> = apply(f, x);
+  r.radius
+end;
+
+define function main()
+  radius-via(square-of, 7)
+end;

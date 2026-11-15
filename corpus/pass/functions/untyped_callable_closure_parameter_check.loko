@@ -1,0 +1,22 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains as <circle>
+
+// A closure is only entered through an indirect call, so it checks its own
+// parameter classes on entry.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function call-with(f :: <callable>, s :: <square>) => <integer>
+  apply(f, s)
+end;
+
+define function main()
+  call-with(function (c :: <circle>) => <integer> c.radius end, make(<square>, side: 7))
+end;

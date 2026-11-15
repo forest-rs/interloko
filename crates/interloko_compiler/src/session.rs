@@ -5099,8 +5099,12 @@ fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::Cla
             .constants
             .get(constant.0 as usize)
             .and_then(|constant| exact_static_class(module, &constant.value)),
+        // A call's result is only bounded by its kind's class, which names
+        // its exact class only when that class is closed (`<integer>`, say).
         sem::Expr::CallableCall { result_kinds, .. } => match result_kinds.as_slice() {
-            [kind] => module.value_kind_class(*kind),
+            [kind] => module
+                .value_kind_class(*kind)
+                .filter(|class| interloko_model::types::ClassHierarchy::is_closed(module, *class)),
             _ => None,
         },
         sem::Expr::Cast { value, .. } => exact_static_class(module, value),

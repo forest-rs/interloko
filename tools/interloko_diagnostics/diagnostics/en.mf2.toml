@@ -58,6 +58,7 @@
 "sem.limited-parameter-specializer" = "the generic declares this parameter { $type }; a method must specialize it as { $type } too, so its body computes with the same type"
 "sem.apply-arity-mismatch" = "apply expects a callable and arguments"
 "sem.apply-target-type-mismatch" = "apply target must be a { $expected }, got { $actual }"
+"sem.unchecked-callable-result" = "an untyped <callable> cannot be checked to return { $expected }; declare its signature with callable(...) => ..."
 "sem.signal-condition-type-mismatch" = "signal condition must be a known object"
 "sem.handle-restart-result-mismatch" = "handle body and restart must have matching result kinds: body { $body }, restart { $restart }"
 "sem.block-exit-result-mismatch" = "block body and exit must have matching result kinds: body { $body }, exit { $exit }"
