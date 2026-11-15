@@ -90,8 +90,13 @@
 //!
 //! The pass is advisory. Its facts are recorded per enclosing definition
 //! ([`DefinitionTyping`]), each keyed by the check's [`SiteId`] within that
-//! definition, and never feed lowering, tape emission, or the runtime, which
-//! keep their own dynamic checks. [`TypingConfig`] maps each check and
+//! definition. By default lowering ignores them and keeps every dynamic
+//! check; under [`crate::lower::CodegenPolicy::Proved`] it drops or
+//! specializes the checks proved here (see [`crate::lower`]). That is sound
+//! only because a fact's reasons cite nothing beyond the owner's body but
+//! contracts, which give a value sem's category for it (never a finer type
+//! read from another body), and the closed-world assumptions the runtime
+//! layout fixes. [`TypingConfig`] maps each check and
 //! verdict to a [`TypingSeverity`]; the default reports refuted obligations
 //! and statically decided `instance?` tests as warnings and keeps
 //! runtime-checked ones silent. Changing the configuration re-derives
@@ -621,6 +626,13 @@ pub enum ReasonKind {
     /// A value built here: `make`, or a closure.
     Constructed,
     /// The result contract of a callee, accessor, or constant.
+    ///
+    /// The fact's type is the category sem gives the value, which is what
+    /// the callee's contract promises; it is never refined from the
+    /// callee's body. A constant's is the type its value is inferred to
+    /// have, which is sound to rely on because the value is lowered where
+    /// it is read. Lowering under [`crate::lower::CodegenPolicy::Proved`]
+    /// relies on both.
     Contract {
         /// Definition owning the contract.
         definition: DefinitionId,
@@ -824,6 +836,32 @@ impl DefinitionTyping {
         self.binding(binding)
             .and_then(|fact| self.reason(fact.reason))
             .map(|reason| &reason.ty)
+    }
+
+    /// Returns the type the flow facts give a read of `binding` at `span`,
+    /// or `None` when the body does not bind it.
+    ///
+    /// This is the read's [`UseFact`] when it has one, or else the binding's
+    /// fact. A read's fact is never wider than sem's category at the use;
+    /// where only that category made it narrower, this returns the fact
+    /// before it was applied, so the result is what flow typing itself
+    /// established.
+    #[must_use]
+    pub fn read_type(&self, binding: Binding, span: Span) -> Option<&Type> {
+        let Some(read) = self
+            .uses
+            .iter()
+            .find(|read| read.binding == binding && read.span == span)
+        else {
+            return self.binding_type(binding);
+        };
+        let reason = self.reason(read.reason)?;
+        match (&reason.kind, reason.from.as_slice()) {
+            (ReasonKind::Declared, [before]) if reason.span == span => {
+                self.reason(*before).map(|before| &before.ty)
+            }
+            _ => Some(&reason.ty),
+        }
     }
 
     /// Returns the type of the body's result.

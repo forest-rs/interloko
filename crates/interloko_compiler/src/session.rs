@@ -1246,28 +1246,7 @@ impl InspectionFacet {
     }
 }
 
-/// What generated code does with the runtime check a typing decision
-/// classifies.
-///
-/// Typing is advisory today: lowering keeps every runtime check, whatever
-/// the verdict. When lowering starts to use typing facts, a check it drops
-/// or specializes reports so here.
-#[non_exhaustive]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum CheckCodegen {
-    /// The generated code performs the runtime check.
-    Kept,
-}
-
-impl CheckCodegen {
-    /// Returns the stable label used in EOP records.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Kept => "kept",
-        }
-    }
-}
+pub use crate::lower::CheckCodegen;
 
 /// Typed soft typing data carried by typing and contract environment
 /// objects.
@@ -1886,22 +1865,57 @@ impl SessionArtifacts {
         artifacts
     }
 
+    /// Returns what the generated code does with the check `decision`
+    /// classifies: [`CheckCodegen::Kept`] unless lowering acted on it under
+    /// [`lower::CodegenPolicy::Proved`].
+    #[must_use]
+    pub fn check_codegen(&self, decision: &typing::TypingDecision) -> CheckCodegen {
+        self.lowered.as_ref().map_or(CheckCodegen::Kept, |lowered| {
+            lowered.check_codegen(decision.owner, decision.site)
+        })
+    }
+
     /// Returns the codegen policy these artifacts were compiled under.
     #[must_use]
     pub const fn codegen_policy(&self) -> lower::CodegenPolicy {
         self.codegen_policy
     }
 
-    /// Returns these artifacts recorded under codegen `policy`.
+    /// Returns these artifacts lowered again under codegen `policy`.
     ///
-    /// Lowering does not consult the policy yet, so nothing is recompiled:
-    /// the artifact graph gives the policy no dependents.
+    /// Typing decisions do not depend on the policy, so nothing before
+    /// lowering is re-derived: the module is lowered again from the recorded
+    /// semantic and typing artifacts, and the tape emitted from it. The
+    /// previous run's result belongs to the previous tape and is dropped.
     #[must_use]
     pub fn with_codegen_policy(&self, policy: lower::CodegenPolicy) -> Self {
         let mut artifacts = self.clone();
+        let mut timings = ArtifactTimingCollector::default();
+        let Emitted {
+            lowered,
+            lower_error,
+            tape,
+            tape_error,
+        } = lower_and_emit(&self.sem, &self.typing, policy, &mut timings);
+        let (diagnostics, elapsed_nanos) = measure_elapsed(|| {
+            aggregate_diagnostics(
+                &self.sem,
+                &self.typing,
+                lower_error.as_ref(),
+                tape_error.as_ref(),
+            )
+        });
+        timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
         artifacts.codegen_policy = policy;
-        artifacts.artifact_metrics =
-            build_artifact_metrics(&artifacts, &ArtifactTimingCollector::default());
+        artifacts.invalidation = QueryInvalidation::for_module(&self.sem, &self.typing, policy);
+        artifacts.lowered = lowered;
+        artifacts.lower_error = lower_error;
+        artifacts.tape = tape;
+        artifacts.tape_error = tape_error;
+        artifacts.diagnostics = diagnostics;
+        artifacts.runtime_result = None;
+        artifacts.runtime_trace = None;
+        artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
         artifacts
     }
 
@@ -4326,6 +4340,14 @@ fn artifact_fingerprint(
         }
         QueryArtifact::MethodLowering(method) | QueryArtifact::MethodTape(method) => {
             builder.mix_str(&fingerprint_method_body(&artifacts.sem, method));
+            for record in method_check_codegen(artifacts, method) {
+                builder.mix_str(&format!(
+                    "{} {} {}",
+                    record.owner,
+                    record.site,
+                    record.codegen.as_str()
+                ));
+            }
         }
         QueryArtifact::GenericDispatcher(generic) => {
             builder.mix_str(&fingerprint_dispatcher(&artifacts.sem, generic));
@@ -4469,6 +4491,32 @@ fn fingerprint_method_lookup(module: &sem::Module, method: DefinitionId) -> Stri
     )
 }
 
+/// The checks typing facts changed in `method`'s lowered body: its own, and
+/// those of the constants whose values it lowers inline.
+fn method_check_codegen(
+    artifacts: &SessionArtifacts,
+    method: DefinitionId,
+) -> Vec<lower::CheckCodegenRecord> {
+    let Some(lowered) = &artifacts.lowered else {
+        return Vec::new();
+    };
+    if lowered.check_codegen.is_empty() {
+        return Vec::new();
+    }
+    let mut owners = alloc::vec![method];
+    owners.extend(crate::incremental::constants_read(
+        &artifacts.sem,
+        &artifacts.typing,
+        method,
+    ));
+    lowered
+        .check_codegen
+        .iter()
+        .filter(|record| owners.contains(&record.owner))
+        .copied()
+        .collect()
+}
+
 fn fingerprint_method_body(module: &sem::Module, method: DefinitionId) -> String {
     let Some(method) = module.methods.iter().find(|item| item.definition == method) else {
         return "missing-method-body".into();
@@ -4546,7 +4594,17 @@ fn fingerprint_lowered(artifacts: &SessionArtifacts) -> String {
     let Some(lowered) = &artifacts.lowered else {
         return format!("{:?}", artifacts.lower_error);
     };
-    strip_span_comments(&lowered.dump())
+    let mut out = strip_span_comments(&lowered.dump());
+    for record in &lowered.check_codegen {
+        let _ = writeln!(
+            out,
+            "codegen {} {} {}",
+            record.owner,
+            record.site,
+            record.codegen.as_str()
+        );
+    }
+    out
 }
 
 fn strip_span_comments(input: &str) -> String {
@@ -5546,21 +5604,14 @@ pub(crate) fn compile_file_with_registries(
     timings.record(QueryArtifact::Bind, elapsed_nanos);
     let (typing, elapsed_nanos) = measure_elapsed(|| typing::analyze(&sem, typing_config));
     timings.record(QueryArtifact::Typing, elapsed_nanos);
-    let invalidation = QueryInvalidation::for_module(&sem, &typing);
+    let invalidation = QueryInvalidation::for_module(&sem, &typing, codegen_policy);
 
-    let ((lowered, lower_error), elapsed_nanos) = measure_elapsed(|| match lower::lower(&sem) {
-        Ok(module) => (Some(module), None),
-        Err(error) => (None, Some(error)),
-    });
-    timings.record(QueryArtifact::LoweredModule, elapsed_nanos);
-    let ((tape, tape_error), elapsed_nanos) = measure_elapsed(|| match &lowered {
-        Some(lowered) => match tape::emit(lowered) {
-            Ok(module) => (Some(module), None),
-            Err(error) => (None, Some(error)),
-        },
-        None => (None, None),
-    });
-    timings.record(QueryArtifact::TapeProgram, elapsed_nanos);
+    let Emitted {
+        lowered,
+        lower_error,
+        tape,
+        tape_error,
+    } = lower_and_emit(&sem, &typing, codegen_policy, &mut timings);
     let (diagnostics, elapsed_nanos) = measure_elapsed(|| {
         aggregate_diagnostics(&sem, &typing, lower_error.as_ref(), tape_error.as_ref())
     });
@@ -5604,6 +5655,44 @@ pub(crate) fn compile_file_with_registries(
     };
     artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
     artifacts
+}
+
+/// What lowering and tape emission produced for one module.
+struct Emitted {
+    lowered: Option<lower::Module>,
+    lower_error: Option<lower::LowerError>,
+    tape: Option<tape::TapeModule>,
+    tape_error: Option<tape::TapeError>,
+}
+
+/// Lowers `sem` under `codegen_policy`, acting on `typing`'s facts when the
+/// policy allows, and emits the tape.
+fn lower_and_emit(
+    sem: &sem::Module,
+    typing: &typing::TypingArtifact,
+    codegen_policy: lower::CodegenPolicy,
+    timings: &mut ArtifactTimingCollector,
+) -> Emitted {
+    let ((lowered, lower_error), elapsed_nanos) =
+        measure_elapsed(|| match lower::lower(sem, typing, codegen_policy) {
+            Ok(module) => (Some(module), None),
+            Err(error) => (None, Some(error)),
+        });
+    timings.record(QueryArtifact::LoweredModule, elapsed_nanos);
+    let ((tape, tape_error), elapsed_nanos) = measure_elapsed(|| match &lowered {
+        Some(lowered) => match tape::emit(lowered) {
+            Ok(module) => (Some(module), None),
+            Err(error) => (None, Some(error)),
+        },
+        None => (None, None),
+    });
+    timings.record(QueryArtifact::TapeProgram, elapsed_nanos);
+    Emitted {
+        lowered,
+        lower_error,
+        tape,
+        tape_error,
+    }
 }
 
 /// Aggregates every compile stage's diagnostics into the session's single
@@ -11144,7 +11233,7 @@ fn project_typing_decision(
             .collect::<Vec<_>>()
             .join(",")
     };
-    let codegen = CheckCodegen::Kept;
+    let codegen = artifacts.check_codegen(decision);
     let mut object = environment_object(EnvironmentObjectParts {
         id: typing_decision_object_id(decision),
         kind: EnvironmentKind::TypingDecision,
@@ -11371,7 +11460,12 @@ fn explain_typing_decision(
             );
         }
     }
-    let _ = writeln!(out, "codegen: {}", CheckCodegen::Kept.as_str());
+    let _ = writeln!(
+        out,
+        "codegen: {} (policy {})",
+        artifacts.check_codegen(decision).as_str(),
+        artifacts.codegen_policy.as_str()
+    );
     let _ = writeln!(
         out,
         "severity: {} (config {} {} proved={} checked={} refuted={})",
@@ -13721,7 +13815,9 @@ mod tests {
         };
         let span = condition.span();
         **condition = sem::Expr::ConstI64 { value: 1, span };
-        let lower_error = lower::lower(&artifacts.sem).expect_err("lowering fails");
+        let lower_error =
+            lower::lower(&artifacts.sem, &artifacts.typing, lower::CodegenPolicy::Off)
+                .expect_err("lowering fails");
 
         let diagnostics =
             aggregate_diagnostics(&artifacts.sem, &artifacts.typing, Some(&lower_error), None);
@@ -15264,7 +15360,7 @@ mod tests {
             .explain_typing(decision.id.as_str())
             .expect("decision explanation");
         assert!(explanation.contains(&format!("depends-on: {contract_id}\n")));
-        assert!(explanation.contains("codegen: kept\n"));
+        assert!(explanation.contains("codegen: kept (policy off)\n"));
 
         let contract = eop_object(&objects, &contract_id);
         assert_eq!(contract.kind, EnvironmentKind::Contract);
@@ -18197,8 +18293,7 @@ mod tests {
             assert_eq!(report.action, CacheAction::Reused, "{untouched:?}");
         }
 
-        // Lowering does not consult the codegen policy yet, so the graph gives
-        // the policy no dependents and a change recompiles nothing else.
+        // A codegen policy change lowers again, from the recorded typing.
         session.set_codegen_policy(lower::CodegenPolicy::Proved);
         let policy = session
             .compile(id, RuntimeMode::CompileOnly)
@@ -18207,24 +18302,86 @@ mod tests {
             policy.artifacts.codegen_policy(),
             lower::CodegenPolicy::Proved
         );
-        assert!(
-            policy
-                .dependency_edges()
-                .iter()
-                .all(|edge| edge.dependency != QueryArtifact::CodegenPolicy)
-        );
+        assert!(policy.dependency_edges().iter().any(|edge| {
+            edge.dependent == QueryArtifact::LoweredModule
+                && edge.dependency == QueryArtifact::CodegenPolicy
+        }));
         let report = cache_report(&policy, QueryArtifact::CodegenPolicy).expect("policy report");
         assert!(report.affected && report.invalidated);
         assert_eq!(report.action, CacheAction::Recomputed);
-        assert_eq!(policy.affected_count(), 1);
-        assert_eq!(policy.recomputed_count(), 1);
-        let lowered = cache_report(&policy, QueryArtifact::LoweredModule).expect("lowered report");
-        assert!(!lowered.affected);
-        assert_eq!(lowered.action, CacheAction::Reused);
+        for lowered in [QueryArtifact::LoweredModule, QueryArtifact::TapeProgram] {
+            let report = cache_report(&policy, lowered).expect("lowering report");
+            assert!(report.affected, "{lowered:?}");
+        }
+        for untouched in [QueryArtifact::Typing, QueryArtifact::Bind] {
+            let report = cache_report(&policy, untouched).expect("artifact report");
+            assert!(!report.affected, "{untouched:?}");
+            assert_eq!(report.action, CacheAction::Reused, "{untouched:?}");
+        }
         assert_eq!(
             policy.artifacts.typing.config,
             typing::TypingConfig::strict()
         );
+    }
+
+    /// `main` adds two small integers, whose sum typing proves fits.
+    const SMALL_SUM: &str = "define function main() => <integer>\n  \
+        let x :: <integer> = 3;\n  x + 4\nend;";
+
+    #[test]
+    fn a_codegen_policy_change_lowers_and_runs_the_new_code() {
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("sum.loko", SMALL_SUM);
+        let off = session
+            .compile(id, RuntimeMode::RunMain)
+            .expect("source was just added");
+        assert!(
+            off.artifacts
+                .dump_stage(DumpStage::Lowered)
+                .contains("i64.add_ovf")
+        );
+
+        session.set_codegen_policy(lower::CodegenPolicy::Proved);
+        let proved = session
+            .compile(id, RuntimeMode::RunMain)
+            .expect("source exists");
+        let lowered = proved.artifacts.dump_stage(DumpStage::Lowered);
+        assert!(!lowered.contains("i64.add_ovf"), "{lowered}");
+        assert!(lowered.contains("i64.add "), "{lowered}");
+        for recomputed in [QueryArtifact::LoweredModule, QueryArtifact::TapeProgram] {
+            let report = cache_report(&proved, recomputed).expect("artifact report");
+            assert!(report.affected, "{recomputed:?}");
+            assert_eq!(report.action, CacheAction::Recomputed, "{recomputed:?}");
+        }
+        // The new tape runs again, to the same value.
+        let run = cache_report(&proved, QueryArtifact::RuntimeResult).expect("run report");
+        assert!(run.affected);
+        assert_eq!(run.action, CacheAction::Reused);
+        let typing = cache_report(&proved, QueryArtifact::Typing).expect("typing report");
+        assert_eq!(typing.action, CacheAction::Reused);
+        assert_eq!(
+            proved
+                .artifacts
+                .runtime_result
+                .as_ref()
+                .map(ToString::to_string),
+            off.artifacts
+                .runtime_result
+                .as_ref()
+                .map(ToString::to_string)
+        );
+        let main = function_definition(&proved.artifacts, "main");
+        let decision = proved
+            .artifacts
+            .typing
+            .decisions()
+            .find(|decision| decision.owner == main)
+            .expect("the sum is a check site");
+        assert_eq!(
+            proved.artifacts.check_codegen(decision),
+            CheckCodegen::Specialized
+        );
+        assert_eq!(off.artifacts.check_codegen(decision), CheckCodegen::Kept);
     }
 
     #[test]
@@ -20572,6 +20729,26 @@ end;
     fn run_across_an_edit(old: &str, new: &str, then: Then) -> AcrossAnEdit {
         let old = CompilerSession::compile_source("shapes.loko", old, RuntimeMode::CompileOnly);
         let new = CompilerSession::compile_source("shapes.loko", new, RuntimeMode::CompileOnly);
+        run_artifacts_across_an_edit(&old, &new, then)
+    }
+
+    /// Compiles `source` under codegen `policy`.
+    fn compile_under(source: &str, policy: lower::CodegenPolicy) -> SessionArtifacts {
+        let mut session = CompilerSession::new();
+        session.set_typing_config(typing::TypingConfig::default());
+        session.set_codegen_policy(policy);
+        let id = session.add_source("shapes.loko", source);
+        session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added")
+    }
+
+    /// As [`run_across_an_edit`], for programs already compiled.
+    fn run_artifacts_across_an_edit(
+        old: &SessionArtifacts,
+        new: &SessionArtifacts,
+        then: Then,
+    ) -> AcrossAnEdit {
         assert_eq!(old.diagnostics, Vec::new());
         assert_eq!(new.diagnostics, Vec::new());
         let mut asked = 0;
@@ -20600,7 +20777,7 @@ end;
                 _ => Choice::UseValue(vec![Value::I64(0)]),
             }
         });
-        let value = call_with_chooser(&old, &mut chooser).ok();
+        let value = call_with_chooser(old, &mut chooser).ok();
         AcrossAnEdit {
             refused,
             retry_refused,
@@ -20797,6 +20974,92 @@ end;
     /// Resumes the pause with 0.
     fn resume() -> Then {
         Then::Choose(Choice::UseValue(vec![Value::I64(0)]))
+    }
+
+    /// `main` pauses, then sends `pick` and casts its result, which typing
+    /// proves from `pick`'s declared `<circle>` result.
+    const PICK_CAST: &str = "define class <oops> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define class <square> (<shape>)\n  slot side :: <integer>;\nend;\n\
+         define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+         define generic pick(n :: <integer>) => <circle>;\n\
+         define method pick(n :: <integer>) => <circle>\n  make(<circle>, radius: n)\nend;\n\
+         define function main() => <integer>\n  \
+           let p = pause();\n  let s :: <shape> = pick(3);\n  as(<circle>, s).radius + p\nend;";
+
+    /// The cast in `PICK_CAST`'s `main`, and what its code does with it.
+    fn pick_cast(artifacts: &SessionArtifacts) -> (CheckCodegen, Vec<typing::TypingDependency>) {
+        let main = function_definition(artifacts, "main");
+        let typed = artifacts.typing.definition(main).expect("main is typed");
+        let cast = typed
+            .decisions
+            .iter()
+            .find(|decision| decision.check == typing::TypingCheck::Cast)
+            .expect("main casts");
+        assert_eq!(cast.verdict, typing::TypingVerdict::Proved);
+        (artifacts.check_codegen(cast), typed.dependencies(cast))
+    }
+
+    #[test]
+    fn proved_code_under_a_live_frame_takes_a_body_edit() {
+        let old = compile_under(PICK_CAST, lower::CodegenPolicy::Proved);
+        // The suspended `main` trusts `pick`'s contract: it does not check
+        // the class of what `pick` returns.
+        let (codegen, depends_on) = pick_cast(&old);
+        assert_eq!(codegen, CheckCodegen::Elided);
+        let pick = old
+            .sem
+            .generics
+            .iter()
+            .find(|generic| generic.name == "pick")
+            .expect("pick is a generic")
+            .definition;
+        assert_eq!(depends_on, [typing::TypingDependency::Contract(pick)]);
+
+        // A body edit keeps the contract, so it installs, and the old
+        // `main` sends `pick` to the new method.
+        let new = compile_under(
+            &PICK_CAST.replace("radius: n)", "radius: n * 10)"),
+            lower::CodegenPolicy::Proved,
+        );
+        let seen = run_artifacts_across_an_edit(&old, &new, resume());
+        assert_eq!(seen.refused, None);
+        assert_eq!(seen.value, Some(FunctionValue::Integer(30)));
+    }
+
+    #[test]
+    fn proved_code_under_a_live_frame_refuses_a_contract_change() {
+        let old = compile_under(PICK_CAST, lower::CodegenPolicy::Proved);
+        assert_eq!(pick_cast(&old).0, CheckCodegen::Elided);
+
+        // Were this installed, the old `main` would read a <square>'s side
+        // as a radius: its cast is gone. The widened contract is refused,
+        // and `main` finishes on the old code.
+        let new = compile_under(
+            &PICK_CAST
+                .replace(
+                    "define generic pick(n :: <integer>) => <circle>;",
+                    "define generic pick(n :: <integer>) => <shape>;",
+                )
+                .replace(
+                    "pick(n :: <integer>) => <circle>\n  make(<circle>, radius: n)",
+                    "pick(n :: <integer>) => <shape>\n  make(<square>, side: 40)",
+                )
+                .replace("as(<circle>, s).radius + p", "p"),
+            lower::CodegenPolicy::Proved,
+        );
+        let seen = run_artifacts_across_an_edit(&old, &new, resume());
+        assert_eq!(
+            broken_contract(install_mismatch(&seen)),
+            (
+                "pick".into(),
+                ContractPosition::Result(0),
+                "<circle>".into(),
+                "<shape>".into()
+            )
+        );
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
     }
 
     #[test]

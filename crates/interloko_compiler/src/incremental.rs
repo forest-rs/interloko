@@ -24,9 +24,18 @@
 //! Lowering trusts the same contracts at each call, so a method's
 //! [`QueryArtifact::MethodLowering`] (and, for functions and constants, the
 //! [`QueryArtifact::LoweredModule`]) depends on the contracts its body cites.
-//! Lowering does not read typing decisions or the
-//! [`QueryArtifact::CodegenPolicy`] yet, so neither has a lowering edge: the
-//! policy is an input with no dependents until lowering consults it.
+//!
+//! # Codegen policy edges
+//!
+//! The [`QueryArtifact::LoweredModule`] and every method's
+//! [`QueryArtifact::MethodLowering`] always depend on the
+//! [`QueryArtifact::CodegenPolicy`], so changing the policy lowers again.
+//! Under [`CodegenPolicy::Proved`] lowering also acts on typing decisions:
+//! a method's lowering (for functions and constants, the lowered module)
+//! then depends on its own [`QueryArtifact::DefinitionTyping`] and on that
+//! of every constant it reads, since a constant's value is lowered where it
+//! is read. Under [`CodegenPolicy::Off`] lowering reads no decision, and a
+//! typing change reaches no lowering.
 //!
 //! [`QueryArtifact::has_early_cutoff`]: crate::incremental::QueryArtifact::has_early_cutoff
 //! [`QueryArtifact::Contract`]: crate::incremental::QueryArtifact::Contract
@@ -37,12 +46,15 @@
 //! [`QueryArtifact::MethodLowering`]: crate::incremental::QueryArtifact::MethodLowering
 //! [`QueryArtifact::LoweredModule`]: crate::incremental::QueryArtifact::LoweredModule
 //! [`QueryArtifact::CodegenPolicy`]: crate::incremental::QueryArtifact::CodegenPolicy
+//! [`CodegenPolicy::Proved`]: crate::lower::CodegenPolicy::Proved
+//! [`CodegenPolicy::Off`]: crate::lower::CodegenPolicy::Off
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec, vec::Vec};
 
 use invalidation::{AddDependency, Channel, InvalidationTracker, LazyPolicy};
 
 use crate::identity::{ArtifactKey, ArtifactKind, DefinitionId, SourceFileId};
+use crate::lower::CodegenPolicy;
 use crate::sem::{MethodId, Module};
 use crate::typing::TypingArtifact;
 
@@ -105,8 +117,8 @@ pub enum QueryArtifact {
     /// which a verdict about a closed class assumes. Has early cutoff.
     ClassCone(DefinitionId),
     /// Session-owned codegen policy input
-    /// ([`crate::lower::CodegenPolicy`]). Lowering does not consult it yet,
-    /// so nothing depends on it.
+    /// ([`crate::lower::CodegenPolicy`]): whether lowering acts on proved
+    /// typing facts.
     CodegenPolicy,
 }
 
@@ -238,15 +250,50 @@ pub struct QueryInvalidation {
     methods: Vec<DefinitionId>,
 }
 
+/// The constants whose values lowering `definition` lowers inline: those
+/// its typing cites, and transitively those their values read. Typing cites
+/// only the constants a body reads directly, since it types a constant's
+/// value without keeping the reasons.
+pub(crate) fn constants_read(
+    module: &Module,
+    typing: &TypingArtifact,
+    definition: DefinitionId,
+) -> Vec<DefinitionId> {
+    let is_constant = |definition: DefinitionId| {
+        module
+            .constants
+            .iter()
+            .any(|constant| constant.definition == definition)
+    };
+    let mut read = Vec::new();
+    let mut pending = vec![definition];
+    while let Some(current) = pending.pop() {
+        let Some(typed) = typing.definition(current) else {
+            continue;
+        };
+        for cited in typed.inputs().contracts {
+            if is_constant(cited) && cited != definition && !read.contains(&cited) {
+                read.push(cited);
+                pending.push(cited);
+            }
+        }
+    }
+    read.sort_unstable();
+    read
+}
+
 impl QueryInvalidation {
-    /// Builds the query invalidation graph for a semantic module and the
-    /// typing artifact checked against it.
+    /// Builds the query invalidation graph for a semantic module, the
+    /// typing artifact checked against it, and the codegen policy it is
+    /// lowered under.
     ///
     /// The typing artifact supplies the edges into each definition's typing
     /// and lowering from the contracts, method tables, and class cones it
-    /// relies on. A blocked typing artifact supplies none.
+    /// relies on. A blocked typing artifact supplies none. Under
+    /// [`CodegenPolicy::Proved`], each lowering also depends on the typing
+    /// it acts on; see the module docs.
     #[must_use]
-    pub fn for_module(module: &Module, typing: &TypingArtifact) -> Self {
+    pub fn for_module(module: &Module, typing: &TypingArtifact, policy: CodegenPolicy) -> Self {
         let mut this = Self {
             source_file: module.source_file,
             tracker: Box::new(InvalidationTracker::new()),
@@ -276,8 +323,7 @@ impl QueryInvalidation {
         this.add(QueryArtifact::TapeProgram, QueryArtifact::Bind);
         this.add(QueryArtifact::TapeProgram, QueryArtifact::LoweredModule);
         this.add(QueryArtifact::RuntimeResult, QueryArtifact::TapeProgram);
-        // An input with no dependents until lowering consults it.
-        this.track(QueryArtifact::CodegenPolicy);
+        this.add(QueryArtifact::LoweredModule, QueryArtifact::CodegenPolicy);
 
         for generic in &module.generics {
             let generic = generic.definition;
@@ -309,6 +355,10 @@ impl QueryInvalidation {
             this.add(
                 QueryArtifact::MethodLowering(method),
                 QueryArtifact::DefinitionSem(method),
+            );
+            this.add(
+                QueryArtifact::MethodLowering(method),
+                QueryArtifact::CodegenPolicy,
             );
             this.add(
                 QueryArtifact::MethodTape(method),
@@ -384,14 +434,19 @@ impl QueryInvalidation {
             );
         }
 
-        this.add_typing_edges(module, typing);
+        this.add_typing_edges(module, typing, policy);
         this
     }
 
     /// Adds the edges the typing artifact names: into each definition's
     /// typing, into the lowering that trusts the same contracts, and into
     /// each constant's inferred contract.
-    fn add_typing_edges(&mut self, module: &Module, typing: &TypingArtifact) {
+    fn add_typing_edges(
+        &mut self,
+        module: &Module,
+        typing: &TypingArtifact,
+        policy: CodegenPolicy,
+    ) {
         let is_constant = |definition: DefinitionId| {
             module
                 .constants
@@ -420,6 +475,20 @@ impl QueryInvalidation {
             } else {
                 QueryArtifact::LoweredModule
             };
+            // A constant's value is lowered where it is read, and so is
+            // every constant that value reads in turn.
+            let inlined = constants_read(module, typing, definition);
+            for constant in &inlined {
+                self.add(lowering, QueryArtifact::DefinitionSem(*constant));
+            }
+            // Proved lowering acts on this definition's decisions, and on
+            // those of each constant whose value it lowers inline.
+            if policy == CodegenPolicy::Proved {
+                self.add(lowering, QueryArtifact::DefinitionTyping(definition));
+                for constant in inlined {
+                    self.add(lowering, QueryArtifact::DefinitionTyping(constant));
+                }
+            }
             for cited in inputs.contracts {
                 self.add_contract_node(module, cited);
                 self.add(
@@ -585,10 +654,8 @@ impl QueryInvalidation {
         self.mark_and_drain(QueryArtifact::TypingConfig)
     }
 
-    /// Marks the codegen policy changed and drains affected artifacts.
-    ///
-    /// Lowering does not consult the policy yet, so only the policy itself
-    /// is affected.
+    /// Marks the codegen policy changed and drains affected artifacts: the
+    /// lowered module and everything built from it.
     pub fn codegen_policy_changed(&mut self) -> Vec<QueryArtifact> {
         self.mark_and_drain(QueryArtifact::CodegenPolicy)
     }
@@ -685,8 +752,12 @@ mod tests {
     use crate::{ast, grammar_frontend, identity::SourceFileId, sem, typing};
 
     fn graph(module: &sem::Module) -> QueryInvalidation {
+        graph_under(module, CodegenPolicy::Off)
+    }
+
+    fn graph_under(module: &sem::Module, policy: CodegenPolicy) -> QueryInvalidation {
         let typing = typing::analyze(module, typing::TypingConfig::default());
-        QueryInvalidation::for_module(module, &typing)
+        QueryInvalidation::for_module(module, &typing, policy)
     }
 
     fn lower_source(source: &str) -> sem::Module {
@@ -840,20 +911,91 @@ mod tests {
     }
 
     #[test]
-    fn codegen_policy_is_an_input_nothing_reads_yet() {
-        let module = lower_source("define function main()\n  1\nend;");
-        let mut invalidation = graph(&module);
-        assert!(invalidation.contains(QueryArtifact::CodegenPolicy));
-        assert!(
-            invalidation
-                .artifact_edges()
-                .iter()
-                .all(|edge| edge.dependency != QueryArtifact::CodegenPolicy)
+    fn codegen_policy_change_lowers_again_without_retyping() {
+        let module = lower_source(
+            "define generic area(x);\n\
+             define method area(x :: <integer>)\n  x * x\nend;\n\
+             define function main()\n  area(3)\nend;",
         );
-        assert_eq!(
-            invalidation.codegen_policy_changed(),
-            [QueryArtifact::CodegenPolicy]
+        let method = module.methods[0].definition;
+        let main = module.functions[0].definition;
+        for policy in CodegenPolicy::ALL {
+            let mut invalidation = graph_under(&module, *policy);
+            let affected = invalidation.codegen_policy_changed();
+            for lowered in [
+                QueryArtifact::CodegenPolicy,
+                QueryArtifact::MethodLowering(method),
+                QueryArtifact::MethodTape(method),
+                QueryArtifact::LoweredModule,
+                QueryArtifact::TapeProgram,
+                QueryArtifact::RuntimeResult,
+            ] {
+                assert!(affected.contains(&lowered), "{policy:?} {lowered:?}");
+            }
+            for untouched in [
+                QueryArtifact::Typing,
+                QueryArtifact::DefinitionTyping(main),
+                QueryArtifact::DefinitionTyping(method),
+                QueryArtifact::Diagnostics,
+                QueryArtifact::Bind,
+            ] {
+                assert!(!affected.contains(&untouched), "{policy:?} {untouched:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn proved_lowering_follows_only_its_own_typing() {
+        let module = lower_source(
+            "define constant k = 2;\n\
+             define generic area(x);\n\
+             define method area(x :: <integer>)\n  x * k\nend;\n\
+             define method area(x :: <double-float>)\n  x * x\nend;\n\
+             define function main()\n  area(3)\nend;",
         );
+        let [integer, float] = [module.methods[0].definition, module.methods[1].definition];
+        let k = module.constants[0].definition;
+
+        // Off lowering reads no decision, so a typing change lowers nothing.
+        let mut off = graph_under(&module, CodegenPolicy::Off);
+        let affected =
+            off.changed_with_cutoff(&[QueryArtifact::DefinitionTyping(integer)], |_| false);
+        assert!(!affected.contains(&QueryArtifact::MethodLowering(integer)));
+        assert!(!affected.contains(&QueryArtifact::LoweredModule));
+
+        // Proved lowering acts on the method's own decisions...
+        let mut proved = graph_under(&module, CodegenPolicy::Proved);
+        let affected =
+            proved.changed_with_cutoff(&[QueryArtifact::DefinitionTyping(integer)], |_| false);
+        assert!(affected.contains(&QueryArtifact::MethodLowering(integer)));
+        assert!(affected.contains(&QueryArtifact::LoweredModule));
+        assert!(!affected.contains(&QueryArtifact::MethodLowering(float)));
+
+        // ...and on those of the constants it lowers inline.
+        let affected = proved.changed_with_cutoff(&[QueryArtifact::DefinitionTyping(k)], |_| false);
+        assert!(affected.contains(&QueryArtifact::MethodLowering(integer)));
+        assert!(!affected.contains(&QueryArtifact::MethodLowering(float)));
+    }
+
+    #[test]
+    fn proved_lowering_follows_constants_read_through_constants() {
+        let module = lower_source(
+            "define constant inner = 2 + 3;\n\
+             define constant outer = inner;\n\
+             define generic area(x);\n\
+             define method area(x :: <integer>)\n  outer\nend;\n\
+             define function main()\n  area(3)\nend;",
+        );
+        let method = module.methods[0].definition;
+        let inner = module.constants[0].definition;
+        let mut proved = graph_under(&module, CodegenPolicy::Proved);
+        // `area`'s body cites only `outer`, but lowers `inner`'s value and
+        // its checks inline too.
+        let affected =
+            proved.changed_with_cutoff(&[QueryArtifact::DefinitionTyping(inner)], |_| false);
+        assert!(affected.contains(&QueryArtifact::MethodLowering(method)));
+        let affected = proved.changed_with_cutoff(&[QueryArtifact::DefinitionSem(inner)], |_| true);
+        assert!(affected.contains(&QueryArtifact::MethodLowering(method)));
     }
 
     #[test]

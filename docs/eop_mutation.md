@@ -591,6 +591,17 @@ single unit and compares nothing with units from earlier runs, so
 recompiling with no suspended frames, and running again, accepts any
 change.
 
+Lowering under `CodegenPolicy::Proved` drops runtime checks that soft
+typing proved, so proved code trusts typing facts too. Those facts rely on
+nothing outside their own body but contracts (a callee's fact is the
+category sem gives its result, which its contract records) and the closed
+method sets and class cones the runtime layout fixes, so the install and
+retry checks above already protect it: a body edit that keeps the contracts
+installs under proved frames, and one that breaks a generic's contract is
+refused. A constant's value is lowered where it is read, so a fact about it
+stays inside the unit that read it. Closure and exit-procedure entries keep
+their class checks: typing cannot see who calls them.
+
 A callable value carries more than its type: code that applies it relies
 on a signature, either a declared `callable(<integer>) => <circle>` type
 or, for a value sem knows to be a particular function, generic or

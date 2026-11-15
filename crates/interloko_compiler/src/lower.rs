@@ -3,7 +3,23 @@
 //! This module owns the register-shaped executable IR that backends consume. It
 //! explicitly does not own syntax parsing, semantic name resolution, runtime
 //! object storage, or `execution_tape` bytecode encoding.
+//!
+//! # Typing facts
+//!
+//! Under the [`Proved`](crate::lower::CodegenPolicy::Proved) codegen policy,
+//! lowering acts on what the soft typing pass ([`crate::typing`]) proved
+//! about each check site: a proved cast between object registers reuses its
+//! operand, a decided `instance?` test is a constant and an `if` on it loses
+//! its dead branch, integer arithmetic that cannot overflow and conversions
+//! that cannot leave their range drop their checks, a shift count proved in
+//! range is not tested, a numeric dispatch whose method typing selected runs
+//! that method's operation inline, and a read sem narrowed after a test
+//! reuses its register when flow typing narrowed it too. Each change is
+//! recorded in [`check_codegen`](crate::lower::Module::check_codegen).
+//! Why the facts hold in code that may run under newer code units is in the
+//! `facts` submodule's documentation.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -15,17 +31,24 @@ use crate::identity::DefinitionId;
 use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
+use crate::typing;
 use interloko_runtime::RuntimeLayout;
 use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
 use interloko_runtime::control::{RestartDescriptor, RestartParameter};
+
+mod facts;
+
+use facts::TypingFacts;
 
 /// Whether lowering may act on facts the soft typing pass proved.
 ///
 /// This is a session input of its own, separate from
 /// [`crate::typing::TypingConfig`]: the typing configuration only chooses
 /// how loudly decisions are reported, and severities never affect lowering.
-/// Lowering does not read typing facts yet, so every policy currently lowers
-/// the same code.
+/// Under [`Self::Proved`], lowering drops or specializes the runtime checks
+/// typing proved and records each one in [`Module::check_codegen`]. When
+/// typing did not run, there is nothing to act on and `Proved` lowers what
+/// `Off` does.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub enum CodegenPolicy {
     /// Lowering ignores typing facts and keeps every runtime check.
@@ -36,6 +59,9 @@ pub enum CodegenPolicy {
 }
 
 impl CodegenPolicy {
+    /// Every policy, in order of how much lowering acts on.
+    pub const ALL: &'static [Self] = &[Self::Off, Self::Proved];
+
     /// Returns the stable label used in dumps and tools.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -44,6 +70,66 @@ impl CodegenPolicy {
             Self::Proved => "proved",
         }
     }
+
+    /// Returns the policy whose label ([`Self::as_str`]) is `label`.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|policy| policy.as_str() == label)
+    }
+}
+
+/// What generated code does with a runtime check, compared with lowering
+/// that ignores typing facts.
+///
+/// Lowering already folds checks its own value kinds decide, such as a cast
+/// to a superclass of the operand's declared class; those are part of what
+/// [`CodegenPolicy::Off`] emits and report [`Self::Kept`]. The other
+/// variants name what a proved typing fact changed.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CheckCodegen {
+    /// The generated code is what lowering emits without typing facts.
+    Kept,
+    /// The check is gone: an `instance?` test became a constant (and an
+    /// `if` on it lost its dead branch), a cast reuses its operand, a shift
+    /// count is not tested, or the check sat in a branch that was dropped.
+    Elided,
+    /// The operation stays without its check: integer arithmetic that
+    /// cannot overflow wraps, and a conversion that cannot leave its range
+    /// reinterprets the bits.
+    Specialized,
+    /// A numeric dispatch whose method typing selected is replaced by that
+    /// method's operation: no method selection, indirect call, or
+    /// dispatcher.
+    Inlined,
+}
+
+impl CheckCodegen {
+    /// Returns the stable label used in dumps and EOP records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::Elided => "elided",
+            Self::Specialized => "specialized",
+            Self::Inlined => "inlined",
+        }
+    }
+}
+
+/// What lowering did with one check site because of a typing fact.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CheckCodegenRecord {
+    /// Definition whose body holds the check.
+    pub owner: DefinitionId,
+    /// Check site within `owner`.
+    pub site: sem::SiteId,
+    /// What the generated code does with the check; never
+    /// [`CheckCodegen::Kept`].
+    pub codegen: CheckCodegen,
 }
 
 /// Durable function identifier within a lowered module.
@@ -143,6 +229,9 @@ pub struct Module {
     /// The contract of each generic, method and source function, which the
     /// lowered code trusts at its calls; see [`sem::Module::contract`].
     pub contracts: Contracts,
+    /// Every check site a typing fact changed, sorted by owner and site.
+    /// Empty under [`CodegenPolicy::Off`]; see [`Self::check_codegen`].
+    pub check_codegen: Vec<CheckCodegenRecord>,
 }
 
 /// A host-backed function signature lowered to backend value categories.
@@ -175,6 +264,20 @@ impl Module {
     #[must_use]
     pub fn callable_signature(&self, id: CallableSigId) -> Option<&CallableSignature> {
         self.call_sigs.get(id.0 as usize)
+    }
+
+    /// Returns what the generated code does with check `site` of `owner`.
+    ///
+    /// A site no typing fact changed is [`CheckCodegen::Kept`], including
+    /// one that has no generated code, such as a check in a constant no
+    /// code reads.
+    #[must_use]
+    pub fn check_codegen(&self, owner: DefinitionId, site: sem::SiteId) -> CheckCodegen {
+        self.check_codegen
+            .binary_search_by(|record| (record.owner, record.site).cmp(&(owner, site)))
+            .ok()
+            .and_then(|index| self.check_codegen.get(index))
+            .map_or(CheckCodegen::Kept, |record| record.codegen)
     }
 }
 
@@ -378,6 +481,17 @@ impl I64ArithOp {
             Self::Mul => "i64.mul_ovf",
         }
     }
+
+    /// Returns the mnemonic of the same operation without its overflow
+    /// report, as [`Instr::I64Unchecked`] emits it.
+    #[must_use]
+    pub const fn unchecked_mnemonic(self) -> &'static str {
+        match self {
+            Self::Add => "i64.add",
+            Self::Sub => "i64.sub",
+            Self::Mul => "i64.mul",
+        }
+    }
 }
 
 /// Signed 64-bit bitwise operation; exact on `<integer>`s.
@@ -532,8 +646,20 @@ pub enum Num32UnaryOp {
     U32ToI64,
     /// `i64.to_i32`: Narrowing; traps unless the value fits.
     I64ToI32,
+    /// `i64.to_i32_wrap`: Keeps the low 32 bits; lowering emits it only
+    /// where typing proved the value fits.
+    I64ToI32Wrap,
     /// `i64.to_u64_wrap`: Reinterprets the bits as unsigned.
     I64ToU64Wrap,
+    /// `u64.to_u32_wrap`: Keeps the low 32 bits; lowering emits it only
+    /// where typing proved the value fits.
+    U64ToU32Wrap,
+    /// `i32.to_u32_wrap`: Reinterprets the bits; lowering emits it only
+    /// where typing proved the value is not negative.
+    I32ToU32Wrap,
+    /// `u32.to_i32_wrap`: Reinterprets the bits; lowering emits it only
+    /// where typing proved the value is at most `i32::MAX`.
+    U32ToI32Wrap,
     /// `u64.to_u32`: Narrowing; traps unless the value fits.
     U64ToU32,
     /// `i32.to_u32`: Sign change; traps on a negative value.
@@ -579,7 +705,11 @@ impl Num32UnaryOp {
             Self::I32ToI64 => "i32.to_i64",
             Self::U32ToI64 => "u32.to_i64",
             Self::I64ToI32 => "i64.to_i32",
+            Self::I64ToI32Wrap => "i64.to_i32_wrap",
             Self::I64ToU64Wrap => "i64.to_u64_wrap",
+            Self::U64ToU32Wrap => "u64.to_u32_wrap",
+            Self::I32ToU32Wrap => "i32.to_u32_wrap",
+            Self::U32ToI32Wrap => "u32.to_i32_wrap",
             Self::U64ToU32 => "u64.to_u32",
             Self::I32ToU32 => "i32.to_u32",
             Self::U32ToI32 => "u32.to_i32",
@@ -989,6 +1119,21 @@ pub enum Instr {
         dst: Register,
         /// Destination `bool` register set when the result overflowed.
         overflow: Register,
+        /// Arithmetic operator.
+        op: I64ArithOp,
+        /// Left operand register.
+        lhs: Register,
+        /// Right operand register.
+        rhs: Register,
+        /// Source span.
+        span: Span,
+    },
+    /// Signed integer arithmetic without an overflow report. Lowering emits
+    /// it only where typing proved the exact result fits in `i64`, so it
+    /// never wraps.
+    I64Unchecked {
+        /// Destination register.
+        dst: Register,
         /// Arithmetic operator.
         op: I64ArithOp,
         /// Left operand register.
@@ -1473,14 +1618,24 @@ impl LowerError {
 }
 
 /// Lowers semantic IR to executable backend-neutral IR.
-pub fn lower(module: &sem::Module) -> Result<Module, LowerError> {
+///
+/// `typing` is the soft typing pass's result for `module`. Under
+/// [`CodegenPolicy::Off`] it is not read, and the result is what lowering
+/// emits without typing; under [`CodegenPolicy::Proved`], checks it proved
+/// are dropped or specialized and recorded in [`Module::check_codegen`].
+pub fn lower(
+    module: &sem::Module,
+    typing: &crate::typing::TypingArtifact,
+    policy: CodegenPolicy,
+) -> Result<Module, LowerError> {
     if !module.diagnostics.is_empty() {
         return Err(LowerError::Diagnostics {
             diagnostics: module.diagnostics.clone(),
         });
     }
 
-    Lowering::new(module)?.lower_module()
+    let facts = TypingFacts::new(typing, policy);
+    Lowering::new(module, &facts)?.lower_module()
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1551,10 +1706,16 @@ struct CallableUses<'module> {
 struct Lowering<'module> {
     module: &'module sem::Module,
     ids: LowerIds,
+    facts: &'module TypingFacts<'module>,
+    /// Owner of each closure's check sites; see [`facts::closure_owners`].
+    closure_owners: Vec<Option<DefinitionId>>,
 }
 
 impl<'module> Lowering<'module> {
-    fn new(module: &'module sem::Module) -> Result<Self, LowerError> {
+    fn new(
+        module: &'module sem::Module,
+        facts: &'module TypingFacts<'module>,
+    ) -> Result<Self, LowerError> {
         let mut ids = LowerIds::default();
         let callable_uses = collect_known_callable_uses(module);
         let mut next = 0_u32;
@@ -1658,7 +1819,16 @@ impl<'module> Lowering<'module> {
 
         ids.restarts = callable_uses.restarts;
 
-        Ok(Self { module, ids })
+        Ok(Self {
+            module,
+            ids,
+            facts,
+            closure_owners: if facts.is_empty() {
+                Vec::new()
+            } else {
+                facts::closure_owners(module)
+            },
+        })
     }
 
     fn lower_module(&self) -> Result<Module, LowerError> {
@@ -1683,19 +1853,20 @@ impl<'module> Lowering<'module> {
                 + self.module.closures.len(),
         );
         let mut main = None;
+        let mut checks = Vec::new();
 
         for function in &self.module.functions {
             if function.name == "main" {
                 main = Some(self.lower_function_id(function.id)?);
             }
             functions.push(
-                self.lower_function(function)
+                self.lower_function(function, &mut checks)
                     .map_err(|error| error.within(function.span))?,
             );
         }
         for method in &self.module.methods {
             functions.push(
-                self.lower_method(method)
+                self.lower_method(method, &mut checks)
                     .map_err(|error| error.within(method.span))?,
             );
         }
@@ -1735,7 +1906,7 @@ impl<'module> Lowering<'module> {
         }
         for closure in &self.module.closures {
             functions.push(
-                self.lower_closure(closure)
+                self.lower_closure(closure, &mut checks)
                     .map_err(|error| error.within(closure.span))?,
             );
         }
@@ -1772,6 +1943,7 @@ impl<'module> Lowering<'module> {
             main,
             dispatch,
             contracts: contracts(self.module),
+            check_codegen: merge_check_records(checks),
         })
     }
 
@@ -1912,11 +2084,17 @@ impl<'module> Lowering<'module> {
         })
     }
 
-    fn lower_function(&self, function: &sem::Function) -> Result<Function, LowerError> {
-        let mut body = BodyLowering::for_function(self.module, &self.ids, function)?;
+    fn lower_function(
+        &self,
+        function: &sem::Function,
+        checks: &mut Vec<CheckCodegenRecord>,
+    ) -> Result<Function, LowerError> {
+        let mut body = BodyLowering::for_function(self.module, &self.ids, function)?
+            .typed(self.facts, Some(function.definition));
         let rets = self.value_kinds(&function.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_retryable_block(&function.body, &rets, function.span)?;
+        checks.append(&mut body.checks);
         Ok(Function {
             id: self.lower_function_id(function.id)?,
             name: function.name.clone(),
@@ -1931,11 +2109,17 @@ impl<'module> Lowering<'module> {
         })
     }
 
-    fn lower_method(&self, method: &sem::Method) -> Result<Function, LowerError> {
-        let mut body = BodyLowering::for_method(self.module, &self.ids, method)?;
+    fn lower_method(
+        &self,
+        method: &sem::Method,
+        checks: &mut Vec<CheckCodegenRecord>,
+    ) -> Result<Function, LowerError> {
+        let mut body = BodyLowering::for_method(self.module, &self.ids, method)?
+            .typed(self.facts, Some(method.definition));
         let rets = self.value_kinds(&method.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_retryable_block(&method.body, &rets, method.span)?;
+        checks.append(&mut body.checks);
         let generic = self
             .module
             .generics
@@ -2223,11 +2407,22 @@ impl<'module> Lowering<'module> {
         })
     }
 
-    fn lower_closure(&self, closure: &sem::Closure) -> Result<Function, LowerError> {
-        let mut body = BodyLowering::for_closure(self.module, &self.ids, closure)?;
+    fn lower_closure(
+        &self,
+        closure: &sem::Closure,
+        checks: &mut Vec<CheckCodegenRecord>,
+    ) -> Result<Function, LowerError> {
+        let owner = self
+            .closure_owners
+            .get(closure.id.0 as usize)
+            .copied()
+            .flatten();
+        let mut body =
+            BodyLowering::for_closure(self.module, &self.ids, closure)?.typed(self.facts, owner);
         let rets = self.value_kinds(&closure.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_block(&closure.body, &rets)?;
+        checks.append(&mut body.checks);
         Ok(Function {
             id: self.lower_closure_id(closure.id)?,
             name: format!("closure#{}", closure.id.0),
@@ -2745,6 +2940,17 @@ struct BodyLowering<'module> {
     register_kinds: Vec<ValueKind>,
     next_reg: u32,
     next_label: u32,
+    /// Typing facts lowering may act on, or `None` for generated code with
+    /// no check sites of its own.
+    facts: Option<&'module TypingFacts<'module>>,
+    /// Definition whose typing decides the sites being lowered: the body's
+    /// own definition, or a constant's while its value is lowered inline.
+    owner: Option<DefinitionId>,
+    /// Sites a typing fact changed, in lowering order.
+    checks: Vec<CheckCodegenRecord>,
+    /// The closure whose body this is, which names its locals' and
+    /// captures' typing bindings.
+    closure: Option<sem::ClosureId>,
 }
 
 impl<'module> BodyLowering<'module> {
@@ -2790,6 +2996,7 @@ impl<'module> BodyLowering<'module> {
         this.register_kinds.push(ValueKind::Aggregate);
         this.env = Some(env);
         this.captures = &closure.captures;
+        this.closure = Some(closure.id);
         this.params.push(Param {
             source: None,
             name: "$env".into(),
@@ -2851,6 +3058,10 @@ impl<'module> BodyLowering<'module> {
             active_constants: Vec::new(),
             next_reg: next_after_inputs(generic.arity),
             next_label: 0,
+            facts: None,
+            owner: None,
+            checks: Vec::new(),
+            closure: None,
         }
     }
 
@@ -2873,6 +3084,104 @@ impl<'module> BodyLowering<'module> {
             register_kinds: Vec::new(),
             next_reg: 1,
             next_label: 0,
+            facts: None,
+            owner: None,
+            checks: Vec::new(),
+            closure: None,
+        }
+    }
+
+    /// Lets this body act on `facts` about the sites `owner` decides.
+    const fn typed(
+        mut self,
+        facts: &'module TypingFacts<'module>,
+        owner: Option<DefinitionId>,
+    ) -> Self {
+        self.facts = Some(facts);
+        self.owner = owner;
+        self
+    }
+
+    /// The typing decision for `site` in the current owner, if lowering may
+    /// act on one.
+    fn fact(&self, site: sem::SiteId) -> Option<&'module typing::TypingDecision> {
+        self.facts?.decision(self.owner, site)
+    }
+
+    /// Whether typing proved the check at `site` passes, or that no value
+    /// reaches it.
+    fn proved(&self, site: sem::SiteId) -> bool {
+        self.fact(site)
+            .is_some_and(|decision| decision.verdict == typing::TypingVerdict::Proved)
+    }
+
+    /// The outcome typing proved for the `instance?` test at `site`, if any.
+    ///
+    /// A test no value reaches is left alone: either outcome would do, and
+    /// dropping a branch on it gains nothing.
+    fn decided_test(&self, site: sem::SiteId) -> Option<bool> {
+        let decision = self.fact(site)?;
+        if decision.rule == typing::TypingRule::Unreachable {
+            return None;
+        }
+        match decision.verdict {
+            typing::TypingVerdict::Proved => Some(true),
+            typing::TypingVerdict::Refuted => Some(false),
+            typing::TypingVerdict::Checked => None,
+        }
+    }
+
+    /// The constant a decided `instance?` test at `site` becomes; its
+    /// operand has already been evaluated for effect.
+    fn decided_test_value(&mut self, site: sem::SiteId, outcome: bool, span: Span) -> Value {
+        self.record(site, CheckCodegen::Elided);
+        let result = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::ConstBool {
+            dst: result.reg,
+            value: outcome,
+            span,
+        });
+        result
+    }
+
+    /// A read of a local or capture whose use gives it a narrower class
+    /// than its register's, such as after an `instance?` test: the value
+    /// at that class with no cast, when flow typing established the class
+    /// itself. Locals and captures are immutable, so the fact holds for
+    /// the register.
+    fn proved_read(
+        &self,
+        value: Value,
+        expected: ValueKind,
+        binding: typing::Binding,
+        span: Span,
+    ) -> Option<Value> {
+        let ValueKind::Object(Some(class)) = expected else {
+            return None;
+        };
+        if value.kind == expected || !matches!(value.kind, ValueKind::Object(_)) {
+            return None;
+        }
+        let ty = self.facts?.read_type(self.owner, binding, span)?;
+        let cone = interloko_model::types::Type::of(
+            interloko_model::types::Atom::Cone(class),
+            self.module,
+        );
+        ty.is_subtype(&cone, self.module).then_some(Value {
+            kind: expected,
+            ..value
+        })
+    }
+
+    /// Records that a typing fact changed what `site` of the current owner
+    /// emits.
+    fn record(&mut self, site: sem::SiteId, codegen: CheckCodegen) {
+        if let Some(owner) = self.owner {
+            self.checks.push(CheckCodegenRecord {
+                owner,
+                site,
+                codegen,
+            });
         }
     }
 
@@ -3626,6 +3935,16 @@ impl<'module> BodyLowering<'module> {
                     *result_kind,
                     callable_signature.as_ref(),
                 )?;
+                let binding = match self.closure {
+                    Some(closure) => typing::Binding::ClosureLocal {
+                        closure,
+                        local: *local,
+                    },
+                    None => typing::Binding::Local(*local),
+                };
+                if let Some(value) = self.proved_read(value, expected, binding, *span) {
+                    return Ok(value);
+                }
                 self.coerce_value(value, expected, *span)
             }
             sem::Expr::Capture {
@@ -3657,6 +3976,19 @@ impl<'module> BodyLowering<'module> {
                     *result_kind,
                     callable_signature.as_ref(),
                 )?;
+                if let Some(closure) = self.closure
+                    && let Some(result) = self.proved_read(
+                        result,
+                        expected,
+                        typing::Binding::Capture {
+                            closure,
+                            capture: *capture,
+                        },
+                        *span,
+                    )
+                {
+                    return Ok(result);
+                }
                 self.coerce_value(result, expected, *span)
             }
             sem::Expr::ConstantRef { constant, span, .. } => {
@@ -3678,7 +4010,10 @@ impl<'module> BodyLowering<'module> {
                 )?;
                 let value = constant_info.value.clone();
                 self.active_constants.push(*constant);
+                // The value's check sites are the constant's own.
+                let owner = self.owner.replace(constant_info.definition);
                 let lowered = self.lower_expr(&value);
+                self.owner = owner;
                 self.active_constants.pop();
                 self.coerce_value(lowered?, expected, *span)
             }
@@ -3773,14 +4108,36 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::GenericCall {
                 generic,
                 args,
+                site,
                 span,
-                ..
             } => {
                 let generic_info = self
                     .module
                     .generics
                     .get(generic.0 as usize)
                     .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
+                if let Some(method) = self.inline_numeric_method(generic_info, *site) {
+                    let values = args
+                        .iter()
+                        .map(|arg| self.lower_expr(arg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(result) =
+                        self.lower_inline_numeric(method, generic_info, &values, *span)?
+                    {
+                        self.record(*site, CheckCodegen::Inlined);
+                        return Ok(result);
+                    }
+                    let mut regs = Vec::with_capacity(values.len());
+                    for (index, (value, arg)) in values.into_iter().zip(args).enumerate() {
+                        regs.push(
+                            self.coerce_generic_arg(value, generic_info, index, arg.span())?
+                                .reg,
+                        );
+                    }
+                    let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
+                    self.send(generic_info, regs, vec![result.reg], *span)?;
+                    return Ok(result);
+                }
                 let args = self.lower_generic_args(args, generic_info)?;
                 if generic_info.result_kinds.len() != 1 {
                     return Err(invalid_semantic(
@@ -3841,9 +4198,15 @@ impl<'module> BodyLowering<'module> {
                 Ok(result)
             }
             sem::Expr::InstanceOf {
-                value, class, span, ..
+                value,
+                class,
+                site,
+                span,
             } => {
                 let value = self.lower_expr(value)?;
+                if let Some(outcome) = self.decided_test(*site) {
+                    return Ok(self.decided_test_value(*site, outcome, *span));
+                }
                 if is_unboxed_number(value.kind) {
                     let result = self.alloc(ValueKind::Bool);
                     self.instructions.push(Instr::ConstBool {
@@ -3877,14 +4240,20 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::InstanceOfLimited {
                 value,
                 limited,
+                site,
                 span,
-                ..
             } => {
                 let value = self.lower_expr(value)?;
+                if let Some(outcome) = self.decided_test(*site) {
+                    return Ok(self.decided_test_value(*site, outcome, *span));
+                }
                 Ok(self.lower_limited_membership(value, *limited, *span))
             }
             sem::Expr::Cast {
-                value, class, span, ..
+                value,
+                class,
+                site,
+                span,
             } => {
                 let value = self.lower_expr(value)?;
                 if *class == sem::OBJECT_CLASS_ID {
@@ -3903,6 +4272,16 @@ impl<'module> BodyLowering<'module> {
                 if let ValueKind::Object(Some(actual)) = value.kind
                     && self.module.is_same_or_subclass(actual, *class)
                 {
+                    return Ok(Value {
+                        kind: ValueKind::Object(Some(*class)),
+                        ..value
+                    });
+                }
+                // A proved cast between object registers reuses its operand.
+                // A boxed `<object>` still needs the host to unwrap it, and
+                // the unwrap checks the class on the way, so it stays.
+                if matches!(value.kind, ValueKind::Object(_)) && self.proved(*site) {
+                    self.record(*site, CheckCodegen::Elided);
                     return Ok(Value {
                         kind: ValueKind::Object(Some(*class)),
                         ..value
@@ -4010,16 +4389,22 @@ impl<'module> BodyLowering<'module> {
                 kind,
                 lhs,
                 rhs,
+                site,
                 span,
-                ..
             } => {
                 // Sem rejects constant shift counts outside 0..=31.
                 let constant_count = matches!(**rhs, sem::Expr::Const32 { .. });
                 let lhs = self.lower_expr(lhs)?;
                 let rhs = self.lower_expr(rhs)?;
+                // Typing proved the result fits, or the shift count is in
+                // range: the check can go.
+                let unchecked = site.filter(|site| self.proved(*site));
                 if op.is_wrapping() || op.is_bitwise() {
                     if op.is_shift() && !constant_count {
-                        self.lower_shift_count_check(*kind, rhs.reg, *span);
+                        match unchecked {
+                            Some(site) => self.record(site, CheckCodegen::Elided),
+                            None => self.lower_shift_count_check(*kind, rhs.reg, *span),
+                        }
                     }
                     return self.lower_bit_operation(*op, *kind, lhs, rhs.reg, *span);
                 }
@@ -4032,6 +4417,12 @@ impl<'module> BodyLowering<'module> {
                             sem::BinaryOp::Mul => I64ArithOp::Mul,
                             _ => return Err(not_arithmetic()),
                         };
+                        if let Some(site) = unchecked {
+                            self.record(site, CheckCodegen::Specialized);
+                            return Ok(
+                                self.lower_unchecked_integer_arith(op, lhs.reg, rhs.reg, *span)
+                            );
+                        }
                         Ok(self.lower_checked_integer_arith(op, lhs.reg, rhs.reg, *span))
                     }
                     sem::NumericKind::Float => {
@@ -4064,6 +4455,19 @@ impl<'module> BodyLowering<'module> {
                     }
                     sem::NumericKind::I32 | sem::NumericKind::U32 => {
                         let unsigned = *kind == sem::NumericKind::U32;
+                        if let Some(site) = unchecked {
+                            let op = match (op, unsigned) {
+                                (sem::BinaryOp::Add, false) => Num32BinaryOp::I32Add,
+                                (sem::BinaryOp::Sub, false) => Num32BinaryOp::I32Sub,
+                                (sem::BinaryOp::Mul, false) => Num32BinaryOp::I32Mul,
+                                (sem::BinaryOp::Add, true) => Num32BinaryOp::U32Add,
+                                (sem::BinaryOp::Sub, true) => Num32BinaryOp::U32Sub,
+                                (sem::BinaryOp::Mul, true) => Num32BinaryOp::U32Mul,
+                                _ => return Err(not_arithmetic()),
+                            };
+                            self.record(site, CheckCodegen::Specialized);
+                            return Ok(self.num32_binary(op, lhs.reg, rhs.reg, lhs.kind, *span));
+                        }
                         let op = match (op, unsigned) {
                             (sem::BinaryOp::Add, false) => Num32CheckedOp::I32AddOvf,
                             (sem::BinaryOp::Sub, false) => Num32CheckedOp::I32SubOvf,
@@ -4083,15 +4487,28 @@ impl<'module> BodyLowering<'module> {
                 span,
             } => self.lower_float_call(*builtin, args, *span),
             sem::Expr::Convert {
-                to, value, span, ..
+                to,
+                value,
+                site,
+                span,
             } => {
                 let value = self.lower_expr(value)?;
+                if self.proved(*site)
+                    && let Some(converted) = self.convert_in_range(value, *to, *span)
+                {
+                    self.record(*site, CheckCodegen::Specialized);
+                    return Ok(converted);
+                }
                 self.convert_number(value, *to, *span)
             }
             sem::Expr::Negate {
-                kind, value, span, ..
+                kind,
+                value,
+                site,
+                span,
             } => {
                 let value = self.lower_expr(value)?;
+                let unchecked = site.filter(|site| self.proved(*site));
                 match kind {
                     sem::NumericKind::Integer => {
                         // `execution_tape` has no `i64.neg`; `0 - x` is exact
@@ -4102,6 +4519,15 @@ impl<'module> BodyLowering<'module> {
                             value: 0,
                             span: *span,
                         });
+                        if let Some(site) = unchecked {
+                            self.record(site, CheckCodegen::Specialized);
+                            return Ok(self.lower_unchecked_integer_arith(
+                                I64ArithOp::Sub,
+                                zero.reg,
+                                value.reg,
+                                *span,
+                            ));
+                        }
                         Ok(self.lower_checked_integer_arith(
                             I64ArithOp::Sub,
                             zero.reg,
@@ -4133,6 +4559,16 @@ impl<'module> BodyLowering<'module> {
                             value: sem::Number32::I32(0),
                             span: *span,
                         });
+                        if let Some(site) = unchecked {
+                            self.record(site, CheckCodegen::Specialized);
+                            return Ok(self.num32_binary(
+                                Num32BinaryOp::I32Sub,
+                                zero.reg,
+                                value.reg,
+                                ValueKind::I32,
+                                *span,
+                            ));
+                        }
                         Ok(self.lower_checked_num32_arith(
                             Num32CheckedOp::I32SubOvf,
                             zero,
@@ -4367,9 +4803,23 @@ impl<'module> BodyLowering<'module> {
         else_branch: &sem::Expr,
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
+        let decided = match condition {
+            sem::Expr::InstanceOf { site, .. } | sem::Expr::InstanceOfLimited { site, .. } => {
+                self.decided_test(*site)
+            }
+            _ => None,
+        };
         let condition = self.lower_expr(condition)?;
         if condition.kind != ValueKind::Bool {
             return Err(invalid_semantic("if condition is not bool"));
+        }
+        if let Some(outcome) = decided {
+            let (live, dead) = if outcome {
+                (then_branch, else_branch)
+            } else {
+                (else_branch, then_branch)
+            };
+            return self.lower_one_branch(result_kinds, live, dead);
         }
 
         let then_label = self.alloc_label();
@@ -4420,6 +4870,49 @@ impl<'module> BodyLowering<'module> {
             .into_iter()
             .map(|result| Value {
                 reachable: then_reachable || else_reachable,
+                ..result
+            })
+            .collect())
+    }
+
+    /// Lowers the one branch of an `if` that typing proved its test takes.
+    ///
+    /// The other branch is not emitted; its checks are recorded as elided.
+    /// Closures it creates are still lowered as functions of their own, and
+    /// report what their code does.
+    fn lower_one_branch(
+        &mut self,
+        result_kinds: &[sem::ValueKind],
+        live: &sem::Expr,
+        dead: &sem::Expr,
+    ) -> Result<Vec<Value>, LowerError> {
+        let mut dropped = Vec::new();
+        facts::for_each_site(dead, &mut |site| dropped.push(site));
+        for site in dropped {
+            self.record(site, CheckCodegen::Elided);
+        }
+        let values = self.lower_results_expr(live)?;
+        let results = self
+            .value_kinds(result_kinds)?
+            .into_iter()
+            .map(|kind| self.alloc(kind))
+            .collect::<Vec<_>>();
+        if values.len() != results.len() {
+            return Err(invalid_semantic("if branch result arities differ"));
+        }
+        let reachable = values.iter().all(|value| value.reachable);
+        if reachable {
+            self.move_results(&results, &values, live.span())?;
+        } else {
+            // As after an `if` neither of whose branches continues: code
+            // after it starts at a label nothing jumps to.
+            let join_label = self.alloc_label();
+            self.instructions.push(Instr::Label { label: join_label });
+        }
+        Ok(results
+            .into_iter()
+            .map(|result| Value {
+                reachable,
                 ..result
             })
             .collect())
@@ -5119,30 +5612,140 @@ impl<'module> BodyLowering<'module> {
         generic: &sem::GenericFunction,
     ) -> Result<Vec<Register>, LowerError> {
         let mut lowered = Vec::with_capacity(args.len());
-        for (index, (arg, expected)) in args.iter().zip(&generic.param_kinds).enumerate() {
+        for (index, arg) in args.iter().enumerate() {
             let value = self.lower_expr(arg)?;
-            let target = dispatcher_param_kind(self.module, generic, index);
-            let dispatched = generic.dispatch_params.contains(&index);
-            let value = match *expected {
-                Some(sem::ValueKind::Any) if dispatched => {
-                    self.coerce_value(value, target, arg.span())?
-                }
-                Some(expected) => {
-                    let expected = self.value_kind(expected)?;
-                    self.coerce_value(value, expected, arg.span())?
-                }
-                // Unannotated parameters keep their legacy pass-through for
-                // non-object values unless the parameter carries boxed values.
-                None if target == ValueKind::Any
-                    || (dispatched && matches!(value.kind, ValueKind::Object(_))) =>
-                {
-                    self.coerce_value(value, target, arg.span())?
-                }
-                None => value,
-            };
+            let value = self.coerce_generic_arg(value, generic, index, arg.span())?;
             lowered.push(value.reg);
         }
         Ok(lowered)
+    }
+
+    /// Converts argument `index` of a send to `generic` to the kind the
+    /// send passes it at.
+    fn coerce_generic_arg(
+        &mut self,
+        value: Value,
+        generic: &sem::GenericFunction,
+        index: usize,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let Some(expected) = generic.param_kinds.get(index) else {
+            return Err(invalid_semantic(
+                "generic call has more arguments than parameters",
+            ));
+        };
+        let target = dispatcher_param_kind(self.module, generic, index);
+        let dispatched = generic.dispatch_params.contains(&index);
+        match *expected {
+            Some(sem::ValueKind::Any) if dispatched => self.coerce_value(value, target, span),
+            Some(expected) => {
+                let expected = self.value_kind(expected)?;
+                self.coerce_value(value, expected, span)
+            }
+            // Unannotated parameters keep their legacy pass-through for
+            // non-object values unless the parameter carries boxed values.
+            None if target == ValueKind::Any
+                || (dispatched && matches!(value.kind, ValueKind::Object(_))) =>
+            {
+                self.coerce_value(value, target, span)
+            }
+            None => Ok(value),
+        }
+    }
+
+    /// The numeric method a send at `site` may run inline instead of
+    /// dispatching: typing proved the dispatch and selected the method from
+    /// every argument's exact class.
+    ///
+    /// Only a built-in numeric generic's own methods qualify. The generic is
+    /// sealed over `<real>` ([`sem::GenericFunctionOrigin::admits_method`]),
+    /// so no method can be more specific for numbers, and its methods come
+    /// from the promotion rules, so every code unit has the same ones; the
+    /// runtime layout, which an install under live frames must keep, fixes
+    /// the method set. Inlining therefore runs what dispatch would.
+    fn inline_numeric_method(
+        &self,
+        generic: &sem::GenericFunction,
+        site: sem::SiteId,
+    ) -> Option<&'module sem::Method> {
+        let decision = self.fact(site)?;
+        if decision.verdict != typing::TypingVerdict::Proved
+            || decision.rule != typing::TypingRule::DispatchCovered
+            || generic.result_kinds.len() != 1
+            || !matches!(generic.origin, sem::GenericFunctionOrigin::Numeric { .. })
+        {
+            return None;
+        }
+        let method = self
+            .module
+            .methods
+            .get(decision.selected_method?.0 as usize)?;
+        (method.generic == generic.id
+            && matches!(method.origin, sem::MethodOrigin::Numeric { .. })
+            && method.params.len() == generic.arity)
+            .then_some(method)
+    }
+
+    /// Runs `method`'s body inline on `args`: each argument converts to its
+    /// parameter's kind (unboxing a boxed number), the promotion rules'
+    /// operation runs directly, and the result converts to the generic's
+    /// kind (boxing it). The body's own checks, such as overflow, stay.
+    ///
+    /// Returns `None`, having emitted nothing, when an argument has a kind
+    /// that cannot convert to its parameter's.
+    fn lower_inline_numeric(
+        &mut self,
+        method: &'module sem::Method,
+        generic: &sem::GenericFunction,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Option<Value>, LowerError> {
+        let mut params = Vec::with_capacity(args.len());
+        for (param, arg) in method.params.iter().zip(args) {
+            let local = method
+                .locals
+                .get(param.0 as usize)
+                .ok_or_else(|| invalid_semantic("method parameter local id is out of range"))?;
+            let kind = self.value_kind(local.kind)?;
+            let converts = arg.kind == kind
+                || arg.kind == ValueKind::Any
+                || (kind == ValueKind::I64 && matches!(arg.kind, ValueKind::I32 | ValueKind::U32));
+            if !converts {
+                return Ok(None);
+            }
+            params.push((*param, kind));
+        }
+        // The generated body has no source of its own; what it does (and
+        // any overflow it reports) belongs to the call.
+        let Some(body) = method
+            .body
+            .lets
+            .is_empty()
+            .then(|| respan_numeric_body(&method.body.result, span))
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let mut bound = Vec::with_capacity(args.len());
+        for ((param, kind), arg) in params.into_iter().zip(args) {
+            bound.push((param, self.coerce_value(*arg, kind, span)?));
+        }
+        let locals = core::mem::replace(&mut self.source_locals, &method.locals);
+        let regs = core::mem::replace(&mut self.local_regs, vec![None; method.locals.len()]);
+        // The method's own checks are decided by its typing, which knows
+        // nothing of this call; they stay.
+        let owner = self.owner.take();
+        let result = (|| {
+            for (param, value) in bound {
+                self.set_local(param, value)?;
+            }
+            self.lower_expr(&body)
+        })();
+        self.source_locals = locals;
+        self.local_regs = regs;
+        self.owner = owner;
+        let kind = self.value_kind(generic.result_kinds[0])?;
+        Ok(Some(self.coerce_value(result?, kind, span)?))
     }
 
     fn coerce_value(
@@ -5717,6 +6320,36 @@ impl<'module> BodyLowering<'module> {
         })
     }
 
+    /// Converts an integer that typing proved is in `to`'s range, without the
+    /// range check, or returns `None`, having emitted nothing, when the
+    /// conversion has no check to drop.
+    fn convert_in_range(
+        &mut self,
+        value: Value,
+        to: sem::NumericKind,
+        span: Span,
+    ) -> Option<Value> {
+        use sem::NumericKind as N;
+        let unary =
+            |this: &mut Self, op, value: Value, kind| this.num32_unary(op, value.reg, kind, span);
+        Some(match (value.kind, to) {
+            (ValueKind::I64, N::I32) => {
+                unary(self, Num32UnaryOp::I64ToI32Wrap, value, ValueKind::I32)
+            }
+            (ValueKind::I64, N::U32) => {
+                let bits = unary(self, Num32UnaryOp::I64ToU64Wrap, value, ValueKind::U64);
+                unary(self, Num32UnaryOp::U64ToU32Wrap, bits, ValueKind::U32)
+            }
+            (ValueKind::I32, N::U32) => {
+                unary(self, Num32UnaryOp::I32ToU32Wrap, value, ValueKind::U32)
+            }
+            (ValueKind::U32, N::I32) => {
+                unary(self, Num32UnaryOp::U32ToI32Wrap, value, ValueKind::I32)
+            }
+            _ => return None,
+        })
+    }
+
     /// Widens an `<i32>` or `<u32>` to the `<integer>` it is; exact.
     fn widen_integer(&mut self, value: Value, span: Span) -> Value {
         let op = match value.kind {
@@ -6210,6 +6843,25 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
+    /// Lowers `<integer>` arithmetic typing proved cannot overflow `i64`.
+    fn lower_unchecked_integer_arith(
+        &mut self,
+        op: I64ArithOp,
+        lhs: Register,
+        rhs: Register,
+        span: Span,
+    ) -> Value {
+        let result = self.alloc(ValueKind::I64);
+        self.instructions.push(Instr::I64Unchecked {
+            dst: result.reg,
+            op,
+            lhs,
+            rhs,
+            span,
+        });
+        result
+    }
+
     /// Emits what happens when fixnum arithmetic overflows `i64`.
     ///
     /// This is the single overflow target for `<integer>` arithmetic. It
@@ -6566,6 +7218,103 @@ fn entry_check_class(kind: ValueKind) -> Option<sem::ClassId> {
     }
 }
 
+/// Copies a numeric method's body (see [`sem::MethodOrigin::Numeric`]) with
+/// every span set to `span`, or returns `None` when it holds anything the
+/// promotion rules do not build.
+fn respan_numeric_body(expr: &sem::Expr, span: Span) -> Option<sem::Expr> {
+    let operand = |expr: &sem::Expr| respan_numeric_body(expr, span).map(Box::new);
+    Some(match expr {
+        sem::Expr::Local {
+            local,
+            result_kind,
+            callable_signature,
+            ..
+        } => sem::Expr::Local {
+            local: *local,
+            result_kind: *result_kind,
+            callable_signature: callable_signature.clone(),
+            span,
+        },
+        sem::Expr::Convert {
+            to, value, site, ..
+        } => sem::Expr::Convert {
+            to: *to,
+            value: operand(value)?,
+            site: *site,
+            span,
+        },
+        sem::Expr::Binary {
+            op,
+            kind,
+            lhs,
+            rhs,
+            site,
+            ..
+        } => sem::Expr::Binary {
+            op: *op,
+            kind: *kind,
+            lhs: operand(lhs)?,
+            rhs: operand(rhs)?,
+            site: *site,
+            span,
+        },
+        sem::Expr::Negate {
+            kind, value, site, ..
+        } => sem::Expr::Negate {
+            kind: *kind,
+            value: operand(value)?,
+            site: *site,
+            span,
+        },
+        sem::Expr::Compare {
+            op, kind, lhs, rhs, ..
+        } => sem::Expr::Compare {
+            op: *op,
+            kind: *kind,
+            lhs: operand(lhs)?,
+            rhs: operand(rhs)?,
+            span,
+        },
+        sem::Expr::MixedCompare {
+            op,
+            lhs_kind,
+            lhs,
+            rhs,
+            ..
+        } => sem::Expr::MixedCompare {
+            op: *op,
+            lhs_kind: *lhs_kind,
+            lhs: operand(lhs)?,
+            rhs: operand(rhs)?,
+            span,
+        },
+        _ => return None,
+    })
+}
+
+/// Sorts check records by owner and site, one per site.
+///
+/// A constant's value is lowered wherever it is read, so its sites can be
+/// recorded more than once. Lowering a constant does not depend on where it
+/// is read, so the copies agree; were they ever to differ, the site reports
+/// the least change.
+fn merge_check_records(mut checks: Vec<CheckCodegenRecord>) -> Vec<CheckCodegenRecord> {
+    checks.sort_by_key(|record| (record.owner, record.site));
+    let mut merged: Vec<CheckCodegenRecord> = Vec::with_capacity(checks.len());
+    for record in checks {
+        match merged.last_mut() {
+            Some(last) if (last.owner, last.site) == (record.owner, record.site) => {
+                if last.codegen != record.codegen {
+                    last.codegen = CheckCodegen::Kept;
+                }
+            }
+            _ => merged.push(record),
+        }
+    }
+    merged.retain(|record| record.codegen != CheckCodegen::Kept);
+    merged
+}
+
 fn input_register(index: usize) -> Register {
     Register(u32::try_from(index + 1).unwrap_or(u32::MAX))
 }
@@ -6824,6 +7573,16 @@ impl Module {
                 span,
             } => {
                 write!(f, "  {dst}, {overflow} = {} {lhs}, {rhs}", op.mnemonic())?;
+                fmt_span(f, *span)
+            }
+            Instr::I64Unchecked {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  {dst} = {} {lhs}, {rhs}", op.unchecked_mnemonic())?;
                 fmt_span(f, *span)
             }
             Instr::F64Binary {
@@ -7370,7 +8129,13 @@ mod tests {
         let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         let sem = sem::lower(&ast);
-        lower(&sem).expect("lowering should succeed")
+        lower_unoptimized(&sem).expect("lowering should succeed")
+    }
+
+    /// Lowers `sem` as [`CodegenPolicy::Off`] does, without typing facts.
+    fn lower_unoptimized(sem: &sem::Module) -> Result<Module, LowerError> {
+        let typing = typing::analyze(sem, typing::TypingConfig::default());
+        lower(sem, &typing, CodegenPolicy::Off)
     }
 
     fn runtime_class<'a>(module: &'a Module, name: &str) -> &'a runtime::RuntimeClass {
@@ -7769,7 +8534,7 @@ mod tests {
         let span = condition.span();
         **condition = sem::Expr::ConstI64 { value: 1, span };
 
-        let error = lower(&sem).expect_err("an integer condition cannot lower");
+        let error = lower_unoptimized(&sem).expect_err("an integer condition cannot lower");
         assert_eq!(
             error,
             LowerError::InvalidSemantic {
@@ -7791,6 +8556,142 @@ mod tests {
             }
             .diagnostic(),
             None
+        );
+    }
+
+    /// Lowers `source` under `policy`, with its typing checked.
+    fn lower_with_policy(source: &str, policy: CodegenPolicy) -> Module {
+        let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
+        let sem = sem::lower(&ast::lower(&tree));
+        assert_eq!(sem.diagnostics, Vec::new());
+        let typing = typing::analyze(&sem, typing::TypingConfig::default());
+        lower(&sem, &typing, policy).expect("lowering should succeed")
+    }
+
+    fn function_dump(module: &Module, name: &str) -> String {
+        let function = module
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("no function {name}"));
+        struct Dump<'a>(&'a Module, &'a Function);
+        impl fmt::Display for Dump<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt_function(f, self.1)
+            }
+        }
+        format!("{}", Dump(module, function))
+    }
+
+    /// Small integers whose sums typing proves fit, a proved cast and a
+    /// decided `instance?` test.
+    const PROVABLE: &str = "define class <shape> (<object>)\nend;\n\
+        define class <circle> (<shape>)\nend;\n\
+        define function area(c :: <circle>) => <integer>\n  3\nend;\n\
+        define function main() => <integer>\n  \
+          let s :: <shape> = make(<circle>);\n  \
+          let n :: <integer> = 4;\n  \
+          if instance?(s, <circle>) then (n + 1) + area(as(<circle>, s)) else 0 end\nend;";
+
+    #[test]
+    fn off_lowering_reads_no_typing_fact() {
+        let off = lower_with_policy(PROVABLE, CodegenPolicy::Off);
+        assert_eq!(off.check_codegen, Vec::new());
+        let main = function_dump(&off, "main");
+        assert!(main.contains("instance?"), "{main}");
+        assert!(main.contains(" = as <circle>"), "{main}");
+        assert_eq!(main.matches("i64.add_ovf").count(), 2, "{main}");
+    }
+
+    #[test]
+    fn proved_lowering_drops_what_typing_proved_and_records_it() {
+        let proved = lower_with_policy(PROVABLE, CodegenPolicy::Proved);
+        let main = function_dump(&proved, "main");
+        assert!(!main.contains("instance?"), "{main}");
+        assert!(!main.contains(" = as "), "{main}");
+        // `n + 1` cannot overflow; adding `area`'s result still may.
+        assert!(main.contains("= i64.add %r"), "{main}");
+        assert_eq!(main.matches("i64.add_ovf").count(), 1, "{main}");
+        let mut codegen = proved
+            .check_codegen
+            .iter()
+            .map(|record| (record.site.0, record.codegen))
+            .collect::<Vec<_>>();
+        codegen.sort_by_key(|(site, _)| *site);
+        // s0 is the test and s1 `n + 1`. s2, the cast, was a no-op without
+        // typing too: the cast lowering drops is the one at the read of `s`
+        // that sem refined to <circle>, which has no site. s3, the outer
+        // sum, keeps its check.
+        assert_eq!(
+            codegen,
+            [(0, CheckCodegen::Elided), (1, CheckCodegen::Specialized)]
+        );
+        let owner = proved.check_codegen[0].owner;
+        assert_eq!(
+            proved.check_codegen(owner, sem::SiteId(1)),
+            CheckCodegen::Specialized
+        );
+        assert_eq!(
+            proved.check_codegen(owner, sem::SiteId(3)),
+            CheckCodegen::Kept
+        );
+    }
+
+    #[test]
+    fn proved_lowering_without_typing_lowers_as_off() {
+        let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, PROVABLE).syntax;
+        let sem = sem::lower(&ast::lower(&tree));
+        let mut typing = typing::analyze(&sem, typing::TypingConfig::default());
+        typing.status = typing::TypingStatus::BlockedBySemanticDiagnostics { count: 1 };
+        let blocked = lower(&sem, &typing, CodegenPolicy::Proved).expect("lowers");
+        assert_eq!(blocked, lower_with_policy(PROVABLE, CodegenPolicy::Off));
+    }
+
+    #[test]
+    fn a_closure_two_bodies_create_keeps_its_checks() {
+        // A slot default is copied into every `make`, so its closure is
+        // created by both functions and is typed twice; lowering trusts
+        // neither. The same closure written in one body is specialized.
+        let source = "define class <box> (<object>)\n  \
+              slot f :: <callable>, init-value: function (x :: <integer>) => <integer>\n    \
+                if x < 10 then if x > 0 then x + 1 else 0 end else 0 end\n  end;\n\
+            end;\n\
+            define function one() => <box>\n  make(<box>)\nend;\n\
+            define function two() => <box>\n  make(<box>)\nend;\n\
+            define function own() => <callable>\n  \
+              function (x :: <integer>) => <integer>\n    \
+                if x < 10 then if x > 0 then x + 1 else 0 end else 0 end\n  end\nend;";
+        let proved = lower_with_policy(source, CodegenPolicy::Proved);
+        let closures = proved
+            .functions
+            .iter()
+            .filter(|function| matches!(function.kind, FunctionKind::Closure(_)))
+            .map(|function| function_dump(&proved, &function.name))
+            .collect::<Vec<_>>();
+        assert_eq!(closures.len(), 2);
+        assert!(closures[0].contains("i64.add_ovf"), "{}", closures[0]);
+        assert!(!closures[1].contains("i64.add_ovf"), "{}", closures[1]);
+    }
+
+    #[test]
+    fn numeric_dispatch_runs_the_selected_method_inline() {
+        let source = "define function main() => <integer>\n  \
+            as(<integer>, as(<object>, 20) + 1)\nend;";
+        let off = function_dump(&lower_with_policy(source, CodegenPolicy::Off), "main");
+        assert!(off.contains("select-method"), "{off}");
+        let proved_module = lower_with_policy(source, CodegenPolicy::Proved);
+        let proved = function_dump(&proved_module, "main");
+        assert!(!proved.contains("select-method"), "{proved}");
+        // Only the retry region calls indirectly.
+        assert_eq!(proved.matches("call.indirect").count(), 1, "{proved}");
+        assert!(proved.contains("unbox"), "{proved}");
+        assert!(proved.contains("i64.add_ovf"), "{proved}");
+        assert!(proved.contains("box.any"), "{proved}");
+        assert!(
+            proved_module
+                .check_codegen
+                .iter()
+                .any(|record| record.codegen == CheckCodegen::Inlined)
         );
     }
 
