@@ -1,7 +1,7 @@
 // expect: run -42
 // expect: diagnostics 0
 // expect: dump sem contains convert to integer
-// expect: dump lowered contains f64.to_i64
+// expect: dump lowered contains f64.to_i64_exact
 
 // Float-to-integer conversion is exact; only integral floats convert.
 define function main() => <integer>
