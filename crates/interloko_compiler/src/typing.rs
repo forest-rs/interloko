@@ -32,10 +32,11 @@
 //! joins the per-branch verdicts.
 //!
 //! The pass is advisory. Its facts are recorded per enclosing definition
-//! ([`DefinitionTyping`]) and never feed lowering, tape emission, or the
-//! runtime, which keep their own dynamic checks. [`TypingConfig`] maps each
-//! check and verdict to a [`TypingSeverity`]; the default reports refuted
-//! obligations as warnings and keeps runtime-checked ones silent. Changing
+//! ([`DefinitionTyping`]), each keyed by the check's [`SiteId`] within that
+//! definition, and never feed lowering, tape emission, or the runtime, which
+//! keep their own dynamic checks. [`TypingConfig`] maps each check and
+//! verdict to a [`TypingSeverity`]; the default reports refuted obligations
+//! as warnings and keeps runtime-checked ones silent. Changing
 //! the configuration re-derives diagnostics from the recorded decisions
 //! without re-checking ([`TypingArtifact::with_config`]).
 //!
@@ -71,7 +72,7 @@ use interloko_model::types::{Atom, Metaobject, Relation, Type};
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, Severity};
 use crate::identity::{DefinitionId, DefinitionKind};
-use crate::sem::{self, ClassId, GenericFunctionId, MethodId};
+use crate::sem::{self, ClassId, GenericFunctionId, MethodId, SiteId};
 use crate::syntax::Span;
 
 /// Residual runtime check classified by the soft typing pass.
@@ -367,9 +368,9 @@ impl TypingRule {
 pub struct TypingDecision {
     /// Definition whose body contains the check.
     pub owner: DefinitionId,
-    /// Zero-based ordinal of this decision within `owner`, in evaluation
-    /// order. Stable across edits to other definitions.
-    pub index: usize,
+    /// Check site within `owner`; with `owner` it names the check, stably
+    /// across edits to other definitions.
+    pub site: SiteId,
     /// Kind of runtime check.
     pub check: TypingCheck,
     /// Classification of the check.
@@ -448,13 +449,18 @@ impl TypingArtifact {
             .flat_map(|definition| definition.decisions.iter())
     }
 
-    /// Returns the decision `index` of `owner`, if present.
+    /// Returns the decision for check site `site` of `owner`, if present.
     #[must_use]
-    pub fn decision(&self, owner: DefinitionId, index: usize) -> Option<&TypingDecision> {
+    pub fn decision(&self, owner: DefinitionId, site: SiteId) -> Option<&TypingDecision> {
         self.definitions
             .iter()
             .find(|definition| definition.definition == owner)
-            .and_then(|definition| definition.decisions.get(index))
+            .and_then(|definition| {
+                definition
+                    .decisions
+                    .iter()
+                    .find(|decision| decision.site == site)
+            })
     }
 
     /// Returns the severity the artifact's configuration assigns to
@@ -537,8 +543,8 @@ impl TypingArtifact {
         for decision in &typed.decisions {
             let _ = writeln!(
                 out,
-                "    t{} {} {} rule={} span={}..{} expected={} actual={} severity={}",
-                decision.index,
+                "    {} {} {} rule={} span={}..{} expected={} actual={} severity={}",
+                decision.site,
                 decision.check.as_str(),
                 decision.verdict.as_str(),
                 decision.rule.as_str(),
@@ -690,15 +696,21 @@ impl Checker<'_> {
                 generic,
                 args,
                 span,
+                site,
             } => {
                 for arg in args {
                     self.expr(arg);
                 }
-                self.dispatch(*generic, args, *span);
+                self.dispatch(*generic, args, *span, *site);
             }
-            sem::Expr::Cast { value, class, span } => {
+            sem::Expr::Cast {
+                value,
+                class,
+                span,
+                site,
+            } => {
                 self.expr(value);
-                self.cast(value, *class, *span);
+                self.cast(value, *class, *span, *site);
             }
             sem::Expr::Closure { closure, .. } => {
                 if let Some(closure) = self.module.closures.get(closure.0 as usize) {
@@ -709,7 +721,7 @@ impl Checker<'_> {
         }
     }
 
-    fn cast(&mut self, value: &sem::Expr, class: ClassId, span: Span) {
+    fn cast(&mut self, value: &sem::Expr, class: ClassId, span: Span, site: SiteId) {
         let target = Type::of(Atom::Cone(class), self.module);
         let verdicts = alternatives(self.module, value)
             .into_iter()
@@ -718,7 +730,7 @@ impl Checker<'_> {
         let (verdict, rule) = joined(TypingCheck::Cast, &verdicts);
         self.decisions.push(TypingDecision {
             owner: self.owner,
-            index: self.decisions.len(),
+            site,
             check: TypingCheck::Cast,
             verdict,
             rule,
@@ -729,7 +741,13 @@ impl Checker<'_> {
         });
     }
 
-    fn dispatch(&mut self, generic: GenericFunctionId, args: &[sem::Expr], span: Span) {
+    fn dispatch(
+        &mut self,
+        generic: GenericFunctionId,
+        args: &[sem::Expr],
+        span: Span,
+        site: SiteId,
+    ) {
         let methods = self
             .module
             .methods
@@ -796,7 +814,7 @@ impl Checker<'_> {
             );
         self.decisions.push(TypingDecision {
             owner: self.owner,
-            index: self.decisions.len(),
+            site,
             check: TypingCheck::Dispatch,
             verdict,
             rule,
@@ -1335,7 +1353,7 @@ mod tests {
                 .find(|function| function.name == name)
                 .expect("function");
             artifact
-                .decision(function.definition, 0)
+                .decision(function.definition, SiteId(0))
                 .map(|decision| (decision.verdict, decision.rule))
                 .expect("cast decision")
         };
@@ -1367,7 +1385,9 @@ mod tests {
              define function main()\n  0\nend;"
         ));
         let pick = &module.functions[0];
-        let decision = artifact.decision(pick.definition, 0).expect("decision");
+        let decision = artifact
+            .decision(pick.definition, SiteId(0))
+            .expect("decision");
         assert_eq!(decision.verdict, TypingVerdict::Checked);
         assert_eq!(decision.rule, TypingRule::BranchesDisagree);
     }
@@ -1394,7 +1414,7 @@ mod tests {
         ));
         assert!(dump.contains("  policy dispatch checked=silent refuted=warning\n"));
         assert!(dump.contains(" function main\n"));
-        assert!(dump.contains("t0 dispatch refuted rule=dispatch-no-applicable-method span="));
+        assert!(dump.contains("s0 dispatch refuted rule=dispatch-no-applicable-method span="));
         assert!(
             dump.contains(
                 "expected=dispatch area methods=2 actual=exactly <shape> severity=warning"

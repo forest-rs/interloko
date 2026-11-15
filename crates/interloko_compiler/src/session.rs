@@ -1823,7 +1823,7 @@ impl SessionArtifacts {
     /// Explains a typing environment object.
     ///
     /// `typing-config:session` renders the policy and every decision; a
-    /// `typing:<definition>:t<n>` id renders one decision with its rule,
+    /// `typing:<definition>:s<n>` id renders one decision with its rule,
     /// operand types, and the policy that set its severity. Function, method,
     /// and constant ids render that definition's decisions.
     #[must_use]
@@ -3776,6 +3776,8 @@ pub enum DispatchSiteOwnerKind {
     Function,
     /// The dispatch site is inside a method body.
     Method,
+    /// The dispatch site is inside a constant's initializer.
+    Constant,
 }
 
 impl DispatchSiteOwnerKind {
@@ -3785,6 +3787,7 @@ impl DispatchSiteOwnerKind {
         match self {
             Self::Function => "function",
             Self::Method => "method",
+            Self::Constant => "constant",
         }
     }
 }
@@ -3845,8 +3848,11 @@ pub struct DispatchSiteRecord {
     pub key: DispatchSiteKey,
     /// Zero-based dispatch-site index in module traversal order.
     pub index: usize,
-    /// Enclosing function or method.
+    /// Enclosing function, method, or constant.
     pub owner: DispatchSiteOwner,
+    /// Check site of the generic call within its owner; the owner's
+    /// definition and this site name the call, as typing decisions do.
+    pub site: sem::SiteId,
     /// Source span for the semantic generic call.
     pub span: Span,
     /// Generic function id.
@@ -4094,7 +4100,7 @@ fn artifact_fingerprint(
                 for decision in &typed.decisions {
                     builder.mix_str(&format!(
                         "{} {} {} {} {:?} {:?} {:?}",
-                        decision.index,
+                        decision.site,
                         decision.check.as_str(),
                         decision.verdict.as_str(),
                         decision.rule.as_str(),
@@ -4359,14 +4365,7 @@ fn collect_dispatch_sites(artifacts: &SessionArtifacts) -> Vec<DispatchSiteRecor
             definition: function.definition,
             name: function.name.clone(),
         };
-        let mut owner_index = 0;
-        collect_dispatch_sites_in_block(
-            artifacts,
-            owner,
-            &function.body,
-            &mut owner_index,
-            &mut sites,
-        );
+        collect_dispatch_sites_in_block(artifacts, &owner, &function.body, &mut sites);
     }
     for method in &artifacts.sem.methods {
         let generic_name = artifacts
@@ -4382,154 +4381,126 @@ fn collect_dispatch_sites(artifacts: &SessionArtifacts) -> Vec<DispatchSiteRecor
                 sem_specializer_vector_label(&artifacts.sem, &method.specializers)
             ),
         };
-        let mut owner_index = 0;
-        collect_dispatch_sites_in_block(
-            artifacts,
-            owner,
-            &method.body,
-            &mut owner_index,
-            &mut sites,
-        );
+        collect_dispatch_sites_in_block(artifacts, &owner, &method.body, &mut sites);
+    }
+    // A constant's initializer is inlined wherever it is referenced, but its
+    // calls are written, and numbered, in the constant.
+    for constant in &artifacts.sem.constants {
+        let owner = DispatchSiteOwner {
+            kind: DispatchSiteOwnerKind::Constant,
+            definition: constant.definition,
+            name: constant.name.clone(),
+        };
+        collect_dispatch_sites_in_expr(artifacts, &owner, &constant.value, &mut sites);
     }
     sites
 }
 
 fn collect_dispatch_sites_in_block(
     artifacts: &SessionArtifacts,
-    owner: DispatchSiteOwner,
+    owner: &DispatchSiteOwner,
     block: &sem::Block,
-    owner_index: &mut usize,
     sites: &mut Vec<DispatchSiteRecord>,
 ) {
     for binding in &block.lets {
-        collect_dispatch_sites_in_expr(
-            artifacts,
-            owner.clone(),
-            &binding.value,
-            owner_index,
-            sites,
-        );
+        collect_dispatch_sites_in_expr(artifacts, owner, &binding.value, sites);
     }
-    collect_dispatch_sites_in_expr(artifacts, owner, &block.result, owner_index, sites);
+    collect_dispatch_sites_in_expr(artifacts, owner, &block.result, sites);
 }
 
 fn collect_dispatch_sites_in_expr(
     artifacts: &SessionArtifacts,
-    owner: DispatchSiteOwner,
+    owner: &DispatchSiteOwner,
     expr: &sem::Expr,
-    owner_index: &mut usize,
     sites: &mut Vec<DispatchSiteRecord>,
 ) {
     match expr {
         sem::Expr::DirectCall { args, .. } | sem::Expr::HostCall { args, .. } => {
             for arg in args {
-                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+                collect_dispatch_sites_in_expr(artifacts, owner, arg, sites);
             }
         }
         sem::Expr::CallableCall { callable, args, .. } => {
-            collect_dispatch_sites_in_expr(artifacts, owner.clone(), callable, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, callable, sites);
             for arg in args {
-                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+                collect_dispatch_sites_in_expr(artifacts, owner, arg, sites);
             }
         }
         sem::Expr::GenericCall {
             generic,
             args,
             span,
+            site,
         } => {
-            let site = make_dispatch_site(
+            let record = make_dispatch_site(
                 artifacts,
                 owner.clone(),
-                *owner_index,
+                *site,
                 sites.len(),
                 *generic,
                 args,
                 *span,
             );
-            *owner_index = owner_index.saturating_add(1);
-            sites.push(site);
+            sites.push(record);
             for arg in args {
-                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+                collect_dispatch_sites_in_expr(artifacts, owner, arg, sites);
             }
         }
         sem::Expr::Signal { condition, .. }
         | sem::Expr::ClassOf {
             object: condition, ..
         } => {
-            collect_dispatch_sites_in_expr(artifacts, owner, condition, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, condition, sites);
         }
         sem::Expr::InstanceOf { value, .. }
         | sem::Expr::InstanceOfLimited { value, .. }
         | sem::Expr::Cast { value, .. } => {
-            collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
         sem::Expr::MakeObject { class, fields, .. } => {
-            collect_dispatch_sites_in_expr(artifacts, owner.clone(), class, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, class, sites);
             for field in fields {
-                collect_dispatch_sites_in_expr(
-                    artifacts,
-                    owner.clone(),
-                    &field.value,
-                    owner_index,
-                    sites,
-                );
+                collect_dispatch_sites_in_expr(artifacts, owner, &field.value, sites);
             }
         }
         sem::Expr::AccessorCall { receiver, .. } => {
-            collect_dispatch_sites_in_expr(artifacts, owner, receiver, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, receiver, sites);
         }
         sem::Expr::SlotWrite {
             receiver, value, ..
         } => {
-            collect_dispatch_sites_in_expr(artifacts, owner.clone(), receiver, owner_index, sites);
-            collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, receiver, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
         sem::Expr::Negate { value, .. } | sem::Expr::Convert { value, .. } => {
-            collect_dispatch_sites_in_expr(artifacts, owner, value, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
         sem::Expr::FloatCall { args, .. } => {
             for arg in args {
-                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+                collect_dispatch_sites_in_expr(artifacts, owner, arg, sites);
             }
         }
         sem::Expr::Binary { lhs, rhs, .. }
         | sem::Expr::Compare { lhs, rhs, .. }
         | sem::Expr::MixedCompare { lhs, rhs, .. } => {
-            collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
-            collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, lhs, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, rhs, sites);
         }
         sem::Expr::ValueEqual { lhs, rhs, .. } => {
-            collect_dispatch_sites_in_expr(artifacts, owner.clone(), lhs, owner_index, sites);
-            collect_dispatch_sites_in_expr(artifacts, owner, rhs, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, lhs, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, rhs, sites);
         }
         sem::Expr::VectorLiteral { elements, .. }
         | sem::Expr::Values {
             values: elements, ..
         } => {
             for element in elements {
-                collect_dispatch_sites_in_expr(
-                    artifacts,
-                    owner.clone(),
-                    element,
-                    owner_index,
-                    sites,
-                );
-            }
-        }
-        sem::Expr::ConstantRef { constant, .. } => {
-            if let Some(constant) = artifacts.sem.constants.get(constant.0 as usize) {
-                collect_dispatch_sites_in_expr(
-                    artifacts,
-                    owner,
-                    &constant.value,
-                    owner_index,
-                    sites,
-                );
+                collect_dispatch_sites_in_expr(artifacts, owner, element, sites);
             }
         }
         sem::Expr::IntrinsicCall { args, .. } => {
             for arg in args {
-                collect_dispatch_sites_in_expr(artifacts, owner.clone(), arg, owner_index, sites);
+                collect_dispatch_sites_in_expr(artifacts, owner, arg, sites);
             }
         }
         sem::Expr::If {
@@ -4538,27 +4509,21 @@ fn collect_dispatch_sites_in_expr(
             else_branch,
             ..
         } => {
-            collect_dispatch_sites_in_expr(artifacts, owner.clone(), condition, owner_index, sites);
-            collect_dispatch_sites_in_expr(
-                artifacts,
-                owner.clone(),
-                then_branch,
-                owner_index,
-                sites,
-            );
-            collect_dispatch_sites_in_expr(artifacts, owner, else_branch, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, condition, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, then_branch, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, else_branch, sites);
         }
         sem::Expr::Handle { body, restart, .. } => {
             if let Some(guard) = &restart.guard {
-                collect_dispatch_sites_in_expr(artifacts, owner.clone(), guard, owner_index, sites);
+                collect_dispatch_sites_in_expr(artifacts, owner, guard, sites);
             }
-            collect_dispatch_sites_in_expr(artifacts, owner.clone(), body, owner_index, sites);
-            collect_dispatch_sites_in_expr(artifacts, owner, &restart.body, owner_index, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, body, sites);
+            collect_dispatch_sites_in_expr(artifacts, owner, &restart.body, sites);
         }
         sem::Expr::Block { body, cleanup, .. } => {
-            collect_dispatch_sites_in_block(artifacts, owner.clone(), body, owner_index, sites);
+            collect_dispatch_sites_in_block(artifacts, owner, body, sites);
             if let Some(cleanup) = cleanup {
-                collect_dispatch_sites_in_block(artifacts, owner, cleanup, owner_index, sites);
+                collect_dispatch_sites_in_block(artifacts, owner, cleanup, sites);
             }
         }
         sem::Expr::ConstI64 { .. }
@@ -4569,6 +4534,7 @@ fn collect_dispatch_sites_in_expr(
         | sem::Expr::SymbolLiteral { .. }
         | sem::Expr::Local { .. }
         | sem::Expr::Capture { .. }
+        | sem::Expr::ConstantRef { .. }
         | sem::Expr::ClassObject { .. }
         | sem::Expr::KnownCallable { .. }
         | sem::Expr::Closure { .. }
@@ -4580,7 +4546,7 @@ fn collect_dispatch_sites_in_expr(
 fn make_dispatch_site(
     artifacts: &SessionArtifacts,
     owner: DispatchSiteOwner,
-    owner_index: usize,
+    site: sem::SiteId,
     global_index: usize,
     generic_id: sem::GenericFunctionId,
     args: &[sem::Expr],
@@ -4620,11 +4586,12 @@ fn make_dispatch_site(
         key: dispatch_site_key(
             artifacts.source.id,
             owner.definition,
-            owner_index,
+            site,
             generic_definition,
         ),
         index: global_index,
         owner,
+        site,
         span,
         generic: generic_id,
         generic_definition,
@@ -4644,13 +4611,13 @@ fn make_dispatch_site(
 fn dispatch_site_key(
     source: SourceFileId,
     owner: DefinitionId,
-    owner_index: usize,
+    site: sem::SiteId,
     generic: DefinitionId,
 ) -> DispatchSiteKey {
     let mut builder = StableIdBuilder::new(0x4341_4952_4453_5054);
     builder.mix_u64(source.raw());
     builder.mix_u64(owner.raw());
-    builder.mix_u64(usize_to_u64(owner_index));
+    builder.mix_u64(u64::from(site.0));
     builder.mix_u64(generic.raw());
     DispatchSiteKey(builder.finish())
 }
@@ -5008,10 +4975,11 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
     let _ = writeln!(out, "  key: {}", site.key);
     let _ = writeln!(
         out,
-        "  owner: {} {} definition={}",
+        "  owner: {} {} definition={} site={}",
         site.owner.kind.as_str(),
         site.owner.name,
-        site.owner.definition
+        site.owner.definition,
+        site.site
     );
     let _ = writeln!(
         out,
@@ -10672,10 +10640,11 @@ fn project_environment_dispatch_site(
             site.lowered_dispatcher, site.runtime_needed
         )),
         inspection: format!(
-            "key={} owner={} {} span={}..{} generic={} contract={} static-args={} exact-classes={} applicable={} rejected={} artifacts={artifact_keys}",
+            "key={} owner={} {} site={} span={}..{} generic={} contract={} static-args={} exact-classes={} applicable={} rejected={} artifacts={artifact_keys}",
             site.key,
             site.owner.kind.as_str(),
             site.owner.name,
+            site.site,
             site.span.start,
             site.span.end,
             generic,
@@ -10691,9 +10660,10 @@ fn project_environment_dispatch_site(
 /// Stable EOP id of the session typing configuration object.
 const TYPING_CONFIG_OBJECT_ID: &str = "typing-config:session";
 
-/// Stable EOP id of one typing decision: owner definition plus ordinal.
+/// Stable EOP id of one typing decision: owner definition plus check site,
+/// such as `typing:def…:s2`.
 fn typing_decision_object_id(decision: &typing::TypingDecision) -> String {
-    format!("typing:{}:t{}", decision.owner, decision.index)
+    format!("typing:{}:{}", decision.owner, decision.site)
 }
 
 fn typing_policy_label(config: typing::TypingConfig) -> String {
@@ -10716,12 +10686,12 @@ fn typing_dispatch_site<'a>(
     decision: &typing::TypingDecision,
     sites: &'a [DispatchSiteRecord],
 ) -> Option<&'a DispatchSiteRecord> {
-    let typing::TypingExpectation::Dispatch { generic, .. } = &decision.expected else {
+    if decision.check != typing::TypingCheck::Dispatch {
         return None;
-    };
+    }
     sites
         .iter()
-        .find(|site| site.span == decision.span && site.generic == *generic)
+        .find(|site| site.owner.definition == decision.owner && site.site == decision.site)
 }
 
 fn project_typing(
@@ -11425,6 +11395,12 @@ fn dump_sem_local_list(out: &mut String, locals: &[sem::LocalId]) {
     }
 }
 
+/// Renders ` site=sN` for a check site, or nothing for an operation that
+/// cannot trap.
+fn optional_site_label(site: Option<sem::SiteId>) -> String {
+    site.map_or_else(String::new, |site| format!(" site={site}"))
+}
+
 fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
     indent_line(out, indent);
     match expr {
@@ -11584,8 +11560,13 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 dump_sem_expr(out, arg, indent + 2);
             }
         }
-        sem::Expr::GenericCall { generic, args, .. } => {
-            let _ = writeln!(out, "generic-call g{}", generic.0);
+        sem::Expr::GenericCall {
+            generic,
+            args,
+            site,
+            ..
+        } => {
+            let _ = writeln!(out, "generic-call g{} site={site}", generic.0);
             for arg in args {
                 dump_sem_expr(out, arg, indent + 2);
             }
@@ -11608,16 +11589,25 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "class-of c{}", class.0);
             dump_sem_expr(out, object, indent + 2);
         }
-        sem::Expr::InstanceOf { value, class, .. } => {
-            let _ = writeln!(out, "instance? c{}", class.0);
+        sem::Expr::InstanceOf {
+            value, class, site, ..
+        } => {
+            let _ = writeln!(out, "instance? c{} site={site}", class.0);
             dump_sem_expr(out, value, indent + 2);
         }
-        sem::Expr::InstanceOfLimited { value, limited, .. } => {
-            let _ = writeln!(out, "instance? {}", limited.name());
+        sem::Expr::InstanceOfLimited {
+            value,
+            limited,
+            site,
+            ..
+        } => {
+            let _ = writeln!(out, "instance? {} site={site}", limited.name());
             dump_sem_expr(out, value, indent + 2);
         }
-        sem::Expr::Cast { value, class, .. } => {
-            let _ = writeln!(out, "as c{}", class.0);
+        sem::Expr::Cast {
+            value, class, site, ..
+        } => {
+            let _ = writeln!(out, "as c{} site={site}", class.0);
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::MakeObject {
@@ -11684,18 +11674,37 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::Binary {
-            op, kind, lhs, rhs, ..
+            op,
+            kind,
+            lhs,
+            rhs,
+            site,
+            ..
         } => {
-            let _ = writeln!(out, "binary {op:?} {}", numeric_kind_label(*kind));
+            let _ = writeln!(
+                out,
+                "binary {op:?} {}{}",
+                numeric_kind_label(*kind),
+                optional_site_label(*site)
+            );
             dump_sem_expr(out, lhs, indent + 2);
             dump_sem_expr(out, rhs, indent + 2);
         }
-        sem::Expr::Negate { kind, value, .. } => {
-            let _ = writeln!(out, "negate {}", numeric_kind_label(*kind));
+        sem::Expr::Negate {
+            kind, value, site, ..
+        } => {
+            let _ = writeln!(
+                out,
+                "negate {}{}",
+                numeric_kind_label(*kind),
+                optional_site_label(*site)
+            );
             dump_sem_expr(out, value, indent + 2);
         }
-        sem::Expr::Convert { to, value, .. } => {
-            let _ = writeln!(out, "convert to {}", numeric_kind_label(*to));
+        sem::Expr::Convert {
+            to, value, site, ..
+        } => {
+            let _ = writeln!(out, "convert to {} site={site}", numeric_kind_label(*to));
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::FloatCall { builtin, args, .. } => {
@@ -14040,7 +14049,7 @@ mod tests {
         assert!(
             artifacts
                 .dump_stage(DumpStage::Typing)
-                .contains("t1 dispatch refuted rule=dispatch-no-applicable-method")
+                .contains("s1 dispatch refuted rule=dispatch-no-applicable-method")
         );
     }
 
@@ -15172,6 +15181,87 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == DiagnosticCode::DuplicateDefinition)
+        );
+    }
+
+    #[test]
+    fn typing_decisions_link_dispatch_sites_by_owner_and_site() {
+        // Both `make`s copy the slot's default, so `main` holds two calls of
+        // `area` with the same span; a constant's call belongs to the
+        // constant.
+        let source = "define class <shape> (<object>)\nend;\n\
+            define class <circle> (<shape>)\nend;\n\
+            define generic area(x);\n\
+            define method area(c :: <circle>) => <integer>\n  7\nend;\n\
+            define class <holder> (<object>)\n  \
+            slot size :: <integer>, init-value: area(make(<circle>));\nend;\n\
+            define constant $seven :: <integer> = area(make(<circle>));\n\
+            define function main() => <integer>\n  \
+            let first = make(<holder>);\n  let second = make(<holder>);\n  \
+            first.size + second.size + $seven\nend;";
+        let artifacts =
+            CompilerSession::compile_source("shared.loko", source, RuntimeMode::CompileOnly);
+        assert!(
+            artifacts.diagnostics.is_empty(),
+            "{:?}",
+            artifacts.diagnostics
+        );
+        let sites = artifacts.dispatch_sites();
+        let labels = sites
+            .iter()
+            .map(|site| {
+                (
+                    site.id.as_str(),
+                    site.owner.kind,
+                    site.owner.name.as_str(),
+                    site.site,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                (
+                    "dispatch:d0",
+                    DispatchSiteOwnerKind::Function,
+                    "main",
+                    sem::SiteId(0)
+                ),
+                (
+                    "dispatch:d1",
+                    DispatchSiteOwnerKind::Function,
+                    "main",
+                    sem::SiteId(1)
+                ),
+                (
+                    "dispatch:d2",
+                    DispatchSiteOwnerKind::Constant,
+                    "$seven",
+                    sem::SiteId(0)
+                ),
+            ]
+        );
+        assert_eq!(sites[0].span, sites[1].span);
+
+        let decisions = artifacts.typing.decisions().collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 3);
+        for (decision, site) in decisions
+            .iter()
+            .zip(["dispatch:d0", "dispatch:d1", "dispatch:d2"])
+        {
+            let id = typing_decision_object_id(decision);
+            assert_eq!(id, format!("typing:{}:{}", decision.owner, decision.site),);
+            let explanation = artifacts.explain_typing(&id).expect("decision");
+            assert!(
+                explanation.contains(&format!("dispatch-site: {site}\n")),
+                "{explanation}"
+            );
+        }
+        assert!(
+            explain_dispatch_site(&artifacts, &sites[1]).contains(&format!(
+                "definition={} site=s1\n",
+                sites[1].owner.definition
+            ))
         );
     }
 

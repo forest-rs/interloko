@@ -2,7 +2,7 @@
 // expect: diagnostics 1
 // expect: diagnostic code typing.dispatch-no-applicable-method
 // expect: diagnostic contains no method of `area` can apply to exactly <shape>
-// expect: dump typing contains t1 dispatch refuted rule=dispatch-no-applicable-method
+// expect: dump typing contains s1 dispatch refuted rule=dispatch-no-applicable-method
 // expect: dump eop contains object typing-config:session
 
 // The soft typing pass warns that the else branch always fails dispatch,
