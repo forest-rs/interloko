@@ -196,9 +196,11 @@ so a local bound to `make(<circle>)` is exactly `<circle>` while the result of
 a callable declared to return `<shape>` is not. When typing is blocked by
 semantic errors, no class is known statically.
 
-The explanation is read-only. It describes the current one-argument nominal
-dispatch model; it does not imply sealed optimization, method combination,
-multi-argument dispatch, or new tape opcodes.
+The explanation is read-only. It describes the current nominal dispatch
+model; it does not imply method combination or new tape opcodes. A send
+over a sealed class's cone is proved when every piece has a method, and is
+linked when every piece is an exact class selecting the same one; a send
+whose pieces select different methods still asks the runtime.
 
 ## Types and Contracts
 
@@ -231,8 +233,16 @@ Each typing decision object carries, besides its verdict:
 - `depends-on`: what the verdict relies on outside its own body, as EOP ids:
   `contract:<definition-id>` for a cited function, generic, or method
   contract (`constant:kN` or `accessor:cN.sM` for a constant's value or a
-  slot read), `generic:gN` for the method set it assumes, and `class:cN` for
-  a closed class it assumes gains no subclasses;
+  slot read), `generic:gN` for the method set it assumes, `class:cN` for a
+  closed built-in or host class it assumes gains no subclasses, and the
+  sealed class's `contract:<definition-id>` for a sealed class whose pieces
+  it relies on;
+- `assumes`: the closed-world assumptions themselves, as sentences such as
+  `sealed abstract class <shape> has exactly direct subclasses {<circle>,
+  <square>}`, `sealed class <circle> has no subclasses`, or `generic area
+  has exactly methods {area(<circle>), area(<square>)}`. They include those
+  the operands' facts cite, so a cast proved in an `instance?` test's else
+  branch assumes the sealing that narrowed it;
 - `codegen`: what generated code does with the check, compared with lowering
   that ignores typing: `kept` (the same code), `elided` (the check is gone:
   a constant `instance?` test, possibly with its dead branch, a cast that
@@ -258,6 +268,17 @@ cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/typ
 Dependents are read from the recorded reasons, so they are what the current
 facts rely on rather than a dependency graph; a method's contract is cited by
 nothing, since sends rely on their generic's contract.
+
+A generic's contract object also says whether the generic is sealed, how
+many methods it has, and how many decisions assume its method set
+(`sealing=sealed methods=2 assumed-by=3`). Each sealed class has a contract
+object too: its sealing is the promise code compiled against it relies on.
+Its inspection lists the direct subclasses and abstractness
+(`sealing=sealed abstract=yes subclasses=[<circle>,<square>] dependents=2`),
+and `show-dependents` renders the closed world as a sentence and lists the
+decisions relying on it. Class and generic objects show `sealing=` (and
+classes `abstract=`) in their inspection, and a sealed generic offers no
+`add-method`.
 
 ## Adjusting Typing
 

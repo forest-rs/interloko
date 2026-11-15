@@ -113,6 +113,23 @@ The current slices include:
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;
+- Dylan's class and generic adjectives: `define abstract class` (no direct
+  instances, so `make` refuses it), `define sealed class` and `define
+  sealed generic`, with `open` and `concrete` as the explicit defaults.
+  Classes and generics are open unless sealed: Interloko is edited live,
+  and an open class is one a later edit may extend without disturbing code
+  compiled against it. There is one compilation unit, so sealing confines
+  a class's direct subclasses and a generic's methods to the defining
+  source: a session `add-method` on a sealed generic is refused, and so is
+  code installed into a running program that breaks what its code relies
+  on. In return soft typing reads a cone over a sealed class as the union
+  of its pieces (its own instances unless it is abstract, and each direct
+  subclass's cone): a dispatch over it is covered when each piece has a
+  method, casts and `instance?` tests are decided piece by piece, an
+  `instance?` else branch keeps only the other pieces, and a sealed class
+  with no subclasses is exact, so its sends link. Every such proof records
+  the closed-world assumption it relies on, such as `sealed abstract class
+  <shape> has exactly direct subclasses {<circle>, <square>}`;
 - a numeric class tower: `<number>` > `<real>`, then `<rational>` >
   `<integer>` and `<float>` > `<double-float>`, where only `<integer>` and
   `<double-float>` are concrete; methods may specialize on any of them, and
@@ -217,8 +234,10 @@ Interloko is intentionally not:
 - an LSP, watch mode, or IDE;
 - a macro system;
 - a Cranelift backend;
-- a full module system;
-- a sealed-dispatch optimizer.
+- a full module system (sealing confines extensions to the one source a
+  compile reads);
+- a sealed-dispatch optimizer beyond typing's proofs: a send over several
+  sealed pieces with different methods still asks the runtime.
 
 The project is useful because the compiler and runtime already expose enough
 structure to inspect what the object model means and how it lowers, without
