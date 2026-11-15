@@ -724,6 +724,8 @@ pub struct TypingTally {
     pub specialized: usize,
     /// Numeric dispatches replaced by their method's operation.
     pub inlined: usize,
+    /// Dispatches that call their method through a relinkable link.
+    pub linked: usize,
 }
 
 impl TypingTally {
@@ -738,6 +740,7 @@ impl TypingTally {
             CheckCodegen::Elided => self.elided += 1,
             CheckCodegen::Specialized => self.specialized += 1,
             CheckCodegen::Inlined => self.inlined += 1,
+            CheckCodegen::Linked => self.linked += 1,
         }
     }
 }
@@ -856,8 +859,17 @@ impl TypingDelta {
         );
         let _ = writeln!(
             out,
-            "  codegen kept {}->{} elided {}->{} specialized {}->{} inlined {}->{}",
-            b.kept, a.kept, b.elided, a.elided, b.specialized, a.specialized, b.inlined, a.inlined
+            "  codegen kept {}->{} elided {}->{} specialized {}->{} inlined {}->{} linked {}->{}",
+            b.kept,
+            a.kept,
+            b.elided,
+            a.elided,
+            b.specialized,
+            a.specialized,
+            b.inlined,
+            a.inlined,
+            b.linked,
+            a.linked
         );
         for change in &self.changes {
             let _ = writeln!(out, "  {}", render_change(change));

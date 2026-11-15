@@ -17,6 +17,18 @@
 //! arguments converted), the answer is the newest unit's compiled dispatcher.
 //! Direct calls to source functions stay within the caller's unit.
 //!
+//! A send whose argument classes typing proved skips the request: it calls
+//! the selected method through an `execution_tape` link, as cheap as a
+//! direct call. Every program declares one link per method of the runtime
+//! layout, `LinkId(m)` for method `m`, so link ids depend on the layout alone
+//! and an edit elsewhere renumbers none. The layout fixes which method
+//! applies to given classes, so a link only has to follow its method's
+//! newest code: whenever a run installs a unit, the driver repoints every
+//! link a unit's sends use at the newest unit's version of the method, or at
+//! its dispatcher when that version converts its arguments or results
+//! ([`CodeUnit::link_target`]), exactly where a request would lead.
+//! Activations already running a method keep it.
+//!
 //! # Contracts
 //!
 //! Compiled code trusts the types its compiler resolved: a send whose
@@ -35,9 +47,10 @@
 //! another unit's definition, which happens only within one run, after a
 //! chooser installs a unit while frames are suspended:
 //!
-//! - a generic send is late-bound, so an old frame may send to the newest
-//!   unit's methods; [`CodeUnit::check_replaces`] refuses a unit that
-//!   changes a generic's contract incompatibly;
+//! - a generic send is late-bound, dynamically or through a repointed link,
+//!   so an old frame may send to the newest unit's methods;
+//!   [`CodeUnit::check_replaces`] refuses a unit that changes a generic's
+//!   contract incompatibly;
 //! - a retried frame calls the newest version of its function or method,
 //!   with the frame's own arguments, and returns to the frame's old caller;
 //!   such a retry is refused ([`FrameCode::retry_refusal`]) when that
@@ -55,7 +68,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use execution_tape::host::HostSig;
-use execution_tape::program::ValueType;
+use execution_tape::program::{LinkId, ValueType};
 use execution_tape::value::{FuncId, FuncRef, UnitId};
 use execution_tape::verifier::VerifiedProgram;
 use interloko_model::contract::{Contract, ContractBreak, ContractPosition, ValueContract};
@@ -109,7 +122,7 @@ pub struct DispatchCase {
 impl GenericDispatch {
     /// The case selected for arguments of `class_of` each position, or
     /// `None` when no method applies.
-    pub(crate) fn select(
+    pub fn select(
         &self,
         class_of: impl Fn(usize) -> Option<ClassId>,
         is_subclass: impl Fn(ClassId, ClassId) -> bool,
@@ -146,6 +159,10 @@ pub struct CodeUnit {
     /// Runtime method selection of each generic, in layout generic order;
     /// `None` leaves the choice to the generic's dispatcher.
     pub dispatch: Vec<Option<GenericDispatch>>,
+    /// The methods whose links the program's sends call, ascending. The
+    /// program declares a link for every method ([`method_link`]); these are
+    /// the ones a run must keep repointing.
+    pub links: Vec<MethodId>,
     /// What code compiled against each definition relies on. A definition
     /// with no contract here (as in a unit built without any) is checked
     /// by its signature alone.
@@ -290,7 +307,46 @@ impl core::fmt::Display for ContractMismatch {
 /// A function's argument and result kinds.
 pub(crate) type Signature = (Vec<ValueType>, Vec<ValueType>);
 
+/// The link a program declares for `method`: link ids are method ids.
+#[must_use]
+pub const fn method_link(method: MethodId) -> LinkId {
+    LinkId(method.0)
+}
+
 impl CodeUnit {
+    /// The methods whose links this unit's sends call ([`Self::links`]).
+    pub fn linked_methods(&self) -> impl Iterator<Item = MethodId> + '_ {
+        self.links.iter().copied()
+    }
+
+    /// Where a send through the link for `method` must go once this unit,
+    /// installed as `unit`, is a run's newest code: this unit's version of
+    /// the method when its table calls it directly, as a request would, and
+    /// otherwise the generic's dispatcher, which converts and checks as a
+    /// dynamic send does.
+    ///
+    /// `None` when this unit's layout lacks the method, which units of one
+    /// run never do.
+    #[must_use]
+    pub fn link_target(&self, unit: UnitId, method: MethodId) -> Option<FuncRef> {
+        let generic = self.layout.methods.get(method.0 as usize)?.generic;
+        let direct = self
+            .dispatch
+            .get(generic.0 as usize)?
+            .as_ref()
+            .is_some_and(|plan| {
+                plan.cases
+                    .iter()
+                    .any(|case| case.method == method && case.direct)
+            });
+        let func = if direct {
+            *self.methods.get(method.0 as usize)?
+        } else {
+            *self.generics.get(generic.0 as usize)?
+        };
+        Some(FuncRef::new(unit, func))
+    }
+
     /// The source definition `func` implements, if any.
     #[must_use]
     pub fn definition(&self, func: FuncId) -> Option<Definition> {
@@ -473,8 +529,9 @@ impl FrameCode {
     }
 }
 
-/// The code units one run installed, oldest first.
-#[derive(Debug, Default)]
+/// Code units installed in one VM, oldest first: the units of one run, or
+/// every unit installed through one [`crate::driver::Installed`].
+#[derive(Clone, Debug, Default)]
 pub(crate) struct UnitTable {
     units: Vec<(UnitId, Arc<CodeUnit>)>,
 }
@@ -490,6 +547,11 @@ impl UnitTable {
 
     pub(crate) fn newest_unit(&self) -> Option<UnitId> {
         self.units.last().map(|(unit, _)| *unit)
+    }
+
+    /// Every unit, oldest first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (UnitId, &Arc<CodeUnit>)> {
+        self.units.iter().map(|(unit, code)| (*unit, code))
     }
 
     pub(crate) fn get(&self, unit: UnitId) -> Option<&CodeUnit> {

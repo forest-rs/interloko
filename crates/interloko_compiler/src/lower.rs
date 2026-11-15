@@ -17,8 +17,9 @@
 //! its dead branch, integer arithmetic that cannot overflow and conversions
 //! that cannot leave their range drop their checks, a shift count proved in
 //! range is not tested, a numeric dispatch whose method typing selected runs
-//! that method's operation inline, and a read sem narrowed after a test
-//! reuses its register when flow typing narrowed it too. Each change is
+//! that method's operation inline, any other dispatch whose method typing
+//! selected calls it through a relinkable link, and a read sem narrowed
+//! after a test reuses its register when flow typing narrowed it too. Each change is
 //! recorded in [`check_codegen`](crate::lower::Module::check_codegen).
 //! Why the facts hold in code that may run under newer code units is in the
 //! `facts` submodule's documentation.
@@ -136,6 +137,11 @@ pub enum CheckCodegen {
     /// method's operation: no method selection, indirect call, or
     /// dispatcher.
     Inlined,
+    /// A dispatch whose method typing selected calls that method through a
+    /// link ([`Instr::LinkedSend`]): no method selection or indirect call.
+    /// The runtime repoints the link when newer code is installed, so the
+    /// send still reaches the newest method.
+    Linked,
 }
 
 impl CheckCodegen {
@@ -147,6 +153,7 @@ impl CheckCodegen {
             Self::Elided => "elided",
             Self::Specialized => "specialized",
             Self::Inlined => "inlined",
+            Self::Linked => "linked",
         }
     }
 }
@@ -1302,6 +1309,23 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// A generic send typing proved the argument classes of: a call to the
+    /// selected method through the program's link for that method, which the
+    /// runtime repoints at the method's newest code on every install. The
+    /// method takes the send's arguments and returns its results unchanged.
+    LinkedSend {
+        /// Destination registers.
+        dsts: Vec<Reg>,
+        /// The selected method, whose link the send calls through.
+        method: sem::MethodId,
+        /// The selected method's lowered function, the link's initial
+        /// target.
+        callee: FunctionId,
+        /// The send's argument registers, in dispatcher parameter kinds.
+        args: Vec<Reg>,
+        /// Source span.
+        span: Span,
+    },
     /// Indirect call through a first-class callable value.
     CallIndirect {
         /// Destination registers.
@@ -1716,6 +1740,9 @@ struct LowerIds {
     exit_thunks: Vec<ExitThunk>,
     restarts: Vec<RestartDescriptor>,
     call_sigs: Vec<CallableSignature>,
+    /// Runtime method selection of each generic, in generic id order, which
+    /// both [`Module::dispatch`] and linked sends follow.
+    dispatch: Vec<Option<GenericDispatch>>,
 }
 
 /// One exit thunk function, shared by every block exit with its signature.
@@ -1886,13 +1913,19 @@ impl<'module> Lowering<'module> {
         intern_recorded_signatures(&mut ids.call_sigs, module)?;
         ids.restarts = callable_uses.restarts;
 
-        Ok(Self {
+        let mut this = Self {
             module,
             ids,
             facts,
             // Closure sites are named by their owner under either policy.
             closure_owners: facts::closure_owners(module),
-        })
+        };
+        this.ids.dispatch = module
+            .generics
+            .iter()
+            .map(|generic| this.dispatch_plan(generic))
+            .collect::<Result<Vec<_>, LowerError>>()?;
+        Ok(this)
     }
 
     fn lower_module(&self) -> Result<Module, LowerError> {
@@ -1992,12 +2025,7 @@ impl<'module> Lowering<'module> {
             })
             .collect::<Result<Vec<_>, LowerError>>()?;
 
-        let dispatch = self
-            .module
-            .generics
-            .iter()
-            .map(|generic| self.dispatch_plan(generic))
-            .collect::<Result<Vec<_>, LowerError>>()?;
+        let dispatch = self.ids.dispatch.clone();
         Ok(Module {
             runtime: runtime_bridge::runtime_layout_from_sem(self.module),
             restarts: self.ids.restarts.clone(),
@@ -3580,14 +3608,27 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    /// Sends to a generic function: the runtime selects the method.
+    /// Sends to a generic function: the runtime selects the method, unless
+    /// typing proved which one at `site` ([`Self::send_link`]).
     fn send(
         &mut self,
         generic: &sem::GenericFunction,
         args: Vec<Reg>,
         dsts: Vec<Reg>,
         span: Span,
+        site: sem::SiteId,
     ) -> Result<(), LowerError> {
+        if let Some((method, callee)) = self.send_link(generic, site) {
+            self.record(site, CheckCodegen::Linked);
+            self.instructions.push(Instr::LinkedSend {
+                dsts,
+                method,
+                callee,
+                args,
+                span,
+            });
+            return Ok(());
+        }
         let callee = self.alloc(ValueKind::Function(None));
         self.instructions.push(Instr::SelectMethod {
             dst: callee.reg,
@@ -3608,6 +3649,48 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(())
+    }
+
+    /// The method a send to `generic` at `site` may call through its link,
+    /// with that method's function: typing proved the dispatch, the
+    /// argument classes are exact, the runtime table selects the same method
+    /// typing did, and the method takes the send's arguments and results
+    /// unchanged. The runtime layout, which every unit of a run shares, fixes
+    /// which method those classes select, so the link need only follow the
+    /// method's newest code.
+    ///
+    /// The call relies on the generic's contract alone, as a dynamic send
+    /// does: the send's results keep the generic's kinds and types. A newer
+    /// unit may replace the method, so nothing here trusts the method's
+    /// narrower contract; the runtime repoints the link on install.
+    fn send_link(
+        &self,
+        generic: &sem::GenericFunction,
+        site: sem::SiteId,
+    ) -> Option<(sem::MethodId, FunctionId)> {
+        let decision = self.fact(site)?;
+        if decision.verdict != typing::TypingVerdict::Proved
+            || decision.rule != typing::TypingRule::DispatchCovered
+            || decision.actual.len() != generic.arity
+        {
+            return None;
+        }
+        let method = decision.selected_method?;
+        let plan = self.ids.dispatch.get(generic.id.0 as usize)?.as_ref()?;
+        let exact = decision
+            .actual
+            .iter()
+            .map(|ty| ty.exact_class(self.module))
+            .collect::<Option<Vec<_>>>()?;
+        let case = plan.select(
+            |index| exact.get(index).copied(),
+            |class, specializer| self.module.is_same_or_subclass(class, specializer),
+        )?;
+        if case.method != method || !case.direct {
+            return None;
+        }
+        let callee = *self.ids.methods.get(method.0 as usize)?;
+        Some((method, callee))
     }
 
     fn lower_lets(&mut self, lets: &[sem::Let]) -> Result<(), LowerError> {
@@ -4346,7 +4429,7 @@ impl<'module> BodyLowering<'module> {
                 generic,
                 args,
                 span,
-                ..
+                site,
             } => {
                 let generic_info = self
                     .module
@@ -4364,7 +4447,7 @@ impl<'module> BodyLowering<'module> {
                     ));
                 }
                 let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
-                self.send(generic_info, args, vec![result.reg], *span)?;
+                self.send(generic_info, args, vec![result.reg], *span, *site)?;
                 Ok(result)
             }
             sem::Expr::CallableCall {
@@ -4990,7 +5073,7 @@ impl<'module> BodyLowering<'module> {
                 generic,
                 args,
                 span,
-                ..
+                site,
             } => {
                 let generic_info = self
                     .module
@@ -5012,6 +5095,7 @@ impl<'module> BodyLowering<'module> {
                     args,
                     results.iter().map(|result| result.reg).collect(),
                     *span,
+                    *site,
                 )?;
                 Ok(results)
             }
@@ -6072,7 +6156,7 @@ impl<'module> BodyLowering<'module> {
             );
         }
         let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
-        self.send(generic_info, regs, vec![result.reg], *span)?;
+        self.send(generic_info, regs, vec![result.reg], *span, *site)?;
         Ok(Some(result))
     }
 
@@ -8483,6 +8567,19 @@ impl Module {
                 span,
             } => {
                 write!(f, "  %{dst} = select-method g{}", generic.0)?;
+                self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
+            Instr::LinkedSend {
+                dsts,
+                method,
+                callee,
+                args,
+                span,
+            } => {
+                write!(f, "  ")?;
+                self.fmt_result_list(f, dsts)?;
+                write!(f, " = linked-send m{} l{}", method.0, callee.0)?;
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }

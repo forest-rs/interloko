@@ -24,7 +24,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::lower;
 use crate::sem;
 use crate::syntax::Span;
-use interloko_runtime::code::CodeUnit;
+use interloko_runtime::code::{CodeUnit, method_link};
 use interloko_runtime::control::{ControlLayout, TypeErrorSite};
 use interloko_runtime::{self as runtime, RuntimeLayout};
 
@@ -164,6 +164,8 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         ids.functions.push(func);
     }
 
+    declare_links(module, &ids, &mut builder)?;
+
     let mut type_errors = vec![Vec::new(); ids.functions.len()];
     for function in &module.functions {
         let func = ids
@@ -195,6 +197,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         methods: vec![FuncId(0); module.runtime.methods.len()],
         functions: Vec::new(),
         dispatch: module.dispatch.clone(),
+        links: linked_methods(module),
         contracts: module.contracts.clone(),
     };
     for (function, func) in module.functions.iter().zip(&ids.functions) {
@@ -301,6 +304,97 @@ fn build_error(error: impl core::fmt::Display) -> TapeError {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TapeIds {
     functions: Vec<FuncId>,
+}
+
+/// Declares one tape link per method of the runtime layout, in method order,
+/// so `LinkId(m)` names method `m` ([`method_link`]) and each starts at the
+/// method's function.
+///
+/// Linked sends call through their method's link. Declaring every method's,
+/// used or not, makes link ids depend on the layout alone: an edit that adds
+/// or drops a send renumbers none, so unchanged functions keep their
+/// bytecode. A link is named after its method's generic and specializers,
+/// as `area(<square>)`, with `_` for an unspecialized parameter.
+fn declare_links(
+    module: &lower::Module,
+    ids: &TapeIds,
+    builder: &mut ProgramBuilder,
+) -> Result<(), TapeError> {
+    let mut methods = vec![None; module.runtime.methods.len()];
+    for (function, func) in module.functions.iter().zip(&ids.functions) {
+        if let lower::FunctionKind::Method(method) = function.kind {
+            *methods
+                .get_mut(method.0 as usize)
+                .ok_or_else(|| invalid_lowered("method is not in the layout"))? = Some(*func);
+        }
+    }
+    for (index, target) in methods.into_iter().enumerate() {
+        let method = sem::MethodId(
+            u32::try_from(index).map_err(|_| invalid_lowered("too many methods to link"))?,
+        );
+        let target = target.ok_or_else(|| invalid_lowered("a layout method has no function"))?;
+        let name = method_link_name(&module.runtime, method);
+        let link = builder.declare_link(&name, target).map_err(build_error)?;
+        if link != method_link(method) {
+            return Err(invalid_lowered("method links are not in method order"));
+        }
+    }
+    Ok(())
+}
+
+/// The methods whose links `module`'s sends call, ascending.
+fn linked_methods(module: &lower::Module) -> Vec<sem::MethodId> {
+    let mut methods = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.instructions)
+        .filter_map(|instr| match instr {
+            lower::Instr::LinkedSend { method, .. } => Some(*method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    methods.sort_unstable_by_key(|method| method.0);
+    methods.dedup();
+    methods
+}
+
+/// A method's link name: its generic and specializers, as `area(<square>)`,
+/// with `_` for a parameter it does not specialize and the method id after a
+/// `#` should two methods ever print alike.
+fn method_link_name(layout: &RuntimeLayout, method: sem::MethodId) -> String {
+    let Some(entry) = layout.methods.get(method.0 as usize) else {
+        return format!("m{}", method.0);
+    };
+    let generic = layout.generic(entry.generic).map_or_else(
+        || format!("g{}", entry.generic.0),
+        |generic| generic.name.clone(),
+    );
+    let specializers = entry
+        .specializers
+        .iter()
+        .map(|specializer| match specializer {
+            Some(class) => layout
+                .class(*class)
+                .map_or_else(|| format!("c{}", class.0), |class| class.name.clone()),
+            None => "_".into(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let name = format!("{generic}({specializers})");
+    let ambiguous = layout
+        .methods
+        .iter()
+        .enumerate()
+        .any(|(other, entry_other)| {
+            other != method.0 as usize
+                && entry_other.generic == entry.generic
+                && entry_other.specializers == entry.specializers
+        });
+    if ambiguous {
+        format!("{name}#m{}", method.0)
+    } else {
+        name
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1581,6 +1675,17 @@ impl<'a> FunctionEmitter<'a> {
                 operands.push(generic_reg);
                 operands.extend(args);
                 self.asm.host_call(EFFECT, sig, EFFECT, &operands, &[*dst]);
+            }
+            lower::Instr::LinkedSend {
+                dsts,
+                method,
+                args,
+                span,
+                ..
+            } => {
+                self.set_span(*span);
+                self.asm
+                    .call_link(EFFECT, method_link(*method), EFFECT, args, dsts);
             }
             lower::Instr::CallIndirect {
                 dsts,

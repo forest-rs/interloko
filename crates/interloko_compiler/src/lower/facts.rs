@@ -29,6 +29,11 @@
 //!   ([`crate::typing::ReasonKind::Dispatched`]) is its selected method's,
 //!   which the method set fixes.
 //!
+//! A linked send ([`super::Instr::LinkedSend`]) relies on a dispatch fact too,
+//! but not on the selected method staying the one that runs: the runtime
+//! repoints its link at the newest code's selection on every install, and
+//! the send's results keep the generic's kinds and contract.
+//!
 //! So every fact lowering acts on is either local to the unit or backed by
 //! something install or retry already checks.
 //!

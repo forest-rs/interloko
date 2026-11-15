@@ -1,0 +1,28 @@
+// codegen: proved
+// expect: run 34
+// expect: diagnostics 0
+// expect: dump eop contains codegen=linked
+// expect: dump lowered contains linked-send m0
+// expect: dump lowered lacks select-method
+// expect: dump tape contains call.link
+// expect: dump tape contains link#0 "area(<circle>)"
+
+// Typing proves both sends' argument is exactly a <circle>, so each calls
+// `area`'s method through one shared tape link rather than asking the
+// runtime and calling indirectly. The link keeps the send late-bound: when
+// a run installs newer code, the runtime selects again from it and repoints
+// the link, so the send reaches the newest method, as a dynamic send would.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define generic area(c :: <circle>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  c.radius * c.radius
+end;
+
+define function main() => <integer>
+  area(make(<circle>, radius: 3)) + area(make(<circle>, radius: 5))
+end;

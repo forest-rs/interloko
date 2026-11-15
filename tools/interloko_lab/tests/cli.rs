@@ -224,7 +224,9 @@ fn run_and_trace_commands_expose_execution_trace() {
     assert!(instruction_trace.starts_with("execution trace: instructions\n"));
     assert!(instruction_trace.contains("instructions: "));
     assert!(instruction_trace.contains(" instr main@0 "));
-    assert!(instruction_trace.contains(" call.indirect -> area#method0@0"));
+    // Typing proves `area`'s argument class, so the send calls the method
+    // through its link.
+    assert!(instruction_trace.contains(" call.link -> area#method0@0"));
 }
 
 #[test]

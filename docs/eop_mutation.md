@@ -712,9 +712,37 @@ resume through and the check-failed tag come first among control tags in a
 fixed order, and their request signatures come last among control
 signatures. Adding or removing checks, or adding an exit procedure (whose
 tag comes after them), renumbers nothing an unchanged function refers to.
-What can still renumber it: adding or removing a source function or method
+Nor do linked sends: a program declares a link for every method of its
+runtime layout, and a link's id is its method's id, so adding or removing a
+send renumbers no link. What can still renumber it: adding or removing a source function or method
 before it (function ids are in source order), and a program's first signal
 with a new result type, whose condition tag shifts the exit tags after it.
+
+A send whose method typing selected from its arguments' exact classes is
+*linked* under `proved`: it calls the method through the `execution_tape`
+link the program declares for that method, instead of asking the runtime
+and calling indirectly. Links keep the send late-bound. The runtime layout,
+which every unit of a run shares, fixes which method those classes select,
+so a link only has to follow its method's newest code: every install
+repoints each link a unit's sends call at the new unit's version of the
+method, or at the new dispatcher when that version converts its arguments
+or results, which is where a dynamic send would go. A linked send relies on
+the generic's contract alone, as a dynamic one does, so the install check
+above protects it; nothing trusts the selected method's own, narrower
+contract. Frames already running a method keep it, and a retry of such a
+frame calls the newest version as usual.
+
+Linked sends agree with dynamic sends across runs too. A run selects from
+its entry unit and what it installs, so the driver's `Installed` handle
+remembers every unit its runs installed, and each run starts by pointing
+all their links back at the entry unit's methods; an install during a run
+repoints them all at the new code. A value made by a unit an earlier run
+installed, such as a returned closure, therefore sends where the same
+dynamic send would. The VM always accepts these targets: the units took
+over from one another, so they share the layout and each generic's tape
+signature, and a link's target has its generic's signature. A chooser sees
+every linked send with the function it calls now
+(`UnhandledCondition::links`).
 
 A callable value carries more than its type: code that applies it relies
 on a signature, either a declared `callable(<integer>) => <circle>` type
