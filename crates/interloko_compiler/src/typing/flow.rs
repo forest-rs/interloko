@@ -881,7 +881,15 @@ impl<'a> Analysis<'a> {
                 let target = Type::of(Atom::Cone(*class), module);
                 let assumes = self.class_assumptions(&[&value.ty, &target]);
                 let decided = decide(module, env, &value.ty, &target, CAST_RULES);
-                let ty = value.ty.meet(&self.bound(expr), module);
+                // A failed cast signals a `<type-error>` whose `use-value`
+                // restart may supply any instance of the target, which the
+                // cast checks again, so only a proved cast keeps what is
+                // known about its operand.
+                let ty = if decided.0 == TypingVerdict::Proved {
+                    value.ty.meet(&self.bound(expr), module)
+                } else {
+                    self.bound(expr)
+                };
                 let from = vec![value.reason];
                 self.record(
                     *site,
@@ -1360,10 +1368,10 @@ impl<'a> Analysis<'a> {
             } if kind.is_integer() => {
                 let lhs_hull = self.peek(when_true, lhs).as_ref().and_then(Interval::hull);
                 let rhs_hull = self.peek(when_true, rhs).as_ref().and_then(Interval::hull);
-                if let (Some(var), Some(other)) = (integer_var_of(module, lhs), rhs_hull) {
+                if let (Some(var), Some(other)) = (self.integer_var_of(lhs), rhs_hull) {
                     self.narrow_compare(when_true, when_false, var, *op, other, *span);
                 }
-                if let (Some(var), Some(other)) = (integer_var_of(module, rhs), lhs_hull) {
+                if let (Some(var), Some(other)) = (self.integer_var_of(rhs), lhs_hull) {
                     self.narrow_compare(when_true, when_false, var, op.reversed(), other, *span);
                 }
             }
@@ -1466,8 +1474,36 @@ impl<'a> Analysis<'a> {
         env.set(var, Fact { ty, reason });
     }
 
+    /// The integer local or capture whose value `expr` is: the binding
+    /// itself, or an integer conversion of it that typing proved in range.
+    ///
+    /// A conversion that may fail is not looked through: a failure signals
+    /// a `<type-error>` whose `use-value` restart supplies some other value,
+    /// so what the conversion yields says nothing about its operand.
+    fn integer_var_of(&self, expr: &sem::Expr) -> Option<Var> {
+        match expr {
+            sem::Expr::Convert { value, site, .. }
+                if is_integer_expr(self.module, value) && self.proved_here(*site) =>
+            {
+                self.integer_var_of(value)
+            }
+            _ => var_of(expr),
+        }
+    }
+
+    /// Whether the check at `site`, already evaluated in this definition,
+    /// was proved: it never fails, so it yields its operand.
+    fn proved_here(&self, site: SiteId) -> bool {
+        self.decisions
+            .iter()
+            .rev()
+            .find(|decision| decision.site == site)
+            .is_some_and(|decision| decision.verdict == TypingVerdict::Proved)
+    }
+
     /// The type of a comparison operand without evaluating it again: a
-    /// local's or capture's fact, a literal's value, or sem's category.
+    /// local's or capture's fact, a literal's value, a proved conversion's
+    /// operand, or sem's category.
     fn peek(&self, env: &Env, expr: &sem::Expr) -> Option<Type> {
         match expr {
             sem::Expr::Local { .. } | sem::Expr::Capture { .. } => {
@@ -1490,7 +1526,9 @@ impl<'a> Analysis<'a> {
                 self.module,
                 IntRange::singleton(i64::from(*value)),
             )),
-            sem::Expr::Convert { value, .. } if is_integer_expr(self.module, value) => {
+            sem::Expr::Convert { value, site, .. }
+                if is_integer_expr(self.module, value) && self.proved_here(*site) =>
+            {
                 self.peek(env, value)
             }
             _ => Some(self.bound(expr)),
@@ -1775,7 +1813,6 @@ impl<'a> Analysis<'a> {
                 }
             };
             let from = vec![lhs.reason, rhs.reason];
-            let refuted = decided.0 == TypingVerdict::Refuted;
             self.record(
                 site,
                 TypingCheck::Overflow,
@@ -1786,8 +1823,10 @@ impl<'a> Analysis<'a> {
                 Vec::new(),
                 None,
             );
-            let ty = if refuted { Type::bottom() } else { bound };
-            return self.fact(ReasonKind::Check { site }, span, ty, from);
+            // A count outside the range signals a `<type-error>`, and the
+            // shift continues with whatever result a `use-value` restart
+            // supplies, so even a refuted check yields its kind's values.
+            return self.fact(ReasonKind::Check { site }, span, bound, from);
         }
         if op.is_bitwise() {
             let decided = if env.dead.is_some() {
@@ -1896,17 +1935,14 @@ impl<'a> Analysis<'a> {
         );
         match decided.0 {
             TypingVerdict::Proved => computed,
-            // A result that may overflow has the full range of its kind.
-            TypingVerdict::Checked => self.fact(
+            // An overflow signals a `<type-error>`, and the operation
+            // continues with whatever result a `use-value` restart supplies,
+            // so a result that may (or must) overflow has the full range of
+            // its kind.
+            TypingVerdict::Checked | TypingVerdict::Refuted => self.fact(
                 ReasonKind::Check { site },
                 span,
                 bound,
-                vec![computed.reason],
-            ),
-            TypingVerdict::Refuted => self.fact(
-                ReasonKind::Check { site },
-                span,
-                Type::bottom(),
                 vec![computed.reason],
             ),
         }
@@ -1942,7 +1978,10 @@ impl<'a> Analysis<'a> {
             _ => (TypingVerdict::Proved, TypingRule::CannotTrap),
         };
         let integral = from.is_some_and(NumericKind::is_integer) && to.is_integer();
-        let ty = if integral {
+        // A value out of range signals a `<type-error>` whose `use-value`
+        // restart may supply any value of the target type, so only a proved
+        // conversion keeps the operand's narrower range.
+        let ty = if integral && decided.0 == TypingVerdict::Proved {
             value.ty.meet(&bound, module)
         } else {
             bound.clone()
@@ -2131,18 +2170,6 @@ fn var_of(expr: &sem::Expr) -> Option<Var> {
 
 fn is_integer_expr(module: &sem::Module, expr: &sem::Expr) -> bool {
     NumericKind::of(module.expr_kind(expr)).is_some_and(NumericKind::is_integer)
-}
-
-/// The integer local or capture whose value `expr` is: the binding itself,
-/// or an integer conversion of it, which preserves the value when it does
-/// not trap.
-fn integer_var_of(module: &sem::Module, expr: &sem::Expr) -> Option<Var> {
-    match expr {
-        sem::Expr::Convert { value, .. } if is_integer_expr(module, value) => {
-            integer_var_of(module, value)
-        }
-        _ => var_of(expr),
-    }
 }
 
 /// Names the integer operation at check site `site` of `owner`, such as

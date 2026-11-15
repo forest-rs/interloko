@@ -36,9 +36,14 @@
 //! narrowed.
 //!
 //! - **Transfer.** Literals have singleton types (integers have point
-//!   ranges), `make` has its exact class, a cast meets its operand with the
-//!   target, and integer arithmetic uses interval arithmetic, where a result
-//!   that may overflow has the full range of its kind. A call has its
+//!   ranges), `make` has its exact class, a proved cast meets its operand
+//!   with the target, and integer arithmetic uses interval arithmetic. A
+//!   check that may fail yields every value of its expected type: a failed
+//!   check signals a `<type-error>` whose `use-value` restart supplies a
+//!   replacement of the expected type, so code after the check runs with a
+//!   value that passes it but may be unrelated to the operand.
+//!   A cast that may fail has its target type, and a result that may
+//!   overflow has the full range of its kind. A call has its
 //!   callee's declared or sem-inferred result, never a type derived from the
 //!   callee's body, so a definition's typing depends only on its own body.
 //!   Anything else has the type of sem's category for the expression
@@ -47,12 +52,14 @@
 //!   branch and to `x ∖ C` in the else branch ([`Type::minus`] is
 //!   conservative); a limited-type test does the same with ranges. Comparing
 //!   an integer local with another integer narrows the local's range in both
-//!   branches. A condition whose type is one boolean, such as a literal,
+//!   branches, also through a conversion of the local typing proved in range
+//!   (one that may fail yields a `use-value` replacement, not the local's
+//!   value). A condition whose type is one boolean, such as a literal,
 //!   takes only its branch. A handler's condition local has the handler's
 //!   class.
 //! - **Joins.** `if` and `handle` join their branches. An expression that
-//!   cannot produce a value (a failed cast, a block exit call, a narrowing
-//!   that leaves no value) has type [`Type::bottom`]; code after it is
+//!   cannot produce a value (a block exit call, a narrowing that leaves no
+//!   value) has type [`Type::bottom`]; code after it is
 //!   unreachable, and an unreachable branch drops out of the join. A `block`
 //!   joins its body's value with the arguments of every call to its exit
 //!   procedure; when the exit procedure escapes, with the block's declared
