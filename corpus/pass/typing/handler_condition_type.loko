@@ -2,6 +2,7 @@
 // expect: diagnostics 0
 // expect: dump typing contains s0 dispatch proved rule=dispatch-covered
 // expect: dump typing contains because=handler-condition(<problem>)
+// expect: dump types contains local e@
 
 // A handler's condition local has the handler's class, so dispatching on
 // it is proved even though the signalled condition is a subclass.

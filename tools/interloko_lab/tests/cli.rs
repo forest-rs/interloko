@@ -1313,3 +1313,67 @@ fn soft_typing_warns_runs_and_explains_decisions() {
     assert!(explanation.contains("dispatch-site: dispatch:d0"));
     assert!(explanation.contains("contract: advisory; the runtime still performs this check"));
 }
+
+/// The id of the object whose presentation title is `title`.
+fn object_id_with_title(eop: &str, title: &str) -> String {
+    let mut current = None;
+    for line in eop.lines() {
+        if let Some(id) = line.trim().strip_prefix("object ") {
+            current = Some(id);
+        } else if line.trim() == format!("presentation title=\"{title}\"") {
+            return current.expect("title follows an object line").to_string();
+        }
+    }
+    panic!("no object titled {title}");
+}
+
+#[test]
+fn show_types_and_contract_dependents_explain_flow_types() {
+    let source = fixture("typed_contracts.loko");
+    let path = source.to_str().expect("fixture path should be utf8");
+
+    let (stdout, _stderr) = run_lab_success(&["run", path]);
+    assert_eq!(stdout.trim(), "7");
+
+    let types = run_lab(&["dump", path, "--stage", "types"]);
+    assert!(types.starts_with("types status=checked definitions=4 "));
+
+    let measure = run_lab(&["invoke-affordance", path, "function:f1", "show-types"]);
+    assert!(measure.contains("function measure"), "{measure}");
+    assert!(measure.contains("    param s@"), "{measure}");
+    assert!(
+        measure.contains(" <circle> because=narrowed(s0,then)@"),
+        "{measure}"
+    );
+    assert!(measure.contains("    result <integer>"), "{measure}");
+
+    let eop = run_lab(&["eop", path]);
+    let contract = object_id_with_title(&eop, "contract of function pick");
+    let affordances = run_lab(&["affordances", path, &contract]);
+    assert!(affordances.contains("show-dependents"), "{affordances}");
+    let dependents = run_lab(&["invoke-affordance", path, &contract, "show-dependents"]);
+    assert!(
+        dependents.starts_with(&format!("contract {contract} of function pick\n")),
+        "{dependents}"
+    );
+    assert!(dependents.contains("results: (<shape>)\n"), "{dependents}");
+    assert!(dependents.contains("dependents: 1\n"), "{dependents}");
+    let decision = dependents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("typing:"))
+        .map(|rest| format!("typing:{}", rest.split(' ').next().expect("id")))
+        .expect("a dependent decision");
+
+    let explanation = run_lab(&["invoke-affordance", path, &decision, "show-typing"]);
+    assert!(
+        explanation.contains(&format!("depends-on: {contract}\n")),
+        "{explanation}"
+    );
+    assert!(
+        explanation.contains("depends-on: generic:g0\n"),
+        "{explanation}"
+    );
+    assert!(explanation.contains("codegen: kept\n"), "{explanation}");
+    let record = run_lab(&["inspect", path, &decision]);
+    assert!(record.contains("codegen=kept"), "{record}");
+}

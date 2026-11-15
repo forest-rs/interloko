@@ -35,6 +35,8 @@ Typical IDs include:
 - `typing-config:session`
 - `typing:<definition-id>:s0` for the typing decision at check site `s0` of
   a definition
+- `contract:<definition-id>` for the type contract of a function, generic,
+  or method
 - `runtime-class:c0` for the root runtime layout row
 - `runtime-class:c1`
 - `runtime-slot:c1.s0`
@@ -127,6 +129,9 @@ Supported read-only invocations are:
 - `dump-eop`
 - `dump-lowered`
 - `dump-tape`
+- `show-typing`
+- `show-types`
+- `show-dependents`
 - `run`
 
 The `add-method` mutation is now executable through `invoke-affordance` on
@@ -178,9 +183,64 @@ explanation also lists each operand's reason chain, such as
 `because #0: narrowed(s0,then)@… <circle> <- declared@… <shape>`, and the
 closed-world assumptions its verdict relies on.
 
+A record's exact argument classes come from the typing decision at the same
+owner and site: an argument has an exact class only when its flow type does,
+so a local bound to `make(<circle>)` is exactly `<circle>` while the result of
+a callable declared to return `<shape>` is not. When typing is blocked by
+semantic errors, no class is known statically.
+
 The explanation is read-only. It describes the current one-argument nominal
 dispatch model; it does not imply sealed optimization, method combination,
 multi-argument dispatch, or new tape opcodes.
+
+## Types and Contracts
+
+Function, method, and constant objects expose `show-types`, which lists the
+flow type of each parameter and local where it is bound, every read a test
+narrowed further, and the definition's result, each with its reason chain:
+
+```sh
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/typed_contracts.loko function:f1 show-types
+```
+
+```text
+  definition def… function measure
+    param s@221..222 <shape> because=declared@221..222 <shape>
+      use @273..274 <circle> because=narrowed(s0,then)@240..262 <circle> <- declared@221..222 <shape>
+    result <integer> because=joined@…
+```
+
+A binding whose flow type is narrower than sem's also shows `declared=`, as
+in `local c@… exactly <circle> declared=<shape>`. Locals of closures and
+captures are labelled `closure#N`. `dump --stage types` renders the same
+listing for every definition. Embedders ask the same question directly with
+`SessionArtifacts::type_of`, selecting a binding, a check site, or a source
+span; site and span queries re-analyze one definition rather than storing a
+fact per expression.
+
+Each typing decision object carries, besides its verdict:
+
+- `reasons`: the rendered reason chain of each operand type;
+- `depends-on`: what the verdict relies on outside its own body, as EOP ids:
+  `contract:<definition-id>` for a cited function, generic, or method
+  contract (`constant:kN` or `accessor:cN.sM` for a constant's value or a
+  slot read), `generic:gN` for the method set it assumes, and `class:cN` for
+  a closed class it assumes gains no subclasses;
+- `codegen`: what generated code does with the check. Typing is advisory, so
+  this is always `kept` for now.
+
+`contract:<definition-id>` objects show a definition's contract, the
+parameter and result types callers were compiled to rely on. Their
+`show-dependents` affordance lists the typing decisions whose reasons cite
+that contract:
+
+```sh
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/typed_contracts.loko contract:<definition-id> show-dependents
+```
+
+Dependents are read from the recorded reasons, so they are what the current
+facts rely on rather than a dependency graph; a method's contract is cited by
+nothing, since sends rely on their generic's contract.
 
 ## Explicit Host Projection
 

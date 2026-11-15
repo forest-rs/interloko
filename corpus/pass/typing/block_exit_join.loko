@@ -3,6 +3,8 @@
 // expect: dump typing contains s0 dispatch proved rule=dispatch-covered
 // expect: dump typing contains actual=type-union(exactly <circle>, exactly <square>)
 // expect: dump typing contains because=joined@
+// expect: dump types contains type-union(exactly <circle>, exactly <square>) declared=<shape> because=joined@
+// expect: dump types contains local picked@
 
 // A block's value is its body's value or an argument of a call to its exit
 // procedure. Soft typing joins both, so `area` is proved on the result even

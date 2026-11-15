@@ -1,0 +1,17 @@
+define class <shape> (<object>)
+end;
+define class <circle> (<shape>)
+end;
+define generic area(x);
+define method area(c :: <circle>)
+  7
+end;
+define function pick() => <shape>
+  make(<circle>)
+end;
+define function measure(s :: <shape>)
+  if instance?(s, <circle>) then area(s) else area(pick()) end
+end;
+define function main()
+  measure(make(<circle>))
+end;

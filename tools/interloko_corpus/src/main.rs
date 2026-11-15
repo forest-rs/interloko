@@ -168,13 +168,13 @@ fn list_command(root: Option<&str>) -> Result<Outcome> {
 fn dump_command(args: &[String]) -> Result<Outcome> {
     if args.len() != 4 || args[2] != "--stage" {
         return Err(CorpusError::Usage(
-            "usage: interloko_corpus dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|all"
+            "usage: interloko_corpus dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all"
                 .into(),
         ));
     }
     let stage = parse_stage(&args[3]).ok_or_else(|| {
         CorpusError::Usage(
-            "stage must be one of syntax|ast|sem|mop|eop|lowered|tape|typing|all".into(),
+            "stage must be one of syntax|ast|sem|mop|eop|lowered|tape|typing|types|all".into(),
         )
     })?;
     let source = read_to_string(Path::new(&args[1]))?;
@@ -525,7 +525,7 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
             invalid_header(
                 path,
                 line,
-                "dump stage must be syntax|ast|sem|mop|eop|lowered|tape|typing|all",
+                "dump stage must be syntax|ast|sem|mop|eop|lowered|tape|typing|types|all",
             )
         })?;
         return Ok(Expectation::DumpContains {
@@ -702,6 +702,7 @@ fn parse_stage(value: &str) -> Option<DumpStage> {
         "lowered" => Some(DumpStage::Lowered),
         "tape" => Some(DumpStage::Tape),
         "typing" => Some(DumpStage::Typing),
+        "types" => Some(DumpStage::Types),
         "all" => Some(DumpStage::All),
         _ => None,
     }
@@ -745,7 +746,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_corpus".into());
     format!(
-        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} heap [root...]\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|all"
+        "usage:\n  {binary} check [corpus-root]\n  {binary} list [corpus-root]\n  {binary} heap [root...]\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all"
     )
 }
 

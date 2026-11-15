@@ -1706,6 +1706,7 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
         EnvironmentKind::TypingDecision => {
             "Advisory classification of one runtime check by the soft typing pass."
         }
+        EnvironmentKind::Contract => "Types that code compiled against a definition relies on.",
     }
 }
 
