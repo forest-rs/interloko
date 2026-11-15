@@ -12,6 +12,8 @@ use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
 
+use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
+
 pub use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, LimitedInteger, MethodId, Number32,
     OBJECT_CLASS_ID, SingleFloatBits, SlotId,
@@ -722,6 +724,54 @@ impl Module {
         }
     }
 
+    /// Returns the static type of every value `kind` can hold.
+    ///
+    /// A [`ValueKind`] is a representation: a register type plus boxing. This
+    /// maps it to the set of values that representation carries, which the
+    /// soft typing pass ([`crate::typing`]) then only ever narrows. Notes on
+    /// the less obvious arms:
+    ///
+    /// - [`ValueKind::I64`] is `<integer>`, which is unbounded; the 64-bit
+    ///   register is a limit of the current runtime, not of the type.
+    /// - [`ValueKind::ClassObject`] is any `<class>`: `object-class` records
+    ///   the static class bound of its operand there, not the runtime class,
+    ///   so it does not name a singleton.
+    /// - Callables have no class: [`ValueKind::KnownCallable`] is
+    ///   [`Atom::Callable`] even when it names a generic function.
+    /// - [`ValueKind::Error`] is [`Type::top`].
+    #[must_use]
+    pub fn kind_type(&self, kind: ValueKind) -> Type {
+        let builtin = |class: BuiltinValueClass| {
+            self.builtin_value_class(class)
+                .map_or_else(Type::top, |class| Type::of(Atom::Cone(class), self))
+        };
+        match kind {
+            ValueKind::Any | ValueKind::Error => Type::top(),
+            ValueKind::I64 => Type::of(Atom::Integer(IntRange::INTEGER), self),
+            ValueKind::I32 => Type::of(Atom::Integer(IntRange::I32), self),
+            ValueKind::U32 => Type::of(Atom::Integer(IntRange::U32), self),
+            ValueKind::F64 => builtin(BuiltinValueClass::DoubleFloat),
+            ValueKind::F32 => builtin(BuiltinValueClass::SingleFloat),
+            ValueKind::Bool => Type::union([Atom::Boolean(false), Atom::Boolean(true)], self),
+            ValueKind::String(class)
+            | ValueKind::Symbol(class)
+            | ValueKind::Vector(class)
+            | ValueKind::Object(class) => Type::of(Atom::Cone(class), self),
+            ValueKind::ClassObject(_) => builtin(BuiltinValueClass::Class),
+            ValueKind::GenericFunctionObject(generic) => {
+                Type::of(Atom::Singleton(Metaobject::Generic(generic)), self)
+            }
+            ValueKind::MethodObject(method) => {
+                Type::of(Atom::Singleton(Metaobject::Method(method)), self)
+            }
+            ValueKind::SlotDescriptorObject { class, slot } => Type::of(
+                Atom::Singleton(Metaobject::SlotDescriptor { class, slot }),
+                self,
+            ),
+            ValueKind::Callable | ValueKind::KnownCallable(_) => Type::of(Atom::Callable, self),
+        }
+    }
+
     /// Returns the scalar value category of `expr`.
     ///
     /// This reads the categories semantic lowering already recorded on the
@@ -799,6 +849,100 @@ impl Module {
                 }
             }
             Expr::Error { .. } => ValueKind::Error,
+        }
+    }
+}
+
+impl ClassHierarchy for Module {
+    fn superclass(&self, class: ClassId) -> Option<ClassId> {
+        self.classes.get(class.0 as usize)?.superclass
+    }
+
+    /// Source classes cannot inherit from built-in value classes or
+    /// host-backed classes, so such a class is closed when no other built-in
+    /// class inherits from it either.
+    ///
+    /// The check is structural rather than a list of names: abstract
+    /// built-ins such as `<number>`, `<real>`, `<rational>`, and `<float>`
+    /// have built-in subclasses and so are never closed, while concrete
+    /// leaves such as `<integer>` and `<double-float>` are.
+    fn is_closed(&self, class: ClassId) -> bool {
+        let sealed_origin = self.classes.get(class.0 as usize).is_some_and(|class| {
+            matches!(
+                class.origin,
+                ClassOrigin::BuiltinValue { .. } | ClassOrigin::HostBacked { .. }
+            )
+        });
+        sealed_origin
+            && !self
+                .classes
+                .iter()
+                .any(|other| other.superclass == Some(class))
+    }
+
+    fn builtin_class(&self, class: BuiltinValueClass) -> Option<ClassId> {
+        self.builtin_value_class(class)
+    }
+
+    fn is_same_or_subclass(&self, class: ClassId, ancestor: ClassId) -> bool {
+        is_same_or_subclass_in_classes(&self.classes, class, ancestor)
+    }
+}
+
+impl TypeNames for Module {
+    fn write_class(&self, out: &mut dyn core::fmt::Write, class: ClassId) -> core::fmt::Result {
+        match self.classes.get(class.0 as usize) {
+            Some(class) => out.write_str(&class.name),
+            None => write!(out, "class#{}", class.0),
+        }
+    }
+
+    fn write_generic(
+        &self,
+        out: &mut dyn core::fmt::Write,
+        generic: GenericFunctionId,
+    ) -> core::fmt::Result {
+        match self.generics.get(generic.0 as usize) {
+            Some(generic) => out.write_str(&generic.name),
+            None => write!(out, "g{}", generic.0),
+        }
+    }
+
+    /// Writes `generic(<specializer>, ...)`, with `?` for a missing
+    /// specializer.
+    fn write_method(&self, out: &mut dyn core::fmt::Write, method: MethodId) -> core::fmt::Result {
+        let Some(method) = self.methods.get(method.0 as usize) else {
+            return write!(out, "m{}", method.0);
+        };
+        self.write_generic(out, method.generic)?;
+        out.write_str("(")?;
+        for (index, specializer) in method.specializers.iter().enumerate() {
+            if index > 0 {
+                out.write_str(", ")?;
+            }
+            match specializer {
+                Some(class) => self.write_class(out, *class)?,
+                None => out.write_str("?")?,
+            }
+        }
+        out.write_str(")")
+    }
+
+    /// Writes `<class>.slot-name`.
+    fn write_slot(
+        &self,
+        out: &mut dyn core::fmt::Write,
+        class: ClassId,
+        slot: SlotId,
+    ) -> core::fmt::Result {
+        self.write_class(out, class)?;
+        match self
+            .classes
+            .get(class.0 as usize)
+            .and_then(|owner| owner.effective_slots.get(slot.0 as usize))
+        {
+            Some(slot) => write!(out, ".{}", slot.name),
+            None => write!(out, ".s{}", slot.0),
         }
     }
 }
@@ -8283,6 +8427,124 @@ mod tests {
         let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
         let ast = ast::lower(&tree);
         lower(&ast)
+    }
+
+    #[test]
+    fn kind_type_maps_every_value_kind_to_its_values() {
+        use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type};
+
+        let module = lower_source(
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  1\nend;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let class = |name: &str| {
+            module
+                .classes
+                .iter()
+                .find(|class| class.name == name)
+                .map(|class| class.id)
+                .expect("class")
+        };
+        let builtin = |kind| module.builtin_value_class(kind).expect("builtin class");
+        let (shape, circle) = (class("<shape>"), class("<circle>"));
+        let generic = GenericFunctionId(0);
+        let method = module.methods[0].id;
+        let slot = SlotId(0);
+        let of = |atom| Type::of(atom, &module);
+
+        let kinds = [
+            ValueKind::Any,
+            ValueKind::I64,
+            ValueKind::F64,
+            ValueKind::I32,
+            ValueKind::U32,
+            ValueKind::F32,
+            ValueKind::Bool,
+            ValueKind::String(builtin(BuiltinValueClass::String)),
+            ValueKind::Symbol(builtin(BuiltinValueClass::Symbol)),
+            ValueKind::Vector(builtin(BuiltinValueClass::Vector)),
+            ValueKind::Object(shape),
+            ValueKind::ClassObject(circle),
+            ValueKind::GenericFunctionObject(generic),
+            ValueKind::MethodObject(method),
+            ValueKind::SlotDescriptorObject {
+                class: circle,
+                slot,
+            },
+            ValueKind::Callable,
+            ValueKind::KnownCallable(KnownCallable::GenericFunction(generic)),
+            ValueKind::Error,
+        ];
+        for kind in kinds {
+            // Exhaustive, so a new kind must be added to the list above.
+            let expected = match kind {
+                ValueKind::Any | ValueKind::Error => Type::top(),
+                ValueKind::I64 => of(Atom::Integer(IntRange::INTEGER)),
+                ValueKind::I32 => of(Atom::Integer(IntRange::I32)),
+                ValueKind::U32 => of(Atom::Integer(IntRange::U32)),
+                ValueKind::F64 => of(Atom::Exact(builtin(BuiltinValueClass::DoubleFloat))),
+                ValueKind::F32 => of(Atom::Exact(builtin(BuiltinValueClass::SingleFloat))),
+                ValueKind::Bool => {
+                    Type::union([Atom::Boolean(true), Atom::Boolean(false)], &module)
+                }
+                // Built-in value classes are closed.
+                ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
+                    of(Atom::Exact(class))
+                }
+                ValueKind::Object(class) => of(Atom::Cone(class)),
+                ValueKind::ClassObject(_) => of(Atom::Exact(builtin(BuiltinValueClass::Class))),
+                ValueKind::GenericFunctionObject(generic) => {
+                    of(Atom::Singleton(Metaobject::Generic(generic)))
+                }
+                ValueKind::MethodObject(method) => of(Atom::Singleton(Metaobject::Method(method))),
+                ValueKind::SlotDescriptorObject { class, slot } => {
+                    of(Atom::Singleton(Metaobject::SlotDescriptor { class, slot }))
+                }
+                ValueKind::Callable | ValueKind::KnownCallable(_) => of(Atom::Callable),
+            };
+            let ty = module.kind_type(kind);
+            assert_eq!(ty, expected, "{kind:?}");
+            // Every class-shaped kind is bounded by its sem class.
+            if let Some(class) = module.value_kind_class(kind) {
+                assert_eq!(ty.class_bound(&module), Some(class), "{kind:?}");
+            }
+        }
+        assert_eq!(
+            module.kind_type(ValueKind::Object(OBJECT_CLASS_ID)),
+            Type::top()
+        );
+        assert_eq!(
+            module.kind_type(ValueKind::Object(builtin(BuiltinValueClass::Integer))),
+            module.kind_type(ValueKind::I64)
+        );
+        assert!(module.is_closed(builtin(BuiltinValueClass::Integer)));
+        assert!(!module.is_closed(builtin(BuiltinValueClass::Real)));
+        assert!(!module.is_closed(circle));
+        assert_eq!(module.superclass(circle), Some(shape));
+        assert_eq!(
+            format!(
+                "{}",
+                module
+                    .kind_type(ValueKind::SlotDescriptorObject {
+                        class: circle,
+                        slot
+                    })
+                    .display(&module)
+            ),
+            "singleton(<circle>.radius)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                module
+                    .kind_type(ValueKind::MethodObject(method))
+                    .display(&module)
+            ),
+            "singleton(area(<circle>))"
+        );
     }
 
     #[test]

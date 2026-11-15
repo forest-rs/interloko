@@ -1,11 +1,17 @@
 //! Shared Interloko substrate model facts.
 //!
 //! This crate owns small, durable identifiers and value-class names that are
-//! shared by compiler and runtime-shaped code. It intentionally does not own
-//! syntax, semantic IR, lowering, tape emission, runtime host execution,
-//! sessions, collaboration, permissions, or persistence.
+//! shared by compiler and runtime-shaped code, and the static type lattice
+//! ([`types`]) that the compiler's checkers and, later, the runtime reason
+//! with. It intentionally does not own syntax, semantic IR, lowering, tape
+//! emission, runtime host execution, sessions, collaboration, permissions, or
+//! persistence.
 
 #![no_std]
+
+extern crate alloc;
+
+pub mod types;
 
 use core::fmt;
 
