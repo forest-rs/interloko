@@ -1433,6 +1433,20 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Runtime checked cast to a class object naming `bound` or one of its
+    /// subclasses, trapping as a failed [`Self::CastObject`] does.
+    CastClassObject {
+        /// Destination register.
+        dst: Register,
+        /// Cast value register.
+        value: Register,
+        /// Cast value kind.
+        input: ValueKind,
+        /// Class the value must name, or name a subclass of.
+        bound: sem::ClassId,
+        /// Source span.
+        span: Span,
+    },
     /// Unsigned integer equality.
     EqU64 {
         /// Destination register.
@@ -1688,6 +1702,9 @@ struct KnownCallableThunk<'a> {
     callable: sem::KnownCallable,
     target: FunctionId,
     call_params: &'a [ValueKind],
+    /// The definition numbering the thunk's entry checks and, per
+    /// parameter, the site of its check; checks without one always stay.
+    entry_sites: Option<(DefinitionId, Vec<Option<sem::SiteId>>)>,
     rets: Vec<ValueKind>,
     span: Span,
 }
@@ -1889,7 +1906,7 @@ impl<'module> Lowering<'module> {
                 .and_then(|id| *id)
                 .is_some()
             {
-                functions.push(self.lower_function_closure_thunk(function)?);
+                functions.push(self.lower_function_closure_thunk(function, &mut checks)?);
             }
         }
         for generic in &self.module.generics {
@@ -2037,20 +2054,16 @@ impl<'module> Lowering<'module> {
         // may not know the block's result classes.
         let mut checks = Vec::new();
         let mut payload = vec![token];
+        // Exit thunks are shared by every block with the same result kinds,
+        // so their checks belong to no one body's sites and always stay.
         for (value, kind) in values.iter().zip(&kinds) {
-            let Some(class) = entry_check_class(*kind) else {
+            let Some(target) = entry_target(*kind) else {
                 payload.push(*value);
                 continue;
             };
             register_kinds.push(*kind);
             let checked = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
-            checks.push(Instr::CastObject {
-                dst: checked,
-                value: *value,
-                input: *kind,
-                class,
-                span,
-            });
+            checks.push(entry_check(target, checked, *value, *kind, span));
             payload.push(checked);
         }
         Ok(Function {
@@ -2218,6 +2231,7 @@ impl<'module> Lowering<'module> {
     fn lower_function_closure_thunk(
         &self,
         function: &sem::Function,
+        checks: &mut Vec<CheckCodegenRecord>,
     ) -> Result<Function, LowerError> {
         let id = self
             .ids
@@ -2233,15 +2247,30 @@ impl<'module> Lowering<'module> {
             .copied()
             .map(value_kind)
             .collect::<Result<Vec<_>, _>>()?;
-        self.lower_known_callable_thunk(KnownCallableThunk {
-            id,
-            name: format!("{}#closure", function.name),
-            callable: sem::KnownCallable::DirectFunction(function.id),
-            target,
-            call_params: &params,
-            rets: self.value_kinds(&function.result_kinds)?,
-            span: function.span,
-        })
+        let sites = function
+            .params
+            .iter()
+            .map(|param| {
+                function
+                    .entry_checks
+                    .iter()
+                    .find(|check| check.param == *param)
+                    .map(|check| check.site)
+            })
+            .collect();
+        self.lower_known_callable_thunk(
+            KnownCallableThunk {
+                id,
+                name: format!("{}#closure", function.name),
+                callable: sem::KnownCallable::DirectFunction(function.id),
+                target,
+                call_params: &params,
+                entry_sites: Some((function.definition, sites)),
+                rets: self.value_kinds(&function.result_kinds)?,
+                span: function.span,
+            },
+            checks,
+        )
     }
 
     fn lower_generic_closure_thunk(
@@ -2259,15 +2288,19 @@ impl<'module> Lowering<'module> {
         let params = (0..generic.arity)
             .map(|index| dispatcher_param_kind(self.module, generic, index))
             .collect::<Vec<_>>();
-        self.lower_known_callable_thunk(KnownCallableThunk {
-            id,
-            name: format!("{}#closure", generic.name),
-            callable: sem::KnownCallable::GenericFunction(generic.id),
-            target,
-            call_params: &params,
-            rets: self.value_kinds(&generic.result_kinds)?,
-            span: generic.span,
-        })
+        self.lower_known_callable_thunk(
+            KnownCallableThunk {
+                id,
+                name: format!("{}#closure", generic.name),
+                callable: sem::KnownCallable::GenericFunction(generic.id),
+                target,
+                call_params: &params,
+                entry_sites: None,
+                rets: self.value_kinds(&generic.result_kinds)?,
+                span: generic.span,
+            },
+            &mut Vec::new(),
+        )
     }
 
     fn lower_accessor_closure_thunk(
@@ -2284,24 +2317,31 @@ impl<'module> Lowering<'module> {
             .get(accessor.slot.0 as usize)
             .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
         let params = [ValueKind::Object(Some(accessor.class))];
-        self.lower_known_callable_thunk(KnownCallableThunk {
-            id: accessor.closure_thunk,
-            name: format!("{}#closure", slot.accessor.name),
-            callable: sem::KnownCallable::SlotAccessor {
-                accessor: accessor.accessor,
-                class: accessor.class,
-                slot: accessor.slot,
+        // An accessor has no body numbering sites, so its receiver check
+        // always stays.
+        self.lower_known_callable_thunk(
+            KnownCallableThunk {
+                id: accessor.closure_thunk,
+                name: format!("{}#closure", slot.accessor.name),
+                callable: sem::KnownCallable::SlotAccessor {
+                    accessor: accessor.accessor,
+                    class: accessor.class,
+                    slot: accessor.slot,
+                },
+                target: accessor.function,
+                call_params: &params,
+                entry_sites: None,
+                rets: vec![self.value_kind(slot.kind)?],
+                span: slot.span,
             },
-            target: accessor.function,
-            call_params: &params,
-            rets: vec![self.value_kind(slot.kind)?],
-            span: slot.span,
-        })
+            &mut Vec::new(),
+        )
     }
 
     fn lower_known_callable_thunk(
         &self,
         spec: KnownCallableThunk<'_>,
+        checks: &mut Vec<CheckCodegenRecord>,
     ) -> Result<Function, LowerError> {
         let mut params = Vec::with_capacity(spec.call_params.len() + 1);
         params.push(Param {
@@ -2338,23 +2378,31 @@ impl<'module> Lowering<'module> {
             .chain(spec.rets.iter().copied())
             .collect::<Vec<_>>();
         // The thunk is the callable's indirect entry, so it checks the
-        // parameter classes its target relies on. A generic's dispatch
-        // already checks every argument's class.
+        // parameter classes its target relies on, unless typing proved one.
+        // A generic's dispatch already checks every argument's class.
         let mut instructions = Vec::new();
         if !matches!(spec.callable, sem::KnownCallable::GenericFunction(_)) {
-            for (arg, kind) in call_args.iter_mut().zip(spec.call_params) {
-                let Some(class) = entry_check_class(*kind) else {
+            for (index, (arg, kind)) in call_args.iter_mut().zip(spec.call_params).enumerate() {
+                let Some(target) = entry_target(*kind) else {
                     continue;
                 };
+                if let Some((owner, sites)) = &spec.entry_sites
+                    && let Some(site) = sites.get(index).copied().flatten()
+                    && self
+                        .facts
+                        .decision(Some(*owner), site)
+                        .is_some_and(|decision| decision.verdict == typing::TypingVerdict::Proved)
+                {
+                    checks.push(CheckCodegenRecord {
+                        owner: *owner,
+                        site,
+                        codegen: CheckCodegen::Elided,
+                    });
+                    continue;
+                }
                 register_kinds.push(*kind);
                 let checked = Register(u32::try_from(register_kinds.len()).unwrap_or(u32::MAX));
-                instructions.push(Instr::CastObject {
-                    dst: checked,
-                    value: *arg,
-                    input: *kind,
-                    class,
-                    span: spec.span,
-                });
+                instructions.push(entry_check(target, checked, *arg, *kind, spec.span));
                 *arg = checked;
             }
         }
@@ -2421,6 +2469,7 @@ impl<'module> Lowering<'module> {
             .flatten();
         let mut body =
             BodyLowering::for_closure(self.module, &self.ids, closure)?.typed(self.facts, owner);
+        body.check_closure_entry(closure)?;
         let rets = self.value_kinds(&closure.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_block(&closure.body, &rets)?;
@@ -3010,24 +3059,35 @@ impl<'module> BodyLowering<'module> {
             this.bind_param(closure.locals.get(local_id.0 as usize), local_id, reg)?;
         }
         this.next_reg = next_after_inputs(closure.params.len() + 1);
-        // A closure is only ever entered through `call.indirect`, whose
-        // caller may not know its parameter classes; see `entry_check_class`.
+        Ok(this)
+    }
+
+    /// Checks a closure's parameters on entry, unless typing proved a check:
+    /// a closure is only ever entered through `call.indirect`, whose caller
+    /// may not know its parameter classes; see [`entry_target`].
+    fn check_closure_entry(&mut self, closure: &sem::Closure) -> Result<(), LowerError> {
         for (index, local_id) in closure.params.iter().copied().enumerate() {
-            let (reg, kind) = (this.params[index + 1].reg, this.params[index + 1].kind);
-            let Some(class) = entry_check_class(kind) else {
+            let (reg, kind) = (self.params[index + 1].reg, self.params[index + 1].kind);
+            let Some(target) = entry_target(kind) else {
                 continue;
             };
-            let checked = this.alloc(kind);
-            this.instructions.push(Instr::CastObject {
-                dst: checked.reg,
-                value: reg,
-                input: kind,
-                class,
-                span: closure.span,
-            });
-            this.set_local(local_id, checked)?;
+            let site = closure
+                .entry_checks
+                .iter()
+                .find(|check| check.param == local_id)
+                .map(|check| check.site);
+            if let Some(site) = site
+                && self.proved(site)
+            {
+                self.record(site, CheckCodegen::Elided);
+                continue;
+            }
+            let checked = self.alloc(kind);
+            self.instructions
+                .push(entry_check(target, checked.reg, reg, kind, closure.span));
+            self.set_local(local_id, checked)?;
         }
-        Ok(this)
+        Ok(())
     }
 
     fn for_dispatcher(
@@ -5853,6 +5913,34 @@ impl<'module> BodyLowering<'module> {
         {
             return Ok(self.unbox(value, class, expected, span));
         }
+        // A class object of a narrower bound already names a class within
+        // the wider one; any other value, such as a dispatched argument a
+        // method specialized only on `<class>`, is checked.
+        if let (ValueKind::ClassObject(Some(actual)), ValueKind::ClassObject(Some(bound))) =
+            (value.kind, expected)
+            && self.module.is_same_or_subclass(actual, bound)
+        {
+            return Ok(Value {
+                kind: expected,
+                ..value
+            });
+        }
+        if let ValueKind::ClassObject(Some(bound)) = expected
+            && matches!(
+                value.kind,
+                ValueKind::Any | ValueKind::Object(_) | ValueKind::ClassObject(_)
+            )
+        {
+            let casted = self.alloc(expected);
+            self.instructions.push(Instr::CastClassObject {
+                dst: casted.reg,
+                value: value.reg,
+                input: value.kind,
+                bound,
+                span,
+            });
+            return Ok(casted);
+        }
         if matches!(value.kind, ValueKind::Any | ValueKind::Object(None))
             && let ValueKind::Object(Some(class)) = expected
         {
@@ -7204,19 +7292,50 @@ fn shares_register_type(lhs: ValueKind, rhs: ValueKind) -> bool {
     }
 }
 
-/// Returns the class a callable's indirect entry must check a `kind`
-/// parameter against, if any.
+/// Returns what a callable's indirect entry must check a `kind` parameter
+/// is, if anything; see [`sem::EntryCheck`].
 ///
 /// A `call.indirect` caller holding an untyped `<callable>` supplies whatever
 /// classes it has, and the tape's `object` register type erases them, so an
 /// entry that may be called that way (a callable thunk, a closure, an exit
-/// procedure) checks each object parameter narrower than `<object>` before
-/// its body relies on the class. Unboxed numbers, booleans and callables are
-/// distinct register types the tape checks itself.
-fn entry_check_class(kind: ValueKind) -> Option<sem::ClassId> {
+/// procedure) checks each object parameter narrower than `<object>`, and
+/// each class object parameter, before its body relies on the class.
+/// Unboxed numbers, booleans and callables are distinct register types the
+/// tape checks itself.
+fn entry_target(kind: ValueKind) -> Option<sem::EntryTarget> {
     match kind {
-        ValueKind::Object(Some(class)) if class != sem::OBJECT_CLASS_ID => Some(class),
+        ValueKind::Object(Some(class)) if class != sem::OBJECT_CLASS_ID => {
+            Some(sem::EntryTarget::Instance(class))
+        }
+        ValueKind::ClassObject(Some(class)) => Some(sem::EntryTarget::ClassObject(class)),
         _ => None,
+    }
+}
+
+/// The instruction checking that `value`, of `kind`, is what `target`
+/// requires, into `dst`.
+const fn entry_check(
+    target: sem::EntryTarget,
+    dst: Register,
+    value: Register,
+    kind: ValueKind,
+    span: Span,
+) -> Instr {
+    match target {
+        sem::EntryTarget::Instance(class) => Instr::CastObject {
+            dst,
+            value,
+            input: kind,
+            class,
+            span,
+        },
+        sem::EntryTarget::ClassObject(bound) => Instr::CastClassObject {
+            dst,
+            value,
+            input: kind,
+            bound,
+            span,
+        },
     }
 }
 
@@ -7843,6 +7962,19 @@ impl Module {
             } => {
                 write!(f, "  {dst} = as ")?;
                 self.fmt_class(f, *class)?;
+                write!(f, ", {value}: ")?;
+                self.fmt_kind(f, *input)?;
+                fmt_span(f, *span)
+            }
+            Instr::CastClassObject {
+                dst,
+                value,
+                input,
+                bound,
+                span,
+            } => {
+                write!(f, "  {dst} = as class ")?;
+                self.fmt_class(f, *bound)?;
                 write!(f, ", {value}: ")?;
                 self.fmt_kind(f, *input)?;
                 fmt_span(f, *span)

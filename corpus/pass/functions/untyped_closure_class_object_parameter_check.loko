@@ -1,0 +1,21 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains as class <shape>
+
+// A closure is only entered through an indirect call, so it checks a
+// `class <shape>` parameter on entry, as a function's callable thunk does.
+
+define class <shape> (<object>)
+end;
+
+define class <other> (<object>)
+end;
+
+define function name-with(f :: <callable>, c :: class <other>) => <string>
+  let name :: <string> = f(c);
+  name
+end;
+
+define function main()
+  name-with(function (c :: class <shape>) => <string> class-name(c) end, <other>)
+end;

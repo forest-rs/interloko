@@ -1,0 +1,29 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains as class <shape>
+// expect: dump typing contains because=indirect-entry
+
+// A `class <shape>` parameter promises a class object naming `<shape>` or a
+// subclass, and the body relies on it: it may pass the value on to code that
+// trusts the bound. A caller applying an untyped `<callable>` cannot know
+// that, so the function's callable thunk checks the class object it is
+// handed. Without the check, `shape-name` would answer "<other>".
+
+define class <shape> (<object>)
+end;
+
+define class <other> (<object>)
+end;
+
+define function shape-name(c :: class <shape>) => <string>
+  class-name(c)
+end;
+
+define function name-with(f :: <callable>, c :: class <other>) => <string>
+  let name :: <string> = f(c);
+  name
+end;
+
+define function main()
+  name-with(shape-name, <other>)
+end;

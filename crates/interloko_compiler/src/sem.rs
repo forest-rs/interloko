@@ -1258,15 +1258,19 @@ fn assign_check_sites(module: &mut Module) {
         constants,
         ..
     } = module;
-    let bodies = functions
-        .iter_mut()
-        .map(|function| &mut function.body)
-        .chain(methods.iter_mut().map(|method| &mut method.body));
-    for body in bodies {
-        SiteNumbering::new(closures).block(body);
+    let mut referenced = Vec::new();
+    // Where each function's body numbering ended, for its entry checks.
+    let mut function_next = Vec::with_capacity(functions.len());
+    for function in functions.iter_mut() {
+        let mut numbering = SiteNumbering::new(closures, &mut referenced);
+        numbering.block(&mut function.body);
+        function_next.push(numbering.next);
+    }
+    for method in methods.iter_mut() {
+        SiteNumbering::new(closures, &mut referenced).block(&mut method.body);
     }
     for constant in constants {
-        SiteNumbering::new(closures).expr(&mut constant.value);
+        SiteNumbering::new(closures, &mut referenced).expr(&mut constant.value);
     }
     for class in classes {
         let initializers = class
@@ -1280,20 +1284,59 @@ fn assign_check_sites(module: &mut Module) {
                     .map(|slot| &mut slot.init_value),
             );
         for value in initializers.flatten() {
-            SiteNumbering::new(closures).expr(value);
+            SiteNumbering::new(closures, &mut referenced).expr(value);
         }
     }
+    // A function used as a value is also entered indirectly; its entry
+    // checks follow its body's sites, so they leave those numbers alone.
+    for (function, next) in functions.iter_mut().zip(function_next) {
+        if !referenced.contains(&function.id) {
+            continue;
+        }
+        let mut next = next;
+        function.entry_checks = entry_checks(&function.params, &function.locals, || {
+            let site = SiteId(next);
+            next = next.saturating_add(1);
+            site
+        });
+    }
+}
+
+/// The checks an indirect entry makes on `params`, numbered by `site`.
+fn entry_checks(
+    params: &[LocalId],
+    locals: &[Local],
+    mut site: impl FnMut() -> SiteId,
+) -> Vec<EntryCheck> {
+    params
+        .iter()
+        .filter_map(|param| {
+            let local = locals.get(param.0 as usize)?;
+            let target = EntryTarget::for_kind(local.kind)?;
+            Some(EntryCheck {
+                param: *param,
+                target,
+                site: site(),
+            })
+        })
+        .collect()
 }
 
 /// Numbers check sites in evaluation order: operands before the check.
 struct SiteNumbering<'a> {
     closures: &'a mut [Closure],
+    /// Functions used as values, which are also entered indirectly.
+    referenced: &'a mut Vec<FunctionId>,
     next: u32,
 }
 
 impl<'a> SiteNumbering<'a> {
-    fn new(closures: &'a mut [Closure]) -> Self {
-        Self { closures, next: 0 }
+    fn new(closures: &'a mut [Closure], referenced: &'a mut Vec<FunctionId>) -> Self {
+        Self {
+            closures,
+            referenced,
+            next: 0,
+        }
     }
 
     fn take(&mut self) -> SiteId {
@@ -1358,8 +1401,25 @@ impl<'a> SiteNumbering<'a> {
                 };
                 let mut body = body;
                 self.block(&mut body);
+                // A closure is only entered indirectly; its entry checks
+                // follow its body's sites.
                 if let Some(closure) = self.closures.get_mut(index) {
                     closure.body = body;
+                    let mut next = self.next;
+                    closure.entry_checks = entry_checks(&closure.params, &closure.locals, || {
+                        let site = SiteId(next);
+                        next = next.saturating_add(1);
+                        site
+                    });
+                    self.next = next;
+                }
+            }
+            Expr::KnownCallable {
+                callable: KnownCallable::DirectFunction(function),
+                ..
+            } => {
+                if !self.referenced.contains(function) {
+                    self.referenced.push(*function);
                 }
             }
             Expr::MakeObject {
@@ -1557,6 +1617,8 @@ fn kind_holds(
         || (matches!(expected, ValueKind::Callable)
             && matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_)))
         || matches!((expected, actual), (ValueKind::Object(expected), ValueKind::Object(actual)) if is_same_or_subclass(actual, expected))
+        // A class object names its bound or a subclass of it.
+        || matches!((expected, actual), (ValueKind::ClassObject(expected), ValueKind::ClassObject(actual)) if is_same_or_subclass(actual, expected))
         || class_of(actual).is_some_and(|actual| matches!(expected, ValueKind::Object(expected) if is_same_or_subclass(actual, expected)))
         || expected == actual
         // `<i32>` and `<u32>` are subtypes of `<integer>`; they widen
@@ -2256,8 +2318,62 @@ pub struct Function {
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
     pub return_annotation: Option<Vec<ValueKind>>,
+    /// Checks the function's indirect entry makes, when the function is
+    /// used as a value; empty otherwise. Direct calls trust its contract.
+    pub entry_checks: Vec<EntryCheck>,
     /// Source span.
     pub span: Span,
+}
+
+/// A check a callable's indirect entry makes on one parameter before its
+/// body relies on the parameter's declared class.
+///
+/// A caller holding an untyped `<callable>`, or one whose signature
+/// nothing checked, supplies whatever value it has, and the tape's
+/// `object` register type erases classes. So a function reached through a
+/// callable value, a closure, or a block's exit procedure checks each
+/// parameter that names a class: an instance of it, or a class object
+/// naming it or a subclass. Unboxed numbers, booleans, and callables are
+/// register types the tape checks itself.
+///
+/// Each check is a site of the definition whose sites number its body,
+/// after the body's own, so soft typing classifies it like any cast.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct EntryCheck {
+    /// The checked parameter.
+    pub param: LocalId,
+    /// What the parameter's value must be.
+    pub target: EntryTarget,
+    /// The check site.
+    pub site: SiteId,
+}
+
+/// What an [`EntryCheck`] establishes about its parameter.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EntryTarget {
+    /// An instance of the class or a subclass.
+    Instance(ClassId),
+    /// A class object naming the class or a subclass.
+    ClassObject(ClassId),
+}
+
+impl EntryTarget {
+    /// The check a parameter of `kind` needs at an indirect entry, if any.
+    #[must_use]
+    pub fn for_kind(kind: ValueKind) -> Option<Self> {
+        match kind {
+            ValueKind::Object(class)
+            | ValueKind::String(class)
+            | ValueKind::Symbol(class)
+            | ValueKind::Vector(class)
+                if class != OBJECT_CLASS_ID =>
+            {
+                Some(Self::Instance(class))
+            }
+            ValueKind::ClassObject(class) => Some(Self::ClassObject(class)),
+            _ => None,
+        }
+    }
 }
 
 /// Semantic anonymous function body and closure capture table.
@@ -2285,6 +2401,9 @@ pub struct Closure {
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
     pub return_annotation: Option<Vec<ValueKind>>,
+    /// Checks the closure's entry makes; a closure is only ever entered
+    /// indirectly. Its sites belong to the body that creates it.
+    pub entry_checks: Vec<EntryCheck>,
     /// Source span.
     pub span: Span,
 }
@@ -5549,6 +5668,7 @@ impl Lowering {
             result_kinds,
             result_callable_sigs,
             return_annotation,
+            entry_checks: Vec::new(),
             span: function.span,
         }
     }
@@ -6545,6 +6665,7 @@ impl Lowering {
             result_kinds: vec![ValueKind::Error],
             result_callable_sigs: vec![None],
             return_annotation: None,
+            entry_checks: Vec::new(),
             span,
         });
 
@@ -6630,6 +6751,7 @@ impl Lowering {
                 result_kinds: result_kinds.clone(),
                 result_callable_sigs: result_callable_sigs.clone(),
                 return_annotation,
+                entry_checks: Vec::new(),
                 span,
             };
         }
@@ -9640,6 +9762,51 @@ mod tests {
         };
         assert_eq!(*site, Some(SiteId(6)));
         assert_eq!(SiteId(6).to_string(), "s6");
+    }
+
+    #[test]
+    fn indirect_entries_check_class_parameters_after_the_body_sites() {
+        let module = lower_source(&format!(
+            "{SITES}define function named(c :: class <shape>, s :: <shape>, n :: <integer>) => <integer>\n  area(s)\nend;\n\
+             define function apply-named(c :: class <shape>) => <integer>\n  \
+             let f :: <callable> = named;\n  \
+             let g :: <callable> = function (k :: class <shape>, o :: <object>) => <integer> 1 end;\n  \
+             0\nend;"
+        ));
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let shape = class_id(&module, "<shape>");
+        // `first` is never a value, so only direct calls enter it.
+        assert!(function(&module, "first").entry_checks.is_empty());
+        assert!(function(&module, "apply-named").entry_checks.is_empty());
+        // `named` is: its class parameters are checked after `area(s)`, s0.
+        let named = function(&module, "named");
+        assert_eq!(
+            named.entry_checks,
+            [
+                EntryCheck {
+                    param: named.params[0],
+                    target: EntryTarget::ClassObject(shape),
+                    site: SiteId(1),
+                },
+                EntryCheck {
+                    param: named.params[1],
+                    target: EntryTarget::Instance(shape),
+                    site: SiteId(2),
+                },
+            ]
+        );
+        // A closure is only entered indirectly; its checks are sites of the
+        // body creating it, and an `<object>` parameter needs none.
+        let closures = closure_ids(&function(&module, "apply-named").body);
+        let closure = &module.closures[closures[0]];
+        assert_eq!(
+            closure.entry_checks,
+            [EntryCheck {
+                param: closure.params[0],
+                target: EntryTarget::ClassObject(shape),
+                site: SiteId(0),
+            }]
+        );
     }
 
     #[test]

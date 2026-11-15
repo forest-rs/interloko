@@ -1,0 +1,24 @@
+// expect: run "<circle>"
+// expect: diagnostics 0
+
+// The entry check of a `class <shape>` parameter accepts a class object
+// naming any subclass of `<shape>`.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function shape-name(c :: class <shape>) => <string>
+  class-name(c)
+end;
+
+define function name-with(f :: <callable>, c :: class <object>) => <string>
+  let name :: <string> = f(c);
+  name
+end;
+
+define function main()
+  name-with(shape-name, <circle>)
+end;

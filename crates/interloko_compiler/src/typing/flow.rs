@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use interloko_model::types::{Atom, IntRange, Relation, Type};
+use interloko_model::types::{Atom, IntRange, Metaobject, Relation, Type};
 
 use super::{
     Assumption, Binding, BindingFact, Branch, ContractSource, Reason, ReasonId, ReasonKind,
@@ -352,6 +352,50 @@ impl<'a> Analysis<'a> {
         let result = self.block(&mut env, body);
         self.result = Some(result.reason);
         self.contexts.pop();
+    }
+
+    /// Classifies the checks a function's indirect entry makes on its
+    /// parameters; see [`sem::EntryCheck`]. The values are whatever an
+    /// indirect caller passes, so only their register type is known.
+    pub(super) fn entry_checks(&mut self, locals: &'a [sem::Local], checks: &[sem::EntryCheck]) {
+        self.contexts.push(Context::new(None, locals, &[]));
+        self.check_entry(&Env::new(locals.len(), 0), checks);
+        self.contexts.pop();
+    }
+
+    fn check_entry(&mut self, env: &Env, checks: &[sem::EntryCheck]) {
+        for check in checks {
+            let Some(span) = self.local(check.param).map(|local| local.span) else {
+                continue;
+            };
+            let passed = self.fact(ReasonKind::IndirectEntry, span, Type::top(), Vec::new());
+            let (decided, expected, assumes) = match check.target {
+                sem::EntryTarget::Instance(class) => {
+                    let target = Type::of(Atom::Cone(class), self.module);
+                    let assumes = self.class_assumptions(&[&passed.ty, &target]);
+                    (
+                        decide(self.module, env, &passed.ty, &target, CAST_RULES),
+                        TypingExpectation::Class(class),
+                        assumes,
+                    )
+                }
+                sem::EntryTarget::ClassObject(bound) => (
+                    decide_class_object(self.module, env, &passed.ty, bound),
+                    TypingExpectation::ClassObject(bound),
+                    Vec::new(),
+                ),
+            };
+            self.record(
+                check.site,
+                TypingCheck::Cast,
+                decided,
+                span,
+                expected,
+                &[passed],
+                assumes,
+                None,
+            );
+        }
     }
 
     /// Analyzes an expression outside any function body, such as a
@@ -1077,6 +1121,7 @@ impl<'a> Analysis<'a> {
         for param in &closure.params {
             self.bind_declared(&mut inner, *param);
         }
+        self.check_entry(&inner, &closure.entry_checks);
         let _ = self.block(&mut inner, &closure.body);
         self.contexts.pop();
     }
@@ -1879,6 +1924,55 @@ fn decide(
         return (TypingVerdict::Proved, TypingRule::Unreachable);
     }
     match operand.relate(expected, module) {
+        Relation::Always => (TypingVerdict::Proved, always),
+        Relation::Maybe => (TypingVerdict::Checked, maybe),
+        Relation::Never => (TypingVerdict::Refuted, never),
+    }
+}
+
+/// Decides whether `operand` is a class object naming `bound` or one of
+/// its subclasses, by the cast rules.
+fn decide_class_object(
+    module: &sem::Module,
+    env: &Env,
+    operand: &Type,
+    bound: ClassId,
+) -> (TypingVerdict, TypingRule) {
+    if env.dead.is_some() {
+        return (TypingVerdict::Proved, TypingRule::Unreachable);
+    }
+    let class_class = module.builtin_value_class(sem::BuiltinValueClass::Class);
+    let relation = operand.atoms().map_or(Relation::Maybe, |atoms| {
+        atoms
+            .iter()
+            .map(|atom| match atom {
+                Atom::Singleton(Metaobject::Class(class)) => {
+                    if module.is_same_or_subclass(*class, bound) {
+                        Relation::Always
+                    } else {
+                        Relation::Never
+                    }
+                }
+                // Instances of a class that may be `<class>` may be any
+                // class object.
+                Atom::Cone(class) | Atom::Exact(class)
+                    if class_class.is_some_and(|class_class| {
+                        module.classes_may_overlap(*class, class_class)
+                    }) =>
+                {
+                    Relation::Maybe
+                }
+                _ => Relation::Never,
+            })
+            .reduce(|left, right| match (left, right) {
+                (Relation::Always, Relation::Always) => Relation::Always,
+                (Relation::Never, Relation::Never) => Relation::Never,
+                _ => Relation::Maybe,
+            })
+            .unwrap_or(Relation::Always)
+    });
+    let [always, maybe, never] = CAST_RULES;
+    match relation {
         Relation::Always => (TypingVerdict::Proved, always),
         Relation::Maybe => (TypingVerdict::Checked, maybe),
         Relation::Never => (TypingVerdict::Refuted, never),

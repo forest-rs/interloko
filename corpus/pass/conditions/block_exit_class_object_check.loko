@@ -1,0 +1,26 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains as class <shape>
+
+// An exit procedure is a first-class callable, so it checks a class object
+// it is handed against the block's `class <shape>` result before
+// delivering it.
+
+define class <shape> (<object>)
+end;
+
+define class <other> (<object>)
+end;
+
+define function deliver(f :: <callable>, c :: class <other>) => <integer>
+  let ignored :: <shape> = f(c);
+  0
+end;
+
+define function main()
+  let c :: class <shape> = block (done)
+    let ignored = deliver(done, <other>);
+    <shape>
+  end;
+  class-name(c)
+end;

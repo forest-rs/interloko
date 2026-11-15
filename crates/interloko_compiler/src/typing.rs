@@ -448,6 +448,9 @@ pub enum TypingExpectation {
     /// The value's runtime class must be `class` or one of its subclasses
     /// (casts and `instance?` tests of a class).
     Class(ClassId),
+    /// The value must be a class object naming `class` or one of its
+    /// subclasses (an indirect entry's check of a `class <c>` parameter).
+    ClassObject(ClassId),
     /// Some method of `generic` must apply to the arguments' runtime classes.
     Dispatch {
         /// Generic function being called.
@@ -667,6 +670,10 @@ pub enum ReasonKind {
     /// A call to a block's exit procedure: control leaves for the block's
     /// end, so the call produces no value.
     Exit,
+    /// A parameter as a caller reaching the definition through a callable
+    /// value passes it: any value its register can hold, which the entry
+    /// checks before the body relies on the parameter's class.
+    IndirectEntry,
     /// A closed-world assumption the decisions citing it rely on.
     ClosedWorld(Assumption),
 }
@@ -687,6 +694,7 @@ impl ReasonKind {
             Self::Interval => "interval",
             Self::Widened => "widened",
             Self::Exit => "exit",
+            Self::IndirectEntry => "indirect-entry",
             Self::ClosedWorld(_) => "closed-world",
         }
     }
@@ -1241,6 +1249,7 @@ fn run_definition(
         .find(|function| function.definition == definition)
     {
         analysis.body(&function.locals, &function.params, &function.body);
+        analysis.entry_checks(&function.locals, &function.entry_checks);
         DefinitionKind::Function
     } else if let Some(method) = module
         .methods
@@ -1354,6 +1363,12 @@ fn decision_diagnostic(
         TypingExpectation::Class(class) => diagnostic
             .with_arg(DiagnosticArg::text("expected", class_name(module, *class)))
             .with_arg(DiagnosticArg::text("actual", actual)),
+        TypingExpectation::ClassObject(class) => diagnostic
+            .with_arg(DiagnosticArg::text(
+                "expected",
+                format!("class {}", class_name(module, *class)),
+            ))
+            .with_arg(DiagnosticArg::text("actual", actual)),
         TypingExpectation::Type(expected) => {
             let diagnostic = diagnostic
                 .with_arg(DiagnosticArg::text("expected", type_name(module, expected)))
@@ -1447,6 +1462,7 @@ fn provenance_labels(
             ReasonKind::Interval => format!("computed as {ty}"),
             ReasonKind::Widened => format!("widened to {ty}"),
             ReasonKind::Exit => "control leaves here".into(),
+            ReasonKind::IndirectEntry => format!("passed indirectly as {ty}"),
             ReasonKind::Joined | ReasonKind::ClosedWorld(_) => continue,
         };
         if reason.span == decision.span
@@ -1533,7 +1549,8 @@ fn reason_label(module: &sem::Module, reason: &Reason) -> String {
         | ReasonKind::Joined
         | ReasonKind::Interval
         | ReasonKind::Widened
-        | ReasonKind::Exit => {}
+        | ReasonKind::Exit
+        | ReasonKind::IndirectEntry => {}
     }
     let _ = write!(
         label,
@@ -1578,6 +1595,7 @@ pub fn config_label(config: TypingConfig) -> &'static str {
 pub fn expectation_label(module: &sem::Module, expected: &TypingExpectation) -> String {
     match expected {
         TypingExpectation::Class(class) => class_name(module, *class),
+        TypingExpectation::ClassObject(class) => format!("class {}", class_name(module, *class)),
         TypingExpectation::Dispatch {
             generic,
             methods,
