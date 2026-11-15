@@ -480,20 +480,31 @@ fn type_error_reports() -> Vec<Vec<ValueType>> {
     reports
 }
 
-/// The types a failing check's `use-value` replacement may have, in the
-/// fixed order of their condition tags: an object, or a number.
-fn type_error_results() -> Vec<Vec<ValueType>> {
-    [
+/// The result types of the condition tags every program that signals
+/// declares first, in a fixed order: what a failing check's `use-value`
+/// replacement may be (an object, or a number), then what else a send that
+/// finds no method may resume with: one boxed `<object>`, boolean or
+/// callable, or nothing (when its results are known callables, which the
+/// dispatcher supplies itself). A generic whose results have another shape,
+/// such as several values, resumes through a tag declared in first-use
+/// order with the program's own signals.
+fn fixed_condition_results() -> Vec<Vec<ValueType>> {
+    let mut results = [
         runtime::object_type(),
         ValueType::I64,
         ValueType::I32,
         ValueType::U32,
         ValueType::F64,
         ValueType::F32,
+        runtime::any_type(),
+        ValueType::Bool,
+        ValueType::Closure,
     ]
     .into_iter()
     .map(|result| vec![result])
-    .collect()
+    .collect::<Vec<_>>();
+    results.push(Vec::new());
+    results
 }
 
 /// Host signatures and tags for dynamic control, declared only when a module
@@ -518,6 +529,9 @@ struct ControlAbi {
     conditions: Vec<(Vec<ValueType>, TagId)>,
     /// `<type-error>` requests by the types of the values they report.
     type_errors: Vec<(Vec<ValueType>, HostSigId)>,
+    /// The `<no-applicable-method>` request a dispatcher makes when no
+    /// method matches.
+    no_applicable_method: HostSigId,
     /// The tag a checking host call raises when its check fails.
     check_failed: TagId,
 }
@@ -561,7 +575,8 @@ impl ControlAbi {
                 lower::Instr::CastObject { .. }
                 | lower::Instr::CastClassObject { .. }
                 | lower::Instr::UnboxValue { .. }
-                | lower::Instr::SignalTypeError { .. } => uses_control = true,
+                | lower::Instr::SignalTypeError { .. }
+                | lower::Instr::NoApplicableMethod { .. } => uses_control = true,
                 lower::Instr::Throw { tag, .. } if *tag != lower::ControlTag::Retry => {
                     uses_control = true;
                     note_tag(*tag);
@@ -584,14 +599,15 @@ impl ControlAbi {
         if !uses_control {
             return Ok(None);
         }
-        // Failing checks resume with these types. Their condition tags and
-        // the check-failed tag come before every other control tag, in a
-        // fixed order, and their request signatures after every other
-        // control signature, so adding or removing a check renumbers
-        // nothing: an unchanged function compiles to the same bytecode in a
-        // newer unit. Tags for a program's own signal result types and exit
-        // signatures follow, in first-use order.
-        let mut results = type_error_results();
+        // Failing checks and sends resume with these types. Their condition
+        // tags and the check-failed tag come before every other control
+        // tag, in a fixed order, and their request signatures after every
+        // other control signature, so adding or removing a check or a
+        // generic renumbers nothing: an unchanged function compiles to the
+        // same bytecode in a newer unit. Tags for the other result types of
+        // a program's own signals and its generics, and for its exit
+        // signatures, follow in first-use order.
+        let mut results = fixed_condition_results();
         for signal in signal_results {
             if !results.contains(&signal) {
                 results.push(signal);
@@ -642,7 +658,10 @@ impl ControlAbi {
                 ret_types: vec![ValueType::Bool],
             })
             .map_err(build_error)?;
-        let mut abi = Self {
+        // Fields initialize in the order written, which is the order the
+        // signatures are declared: the failing-check and failing-send
+        // requests last.
+        Ok(Some(Self {
             signal: builder.host_sig_for(
                 runtime::control::CONDITION_SIGNAL,
                 runtime::control::signal_signature(),
@@ -682,20 +701,22 @@ impl ControlAbi {
                 runtime::control::check_exit_signature(),
             ),
             exits,
-            type_errors: Vec::new(),
+            type_errors: type_error_reports()
+                .into_iter()
+                .map(|values| {
+                    let sig = builder.host_sig_for(
+                        runtime::control::CONDITION_TYPE_ERROR,
+                        runtime::control::type_error_signature(&values),
+                    );
+                    (values, sig)
+                })
+                .collect(),
+            no_applicable_method: builder.host_sig_for(
+                runtime::control::CONDITION_NO_APPLICABLE_METHOD,
+                runtime::control::no_applicable_method_signature(),
+            ),
             check_failed,
-        };
-        abi.type_errors = type_error_reports()
-            .into_iter()
-            .map(|values| {
-                let sig = builder.host_sig_for(
-                    runtime::control::CONDITION_TYPE_ERROR,
-                    runtime::control::type_error_signature(&values),
-                );
-                (values, sig)
-            })
-            .collect();
-        Ok(Some(abi))
+        }))
     }
 
     fn condition_tag(&self, results: &[ValueType]) -> Result<TagId, TapeError> {
@@ -2005,6 +2026,19 @@ impl<'a> FunctionEmitter<'a> {
                     .map(|dst| self.register_type(*dst))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.emit_signal(&results, dsts, *condition, *span)?;
+            }
+            lower::Instr::NoApplicableMethod {
+                dst,
+                generic,
+                arguments,
+                span,
+            } => {
+                let sig = self.abi.control()?.no_applicable_method;
+                let generic_id = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(generic_id, u64::from(generic.0));
+                self.asm
+                    .host_call(EFFECT, sig, EFFECT, &[generic_id, *arguments], &[*dst]);
             }
             lower::Instr::SignalTypeError {
                 dst,

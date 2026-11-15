@@ -7,7 +7,7 @@
 //! time, because some checks are deliberately left to the runtime:
 //!
 //! - generic dispatch picks a method from the arguments' runtime classes and
-//!   traps when no method applies;
+//!   signals a `<no-applicable-method>` when no method applies;
 //! - `as(<class>, value)` tests the value's runtime class and signals a
 //!   `<type-error>` when the test fails;
 //! - converting to a limited integer type signals a `<type-error>` when the
@@ -54,7 +54,11 @@
 //!   overflow has the full range of its kind. A call has its
 //!   callee's declared or sem-inferred result, within a declared limited
 //!   range, never a type derived from the callee's body, so a definition's
-//!   typing depends only on its own body. A binding has its declared type,
+//!   typing depends only on its own body. That holds for a send whose
+//!   dispatch is refuted too: its `<no-applicable-method>` has a `use-value`
+//!   restart, whose replacement the dispatcher checks against the generic's
+//!   declared results, so the send yields them rather than bottom, and a
+//!   send narrows none of its arguments. A binding has its declared type,
 //!   within its limited range. Anything else has the type of sem's category
 //!   for the expression ([`sem::Module::kind_type`]).
 //! - **Narrowing.** `instance?(x, C)` narrows `x` to `x ⊓ C` in the then

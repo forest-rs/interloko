@@ -1028,16 +1028,18 @@ mod tests {
         };
         assert_eq!(
             trap(execution_tape::vm::Trap::TrapCode(
-                crate::lower::LokoTrap::NoApplicableMethod.code()
+                crate::lower::LokoTrap::MakeClassOutsideBound.code()
             ))
             .code(),
             Some(DiagnosticCode::RuntimeTrap)
         );
-        // Codes failed type checks once trapped with are retired.
+        // Codes failed type checks and sends once trapped with are retired.
+        assert_eq!(crate::lower::LokoTrap::from_code(1), None);
         assert_eq!(crate::lower::LokoTrap::from_code(3), None);
         let unhandled = |type_error| crate::session::RuntimeResult::UnhandledCondition {
             class: "<type-error>".into(),
             type_error,
+            no_applicable_method: None,
         };
         assert_eq!(
             unhandled(None).code(),
@@ -1054,6 +1056,27 @@ mod tests {
             )))
             .code(),
             Some(DiagnosticCode::TypeErrorOverflow)
+        );
+        let failed_send = crate::session::RuntimeResult::UnhandledCondition {
+            class: "<no-applicable-method>".into(),
+            type_error: None,
+            no_applicable_method: Some(alloc::boxed::Box::new(
+                crate::session::NoApplicableMethodReport {
+                    code: "dispatch.no-applicable-method".into(),
+                    generic: "area".into(),
+                    arguments: alloc::vec!["{<square>}".into()],
+                    argument_classes: alloc::vec!["<square>".into()],
+                },
+            )),
+        };
+        assert_eq!(
+            failed_send.code(),
+            Some(DiagnosticCode::DispatchNoApplicableMethod)
+        );
+        assert_eq!(
+            alloc::string::ToString::to_string(&failed_send),
+            "unhandled condition <no-applicable-method>: dispatch.no-applicable-method: \
+             no method of area applies to (<square>), called with ({<square>})"
         );
         assert_eq!(
             trap(execution_tape::vm::Trap::TrapCode(99)).code(),

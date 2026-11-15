@@ -1,0 +1,35 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// A generic with several results signals the same condition; a handler's
+// recovery supplies all of them.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define generic extent(s :: <shape>) => (<integer>, <integer>);
+
+define method extent(c :: <circle>) => (<integer>, <integer>)
+  values(c.radius, c.radius)
+end;
+
+define function measured(s :: <shape>) => (<integer>, <integer>)
+  handle
+    extent(s)
+  with restart e :: <no-applicable-method>
+    values(40, 2)
+  end
+end;
+
+define function main() => <integer>
+  let (width :: <integer>, height :: <integer>) = measured(make(<square>, side: 3));
+  width + height
+end;

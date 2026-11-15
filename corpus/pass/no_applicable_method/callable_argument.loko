@@ -1,0 +1,20 @@
+// expect: run 21
+// expect: diagnostics 0
+// expect: dump lowered contains = literal.symbol #<callable>: <symbol>
+// expect: dump lowered contains = literal.vector <vector>(
+
+// A callable is not an `<object>`, so no `<vector>` can hold it. The
+// dispatcher of a generic that takes one, such as the setter of a
+// `<callable>` slot, builds its failed send's arguments with the symbol
+// `#<callable>` in its place; a callable never selects a method anyway.
+// (Sem's argument checks keep such a setter's sends from failing, so this
+// case checks the lowering and that the program still runs.)
+
+define class <stash> (<object>)
+  slot fn :: <callable>;
+end;
+
+define function main() => <integer>
+  let stash = make(<stash>, fn: function (x :: <integer>) => <integer> x + 1 end);
+  apply(stash.fn, 20)
+end;
