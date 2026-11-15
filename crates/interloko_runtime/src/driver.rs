@@ -18,7 +18,9 @@
 //! VM, either by [`run`] or once by [`install`] for any number of
 //! [`run_installed`] calls, and a chooser may install replacements while a
 //! condition is unhandled. Generic sends ask
-//! the driver which method to call ([`crate::code::CODE_DISPATCH`]),
+//! the driver which method to call ([`crate::code::CODE_DISPATCH`]) or, when
+//! typing selected the method, call it through a link that every install
+//! repoints ([`crate::code::CodeUnit::link_target`]),
 //! and a retried frame calls the newest version of its function, while every
 //! frame keeps running the unit it entered.
 
@@ -30,19 +32,21 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use execution_tape::host::{Host, HostError, ValueRef};
+use execution_tape::program::LinkId;
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, UnitId, Value};
 use execution_tape::vm::{
     ActivationId, InstallError, InvocationInspection, InvocationOptions, PendingHostCall,
-    PendingSuspension, RunStatus, TagError, Trap, TrapInfo, Vm,
+    PendingSuspension, RelinkError, RunStatus, TagError, Trap, TrapInfo, Units, Vm,
 };
 use interloko_model::{ClassId, GenericFunctionId};
 
 use crate::InterlokoHost;
 use crate::chooser::{
-    Choice, ConditionChooser, FrameSnapshot, OfferedRestart, RegisterSnapshot, UnhandledCondition,
+    Choice, ConditionChooser, FrameSnapshot, LinkSnapshot, OfferedRestart, RegisterSnapshot,
+    UnhandledCondition,
 };
-use crate::code::{CODE_DISPATCH, CodeMismatch, CodeUnit, Definition, UnitTable};
+use crate::code::{CODE_DISPATCH, CodeMismatch, CodeUnit, Definition, UnitTable, method_link};
 use crate::control::{
     ABORT_TAG, BindingKind, BindingToken, CHECK_FAILED_TAG, CONDITION_GUARD,
     CONDITION_GUARD_RESULT, CONDITION_GUARD_UNWOUND, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL,
@@ -140,6 +144,12 @@ pub enum LinkError {
     Mismatch(CodeMismatch),
     /// The VM asked to run an [`Installed`] unit did not install it.
     NotInstalled,
+    /// The VM refused to repoint a linked send's link at the newest code.
+    ///
+    /// Units that took over from one another always accept each other's
+    /// targets, so this reports a broken invariant: links repointed before
+    /// the refusal stay repointed, and a refused install does not take over.
+    Relink(RelinkError),
 }
 
 impl core::fmt::Display for LinkError {
@@ -151,16 +161,24 @@ impl core::fmt::Display for LinkError {
                 write!(formatter, "cannot replace running code: {mismatch}")
             }
             Self::NotInstalled => formatter.write_str("the code is not installed in this VM"),
+            Self::Relink(error) => write!(formatter, "cannot repoint a linked send: {error}"),
         }
     }
 }
 
 /// A code unit installed in one VM, to run there any number of times with
 /// [`run_installed`].
+///
+/// It also remembers the units choosers install during its runs, for the
+/// VM's lifetime: their linked sends must keep following the code each run
+/// selects from, even when a value made by such a unit is called in a later
+/// run.
 #[derive(Clone, Debug)]
 pub struct Installed {
     unit: UnitId,
     code: Arc<CodeUnit>,
+    /// This unit and every unit installed during its runs, oldest first.
+    linked: UnitTable,
 }
 
 impl Installed {
@@ -177,6 +195,40 @@ impl Installed {
     }
 }
 
+/// Points every link the sends of `units` use where a dynamic send would go
+/// with `newest`, installed as `unit`, as a run's newest code: see
+/// [`CodeUnit::link_target`].
+///
+/// The VM accepts every target. Each unit took over from the one before it
+/// ([`CodeUnit::check_replaces`]), so they all share the layout and each
+/// generic's tape signature; a link's signature is its method's, which a
+/// unit only calls directly when it is its generic's; and the target is the
+/// newest unit's version of the method only when that has the generic's
+/// signature too, and its dispatcher otherwise. A refusal or a missing method
+/// therefore breaks that invariant, and is reported without undoing the
+/// links already repointed.
+fn relink_all<'u>(
+    units: impl IntoIterator<Item = (UnitId, &'u CodeUnit)>,
+    unit: UnitId,
+    newest: &CodeUnit,
+    mut relink: impl FnMut(UnitId, LinkId, FuncRef) -> Result<FuncRef, RelinkError>,
+) -> Result<(), LinkError> {
+    for (owner, code) in units {
+        for method in code.linked_methods() {
+            let target = newest
+                .link_target(unit, method)
+                .ok_or(LinkError::Mismatch(CodeMismatch::Layout))?;
+            let relinked = relink(owner, method_link(method), target);
+            debug_assert!(
+                relinked.is_ok(),
+                "units that took over from each other accept each other's targets: {relinked:?}"
+            );
+            relinked.map_err(LinkError::Relink)?;
+        }
+    }
+    Ok(())
+}
+
 /// Defines the control tags `code` imports, unless `vm` already has them,
 /// and installs `code` as a new VM unit.
 ///
@@ -187,9 +239,12 @@ pub fn install<H: Host>(vm: &mut Vm<H>, code: &Arc<CodeUnit>) -> Result<Installe
     let unit = vm
         .install(Arc::clone(&code.program))
         .map_err(LinkError::Install)?;
+    let mut linked = UnitTable::default();
+    linked.push(unit, Arc::clone(code));
     Ok(Installed {
         unit,
         code: Arc::clone(code),
+        linked,
     })
 }
 
@@ -206,8 +261,8 @@ pub fn run<'a, H: RuntimeHost>(
     options: InvocationOptions<'a>,
     chooser: &mut dyn ConditionChooser,
 ) -> Result<RunOutcome, RunFailure> {
-    let installed = install(vm, unit).map_err(RunFailure::Link)?;
-    run_installed(vm, &installed, entry, args, options, chooser)
+    let mut installed = install(vm, unit).map_err(RunFailure::Link)?;
+    run_installed(vm, &mut installed, entry, args, options, chooser)
 }
 
 /// Runs function `entry` of code that [`install`] installed in `vm`, with
@@ -219,10 +274,14 @@ pub fn run<'a, H: RuntimeHost>(
 /// exit bindings, handler searches and selected sends start empty every run.
 ///
 /// A condition that no live handler accepts goes to `chooser` before anything
-/// unwinds. Code it installs stays in `vm` after the run.
+/// unwinds. Code it installs stays in `vm` after the run, and `installed`
+/// remembers it: every run starts by pointing the linked sends of all those
+/// units back at the entry unit's methods, which is where their dynamic
+/// sends go too, since a run selects from its entry unit and what it
+/// installs.
 pub fn run_installed<'a, H: RuntimeHost>(
     vm: &'a mut Vm<H>,
-    installed: &Installed,
+    installed: &mut Installed,
     entry: FuncId,
     args: &'a [Value],
     options: InvocationOptions<'a>,
@@ -238,6 +297,18 @@ pub fn run_installed<'a, H: RuntimeHost>(
     }
     let tags = define_tags(vm).map_err(RunFailure::Link)?;
     let mut units = UnitTable::default();
+    // A run starts from its entry unit alone, so every linked send, including
+    // those of units an earlier run installed, follows it.
+    relink_all(
+        installed
+            .linked
+            .iter()
+            .map(|(owner, code)| (owner, &**code)),
+        unit,
+        &installed.code,
+        |owner, link, target| vm.relink(owner, link, target),
+    )
+    .map_err(RunFailure::Link)?;
     units.push(unit, Arc::clone(&installed.code));
     let mut invocation = vm
         .start(
@@ -248,6 +319,7 @@ pub fn run_installed<'a, H: RuntimeHost>(
         .map_err(|trap| RunFailure::Trap(Box::new(trap)))?;
     let mut driver = Driver {
         units,
+        linked: &mut installed.linked,
         sends: BTreeMap::new(),
         tags,
         state: ControlState::default(),
@@ -306,6 +378,39 @@ fn define_tags<H: Host>(vm: &mut Vm<H>) -> Result<VmTags, LinkError> {
 }
 
 /// Copies the live frames and their initialized registers, innermost first.
+/// Every link the sends of `units` use, with its current target.
+///
+/// Each unit was installed in this VM, and its program declares a link per
+/// method of its layout.
+fn snapshot_links(vm: Units<'_>, units: &UnitTable) -> Vec<LinkSnapshot> {
+    let mut snapshots = Vec::new();
+    for (unit, code) in units.iter() {
+        let targets = vm
+            .links(unit)
+            .expect("linked units are installed in this VM");
+        for method in code.linked_methods() {
+            let link = method_link(method);
+            let target = targets[link.0 as usize];
+            let name = code
+                .program
+                .program()
+                .link_name(link)
+                .expect("a program names the link of each method");
+            snapshots.push(LinkSnapshot {
+                unit,
+                link,
+                name: String::from(name),
+                method,
+                target,
+                definition: units
+                    .get(target.unit)
+                    .and_then(|code| code.definition(target.func)),
+            });
+        }
+    }
+    snapshots
+}
+
 fn snapshot_frames(
     mut inspection: InvocationInspection<'_>,
     units: &UnitTable,
@@ -337,8 +442,11 @@ fn snapshot_frames(
         .collect()
 }
 
-struct Driver {
+struct Driver<'a> {
     units: UnitTable,
+    /// Every unit installed through the run's [`Installed`], this run's
+    /// included, whose linked sends follow the run's newest code.
+    linked: &'a mut UnitTable,
     /// Functions sends selected, by generic and the classes of the argument
     /// positions its methods specialize. Cleared by every install.
     sends: BTreeMap<SendKey, FuncRef>,
@@ -434,7 +542,7 @@ enum Action {
     Fail(ControlFault),
 }
 
-impl Driver {
+impl Driver<'_> {
     fn failure(&self, trap: TrapInfo) -> RunFailure {
         if let Trap::Uncaught(exception) = &trap.trap
             && exception.tag() == self.tags.abort
@@ -859,6 +967,7 @@ impl Driver {
         let mut refused = None;
         loop {
             let frames = snapshot_frames(pending.inspect(), &self.units);
+            let links = snapshot_links(pending.units(), self.linked);
             let choice = {
                 let mut restarts = Vec::new();
                 for binding in self.state.bindings().iter().rev() {
@@ -882,6 +991,7 @@ impl Driver {
                         failed_check,
                         runtime,
                         frames: &frames,
+                        links: &links,
                         restarts: &restarts,
                         refused: refused.as_ref(),
                     })
@@ -929,6 +1039,18 @@ impl Driver {
         let unit = pending
             .install(Arc::clone(&code.program))
             .map_err(LinkError::Install)?;
+        // Linked sends of every unit, suspended frames' and earlier runs'
+        // included, now follow the new code, as dynamic sends do.
+        relink_all(
+            self.linked
+                .iter()
+                .map(|(owner, code)| (owner, &**code))
+                .chain(core::iter::once((unit, &*code))),
+            unit,
+            &code,
+            |owner, link, target| pending.relink(owner, link, target),
+        )?;
+        self.linked.push(unit, Arc::clone(&code));
         self.units.push(unit, code);
         // Selections name the previous newest unit's methods.
         self.sends.clear();

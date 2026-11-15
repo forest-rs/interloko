@@ -1,3 +1,4 @@
+// codegen: off
 // expect: run 9
 // expect: diagnostics 0
 // expect: dump lowered contains select-method g0(
@@ -7,7 +8,9 @@
 
 // A generic send asks the runtime which method its arguments select from
 // the newest code unit and calls it indirectly, so a unit installed while
-// this run is suspended can replace `area`'s methods under it. Every function and method body is
+// this run is suspended can replace `area`'s methods under it. Under the
+// default codegen policy typing proves this send's method, and the send calls
+// it through a link instead (see linked_send.loko). Every function and method body is
 // a retry region, so a break loop can call it again with newer code.
 
 define class <circle> (<object>)

@@ -6378,7 +6378,7 @@ fn run_turn_body<'a>(
         runtime_arguments.push(value);
     }
 
-    let parked = match vm.take() {
+    let mut parked = match vm.take() {
         Some(parked) if Arc::ptr_eq(parked.installed.code(), &tape.code) => parked,
         _ => ParkedVm::new(&tape.code).map_err(|error| FunctionCallError::Link { error })?,
     };
@@ -6393,7 +6393,7 @@ fn run_turn_body<'a>(
         }
         driver::run_installed(
             &mut lent,
-            &parked.installed,
+            &mut parked.installed,
             entry,
             &runtime_arguments,
             options,
@@ -15574,9 +15574,11 @@ mod tests {
         let trace = traced.trace.expect("trace should be captured");
         let view = artifacts.execution_trace_view(&trace);
         assert!(view.instructions().len() > 0);
+        // Typing proves `area`'s argument class, so the send calls the
+        // method through its link.
         assert!(
             view.instructions()
-                .any(|step| step.mnemonic() == "call.indirect" && step.next.is_some())
+                .any(|step| step.mnemonic() == "call.link" && step.next.is_some())
         );
         assert!(
             artifacts
@@ -22249,12 +22251,12 @@ end;
 
     #[test]
     fn sends_select_methods_in_the_runtime_and_installs_clear_the_cache() {
-        let original =
-            CompilerSession::compile_source("weights.loko", SEND_CACHE, RuntimeMode::CompileOnly);
-        let heavier = CompilerSession::compile_source(
-            "weights.loko",
+        // Without typing facts every send asks the runtime.
+        let off = lower::CodegenPolicy::Off;
+        let original = compile_under(SEND_CACHE, off);
+        let heavier = compile_under(
             &SEND_CACHE.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
-            RuntimeMode::CompileOnly,
+            off,
         );
         assert_eq!(original.diagnostics, Vec::new());
         assert_eq!(heavier.diagnostics, Vec::new());
@@ -22287,6 +22289,400 @@ end;
         let value = call_with_chooser(&original, &mut chooser).expect("use-value resumes");
         assert_eq!(value, FunctionValue::Integer(40));
         assert_eq!(asked, 2);
+    }
+
+    #[test]
+    fn a_linked_send_reaches_a_method_installed_while_its_frame_waits() {
+        // Typing proves `c` is a <circle>, so every `weight(c)` calls the
+        // method through one link. The install must repoint it for the send
+        // `main` makes after resuming: 10 + 10 + 0 + 20, not 30.
+        let proved = lower::CodegenPolicy::Proved;
+        let original = compile_under(SEND_CACHE, proved);
+        let heavier = compile_under(
+            &SEND_CACHE.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+            proved,
+        );
+        assert_eq!(original.diagnostics, Vec::new());
+        let lowered = original.dump_stage(DumpStage::Lowered);
+        assert!(lowered.contains("linked-send m1"), "{lowered}");
+        assert!(!lowered.contains("select-method g0("), "{lowered}");
+        let code = original.code_unit().expect("tape");
+        let program = code.program.program();
+        assert_eq!(
+            program.links.len(),
+            code.layout.methods.len(),
+            "a link per method"
+        );
+        assert_eq!(
+            program.link_name(execution_tape::program::LinkId(1)),
+            Some("weight(<circle>)")
+        );
+        assert_eq!(
+            lowered.matches("linked-send m1").count(),
+            3,
+            "every send of weight(c) calls the <circle> method's link"
+        );
+
+        let mut asked = 0;
+        let mut after = Vec::new();
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            assert!(condition.refused.is_none());
+            match asked {
+                1 => {
+                    let [link] = condition.links else {
+                        panic!("one link, got {:?}", condition.links);
+                    };
+                    assert_eq!(
+                        (link.name.as_str(), link.target.unit.0),
+                        ("weight(<circle>)", 0)
+                    );
+                    Choice::Install(heavier.code_unit().expect("tape"))
+                }
+                _ => {
+                    after = condition.links.to_vec();
+                    Choice::UseValue(vec![Value::I64(0)])
+                }
+            }
+        });
+        let value = call_with_chooser(&original, &mut chooser).expect("use-value resumes");
+        assert_eq!(value, FunctionValue::Integer(40));
+        // Both units' links now name the new unit's method.
+        assert_eq!(after.len(), 2);
+        for link in &after {
+            assert_eq!(link.target.unit.0, 1, "{link:?}");
+            assert!(matches!(
+                link.definition,
+                Some(interloko_runtime::code::Definition::Method(_))
+            ));
+        }
+    }
+
+    /// The tape function of source function `name` in `artifacts`.
+    fn tape_function(artifacts: &SessionArtifacts, name: &str) -> execution_tape::value::FuncId {
+        artifacts
+            .code_unit()
+            .expect("tape")
+            .functions
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, func)| *func)
+            .unwrap_or_else(|| panic!("no function {name}"))
+    }
+
+    /// Runs `entry` of `installed` in `vm` with `args`, answering conditions
+    /// with `choose`, and returns its outputs.
+    fn run_driver(
+        vm: &mut Vm<InterlokoHost>,
+        installed: &mut Installed,
+        entry: execution_tape::value::FuncId,
+        args: &[Value],
+        choose: impl FnMut(&UnhandledCondition<'_>) -> Choice,
+    ) -> Vec<Value> {
+        driver::run_installed(
+            vm,
+            installed,
+            entry,
+            args,
+            InvocationOptions::default(),
+            &mut Scripted(choose),
+        )
+        .expect("the run completes")
+        .outputs
+    }
+
+    #[test]
+    fn a_rerun_sends_to_its_own_methods_after_a_run_installed_newer_ones() {
+        // The first run installs a heavier circle while `check` waits, so
+        // its last send weighs 20. A second run of the same unit in the same
+        // VM starts from that unit's own methods again, as its dynamic sends
+        // do: 10 + 0 + 10.
+        let outcomes = [lower::CodegenPolicy::Off, lower::CodegenPolicy::Proved].map(|policy| {
+            let original = compile_under(SEND_CACHE, policy);
+            let heavier = compile_under(
+                &SEND_CACHE.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+                policy,
+            );
+            let tape = original.tape.as_ref().expect("tape");
+            let mut vm = Vm::new(
+                InterlokoHost::new(tape.runtime().clone()),
+                Limits::default(),
+            );
+            let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+            let main = tape_function(&original, "main");
+            let mut asked = 0;
+            let first = run_driver(&mut vm, &mut installed, main, &[], |_| {
+                asked += 1;
+                match asked {
+                    1 => Choice::Install(heavier.code_unit().expect("tape")),
+                    _ => Choice::UseValue(vec![Value::I64(0)]),
+                }
+            });
+            let second = run_driver(&mut vm, &mut installed, main, &[], |_| {
+                Choice::UseValue(vec![Value::I64(0)])
+            });
+            (first, second)
+        });
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "linked sends follow dynamic dispatch"
+        );
+        assert_eq!(
+            outcomes[1],
+            (
+                vec![Value::I64(10 + 10 + 20)],
+                vec![Value::I64(10 + 10 + 10)]
+            )
+        );
+    }
+
+    /// `main` stops, and once a chooser has installed newer code and
+    /// retried it, returns `probe`; `use` stops before applying a callable.
+    const PROBE: &str = "define class <stop> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic weight(s :: <shape>) => <integer>;\n\
+         define method weight(s :: <circle>) => <integer>\n  10\nend;\n\
+         define function stop() => <integer>\n  signal(make(<stop>))\nend;\n\
+         define function probe() => <integer>\n  let c = make(<circle>);\n  weight(c)\nend;\n\
+         define function main() => <callable>\n  let x = stop();\n  probe\nend;\n\
+         define function apply-it(f :: <callable>) => <integer>\n  apply(f)\nend;\n\
+         define function use(f :: <callable>) => <integer>\n  let x = stop();\n  apply(f)\nend;";
+
+    #[test]
+    fn linked_sends_of_code_from_earlier_runs_follow_each_run() {
+        // Run 1 installs B (weight 20) and retries `main`, which returns B's
+        // `probe`. Run 2 applies it from A: its dynamic send selects from A,
+        // so 10. Run 3 installs C (weight 30) before applying it: 30. Linked
+        // sends must agree in every unit, B's included.
+        let weighs = |weight: i64, stops: bool| {
+            let source = PROBE.replace(
+                "<integer>\n  10\nend;",
+                &format!("<integer>\n  {weight}\nend;"),
+            );
+            if stops {
+                source
+            } else {
+                source.replace("let x = stop();\n  probe", "let x = 0;\n  probe")
+            }
+        };
+        let outcomes = [lower::CodegenPolicy::Off, lower::CodegenPolicy::Proved].map(|policy| {
+            let a = compile_under(&weighs(10, true), policy);
+            let b = compile_under(&weighs(20, false), policy);
+            let c = compile_under(&weighs(30, false), policy);
+            assert_eq!(a.diagnostics, Vec::new());
+            let tape = a.tape.as_ref().expect("tape");
+            let mut vm = Vm::new(
+                InterlokoHost::new(tape.runtime().clone()),
+                Limits::default(),
+            );
+            let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+            let mut asked = 0;
+            let probe = run_driver(
+                &mut vm,
+                &mut installed,
+                tape_function(&a, "main"),
+                &[],
+                |condition| {
+                    asked += 1;
+                    match asked {
+                        1 => Choice::Install(b.code_unit().expect("tape")),
+                        _ => {
+                            let main = condition
+                                .frames
+                                .iter()
+                                .find(|frame| frame.code.name.as_deref() == Some("main"))
+                                .expect("main waits");
+                            Choice::Retry {
+                                frame: main.frame.activation.clone(),
+                            }
+                        }
+                    }
+                },
+            );
+            let applied = run_driver(
+                &mut vm,
+                &mut installed,
+                tape_function(&a, "apply-it"),
+                &probe,
+                |_| Choice::Abort,
+            );
+            let mut asked = 0;
+            let after_install = run_driver(
+                &mut vm,
+                &mut installed,
+                tape_function(&a, "use"),
+                &probe,
+                |_| {
+                    asked += 1;
+                    match asked {
+                        1 => Choice::Install(c.code_unit().expect("tape")),
+                        _ => Choice::UseValue(vec![Value::I64(0)]),
+                    }
+                },
+            );
+            (applied, after_install)
+        });
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "linked sends follow dynamic dispatch"
+        );
+        assert_eq!(outcomes[1], (vec![Value::I64(10)], vec![Value::I64(30)]));
+    }
+
+    #[test]
+    fn link_ids_do_not_depend_on_which_sends_exist() {
+        // Dropping the only send of another method from `other` leaves
+        // `main`, which sends to the <circle> method, byte for byte the same.
+        let with = SEND_CACHE.replace(
+            "define function main()",
+            "define function other() => <integer>\n  weight(make(<shape>))\nend;\n\
+             define function main()",
+        );
+        let without = SEND_CACHE.replace(
+            "define function main()",
+            "define function other() => <integer>\n  1\nend;\n\
+             define function main()",
+        );
+        let bytes = |source: &str| {
+            let artifacts = compile_under(source, lower::CodegenPolicy::Proved);
+            assert_eq!(artifacts.diagnostics, Vec::new());
+            let main = tape_function(&artifacts, "main");
+            let code = artifacts.code_unit().expect("tape");
+            let program = code.program.program();
+            let bytes = program.functions[main.0 as usize]
+                .bytecode(program)
+                .expect("main has bytecode")
+                .to_vec();
+            (bytes, code.links.clone())
+        };
+        let (with_bytes, with_links) = bytes(&with);
+        let (without_bytes, without_links) = bytes(&without);
+        assert_ne!(
+            with_links, without_links,
+            "`other`'s send uses a link of its own"
+        );
+        assert_eq!(with_bytes, without_bytes);
+    }
+
+    /// `weight(<circle>)` returns its result boxed, as the generic does, so
+    /// sends call it directly.
+    const BOXED_WEIGHT: &str = "define class <too-heavy> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic weight(s :: <shape>) => <object>;\n\
+         define method weight(s :: <circle>) => <object>\n  10\nend;\n\
+         define function check(w :: <integer>) => <integer>\n  if w > 50 then signal(make(<too-heavy>)) else w end\nend;\n\
+         define function main() => <integer>\n  let c = make(<circle>);\n  as(<integer>, weight(c) + check(100) + weight(c))\nend;";
+
+    #[test]
+    fn a_linked_send_falls_back_to_the_dispatcher_when_the_new_method_converts() {
+        // The replacement returns an unboxed <integer> where the generic
+        // returns <object>, so a send can no longer call it directly: the
+        // link must name the new dispatcher, which boxes the result.
+        let proved = lower::CodegenPolicy::Proved;
+        let original = compile_under(BOXED_WEIGHT, proved);
+        let unboxed = compile_under(
+            &BOXED_WEIGHT.replace(
+                "weight(s :: <circle>) => <object>\n  10",
+                "weight(s :: <circle>) => <integer>\n  20",
+            ),
+            proved,
+        );
+        assert_eq!(original.diagnostics, Vec::new());
+        assert_eq!(unboxed.diagnostics, Vec::new());
+        let plan = |artifacts: &SessionArtifacts| {
+            artifacts.tape.as_ref().unwrap().code.dispatch[0]
+                .as_ref()
+                .expect("weight is selected in the runtime")
+                .cases[0]
+                .direct
+        };
+        assert!(plan(&original) && !plan(&unboxed));
+
+        let mut asked = 0;
+        let mut after = Vec::new();
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            assert!(condition.refused.is_none(), "{:?}", condition.refused);
+            match asked {
+                1 => Choice::Install(unboxed.code_unit().expect("tape")),
+                _ => {
+                    after = condition.links.to_vec();
+                    Choice::UseValue(vec![Value::I64(0)])
+                }
+            }
+        });
+        let value = call_with_chooser(&original, &mut chooser).expect("use-value resumes");
+        assert_eq!(value, FunctionValue::Integer(30));
+        let old = after
+            .iter()
+            .find(|link| link.unit.0 == 0)
+            .expect("the old unit's link");
+        assert_eq!(old.target.unit.0, 1);
+        assert!(
+            matches!(
+                old.definition,
+                Some(interloko_runtime::code::Definition::Generic(_))
+            ),
+            "{old:?}"
+        );
+    }
+
+    const BROKEN_WEIGHT: &str = "define class <broken> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic weight(s :: <shape>) => <integer>;\n\
+         define method weight(s :: <circle>) => <integer>\n  signal(make(<broken>))\nend;\n\
+         define function main() => <integer>\n  let c = make(<circle>);\n  weight(c) + weight(c)\nend;";
+
+    #[test]
+    fn a_method_reached_through_a_link_retries_with_the_new_code() {
+        // The first linked send signals inside `weight`. The chooser installs
+        // a fixed method and retries the method's frame, which runs the new
+        // code; the second send then reaches it through the repointed link.
+        let proved = lower::CodegenPolicy::Proved;
+        let original = compile_under(BROKEN_WEIGHT, proved);
+        let fixed = compile_under(
+            &BROKEN_WEIGHT.replace("signal(make(<broken>))", "7"),
+            proved,
+        );
+        assert_eq!(original.diagnostics, Vec::new());
+        assert_eq!(fixed.diagnostics, Vec::new());
+        assert!(
+            original
+                .dump_stage(DumpStage::Lowered)
+                .contains("linked-send m0")
+        );
+
+        let mut asked = 0;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            assert!(condition.refused.is_none(), "{:?}", condition.refused);
+            match asked {
+                1 => Choice::Install(fixed.code_unit().expect("tape")),
+                2 => {
+                    let method = condition
+                        .frames
+                        .iter()
+                        .find(|frame| {
+                            matches!(
+                                frame.code.definition,
+                                Some(interloko_runtime::code::Definition::Method(_))
+                            )
+                        })
+                        .expect("the weight method is suspended");
+                    assert!(method.code.is_retryable(), "{:?}", method.code);
+                    Choice::Retry {
+                        frame: method.frame.activation.clone(),
+                    }
+                }
+                _ => Choice::Abort,
+            }
+        });
+        let value = call_with_chooser(&original, &mut chooser).expect("the retry recovers");
+        assert_eq!(value, FunctionValue::Integer(14));
+        assert_eq!(asked, 2, "the second send reached the fixed method");
     }
 
     const PARKED_PROGRAM: &str = "define class <problem> (<object>)\nend;\n\
@@ -22417,11 +22813,11 @@ end;
         let entry = tape.functions[0];
         let host = || InterlokoHost::new(tape.runtime().clone());
         let mut installer = Vm::new(host(), Limits::default());
-        let installed = driver::install(&mut installer, &tape.code).expect("installs");
-        let run = |vm: &mut Vm<InterlokoHost>| {
+        let mut installed = driver::install(&mut installer, &tape.code).expect("installs");
+        let mut run = |vm: &mut Vm<InterlokoHost>| {
             driver::run_installed(
                 vm,
-                &installed,
+                &mut installed,
                 entry,
                 &[],
                 InvocationOptions::default(),

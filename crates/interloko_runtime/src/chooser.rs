@@ -7,15 +7,16 @@
 //! and carries it out. A REPL break loop, a scripted chooser or a recorded
 //! oracle are all choosers; [`ReportUnhandled`] is the default.
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use execution_tape::program::{Reg, ValueType};
-use execution_tape::value::{Obj, Value};
+use execution_tape::program::{LinkId, Reg, ValueType};
+use execution_tape::value::{FuncRef, Obj, UnitId, Value};
 use execution_tape::vm::{ActivationId, PausedFrame};
-use interloko_model::ClassId;
+use interloko_model::{ClassId, MethodId};
 
-use crate::code::{CodeUnit, FrameCode};
+use crate::code::{CodeUnit, Definition, FrameCode};
 use crate::control::{BindingToken, RestartDescriptor};
 use crate::driver::LinkError;
 use crate::{InterlokoHost, TypeErrorReport};
@@ -38,6 +39,27 @@ pub struct FrameSnapshot {
     pub registers: Vec<RegisterSnapshot>,
     /// The code unit the frame runs and whether newer code replaced it.
     pub code: FrameCode,
+}
+
+/// Where one devirtualized send of one installed unit points now.
+///
+/// Installing code repoints every unit's links at the newest code's
+/// selection; this is how a chooser sees the result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkSnapshot {
+    /// The unit whose code makes the send.
+    pub unit: UnitId,
+    /// The link within that unit's program.
+    pub link: LinkId,
+    /// The link's name in the program, such as `area(<circle>)`.
+    pub name: String,
+    /// The method the send selected, whose link this is.
+    pub method: MethodId,
+    /// The function the send calls now.
+    pub target: FuncRef,
+    /// What that function implements: the selected method, or the generic's
+    /// dispatcher when the newest method needs its arguments converted.
+    pub definition: Option<Definition>,
 }
 
 /// A restart a chooser may select.
@@ -85,6 +107,9 @@ pub struct UnhandledCondition<'a> {
     pub runtime: &'a InterlokoHost,
     /// Live frames, innermost (the signaller) first. Nothing has unwound.
     pub frames: &'a [FrameSnapshot],
+    /// Every link the sends of the run's units, and of units earlier runs
+    /// installed, use, oldest unit first, with the function it calls now.
+    pub links: &'a [LinkSnapshot],
     /// Restarts on offer, innermost handler sites first, then the built-ins.
     pub restarts: &'a [OfferedRestart<'a>],
     /// Why the chooser's last [`Choice::Install`] was refused, if it was.

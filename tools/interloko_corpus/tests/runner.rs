@@ -153,7 +153,8 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/codegen/instance_drops_dead_branch.loko"));
     assert!(out.contains("ok pass/type_errors/cast_unhandled.loko"));
     assert!(out.contains("ok pass/type_errors/entry_handled.loko"));
-    assert!(out.contains("corpus: 388 passed, 0 failed, 388 total"));
+    assert!(out.contains("ok pass/codegen/linked_send.loko"));
+    assert!(out.contains("corpus: 389 passed, 0 failed, 389 total"));
 }
 
 #[test]
