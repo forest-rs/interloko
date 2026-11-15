@@ -11817,7 +11817,7 @@ const TYPING_CONFIG_OBJECT_ID: &str = "typing-config:session";
 /// Stable EOP id of one typing decision: owner definition plus check site,
 /// such as `typing:def…:s2`.
 fn typing_decision_object_id(decision: &typing::TypingDecision) -> String {
-    format!("typing:{}:{}", decision.owner, decision.site)
+    typing::decision_id(decision)
 }
 
 fn typing_policy_label(config: typing::TypingConfig) -> String {
@@ -16105,12 +16105,14 @@ mod tests {
             .iter()
             .map(|diagnostic| (diagnostic.code, diagnostic.severity))
             .collect::<Vec<_>>();
+        // The strict preset holds every definition to strict typing: the
+        // runtime-checked send is unproved, and the refuted one an error.
         assert_eq!(
             codes,
             [
                 (
-                    DiagnosticCode::TypingDispatchRuntimeChecked,
-                    crate::diagnostic::Severity::Warning
+                    DiagnosticCode::TypingUnprovedDispatch,
+                    crate::diagnostic::Severity::Error
                 ),
                 (
                     DiagnosticCode::TypingDispatchNoApplicableMethod,

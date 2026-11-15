@@ -1,16 +1,16 @@
 // typing: strict
 // expect: run 1.5
-// expect: diagnostics 2
-// expect: diagnostic code typing.cast-runtime-checked
+// expect: diagnostics 1
 // expect: diagnostic code typing.cast-always-fails
 // expect: dump typing contains cast checked rule=cast-narrowing
 // expect: dump typing contains expected=<double-float> actual=<object>
 // expect: dump typing contains cast refuted rule=cast-disjoint
 // expect: dump typing contains expected=<double-float> actual=<string>
 
-// Under the strict preset, unboxing an `<object>` to `<double-float>` is a
-// runtime-checked warning and casting a boxed string is an always-failing
-// error. Neither blocks running `main`, and the checked cast succeeds.
+// Under the strict preset, explicitly unboxing an `<object>` to
+// `<double-float>` stays a runtime check, while casting a boxed string
+// always fails, which is an error in strict code. Neither blocks running
+// `main`, and the checked cast succeeds.
 
 define function to-float(x :: <object>) => <double-float>
   as(<double-float>, x)

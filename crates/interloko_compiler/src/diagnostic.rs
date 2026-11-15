@@ -262,6 +262,19 @@ pub enum DiagnosticCode {
     TypingOverflowRuntimeChecked,
     /// Soft typing: an integer operation always traps when reached.
     TypingOverflowCertain,
+    /// Strict typing could not prove that a send in a strict definition
+    /// finds a method, so it would be left to the runtime.
+    TypingUnprovedDispatch,
+    /// Strict typing could not prove a cast the compiler inserted in a
+    /// strict definition, such as the check of a value returned through a
+    /// `<callable>`.
+    TypingUnprovedCast,
+    /// Strict typing could not prove that a value reaching a limited
+    /// integer declaration in a strict definition is in its range.
+    TypingUnprovedRange,
+    /// Strict typing could not prove that integer arithmetic in a strict
+    /// definition stays within its kind, under `strict.overflow=proved`.
+    TypingUnprovedOverflow,
     /// Lowered IR failed an internal semantic invariant.
     LowerInvalidSemantic,
     /// Lowering stopped because earlier diagnostics exist.
@@ -422,6 +435,10 @@ impl DiagnosticCode {
         Self::TypingOverflowImpossible,
         Self::TypingOverflowRuntimeChecked,
         Self::TypingOverflowCertain,
+        Self::TypingUnprovedDispatch,
+        Self::TypingUnprovedCast,
+        Self::TypingUnprovedRange,
+        Self::TypingUnprovedOverflow,
         Self::LowerInvalidSemantic,
         Self::LowerBlockedByDiagnostics,
         Self::TapeInvalidLowered,
@@ -557,6 +574,10 @@ impl DiagnosticCode {
             Self::TypingOverflowImpossible => "typing.overflow-impossible",
             Self::TypingOverflowRuntimeChecked => "typing.overflow-runtime-checked",
             Self::TypingOverflowCertain => "typing.overflow-certain",
+            Self::TypingUnprovedDispatch => "typing.unproved-dispatch",
+            Self::TypingUnprovedCast => "typing.unproved-cast",
+            Self::TypingUnprovedRange => "typing.unproved-range",
+            Self::TypingUnprovedOverflow => "typing.unproved-overflow",
             Self::LowerInvalidSemantic => "lower.invalid-semantic",
             Self::LowerBlockedByDiagnostics => "lower.blocked-by-diagnostics",
             Self::TapeInvalidLowered => "tape.invalid-lowered",
@@ -693,6 +714,10 @@ impl DiagnosticCode {
             "typing.overflow-impossible" => Self::TypingOverflowImpossible,
             "typing.overflow-runtime-checked" => Self::TypingOverflowRuntimeChecked,
             "typing.overflow-certain" => Self::TypingOverflowCertain,
+            "typing.unproved-dispatch" => Self::TypingUnprovedDispatch,
+            "typing.unproved-cast" => Self::TypingUnprovedCast,
+            "typing.unproved-range" => Self::TypingUnprovedRange,
+            "typing.unproved-overflow" => Self::TypingUnprovedOverflow,
             "lower.invalid-semantic" => Self::LowerInvalidSemantic,
             "lower.blocked-by-diagnostics" => Self::LowerBlockedByDiagnostics,
             "tape.invalid-lowered" => Self::TapeInvalidLowered,
