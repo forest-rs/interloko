@@ -4478,6 +4478,20 @@ fn collect_dispatch_sites_in_expr(
                 collect_dispatch_sites_in_expr(artifacts, owner, &field.value, sites);
             }
         }
+        sem::Expr::MakeRuntimeClass {
+            class,
+            init_args,
+            candidates,
+            ..
+        } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, class, sites);
+            for arg in init_args {
+                collect_dispatch_sites_in_expr(artifacts, owner, &arg.value, sites);
+            }
+            for field in candidates.iter().flat_map(|candidate| &candidate.defaults) {
+                collect_dispatch_sites_in_expr(artifacts, owner, &field.value, sites);
+            }
+        }
         sem::Expr::AccessorCall { receiver, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, receiver, sites);
         }
@@ -11678,6 +11692,48 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 dump_sem_expr(out, &field.value, indent + 4);
             }
         }
+        sem::Expr::MakeRuntimeClass {
+            class,
+            bound,
+            init_args,
+            candidates,
+            ..
+        } => {
+            let _ = writeln!(out, "make-runtime-class bound=c{}", bound.0);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "class");
+            dump_sem_expr(out, class, indent + 4);
+            if !init_args.is_empty() {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "init-args");
+                for arg in init_args {
+                    indent_line(out, indent + 4);
+                    let _ = writeln!(out, "{}: -> s{}", arg.keyword, arg.slot.0);
+                    dump_sem_expr(out, &arg.value, indent + 6);
+                }
+            }
+            for candidate in candidates {
+                indent_line(out, indent + 2);
+                match &candidate.missing_keyword {
+                    Some(keyword) => {
+                        let _ = writeln!(out, "candidate c{} missing={keyword}", candidate.class.0);
+                    }
+                    None => {
+                        let _ = writeln!(out, "candidate c{}", candidate.class.0);
+                    }
+                }
+                for field in &candidate.defaults {
+                    indent_line(out, indent + 4);
+                    let _ = writeln!(
+                        out,
+                        "field s{} source={}",
+                        field.slot.0,
+                        sem_field_init_source_label(field.source)
+                    );
+                    dump_sem_expr(out, &field.value, indent + 6);
+                }
+            }
+        }
         sem::Expr::AccessorCall {
             accessor,
             receiver,
@@ -12685,6 +12741,50 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 );
                 fingerprint_sem_expr(module, &field.value, out);
                 out.push(',');
+            }
+            out.push(')');
+        }
+        // The candidates follow the class hierarchy, so adding a subclass of
+        // the bound changes this fingerprint too.
+        sem::Expr::MakeRuntimeClass {
+            class,
+            bound,
+            init_args,
+            candidates,
+            ..
+        } => {
+            let class_definition = |class: sem::ClassId| {
+                module
+                    .classes
+                    .get(class.0 as usize)
+                    .map_or(0, |class| class.definition.raw())
+            };
+            let _ = write!(out, "make-runtime-class({}:", class_definition(*bound));
+            fingerprint_sem_expr(module, class, out);
+            out.push(':');
+            for arg in init_args {
+                let _ = write!(out, "arg{}:slot{}=", arg.keyword, arg.slot.0);
+                fingerprint_sem_expr(module, &arg.value, out);
+                out.push(',');
+            }
+            for candidate in candidates {
+                let _ = write!(
+                    out,
+                    ":candidate{}:{}",
+                    class_definition(candidate.class),
+                    candidate.missing_keyword.as_deref().unwrap_or("")
+                );
+                for field in &candidate.defaults {
+                    let kind = module
+                        .classes
+                        .get(candidate.class.0 as usize)
+                        .and_then(|class| class.effective_slots.get(field.slot.0 as usize))
+                        .map_or(String::from("error"), |slot| {
+                            sem_kind_fingerprint(module, slot.kind)
+                        });
+                    let _ = write!(out, ",slot{}:{kind}=", field.slot.0);
+                    fingerprint_sem_expr(module, &field.value, out);
+                }
             }
             out.push(')');
         }

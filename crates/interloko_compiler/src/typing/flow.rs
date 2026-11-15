@@ -699,6 +699,29 @@ impl<'a> Analysis<'a> {
                     Vec::new(),
                 )
             }
+            // The class value may name any subclass of the bound, so the
+            // object is only known to be in the bound's cone.
+            E::MakeRuntimeClass {
+                class,
+                bound,
+                init_args,
+                candidates,
+                span,
+            } => {
+                let _ = self.eval(env, class);
+                for arg in init_args {
+                    let _ = self.eval(env, &arg.value);
+                }
+                for field in candidates.iter().flat_map(|candidate| &candidate.defaults) {
+                    let _ = self.eval(env, &field.value);
+                }
+                self.fact(
+                    ReasonKind::Constructed,
+                    *span,
+                    Type::of(Atom::Cone(*bound), module),
+                    Vec::new(),
+                )
+            }
             E::AccessorCall {
                 accessor,
                 receiver,
@@ -1851,6 +1874,20 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         E::MakeObject { class, fields, .. } => {
             walk(module, class, visit);
             for field in fields {
+                walk(module, &field.value, visit);
+            }
+        }
+        E::MakeRuntimeClass {
+            class,
+            init_args,
+            candidates,
+            ..
+        } => {
+            walk(module, class, visit);
+            for arg in init_args {
+                walk(module, &arg.value, visit);
+            }
+            for field in candidates.iter().flat_map(|candidate| &candidate.defaults) {
                 walk(module, &field.value, visit);
             }
         }

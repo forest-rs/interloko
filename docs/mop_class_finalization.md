@@ -99,6 +99,16 @@ construction. Explicit keyword values override defaults.
 
 Semantic IR now records the explicit init arguments at the `make` call site and
 the planned field initializers chosen from the class initialization plan.
+
+`make` on a class value rather than a class literal, such as
+`make(class-of(shape))`, allocates the class the value names at run time, as
+Dylan does. The value's kind is only a bound (`class-of` records its operand's
+static class), so sem checks the init arguments against the bound and plans
+each native subclass of it as a candidate, completing the arguments with that
+class's own defaults. Lowering evaluates the class and the arguments once, then
+compares the value's class id against each candidate. A candidate requiring an
+init keyword the call does not pass, or a value naming no candidate, traps. The
+result is only known to be in the bound's cone, never its exact class.
 Diagnostics distinguish unknown keywords, duplicate keywords, missing required
 keywords, explicit initializer type mismatches, and default `init-value:` type
 mismatches.

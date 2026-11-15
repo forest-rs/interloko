@@ -773,6 +773,11 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::meta_class_object_signature(),
         ),
         (
+            RuntimeOp::ClassMetaId,
+            runtime::META_CLASS_ID,
+            runtime::meta_class_id_signature(),
+        ),
+        (
             RuntimeOp::GenericMetaObject,
             runtime::META_GENERIC_OBJECT,
             runtime::meta_generic_object_signature(),
