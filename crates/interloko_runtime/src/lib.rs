@@ -70,6 +70,9 @@ pub const UNBOX_VALUE: &str = "interloko.unbox_value";
 pub const INSTANCE_OF: &str = "interloko.instance_of";
 /// Host-call symbol for casting a value to a known runtime object class.
 pub const CAST_OBJECT: &str = "interloko.cast_object";
+/// Host-call symbol for casting a value to a class object naming a known
+/// class or one of its subclasses. It takes [`cast_object_signature`].
+pub const CAST_CLASS_OBJECT: &str = "interloko.cast_class_object";
 /// Host-call symbol for constructing a string object from an execution string.
 pub const STRING_LITERAL: &str = "interloko.literal.string";
 /// Host-call symbol for constructing an interned symbol object from an execution string.
@@ -2346,6 +2349,26 @@ impl Host for InterlokoHost {
                     .filter(|obj| {
                         self.object(*obj).is_ok_and(|object| {
                             self.layout.is_same_or_subclass(object.class, class)
+                        })
+                    })
+                    .ok_or(HostError::Failed)?;
+                rets[0] = Value::Obj(obj);
+                Ok(0)
+            }
+            CAST_CLASS_OBJECT => {
+                let [value, ValueRef::U64(bound_raw)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let bound = runtime_class_id(*bound_raw)?;
+                let obj = self
+                    .value_object(*value)
+                    .filter(|obj| {
+                        self.object(*obj).is_ok_and(|object| {
+                            matches!(
+                                object.storage,
+                                RuntimeObjectStorage::ClassMeta { class }
+                                    if self.layout.is_same_or_subclass(class, bound)
+                            )
                         })
                     })
                     .ok_or(HostError::Failed)?;

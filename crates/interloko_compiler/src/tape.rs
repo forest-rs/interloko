@@ -324,6 +324,9 @@ struct AbiTables {
     instance_object: HostSigId,
     cast_any: HostSigId,
     cast_object: HostSigId,
+    /// `any` and `object` input signatures for class object casts, when
+    /// the module makes any.
+    cast_class: Option<(HostSigId, HostSigId)>,
     tags: SharedTags,
     control: Option<ControlAbi>,
 }
@@ -625,6 +628,23 @@ impl AbiTables {
             runtime::CAST_OBJECT,
             runtime::cast_object_signature(runtime::object_type()),
         );
+        let cast_class = module
+            .functions
+            .iter()
+            .flat_map(|function| &function.instructions)
+            .any(|instr| matches!(instr, lower::Instr::CastClassObject { .. }))
+            .then(|| {
+                (
+                    builder.host_sig_for(
+                        runtime::CAST_CLASS_OBJECT,
+                        runtime::cast_object_signature(runtime::any_type()),
+                    ),
+                    builder.host_sig_for(
+                        runtime::CAST_CLASS_OBJECT,
+                        runtime::cast_object_signature(runtime::object_type()),
+                    ),
+                )
+            });
         let string_literal_consts = literal_consts(builder, module, |instr| match instr {
             lower::Instr::StringLiteral { value, .. } => Some(value.as_str()),
             _ => None,
@@ -686,6 +706,7 @@ impl AbiTables {
             instance_object,
             cast_any,
             cast_object,
+            cast_class,
             tags,
             control,
         })
@@ -1615,6 +1636,20 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
             }
+            lower::Instr::CastClassObject {
+                dst,
+                value,
+                input,
+                bound,
+                span,
+            } => {
+                let sig = self.cast_class_sig(*input)?;
+                let class_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(class_reg, u64::from(bound.0));
+                self.asm
+                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
+            }
             lower::Instr::EqU64 {
                 dst,
                 lhs,
@@ -1840,6 +1875,18 @@ impl<'a> FunctionEmitter<'a> {
             lower::ValueKind::Any => Ok(self.abi.cast_any),
             lower::ValueKind::Object(_) => Ok(self.abi.cast_object),
             _ => Err(invalid_lowered("cast input kind is invalid")),
+        }
+    }
+
+    fn cast_class_sig(&self, kind: lower::ValueKind) -> Result<HostSigId, TapeError> {
+        let (any, object) = self
+            .abi
+            .cast_class
+            .ok_or_else(|| invalid_lowered("class object cast signature is missing"))?;
+        match kind {
+            lower::ValueKind::Any => Ok(any),
+            lower::ValueKind::Object(_) | lower::ValueKind::ClassObject(_) => Ok(object),
+            _ => Err(invalid_lowered("class object cast input kind is invalid")),
         }
     }
 }
