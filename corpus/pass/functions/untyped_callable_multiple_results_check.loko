@@ -1,0 +1,28 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+
+// Each of several results through a callable value is checked: the
+// `<square>` this callable returns first is not the `<circle>` its caller
+// relies on, so the cast fails instead of `side` being read as `radius`.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function first-radius(f :: callable(<integer>) => (<circle>, <integer>)) => <integer>
+  let (c, n) = f(3);
+  c.radius + n
+end;
+
+define function call-with(g :: <callable>, f :: <callable>) => <integer>
+  let r :: <integer> = g(f);
+  r
+end;
+
+define function main()
+  call-with(first-radius, function (x :: <integer>) => (<square>, <integer>) values(make(<square>, side: x), 1) end)
+end;

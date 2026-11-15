@@ -1,0 +1,20 @@
+// expect: run 4
+// expect: diagnostics 0
+// expect: dump lowered contains as <circle>
+
+// A call through a callable value relies on each of several results as its
+// context says. The call binds them to temporaries and checks each on its
+// own, as it would a single result.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function first-radius(f :: <callable>) => <integer>
+  let (c :: <circle>, n :: <integer>) = apply(f, 3);
+  c.radius + n
+end;
+
+define function main()
+  first-radius(function (x :: <integer>) => (<circle>, <integer>) values(make(<circle>, radius: x), 1) end)
+end;
