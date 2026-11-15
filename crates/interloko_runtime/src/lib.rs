@@ -22,6 +22,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use core::fmt;
 #[cfg(test)]
 use execution_tape::host::AccessSink;
 use execution_tape::host::{
@@ -29,6 +30,8 @@ use execution_tape::host::{
 };
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
+
+use interloko_model::types::{ClassHierarchy, TypeNames};
 use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID,
     SingleFloatBits, SlotId,
@@ -1370,6 +1373,84 @@ impl RuntimeLayout {
             }
         }
         stricter
+    }
+}
+
+/// The runtime layout's classes, for comparing [`interloko_model::types::Type`]s
+/// such as code-unit [contracts](crate::code::Contracts).
+///
+/// The layout mirrors the compiler's classes in the same order, so it
+/// answers as the compiler's hierarchy did when it built those types.
+impl ClassHierarchy for RuntimeLayout {
+    fn superclass(&self, class: ClassId) -> Option<ClassId> {
+        self.class(class)?.superclass
+    }
+
+    /// A built-in value or host-backed class is closed unless another class
+    /// inherits from it, as in the compiler.
+    fn is_closed(&self, class: ClassId) -> bool {
+        self.class(class).is_some_and(|runtime| {
+            matches!(
+                runtime.kind,
+                HostObjectKind::BuiltinValue { .. } | HostObjectKind::HostBacked
+            )
+        }) && !self
+            .classes
+            .iter()
+            .any(|other| other.superclass == Some(class))
+    }
+
+    fn builtin_class(&self, kind: BuiltinValueClass) -> Option<ClassId> {
+        self.classes
+            .iter()
+            .position(|class| class.kind == HostObjectKind::BuiltinValue { kind })
+            .map(|index| ClassId(u32::try_from(index).unwrap_or(u32::MAX)))
+    }
+
+    fn is_same_or_subclass(&self, class: ClassId, ancestor: ClassId) -> bool {
+        Self::is_same_or_subclass(self, class, ancestor)
+    }
+}
+
+impl TypeNames for RuntimeLayout {
+    fn write_class(&self, out: &mut dyn fmt::Write, class: ClassId) -> fmt::Result {
+        match self.class(class) {
+            Some(runtime) => out.write_str(&runtime.name),
+            None => write!(out, "class#{}", class.0),
+        }
+    }
+
+    fn write_generic(&self, out: &mut dyn fmt::Write, generic: GenericFunctionId) -> fmt::Result {
+        match self.generic(generic) {
+            Some(runtime) => out.write_str(&runtime.name),
+            None => write!(out, "generic#{}", generic.0),
+        }
+    }
+
+    /// Writes `generic(<specializer>, ...)`, with `<object>` for an
+    /// unspecialized parameter.
+    fn write_method(&self, out: &mut dyn fmt::Write, method: MethodId) -> fmt::Result {
+        let Some(runtime) = self.method(method) else {
+            return write!(out, "method#{}", method.0);
+        };
+        self.write_generic(out, runtime.generic)?;
+        out.write_str("(")?;
+        for (index, specializer) in runtime.specializers.iter().enumerate() {
+            if index > 0 {
+                out.write_str(", ")?;
+            }
+            self.write_class(out, specializer.unwrap_or(OBJECT_CLASS_ID))?;
+        }
+        out.write_str(")")
+    }
+
+    /// Writes `<class>.slot-name`.
+    fn write_slot(&self, out: &mut dyn fmt::Write, class: ClassId, slot: SlotId) -> fmt::Result {
+        self.write_class(out, class)?;
+        match self.slot(class, slot) {
+            Some(runtime) => write!(out, ".{}", runtime.name),
+            None => write!(out, ".slot#{}", slot.0),
+        }
     }
 }
 
