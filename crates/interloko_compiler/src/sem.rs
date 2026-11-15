@@ -12,7 +12,7 @@ use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
 
-use interloko_model::contract::Contract;
+use interloko_model::contract::{CallableContract, Contract, ValueContract};
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
 
 pub use interloko_model::{
@@ -819,11 +819,14 @@ impl Module {
     /// - a function's parameters and results are its declared or inferred
     ///   kinds.
     ///
+    /// A callable value also records the signature its callers call it
+    /// with: a declared `callable(...) => ...` type, or for a
+    /// [`ValueKind::KnownCallable`], the known function's, generic's or
+    /// accessor's own signature, expanded the same way.
+    ///
     /// The contract never comes from a finer analysis of a body (such as
     /// [`crate::typing`]), so a body edit changes a contract only when it
-    /// changes the kinds lowering trusts. Callable types do not yet carry
-    /// signatures, so a contract does not constrain a callable's
-    /// parameters or results.
+    /// changes the kinds lowering trusts.
     #[must_use]
     pub fn contract(&self, definition: DefinitionId) -> Option<Contract> {
         if let Some(generic) = self
@@ -849,49 +852,168 @@ impl Module {
     /// Returns `generic`'s contract; see [`Self::contract`].
     #[must_use]
     pub fn generic_contract(&self, generic: &GenericFunction) -> Contract {
-        Contract {
-            params: generic
-                .param_kinds
-                .iter()
-                .map(|kind| kind.map_or_else(Type::top, |kind| self.kind_type(kind)))
-                .collect(),
-            results: self.kind_types(&generic.result_kinds),
-        }
+        let mut outer = vec![Some(KnownCallable::GenericFunction(generic.id))];
+        self.generic_signature(generic, &mut outer)
     }
 
     /// Returns `method`'s contract; see [`Self::contract`].
     #[must_use]
     pub fn method_contract(&self, method: &Method) -> Contract {
-        Contract {
-            params: method
-                .params
-                .iter()
-                .map(|param| {
-                    method
-                        .locals
-                        .get(param.0 as usize)
-                        .map_or_else(Type::top, |local| self.kind_type(local.kind))
-                })
-                .collect(),
-            results: self.kind_types(
-                self.generics
-                    .get(method.generic.0 as usize)
-                    .map_or(&method.result_kinds, |generic| &generic.result_kinds),
+        let mut outer = vec![None];
+        let params = method
+            .params
+            .iter()
+            .map(|param| match method.locals.get(param.0 as usize) {
+                Some(local) => {
+                    self.value_contract(local.kind, local.callable_signature.as_ref(), &mut outer)
+                }
+                None => Type::top().into(),
+            })
+            .collect();
+        let results = match self.generics.get(method.generic.0 as usize) {
+            Some(generic) => self.value_contracts(
+                &generic.result_kinds,
+                &generic.result_callable_sigs,
+                &mut outer,
             ),
-        }
+            None => self.value_contracts(&method.result_kinds, &[], &mut outer),
+        };
+        Contract { params, results }
     }
 
     /// Returns `function`'s contract; see [`Self::contract`].
     #[must_use]
     pub fn function_contract(&self, function: &Function) -> Contract {
+        let mut outer = vec![Some(KnownCallable::DirectFunction(function.id))];
+        self.function_signature(function, &mut outer)
+    }
+
+    fn generic_signature(
+        &self,
+        generic: &GenericFunction,
+        outer: &mut Vec<Option<KnownCallable>>,
+    ) -> Contract {
         Contract {
-            params: self.kind_types(&function.param_kinds),
-            results: self.kind_types(&function.result_kinds),
+            params: generic
+                .param_kinds
+                .iter()
+                .map(|kind| {
+                    kind.map_or_else(
+                        || Type::top().into(),
+                        |kind| self.value_contract(kind, None, outer),
+                    )
+                })
+                .collect(),
+            results: self.value_contracts(
+                &generic.result_kinds,
+                &generic.result_callable_sigs,
+                outer,
+            ),
         }
     }
 
-    fn kind_types(&self, kinds: &[ValueKind]) -> Vec<Type> {
-        kinds.iter().map(|kind| self.kind_type(*kind)).collect()
+    fn function_signature(
+        &self,
+        function: &Function,
+        outer: &mut Vec<Option<KnownCallable>>,
+    ) -> Contract {
+        Contract {
+            params: self.value_contracts(
+                &function.param_kinds,
+                &function.param_callable_sigs,
+                outer,
+            ),
+            results: self.value_contracts(
+                &function.result_kinds,
+                &function.result_callable_sigs,
+                outer,
+            ),
+        }
+    }
+
+    fn value_contracts(
+        &self,
+        kinds: &[ValueKind],
+        signatures: &[Option<CallableSignature>],
+        outer: &mut Vec<Option<KnownCallable>>,
+    ) -> Vec<ValueContract> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let signature = signatures.get(index).and_then(Option::as_ref);
+                self.value_contract(*kind, signature, outer)
+            })
+            .collect()
+    }
+
+    /// What callers assume of one value of `kind`, called with `signature`
+    /// when it is a typed callable. `outer` holds the signatures being
+    /// expanded, innermost last, naming the known callable each belongs to.
+    fn value_contract(
+        &self,
+        kind: ValueKind,
+        signature: Option<&CallableSignature>,
+        outer: &mut Vec<Option<KnownCallable>>,
+    ) -> ValueContract {
+        let ty = self.kind_type(kind);
+        // Applying a known callable trusts its own signature, whatever
+        // signature the value also records.
+        let signature = match (kind, signature) {
+            (ValueKind::KnownCallable(callable), _) => {
+                match outer.iter().rposition(|known| *known == Some(callable)) {
+                    Some(index) => Some(CallableContract::Enclosing(outer.len() - 1 - index)),
+                    None => {
+                        outer.push(Some(callable));
+                        let contract = self.known_callable_contract(callable, outer);
+                        outer.pop();
+                        contract.map(|contract| CallableContract::Signature(Box::new(contract)))
+                    }
+                }
+            }
+            (_, Some(signature)) => {
+                outer.push(None);
+                let contract = Contract {
+                    params: self.value_contracts(&signature.params, &[], outer),
+                    results: self.value_contracts(&signature.results, &[], outer),
+                };
+                outer.pop();
+                Some(CallableContract::Signature(Box::new(contract)))
+            }
+            (_, None) => None,
+        };
+        ValueContract { ty, signature }
+    }
+
+    /// The signature a call of `callable` trusts, as sem resolves it when a
+    /// value of [`ValueKind::KnownCallable`] is applied.
+    fn known_callable_contract(
+        &self,
+        callable: KnownCallable,
+        outer: &mut Vec<Option<KnownCallable>>,
+    ) -> Option<Contract> {
+        match callable {
+            KnownCallable::DirectFunction(function) => self
+                .functions
+                .iter()
+                .find(|candidate| candidate.id == function)
+                .map(|function| self.function_signature(function, outer)),
+            KnownCallable::GenericFunction(generic) => self
+                .generics
+                .get(generic.0 as usize)
+                .map(|generic| self.generic_signature(generic, outer)),
+            KnownCallable::SlotAccessor { class, slot, .. } => {
+                let slot = self
+                    .classes
+                    .get(class.0 as usize)?
+                    .effective_slots
+                    .get(slot.0 as usize)?;
+                Some(Contract {
+                    params: vec![self.kind_type(ValueKind::Object(class)).into()],
+                    results: vec![self.value_contract(slot.kind, None, outer)],
+                })
+            }
+        }
     }
 
     /// Returns the scalar value category of `expr`.
@@ -1827,6 +1949,8 @@ pub struct GenericFunction {
     pub dispatch_params: Vec<usize>,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
+    /// Typed callable signatures for callable results, when declared.
+    pub result_callable_sigs: Vec<Option<CallableSignature>>,
     /// Explicit declared result categories, when present. `None` means the
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
@@ -4025,6 +4149,7 @@ impl Lowering {
                 dispatch_param: 0,
                 dispatch_params: (0..generic.params.len()).collect(),
                 result_kinds: return_kinds,
+                result_callable_sigs: return_callable_sigs,
                 return_annotation,
                 span: generic.span,
                 origin: GenericFunctionOrigin::Source,
@@ -4095,6 +4220,7 @@ impl Lowering {
                 dispatch_param: 1,
                 dispatch_params: vec![0, 1],
                 result_kinds: vec![slot_kind],
+                result_callable_sigs: vec![None],
                 return_annotation: Some(vec![slot_kind]),
                 span: slot_span,
                 origin,
@@ -4149,6 +4275,7 @@ impl Lowering {
             dispatch_param: 0,
             dispatch_params: (0..arity).collect(),
             result_kinds: result_kinds.clone(),
+            result_callable_sigs: vec![None],
             return_annotation: Some(result_kinds),
             span: Span::default(),
             origin: GenericFunctionOrigin::Numeric { operator },
@@ -4831,6 +4958,7 @@ impl Lowering {
         for (id, result_kinds) in updates {
             if let Some(generic) = self.generics.get_mut(id.0 as usize) {
                 generic.result_kinds = result_kinds.clone();
+                generic.result_callable_sigs = vec![None; result_kinds.len()];
             }
             if let Some(symbol) = self.generic_symbols.get_mut(id.0 as usize) {
                 symbol.return_kinds = result_kinds.clone();

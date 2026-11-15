@@ -582,8 +582,25 @@ The check applies only where code compiled against one unit can reach
 another's definitions, which is within one run. A run starts from a
 single unit and compares nothing with units from earlier runs, so
 recompiling with no suspended frames, and running again, accepts any
-change. Callable types do not carry signatures yet, so a contract does not
-constrain a callable value's parameters or results.
+change.
+
+A callable value carries more than its type: code that applies it trusts a
+signature, either a declared `callable(<integer>) => <circle>` type or,
+for a value sem knows to be a particular function, generic or accessor,
+that definition's own signature. The type lattice's callable atom has no
+signature, so a contract records it beside the type, as a nested contract
+compared by the same rule. Inside a returned callable the rule applies as
+written (it may accept more and return less); inside a callable parameter
+it flips, because callers supply that callable and the new code calls it.
+A signature that mentions itself, such as a function that returns itself,
+is recorded as a reference to the enclosing contract, and a contract
+holding such a reference must stay equal. Register kinds inside a
+signature (an `<i32>` where an `<integer>` was) are not compared here;
+the VM traps a call whose closure has a different signature.
+
+A class object's kind is only a static bound: `make` on one allocates the
+class sem resolved and never reads the value, so a contract records a
+class object as any `<class>`.
 
 ## Deferred
 
