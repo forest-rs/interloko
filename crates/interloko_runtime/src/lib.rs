@@ -2701,10 +2701,14 @@ impl InterlokoHost {
                     Err(RuntimeError::ValueKindMismatch { expected: kind })
                 }
             }
+            // A class object slot holds a class object naming its bound or a
+            // subclass of it.
             (ValueKind::ClassObject(expected), ValueRef::Obj(obj)) => {
                 let object = self.object(obj)?;
                 match &object.storage {
-                    RuntimeObjectStorage::ClassMeta { class } if *class == expected => {
+                    RuntimeObjectStorage::ClassMeta { class }
+                        if self.layout.is_same_or_subclass(*class, expected) =>
+                    {
                         Ok(Value::Obj(obj))
                     }
                     _ => Err(RuntimeError::ValueKindMismatch { expected: kind }),

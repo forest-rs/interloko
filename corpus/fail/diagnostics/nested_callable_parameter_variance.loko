@@ -1,0 +1,16 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.callable-parameter-variance
+// expect: diagnostic contains its parameter 1 accepts only callable(<integer>) => <integer>, but callers may pass any <callable>
+
+// A callable parameter's own signature compares contravariantly too:
+// callers of `g` may pass any `<callable>`, but `apply-one` relies on
+// calling its argument with an `<integer>`.
+
+define function apply-one(f :: callable(<integer>) => <integer>) => <integer>
+  f(1)
+end;
+
+define function main()
+  let g :: callable(<callable>) => <integer> = apply-one;
+  0
+end;

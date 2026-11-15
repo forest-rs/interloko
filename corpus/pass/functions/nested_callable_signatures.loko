@@ -1,0 +1,25 @@
+// expect: run 11
+// expect: diagnostics 0
+
+// A callable type's parameters and results may be typed callables too, and
+// keep their own signatures: `g` is called with a callable it may call with
+// an `<integer>`, and `twice` returns one callers call the same way.
+
+define function add-five(x :: <integer>) => <integer>
+  x + 5
+end;
+
+define function apply-one(f :: callable(<integer>) => <integer>) => <integer>
+  f(1)
+end;
+
+define function twice(f :: callable(<integer>) => <integer>)
+    => callable(<integer>) => <integer>
+  function (x :: <integer>) => <integer> f(f(x)) end
+end;
+
+define function main()
+  let g :: callable(callable(<integer>) => <integer>) => <integer> = apply-one;
+  let h = twice(add-five);
+  g(add-five) + h(-5)
+end;

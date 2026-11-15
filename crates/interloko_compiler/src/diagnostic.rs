@@ -64,6 +64,9 @@ pub enum DiagnosticCode {
     AstUnsupportedSlotOption,
     /// A method declaration has the wrong first-slice specializer shape.
     AstInvalidMethodSpecializer,
+    /// A method or restart parameter, which must name a class, is annotated
+    /// with a class object or callable type.
+    AstAnnotationNotClass,
     /// `instance?` has the wrong syntactic argument shape.
     AstInvalidInstanceOf,
     /// `as` has the wrong syntactic argument shape.
@@ -292,6 +295,7 @@ impl DiagnosticCode {
         Self::AstSlotInitValueRequiresExpression,
         Self::AstUnsupportedSlotOption,
         Self::AstInvalidMethodSpecializer,
+        Self::AstAnnotationNotClass,
         Self::AstInvalidInstanceOf,
         Self::AstInvalidCast,
         Self::AstInvalidSignal,
@@ -413,6 +417,7 @@ impl DiagnosticCode {
             Self::AstSlotInitValueRequiresExpression => "ast.slot-init-value-requires-expression",
             Self::AstUnsupportedSlotOption => "ast.unsupported-slot-option",
             Self::AstInvalidMethodSpecializer => "ast.invalid-method-specializer",
+            Self::AstAnnotationNotClass => "ast.annotation-not-class",
             Self::AstInvalidInstanceOf => "ast.invalid-instance-of",
             Self::AstInvalidCast => "ast.invalid-cast",
             Self::AstInvalidSignal => "ast.invalid-signal",
@@ -537,6 +542,7 @@ impl DiagnosticCode {
             "ast.slot-init-value-requires-expression" => Self::AstSlotInitValueRequiresExpression,
             "ast.unsupported-slot-option" => Self::AstUnsupportedSlotOption,
             "ast.invalid-method-specializer" => Self::AstInvalidMethodSpecializer,
+            "ast.annotation-not-class" => Self::AstAnnotationNotClass,
             "ast.invalid-instance-of" => Self::AstInvalidInstanceOf,
             "ast.invalid-cast" => Self::AstInvalidCast,
             "ast.invalid-signal" => Self::AstInvalidSignal,

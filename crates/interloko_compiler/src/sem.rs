@@ -184,12 +184,64 @@ impl ValueKind {
 }
 
 /// Callable argument and result categories carried by a typed callable value.
+///
+/// A parameter or result that is itself a typed callable carries its own
+/// signature in [`Self::param_sigs`] or [`Self::result_sigs`], so a
+/// `callable(callable(<integer>) => <integer>) => <integer>` keeps the inner
+/// signature rather than reading as a plain `<callable>`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
     /// Parameter value categories in call order.
     pub params: Vec<ValueKind>,
+    /// Signatures of typed callable parameters, parallel to `params`;
+    /// `None` where a parameter is not one.
+    pub param_sigs: Vec<Option<CallableSignature>>,
     /// Result value categories in return order.
     pub results: Vec<ValueKind>,
+    /// Signatures of typed callable results, parallel to `results`; `None`
+    /// where a result is not one.
+    pub result_sigs: Vec<Option<CallableSignature>>,
+}
+
+impl CallableSignature {
+    /// Returns a signature none of whose parameters or results carries a
+    /// signature of its own.
+    #[must_use]
+    pub fn flat(params: Vec<ValueKind>, results: Vec<ValueKind>) -> Self {
+        Self {
+            param_sigs: vec![None; params.len()],
+            result_sigs: vec![None; results.len()],
+            params,
+            results,
+        }
+    }
+
+    /// Returns the signature of the zero-based parameter `index`, when it is
+    /// a typed callable.
+    #[must_use]
+    pub fn param_sig(&self, index: usize) -> Option<&Self> {
+        self.param_sigs.get(index).and_then(Option::as_ref)
+    }
+
+    /// Returns the signature of the zero-based result `index`, when it is a
+    /// typed callable.
+    #[must_use]
+    pub fn result_sig(&self, index: usize) -> Option<&Self> {
+        self.result_sigs.get(index).and_then(Option::as_ref)
+    }
+    fn param_value(&self, index: usize) -> SignatureValue<'_> {
+        SignatureValue {
+            kind: self.params.get(index).copied().unwrap_or(ValueKind::Error),
+            signature: self.param_sig(index),
+        }
+    }
+
+    fn result_value(&self, index: usize) -> SignatureValue<'_> {
+        SignatureValue {
+            kind: self.results.get(index).copied().unwrap_or(ValueKind::Error),
+            signature: self.result_sig(index),
+        }
+    }
 }
 
 fn slot_setter_name(slot_name: &str) -> String {
@@ -976,8 +1028,12 @@ impl Module {
             (_, Some(signature)) => {
                 outer.push(None);
                 let contract = Contract {
-                    params: self.value_contracts(&signature.params, &[], outer),
-                    results: self.value_contracts(&signature.results, &[], outer),
+                    params: self.value_contracts(&signature.params, &signature.param_sigs, outer),
+                    results: self.value_contracts(
+                        &signature.results,
+                        &signature.result_sigs,
+                        outer,
+                    ),
                 };
                 outer.pop();
                 Some(CallableContract::Signature(Box::new(contract)))
@@ -1012,7 +1068,11 @@ impl Module {
                     .get(slot.0 as usize)?;
                 Some(Contract {
                     params: vec![self.kind_type(ValueKind::Object(class)).into()],
-                    results: vec![self.value_contract(slot.kind, None, outer)],
+                    results: vec![self.value_contract(
+                        slot.kind,
+                        slot.callable_signature.as_ref(),
+                        outer,
+                    )],
                 })
             }
         }
@@ -1688,21 +1748,30 @@ fn join_arm_kinds(
 }
 
 /// Why a callable's signature cannot stand in for an expected one.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum SignatureMismatch {
     /// The arities differ, a pair of kinds is held in different register
     /// types, or a pair is unrelated.
     Incompatible,
     /// A parameter or result would match the other way round: a parameter
-    /// narrower than the one expected, or a result wider.
+    /// narrower than the one expected, or a result wider, either in its
+    /// kind or in the signature of a callable it holds.
     Variance {
         /// The parameter or result.
         position: ContractPosition,
-        /// Its kind in the expected signature.
-        expected: ValueKind,
-        /// Its kind in the callable's own signature.
-        actual: ValueKind,
+        /// Its type in the expected signature, as source names it.
+        expected: String,
+        /// Its type in the callable's own signature, as source names it.
+        actual: String,
     },
+}
+
+/// One parameter or result of a callable signature: its kind, and its own
+/// signature when it is a typed callable.
+#[derive(Copy, Clone)]
+struct SignatureValue<'a> {
+    kind: ValueKind,
+    signature: Option<&'a CallableSignature>,
 }
 
 /// Returns whether values of kinds `lhs` and `rhs` are held in the same
@@ -2067,11 +2136,15 @@ pub struct Slot {
     pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
-    /// Declared source type name, with missing declarations normalized to
-    /// `<object>`.
+    /// Declared source type as source spells it, such as `<circle>`,
+    /// `class <shape>` or `callable(<integer>) => <integer>`, with missing
+    /// declarations normalized to `<object>`.
     pub type_name: String,
     /// Declared slot value category.
     pub kind: ValueKind,
+    /// Declared signature when the slot holds a typed callable, which
+    /// reads of the slot are called with and writes must satisfy.
+    pub callable_signature: Option<CallableSignature>,
     /// Native or host-backed slot origin.
     pub origin: SlotOrigin,
     /// Getter accessor defined by this slot.
@@ -2105,11 +2178,13 @@ pub struct EffectiveSlot {
     pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
-    /// Declared source type name, with missing declarations normalized to
-    /// `<object>`.
+    /// Declared source type as source spells it; see [`Slot::type_name`].
     pub type_name: String,
     /// Slot value category.
     pub kind: ValueKind,
+    /// Declared signature when the slot holds a typed callable; see
+    /// [`Slot::callable_signature`].
+    pub callable_signature: Option<CallableSignature>,
     /// Native or host-backed slot origin.
     pub origin: SlotOrigin,
     /// Class that originally introduced this slot.
@@ -4017,13 +4092,21 @@ impl Lowering {
                 .enumerate()
                 .map(|(slot_index, slot)| {
                     let id = SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX));
-                    let kind = self.resolve_slot_kind(slot.type_name.as_deref(), slot.type_span);
+                    let resolved = self.resolve_function_type_detail(
+                        slot.type_annotation.as_ref(),
+                        ValueKind::Any,
+                    );
+                    let kind = resolved.kind;
                     Slot {
                         id,
                         definition: slot.definition,
                         name: slot.name.clone(),
-                        type_name: slot.type_name.clone().unwrap_or_else(|| "<object>".into()),
+                        type_name: slot
+                            .type_annotation
+                            .as_ref()
+                            .map_or_else(|| "<object>".into(), ToString::to_string),
                         kind,
+                        callable_signature: resolved.callable_signature,
                         origin: SlotOrigin::Native,
                         accessor: Accessor {
                             definition: slot.definition,
@@ -4097,6 +4180,7 @@ impl Lowering {
                         name: host_slot.name.clone(),
                         type_name: host_slot.type_name.clone(),
                         kind: host_slot.kind,
+                        callable_signature: None,
                         origin: SlotOrigin::HostBacked {
                             host_class: host_class_id,
                             host_slot: host_slot_id,
@@ -4250,11 +4334,13 @@ impl Lowering {
                     continue;
                 };
                 let mut ctx = FunctionContext::new();
-                let slot_kind = self
+                let (slot_kind, slot_signature) = self
                     .classes
                     .get(lowered_class_index)
                     .and_then(|class| class.direct_slots.get(slot_index))
-                    .map_or(ValueKind::Error, |slot| slot.kind);
+                    .map_or((ValueKind::Error, None), |slot| {
+                        (slot.kind, slot.callable_signature.clone())
+                    });
                 let value = adapt_literal(
                     self.lower_expr(&mut ctx, init_value),
                     Some(core::slice::from_ref(&slot_kind)),
@@ -4271,6 +4357,23 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("expected", self.kind_name(slot_kind)))
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(value_kind))),
                     );
+                } else if let Some(expected) = &slot_signature {
+                    let diagnostic = self.callable_value_diagnostic(
+                        init_value.span(),
+                        expected,
+                        value_kind,
+                        self.expr_callable_signature(&value).as_ref(),
+                        |expected, actual| {
+                            Diagnostic::error(
+                                init_value.span(),
+                                DiagnosticCode::SlotDefaultTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                            .with_arg(DiagnosticArg::text("expected", expected))
+                            .with_arg(DiagnosticArg::text("actual", actual))
+                        },
+                    );
+                    self.diagnostics.extend(diagnostic);
                 }
                 lowered_values.push((lowered_class_index, slot_index, value));
             }
@@ -4370,6 +4473,7 @@ impl Lowering {
             name: slot.name.clone(),
             type_name: slot.type_name.clone(),
             kind: slot.kind,
+            callable_signature: slot.callable_signature.clone(),
             origin: slot.origin,
             source_class: owner,
             source_slot: slot.id,
@@ -5472,7 +5576,9 @@ impl Lowering {
                 .as_ref()
                 .and_then(|symbol| symbol.param_kinds.get(index).copied().flatten());
             let (specializer, kind) = self.resolve_method_specializer(param, generic_kind);
+            // A specializer that did not resolve has been reported already.
             if let Some(expected) = generic_kind
+                && kind != ValueKind::Error
                 && !self.generic_specializer_matches(expected, specializer)
             {
                 ctx.diagnostics.push(
@@ -5515,50 +5621,72 @@ impl Lowering {
             .flatten()
             .or_else(|| specializers.iter().copied().flatten().next())
             .unwrap_or(ClassId(u32::MAX));
-        let return_annotation = method
+        let (return_annotation, annotated_callable_sigs) = method
             .return_type
             .as_ref()
-            .map(|annotation| self.resolve_result_annotation(annotation));
+            .map(|annotation| self.resolve_result_annotation_detail(annotation))
+            .unzip();
         let body = self.lower_block(&mut ctx, &method.body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&body.result);
+        let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
         let result_kinds = return_annotation
             .clone()
             .unwrap_or_else(|| body_kinds.clone());
-        if let Some(expected) = &return_annotation
-            && !self.result_kinds_match(expected, &body_kinds)
-        {
-            ctx.diagnostics.push(
+        let result_callable_sigs =
+            annotated_callable_sigs.unwrap_or_else(|| body_callable_sigs.clone());
+        let mut results_match = true;
+        if let Some(expected) = &return_annotation {
+            let mismatch = |expected: String, actual: String| {
                 Diagnostic::error(body.result.span(), DiagnosticCode::MethodReturnTypeMismatch)
                     .with_arg(DiagnosticArg::text("method", method.name.clone()))
-                    .with_arg(DiagnosticArg::text(
-                        "expected",
-                        self.result_kinds_name(expected),
-                    ))
-                    .with_arg(DiagnosticArg::text(
-                        "actual",
-                        self.result_kinds_name(&body_kinds),
-                    )),
-            );
+                    .with_arg(DiagnosticArg::text("expected", expected))
+                    .with_arg(DiagnosticArg::text("actual", actual))
+            };
+            if self.result_kinds_match(expected, &body_kinds) {
+                let diagnostics = self.callable_results_diagnostics(
+                    body.result.span(),
+                    &result_callable_sigs,
+                    &body_kinds,
+                    &body_callable_sigs,
+                    mismatch,
+                );
+                results_match = diagnostics.is_empty();
+                ctx.diagnostics.extend(diagnostics);
+            } else {
+                ctx.diagnostics.push(mismatch(
+                    self.result_kinds_name(expected),
+                    self.result_kinds_name(&body_kinds),
+                ));
+            }
         }
+        // Every send trusts the generic's declared results, so a method must
+        // return what they promise, a typed callable included.
         if let Some(symbol) = &generic_symbol
             && let Some(expected) = &symbol.return_annotation
-            && !self.result_kinds_match(expected, &result_kinds)
         {
-            ctx.diagnostics.push(
+            let mismatch = |expected: String, actual: String| {
                 Diagnostic::error(
                     body.result.span(),
                     DiagnosticCode::GenericMethodResultTypeMismatch,
                 )
                 .with_arg(DiagnosticArg::text("method", method.name.clone()))
-                .with_arg(DiagnosticArg::text(
-                    "actual",
-                    self.result_kinds_name(&result_kinds),
-                ))
-                .with_arg(DiagnosticArg::text(
-                    "expected",
+                .with_arg(DiagnosticArg::text("actual", actual))
+                .with_arg(DiagnosticArg::text("expected", expected))
+            };
+            if !self.result_kinds_match(expected, &result_kinds) {
+                ctx.diagnostics.push(mismatch(
                     self.result_kinds_name(expected),
-                )),
-            );
+                    self.result_kinds_name(&result_kinds),
+                ));
+            } else if results_match {
+                ctx.diagnostics.extend(self.callable_results_diagnostics(
+                    body.result.span(),
+                    &symbol.return_callable_sigs,
+                    &result_kinds,
+                    &result_callable_sigs,
+                    mismatch,
+                ));
+            }
         }
         self.diagnostics.extend(ctx.diagnostics);
         Method {
@@ -5624,26 +5752,32 @@ impl Lowering {
         let result_callable_sigs = if return_annotation.is_some() {
             annotated_return_callable_sigs
         } else {
-            body_callable_sigs
+            body_callable_sigs.clone()
         };
-        if let Some(expected) = &return_annotation
-            && !self.result_kinds_match(expected, &body_kinds)
-        {
-            ctx.diagnostics.push(
+        if let Some(expected) = &return_annotation {
+            let mismatch = |expected: String, actual: String| {
                 Diagnostic::error(
                     body.result.span(),
                     DiagnosticCode::FunctionReturnTypeMismatch,
                 )
                 .with_arg(DiagnosticArg::text("function", function.name.clone()))
-                .with_arg(DiagnosticArg::text(
-                    "expected",
+                .with_arg(DiagnosticArg::text("expected", expected))
+                .with_arg(DiagnosticArg::text("actual", actual))
+            };
+            if self.result_kinds_match(expected, &body_kinds) {
+                ctx.diagnostics.extend(self.callable_results_diagnostics(
+                    body.result.span(),
+                    &result_callable_sigs,
+                    &body_kinds,
+                    &body_callable_sigs,
+                    mismatch,
+                ));
+            } else {
+                ctx.diagnostics.push(mismatch(
                     self.result_kinds_name(expected),
-                ))
-                .with_arg(DiagnosticArg::text(
-                    "actual",
                     self.result_kinds_name(&body_kinds),
-                )),
-            );
+                ));
+            }
         }
         if let Some(symbol) = self.functions.get_mut(id.0 as usize)
             && symbol.return_annotation.is_none()
@@ -6715,26 +6849,34 @@ impl Lowering {
         let result_callable_sigs = if return_annotation.is_some() {
             annotated_return_callable_sigs
         } else {
-            body_callable_sigs
+            body_callable_sigs.clone()
         };
-        if let Some(expected) = &return_annotation
-            && !self.result_kinds_match(expected, &body_kinds)
-        {
-            closure_ctx.diagnostics.push(
+        if let Some(expected) = &return_annotation {
+            let mismatch = |expected: String, actual: String| {
                 Diagnostic::error(
                     body.result.span(),
                     DiagnosticCode::FunctionReturnTypeMismatch,
                 )
                 .with_arg(DiagnosticArg::text("function", "<closure>"))
-                .with_arg(DiagnosticArg::text(
-                    "expected",
+                .with_arg(DiagnosticArg::text("expected", expected))
+                .with_arg(DiagnosticArg::text("actual", actual))
+            };
+            if self.result_kinds_match(expected, &body_kinds) {
+                closure_ctx
+                    .diagnostics
+                    .extend(self.callable_results_diagnostics(
+                        body.result.span(),
+                        &result_callable_sigs,
+                        &body_kinds,
+                        &body_callable_sigs,
+                        mismatch,
+                    ));
+            } else {
+                closure_ctx.diagnostics.push(mismatch(
                     self.result_kinds_name(expected),
-                ))
-                .with_arg(DiagnosticArg::text(
-                    "actual",
                     self.result_kinds_name(&body_kinds),
-                )),
-            );
+                ));
+            }
         }
 
         let captures = closure_ctx.captures.clone();
@@ -6758,7 +6900,9 @@ impl Lowering {
 
         let callable_signature = CallableSignature {
             params: param_kinds,
+            param_sigs: param_callable_sigs,
             results: result_kinds,
+            result_sigs: result_callable_sigs,
         };
         Expr::Closure {
             closure: id,
@@ -7287,17 +7431,27 @@ impl Lowering {
             adapt_literal_args(&mut args, signature.params.iter().map(Some));
             for (index, (arg, expected)) in args.iter().zip(&signature.params).enumerate() {
                 let actual = self.expr_kind(arg);
+                let mismatch = |expected: String, actual: String| {
+                    Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                        .with_arg(DiagnosticArg::text("function", "apply target"))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "argument_index",
+                            u64::try_from(index + 1).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::text("expected", expected))
+                        .with_arg(DiagnosticArg::text("actual", actual))
+                };
                 if !self.kinds_match(*expected, actual) {
-                    ctx.diagnostics.push(
-                        Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
-                            .with_arg(DiagnosticArg::text("function", "apply target"))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "argument_index",
-                                u64::try_from(index + 1).unwrap_or(u64::MAX),
-                            ))
-                            .with_arg(DiagnosticArg::text("expected", self.kind_name(*expected)))
-                            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
-                    );
+                    ctx.diagnostics
+                        .push(mismatch(self.kind_name(*expected), self.kind_name(actual)));
+                } else if let Some(expected) = signature.param_sig(index) {
+                    ctx.diagnostics.extend(self.callable_value_diagnostic(
+                        arg.span(),
+                        expected,
+                        actual,
+                        self.expr_callable_signature(arg).as_ref(),
+                        mismatch,
+                    ));
                 }
             }
             // A block's exit procedure never returns, so nothing relies on
@@ -7322,14 +7476,7 @@ impl Lowering {
             // call. Arguments need nothing here: the callee's indirect entry
             // checks the classes it relies on.
             return self
-                .checked_callable_call(
-                    target,
-                    args,
-                    signature.params,
-                    &signature.results,
-                    Self::signature_result_check,
-                    span,
-                )
+                .checked_callable_call(target, args, signature, Self::signature_result_check, span)
                 .unwrap_or_else(|diagnostic| {
                     ctx.diagnostics.push(diagnostic);
                     Expr::Error { span }
@@ -7367,8 +7514,7 @@ impl Lowering {
         self.checked_callable_call(
             target,
             args,
-            arg_kinds,
-            result_kinds,
+            CallableSignature::flat(arg_kinds, result_kinds.to_vec()),
             Self::untyped_result_check,
             span,
         )
@@ -7378,8 +7524,11 @@ impl Lowering {
         })
     }
 
-    /// Builds a call through a `<callable>` value whose results the call site
-    /// relies on as `result_kinds`, checking each as `check` says.
+    /// Builds a call through a `<callable>` value as `called`: arguments at
+    /// its parameter kinds, and results the call site relies on as its result
+    /// kinds, each checked as `check` says. A typed callable result is called
+    /// as `called` declares; calls through it check what they rely on in
+    /// turn.
     ///
     /// The call itself produces each result at its check's wire kind, and a
     /// single checked result is wrapped in its conversion or cast: an
@@ -7391,11 +7540,11 @@ impl Lowering {
         &self,
         target: Expr,
         args: Vec<Expr>,
-        arg_kinds: Vec<ValueKind>,
-        result_kinds: &[ValueKind],
+        called: CallableSignature,
         check: fn(&Self, ValueKind) -> Option<CallableResultCheck>,
         span: Span,
     ) -> Result<Expr, Diagnostic> {
+        let result_kinds = &called.results;
         let checks = result_kinds
             .iter()
             .map(|kind| check(self, *kind))
@@ -7421,8 +7570,8 @@ impl Lowering {
         let call = Expr::CallableCall {
             callable: Box::new(target),
             args,
-            arg_kinds,
-            result_callable_sigs: vec![None; result_kinds.len()],
+            arg_kinds: called.params,
+            result_callable_sigs: called.result_sigs,
             result_kinds: wire_kinds,
             span,
         };
@@ -7609,10 +7758,13 @@ impl Lowering {
             .resolve_class(&restart.class_name)
             .map(|class| class.id)
             .unwrap_or_else(|| {
-                ctx.diagnostics.push(
-                    Diagnostic::error(restart.span, DiagnosticCode::UnresolvedClass)
-                        .with_arg(DiagnosticArg::text("class", restart.class_name.clone())),
-                );
+                // Lowering to the AST reported a restart it found no class for.
+                if !restart.class_name.is_empty() {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(restart.span, DiagnosticCode::UnresolvedClass)
+                            .with_arg(DiagnosticArg::text("class", restart.class_name.clone())),
+                    );
+                }
                 ClassId(u32::MAX)
             });
 
@@ -7733,10 +7885,10 @@ impl Lowering {
                 definition,
                 exit.name.clone(),
                 ValueKind::Callable,
-                Some(CallableSignature {
-                    params: result_kinds.clone(),
-                    results: result_kinds.clone(),
-                }),
+                Some(CallableSignature::flat(
+                    result_kinds.clone(),
+                    result_kinds.clone(),
+                )),
                 exit.span,
             );
             BlockExit {
@@ -8391,6 +8543,19 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("expected", self.kind_name(slot.kind)))
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(value_kind))),
                 );
+            } else if let Some(expected) = &slot.callable_signature {
+                ctx.diagnostics.extend(self.callable_value_diagnostic(
+                    field.span,
+                    expected,
+                    value_kind,
+                    self.expr_callable_signature(&value).as_ref(),
+                    |expected, actual| {
+                        Diagnostic::error(field.span, DiagnosticCode::SlotInitializerTypeMismatch)
+                            .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                            .with_arg(DiagnosticArg::text("expected", expected))
+                            .with_arg(DiagnosticArg::text("actual", actual))
+                    },
+                ));
             }
             init_args.push(InitArg {
                 keyword: field.name.clone(),
@@ -8582,6 +8747,19 @@ impl Lowering {
                     .with_arg(DiagnosticArg::text("expected", self.kind_name(slot.kind)))
                     .with_arg(DiagnosticArg::text("actual", self.kind_name(value_kind))),
             );
+        } else if let Some(expected) = &slot.callable_signature {
+            ctx.diagnostics.extend(self.callable_value_diagnostic(
+                span,
+                expected,
+                value_kind,
+                self.expr_callable_signature(&value).as_ref(),
+                |expected, actual| {
+                    Diagnostic::error(span, DiagnosticCode::SlotAssignmentTypeMismatch)
+                        .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                        .with_arg(DiagnosticArg::text("expected", expected))
+                        .with_arg(DiagnosticArg::text("actual", actual))
+                },
+            ));
         }
         let setter_name = slot_setter_name(&slot.name);
         let Some(setter) = self.resolve_generic(&setter_name) else {
@@ -8802,6 +8980,22 @@ impl Lowering {
             } => Some(callable_signature.clone()),
             Expr::KnownCallable { callable, .. } => self.known_callable_signature(*callable),
             Expr::Block { body, .. } => self.expr_callable_signature(&body.result),
+            Expr::AccessorCall { class, slot, .. } => self
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.effective_slots.get(slot.0 as usize))
+                .and_then(|slot| slot.callable_signature.clone()),
+            Expr::CallableCall { .. }
+            | Expr::Signal { .. }
+            | Expr::DirectCall { .. }
+            | Expr::GenericCall { .. }
+            | Expr::If { .. }
+            | Expr::Handle { .. } => {
+                match self.expr_result_callable_signatures(expr).as_mut_slice() {
+                    [signature] => signature.take(),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -8979,13 +9173,6 @@ impl Lowering {
         found.map_or(AccessorResolution::None, AccessorResolution::One)
     }
 
-    fn resolve_slot_kind(&mut self, type_name: Option<&str>, span: Span) -> ValueKind {
-        let Some(type_name) = type_name else {
-            return ValueKind::Any;
-        };
-        self.resolve_type_name(type_name, false, span)
-    }
-
     fn resolve_function_type_detail(
         &mut self,
         annotation: Option<&ast::TypeAnnotation>,
@@ -9022,10 +9209,6 @@ impl Lowering {
         }
     }
 
-    fn resolve_result_annotation(&mut self, annotation: &ast::ResultAnnotation) -> Vec<ValueKind> {
-        self.resolve_result_annotation_detail(annotation).0
-    }
-
     fn resolve_result_annotation_detail(
         &mut self,
         annotation: &ast::ResultAnnotation,
@@ -9042,22 +9225,19 @@ impl Lowering {
         &mut self,
         annotation: &ast::CallableTypeAnnotation,
     ) -> CallableSignature {
-        let params = annotation
+        let (params, param_sigs) = annotation
             .params
             .iter()
-            .map(|param| self.resolve_type_annotation(param))
-            .collect();
-        let results = self.resolve_result_annotation(&annotation.results);
-        CallableSignature { params, results }
-    }
-
-    fn resolve_type_annotation_in_context(
-        &self,
-        ctx: &mut FunctionContext,
-        annotation: &ast::TypeAnnotation,
-    ) -> ValueKind {
-        self.resolve_type_annotation_detail_in_context(ctx, annotation)
-            .kind
+            .map(|param| self.resolve_type_annotation_detail(param))
+            .map(|resolved| (resolved.kind, resolved.callable_signature))
+            .unzip();
+        let (results, result_sigs) = self.resolve_result_annotation_detail(&annotation.results);
+        CallableSignature {
+            params,
+            param_sigs,
+            results,
+            result_sigs,
+        }
     }
 
     fn resolve_type_annotation_detail_in_context(
@@ -9088,18 +9268,25 @@ impl Lowering {
         ctx: &mut FunctionContext,
         annotation: &ast::CallableTypeAnnotation,
     ) -> CallableSignature {
-        let params = annotation
+        let (params, param_sigs) = annotation
             .params
             .iter()
-            .map(|param| self.resolve_type_annotation_in_context(ctx, param))
-            .collect();
-        let results = annotation
+            .map(|param| self.resolve_type_annotation_detail_in_context(ctx, param))
+            .map(|resolved| (resolved.kind, resolved.callable_signature))
+            .unzip();
+        let (results, result_sigs) = annotation
             .results
             .values
             .iter()
-            .map(|result| self.resolve_type_annotation_in_context(ctx, result))
-            .collect();
-        CallableSignature { params, results }
+            .map(|result| self.resolve_type_annotation_detail_in_context(ctx, result))
+            .map(|resolved| (resolved.kind, resolved.callable_signature))
+            .unzip();
+        CallableSignature {
+            params,
+            param_sigs,
+            results,
+            result_sigs,
+        }
     }
 
     /// Resolves a method parameter's specializer and the value kind the
@@ -9118,6 +9305,10 @@ impl Lowering {
         param: &ast::MethodParam,
         generic_kind: Option<ValueKind>,
     ) -> (MethodSpecializer, ValueKind) {
+        // Lowering to the AST reported a parameter it found no class for.
+        if param.class_name.is_empty() {
+            return (Some(ClassId(u32::MAX)), ValueKind::Error);
+        }
         if param.class_name == "<object>" {
             return (Some(OBJECT_CLASS_ID), ValueKind::Any);
         }
@@ -9401,24 +9592,32 @@ impl Lowering {
                     .get(function.0 as usize)
                     .map(|function| CallableSignature {
                         params: function.param_kinds.clone(),
+                        param_sigs: function.param_callable_sigs.clone(),
                         results: function.return_kinds.clone(),
+                        result_sigs: function.return_callable_sigs.clone(),
                     })
             }
-            KnownCallable::GenericFunction(generic) => self
-                .generic_symbols
-                .get(generic.0 as usize)
-                .map(|generic| CallableSignature {
-                    params: (0..generic.arity())
+            KnownCallable::GenericFunction(generic) => {
+                self.generic_symbols.get(generic.0 as usize).map(|generic| {
+                    let params = (0..generic.arity())
                         .map(|index| self.generic_callable_arg_kind(generic.id, index))
-                        .collect(),
-                    results: generic.return_kinds.clone(),
-                }),
+                        .collect::<Vec<_>>();
+                    CallableSignature {
+                        param_sigs: vec![None; params.len()],
+                        params,
+                        results: generic.return_kinds.clone(),
+                        result_sigs: generic.return_callable_sigs.clone(),
+                    }
+                })
+            }
             KnownCallable::SlotAccessor { class, slot, .. } => {
                 let class = self.classes.get(class.0 as usize)?;
                 let slot = class.effective_slots.get(slot.0 as usize)?;
                 Some(CallableSignature {
                     params: vec![ValueKind::Object(class.id)],
+                    param_sigs: vec![None],
                     results: vec![slot.kind],
+                    result_sigs: vec![slot.callable_signature.clone()],
                 })
             }
         }
@@ -9444,13 +9643,14 @@ impl Lowering {
     /// Callable subtyping is [`Contract::check_replaces`]'s rule: each
     /// parameter must accept at least every value callers may pass
     /// (contravariance) and each result must be at most what callers rely
-    /// on (covariance). A parameter or result that is itself a callable is
-    /// a plain `<callable>` here, since a signature records no nested one;
-    /// calls through it check what they rely on. On top of that, a
-    /// callable's ABI fixes its register kinds and nothing adapts one
-    /// signature to another, so each pair must also share a register type:
-    /// `<i32>` does not stand in for `<integer>`, nor a class for
-    /// `<object>`, though every class shares one.
+    /// on (covariance). A parameter or result that is itself a typed
+    /// callable compares its own signature by the same rule, flipped for a
+    /// parameter; an untyped `<callable>` stands in only where no signature
+    /// is relied on. On top of that, a callable's ABI fixes its register
+    /// kinds and nothing adapts one signature to another, so each pair must
+    /// also share a register type: `<i32>` does not stand in for
+    /// `<integer>`, nor a class for `<object>`, though every class shares
+    /// one.
     fn callable_signature_mismatch(
         &self,
         expected: &CallableSignature,
@@ -9461,52 +9661,74 @@ impl Lowering {
         {
             return Some(SignatureMismatch::Incompatible);
         }
-        let params = expected.params.iter().zip(&actual.params).enumerate().map(
-            |(index, (expected, actual))| {
-                // The callee's parameter must accept what callers pass.
-                (
-                    ContractPosition::Parameter(index),
-                    *expected,
-                    *actual,
-                    *actual,
-                    *expected,
-                )
-            },
-        );
-        let results = expected
-            .results
-            .iter()
-            .zip(&actual.results)
-            .enumerate()
-            .map(|(index, (expected, actual))| {
-                // Callers must accept what the callee returns.
-                (
-                    ContractPosition::Result(index),
-                    *expected,
-                    *actual,
-                    *expected,
-                    *actual,
-                )
-            });
+        // Callers pass the expected parameter into the callable's own.
+        let params = (0..expected.params.len()).map(|index| {
+            let (expected, actual) = (expected.param_value(index), actual.param_value(index));
+            (
+                ContractPosition::Parameter(index),
+                expected,
+                actual,
+                expected,
+                actual,
+            )
+        });
+        // The callable's result flows to callers relying on the expected one.
+        let results = (0..expected.results.len()).map(|index| {
+            let (expected, actual) = (expected.result_value(index), actual.result_value(index));
+            (
+                ContractPosition::Result(index),
+                expected,
+                actual,
+                actual,
+                expected,
+            )
+        });
         params
             .chain(results)
-            .find_map(|(position, expected, actual, wider, narrower)| {
-                if !shares_register_type(expected, actual) {
+            .find_map(|(position, expected, actual, from, into)| {
+                if !shares_register_type(expected.kind, actual.kind) {
                     return Some(SignatureMismatch::Incompatible);
                 }
-                if self.kinds_match(wider, narrower) {
-                    return None;
+                let variance = || SignatureMismatch::Variance {
+                    position,
+                    expected: self.signature_value_name(expected),
+                    actual: self.signature_value_name(actual),
+                };
+                if !self.kinds_match(into.kind, from.kind) {
+                    return Some(if self.kinds_match(from.kind, into.kind) {
+                        variance()
+                    } else {
+                        SignatureMismatch::Incompatible
+                    });
                 }
-                Some(if self.kinds_match(narrower, wider) {
-                    SignatureMismatch::Variance {
-                        position,
-                        expected,
-                        actual,
-                    }
-                } else {
-                    SignatureMismatch::Incompatible
-                })
+                // A value whose callers call it with a signature must have
+                // one it can be called as.
+                let into_signature = self.signature_value_signature(into)?;
+                let Some(from_signature) = self.signature_value_signature(from) else {
+                    return Some(variance());
+                };
+                match self.callable_signature_mismatch(&into_signature, &from_signature)? {
+                    SignatureMismatch::Variance { .. } => Some(variance()),
+                    SignatureMismatch::Incompatible => Some(SignatureMismatch::Incompatible),
+                }
             })
+    }
+
+    /// The signature callers of a callable `value` may rely on: its declared
+    /// one, or a known callable's own.
+    fn signature_value_signature(&self, value: SignatureValue<'_>) -> Option<CallableSignature> {
+        match (value.signature, value.kind) {
+            (Some(signature), _) => Some(signature.clone()),
+            (None, ValueKind::KnownCallable(callable)) => self.known_callable_signature(callable),
+            (None, _) => None,
+        }
+    }
+
+    fn signature_value_name(&self, value: SignatureValue<'_>) -> String {
+        value.signature.map_or_else(
+            || self.kind_name(value.kind),
+            |signature| self.callable_signature_name(signature),
+        )
     }
 
     /// Returns the diagnostic for a callable of signature `actual` that
@@ -9521,8 +9743,8 @@ impl Lowering {
     ) -> Option<Diagnostic> {
         let Some(SignatureMismatch::Variance {
             position,
-            expected: expected_kind,
-            actual: actual_kind,
+            expected: expected_name,
+            actual: actual_name,
         }) = self.callable_signature_mismatch(expected, actual?)
         else {
             return None;
@@ -9531,12 +9753,12 @@ impl Lowering {
             ContractPosition::Parameter(index) => (
                 DiagnosticCode::CallableParameterVariance,
                 index,
-                [("accepted", actual_kind), ("passed", expected_kind)],
+                [("accepted", actual_name), ("passed", expected_name)],
             ),
             ContractPosition::Result(index) => (
                 DiagnosticCode::CallableResultVariance,
                 index,
-                [("returned", actual_kind), ("relied", expected_kind)],
+                [("returned", actual_name), ("relied", expected_name)],
             ),
         };
         let mut diagnostic = Diagnostic::error(span, code)
@@ -9552,23 +9774,103 @@ impl Lowering {
                 "index",
                 u64::try_from(index + 1).unwrap_or(u64::MAX),
             ));
-        for (name, kind) in names {
-            diagnostic = diagnostic.with_arg(DiagnosticArg::text(name, self.kind_name(kind)));
+        for (name, value) in names {
+            diagnostic = diagnostic.with_arg(DiagnosticArg::text(name, value));
         }
         Some(diagnostic)
     }
 
+    /// Returns the diagnostic for a value of `actual_kind`, a callable of
+    /// signature `actual` when one is known, held where callers call it as
+    /// `expected`, or `None` when it can be called that way: a variance
+    /// diagnostic when one of its parameters or results is the wrong way
+    /// round, otherwise what `mismatch` builds from the expected and actual
+    /// types' names.
+    fn callable_value_diagnostic(
+        &self,
+        span: Span,
+        expected: &CallableSignature,
+        actual_kind: ValueKind,
+        actual: Option<&CallableSignature>,
+        mismatch: impl FnOnce(String, String) -> Diagnostic,
+    ) -> Option<Diagnostic> {
+        // A known callable is called with its own signature.
+        let known = match (actual, actual_kind) {
+            (None, ValueKind::KnownCallable(callable)) => self.known_callable_signature(callable),
+            _ => None,
+        };
+        let actual = actual.or(known.as_ref());
+        if matches!(actual_kind, ValueKind::Error)
+            || self.callable_signatures_match(Some(expected), actual)
+        {
+            return None;
+        }
+        Some(
+            self.callable_variance_diagnostic(span, expected, actual)
+                .unwrap_or_else(|| {
+                    mismatch(
+                        self.callable_signature_name(expected),
+                        actual.map_or_else(
+                            || self.kind_name(actual_kind),
+                            |signature| self.callable_signature_name(signature),
+                        ),
+                    )
+                }),
+        )
+    }
+
+    /// Returns a diagnostic for each typed callable result in `expected`
+    /// that the result of `actual_kinds` and `actual_sigs` at the same
+    /// position cannot be called as; see [`Self::callable_value_diagnostic`].
+    fn callable_results_diagnostics(
+        &self,
+        span: Span,
+        expected: &[Option<CallableSignature>],
+        actual_kinds: &[ValueKind],
+        actual_sigs: &[Option<CallableSignature>],
+        mismatch: impl Fn(String, String) -> Diagnostic,
+    ) -> Vec<Diagnostic> {
+        expected
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expected)| {
+                self.callable_value_diagnostic(
+                    span,
+                    expected.as_ref()?,
+                    actual_kinds.get(index).copied().unwrap_or(ValueKind::Error),
+                    actual_sigs.get(index).and_then(Option::as_ref),
+                    &mismatch,
+                )
+            })
+            .collect()
+    }
+
     fn callable_signature_name(&self, signature: &CallableSignature) -> String {
+        let name = |kind: &ValueKind, nested: Option<&CallableSignature>| {
+            nested.map_or_else(
+                || self.kind_name(*kind),
+                |nested| self.callable_signature_name(nested),
+            )
+        };
         let params = signature
             .params
             .iter()
-            .map(|kind| self.kind_name(*kind))
+            .enumerate()
+            .map(|(index, kind)| name(kind, signature.param_sig(index)))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "callable({params}) => {}",
-            self.result_kinds_name(&signature.results)
-        )
+        let results = signature
+            .results
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| name(kind, signature.result_sig(index)))
+            .collect::<Vec<_>>();
+        let results = match results.as_slice() {
+            [] => "0 values".into(),
+            [result] => result.clone(),
+            _ => format!("{} values ({})", results.len(), results.join(", ")),
+        };
+        format!("callable({params}) => {results}")
     }
 
     fn result_kinds_name(&self, kinds: &[ValueKind]) -> String {
@@ -11521,5 +11823,88 @@ mod tests {
                             if result_kinds == &[ValueKind::Object(OBJECT_CLASS_ID)]
                     )
         ));
+    }
+
+    #[test]
+    fn callable_annotations_reach_contracts_slots_and_nested_signatures() {
+        let module = lower_shapes(
+            "define class <holder> (<object>)\n  \
+             slot measure :: callable(<shape>) => <integer>, init-keyword: measure:;\nend;\n\
+             define generic chooser(s :: <shape>) => callable(<shape>) => <integer>;\n\
+             define method chooser(s :: <shape>) => callable(<shape>) => <integer>\n  size-of\nend;\n\
+             define function apply-to(f :: callable(callable(<shape>) => <integer>) => <integer>) => <integer>\n  \
+             f(size-of)\nend;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let holder = class(&module, "<holder>");
+        let measure = CallableSignature {
+            params: vec![ValueKind::Object(class_id(&module, "<shape>"))],
+            param_sigs: vec![None],
+            results: vec![ValueKind::I64],
+            result_sigs: vec![None],
+        };
+        assert_eq!(
+            holder.direct_slots[0].callable_signature.as_ref(),
+            Some(&measure)
+        );
+        assert_eq!(
+            holder.direct_slots[0].type_name,
+            "callable(<shape>) => <integer>"
+        );
+        let shown = |definition| {
+            let contract = module.contract(definition).expect("contract");
+            contract
+                .params
+                .iter()
+                .chain(&contract.results)
+                .map(|value| value.display(&module).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shown(
+                module
+                    .generics
+                    .iter()
+                    .find(|g| g.name == "chooser")
+                    .expect("generic")
+                    .definition
+            ),
+            ["<shape>", "callable(<shape>) => <integer>"]
+        );
+        assert_eq!(
+            shown(function(&module, "apply-to").definition),
+            [
+                "callable(callable(<shape>) => <integer>) => <integer>",
+                "<integer>"
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_callable_signatures_compare_by_variance() {
+        // Callers of `g` may hand it a callable of `<circle>`, but
+        // `apply-to` calls its argument with any `<shape>`.
+        let module = lower_shapes(
+            "define function apply-to(f :: callable(<shape>) => <integer>) => <integer>\n  \
+             f(make(<circle>, radius: 1))\nend;\n\
+             define function main()\n  \
+             let g :: callable(callable(<circle>) => <integer>) => <integer> = apply-to;\n  0\nend;",
+        );
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::CallableParameterVariance,
+            &[
+                ("accepted", "callable(<shape>) => <integer>"),
+                ("passed", "callable(<circle>) => <integer>")
+            ]
+        ));
+        // The wider nested parameter is accepted.
+        let module = lower_shapes(
+            "define function apply-to(f :: callable(<circle>) => <integer>) => <integer>\n  \
+             f(make(<circle>, radius: 1))\nend;\n\
+             define function main()\n  \
+             let g :: callable(callable(<shape>) => <integer>) => <integer> = apply-to;\n  g(size-of)\nend;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
     }
 }

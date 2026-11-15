@@ -1,0 +1,29 @@
+// expect: run 47
+// expect: diagnostics 0
+// expect: dump sem contains on-click :: callable(<integer>) => <integer>
+
+// A slot may hold a typed callable: initializers, defaults and writes must
+// satisfy its signature, and a read is called with it.
+
+define function double(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define function triple(x :: <integer>) => <integer>
+  x * 3
+end;
+
+define class <button> (<object>)
+  slot on-click :: callable(<integer>) => <integer>, init-keyword: on-click:;
+  constant slot on-hover :: callable(<integer>) => <integer>, init-value: triple;
+end;
+
+define function main()
+  let b = make(<button>, on-click: double);
+  let click = b.on-click;
+  let before = click(5);
+  let ignored = b.on-click := triple;
+  let hover = b.on-hover;
+  let after = b.on-click;
+  before + hover(4) + after(5) + 10
+end;

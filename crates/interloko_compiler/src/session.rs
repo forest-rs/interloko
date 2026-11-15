@@ -6613,7 +6613,10 @@ fn dump_ast(module: &ast::Module) -> String {
             class.id, class.definition, class.name
         );
         for slot in &class.slots {
-            let type_name = slot.type_name.as_deref().unwrap_or("<object>");
+            let type_name = slot
+                .type_annotation
+                .as_ref()
+                .map_or_else(|| "<object>".into(), ToString::to_string);
             let init_keyword = slot.init_keyword.as_deref().unwrap_or(&slot.name);
             let required = if slot.required_init_keyword {
                 " required"
@@ -6715,38 +6718,11 @@ fn dump_function_param(param: &ast::FunctionParam) -> String {
 }
 
 fn dump_type_annotation(annotation: &ast::TypeAnnotation) -> String {
-    if let Some(callable) = &annotation.callable {
-        let params = callable
-            .params
-            .iter()
-            .map(dump_type_annotation)
-            .collect::<Vec<_>>()
-            .join(", ");
-        return format!(
-            "callable({params}) => {}",
-            dump_result_annotation(&callable.results)
-        );
-    }
-    if annotation.class_object {
-        format!("class {}", annotation.name)
-    } else {
-        annotation.name.clone()
-    }
+    annotation.to_string()
 }
 
 fn dump_result_annotation(annotation: &ast::ResultAnnotation) -> String {
-    match annotation.values.as_slice() {
-        [] => "()".into(),
-        [value] => dump_type_annotation(value),
-        values => {
-            let values = values
-                .iter()
-                .map(dump_type_annotation)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("({values})")
-        }
-    }
+    annotation.to_string()
 }
 
 fn ast_slot_allocation_label(allocation: ast::SlotAllocation) -> &'static str {

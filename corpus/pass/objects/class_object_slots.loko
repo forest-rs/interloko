@@ -1,0 +1,24 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump sem contains kind :: class <shape>
+
+// A slot may hold a class object. The annotation was once read as the class
+// itself, so the slot would have held `<shape>` instances instead.
+
+define class <shape> (<object>)
+  slot sides :: <integer>, init-value: 0;
+end;
+
+define class <triangle> (<shape>)
+end;
+
+define class <factory> (<object>)
+  slot kind :: class <shape>, init-keyword: kind:;
+end;
+
+define function main()
+  let f = make(<factory>, kind: <shape>);
+  let ignored = f.kind := <triangle>;
+  let made = make(f.kind, sides: 3);
+  made.sides
+end;

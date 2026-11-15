@@ -1,0 +1,42 @@
+// expect: run 55
+// expect: diagnostics 0
+
+// A callable type is a result annotation like any other, written bare or
+// parenthesized, alone or among several results, on functions, function
+// expressions, generics and methods. Each call result keeps its signature,
+// so calling it needs no other context.
+
+define class <shape> (<object>)
+end;
+
+define function seven(x :: <integer>) => <integer>
+  x + 6
+end;
+
+define function bare() => callable(<integer>) => <integer>
+  seven
+end;
+
+define function wrapped() => (callable(<integer>) => <integer>)
+  seven
+end;
+
+define function with-count() => (callable(<integer>) => <integer>, <integer>)
+  values(seven, 10)
+end;
+
+define generic chooser(s :: <shape>) => callable(<integer>) => <integer>;
+
+define method chooser(s :: <shape>) => callable(<integer>) => <integer>
+  seven
+end;
+
+define function main()
+  let f = bare();
+  let g = wrapped();
+  let (h, n) = with-count();
+  let make-adder = function () => callable(<integer>) => <integer> seven end;
+  let k = make-adder();
+  let c = chooser(make(<shape>));
+  f(1) + g(2) + h(3) + n + k(4) + c(5)
+end;

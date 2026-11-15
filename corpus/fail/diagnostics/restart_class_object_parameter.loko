@@ -1,0 +1,18 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.annotation-not-class
+// expect: diagnostic contains restart parameter `e` is declared class <invalid-radius>, but it must name a class
+
+// A restart's parameter names the class of conditions it recovers from. A
+// class object type names none, and was once read as the class itself.
+
+define class <invalid-radius> (<object>)
+  slot fallback :: <integer>;
+end;
+
+define function main()
+  handle
+    signal(make(<invalid-radius>, fallback: 0))
+  with restart e :: class <invalid-radius>
+    0
+  end
+end;

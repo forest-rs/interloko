@@ -1,0 +1,29 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains as class <shape>
+
+// A slot setter is a method of a generic specialized on `<class>`, and a
+// generic is a callable value an untyped caller may hand anything. The
+// setter checks that the class object names the slot's bound before it
+// stores it, so `kind` never holds `<other>`.
+
+define class <shape> (<object>)
+end;
+
+define class <other> (<object>)
+end;
+
+define class <factory> (<object>)
+  slot kind :: class <shape>, init-keyword: kind:;
+end;
+
+define function store(set :: <callable>, c :: class <other>, f :: <factory>) => <integer>
+  let ignored :: <shape> = set(c, f);
+  0
+end;
+
+define function main()
+  let f = make(<factory>, kind: <shape>);
+  let ignored = store(kind-setter, <other>, f);
+  class-name(f.kind)
+end;

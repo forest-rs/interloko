@@ -1,0 +1,25 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.callable-parameter-variance
+// expect: diagnostic contains its parameter 1 accepts only <circle>, but callers may pass any <shape>
+
+// A function's declared callable result is what its callers call, so the
+// value it returns must satisfy that signature.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function measurer() => callable(<shape>) => <integer>
+  radius-of
+end;
+
+define function main()
+  0
+end;

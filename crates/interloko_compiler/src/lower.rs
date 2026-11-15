@@ -1836,6 +1836,7 @@ impl<'module> Lowering<'module> {
             next = next.saturating_add(1);
         }
 
+        intern_recorded_signatures(&mut ids.call_sigs, module)?;
         ids.restarts = callable_uses.restarts;
 
         Ok(Self {
@@ -2859,39 +2860,41 @@ fn intern_sem_callable_signature(
     signatures: &mut Vec<CallableSignature>,
     signature: &sem::CallableSignature,
 ) -> Result<CallableSigId, LowerError> {
-    let lowered = CallableSignature {
-        params: signature
-            .params
-            .iter()
-            .copied()
-            .map(value_kind)
-            .collect::<Result<Vec<_>, _>>()?,
-        rets: signature
-            .results
-            .iter()
-            .copied()
-            .map(value_kind)
-            .collect::<Result<Vec<_>, _>>()?,
-    };
+    let lowered = callable_signature_from_sem(
+        signatures,
+        &signature.params,
+        &signature.param_sigs,
+        &signature.results,
+        &signature.result_sigs,
+    )?;
     Ok(intern_callable_signature(signatures, lowered))
 }
 
+/// Returns the id [`intern_sem_callable_signature`] gave `signature`; every
+/// signature sem records is interned before bodies are lowered, by
+/// [`intern_recorded_signatures`].
 fn sem_callable_signature_id(
     ids: &LowerIds,
     signature: &sem::CallableSignature,
 ) -> Result<CallableSigId, LowerError> {
+    let kind = |kind: sem::ValueKind, nested: Option<&sem::CallableSignature>| match nested {
+        Some(nested) => {
+            sem_callable_signature_id(ids, nested).map(|sig| ValueKind::Closure(Some(sig)))
+        }
+        None => value_kind(kind),
+    };
     let lowered = CallableSignature {
         params: signature
             .params
             .iter()
-            .copied()
-            .map(value_kind)
+            .enumerate()
+            .map(|(index, param)| kind(*param, signature.param_sig(index)))
             .collect::<Result<Vec<_>, _>>()?,
         rets: signature
             .results
             .iter()
-            .copied()
-            .map(value_kind)
+            .enumerate()
+            .map(|(index, result)| kind(*result, signature.result_sig(index)))
             .collect::<Result<Vec<_>, _>>()?,
     };
     ids.call_sigs
@@ -2899,6 +2902,62 @@ fn sem_callable_signature_id(
         .position(|candidate| *candidate == lowered)
         .map(|index| CallableSigId(u32::try_from(index).unwrap_or(u32::MAX)))
         .ok_or_else(|| invalid_semantic("callable signature id is missing"))
+}
+
+/// Interns every callable signature sem records on a value lowering may
+/// type by it: locals, captures, constants and slots, beside the function
+/// and closure signatures interned with their code. Bodies then only look
+/// signatures up.
+fn intern_recorded_signatures(
+    signatures: &mut Vec<CallableSignature>,
+    module: &sem::Module,
+) -> Result<(), LowerError> {
+    let locals = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.locals)
+        .chain(module.methods.iter().flat_map(|method| &method.locals))
+        .chain(module.closures.iter().flat_map(|closure| &closure.locals))
+        .map(|local| local.callable_signature.as_ref());
+    let captures = module
+        .closures
+        .iter()
+        .flat_map(|closure| &closure.captures)
+        .map(|capture| capture.callable_signature.as_ref());
+    let constants = module
+        .constants
+        .iter()
+        .map(|constant| constant.callable_signature.as_ref());
+    let slots = module
+        .classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .direct_slots
+                .iter()
+                .map(|slot| &slot.callable_signature)
+        })
+        .chain(module.classes.iter().flat_map(|class| {
+            class
+                .effective_slots
+                .iter()
+                .map(|slot| &slot.callable_signature)
+        }))
+        .map(Option::as_ref);
+    let generic_results = module
+        .generics
+        .iter()
+        .flat_map(|generic| generic.result_callable_sigs.iter().map(Option::as_ref));
+    for signature in locals
+        .chain(captures)
+        .chain(constants)
+        .chain(slots)
+        .chain(generic_results)
+        .flatten()
+    {
+        intern_sem_callable_signature(signatures, signature)?;
+    }
+    Ok(())
 }
 
 fn accessor_callable_signature(
@@ -5825,6 +5884,20 @@ impl<'module> BodyLowering<'module> {
                 | (ValueKind::Closure(Some(_)), ValueKind::Closure(None))
         ) {
             return Ok(value);
+        }
+        // A callable read from somewhere lowering types only by its register
+        // (a slot, a generic's result) takes the signature sem checked it
+        // against. The label is static: calls through any callable value
+        // check the class results they rely on, and the tape checks the
+        // register kinds.
+        if matches!(
+            (value.kind, expected),
+            (ValueKind::Closure(None), ValueKind::Closure(Some(_)))
+        ) {
+            return Ok(Value {
+                kind: expected,
+                ..value
+            });
         }
         // Sem accepts a callable for another signature when its parameters
         // are at least as wide and its results at most as wide, and every

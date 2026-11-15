@@ -1,0 +1,20 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.generic-method-result-type-mismatch
+// expect: diagnostic contains method `count` result <integer> does not satisfy generic return <callable>
+
+// A generic's result may be a callable type. The annotation was once read as
+// its inner result type, `<integer>`, so this method was accepted and every
+// send trusted a result the generic never promised.
+
+define class <shape> (<object>)
+end;
+
+define generic count(s :: <shape>) => callable(<integer>) => <integer>;
+
+define method count(s :: <shape>) => <integer>
+  7
+end;
+
+define function main()
+  count(make(<shape>))
+end;
