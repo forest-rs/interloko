@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.limited-type-option
+// expect: diagnostic contains `size:` is not an option here
+
+// `limited(<integer>, ...)` takes one `min:` and one `max:`.
+define function main(n :: limited(<integer>, size: 3))
+  0
+end;

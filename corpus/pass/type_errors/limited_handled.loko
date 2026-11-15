@@ -1,0 +1,19 @@
+// expect: run -1
+// expect: diagnostics 0
+
+// A handler can turn a failed range check into a sentinel.
+define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n
+end;
+
+define function checked(x :: <integer>) => <integer>
+  handle
+    byte(x)
+  with restart e :: <type-error>
+    -1
+  end
+end;
+
+define function main() => <integer>
+  checked(1000)
+end;

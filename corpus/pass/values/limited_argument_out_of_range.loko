@@ -1,0 +1,13 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 1
+// expect: diagnostic code typing.range-always-outside
+
+// A literal argument outside the parameter's range fails every time it is
+// reached, which typing reports before the run signals.
+define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n
+end;
+
+define function main() => <integer>
+  byte(300)
+end;

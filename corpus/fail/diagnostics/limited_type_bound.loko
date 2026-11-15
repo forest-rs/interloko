@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.limited-type-bound
+// expect: diagnostic contains must be an <integer> literal, not `2.5`
+
+// A bound is an `<integer>` literal.
+define function main(n :: limited(<integer>, max: 2.5))
+  0
+end;

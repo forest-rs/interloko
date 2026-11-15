@@ -1,0 +1,14 @@
+// codegen: off
+// expect: run 84
+// expect: diagnostics 0
+// expect: dump lowered contains signal type-error.range limited(<integer>, min: 0, max: 255)
+
+// Without typing facts the caller tests every argument for a limited
+// parameter, and the body relies on the range it was given.
+define function double(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n + n
+end;
+
+define function main() => <integer>
+  double(42)
+end;

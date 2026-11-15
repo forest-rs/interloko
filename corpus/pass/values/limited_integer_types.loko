@@ -1,0 +1,33 @@
+// expect: run 3133
+// expect: diagnostics 0
+// expect: dump sem contains check limited(<integer>, min: 0, max: 255)
+// expect: dump sem contains instance? limited(<integer>, max: 9)
+
+// `limited(<integer>, min: m, max: n)` is the `<integer>`s in a range, with
+// either bound optional. It types parameters, results, `let` bindings,
+// slots, constants and generic parameters, and `as` and `instance?` take it
+// too. A value is still an `<integer>`; each declaration checks what reaches
+// it, so code reading the declared value may assume the range.
+define constant $base :: limited(<integer>, min: 0) = 3000;
+
+define class <dial> (<object>)
+  slot level :: limited(<integer>, min: 1, max: 3), init-value: 1;
+end;
+
+define generic weigh(n :: limited(<integer>, min: 0, max: 255)) => <integer>;
+
+define method weigh(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n * 2
+end;
+
+define function byte(n :: limited(<integer>, min: 0, max: 255)) => limited(<integer>, min: 0, max: 510)
+  n + n
+end;
+
+define function main() => <integer>
+  let d = make(<dial>);
+  let set = d.level := 3;
+  let small :: limited(<integer>, max: 9) = 7;
+  let tested = if instance?(small, limited(<integer>, max: 9)) then 10 else 0 end;
+  $base + byte(50) + weigh(5) + d.level + set + as(limited(<integer>, min: 0), small) + tested
+end;

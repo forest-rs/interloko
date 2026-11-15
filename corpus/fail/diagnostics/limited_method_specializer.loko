@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.limited-type-specializer
+
+// A limited type is not a class to dispatch on: a method may only restate
+// the range its generic declares.
+define generic level(n :: limited(<integer>, min: 0));
+
+define method level(n :: limited(<integer>, min: 1))
+  n
+end;
+
+define function main()
+  0
+end;

@@ -1,0 +1,13 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 12 is not of type limited(<integer>, max: 9) at typing:def
+// expect: diagnostics 0
+
+// A function checks a limited result before it returns, so its callers may
+// assume the range.
+define function digit(n :: <integer>) => limited(<integer>, max: 9)
+  n
+end;
+
+define function main() => <integer>
+  digit(12)
+end;

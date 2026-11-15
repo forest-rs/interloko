@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.empty-limited-type
+// expect: diagnostic contains limited(<integer>, min: 5, max: 4) has no values
+
+// A range whose `min:` is above its `max:` holds no value.
+define function main(n :: limited(<integer>, min: 5, max: 4))
+  0
+end;

@@ -154,7 +154,9 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/type_errors/cast_unhandled.loko"));
     assert!(out.contains("ok pass/type_errors/entry_handled.loko"));
     assert!(out.contains("ok pass/codegen/linked_send.loko"));
-    assert!(out.contains("corpus: 389 passed, 0 failed, 389 total"));
+    assert!(out.contains("ok pass/codegen/limited_argument_proved.loko"));
+    assert!(out.contains("ok pass/type_errors/limited_argument_unhandled.loko"));
+    assert!(out.contains("corpus: 405 passed, 0 failed, 405 total"));
 }
 
 #[test]
