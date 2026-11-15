@@ -76,13 +76,14 @@ fn dispatch_on_a_superclass_is_runtime_checked_and_silent_by_default() {
     assert_eq!(decision.selected_method, None);
     assert!(artifact.diagnostics.is_empty());
 
+    // Under the strict preset every definition must prove its sends.
     let strict = artifact.with_config(&module, TypingConfig::strict());
     assert_eq!(strict.diagnostics.len(), 1);
     assert_eq!(
         strict.diagnostics[0].code,
-        DiagnosticCode::TypingDispatchRuntimeChecked
+        DiagnosticCode::TypingUnprovedDispatch
     );
-    assert_eq!(strict.diagnostics[0].severity, Severity::Warning);
+    assert_eq!(strict.diagnostics[0].severity, Severity::Error);
     assert_eq!(strict.definitions, artifact.definitions);
 }
 
@@ -1222,20 +1223,15 @@ fn loop_heads_widen_to_a_fixpoint() {
 }
 
 #[test]
-fn strict_preset_reports_certain_but_not_possible_overflow() {
+fn strict_preset_is_soft_reporting_with_every_definition_strict() {
     let strict = TypingConfig::strict();
-    assert_eq!(
-        strict.severity(TypingCheck::Overflow, TypingVerdict::Checked),
-        TypingSeverity::Silent
-    );
-    assert_eq!(
-        strict.severity(TypingCheck::Overflow, TypingVerdict::Refuted),
-        TypingSeverity::Error
-    );
-    assert_eq!(
-        strict.severity(TypingCheck::Range, TypingVerdict::Checked),
-        TypingSeverity::Warning
-    );
+    for check in TypingCheck::ALL {
+        assert_eq!(strict.policy(*check), TypingConfig::soft().policy(*check));
+    }
+    assert_eq!(strict.strict.scope, StrictScope::All);
+    assert!(!strict.strict.overflow);
+    assert_eq!(TypingConfig::soft().strict, StrictPolicy::DECLARED);
+    assert_eq!(TypingConfig::silent().strict, StrictPolicy::DECLARED);
     assert_eq!(
         TypingConfig::soft().severity(TypingCheck::Instance, TypingVerdict::Proved),
         TypingSeverity::Warning
@@ -1815,5 +1811,472 @@ fn decisions_record_who_asked_for_each_check() {
         artifact
             .dump(&module)
             .contains("severity=silent origin=explicit")
+    );
+}
+
+/// The strict errors of `artifact`, as (code, definition label) pairs.
+fn strict_errors(artifact: &TypingArtifact) -> Vec<(DiagnosticCode, String)> {
+    artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_error())
+        .map(|diagnostic| {
+            let definition = diagnostic
+                .args
+                .iter()
+                .find(|arg| arg.name == "definition")
+                .map(|arg| arg.value.render())
+                .unwrap_or_default();
+            (diagnostic.code, definition)
+        })
+        .collect()
+}
+
+fn arg<'a>(diagnostic: &'a Diagnostic, name: &str) -> &'a str {
+    diagnostic
+        .args
+        .iter()
+        .find(|arg| arg.name == name)
+        .map_or("", |arg| match &arg.value {
+            crate::diagnostic::DiagnosticArgValue::Text(text)
+            | crate::diagnostic::DiagnosticArgValue::Id(text) => text.as_str(),
+            _ => "",
+        })
+}
+
+#[test]
+fn a_strict_function_whose_checks_are_proved_has_no_errors() {
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define strict function round(c :: <circle>)\n  area(c)\nend;\n\
+         define function main()\n  round(make(<circle>))\nend;"
+    ));
+    let round = function_definition(&module, "round");
+    assert_eq!(artifact.strictness(round), Some(StrictSource::Declared));
+    assert_eq!(
+        artifact.strictness(function_definition(&module, "main")),
+        None
+    );
+    assert!(
+        artifact.diagnostics.is_empty(),
+        "{:?}",
+        artifact.diagnostics
+    );
+    assert_eq!(artifact.strict_error_count(), 0);
+    assert!(
+        artifact
+            .dump(&module)
+            .contains("strict scope=declared overflow=runtime definitions=1 errors=0")
+    );
+}
+
+#[test]
+fn strict_reports_each_unproved_check_with_its_code_reasons_and_fixes() {
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function small(n :: limited(<integer>, min: 0, max: 9)) => <integer>\n  \
+         n\nend;\n\
+         define strict function measure(s :: <shape>, n :: <integer>, f :: <callable>)\n  \
+         let k :: <circle> = f(s);\n  \
+         small(n) + area(s)\nend;\n\
+         define function main()\n  0\nend;"
+    ));
+    let measure = function_definition(&module, "measure");
+    let codes = strict_errors(&artifact);
+    assert_eq!(
+        codes,
+        [
+            (
+                DiagnosticCode::TypingUnprovedCast,
+                "function measure".into()
+            ),
+            (
+                DiagnosticCode::TypingUnprovedRange,
+                "function measure".into()
+            ),
+            (
+                DiagnosticCode::TypingUnprovedDispatch,
+                "function measure".into()
+            ),
+        ]
+    );
+    // Strict errors are errors whatever the soft policy says.
+    assert_eq!(
+        strict_errors(&artifact.with_config(&module, TypingConfig::silent())),
+        codes
+    );
+
+    let typed = artifact.definition(measure).expect("typed");
+    let range = artifact
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::TypingUnprovedRange)
+        .expect("range error");
+    let decision = typed
+        .decisions
+        .iter()
+        .find(|decision| decision.check == TypingCheck::Range)
+        .expect("range decision");
+    assert_eq!(arg(range, "decision"), decision_id(decision));
+    assert_eq!(arg(range, "strict"), "declared");
+    assert_eq!(arg(range, "actual"), "<integer>");
+    assert_eq!(arg(range, "expected"), "limited(<integer>, min: 0, max: 9)");
+    assert_eq!(artifact.severity(decision), TypingSeverity::Error);
+    assert_eq!(
+        artifact.strict_violation(decision),
+        Some(StrictViolation::Unproved)
+    );
+    let notes = range
+        .notes
+        .iter()
+        .map(|note| note.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("because declared@")),
+        "{notes:?}"
+    );
+    assert!(
+        notes.contains(&"fix: annotate parameter n as limited(<integer>, min: 0, max: 9)"),
+        "{notes:?}"
+    );
+    assert!(
+        notes.contains(
+            &"fix: write as(limited(<integer>, min: 0, max: 9), ...) to check deliberately"
+        ),
+        "{notes:?}"
+    );
+
+    let dispatch = artifact
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::TypingUnprovedDispatch)
+        .expect("dispatch error");
+    assert_eq!(arg(dispatch, "generic"), "area");
+    assert_eq!(arg(dispatch, "arguments"), "<shape>");
+    let notes = dispatch
+        .notes
+        .iter()
+        .map(|note| note.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        notes.contains(&"fix: test s with instance? against <circle> or <square> first"),
+        "{notes:?}"
+    );
+    assert!(
+        notes.contains(&"fix: declare <shape> sealed abstract"),
+        "{notes:?}"
+    );
+    // The secondary labels point at where the operand types came from.
+    assert!(dispatch.labels.len() > 1, "{:?}", dispatch.labels);
+}
+
+#[test]
+fn explicit_casts_tests_and_indirect_entries_are_not_strict_obligations() {
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define strict function keep(s :: <circle>) => <circle>\n  s\nend;\n\
+         define strict function main(s :: <shape>, n :: <integer>)\n  \
+         let g = keep;\n  \
+         let c = as(<circle>, s);\n  \
+         let m = as(limited(<integer>, min: 0), n);\n  \
+         if instance?(s, <square>) then 1 else 2 end\nend;"
+    ));
+    let origins = artifact
+        .decisions()
+        .filter(|decision| decision.verdict == TypingVerdict::Checked)
+        .map(|decision| decision.origin)
+        .collect::<Vec<_>>();
+    assert!(origins.contains(&CheckOrigin::Entry), "{origins:?}");
+    assert!(origins.contains(&CheckOrigin::Explicit), "{origins:?}");
+    assert!(origins.contains(&CheckOrigin::Test), "{origins:?}");
+    assert!(
+        artifact.diagnostics.is_empty(),
+        "{:?}",
+        artifact.diagnostics
+    );
+    assert_eq!(artifact.strict.len(), 2);
+    let _ = module;
+}
+
+#[test]
+fn checks_that_always_fail_are_errors_in_strict_code_and_warnings_in_soft_code() {
+    let source = |adjective: &str| {
+        format!(
+            "{SHAPES}define {adjective}function main()\n  \
+             as(<circle>, as(<object>, make(<label>)))\nend;"
+        )
+    };
+    let (_, soft) = decisions_for(&source(""));
+    assert_eq!(soft.diagnostics.len(), 1);
+    assert_eq!(
+        soft.diagnostics[0].code,
+        DiagnosticCode::TypingCastAlwaysFails
+    );
+    assert_eq!(soft.diagnostics[0].severity, Severity::Warning);
+
+    let (_, strict) = decisions_for(&source("strict "));
+    assert_eq!(
+        strict_errors(&strict),
+        [(
+            DiagnosticCode::TypingCastAlwaysFails,
+            "function main".into()
+        )]
+    );
+    let decision = strict
+        .decisions()
+        .find(|decision| decision.verdict == TypingVerdict::Refuted)
+        .expect("cast");
+    assert_eq!(decision.origin, CheckOrigin::Explicit);
+    assert_eq!(
+        strict.strict_violation(decision),
+        Some(StrictViolation::Refuted)
+    );
+}
+
+#[test]
+fn a_strict_generic_holds_each_of_its_methods_to_strict_typing() {
+    let (module, artifact) = decisions_for(
+        "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic describe(x);\n\
+         define method describe(c :: <circle>)\n  1\nend;\n\
+         define strict generic measure(s :: <shape>);\n\
+         define method measure(s :: <shape>)\n  describe(s)\nend;\n\
+         define generic loose(s :: <shape>);\n\
+         define method loose(s :: <shape>)\n  describe(s)\nend;\n\
+         define function main()\n  0\nend;",
+    );
+    let method_of = |name: &str| {
+        let generic = module
+            .generics
+            .iter()
+            .find(|generic| generic.name == name)
+            .expect("generic")
+            .id;
+        module
+            .methods
+            .iter()
+            .find(|method| method.generic == generic)
+            .expect("method")
+            .definition
+    };
+    assert_eq!(
+        artifact.strictness(method_of("measure")),
+        Some(StrictSource::Generic(
+            module
+                .generics
+                .iter()
+                .find(|generic| generic.name == "measure")
+                .expect("generic")
+                .id
+        ))
+    );
+    assert_eq!(artifact.strictness(method_of("loose")), None);
+    assert_eq!(
+        strict_errors(&artifact),
+        [(
+            DiagnosticCode::TypingUnprovedDispatch,
+            "method measure(<shape>)".into()
+        )]
+    );
+    assert_eq!(
+        arg(&artifact.diagnostics[0], "strict"),
+        "generic measure is strict"
+    );
+    assert!(
+        artifact
+            .dump(&module)
+            .contains("method measure(<shape>) strict=generic(measure)")
+    );
+}
+
+#[test]
+fn the_strict_preset_holds_every_definition_and_overflow_is_opt_in() {
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function measure(s :: <shape>, n :: <integer>)\n  \
+         area(s) + n\nend;\n\
+         define function main()\n  measure(make(<circle>), 1)\nend;"
+    ));
+    assert!(artifact.diagnostics.is_empty());
+    assert!(artifact.strict.is_empty());
+
+    let strict = artifact.with_config(&module, TypingConfig::strict());
+    assert_eq!(strict.definitions, artifact.definitions);
+    assert_eq!(
+        strict.strictness(function_definition(&module, "main")),
+        Some(StrictSource::Policy)
+    );
+    // `area` returns an unannotated `<object>`, so `+` dispatches too.
+    let codes = strict_errors(&strict)
+        .into_iter()
+        .map(|(code, _)| code)
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&DiagnosticCode::TypingUnprovedDispatch));
+    assert!(!codes.contains(&DiagnosticCode::TypingUnprovedOverflow));
+
+    let (module, artifact) = decisions_for(
+        "define function add(a :: <integer>, b :: <integer>) => <integer>\n  a + b\nend;\n\
+         define function main()\n  add(1, 2)\nend;",
+    );
+    let strict = artifact.with_config(&module, TypingConfig::strict());
+    assert!(strict.diagnostics.is_empty(), "{:?}", strict.diagnostics);
+    let overflow = TypingConfig::strict()
+        .apply_spec("strict.overflow=proved")
+        .expect("valid");
+    let strict = artifact.with_config(&module, overflow);
+    assert_eq!(
+        strict_errors(&strict),
+        [(
+            DiagnosticCode::TypingUnprovedOverflow,
+            "function add".into()
+        )]
+    );
+    assert!(
+        strict
+            .dump(&module)
+            .contains("strict scope=all overflow=proved definitions=2 errors=1")
+    );
+}
+
+#[test]
+fn strict_settings_parse_and_compose_with_presets() {
+    let config = TypingConfig::soft()
+        .apply_spec("strict.scope=all strict.overflow=proved")
+        .expect("valid");
+    assert_eq!(
+        config.strict,
+        StrictPolicy {
+            scope: StrictScope::All,
+            overflow: true
+        }
+    );
+    assert_eq!(config_label(config), "custom");
+    assert_eq!(
+        TypingConfig::soft().apply_spec("strict.scope=all"),
+        Ok(TypingConfig::strict())
+    );
+    assert_eq!(
+        TypingConfig::strict().apply_spec("soft"),
+        Ok(TypingConfig::soft())
+    );
+    assert_eq!(
+        config.strict.label(),
+        "strict.scope=all strict.overflow=proved"
+    );
+    for bad in [
+        "strict.scope=some",
+        "strict.overflow=yes",
+        "strict.depth=1",
+        "strict.",
+    ] {
+        assert_eq!(
+            TypingConfig::soft().apply_spec(bad),
+            Err(TypingConfigError::InvalidWord(bad.into())),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn sealing_makes_strict_dispatch_over_a_hierarchy_provable() {
+    let source = |adjectives: &str| {
+        format!(
+            "define {adjectives}class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define class <square> (<shape>)\nend;\n\
+             define generic area(x);\n\
+             define method area(c :: <circle>)\n  1\nend;\n\
+             define method area(s :: <square>)\n  2\nend;\n\
+             define strict function measure(s :: <shape>)\n  area(s)\nend;\n\
+             define function main()\n  measure(make(<circle>))\nend;"
+        )
+    };
+    let (module, open) = decisions_for(&source(""));
+    assert_eq!(
+        strict_errors(&open),
+        [(
+            DiagnosticCode::TypingUnprovedDispatch,
+            "function measure".into()
+        )]
+    );
+    let measure = function_definition(&module, "measure");
+    let typed = open.definition(measure).expect("typed");
+    let fixes = strict_fixes(&module, typed, &typed.decisions[0]);
+    let shape = module
+        .classes
+        .iter()
+        .find(|class| class.name == "<shape>")
+        .expect("class")
+        .id;
+    assert!(fixes.contains(&StrictFix::Seal {
+        class: shape,
+        make_abstract: true
+    }));
+
+    let (module, sealed) = decisions_for(&source("sealed abstract "));
+    assert!(sealed.diagnostics.is_empty(), "{:?}", sealed.diagnostics);
+    let decision = sealed
+        .definition(function_definition(&module, "measure"))
+        .expect("typed")
+        .decisions[0]
+        .clone();
+    assert_eq!(decision.verdict, TypingVerdict::Proved);
+    assert!(!decision.assumes.is_empty());
+}
+
+#[test]
+fn limited_ranges_prove_strict_range_checks() {
+    let source = |param: &str| {
+        format!(
+            "define function small(n :: limited(<integer>, min: 0, max: 9)) => <integer>\n  \
+             n\nend;\n\
+             define strict function twice(n :: {param}) => <integer>\n  small(n) + small(n)\nend;\n\
+             define function main()\n  twice(3)\nend;"
+        )
+    };
+    let (module, loose) = decisions_for(&source("<integer>"));
+    assert_eq!(
+        strict_errors(&loose),
+        [
+            (DiagnosticCode::TypingUnprovedRange, "function twice".into()),
+            (DiagnosticCode::TypingUnprovedRange, "function twice".into()),
+        ]
+    );
+    let twice = function_definition(&module, "twice");
+    let typed = loose.definition(twice).expect("typed");
+    let fixes = strict_fixes(&module, typed, &typed.decisions[0]);
+    let StrictFix::Annotate { name, ty, .. } = &fixes[0] else {
+        panic!("{fixes:?}");
+    };
+    assert_eq!(name, "n");
+    assert_eq!(
+        type_source(&module, ty).as_deref(),
+        Some("limited(<integer>, min: 0, max: 9)")
+    );
+
+    let (_, narrow) = decisions_for(&source("limited(<integer>, min: 2, max: 5)"));
+    assert!(narrow.diagnostics.is_empty(), "{:?}", narrow.diagnostics);
+}
+
+#[test]
+fn strict_preview_reports_what_would_fail_without_changing_anything() {
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function measure(s :: <shape>)\n  area(s)\nend;\n\
+         define function main()\n  measure(make(<circle>))\nend;"
+    ));
+    let measure = function_definition(&module, "measure");
+    assert_eq!(artifact.strictness(measure), None);
+    let preview = artifact.strict_preview(&module, measure);
+    assert_eq!(
+        preview
+            .iter()
+            .map(|diagnostic| (diagnostic.code, arg(diagnostic, "strict")))
+            .collect::<Vec<_>>(),
+        [(DiagnosticCode::TypingUnprovedDispatch, "declared")]
+    );
+    assert!(artifact.diagnostics.is_empty());
+    assert!(
+        artifact
+            .strict_preview(&module, function_definition(&module, "main"))
+            .is_empty()
     );
 }

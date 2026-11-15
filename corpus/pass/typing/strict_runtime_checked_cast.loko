@@ -1,12 +1,14 @@
 // typing: strict
 // expect: run 3
-// expect: diagnostics 1
-// expect: diagnostic code typing.cast-runtime-checked
+// expect: diagnostics 0
 // expect: dump typing contains config=strict
+// expect: dump typing contains strict scope=all overflow=runtime definitions=2 errors=0
 // expect: dump typing contains s0 cast checked rule=cast-narrowing
+// expect: dump typing contains severity=silent origin=explicit
 
-// Under the strict preset, casts the runtime must check are reported as
-// warnings; the cast still runs and succeeds.
+// The strict preset holds every definition to strict typing, but an
+// explicit `as` is a check the program asks for: strict code keeps it at
+// runtime without a finding, and the cast runs and succeeds.
 
 define class <shape> (<object>)
   slot sides :: <integer>, init-value: 0;

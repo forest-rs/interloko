@@ -147,6 +147,39 @@
 //! The pass runs only when semantic lowering produced no diagnostics, so it
 //! never repeats or contradicts a hard semantic error.
 //!
+//! # Strict typing
+//!
+//! A definition can ask to be held to more than advice. `define strict
+//! function`, `method`, or `constant` makes it *strict*, and so does
+//! `define strict generic` for every method of the generic; the session's
+//! typing policy can also hold every definition to it
+//! ([`StrictScope::All`], the `strict` preset). [`strictness`] says which
+//! applies.
+//!
+//! A strict definition must prove the checks the compiler inserts into its
+//! body ([`CheckOrigin::Implicit`]): the dispatch of every send, the casts
+//! and range checks where a value meets a declaration or comes back
+//! through a `<callable>`, and, under `strict.overflow=proved`
+//! ([`StrictPolicy::overflow`]), integer overflow. It need not prove an
+//! explicit `as`, which is how strict code checks deliberately, an
+//! `instance?` test, which answers a question rather than failing, or the
+//! check of an indirect entry, which guards the body against callers
+//! typing does not see and blames them when it fails. Each required check
+//! typing leaves to the runtime is an error, `typing.unproved-dispatch`,
+//! `-cast`, `-range` or `-overflow`, and any check that always fails is an
+//! error too ([`StrictViolation`]). Each error names its decision, carries
+//! the reason chains that explain the operand types, and suggests edits
+//! that could prove the check ([`StrictFix`]).
+//!
+//! Strictness changes reporting only. A strict definition's checks are
+//! classified exactly as anyone else's, so it lowers exactly as it would
+//! otherwise: once its errors are fixed, every required check is proved
+//! and lowering under [`crate::lower::CodegenPolicy::Proved`] drops it. A
+//! strict definition with errors still lowers, keeping the checks it could
+//! not prove, so meaning never depends on strictness. Like the reporting
+//! policies, strictness is applied when diagnostics are derived, so
+//! changing it re-derives them without re-checking anything.
+//!
 //! # Types
 //!
 //! A [`Type`] is a normalized union of atoms: class cones and exact
@@ -180,10 +213,15 @@ use crate::syntax::Span;
 
 mod flow;
 mod query;
+mod strict;
 
 pub use query::{
     TypeQueryError, TypeReport, TypeSelector, TypeSubject, TypesAnchor, TypingDependency, UseType,
     no_type_labels,
+};
+pub use strict::{
+    StrictDefinition, StrictFix, StrictPolicy, StrictScope, StrictSource, StrictViolation,
+    fixes as strict_fixes, strictness, type_source,
 };
 
 /// Residual runtime check classified by the soft typing pass.
@@ -427,6 +465,10 @@ impl TypingPolicy {
 ///
 /// Sessions own one configuration and pass it to every compile, the way they
 /// pass [`crate::session::RuntimeMode`]. The default is [`Self::soft`].
+///
+/// The per-check policies set how loudly soft findings are reported;
+/// [`Self::strict`] sets which definitions are held to strict typing, whose
+/// unproved checks are errors whatever the policies say.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TypingConfig {
     /// Policy for generic dispatch obligations.
@@ -439,6 +481,8 @@ pub struct TypingConfig {
     pub range: TypingPolicy,
     /// Policy for integer overflow and shift-count obligations.
     pub overflow: TypingPolicy,
+    /// Which definitions strict typing holds to proving their checks.
+    pub strict: StrictPolicy,
 }
 
 impl TypingConfig {
@@ -447,7 +491,8 @@ impl TypingConfig {
 
     /// Warns about obligations that always fail and about `instance?` tests
     /// whose outcome the types decide; runtime-checked obligations stay
-    /// silent.
+    /// silent. Only definitions declared `strict` are held to strict
+    /// typing.
     ///
     /// A decided `instance?` test warns because one of its branches is dead
     /// or the test is redundant. Flow typing derives the decision only from
@@ -463,10 +508,14 @@ impl TypingConfig {
             instance: policy.with_proved(TypingSeverity::Warning),
             range: policy,
             overflow: policy,
+            strict: StrictPolicy::DECLARED,
         }
     }
 
-    /// Records decisions without reporting any of them.
+    /// Records decisions without reporting any soft finding.
+    ///
+    /// A definition declared `strict` is still held to it: strictness is
+    /// part of the program, not a reporting preference.
     #[must_use]
     pub const fn silent() -> Self {
         let policy = TypingPolicy::new(TypingSeverity::Silent, TypingSeverity::Silent);
@@ -476,30 +525,21 @@ impl TypingConfig {
             instance: policy,
             range: policy,
             overflow: policy,
+            strict: StrictPolicy::DECLARED,
         }
     }
 
-    /// Reports always-failing obligations as errors and runtime-checked
-    /// obligations as warnings, with two exceptions.
+    /// Holds every source definition to strict typing, as if each were
+    /// declared `strict`, and reports everything else as [`Self::soft`]
+    /// does.
     ///
-    /// An `instance?` test never fails: a runtime-decided one is its normal
-    /// use and stays silent, and a decided one is dead code rather than a
-    /// failure, so it stays a warning. And almost every integer operation
-    /// on declared types may overflow, mostly because `<integer>` is held
-    /// in 64 bits, a limit of the current runtime rather than of the type;
-    /// warning on each would bury every other report, so runtime-checked
-    /// overflow stays silent while certain overflow is an error.
+    /// This is the session-wide end of the progression from exploratory to
+    /// checked code; a definition can opt in alone with `define strict`.
     #[must_use]
     pub const fn strict() -> Self {
-        let policy = TypingPolicy::new(TypingSeverity::Warning, TypingSeverity::Error);
-        Self {
-            dispatch: policy,
-            cast: policy,
-            instance: TypingPolicy::new(TypingSeverity::Silent, TypingSeverity::Warning)
-                .with_proved(TypingSeverity::Warning),
-            range: policy,
-            overflow: TypingPolicy::new(TypingSeverity::Silent, TypingSeverity::Error),
-        }
+        let mut config = Self::soft();
+        config.strict.scope = StrictScope::All;
+        config
     }
 
     /// Returns the preset named `name`, if any.
@@ -573,10 +613,13 @@ impl TypingConfig {
 
     /// Returns this configuration changed by `spec`: whitespace-separated
     /// words, each a preset name (see [`Self::PRESETS`]), which replaces the
-    /// whole configuration, or a `check.verdict=severity` setting such as
-    /// `cast.checked=warning`, applied in order. `strict
-    /// overflow.checked=warning` is the strict preset with checked overflow
-    /// reported.
+    /// whole configuration, a `check.verdict=severity` setting such as
+    /// `cast.checked=warning`, or a strict setting, `strict.scope=declared`
+    /// or `strict.scope=all` ([`StrictScope`]) and `strict.overflow=runtime`
+    /// or `strict.overflow=proved` ([`StrictPolicy::overflow`]), applied in
+    /// order. `strict strict.overflow=proved` holds every definition to
+    /// strict typing including overflow, and `soft strict.scope=all` is the
+    /// same as `strict`.
     ///
     /// # Errors
     ///
@@ -594,6 +637,10 @@ impl TypingConfig {
                 continue;
             }
             let invalid = || TypingConfigError::InvalidWord(word.into());
+            if let Some(setting) = word.strip_prefix("strict.") {
+                config.strict = config.strict.apply(setting).ok_or_else(invalid)?;
+                continue;
+            }
             let (setting, severity) = word.split_once('=').ok_or_else(invalid)?;
             let (check, verdict) = setting.split_once('.').ok_or_else(invalid)?;
             let check = TypingCheck::from_label(check).ok_or_else(invalid)?;
@@ -610,20 +657,21 @@ impl TypingConfig {
 pub enum TypingConfigError {
     /// The specification has no words.
     Empty,
-    /// This word is neither a preset nor a `check.verdict=severity`
-    /// setting.
+    /// This word is neither a preset, a `check.verdict=severity` setting,
+    /// nor a strict setting.
     InvalidWord(String),
 }
 
 impl fmt::Display for TypingConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => {
-                f.write_str("empty typing policy; expected a preset or check.verdict=severity")
-            }
+            Self::Empty => f.write_str(
+                "empty typing policy; expected a preset, check.verdict=severity, or a strict setting",
+            ),
             Self::InvalidWord(word) => write!(
                 f,
-                "`{word}` is neither a typing preset ({}) nor check.verdict=severity",
+                "`{word}` is neither a typing preset ({}), check.verdict=severity, \
+                 strict.scope=declared|all nor strict.overflow=runtime|proved",
                 TypingConfig::PRESETS.join("|")
             ),
         }
@@ -1241,6 +1289,10 @@ pub struct TypingArtifact {
     /// Per-definition decisions, in module order (functions, methods,
     /// constants).
     pub definitions: Vec<DefinitionTyping>,
+    /// The checked definitions held to strict typing under `config`, with
+    /// why, in module order. Like the diagnostics, this is derived from
+    /// the module and the configuration, never from the decisions.
+    pub strict: Vec<StrictDefinition>,
     /// Diagnostics derived from `definitions` under `config`, in decision
     /// order.
     pub diagnostics: Vec<Diagnostic>,
@@ -1274,13 +1326,72 @@ impl TypingArtifact {
     }
 
     /// Returns the severity the artifact's configuration assigns to
-    /// `decision`.
+    /// `decision`: an error when it violates its strict owner's typing
+    /// ([`Self::strict_violation`]), and otherwise its check's policy.
     #[must_use]
-    pub const fn severity(&self, decision: &TypingDecision) -> TypingSeverity {
+    pub fn severity(&self, decision: &TypingDecision) -> TypingSeverity {
         if matches!(decision.rule, TypingRule::Unreachable) {
             return TypingSeverity::Silent;
         }
+        if self.strict_violation(decision).is_some() {
+            return TypingSeverity::Error;
+        }
         self.config.severity(decision.check, decision.verdict)
+    }
+
+    /// Returns why `definition` is held to strict typing, or `None` when it
+    /// is not.
+    #[must_use]
+    pub fn strictness(&self, definition: DefinitionId) -> Option<StrictSource> {
+        self.strict
+            .iter()
+            .find(|strict| strict.definition == definition)
+            .map(|strict| strict.source)
+    }
+
+    /// Returns how `decision` falls short of strict typing, or `None` when
+    /// its owner is not strict or the decision is fine.
+    #[must_use]
+    pub fn strict_violation(&self, decision: &TypingDecision) -> Option<StrictViolation> {
+        self.strictness(decision.owner)?;
+        self.config.strict.violation(decision)
+    }
+
+    /// Returns what would fail if `definition` were strict, without
+    /// changing anything: the diagnostics its decisions would have as a
+    /// definition declared `strict`, in decision order. Empty when it
+    /// would pass, or when typing did not check it.
+    #[must_use]
+    pub fn strict_preview(
+        &self,
+        module: &sem::Module,
+        definition: DefinitionId,
+    ) -> Vec<Diagnostic> {
+        let Some(typed) = self.definition(definition) else {
+            return Vec::new();
+        };
+        let source = self
+            .strictness(definition)
+            .unwrap_or(StrictSource::Declared);
+        typed
+            .decisions
+            .iter()
+            .filter_map(|decision| {
+                let violation = self.config.strict.violation(decision)?;
+                Some(strict_diagnostic(
+                    module, typed, decision, source, violation,
+                ))
+            })
+            .collect()
+    }
+
+    /// Counts decisions that fall short of their strict owner's typing:
+    /// the errors strict typing reports.
+    #[must_use]
+    pub fn strict_error_count(&self) -> usize {
+        self.decisions()
+            .filter(|decision| self.strict_violation(decision).is_some())
+            .count()
     }
 
     /// Counts decisions with `verdict`.
@@ -1324,6 +1435,18 @@ impl TypingArtifact {
                 policy.refuted.as_str()
             );
         }
+        let _ = writeln!(
+            out,
+            "  strict scope={} overflow={} definitions={} errors={}",
+            self.config.strict.scope.as_str(),
+            if self.config.strict.overflow {
+                "proved"
+            } else {
+                "runtime"
+            },
+            self.strict.len(),
+            self.strict_error_count()
+        );
         for definition in &self.definitions {
             if !definition.decisions.is_empty() {
                 self.write_definition(&mut out, module, definition);
@@ -1351,12 +1474,21 @@ impl TypingArtifact {
     }
 
     fn write_definition(&self, out: &mut String, module: &sem::Module, typed: &DefinitionTyping) {
-        let _ = writeln!(
+        let _ = write!(
             out,
             "  definition {} {}",
             typed.definition,
             definition_label(module, typed.definition)
         );
+        match self.strictness(typed.definition) {
+            Some(StrictSource::Generic(generic)) => {
+                let _ = writeln!(out, " strict=generic({})", generic_name(module, generic));
+            }
+            Some(source) => {
+                let _ = writeln!(out, " strict={}", source.as_str());
+            }
+            None => out.push('\n'),
+        }
         for decision in &typed.decisions {
             let _ = write!(
                 out,
@@ -1372,6 +1504,9 @@ impl TypingArtifact {
                 self.severity(decision).as_str(),
                 decision.origin.as_str()
             );
+            if let Some(violation) = self.strict_violation(decision) {
+                let _ = write!(out, " strict={}", violation.as_str());
+            }
             if !decision.because.is_empty() {
                 let because = decision
                     .because
@@ -1399,7 +1534,8 @@ impl TypingArtifact {
         }
     }
 
-    /// Re-derives diagnostics under `config` without re-checking.
+    /// Re-derives strictness and diagnostics under `config` without
+    /// re-checking.
     #[must_use]
     pub fn with_config(&self, module: &sem::Module, config: TypingConfig) -> Self {
         Self::from_definitions(module, config, self.status, self.definitions.clone())
@@ -1411,11 +1547,33 @@ impl TypingArtifact {
         status: TypingStatus,
         definitions: Vec<DefinitionTyping>,
     ) -> Self {
+        let strict = definitions
+            .iter()
+            .filter_map(|typed| {
+                strictness(module, config.strict.scope, typed.definition).map(|source| {
+                    StrictDefinition {
+                        definition: typed.definition,
+                        source,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
         let diagnostics = definitions
             .iter()
-            .flat_map(|definition| {
-                definition.decisions.iter().filter_map(move |decision| {
-                    decision_diagnostic(module, config, definition, decision)
+            .flat_map(|typed| {
+                let source = strict
+                    .iter()
+                    .find(|strict| strict.definition == typed.definition)
+                    .map(|strict| strict.source);
+                typed.decisions.iter().filter_map(move |decision| {
+                    let violation = source
+                        .and_then(|source| Some((source, config.strict.violation(decision)?)));
+                    match violation {
+                        Some((source, violation)) => Some(strict_diagnostic(
+                            module, typed, decision, source, violation,
+                        )),
+                        None => decision_diagnostic(module, config, typed, decision),
+                    }
                 })
             })
             .collect();
@@ -1423,6 +1581,7 @@ impl TypingArtifact {
             config,
             status,
             definitions,
+            strict,
             diagnostics,
         }
     }
@@ -1642,6 +1801,72 @@ fn decision_diagnostic(
         .severity(decision.check, decision.verdict)
         .diagnostic_severity()?;
     let code = diagnostic_code(decision.check, decision.verdict);
+    let mut diagnostic = decision_facts(module, typed, decision, severity, code);
+    if decision.verdict == TypingVerdict::Refuted {
+        for label in provenance_labels(module, typed, decision) {
+            diagnostic = diagnostic.with_label(label);
+        }
+    }
+    Some(diagnostic)
+}
+
+/// The error a decision that falls short of its strict owner's typing
+/// reports: `typing.unproved-*` for a check left to the runtime, or the
+/// check's always-fails code for a refuted one. Beyond a soft finding's
+/// facts it names the definition and why it is strict (`definition`,
+/// `strict`), points at where the operand types came from, and carries
+/// the reason chains (`because ...` notes) and the edits that could prove
+/// the check (`fix: ...` notes).
+fn strict_diagnostic(
+    module: &sem::Module,
+    typed: &DefinitionTyping,
+    decision: &TypingDecision,
+    source: StrictSource,
+    violation: StrictViolation,
+) -> Diagnostic {
+    let code = match violation {
+        StrictViolation::Unproved => unproved_code(decision.check),
+        StrictViolation::Refuted => diagnostic_code(decision.check, decision.verdict),
+    };
+    let mut diagnostic = decision_facts(module, typed, decision, Severity::Error, code)
+        .with_arg(DiagnosticArg::text(
+            "definition",
+            definition_label(module, typed.definition),
+        ))
+        .with_arg(DiagnosticArg::text("strict", source.describe(module)));
+    for label in provenance_labels(module, typed, decision) {
+        diagnostic = diagnostic.with_label(label);
+    }
+    for reason in &decision.because {
+        diagnostic =
+            diagnostic.with_note(format!("because {}", typed.reason_chain(module, *reason)));
+    }
+    if violation == StrictViolation::Unproved {
+        for fix in strict::fixes(module, typed, decision) {
+            diagnostic = diagnostic.with_note(format!("fix: {}", fix.describe(module)));
+        }
+    }
+    diagnostic
+}
+
+/// The stable id of `decision`'s EOP object, `typing:<definition>:s<n>`,
+/// which runtime type errors also name.
+#[must_use]
+pub fn decision_id(decision: &TypingDecision) -> String {
+    format!("typing:{}:{}", decision.owner, decision.site)
+}
+
+/// A diagnostic at `decision` with the facts every typing finding carries:
+/// what was expected and found (`expected`/`actual`, or `generic` and
+/// `arguments` for a send, plus `operation` for arithmetic), the `rule`,
+/// and the `decision` id.
+fn decision_facts(
+    module: &sem::Module,
+    typed: &DefinitionTyping,
+    decision: &TypingDecision,
+    severity: Severity,
+    code: DiagnosticCode,
+) -> Diagnostic {
     let diagnostic = match severity {
         Severity::Warning => Diagnostic::warning(decision.span, code),
         Severity::Error => Diagnostic::error(decision.span, code),
@@ -1673,13 +1898,18 @@ fn decision_diagnostic(
             }
         }
     };
-    let mut diagnostic = diagnostic.with_arg(DiagnosticArg::text("rule", decision.rule.as_str()));
-    if decision.verdict == TypingVerdict::Refuted {
-        for label in provenance_labels(module, typed, decision) {
-            diagnostic = diagnostic.with_label(label);
-        }
+    diagnostic
+        .with_arg(DiagnosticArg::text("rule", decision.rule.as_str()))
+        .with_arg(DiagnosticArg::id("decision", decision_id(decision)))
+}
+
+const fn unproved_code(check: TypingCheck) -> DiagnosticCode {
+    match check {
+        TypingCheck::Dispatch => DiagnosticCode::TypingUnprovedDispatch,
+        TypingCheck::Cast | TypingCheck::Instance => DiagnosticCode::TypingUnprovedCast,
+        TypingCheck::Range => DiagnosticCode::TypingUnprovedRange,
+        TypingCheck::Overflow => DiagnosticCode::TypingUnprovedOverflow,
     }
-    Some(diagnostic)
 }
 
 const fn diagnostic_code(check: TypingCheck, verdict: TypingVerdict) -> DiagnosticCode {

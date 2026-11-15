@@ -1101,7 +1101,7 @@ fn typing_command_shows_and_sets_the_policy_and_survives_reset() {
     assert!(stdout.contains("typing soft\n"), "{stdout}");
     assert!(stdout.contains("typing strict\n"), "{stdout}");
     assert!(
-        stdout.contains("dispatch verdict=checked codegen=kept severity=silent->warning"),
+        stdout.contains("dispatch verdict=checked codegen=kept severity=silent->error"),
         "{stdout}"
     );
     assert!(stdout.contains("reset\ntyping strict\n"), "{stdout}");
