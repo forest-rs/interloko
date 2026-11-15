@@ -165,6 +165,17 @@ The current slices include:
   The float library takes single-floats too, inline in binary32 where the
   tape has an instruction and through the binary64 library (rounded once
   back) otherwise;
+- `limited(<integer>, min: 0, max: 255)` types, with either bound optional,
+  wherever a type goes (parameters, results, `let`, slots, constants,
+  generics, callable signatures, `as` and `instance?`). The values stay
+  `<integer>`s; each declaration checks what reaches it (the caller checks
+  an argument, where typing usually proves it), so the code reading it may
+  assume the range, and the ranges are part of a definition's contract.
+  An `<integer>` reaches a limited type with that implicit check because
+  the representation does not change, while reaching `<i32>` or `<u32>`
+  changes it and so takes an explicit `as`. A method's limited parameter
+  restates or widens its generic's range: unlike Dylan's DRM, methods do
+  not dispatch on ranges, so a send's range check is the only one;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms, with `<condition>`, `<error>` and
   `<type-error>` defined by the kernel: a runtime check that fails (a cast,

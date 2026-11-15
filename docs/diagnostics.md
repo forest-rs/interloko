@@ -117,7 +117,7 @@ failed:
 | --- | --- |
 | `type-error.cast` | a value is not an instance of the class an `as` (or a boxed `<object>` read as a number) expects |
 | `type-error.entry` | an object argument passed through an untyped `<callable>` is not of its parameter's class, or an exit procedure's value is not of its block's class (a scalar of the wrong representation still traps; see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
-| `type-error.range` | a number is outside a limited type's range: a conversion to `<i32>`/`<u32>`, a float converted to an integer it does not equal, or a shift count outside `0..=31` |
+| `type-error.range` | a number is outside a limited type's range: a conversion to `<i32>`/`<u32>`, a float converted to an integer it does not equal, a shift count outside `0..=31`, or an argument, binding, slot value, constant or result outside its `limited(<integer>, ...)` type |
 | `type-error.overflow` | integer arithmetic produced a result its type cannot represent |
 
 `interloko_model::condition::TypeErrorKind` owns the codes, and

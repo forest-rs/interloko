@@ -490,8 +490,26 @@ end
 
 Its slots are `type-error-value` (the rejected value, as an `<object>`;
 for an overflow, a vector of the operation's operands),
-`type-error-expected-type` (the printed type, such as `<circle>`, `<i32>`
-or `subclass(<shape>)`), `type-error-site` and `type-error-code`.
+`type-error-expected-type` (the printed type, such as `<circle>`, `<i32>`,
+`limited(<integer>, min: 0, max: 255)` or `subclass(<shape>)`),
+`type-error-site` and `type-error-code`.
+
+A `limited(<integer>, min: m, max: n)` type is checked where a value
+reaches its declaration, so code reading the declared value may assume the
+range. The caller checks an argument for a limited parameter, where typing
+usually knows the argument's range and can prove the check away; a `let`
+binding, a slot write and a constant check their values, and a function or
+method checks a limited result before it returns (a method against its
+generic's range, widening an `<i32>` or `<u32>` result to do so). Classes
+that declare a slot of the same name share its setter generic, whose send
+checks a range only when every such slot declares the same one; otherwise
+each class's setter method checks the value against its own slot's range. A call that cannot see
+the parameter's range is checked at the callee instead: a function entered
+through a callable value, a closure, and a first-class generic check on
+entry, and a host call through `call_function` refuses an argument out of
+range (`FunctionCallError::ArgumentOutOfRange`). Each failure is a
+`type-error.range` whose expected type is the limited type and whose site
+is the check's, such as the call site.
 
 The site ties a failure at run time to the static decision: for a check
 typing classified it is the decision's EOP id, so an agent can inspect it
@@ -530,7 +548,10 @@ another type is an invalid choice that ends the run, which the break loop
 refuses before choosing it. A failed cast takes an
 object, which the cast checks again: one of the wrong class signals a new
 `<type-error>` at the same site, so code after a check only ever sees a
-value that passed it. `retry` and `abort` work as for any condition. The
+value that passed it. A failed `limited(<integer>, ...)` check takes an
+`<integer>`, whose register type does not establish the range, so it too
+tests the replacement again and signals at the same site until one is in
+range. `retry` and `abort` work as for any condition. The
 break loop parses literals only, so it can resume a numeric check; a cast
 needs an object, which a programmatic chooser can take from a frame's
 registers (`InterlokoHost::value_class` finds one of the right class).
