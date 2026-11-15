@@ -8,10 +8,16 @@
 //!
 //! - generic dispatch picks a method from the arguments' runtime classes and
 //!   traps when no method applies;
-//! - `as(<class>, value)` tests the value's runtime class and traps when the
-//!   test fails;
-//! - converting to a limited integer type traps when the value is out of
-//!   range, and integer arithmetic traps when it overflows.
+//! - `as(<class>, value)` tests the value's runtime class and signals a
+//!   `<type-error>` when the test fails;
+//! - converting to a limited integer type signals a `<type-error>` when the
+//!   value is out of range, and integer arithmetic signals one when it
+//!   overflows.
+//!
+//! A `<type-error>`'s `use-value` restart continues the failed check with a
+//! replacement of its expected type (a number of the operation's result
+//! type, or an object a cast checks again), so a check that fails does not
+//! end the code after it (see *Transfer* below).
 //!
 //! This module is the *soft* layer over those residual runtime checks, plus
 //! the `instance?` tests whose outcome the types already decide. It
@@ -165,8 +171,8 @@ pub enum TypingCheck {
     /// [`TypingVerdict::Refuted`] when always false.
     Instance,
     /// A value must be within a limited integer range: a numeric conversion
-    /// (which traps when it is not) or an `instance?` test of a limited
-    /// integer type (which is false when it is not).
+    /// (which signals a `<type-error>` when it is not) or an `instance?`
+    /// test of a limited integer type (which is false when it is not).
     Range,
     /// Integer arithmetic must not overflow its kind, and a shift count must
     /// be in `0..=31`.

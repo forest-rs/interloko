@@ -1,8 +1,8 @@
-// expect: runtime code runtime.integer-overflow
+// expect: runtime code type-error.overflow
 // expect: diagnostics 1
 // expect: diagnostic code typing.overflow-certain
 // expect: dump lowered contains i64.add_ovf
-// expect: dump lowered contains trap 3 (integer overflow)
+// expect: dump lowered contains signal type-error.overflow
 
 define function main()
   9223372036854775807 + 1

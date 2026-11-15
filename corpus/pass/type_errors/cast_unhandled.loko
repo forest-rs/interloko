@@ -1,0 +1,28 @@
+// expect: runtime code type-error.cast
+// expect: run reports unhandled condition <type-error>: type-error.cast: {<square>} is not of type <circle> at typing:def
+// expect: diagnostics 0
+// expect: dump lowered contains = as <circle>, %r1: object(<shape>) else type-error.cast <circle> at typing:def
+
+// A cast that fails signals a `<type-error>` instead of trapping. Nothing
+// handles it here, so the run ends with the condition's own code, and the
+// report names the rejected value, the expected type, and the cast's
+// typing decision.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function radius-of(s :: <shape>) => <integer>
+  as(<circle>, s).radius
+end;
+
+define function main() => <integer>
+  radius-of(make(<square>, side: 2))
+end;

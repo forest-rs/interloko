@@ -1,0 +1,38 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump sem contains handle restart
+
+// A handler for `<type-error>` reads what the failed cast reports: its
+// stable code, the expected type, and the value it rejected. The handle
+// site's recovery stands in for the whole `handle` expression.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function radius-of(s :: <shape>) => <integer>
+  handle
+    as(<circle>, s).radius
+  with restart e :: <type-error>
+    if e.type-error-code = "type-error.cast" then
+      if e.type-error-expected-type = "<circle>" then
+        if instance?(e.type-error-value, <square>) then 7 else 2 end
+      else
+        1
+      end
+    else
+      0
+    end
+  end
+end;
+
+define function main() => <integer>
+  radius-of(make(<square>, side: 2))
+end;

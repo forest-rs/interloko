@@ -1,4 +1,4 @@
-// expect: runtime code runtime.trap
+// expect: runtime code type-error.cast
 // expect: diagnostics 0
 
 // Each of several results through a callable value is checked: the

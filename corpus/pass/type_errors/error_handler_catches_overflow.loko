@@ -1,0 +1,26 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// `<type-error>` is an `<error>`, and that a `<condition>`, so a handler
+// for any of them catches a failed check: here an `<integer>` overflow,
+// whose value is the vector of the operation's operands.
+
+define function sum(a :: <integer>, b :: <integer>) => <integer>
+  a + b
+end;
+
+define function checked-sum(a :: <integer>, b :: <integer>) => <integer>
+  handle
+    sum(a, b)
+  with restart e :: <error>
+    if instance?(e, <type-error>) then
+      3
+    else
+      0
+    end
+  end
+end;
+
+define function main() => <integer>
+  checked-sum(9223372036854775807, 1)
+end;

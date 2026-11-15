@@ -43,7 +43,7 @@ Supported expectations:
   the runtime checks soft typing proved; `corpus/pass/codegen` shows each kind.
   Whatever the header says, every case that runs `main` also runs under the
   other policy, and the check fails unless both runs end the same way: the
-  same value, or the same runtime outcome code (a trap may be reported at a
+  same value, or the same runtime outcome code (a failure may be reported at a
   different place, since the code differs).
 - `// grammar: base-loko|derived-host`: select the grammar environment used by
   the session. `derived-host` is a trusted fixture that extends the base grammar

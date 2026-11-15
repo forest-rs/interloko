@@ -25,7 +25,7 @@ use crate::lower;
 use crate::sem;
 use crate::syntax::Span;
 use interloko_runtime::code::CodeUnit;
-use interloko_runtime::control::ControlLayout;
+use interloko_runtime::control::{ControlLayout, TypeErrorSite};
 use interloko_runtime::{self as runtime, RuntimeLayout};
 
 /// The tape effect register, r0, which effectful instructions thread.
@@ -164,13 +164,17 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         ids.functions.push(func);
     }
 
+    let mut type_errors = vec![Vec::new(); ids.functions.len()];
     for function in &module.functions {
         let func = ids
             .functions
             .get(function.id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_lowered("function id is out of range"))?;
-        let asm = FunctionEmitter::new(function, &ids, &abi, &mut builder).emit()?;
+        let sites = type_errors
+            .get_mut(func.0 as usize)
+            .ok_or_else(|| invalid_lowered("function id is out of range"))?;
+        let asm = FunctionEmitter::new(function, &ids, &abi, &mut builder, sites).emit()?;
         builder.define_function(func, asm).map_err(build_error)?;
     }
 
@@ -180,7 +184,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         layout: module.runtime.clone(),
         control: ControlLayout {
             restarts: module.restarts.clone(),
-            type_errors: Vec::new(),
+            type_errors,
             conditions: abi
                 .control
                 .as_ref()
@@ -361,6 +365,43 @@ impl SharedTags {
     }
 }
 
+/// The value types a failing check reports, in the fixed order their
+/// `<type-error>` request signatures are declared: a cast's operand (boxed
+/// or an object), a conversion's or shift count's operand, and the operands
+/// of an overflowing operation (two, or one for a negation).
+fn type_error_reports() -> Vec<Vec<ValueType>> {
+    let mut reports = vec![vec![runtime::any_type()], vec![runtime::object_type()]];
+    for scalar in [
+        ValueType::I64,
+        ValueType::I32,
+        ValueType::U32,
+        ValueType::F64,
+        ValueType::F32,
+    ] {
+        reports.push(vec![scalar]);
+    }
+    for integer in [ValueType::I64, ValueType::I32, ValueType::U32] {
+        reports.push(vec![integer, integer]);
+    }
+    reports
+}
+
+/// The types a failing check's `use-value` replacement may have, in the
+/// fixed order of their condition tags: an object, or a number.
+fn type_error_results() -> Vec<Vec<ValueType>> {
+    [
+        runtime::object_type(),
+        ValueType::I64,
+        ValueType::I32,
+        ValueType::U32,
+        ValueType::F64,
+        ValueType::F32,
+    ]
+    .into_iter()
+    .map(|result| vec![result])
+    .collect()
+}
+
 /// Host signatures and tags for dynamic control, declared only when a module
 /// establishes handlers, signals or exit points. Cleanup-only regions need
 /// neither.
@@ -381,6 +422,10 @@ struct ControlAbi {
     /// Condition tags by the result types of the signals that suspend on
     /// them.
     conditions: Vec<(Vec<ValueType>, TagId)>,
+    /// `<type-error>` requests by the types of the values they report.
+    type_errors: Vec<(Vec<ValueType>, HostSigId)>,
+    /// The tag a checking host call raises when its check fails.
+    check_failed: TagId,
 }
 
 impl ControlAbi {
@@ -419,6 +464,10 @@ impl ControlAbi {
                 | lower::Instr::PopBinding { .. }
                 | lower::Instr::PushExit { .. }
                 | lower::Instr::CheckExit { .. } => uses_control = true,
+                lower::Instr::CastObject { .. }
+                | lower::Instr::CastClassObject { .. }
+                | lower::Instr::UnboxValue { .. }
+                | lower::Instr::SignalTypeError { .. } => uses_control = true,
                 lower::Instr::Throw { tag, .. } if *tag != lower::ControlTag::Retry => {
                     uses_control = true;
                     note_tag(*tag);
@@ -441,6 +490,40 @@ impl ControlAbi {
         if !uses_control {
             return Ok(None);
         }
+        // Failing checks resume with these types. Their condition tags and
+        // the check-failed tag come before every other control tag, in a
+        // fixed order, and their request signatures after every other
+        // control signature, so adding or removing a check renumbers
+        // nothing: an unchanged function compiles to the same bytecode in a
+        // newer unit. Tags for a program's own signal result types and exit
+        // signatures follow, in first-use order.
+        let mut results = type_error_results();
+        for signal in signal_results {
+            if !results.contains(&signal) {
+                results.push(signal);
+            }
+        }
+        let signal_results = results;
+        let payload = runtime::control::condition_payload().map(Into::into);
+        let conditions = signal_results
+            .into_iter()
+            .enumerate()
+            .map(|(index, results)| {
+                let result_abi = results.iter().cloned().map(Into::into).collect::<Vec<_>>();
+                let tag = builder
+                    .declare_tag_with_results(
+                        &format!("interloko.condition#{index}"),
+                        &payload,
+                        &result_abi,
+                    )
+                    .map_err(build_error)?;
+                Ok((results, tag))
+            })
+            .collect::<Result<Vec<_>, TapeError>>()?;
+        // Raised by host calls only; declared with the fixed tags.
+        let check_failed = builder
+            .import_tag(runtime::control::CHECK_FAILED_TAG, &[])
+            .map_err(build_error)?;
         let exits = exit_sigs
             .into_iter()
             .map(|signature| {
@@ -459,29 +542,13 @@ impl ControlAbi {
                 Ok((signature, tag))
             })
             .collect::<Result<Vec<_>, TapeError>>()?;
-        let payload = runtime::control::condition_payload().map(Into::into);
-        let conditions = signal_results
-            .into_iter()
-            .enumerate()
-            .map(|(index, results)| {
-                let result_abi = results.iter().cloned().map(Into::into).collect::<Vec<_>>();
-                let tag = builder
-                    .declare_tag_with_results(
-                        &format!("interloko.condition#{index}"),
-                        &payload,
-                        &result_abi,
-                    )
-                    .map_err(build_error)?;
-                Ok((results, tag))
-            })
-            .collect::<Result<Vec<_>, TapeError>>()?;
         let guard_call = builder
             .call_sig(FunctionSig {
                 arg_types: vec![runtime::object_type()],
                 ret_types: vec![ValueType::Bool],
             })
             .map_err(build_error)?;
-        Ok(Some(Self {
+        let mut abi = Self {
             signal: builder.host_sig_for(
                 runtime::control::CONDITION_SIGNAL,
                 runtime::control::signal_signature(),
@@ -521,7 +588,20 @@ impl ControlAbi {
                 runtime::control::check_exit_signature(),
             ),
             exits,
-        }))
+            type_errors: Vec::new(),
+            check_failed,
+        };
+        abi.type_errors = type_error_reports()
+            .into_iter()
+            .map(|values| {
+                let sig = builder.host_sig_for(
+                    runtime::control::CONDITION_TYPE_ERROR,
+                    runtime::control::type_error_signature(&values),
+                );
+                (values, sig)
+            })
+            .collect();
+        Ok(Some(abi))
     }
 
     fn condition_tag(&self, results: &[ValueType]) -> Result<TagId, TapeError> {
@@ -530,6 +610,14 @@ impl ControlAbi {
             .find(|(candidate, _)| candidate == results)
             .map(|(_, tag)| *tag)
             .ok_or_else(|| invalid_lowered("condition tag is missing"))
+    }
+
+    fn type_error_sig(&self, values: &[ValueType]) -> Result<HostSigId, TapeError> {
+        self.type_errors
+            .iter()
+            .find(|(candidate, _)| candidate == values)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| invalid_lowered("type error signature is missing"))
     }
 
     fn exit_tag(&self, signature: lower::CallableSigId) -> Result<TagId, TapeError> {
@@ -981,6 +1069,17 @@ fn vector_literal_sig(
     None
 }
 
+/// A checking host call: `sig(value, class)`, which raises the check-failed
+/// tag when it rejects the value, and the call that checks a replacement
+/// object again, when the result's register type does not establish the
+/// check.
+#[derive(Copy, Clone)]
+struct CheckedCall {
+    sig: HostSigId,
+    recheck: Option<HostSigId>,
+    class: u32,
+}
+
 struct FunctionEmitter<'a> {
     function: &'a lower::Function,
     ids: &'a TapeIds,
@@ -988,6 +1087,35 @@ struct FunctionEmitter<'a> {
     builder: &'a mut ProgramBuilder,
     asm: Asm,
     labels: Vec<Label>,
+    /// The function's `<type-error>` sites, which
+    /// [`ControlLayout::type_errors`] carries: one per failing check, in
+    /// emission order.
+    type_errors: &'a mut Vec<TypeErrorSite>,
+    /// Registers the function's signal paths share, by role and type.
+    shared: Vec<(SharedTemp, ValueType, Reg)>,
+}
+
+/// What a register shared by every signal path of a function holds.
+///
+/// One activation runs at most one signal path at a time (a guard runs in
+/// its own activation), so the paths can share their scratch registers
+/// rather than each adding its own to every call's frame.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SharedTemp {
+    /// Whether the handler search waits on a guard.
+    Pending,
+    /// The guard to run.
+    Guard,
+    /// The guard's answer.
+    Accepted,
+    /// The exception a guard exited by.
+    Escaped,
+    /// The condition being signalled.
+    Condition,
+    /// A `<type-error>` site operand.
+    Site,
+    /// A `use-value` replacement to check again.
+    Replacement,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -996,6 +1124,7 @@ impl<'a> FunctionEmitter<'a> {
         ids: &'a TapeIds,
         abi: &'a AbiTables,
         builder: &'a mut ProgramBuilder,
+        type_errors: &'a mut Vec<TypeErrorSite>,
     ) -> Self {
         let mut asm = builder
             .function_asm(ids.functions[function.id.0 as usize])
@@ -1011,6 +1140,8 @@ impl<'a> FunctionEmitter<'a> {
             builder,
             asm,
             labels,
+            type_errors,
+            shared: Vec::new(),
         }
     }
 
@@ -1056,21 +1187,17 @@ impl<'a> FunctionEmitter<'a> {
                     lower::Num32UnaryOp::F32Sqrt => self.asm.f32_sqrt(dst, src),
                     lower::Num32UnaryOp::I32ToI64 => self.asm.i32_to_i64(dst, src),
                     lower::Num32UnaryOp::U32ToI64 => self.asm.u32_to_i64(dst, src),
-                    lower::Num32UnaryOp::I64ToI32 => self.asm.i64_to_i32(dst, src),
                     lower::Num32UnaryOp::I64ToI32Wrap => self.asm.i64_to_i32_wrap(dst, src),
                     lower::Num32UnaryOp::I64ToU64Wrap => self.asm.i64_to_u64_wrap(dst, src),
                     lower::Num32UnaryOp::U64ToU32Wrap => self.asm.u64_to_u32_wrap(dst, src),
                     lower::Num32UnaryOp::I32ToU32Wrap => self.asm.i32_to_u32_wrap(dst, src),
                     lower::Num32UnaryOp::U32ToI32Wrap => self.asm.u32_to_i32_wrap(dst, src),
-                    lower::Num32UnaryOp::U64ToU32 => self.asm.u64_to_u32(dst, src),
-                    lower::Num32UnaryOp::I32ToU32 => self.asm.i32_to_u32(dst, src),
-                    lower::Num32UnaryOp::U32ToI32 => self.asm.u32_to_i32(dst, src),
+                    lower::Num32UnaryOp::F64ToI32Sat => self.asm.f64_to_i32_sat(dst, src),
+                    lower::Num32UnaryOp::F64ToU32Sat => self.asm.f64_to_u32_sat(dst, src),
                     lower::Num32UnaryOp::F32ToF64 => self.asm.f32_to_f64(dst, src),
                     lower::Num32UnaryOp::F64ToF32 => self.asm.f64_to_f32(dst, src),
                     lower::Num32UnaryOp::F32ToI32 => self.asm.f32_to_i32(dst, src),
                     lower::Num32UnaryOp::F32ToU32 => self.asm.f32_to_u32(dst, src),
-                    lower::Num32UnaryOp::F64ToI32 => self.asm.f64_to_i32(dst, src),
-                    lower::Num32UnaryOp::F64ToU32 => self.asm.f64_to_u32(dst, src),
                     lower::Num32UnaryOp::I32ToF32 => self.asm.i32_to_f32(dst, src),
                     lower::Num32UnaryOp::U32ToF32 => self.asm.u32_to_f32(dst, src),
                     lower::Num32UnaryOp::I64ToF32 => self.asm.i64_to_f32(dst, src),
@@ -1360,6 +1487,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.f64_to_i64(*dst, *src);
             }
+            lower::Instr::F64ToI64Sat { dst, src, span } => {
+                self.set_span(*span);
+                self.asm.f64_to_i64_sat(*dst, *src);
+            }
             lower::Instr::F64Compare {
                 dst,
                 op,
@@ -1594,6 +1725,7 @@ impl<'a> FunctionEmitter<'a> {
                 value,
                 class,
                 kind,
+                type_error,
                 span,
             } => {
                 let sig = match kind {
@@ -1602,11 +1734,14 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::F32 => self.abi.unbox_f32,
                     _ => return Err(invalid_lowered("unbox result kind is not a scalar")),
                 };
-                let class_reg = self.alloc_temp(ValueType::U64);
-                self.set_span(*span);
-                self.asm.const_u64(class_reg, u64::from(class.0));
-                self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
+                // Every value of the result's register type is an instance
+                // of the scalar class, so a replacement needs no check.
+                let check = CheckedCall {
+                    sig,
+                    recheck: None,
+                    class: class.0,
+                };
+                self.emit_checked_call(*dst, *value, check, type_error, *span)?;
             }
             lower::Instr::InstanceOf {
                 dst,
@@ -1627,28 +1762,30 @@ impl<'a> FunctionEmitter<'a> {
                 value,
                 input,
                 class,
+                type_error,
                 span,
             } => {
-                let sig = self.cast_sig(*input)?;
-                let class_reg = self.alloc_temp(ValueType::U64);
-                self.set_span(*span);
-                self.asm.const_u64(class_reg, u64::from(class.0));
-                self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
+                let check = CheckedCall {
+                    sig: self.cast_sig(*input)?,
+                    recheck: Some(self.cast_sig(lower::ValueKind::Object(None))?),
+                    class: class.0,
+                };
+                self.emit_checked_call(*dst, *value, check, type_error, *span)?;
             }
             lower::Instr::CastClassObject {
                 dst,
                 value,
                 input,
                 bound,
+                type_error,
                 span,
             } => {
-                let sig = self.cast_class_sig(*input)?;
-                let class_reg = self.alloc_temp(ValueType::U64);
-                self.set_span(*span);
-                self.asm.const_u64(class_reg, u64::from(bound.0));
-                self.asm
-                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
+                let check = CheckedCall {
+                    sig: self.cast_class_sig(*input)?,
+                    recheck: Some(self.cast_class_sig(lower::ValueKind::Object(None))?),
+                    class: bound.0,
+                };
+                self.emit_checked_call(*dst, *value, check, type_error, *span)?;
             }
             lower::Instr::EqU64 {
                 dst,
@@ -1726,7 +1863,35 @@ impl<'a> FunctionEmitter<'a> {
                 dsts,
                 condition,
                 span,
-            } => self.emit_signal(dsts, *condition, *span)?,
+            } => {
+                let results = dsts
+                    .iter()
+                    .map(|dst| self.register_type(*dst))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.emit_signal(&results, dsts, *condition, *span)?;
+            }
+            lower::Instr::SignalTypeError {
+                dst,
+                values,
+                type_error,
+                resume,
+                span,
+            } => {
+                let types = values
+                    .iter()
+                    .map(|value| self.register_type(*value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let site = self.type_error_site(type_error, *span)?;
+                let condition = self.shared_temp(SharedTemp::Condition, runtime::object_type());
+                let mut args = values.clone();
+                args.push(site);
+                let sig = self.abi.control()?.type_error_sig(&types)?;
+                self.asm.host_call(EFFECT, sig, EFFECT, &args, &[condition]);
+                let result = self.register_type(*dst)?;
+                self.emit_signal(&[result], &[*dst], condition, *span)?;
+                let resume = self.label(*resume)?;
+                self.asm.jmp(resume);
+            }
             lower::Instr::EnterRegion { catches } => {
                 let clauses = catches
                     .iter()
@@ -1795,13 +1960,15 @@ impl<'a> FunctionEmitter<'a> {
     ///           throw_ref exn
     /// none:     dsts = suspend condition#n(condition)
     /// ```
-    fn emit_signal(&mut self, dsts: &[Reg], condition: Reg, span: Span) -> Result<(), TapeError> {
+    fn emit_signal(
+        &mut self,
+        results: &[ValueType],
+        dsts: &[Reg],
+        condition: Reg,
+        span: Span,
+    ) -> Result<(), TapeError> {
         let control = self.abi.control()?;
-        let results = dsts
-            .iter()
-            .map(|dst| self.register_type(*dst))
-            .collect::<Result<Vec<_>, _>>()?;
-        let tag = control.condition_tag(&results)?;
+        let tag = control.condition_tag(results)?;
         let (signal, guard, guard_result, guard_unwound, guard_call) = (
             control.signal,
             control.guard,
@@ -1809,10 +1976,10 @@ impl<'a> FunctionEmitter<'a> {
             control.guard_unwound,
             control.guard_call,
         );
-        let pending = self.alloc_temp(ValueType::Bool);
-        let closure = self.alloc_temp(ValueType::Closure);
-        let accepted = self.alloc_temp(ValueType::Bool);
-        let escaped = self.alloc_temp(ValueType::Exn);
+        let pending = self.shared_temp(SharedTemp::Pending, ValueType::Bool);
+        let closure = self.shared_temp(SharedTemp::Guard, ValueType::Closure);
+        let accepted = self.shared_temp(SharedTemp::Accepted, ValueType::Bool);
+        let escaped = self.shared_temp(SharedTemp::Escaped, ValueType::Exn);
         let (search, run_guard, none) = (self.asm.label(), self.asm.label(), self.asm.label());
         let unwound = self.asm.block(&[escaped]);
         self.set_span(span);
@@ -1847,6 +2014,112 @@ impl<'a> FunctionEmitter<'a> {
         Ok(())
     }
 
+    /// Registers `type_error` in the function's sites and loads its index,
+    /// the site operand of a `<type-error>` request, into a register.
+    fn type_error_site(
+        &mut self,
+        type_error: &TypeErrorSite,
+        span: Span,
+    ) -> Result<Reg, TapeError> {
+        let index = u64::try_from(self.type_errors.len())
+            .map_err(|_| invalid_lowered("too many type error sites"))?;
+        self.type_errors.push(type_error.clone());
+        let site = self.shared_temp(SharedTemp::Site, ValueType::U64);
+        self.set_span(span);
+        self.asm.const_u64(site, index);
+        Ok(site)
+    }
+
+    /// Emits a checking host call, `dst = check(operand, class)`, and what
+    /// happens when it fails.
+    ///
+    /// The call sits in a protected region: a check that rejects its value
+    /// raises the check-failed tag, and the passing path is the call and a
+    /// jump. A failure signals `type_error` for the operand. A `use-value`
+    /// restart resumes it with a replacement in the result's register type;
+    /// when that type does not establish the check (an object for a class),
+    /// the replacement is checked again with `check.recheck`, signalling
+    /// again for as long as replacements fail:
+    ///
+    /// ```text
+    ///           region [check_failed -> failed]
+    ///             dst = host_call check(operand, class)
+    ///           jmp done
+    /// failed:   condition = host_call type_error(operand, site)
+    ///           jmp retry
+    /// retry:    replacement = <signal condition>
+    ///           region [check_failed -> refailed]
+    ///             dst = host_call recheck(replacement, class)
+    ///           jmp done
+    /// refailed: condition = host_call type_error(replacement, site)
+    ///           jmp retry
+    /// done:
+    /// ```
+    ///
+    /// Without a recheck, the signal resumes straight into `dst`.
+    fn emit_checked_call(
+        &mut self,
+        dst: Reg,
+        operand: Reg,
+        check: CheckedCall,
+        type_error: &TypeErrorSite,
+        span: Span,
+    ) -> Result<(), TapeError> {
+        let control = self.abi.control()?;
+        let check_failed = control.check_failed;
+        let class = self.alloc_temp(ValueType::U64);
+        let (failed, done) = (self.asm.label(), self.asm.label());
+        self.set_span(span);
+        self.asm.const_u64(class, u64::from(check.class));
+        self.asm.begin_region(&[Catch::Tag(check_failed, failed)]);
+        self.asm
+            .host_call(EFFECT, check.sig, EFFECT, &[operand, class], &[dst]);
+        self.asm
+            .end_region()
+            .ok_or_else(|| invalid_lowered("check region is not open"))?;
+        self.asm.jmp(done);
+        self.asm.place(failed).map_err(build_error)?;
+        let site = self.type_error_site(type_error, span)?;
+        let condition = self.shared_temp(SharedTemp::Condition, runtime::object_type());
+        let operand_type = self.register_type(operand)?;
+        let report = control.type_error_sig(&[operand_type])?;
+        self.asm
+            .host_call(EFFECT, report, EFFECT, &[operand, site], &[condition]);
+        let result = self.register_type(dst)?;
+        match check.recheck {
+            None => {
+                self.emit_signal(&[result], &[dst], condition, span)?;
+                self.asm.jmp(done);
+            }
+            Some(recheck) => {
+                let replacement = self.shared_temp(SharedTemp::Replacement, result);
+                let report_again = control.type_error_sig(&[result])?;
+                let (retry, refailed) = (self.asm.label(), self.asm.label());
+                self.asm.jmp(retry);
+                self.asm.place(retry).map_err(build_error)?;
+                self.emit_signal(&[result], &[replacement], condition, span)?;
+                self.asm.begin_region(&[Catch::Tag(check_failed, refailed)]);
+                self.asm
+                    .host_call(EFFECT, recheck, EFFECT, &[replacement, class], &[dst]);
+                self.asm
+                    .end_region()
+                    .ok_or_else(|| invalid_lowered("recheck region is not open"))?;
+                self.asm.jmp(done);
+                self.asm.place(refailed).map_err(build_error)?;
+                self.asm.host_call(
+                    EFFECT,
+                    report_again,
+                    EFFECT,
+                    &[replacement, site],
+                    &[condition],
+                );
+                self.asm.jmp(retry);
+            }
+        }
+        self.asm.place(done).map_err(build_error)?;
+        Ok(())
+    }
+
     fn label(&self, label: lower::LabelId) -> Result<Label, TapeError> {
         self.labels
             .get(label.0 as usize)
@@ -1856,6 +2129,21 @@ impl<'a> FunctionEmitter<'a> {
 
     fn register_type(&self, register: Reg) -> Result<ValueType, TapeError> {
         register_type(self.function, register)
+    }
+
+    /// The function's register for `role` of type `kind`, allocated on
+    /// first use.
+    fn shared_temp(&mut self, role: SharedTemp, kind: ValueType) -> Reg {
+        if let Some((_, _, register)) = self
+            .shared
+            .iter()
+            .find(|(candidate, ty, _)| *candidate == role && *ty == kind)
+        {
+            return *register;
+        }
+        let register = self.alloc_temp(kind);
+        self.shared.push((role, kind, register));
+        register
     }
 
     fn alloc_temp(&mut self, kind: ValueType) -> Reg {

@@ -1,7 +1,8 @@
 // Soft typing knows the boxed operand is an <integer>, so it proves which
 // `+` method the send selects. Under the `proved` codegen policy the send
-// runs that method's addition inline: no dispatch, and the overflow traps
-// in `main` at the call. Under `off` it dispatches and traps in the method.
+// runs that method's addition inline: no dispatch, and the overflow signals
+// its `<type-error>` from `main` at the call. Under `off` it dispatches and
+// signals from the method.
 
 define function main() => <integer>
   as(<integer>, as(<object>, 9223372036854775807) + 1)

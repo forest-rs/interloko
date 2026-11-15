@@ -1,0 +1,15 @@
+// expect: runtime code type-error.overflow
+// expect: run reports type-error.overflow: <integer> arithmetic on #[9223372036854775807, 2] overflows at typing:def
+// expect: diagnostics 0
+// expect: dump lowered contains i64.mul_ovf
+
+// An overflow has no value of its own to reject, so the `<type-error>`
+// reports the operation's operands.
+
+define function twice(n :: <integer>) => <integer>
+  n * 2
+end;
+
+define function main() => <integer>
+  twice(9223372036854775807)
+end;

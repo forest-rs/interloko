@@ -23,7 +23,7 @@ use core::ops::Range;
 
 use execution_tape::host::HostSig;
 use execution_tape::program::{TagId, ValueType};
-use execution_tape::value::{Obj, UnitId, Value};
+use execution_tape::value::{FuncId, Obj, UnitId, Value};
 use execution_tape::vm::ActivationId;
 use interloko_model::ClassId;
 use interloko_model::condition::TypeErrorKind;
@@ -49,9 +49,10 @@ pub const CONDITION_GUARD_RESULT: &str = "interloko.condition.guard_result";
 /// guard exited by an exception, which the guest raises again afterwards.
 pub const CONDITION_GUARD_UNWOUND: &str = "interloko.condition.guard_unwound";
 /// Host symbol that makes the `<type-error>` a failed runtime check signals:
-/// `(values..., site) -> condition`, where `site` indexes the calling unit's
-/// [`ControlLayout::type_errors`]. One value becomes the condition's value;
-/// several (the operands of an overflowing operation) a `<vector>` of them.
+/// `(values..., site) -> condition`, where `site` indexes the calling
+/// function's sites in its unit's [`ControlLayout::type_errors`]. One value
+/// becomes the condition's value; several (the operands of an overflowing
+/// operation) a `<vector>` of them.
 pub const CONDITION_TYPE_ERROR: &str = "interloko.condition.type_error";
 /// Host symbol that pops the innermost dynamic binding by token.
 pub const CONTROL_POP: &str = "interloko.control.pop";
@@ -172,14 +173,25 @@ pub struct ControlLayout {
     /// Restart sites, indexed by the descriptor operand of
     /// [`CONDITION_PUSH_HANDLER`].
     pub restarts: Vec<RestartDescriptor>,
-    /// Checks that signal a `<type-error>` when they fail, indexed by the
-    /// site operand of [`CONDITION_TYPE_ERROR`].
-    pub type_errors: Vec<TypeErrorSite>,
+    /// Checks that signal a `<type-error>` when they fail: per function, by
+    /// function id, the sites the site operand of [`CONDITION_TYPE_ERROR`]
+    /// indexes. Numbering them per function keeps a function's code
+    /// independent of how many checks other functions have, so an edit
+    /// elsewhere leaves it byte-for-byte the same.
+    pub type_errors: Vec<Vec<TypeErrorSite>>,
     /// The program's condition tags: an unhandled signal suspends on one,
     /// with payload `(condition)` and its own result types as the tag's
     /// results. No guest code handles them, so each suspension reaches the
     /// driver, which answers it with the chooser's restart.
     pub conditions: Vec<TagId>,
+}
+
+impl ControlLayout {
+    /// The `<type-error>` site `index` of function `func`.
+    #[must_use]
+    pub fn type_error(&self, func: FuncId, index: usize) -> Option<&TypeErrorSite> {
+        self.type_errors.get(func.0 as usize)?.get(index)
+    }
 }
 
 /// What a dynamic binding establishes.

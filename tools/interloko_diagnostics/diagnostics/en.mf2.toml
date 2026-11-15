@@ -107,7 +107,6 @@
 "runtime.missing-main" = "no zero-argument main function is available"
 "runtime.main-has-parameters" = "main has parameters"
 "runtime.trap" = "runtime execution trapped"
-"runtime.integer-overflow" = "integer arithmetic overflowed the 64-bit integer range"
 "runtime.host-function-failed" = "a declared host function failed"
 "runtime.unsupported-result" = "main does not return one supported scalar value"
 "runtime.unhandled-condition" = "no live handler applies to a signalled condition"
