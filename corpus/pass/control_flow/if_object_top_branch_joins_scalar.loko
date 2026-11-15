@@ -1,0 +1,11 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// An `<object>` branch joins an unboxed `<integer>` branch at `<object>`, in
+// either order: the integer branch is boxed on its way to the join.
+
+define function main() => <integer>
+  let c :: <boolean> = #f;
+  as(<integer>, if c then as(<object>, 1) else 2 end)
+    + as(<integer>, if c then 2 else as(<object>, 1) end)
+end;

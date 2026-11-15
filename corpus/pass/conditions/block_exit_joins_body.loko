@@ -1,0 +1,28 @@
+// expect: run 10
+// expect: diagnostics 0
+
+// A `block` produces its body's values or the values passed to its exit, so
+// a body of a subclass joins an exit of its superclass.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 5;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define function pick(c :: <boolean>) => <shape>
+  block (return)
+    if c then return(make(<square>)) else make(<circle>) end
+  end
+end;
+
+define function main() => <integer>
+  let s :: <shape> = block (return)
+    make(<circle>)
+  end;
+  pick(#t).size + s.size
+end;

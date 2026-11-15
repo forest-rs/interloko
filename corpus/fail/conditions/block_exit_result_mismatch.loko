@@ -1,4 +1,4 @@
-// expect: diagnostics 2
+// expect: diagnostics 1
 // expect: diagnostic code sem.block-exit-result-mismatch
 // expect: diagnostic contains block body and exit must have matching result kinds
 

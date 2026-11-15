@@ -1,0 +1,39 @@
+// expect: run 13
+// expect: diagnostics 0
+// expect: dump sem contains shape-of(x:untyped) result=object(<shape>) return=inferred
+// expect: dump sem contains count-of(x:untyped) result=integer return=inferred
+
+// An unannotated generic's result joins its methods' results as an `if`
+// joins its branches: a `<circle>` and a `<shape>` give `<shape>`, and an
+// `<integer>` and an `<i32>` give `<integer>`.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 5;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define generic shape-of(x);
+
+define method shape-of(x :: <integer>)
+  make(<circle>)
+end;
+
+define method shape-of(x :: <double-float>)
+  make(<shape>)
+end;
+
+define generic count-of(x);
+
+define method count-of(x :: <integer>)
+  1
+end;
+
+define method count-of(x :: <double-float>)
+  2i32
+end;
+
+define function main() => <integer>
+  shape-of(1).size + shape-of(1.0).size + count-of(1) + count-of(1.0)
+end;
