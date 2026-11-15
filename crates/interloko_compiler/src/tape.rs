@@ -199,6 +199,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         dispatch: module.dispatch.clone(),
         links: linked_methods(module),
         contracts: module.contracts.clone(),
+        assumptions: module.assumptions.clone(),
     };
     for (function, func) in module.functions.iter().zip(&ids.functions) {
         let slot = match function.kind {

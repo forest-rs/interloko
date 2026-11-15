@@ -77,6 +77,7 @@ use crate::sem;
 use crate::syntax::Span;
 use crate::typing;
 use interloko_model::condition::TypeErrorKind;
+use interloko_model::sealing::ClosedWorld;
 use interloko_model::types::IntRange;
 use interloko_runtime::RuntimeLayout;
 use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
@@ -276,6 +277,11 @@ pub struct Module {
     /// The contract of each generic, method and source function, which the
     /// lowered code trusts at its calls; see [`sem::Module::contract`].
     pub contracts: Contracts,
+    /// The closed-world assumptions the lowered code relies on: those of
+    /// every typing decision it acts on, sealed classes and method sets
+    /// with source names, in first-use order. Empty under
+    /// [`CodegenPolicy::Off`].
+    pub assumptions: Vec<ClosedWorld>,
     /// Every check site a typing fact changed, sorted by owner and site.
     /// Empty under [`CodegenPolicy::Off`]; see [`Self::check_codegen`].
     pub check_codegen: Vec<CheckCodegenRecord>,
@@ -2106,6 +2112,7 @@ impl<'module> Lowering<'module> {
             .collect::<Result<Vec<_>, LowerError>>()?;
 
         let dispatch = self.ids.dispatch.clone();
+        let check_codegen = merge_check_records(checks);
         Ok(Module {
             runtime: runtime_bridge::runtime_layout_from_sem(self.module),
             restarts: self.ids.restarts.clone(),
@@ -2115,7 +2122,8 @@ impl<'module> Lowering<'module> {
             main,
             dispatch,
             contracts: contracts(self.module),
-            check_codegen: merge_check_records(checks),
+            assumptions: self.facts.closed_world(self.module, &check_codegen),
+            check_codegen,
         })
     }
 
