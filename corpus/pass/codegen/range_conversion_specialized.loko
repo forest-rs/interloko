@@ -1,0 +1,18 @@
+// codegen: proved
+// expect: run 41i32
+// expect: diagnostics 0
+// expect: dump typing contains range proved rule=range-within
+// expect: dump eop contains codegen=specialized
+// expect: dump lowered contains i64.to_i32_wrap
+// expect: dump lowered lacks = i64.to_i32 %r
+
+// Between 0 and 100, `n` fits in <i32>, so the conversion keeps the low 32
+// bits instead of trapping on values that cannot reach it.
+
+define function narrow(n :: <integer>) => <i32>
+  if n < 0 then 0i32 else if n > 100 then 100i32 else as(<i32>, n) end end
+end;
+
+define function main() => <i32>
+  narrow(41)
+end;

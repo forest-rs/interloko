@@ -1,0 +1,18 @@
+// codegen: proved
+// expect: run 1000i32
+// expect: diagnostics 0
+// expect: dump eop contains codegen=specialized
+// expect: dump eop contains codegen=kept
+// expect: dump lowered contains i32.add %r
+// expect: dump lowered contains i32.add_ovf
+
+// The guarded `i + 1` cannot leave <i32> and wraps without a check; the
+// unguarded `i + 2` keeps its overflow check.
+
+define function step(i :: <i32>) => <i32>
+  if i < 1000 then i + 1 else i + 2 end
+end;
+
+define function main() => <i32>
+  step(999)
+end;

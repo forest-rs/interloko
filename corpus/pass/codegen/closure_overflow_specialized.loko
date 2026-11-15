@@ -1,0 +1,18 @@
+// codegen: proved
+// expect: run 8
+// expect: diagnostics 0
+// expect: dump typing contains overflow proved rule=overflow-impossible
+// expect: dump eop contains codegen=specialized
+// expect: dump lowered lacks i64.add_ovf
+
+// A closure's checks are typed with the function that creates it, and its
+// captures hold their values there: `step` is the literal 3, so `x + step`
+// on a small `x` cannot overflow inside the closure's own code.
+
+define function main() => <integer>
+  let step :: <integer> = 3;
+  let bump = function (x :: <integer>) => <integer>
+    if x < 100 then if x > 0 then x + step else 0 end else 0 end
+  end;
+  apply(bump, 5)
+end;

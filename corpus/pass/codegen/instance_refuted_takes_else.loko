@@ -1,0 +1,19 @@
+// codegen: proved
+// expect: run 2
+// expect: dump typing contains instance refuted rule=instance-never
+// expect: dump eop contains codegen=elided
+// expect: dump lowered lacks instance?
+
+// `s` holds the <square> just made, so it is never a <circle>: the test is
+// the constant `#f` and only the else branch is emitted.
+
+define class <circle> (<object>)
+end;
+
+define class <square> (<object>)
+end;
+
+define function main() => <integer>
+  let s :: <object> = make(<square>);
+  if instance?(s, <circle>) then 1 else 2 end
+end;

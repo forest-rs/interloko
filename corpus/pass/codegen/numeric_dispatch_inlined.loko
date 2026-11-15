@@ -1,0 +1,14 @@
+// codegen: proved
+// expect: run 21
+// expect: diagnostics 0
+// expect: dump eop contains codegen=inlined
+// expect: dump lowered lacks select-method
+
+// Soft typing knows the boxed operand is the <integer> 20, so it selects
+// the built-in `+` method for two <integer>s. Under `codegen: proved` the
+// send becomes that method's operation: unbox, add, box. No method is
+// selected at run time, and neither the dispatcher nor the method is called.
+
+define function main() => <integer>
+  as(<integer>, as(<object>, 20) + 1)
+end;

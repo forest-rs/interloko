@@ -1,0 +1,26 @@
+// codegen: proved
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump typing contains cast proved rule=cast-upcast
+// expect: dump eop contains rule=cast-upcast owner=
+// expect: dump eop contains codegen=elided
+// expect: dump lowered lacks = as
+
+// `s` is declared a <shape>, so sem casts it to <circle> at run time, but
+// soft typing knows it holds the <circle> just made. Under `codegen: proved`
+// the cast reuses its operand: no host call checks the class.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function area(c :: <circle>) => <integer>
+  3
+end;
+
+define function main() => <integer>
+  let s :: <shape> = make(<circle>);
+  area(as(<circle>, s))
+end;

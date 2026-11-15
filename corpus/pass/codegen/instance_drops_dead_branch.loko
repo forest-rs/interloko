@@ -1,0 +1,30 @@
+// codegen: proved
+// expect: run 1
+// expect: diagnostics 1
+// expect: diagnostic code typing.instance-always-true
+// expect: dump eop contains codegen=elided
+// expect: dump lowered lacks instance?
+// expect: dump lowered lacks call l0()
+
+// The `instance?` test is always true, so under `codegen: proved` it is the
+// constant `#t` and its dead else branch, the call to `never` (`l0`), is not
+// emitted at all.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function never() => <integer>
+  0
+end;
+
+define function round?(s :: <shape>) => <integer>
+  let c :: <shape> = make(<circle>);
+  if instance?(c, <circle>) then 1 else never() end
+end;
+
+define function main() => <integer>
+  round?(make(<circle>))
+end;

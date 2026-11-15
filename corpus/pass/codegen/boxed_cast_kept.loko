@@ -1,0 +1,23 @@
+// codegen: proved
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump typing contains cast proved rule=cast-upcast
+// expect: dump eop contains codegen=kept
+// expect: dump lowered contains = as <circle>
+// expect: dump eop lacks codegen=elided
+
+// A proved cast from a boxed <object> still calls the host: the box has to
+// be unwrapped to reach the object, and the unwrap checks the class on the
+// way, so there is no cheaper path to take.
+
+define class <circle> (<object>)
+end;
+
+define function area(c :: <circle>) => <integer>
+  3
+end;
+
+define function main() => <integer>
+  let o :: <object> = make(<circle>);
+  area(as(<circle>, o))
+end;
