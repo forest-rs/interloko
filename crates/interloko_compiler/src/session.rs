@@ -12784,6 +12784,20 @@ fn indent_line(out: &mut String, indent: usize) {
 mod tests {
     use super::*;
 
+    /// `SessionArtifacts` is moved, cloned and returned by value through the
+    /// compiler and the REPL, and an unoptimized frame keeps a separate slot
+    /// for each such temporary. When the invalidation tracker sat inline it
+    /// was 11 KiB, and the REPL's break-loop edit overflowed the 1 MiB main
+    /// stack on Windows. Large parts belong behind a pointer.
+    #[test]
+    fn session_artifacts_stay_small_enough_to_move_by_value() {
+        let size = core::mem::size_of::<SessionArtifacts>();
+        assert!(
+            size <= 4 * 1024,
+            "SessionArtifacts is {size} bytes; box the field that grew"
+        );
+    }
+
     fn run_scalar(
         artifacts: &SessionArtifacts,
         name: &str,

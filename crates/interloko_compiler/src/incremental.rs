@@ -3,7 +3,7 @@
 //! Interloko owns artifacts and scheduling. This module only maps compiler query
 //! artifacts into `invalidation` keys and exposes affected-order drains.
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 use invalidation::{Channel, InvalidationTracker, LazyPolicy};
 
@@ -145,7 +145,13 @@ impl QueryArtifact {
 #[derive(Clone, Debug)]
 pub struct QueryInvalidation {
     source_file: SourceFileId,
-    tracker: InvalidationTracker<usize>,
+    /// Boxed: the tracker keeps fixed per-channel tables inline (about 9 KiB),
+    /// and this value travels inside every [`SessionArtifacts`] that is moved,
+    /// cloned or returned. Inline, it made each such stack slot 11 KiB, and
+    /// unoptimized frames that hold several of them overflowed a 1 MiB stack.
+    ///
+    /// [`SessionArtifacts`]: crate::session::SessionArtifacts
+    tracker: Box<InvalidationTracker<usize>>,
     artifacts: Vec<(ArtifactKey, QueryArtifact)>,
     edges: Vec<ArtifactEdge>,
     methods: Vec<DefinitionId>,
@@ -157,7 +163,7 @@ impl QueryInvalidation {
     pub fn for_module(module: &Module) -> Self {
         let mut this = Self {
             source_file: module.source_file,
-            tracker: InvalidationTracker::new(),
+            tracker: Box::new(InvalidationTracker::new()),
             artifacts: Vec::new(),
             edges: Vec::new(),
             methods: module
