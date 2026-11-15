@@ -1,0 +1,14 @@
+// A strict function whose argument may be out of its callee's range: each
+// call is a `typing.unproved-range` error whose first fix annotates `n`.
+
+define function small(n :: limited(<integer>, min: 0, max: 9)) => <integer>
+  n
+end;
+
+define strict function twice(n :: <integer>) => <integer>
+  small(n) + small(n)
+end;
+
+define function main() => <integer>
+  twice(3)
+end;

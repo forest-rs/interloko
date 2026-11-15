@@ -1114,3 +1114,37 @@ fn typing_command_shows_and_sets_the_policy_and_survives_reset() {
         "{stderr}"
     );
 }
+
+#[test]
+fn strict_definitions_must_prove_their_checks_and_preview_before_opting_in() {
+    let (stdout, stderr) = run_repl(&format!(
+        "{SHAPES}\
+         :invoke function:f0 preview-strict\n\
+         define strict function exact(s :: <shape>)\n  area(s)\nend;\n\
+         define strict function round(c :: <circle>)\n  area(c)\nend;\n\
+         :quit\n"
+    ));
+    assert!(
+        stdout.contains("strict preview function measure (not applied) strict=none errors=1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("    fix: test s with instance? against <circle> first"),
+        "{stdout}"
+    );
+    // A strict definition that leaves a send to the runtime is rejected with
+    // its reasons and fixes; one whose sends are proved is accepted.
+    assert!(
+        stderr.contains("Error typing.unproved-dispatch"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("    fix: declare <shape> sealed abstract"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("typing.unproved-dispatch").count(),
+        1,
+        "{stderr}"
+    );
+}

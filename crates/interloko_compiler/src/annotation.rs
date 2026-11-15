@@ -729,6 +729,9 @@ pub struct TypingTally {
     pub inlined: usize,
     /// Dispatches that call their method through a relinkable link.
     pub linked: usize,
+    /// Decisions reported as errors, such as a strict definition's
+    /// unproved checks.
+    pub errors: usize,
 }
 
 impl TypingTally {
@@ -744,6 +747,9 @@ impl TypingTally {
             CheckCodegen::Specialized => self.specialized += 1,
             CheckCodegen::Inlined => self.inlined += 1,
             CheckCodegen::Linked => self.linked += 1,
+        }
+        if snapshot.severity == TypingSeverity::Error {
+            self.errors += 1;
         }
     }
 }
@@ -838,8 +844,8 @@ impl TypingDelta {
         self.changes.is_empty()
     }
 
-    /// Renders the delta: a summary line, the verdict and codegen counts
-    /// before and after, then one line per change, such as
+    /// Renders the delta: a summary line, the verdict, codegen, and error
+    /// counts before and after, then one line per change, such as
     /// `typing:def…:s0 instance verdict=checked->proved codegen=kept->elided`.
     #[must_use]
     pub fn render(&self) -> String {
@@ -874,6 +880,7 @@ impl TypingDelta {
             b.linked,
             a.linked
         );
+        let _ = writeln!(out, "  errors {}->{}", b.errors, a.errors);
         for change in &self.changes {
             let _ = writeln!(out, "  {}", render_change(change));
         }

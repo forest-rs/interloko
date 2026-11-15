@@ -1630,3 +1630,45 @@ fn typing_config_affordances_report_policy_deltas() {
     );
     assert!(stdout.contains("codegen=inlined->kept"), "{stdout}");
 }
+
+#[test]
+fn strict_errors_preview_strictness_and_fixes_through_affordances() {
+    let path = fixture("strict_digits.loko");
+    let path = path.to_str().expect("fixture path should be utf8");
+
+    let (stdout, stderr) = run_lab_success(&["run", path]);
+    assert_eq!(stdout, "6\n");
+    assert!(stderr.contains("Error typing.unproved-range"), "{stderr}");
+    assert!(
+        stderr.contains("    fix: annotate parameter n as limited(<integer>, min: 0, max: 9)"),
+        "{stderr}"
+    );
+
+    let affordances = run_lab(&["affordances", path, "diagnostic:d0"]);
+    for name in ["show-typing", "preview-fix", "apply-fix"] {
+        assert!(affordances.contains(name), "{affordances}");
+    }
+    let preview = run_lab(&["invoke-affordance", path, "function:f0", "preview-strict"]);
+    assert_eq!(
+        preview,
+        "strict preview function small (not applied) strict=none errors=0\n"
+    );
+
+    let (stdout, _) = run_lab_success(&["invoke-affordance", path, "diagnostic:d0", "preview-fix"]);
+    assert!(stdout.contains("(not applied)"), "{stdout}");
+    assert!(stdout.contains("  errors 2->0\n"), "{stdout}");
+    assert!(
+        stdout
+            .contains("range verdict=checked->proved codegen=kept->elided severity=error->silent"),
+        "{stdout}"
+    );
+    let (stdout, _) =
+        run_lab_success(&["invoke-affordance", path, "diagnostic:d0", "apply-fix", "0"]);
+    assert!(stdout.contains("applied annotate"), "{stdout}");
+
+    let stderr = run_lab_failure(&["invoke-affordance", path, "diagnostic:d0", "apply-fix", "1"]);
+    assert!(
+        stderr.contains("fix 1 of `diagnostic:d0` is not one an annotation makes"),
+        "{stderr}"
+    );
+}

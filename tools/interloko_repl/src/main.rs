@@ -797,6 +797,10 @@ impl Repl {
                 diagnostic.span.end,
                 self.renderer.render(diagnostic)?
             )?;
+            // Notes are facts, such as a strict error's reasons and fixes.
+            for note in &diagnostic.notes {
+                writeln!(stderr, "    {}", note.message)?;
+            }
         }
         Ok(())
     }
@@ -1017,6 +1021,8 @@ impl Repl {
                     | EnvironmentAffordance::PreviewAnnotation
                     | EnvironmentAffordance::SetTypingPolicy
                     | EnvironmentAffordance::SetCodegenPolicy
+                    | EnvironmentAffordance::PreviewFix
+                    | EnvironmentAffordance::ApplyFix
             )
         }) {
             let Some(object) = find_object(&artifacts, &id) else {
@@ -1036,6 +1042,32 @@ impl Repl {
                 }
                 EnvironmentAffordance::SetCodegenPolicy => {
                     self.set_codegen_policy_with_delta(&extra, stdout, stderr)
+                }
+                EnvironmentAffordance::PreviewFix | EnvironmentAffordance::ApplyFix => {
+                    let index = match extra.as_slice() {
+                        [] => Some(0),
+                        [index] => index.parse().ok(),
+                        _ => None,
+                    };
+                    let Some(index) = index else {
+                        writeln!(stderr, "usage: :invoke {id} {affordance} [fix-index]")?;
+                        return Ok(());
+                    };
+                    let Some((target, type_source)) = artifacts.strict_fix_annotation(&id, index)
+                    else {
+                        writeln!(
+                            stderr,
+                            "error: fix {index} of `{id}` is not one an annotation makes"
+                        )?;
+                        return Ok(());
+                    };
+                    self.annotate(
+                        &target.to_string(),
+                        &type_source,
+                        adjustment == EnvironmentAffordance::PreviewFix,
+                        stdout,
+                        stderr,
+                    )
                 }
                 _ if extra.is_empty() => {
                     writeln!(stderr, "usage: :invoke {id} {affordance} <type>")?;
@@ -1338,6 +1370,13 @@ impl Repl {
                 affordance,
                 object.id.as_str(),
             )?,
+            EnvironmentAffordance::PreviewStrict => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.preview_strict(object.id.as_str()),
+                affordance,
+                object.id.as_str(),
+            )?,
             EnvironmentAffordance::Run => {
                 self.run_environment_object(artifacts, object, stdout, stderr)?
             }
@@ -1349,7 +1388,9 @@ impl Repl {
             EnvironmentAffordance::Annotate
             | EnvironmentAffordance::PreviewAnnotation
             | EnvironmentAffordance::SetTypingPolicy
-            | EnvironmentAffordance::SetCodegenPolicy => writeln!(
+            | EnvironmentAffordance::SetCodegenPolicy
+            | EnvironmentAffordance::PreviewFix
+            | EnvironmentAffordance::ApplyFix => writeln!(
                 stderr,
                 "error: affordance `{}` takes arguments; use :invoke {} {} <args>",
                 affordance.as_str(),
@@ -2231,7 +2272,12 @@ where
             if extra.is_empty()
                 || matches!(
                     *affordance,
-                    "annotate" | "preview-annotation" | "set-typing-policy" | "set-codegen-policy"
+                    "annotate"
+                        | "preview-annotation"
+                        | "set-typing-policy"
+                        | "set-codegen-policy"
+                        | "preview-fix"
+                        | "apply-fix"
                 ) =>
         {
             Ok(Some((
@@ -3334,8 +3380,9 @@ fn help_text() -> &'static str {
                                 keeps every runtime check
   :typing [preset|check.verdict=severity...]
                                 show or set the typing policy (soft, silent,
-                                strict, or settings such as cast.checked=warning)
-                                and report the decisions whose severity moved
+                                strict, or settings such as cast.checked=warning
+                                or strict.scope=all) and report the decisions
+                                whose severity moved
   :cancel                       cancel a pending multiline definition
   :clear-pending                alias for :cancel
   :pending                      show pending multiline definition
@@ -3357,7 +3404,11 @@ typing:
   :annotate [--dry-run] <binding:...|result:...> <type>
                                 write a type annotation and report the typing
                                 decisions it changes; --dry-run only reports
-  :invoke typing-config:session set-typing-policy|set-codegen-policy <args>"
+  :invoke typing-config:session set-typing-policy|set-codegen-policy <args>
+  :invoke <function:...|method:...|generic:...|constant:...> preview-strict
+                                report what would fail if it were strict
+  :invoke <diagnostic:dN> preview-fix|apply-fix [fix-index]
+                                preview or apply a strict error's annotation fix"
 }
 
 #[derive(Clone, Debug, Default)]
