@@ -28,9 +28,13 @@ rule result-annotation = `=>` result-annotation-value
 rule result-annotation-value = type-annotation-value | result-annotation-values
 rule result-annotation-values = `(` trailing-list-of<type-annotation-value, `,`>? `)`
 rule type-annotation = `::` type-annotation-value
-rule type-annotation-value = callable-type | nominal-type
+rule type-annotation-value = callable-type | limited-type | nominal-type
 rule callable-type = `callable` `(` callable-parameter-types? `)` result-annotation
 rule callable-parameter-types = trailing-list-of<type-annotation-value, `,`>
+rule limited-type = `limited` `(` annotation-type limited-option* `)`
+rule limited-option = `,` limited-keyword limited-bound
+rule limited-keyword = name `:`
+rule limited-bound = `-`? number
 rule nominal-type = class-object-annotation-type | annotation-type
 rule class-object-annotation-type = class-object-type annotation-type
 rule annotation-type = type-name

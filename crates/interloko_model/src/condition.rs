@@ -157,8 +157,9 @@ pub enum TypeErrorKind {
     /// class. Code `type-error.entry`.
     Entry,
     /// A number is outside a limited type's range: converting to `<i32>`,
-    /// a float to an integer it does not equal, or a shift count outside
-    /// `0..=31`. Code `type-error.range`.
+    /// a float to an integer it does not equal, a shift count outside
+    /// `0..=31`, or an argument, binding, slot value, constant or result
+    /// outside its `limited(<integer>, ...)` type. Code `type-error.range`.
     Range,
     /// Integer arithmetic produced a result its kind cannot represent.
     /// Code `type-error.overflow`.

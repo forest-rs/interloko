@@ -392,6 +392,23 @@ impl QueryInvalidation {
                 QueryArtifact::Contract(method),
                 QueryArtifact::Contract(generic.definition),
             );
+            // Its body assumes the generic's parameter ranges and checks
+            // its results against the generic's, so its typing and lowering
+            // follow the generic's contract wherever that declares a range.
+            // (An open result is inferred from the methods, so an edge from
+            // every one would make sibling methods depend on each other.)
+            if generic.param_ranges.iter().any(Option::is_some)
+                || generic.result_ranges.iter().any(Option::is_some)
+            {
+                this.add(
+                    QueryArtifact::DefinitionTyping(method),
+                    QueryArtifact::Contract(generic.definition),
+                );
+                this.add(
+                    QueryArtifact::MethodLowering(method),
+                    QueryArtifact::Contract(generic.definition),
+                );
+            }
             // An open result is inferred from every method's body.
             if generic.return_annotation.is_none() {
                 this.add(

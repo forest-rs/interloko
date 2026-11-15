@@ -11,8 +11,10 @@
 //! - `as(<class>, value)` tests the value's runtime class and signals a
 //!   `<type-error>` when the test fails;
 //! - converting to a limited integer type signals a `<type-error>` when the
-//!   value is out of range, and integer arithmetic signals one when it
-//!   overflows.
+//!   value is out of range, and so does a value reaching a declaration of a
+//!   `limited(<integer>, ...)` type (an argument, `let` binding, slot,
+//!   constant or result; see [`sem::Expr::CheckRange`]); integer arithmetic
+//!   signals one when it overflows.
 //!
 //! A `<type-error>`'s `use-value` restart continues the failed check with a
 //! replacement of its expected type (a number of the operation's result
@@ -50,10 +52,11 @@
 //!   value that passes it but may be unrelated to the operand.
 //!   A cast that may fail has its target type, and a result that may
 //!   overflow has the full range of its kind. A call has its
-//!   callee's declared or sem-inferred result, never a type derived from the
-//!   callee's body, so a definition's typing depends only on its own body.
-//!   Anything else has the type of sem's category for the expression
-//!   ([`sem::Module::kind_type`]).
+//!   callee's declared or sem-inferred result, within a declared limited
+//!   range, never a type derived from the callee's body, so a definition's
+//!   typing depends only on its own body. A binding has its declared type,
+//!   within its limited range. Anything else has the type of sem's category
+//!   for the expression ([`sem::Module::kind_type`]).
 //! - **Narrowing.** `instance?(x, C)` narrows `x` to `x ⊓ C` in the then
 //!   branch and to `x ∖ C` in the else branch ([`Type::minus`] is
 //!   conservative); a limited-type test does the same with ranges. Comparing

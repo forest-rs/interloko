@@ -460,3 +460,71 @@ fn policy_changes_report_codegen_deltas_without_touching_the_log() {
     assert_eq!(delta.before.proved, delta.after.proved);
     assert!(off.mutations().is_empty());
 }
+
+#[test]
+fn annotating_a_limited_parameter_proves_its_conversion_and_checks_its_callers() {
+    // `n` defaults to `<integer>`, so `as(<u32>, n)` is tested. Limiting it
+    // to a digit proves the conversion inside `digit` and moves the range
+    // check to `main`, where the 7 it passes is proved too.
+    let source = "\
+define function digit(n)
+  as(<u32>, n)
+end;
+define function main()
+  as(<integer>, digit(7))
+end;
+";
+    let mut artifacts = compile(source);
+    assert!(!artifacts.has_errors(), "{:?}", artifacts.diagnostics);
+    let before = run_main(&artifacts);
+    let target = binding(&artifacts, "digit", "n");
+    let digit = "limited(<integer>, min: 0, max: 9)";
+
+    let outcome = artifacts
+        .apply_mutation(SessionMutation::Annotate {
+            target: target.clone(),
+            type_source: digit.into(),
+        })
+        .expect("annotation compiles");
+    let annotation = outcome.annotation().expect("annotate");
+    assert_eq!(annotation.previous, None);
+    let conversion = change(annotation, TypingCheck::Range);
+    assert_eq!(
+        conversion.before.as_ref().map(|before| before.verdict),
+        Some(TypingVerdict::Checked)
+    );
+    assert_eq!(
+        conversion.after.as_ref().map(|after| after.verdict),
+        Some(TypingVerdict::Proved)
+    );
+    assert_eq!(
+        conversion.after.as_ref().map(|after| after.codegen),
+        Some(CheckCodegen::Specialized)
+    );
+    let rendered = annotation.delta.render();
+    assert!(rendered.contains("added=1"), "{rendered}");
+    assert!(
+        artifacts
+            .source
+            .source
+            .contains("define function digit(n :: limited(<integer>, min: 0, max: 9))")
+    );
+
+    let site = artifacts
+        .annotation_sites()
+        .into_iter()
+        .find(|site| site.target == target)
+        .expect("n is a site");
+    let report = artifacts
+        .type_of(&TypeSelector::Span(site.span))
+        .expect("n is typed");
+    assert_eq!(report.declaration, Some(DeclarationOrigin::Written));
+    let types = artifacts
+        .explain_types(&target.to_string())
+        .expect("binding types");
+    assert!(
+        types.contains(&format!("declared: {digit} written")),
+        "{types}"
+    );
+    assert_eq!(run_main(&artifacts), before);
+}

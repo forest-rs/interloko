@@ -17,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
-use interloko_model::types::Type;
+use interloko_model::types::{IntRange, Type};
 
 use super::flow::{ProbeHit, ProbeTarget};
 use super::{
@@ -394,7 +394,7 @@ fn write_definition_types(
             type_name(module, &reason.ty)
         );
         if let Some(info) = &info {
-            let declared = module.kind_type(info.kind);
+            let declared = info.declared(module);
             if declared != reason.ty {
                 let _ = write!(out, " declared={}", type_name(module, &declared));
             }
@@ -474,7 +474,9 @@ fn binding_report(
         span: info.as_ref().map_or(reason.span, |info| info.span),
         ty: reason.ty.clone(),
         rep,
-        declared: module.kind_type(rep),
+        declared: info
+            .as_ref()
+            .map_or_else(|| module.kind_type(rep), |info| info.declared(module)),
         declaration: None,
         reason: roots.first().copied().unwrap_or(ReasonId(0)),
         reasons,
@@ -551,8 +553,17 @@ fn extract(arena: &[Reason], roots: &[ReasonId]) -> (Vec<Reason>, Vec<ReasonId>)
 struct BindingInfo<'a> {
     name: &'a str,
     kind: ValueKind,
+    /// The binding's declared limited range, if any.
+    range: Option<IntRange>,
     span: Span,
     role: &'static str,
+}
+
+impl BindingInfo<'_> {
+    /// The type the binding declares: its kind's, within its range.
+    fn declared(&self, module: &sem::Module) -> Type {
+        super::flow::declared(module, self.kind, self.range)
+    }
 }
 
 impl BindingInfo<'_> {
@@ -582,7 +593,7 @@ fn binding_key(binding: Binding) -> String {
     }
 }
 
-type LocalInfo<'a> = (&'a str, ValueKind, Span, &'static str);
+type LocalInfo<'a> = (&'a str, ValueKind, Option<IntRange>, Span, &'static str);
 
 /// Name, kind, span, and role (`param` or `local`) of `local`.
 fn local_info<'a>(
@@ -596,7 +607,13 @@ fn local_info<'a>(
     } else {
         "local"
     };
-    Some((found.name.as_str(), found.kind, found.span, role))
+    Some((
+        found.name.as_str(),
+        found.kind,
+        found.range,
+        found.span,
+        role,
+    ))
 }
 
 fn binding_info(
@@ -604,7 +621,7 @@ fn binding_info(
     definition: DefinitionId,
     binding: Binding,
 ) -> Option<BindingInfo<'_>> {
-    let (name, kind, span, role) = match binding {
+    let (name, kind, range, span, role) = match binding {
         Binding::Local(local) => {
             if let Some(function) = module
                 .functions
@@ -630,12 +647,19 @@ fn binding_info(
                 .captures
                 .iter()
                 .find(|candidate| candidate.id == capture)?;
-            (found.name.as_str(), found.kind, found.span, "capture")
+            (
+                found.name.as_str(),
+                found.kind,
+                found.range,
+                found.span,
+                "capture",
+            )
         }
     };
     Some(BindingInfo {
         name,
         kind,
+        range,
         span,
         role,
     })

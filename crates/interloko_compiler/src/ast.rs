@@ -62,7 +62,7 @@ pub struct Constant {
     /// Constant name, conventionally including a leading `$`.
     pub name: String,
     /// Optional value type annotation.
-    pub type_annotation: Option<TypeAnnotation>,
+    pub type_annotation: Option<TypeExpr>,
     /// Initializer expression.
     pub value: Expr,
     /// Source span.
@@ -77,60 +77,152 @@ pub struct FunctionParam {
     /// Parameter name.
     pub name: String,
     /// Optional declared parameter type.
-    pub type_annotation: Option<TypeAnnotation>,
+    pub type_annotation: Option<TypeExpr>,
     /// Source span.
     pub span: Span,
 }
 
-/// Source type annotation.
+/// Source type expression: what a `::` or `=>` annotation, a method
+/// parameter's specializer, or the type argument of `as` or `instance?`
+/// names.
+///
+/// Each variant is one form of type the surface syntax can write. A future
+/// type constructor (a union, `false-or`) is a new variant, and every
+/// consumer that matches on this enum must then decide what it means there.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TypeAnnotation {
-    /// Type name, including angle brackets.
-    pub name: String,
-    /// Whether this annotation denotes the class object named by `name`.
-    pub class_object: bool,
-    /// Callable type signature when this annotation uses `callable(...) => ...`.
-    pub callable: Option<CallableTypeAnnotation>,
-    /// Source span.
-    pub span: Span,
+pub enum TypeExpr {
+    /// A class or other named type, such as `<circle>` or `<i32>`.
+    Named {
+        /// Type name, including angle brackets.
+        name: String,
+        /// Source span.
+        span: Span,
+    },
+    /// The class objects naming a class or one of its subclasses:
+    /// `class <shape>`.
+    ClassObject {
+        /// Bounding class name, including angle brackets.
+        name: String,
+        /// Source span, from `class` to the name.
+        span: Span,
+    },
+    /// A callable value with a signature: `callable(<integer>) => <circle>`.
+    Callable {
+        /// Parameter and result types.
+        signature: CallableTypeExpr,
+        /// Source span, from `callable` to the last result type.
+        span: Span,
+    },
+    /// A limited type: `limited(<integer>, min: 0, max: 255)`.
+    Limited(LimitedTypeExpr),
 }
 
-/// Source callable type annotation.
+impl TypeExpr {
+    /// Returns the source span of the whole expression.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        match self {
+            Self::Named { span, .. }
+            | Self::ClassObject { span, .. }
+            | Self::Callable { span, .. }
+            | Self::Limited(LimitedTypeExpr { span, .. }) => *span,
+        }
+    }
+
+    /// Returns the name a [`Self::Named`] type writes.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Named { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// Source callable type signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CallableTypeAnnotation {
-    /// Callable parameter annotations in call order.
-    pub params: Vec<TypeAnnotation>,
-    /// Callable result annotations in return order.
+pub struct CallableTypeExpr {
+    /// Parameter types in call order.
+    pub params: Vec<TypeExpr>,
+    /// Result types in return order.
     pub results: ResultAnnotation,
+}
+
+/// Source `limited(<base>, min: m, max: n)` type, as written: the values
+/// of `base` within the bounds its options give.
+///
+/// The options are kept in source order and unvalidated; semantic lowering
+/// accepts `min:` and `max:`, each at most once, with an `<integer>`
+/// literal, and either may be omitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LimitedTypeExpr {
+    /// The limited type, such as `<integer>`.
+    pub base: Box<TypeExpr>,
+    /// Keyword options in source order, such as `min: 0`.
+    pub options: Vec<TypeOption>,
+    /// Source span, from `limited` to the closing parenthesis.
+    pub span: Span,
+}
+
+impl LimitedTypeExpr {
+    /// Returns the value of the first option named `keyword` that has one.
+    #[must_use]
+    pub fn bound(&self, keyword: &str) -> Option<i64> {
+        self.options
+            .iter()
+            .find(|option| option.keyword == keyword)
+            .and_then(|option| option.value)
+    }
+}
+
+/// One `keyword: value` option of a type constructor such as `limited`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeOption {
+    /// Keyword without its colon, such as `min`.
+    pub keyword: String,
+    /// The value as written, such as `-1`.
+    pub text: String,
+    /// The value, or `None` when the text is not an `<integer>` literal.
+    pub value: Option<i64>,
+    /// Source span, from the keyword to the value.
+    pub span: Span,
 }
 
 /// Source result annotation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResultAnnotation {
-    /// Result value annotations in return order.
-    pub values: Vec<TypeAnnotation>,
+    /// Result value types in return order.
+    pub values: Vec<TypeExpr>,
     /// Source span.
     pub span: Span,
 }
 
-impl core::fmt::Display for TypeAnnotation {
-    /// Writes the annotation as source would spell it: `<circle>`,
-    /// `class <shape>`, or `callable(<integer>) => <circle>`.
+impl core::fmt::Display for TypeExpr {
+    /// Writes the type as source would spell it: `<circle>`,
+    /// `class <shape>`, `callable(<integer>) => <circle>`, or
+    /// `limited(<integer>, min: 0, max: 255)`.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if let Some(callable) = &self.callable {
-            f.write_str("callable(")?;
-            for (index, param) in callable.params.iter().enumerate() {
-                if index > 0 {
-                    f.write_str(", ")?;
+        match self {
+            Self::Named { name, .. } => f.write_str(name),
+            Self::ClassObject { name, .. } => write!(f, "class {name}"),
+            Self::Callable { signature, .. } => {
+                f.write_str("callable(")?;
+                for (index, param) in signature.params.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{param}")?;
                 }
-                write!(f, "{param}")?;
+                write!(f, ") => {}", signature.results)
             }
-            return write!(f, ") => {}", callable.results);
+            Self::Limited(limited) => {
+                write!(f, "limited({}", limited.base)?;
+                for option in &limited.options {
+                    write!(f, ", {}: {}", option.keyword, option.text)?;
+                }
+                f.write_str(")")
+            }
         }
-        if self.class_object {
-            f.write_str("class ")?;
-        }
-        f.write_str(&self.name)
     }
 }
 
@@ -189,7 +281,7 @@ pub struct Slot {
     ///
     /// Missing types default to Dylan's top `<object>` value category during
     /// semantic lowering.
-    pub type_annotation: Option<TypeAnnotation>,
+    pub type_annotation: Option<TypeExpr>,
     /// Source span for the optional slot type, or the slot name span when the
     /// declaration is untyped.
     pub type_span: Span,
@@ -254,7 +346,7 @@ pub struct GenericParam {
     /// Parameter name.
     pub name: String,
     /// Optional declared parameter type.
-    pub type_annotation: Option<TypeAnnotation>,
+    pub type_annotation: Option<TypeExpr>,
     /// Source span.
     pub span: Span,
 }
@@ -285,12 +377,13 @@ pub struct MethodParam {
     pub id: AstNodeId,
     /// Parameter name.
     pub name: String,
-    /// Nominal class specializer.
+    /// The parameter's specializer: a class, or a limited type restating
+    /// its generic's.
     ///
     /// `<object>` is normalized by semantic lowering because the current
-    /// semantic top value is not a nominal class id. Empty when the source
+    /// semantic top value is not a nominal class id. `None` when the source
     /// gave no class, which lowering to the AST has already reported.
-    pub class_name: String,
+    pub specializer: Option<TypeExpr>,
     /// Source span.
     pub span: Span,
 }
@@ -320,7 +413,7 @@ pub struct Let {
     /// Binding pattern introduced by this let.
     pub pattern: LetPattern,
     /// Optional value type annotation.
-    pub type_annotation: Option<TypeAnnotation>,
+    pub type_annotation: Option<TypeExpr>,
     /// Bound value expression.
     pub value: Expr,
     /// Source span.
@@ -349,7 +442,7 @@ pub struct LetBinding {
     /// Local name.
     pub name: String,
     /// Optional declared local type.
-    pub type_annotation: Option<TypeAnnotation>,
+    pub type_annotation: Option<TypeExpr>,
     /// Source span of the binding name.
     pub span: Span,
 }
@@ -485,23 +578,23 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Runtime class membership test.
+    /// Runtime type membership test: `instance?(value, type)`.
     InstanceOf {
         /// Stable-ish AST node identity.
         id: AstNodeId,
         /// Tested value.
         value: Box<Expr>,
-        /// Tested class name.
-        class_name: String,
+        /// Tested type: a class or limited type.
+        target: TypeExpr,
         /// Source span.
         span: Span,
     },
-    /// Checked object cast/narrowing expression.
+    /// Checked cast or conversion: `as(type, value)`.
     Cast {
         /// Stable-ish AST node identity.
         id: AstNodeId,
-        /// Target class name.
-        class_name: String,
+        /// Target type: a class or limited type.
+        target: TypeExpr,
         /// Value to cast.
         value: Box<Expr>,
         /// Source span.
@@ -964,7 +1057,7 @@ impl<'tree> Lowering<'tree> {
             name,
             type_span: slot_type
                 .as_ref()
-                .map_or(span, |annotation| annotation.span),
+                .map_or(span, |annotation| annotation.span()),
             type_annotation: slot_type,
             init_keyword,
             init_keyword_span,
@@ -1069,7 +1162,12 @@ impl<'tree> Lowering<'tree> {
         let name = self.definition_name_after(node, TokenKind::Method);
         let specializers = params
             .iter()
-            .map(|param| param.class_name.as_str())
+            .map(|param| {
+                param
+                    .specializer
+                    .as_ref()
+                    .map_or_else(String::new, ToString::to_string)
+            })
             .collect::<Vec<_>>()
             .join(",");
         let definition = self.definition(DefinitionKind::Method, &name, &specializers);
@@ -1271,24 +1369,27 @@ impl<'tree> Lowering<'tree> {
                 None
             };
             index = annotation.as_ref().map_or(index + 1, |(_, next)| *next);
-            // A method specializes each parameter on a class; a class object
-            // or callable type names no class to dispatch on.
-            let class_name = match annotation {
+            // A method specializes each parameter on a class, or restates
+            // its generic's limited type; a class object or callable type
+            // names no class to dispatch on.
+            let specializer = match annotation {
+                Some((annotation @ TypeExpr::Limited(_), _)) => Some(annotation),
                 Some((annotation, _)) => {
-                    self.class_annotation_name(&annotation, "method parameter", &name)
+                    let class = self.class_annotation_name(&annotation, "method parameter", &name);
+                    (!class.is_empty()).then_some(annotation)
                 }
                 None => {
                     self.diagnostics.push(
                         Diagnostic::error(token.span, DiagnosticCode::AstInvalidMethodSpecializer)
                             .with_arg(DiagnosticArg::unsigned("actual_count", 0)),
                     );
-                    String::new()
+                    None
                 }
             };
             params.push(MethodParam {
                 id: AstNodeId::child(node.id, 2, &name),
                 name,
-                class_name,
+                specializer,
                 span: token.span,
             });
         }
@@ -1868,29 +1969,9 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_instance_of(&mut self, node: &CstNode) -> Expr {
-        let args = self.lower_regular_args(node);
-        if args.len() != 2 {
-            self.diagnostics.push(
-                Diagnostic::error(node.span, DiagnosticCode::AstInvalidInstanceOf)
-                    .with_arg(DiagnosticArg::unsigned("expected_count", 2))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(args.len()).unwrap_or(u64::MAX),
-                    )),
-            );
-            return Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            };
-        }
-        let mut args = args.into_iter();
-        let value = args.next().expect("arity was checked");
-        let class = args.next().expect("arity was checked");
-        let Expr::ClassName { class_name, .. } = class else {
-            self.diagnostics.push(Diagnostic::error(
-                node.span,
-                DiagnosticCode::AstInvalidInstanceOf,
-            ));
+        let Some((value, target)) =
+            self.lower_typed_args(node, false, DiagnosticCode::AstInvalidInstanceOf)
+        else {
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1899,33 +1980,15 @@ impl<'tree> Lowering<'tree> {
         Expr::InstanceOf {
             id: self.ast_id(node),
             value: Box::new(value),
-            class_name,
+            target,
             span: node.span,
         }
     }
 
     fn lower_cast(&mut self, node: &CstNode) -> Expr {
-        let args = self.lower_regular_args(node);
-        if args.len() != 2 {
-            self.diagnostics.push(
-                Diagnostic::error(node.span, DiagnosticCode::AstInvalidCast)
-                    .with_arg(DiagnosticArg::unsigned("expected_count", 2))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(args.len()).unwrap_or(u64::MAX),
-                    )),
-            );
-            return Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            };
-        }
-        let mut args = args.into_iter();
-        let class = args.next().expect("arity was checked");
-        let value = args.next().expect("arity was checked");
-        let Expr::ClassName { class_name, .. } = class else {
-            self.diagnostics
-                .push(Diagnostic::error(node.span, DiagnosticCode::AstInvalidCast));
+        let Some((value, target)) =
+            self.lower_typed_args(node, true, DiagnosticCode::AstInvalidCast)
+        else {
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1933,9 +1996,92 @@ impl<'tree> Lowering<'tree> {
         };
         Expr::Cast {
             id: self.ast_id(node),
-            class_name,
+            target,
             value: Box::new(value),
             span: node.span,
+        }
+    }
+
+    /// Lowers the two arguments of `as` (`type_first`) or `instance?`: a
+    /// value and a type, reporting `code` when there are not two or the
+    /// type argument writes no type.
+    fn lower_typed_args(
+        &mut self,
+        node: &CstNode,
+        type_first: bool,
+        code: DiagnosticCode,
+    ) -> Option<(Expr, TypeExpr)> {
+        let args = regular_arg_nodes(node);
+        let [first, second] = args.as_slice() else {
+            self.diagnostics.push(
+                Diagnostic::error(node.span, code)
+                    .with_arg(DiagnosticArg::unsigned("expected_count", 2))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
+            return None;
+        };
+        let (type_node, value_node) = if type_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let target = self.type_expr_from_node(type_node);
+        let value = self.lower_expr(value_node);
+        let Some(target) = target else {
+            self.diagnostics.push(Diagnostic::error(node.span, code));
+            return None;
+        };
+        Some((value, target))
+    }
+
+    /// The type an expression node writes where `as` and `instance?` take
+    /// one: a type name, or a `limited(<base>, keyword: bound, ...)` call.
+    fn type_expr_from_node(&mut self, node: &CstNode) -> Option<TypeExpr> {
+        match node.kind {
+            CstKind::TypeExpr => {
+                let (span, name) = self.first_token_text(node, TokenKind::TypeName)?;
+                Some(TypeExpr::Named {
+                    name: name.to_string(),
+                    span,
+                })
+            }
+            CstKind::CallExpr => {
+                let (_, callee) = self.first_token_text(node, TokenKind::Ident)?;
+                if callee != "limited" {
+                    return None;
+                }
+                let args = regular_arg_nodes(node);
+                let [base] = args.as_slice() else {
+                    return None;
+                };
+                let base = self.type_expr_from_node(base)?;
+                let options = node
+                    .child_nodes(CstKind::ArgList)
+                    .flat_map(|list| list.child_nodes(CstKind::KeywordArg))
+                    .map(|keyword| {
+                        let arg = self.lower_keyword_arg(keyword);
+                        let value_span = arg.value.span();
+                        TypeOption {
+                            keyword: arg.name,
+                            text: self.tree.source[value_span.start..value_span.end].to_string(),
+                            value: match arg.value {
+                                Expr::Number { value, .. } => Some(value),
+                                _ => None,
+                            },
+                            span: arg.span,
+                        }
+                    })
+                    .collect();
+                Some(TypeExpr::Limited(LimitedTypeExpr {
+                    base: Box::new(base),
+                    options,
+                    span: node.span,
+                }))
+            }
+            _ => None,
         }
     }
 
@@ -2383,15 +2529,15 @@ impl<'tree> Lowering<'tree> {
     /// type there and returns an empty name.
     fn class_annotation_name(
         &mut self,
-        annotation: &TypeAnnotation,
+        annotation: &TypeExpr,
         position: &str,
         name: &str,
     ) -> String {
-        if annotation.callable.is_none() && !annotation.class_object {
-            return annotation.name.clone();
+        if let TypeExpr::Named { name, .. } = annotation {
+            return name.clone();
         }
         self.diagnostics.push(
-            Diagnostic::error(annotation.span, DiagnosticCode::AstAnnotationNotClass)
+            Diagnostic::error(annotation.span(), DiagnosticCode::AstAnnotationNotClass)
                 .with_arg(DiagnosticArg::text("position", position))
                 .with_arg(DiagnosticArg::text("name", name))
                 .with_arg(DiagnosticArg::text("type", annotation.to_string())),
@@ -2447,7 +2593,7 @@ impl<'tree> Lowering<'tree> {
             .collect()
     }
 
-    fn type_annotation_after(&self, node: &CstNode, marker_index: usize) -> Option<TypeAnnotation> {
+    fn type_annotation_after(&self, node: &CstNode, marker_index: usize) -> Option<TypeExpr> {
         let tokens = self.node_token_indices(node);
         let marker = tokens.iter().position(|index| *index == marker_index)?;
         self.type_annotation_from_tokens(&tokens, marker + 1)
@@ -2512,7 +2658,7 @@ impl<'tree> Lowering<'tree> {
             .map(|(annotation, next)| {
                 (
                     ResultAnnotation {
-                        span: annotation.span,
+                        span: annotation.span(),
                         values: vec![annotation],
                     },
                     next,
@@ -2524,14 +2670,18 @@ impl<'tree> Lowering<'tree> {
         &self,
         tokens: &[usize],
         mut index: usize,
-    ) -> Option<(TypeAnnotation, usize)> {
+    ) -> Option<(TypeExpr, usize)> {
         let start = index;
-        if tokens.get(index).is_some_and(|token| {
-            let token = self.tree.tokens[*token];
-            token.kind == TokenKind::Ident && token.text(&self.tree.source) == "callable"
-        }) {
+        let kind_at = |index: usize| tokens.get(index).map(|token| self.tree.tokens[*token].kind);
+        let ident_at = |index: usize, text: &str| {
+            tokens.get(index).is_some_and(|token| {
+                let token = self.tree.tokens[*token];
+                token.kind == TokenKind::Ident && token.text(&self.tree.source) == text
+            })
+        };
+        if ident_at(index, "callable") {
             let callable_token = self.tree.tokens[tokens[index]];
-            if self.tree.tokens[tokens.get(index + 1).copied()?].kind != TokenKind::LParen {
+            if kind_at(index + 1)? != TokenKind::LParen {
                 return None;
             }
             index += 2;
@@ -2549,49 +2699,92 @@ impl<'tree> Lowering<'tree> {
                     }
                 }
             }
-            let rparen_index = tokens.get(index).copied()?;
-            if self.tree.tokens[rparen_index].kind != TokenKind::RParen {
-                return None;
-            }
-            let arrow_index = tokens.get(index + 1).copied()?;
-            if self.tree.tokens[arrow_index].kind != TokenKind::Arrow {
+            if kind_at(index)? != TokenKind::RParen || kind_at(index + 1)? != TokenKind::Arrow {
                 return None;
             }
             let (results, next) = self.result_annotation_from_tokens(tokens, index + 2)?;
             let span = callable_token.span.cover(results.span);
             return Some((
-                TypeAnnotation {
-                    name: "<callable>".into(),
-                    class_object: false,
-                    callable: Some(CallableTypeAnnotation { params, results }),
+                TypeExpr::Callable {
+                    signature: CallableTypeExpr { params, results },
                     span,
                 },
                 next,
             ));
         }
-        let class_object = tokens
-            .get(index)
-            .is_some_and(|token| self.tree.tokens[*token].kind == TokenKind::Class);
+        if ident_at(index, "limited") && kind_at(index + 1) == Some(TokenKind::LParen) {
+            return self.limited_type_from_tokens(tokens, index);
+        }
+        let class_object = kind_at(index) == Some(TokenKind::Class);
         if class_object {
             index += 1;
         }
-        let type_index = tokens.get(index).copied()?;
-        let type_token = self.tree.tokens[type_index];
+        let type_token = self.tree.tokens[tokens.get(index).copied()?];
         if type_token.kind != TokenKind::TypeName {
             return None;
         }
-        let span = if class_object {
-            self.tree.tokens[tokens[start]].span.cover(type_token.span)
+        let name = type_token.text(&self.tree.source).to_string();
+        let annotation = if class_object {
+            TypeExpr::ClassObject {
+                name,
+                span: self.tree.tokens[tokens[start]].span.cover(type_token.span),
+            }
         } else {
-            type_token.span
+            TypeExpr::Named {
+                name,
+                span: type_token.span,
+            }
         };
-        Some(TypeAnnotation {
-            name: type_token.text(&self.tree.source).to_string(),
-            class_object,
-            callable: None,
-            span,
-        })
-        .map(|annotation| (annotation, index + 1))
+        Some((annotation, index + 1))
+    }
+
+    /// Parses `limited(<base>, keyword: bound, ...)` starting at the
+    /// `limited` token `index`; the grammar has already checked its shape.
+    fn limited_type_from_tokens(
+        &self,
+        tokens: &[usize],
+        index: usize,
+    ) -> Option<(TypeExpr, usize)> {
+        let token = |index: usize| tokens.get(index).map(|token| self.tree.tokens[*token]);
+        let limited_token = token(index)?;
+        let (base, mut index) = self.type_annotation_from_tokens(tokens, index + 2)?;
+        let mut options = Vec::new();
+        while token(index)?.kind == TokenKind::Comma {
+            let keyword = token(index + 1)?;
+            if keyword.kind != TokenKind::Ident || token(index + 2)?.kind != TokenKind::Colon {
+                return None;
+            }
+            index += 3;
+            let first = token(index)?;
+            let negative = first.kind == TokenKind::Minus;
+            if negative {
+                index += 1;
+            }
+            let number = token(index)?;
+            if number.kind != TokenKind::Number {
+                return None;
+            }
+            index += 1;
+            let span = first.span.cover(number.span);
+            options.push(TypeOption {
+                keyword: keyword.text(&self.tree.source).to_string(),
+                text: self.tree.source[span.start..span.end].to_string(),
+                value: integer_bound(negative, number.text(&self.tree.source)),
+                span: keyword.span.cover(number.span),
+            });
+        }
+        let close = token(index)?;
+        if close.kind != TokenKind::RParen {
+            return None;
+        }
+        Some((
+            TypeExpr::Limited(LimitedTypeExpr {
+                base: Box::new(base),
+                options,
+                span: limited_token.span.cover(close.span),
+            }),
+            index + 1,
+        ))
     }
 
     fn first_restart_condition_name(&self, node: &CstNode) -> Option<(Span, &'tree str)> {
@@ -2666,7 +2859,28 @@ fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
     }
 }
 
-fn let_pattern_scalar_annotation(pattern: &LetPattern) -> Option<TypeAnnotation> {
+/// The argument nodes of a call that are not keyword arguments, in order.
+fn regular_arg_nodes(node: &CstNode) -> Vec<&CstNode> {
+    node.child_nodes(CstKind::ArgList)
+        .flat_map(|list| &list.children)
+        .filter_map(|child| match child {
+            CstElement::Node(expr) if expr.kind != CstKind::KeywordArg => Some(expr),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `<integer>` a type option's bound writes: `digits`, negated when
+/// `negative`, or `None` when that is not a plain integer literal in range.
+fn integer_bound(negative: bool, digits: &str) -> Option<i64> {
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude = digits.parse::<i128>().ok()?;
+    i64::try_from(if negative { -magnitude } else { magnitude }).ok()
+}
+
+fn let_pattern_scalar_annotation(pattern: &LetPattern) -> Option<TypeExpr> {
     match pattern {
         LetPattern::Name(binding) => binding.type_annotation.clone(),
         LetPattern::Tuple { .. } => None,
@@ -2783,10 +2997,8 @@ impl FrontendFormLowering {
             ),
             definition: self.definition(DefinitionKind::Slot, &slot.name, class_name),
             name: slot.name.clone(),
-            type_annotation: Some(TypeAnnotation {
+            type_annotation: Some(TypeExpr::Named {
                 name: slot.type_name.clone(),
-                class_object: false,
-                callable: None,
                 span: slot.source_span,
             }),
             type_span: slot.source_span,
@@ -2925,6 +3137,84 @@ mod tests {
     }
 
     #[test]
+    fn limited_types_print_as_written_wherever_a_type_goes() {
+        let written = [
+            "limited(<integer>, min: -1, max: 255)",
+            "limited(<integer>, max: 9)",
+            "limited(<integer>, min: 0)",
+            "limited(<integer>, max: 3, min: 1)",
+            "callable(limited(<integer>, min: 0)) => limited(<integer>, max: 9)",
+            "limited(<integer>, min: 2)",
+            "limited(<integer>, min: 7)",
+        ];
+        let source = format!(
+            "define class <c> (<object>)\n  slot s :: {6};\nend;\n\
+             define function f(n :: {0}) => {1}\n  \
+             let m :: {2} = n;\n  let g :: {4} = f;\n  \
+             if instance?(n, {5}) then as({3}, m) else 0 end\nend;",
+            written[0], written[1], written[2], written[3], written[4], written[5], written[6]
+        );
+        let tree = parse(&source);
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let function = &module.functions[0];
+        let shown = |annotation: Option<&TypeExpr>| annotation.map(ToString::to_string);
+        assert_eq!(
+            shown(function.params[0].type_annotation.as_ref()).as_deref(),
+            Some(written[0])
+        );
+        assert_eq!(
+            function
+                .return_type
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(written[1])
+        );
+        let LetPattern::Name(m) = &function.body.lets[0].pattern else {
+            panic!("a name binding");
+        };
+        assert_eq!(
+            shown(m.type_annotation.as_ref()).as_deref(),
+            Some(written[2])
+        );
+        let LetPattern::Name(g) = &function.body.lets[1].pattern else {
+            panic!("a name binding");
+        };
+        assert_eq!(
+            shown(g.type_annotation.as_ref()).as_deref(),
+            Some(written[4])
+        );
+        let Expr::If {
+            condition,
+            then_branch,
+            ..
+        } = &function.body.result
+        else {
+            panic!("an if");
+        };
+        let Expr::InstanceOf { target, .. } = condition.as_ref() else {
+            panic!("instance?");
+        };
+        assert_eq!(target.to_string(), written[5]);
+        let Expr::Cast { target, .. } = then_branch.as_ref() else {
+            panic!("as");
+        };
+        assert_eq!(target.to_string(), written[3]);
+        let TypeExpr::Limited(limited) = target else {
+            panic!("a limited type");
+        };
+        assert_eq!(
+            (limited.bound("min"), limited.bound("max")),
+            (Some(1), Some(3))
+        );
+        assert_eq!(
+            shown(module.classes[0].slots[0].type_annotation.as_ref()).as_deref(),
+            Some(written[6])
+        );
+    }
+
+    #[test]
     fn lowers_function_params_lets_and_binary_result() {
         let tree =
             parse("define function add-one(x)\n  let one :: <integer> = 1;\n  x + one\nend;");
@@ -2939,7 +3229,7 @@ mod tests {
             module.functions[0].body.lets[0]
                 .type_annotation
                 .as_ref()
-                .map(|annotation| annotation.name.as_str()),
+                .and_then(TypeExpr::name),
             Some("<integer>")
         );
         assert!(matches!(
@@ -2964,24 +3254,24 @@ mod tests {
             function.params[0]
                 .type_annotation
                 .as_ref()
-                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
-            Some((true, "<circle>"))
+                .map(ToString::to_string),
+            Some("class <circle>".into())
         );
         assert_eq!(function.params[1].name, "radius");
         assert_eq!(
             function.params[1]
                 .type_annotation
                 .as_ref()
-                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
-            Some((false, "<integer>"))
+                .map(ToString::to_string),
+            Some("<integer>".into())
         );
         assert_eq!(
             function
                 .return_type
                 .as_ref()
                 .and_then(|annotation| annotation.values.first())
-                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
-            Some((false, "<circle>"))
+                .map(ToString::to_string),
+            Some("<circle>".into())
         );
     }
 
@@ -3056,7 +3346,7 @@ mod tests {
             module
                 .methods
                 .iter()
-                .all(|method| method.params[0].class_name.is_empty())
+                .all(|method| method.params[0].specializer.is_none())
         );
     }
 
@@ -3070,7 +3360,7 @@ mod tests {
             module.constants[0]
                 .type_annotation
                 .as_ref()
-                .map(|annotation| annotation.name.as_str()),
+                .and_then(TypeExpr::name),
             Some("<integer>")
         );
     }
@@ -3140,12 +3430,12 @@ mod tests {
         };
         assert!(matches!(
             condition.as_ref(),
-            Expr::InstanceOf { class_name, .. } if class_name == "<circle>"
+            Expr::InstanceOf { target, .. } if target.name() == Some("<circle>")
         ));
         assert!(matches!(
             then_branch.as_ref(),
             Expr::SlotRead { receiver, .. }
-                if matches!(receiver.as_ref(), Expr::Cast { class_name, .. } if class_name == "<circle>")
+                if matches!(receiver.as_ref(), Expr::Cast { target, .. } if target.name() == Some("<circle>"))
         ));
     }
 
@@ -3166,7 +3456,7 @@ mod tests {
             module.classes[0].slots[0]
                 .type_annotation
                 .as_ref()
-                .map(|annotation| annotation.name.as_str()),
+                .and_then(TypeExpr::name),
             Some("<integer>")
         );
         assert_eq!(
@@ -3188,7 +3478,7 @@ mod tests {
             module.classes[0].slots[1]
                 .type_annotation
                 .as_ref()
-                .map(|annotation| annotation.name.as_str()),
+                .and_then(TypeExpr::name),
             Some("<boolean>")
         );
         assert_eq!(
@@ -3211,26 +3501,32 @@ mod tests {
             module.generics[0].params[0]
                 .type_annotation
                 .as_ref()
-                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
-            Some((false, "<object>"))
+                .map(ToString::to_string),
+            Some("<object>".into())
         );
         assert_eq!(
             module.generics[0]
                 .return_type
                 .as_ref()
                 .and_then(|annotation| annotation.values.first())
-                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
-            Some((false, "<integer>"))
+                .map(ToString::to_string),
+            Some("<integer>".into())
         );
         assert_eq!(module.methods[0].name, "area");
-        assert_eq!(module.methods[0].params[0].class_name, "<circle>");
+        assert_eq!(
+            module.methods[0].params[0]
+                .specializer
+                .as_ref()
+                .and_then(TypeExpr::name),
+            Some("<circle>")
+        );
         assert_eq!(
             module.methods[0]
                 .return_type
                 .as_ref()
                 .and_then(|annotation| annotation.values.first())
-                .map(|annotation| (annotation.class_object, annotation.name.as_str())),
-            Some((false, "<integer>"))
+                .map(ToString::to_string),
+            Some("<integer>".into())
         );
         assert!(matches!(module.methods[0].body.result, Expr::Binary { .. }));
         let Expr::Call { args, .. } = &module.functions[0].body.result else {

@@ -197,11 +197,17 @@ pub struct CallableSignature {
     /// Signatures of typed callable parameters, parallel to `params`;
     /// `None` where a parameter is not one.
     pub param_sigs: Vec<Option<CallableSignature>>,
+    /// Ranges of `limited(<integer>, ...)` parameters, parallel to
+    /// `params`; `None` where a parameter is not one.
+    pub param_ranges: Vec<Option<IntRange>>,
     /// Result value categories in return order.
     pub results: Vec<ValueKind>,
     /// Signatures of typed callable results, parallel to `results`; `None`
     /// where a result is not one.
     pub result_sigs: Vec<Option<CallableSignature>>,
+    /// Ranges of `limited(<integer>, ...)` results, parallel to `results`;
+    /// `None` where a result is not one.
+    pub result_ranges: Vec<Option<IntRange>>,
 }
 
 impl CallableSignature {
@@ -211,7 +217,9 @@ impl CallableSignature {
     pub fn flat(params: Vec<ValueKind>, results: Vec<ValueKind>) -> Self {
         Self {
             param_sigs: vec![None; params.len()],
+            param_ranges: vec![None; params.len()],
             result_sigs: vec![None; results.len()],
+            result_ranges: vec![None; results.len()],
             params,
             results,
         }
@@ -230,10 +238,25 @@ impl CallableSignature {
     pub fn result_sig(&self, index: usize) -> Option<&Self> {
         self.result_sigs.get(index).and_then(Option::as_ref)
     }
+    /// Returns the range of the zero-based parameter `index`, when it is
+    /// a limited integer.
+    #[must_use]
+    pub fn param_range(&self, index: usize) -> Option<IntRange> {
+        self.param_ranges.get(index).copied().flatten()
+    }
+
+    /// Returns the range of the zero-based result `index`, when it is a
+    /// limited integer.
+    #[must_use]
+    pub fn result_range(&self, index: usize) -> Option<IntRange> {
+        self.result_ranges.get(index).copied().flatten()
+    }
+
     fn param_value(&self, index: usize) -> SignatureValue<'_> {
         SignatureValue {
             kind: self.params.get(index).copied().unwrap_or(ValueKind::Error),
             signature: self.param_sig(index),
+            range: self.param_range(index),
         }
     }
 
@@ -241,6 +264,7 @@ impl CallableSignature {
         SignatureValue {
             kind: self.results.get(index).copied().unwrap_or(ValueKind::Error),
             signature: self.result_sig(index),
+            range: self.result_range(index),
         }
     }
 }
@@ -884,6 +908,10 @@ impl Module {
     /// - a function's parameters and results are its declared or inferred
     ///   kinds.
     ///
+    /// A declared `limited(<integer>, ...)` parameter or result is recorded
+    /// as its range, since callers check arguments against a parameter's
+    /// range and rely on a result's.
+    ///
     /// A callable value also records the signature its callers call it
     /// with: a declared `callable(...) => ...` type, or for a
     /// [`ValueKind::KnownCallable`], the known function's, generic's or
@@ -929,9 +957,12 @@ impl Module {
             .params
             .iter()
             .map(|param| match method.locals.get(param.0 as usize) {
-                Some(local) => {
-                    self.value_contract(local.kind, local.callable_signature.as_ref(), &mut outer)
-                }
+                Some(local) => self.value_contract(
+                    local.kind,
+                    local.callable_signature.as_ref(),
+                    local.range,
+                    &mut outer,
+                ),
                 None => Type::top().into(),
             })
             .collect();
@@ -939,9 +970,10 @@ impl Module {
             Some(generic) => self.value_contracts(
                 &generic.result_kinds,
                 &generic.result_callable_sigs,
+                &generic.result_ranges,
                 &mut outer,
             ),
-            None => self.value_contracts(&method.result_kinds, &[], &mut outer),
+            None => self.value_contracts(&method.result_kinds, &[], &[], &mut outer),
         };
         Contract { params, results }
     }
@@ -962,16 +994,21 @@ impl Module {
             params: generic
                 .param_kinds
                 .iter()
-                .map(|kind| {
+                .enumerate()
+                .map(|(index, kind)| {
                     kind.map_or_else(
                         || Type::top().into(),
-                        |kind| self.value_contract(kind, None, outer),
+                        |kind| {
+                            let range = generic.param_ranges.get(index).copied().flatten();
+                            self.value_contract(kind, None, range, outer)
+                        },
                     )
                 })
                 .collect(),
             results: self.value_contracts(
                 &generic.result_kinds,
                 &generic.result_callable_sigs,
+                &generic.result_ranges,
                 outer,
             ),
         }
@@ -986,11 +1023,13 @@ impl Module {
             params: self.value_contracts(
                 &function.param_kinds,
                 &function.param_callable_sigs,
+                &function.param_ranges,
                 outer,
             ),
             results: self.value_contracts(
                 &function.result_kinds,
                 &function.result_callable_sigs,
+                &function.result_ranges,
                 outer,
             ),
         }
@@ -1000,6 +1039,7 @@ impl Module {
         &self,
         kinds: &[ValueKind],
         signatures: &[Option<CallableSignature>],
+        ranges: &[Option<IntRange>],
         outer: &mut Vec<Option<KnownCallable>>,
     ) -> Vec<ValueContract> {
         kinds
@@ -1007,21 +1047,27 @@ impl Module {
             .enumerate()
             .map(|(index, kind)| {
                 let signature = signatures.get(index).and_then(Option::as_ref);
-                self.value_contract(*kind, signature, outer)
+                let range = ranges.get(index).copied().flatten();
+                self.value_contract(*kind, signature, range, outer)
             })
             .collect()
     }
 
     /// What callers assume of one value of `kind`, called with `signature`
-    /// when it is a typed callable. `outer` holds the signatures being
-    /// expanded, innermost last, naming the known callable each belongs to.
+    /// when it is a typed callable, and within `range` when it is a limited
+    /// integer. `outer` holds the signatures being expanded, innermost last,
+    /// naming the known callable each belongs to.
     fn value_contract(
         &self,
         kind: ValueKind,
         signature: Option<&CallableSignature>,
+        range: Option<IntRange>,
         outer: &mut Vec<Option<KnownCallable>>,
     ) -> ValueContract {
-        let ty = self.kind_type(kind);
+        let mut ty = self.kind_type(kind);
+        if let Some(range) = range {
+            ty = ty.meet(&Type::of(Atom::Integer(range), self), self);
+        }
         // Applying a known callable trusts its own signature, whatever
         // signature the value also records.
         let signature = match (kind, signature) {
@@ -1039,10 +1085,16 @@ impl Module {
             (_, Some(signature)) => {
                 outer.push(None);
                 let contract = Contract {
-                    params: self.value_contracts(&signature.params, &signature.param_sigs, outer),
+                    params: self.value_contracts(
+                        &signature.params,
+                        &signature.param_sigs,
+                        &signature.param_ranges,
+                        outer,
+                    ),
                     results: self.value_contracts(
                         &signature.results,
                         &signature.result_sigs,
+                        &signature.result_ranges,
                         outer,
                     ),
                 };
@@ -1082,6 +1134,7 @@ impl Module {
                     results: vec![self.value_contract(
                         slot.kind,
                         slot.callable_signature.as_ref(),
+                        slot.range,
                         outer,
                     )],
                 })
@@ -1100,7 +1153,7 @@ impl Module {
     #[must_use]
     pub fn expr_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
-            Expr::ConstI64 { .. } => ValueKind::I64,
+            Expr::ConstI64 { .. } | Expr::CheckRange { .. } => ValueKind::I64,
             Expr::ConstF64 { .. } => ValueKind::F64,
             Expr::Const32 { value, .. } => number32_kind(*value),
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
@@ -1383,7 +1436,10 @@ fn entry_checks(
         .iter()
         .filter_map(|param| {
             let local = locals.get(param.0 as usize)?;
-            let target = EntryTarget::for_kind(local.kind)?;
+            let target = match local.range {
+                Some(range) if local.kind == ValueKind::I64 => EntryTarget::Range(range),
+                _ => EntryTarget::for_kind(local.kind)?,
+            };
             Some(EntryCheck {
                 param: *param,
                 target,
@@ -1438,7 +1494,8 @@ impl<'a> SiteNumbering<'a> {
             Expr::Cast { value, site, .. }
             | Expr::InstanceOf { value, site, .. }
             | Expr::InstanceOfLimited { value, site, .. }
-            | Expr::Convert { value, site, .. } => {
+            | Expr::Convert { value, site, .. }
+            | Expr::CheckRange { value, site, .. } => {
                 self.expr(value);
                 *site = self.take();
             }
@@ -1783,6 +1840,7 @@ enum SignatureMismatch {
 struct SignatureValue<'a> {
     kind: ValueKind,
     signature: Option<&'a CallableSignature>,
+    range: Option<IntRange>,
 }
 
 /// Returns whether values of kinds `lhs` and `rhs` are held in the same
@@ -2156,6 +2214,9 @@ pub struct Slot {
     /// Declared signature when the slot holds a typed callable, which
     /// reads of the slot are called with and writes must satisfy.
     pub callable_signature: Option<CallableSignature>,
+    /// Declared range when the slot holds a `limited(<integer>, ...)`,
+    /// which every write checks and reads may assume.
+    pub range: Option<IntRange>,
     /// Native or host-backed slot origin.
     pub origin: SlotOrigin,
     /// Getter accessor defined by this slot.
@@ -2196,6 +2257,8 @@ pub struct EffectiveSlot {
     /// Declared signature when the slot holds a typed callable; see
     /// [`Slot::callable_signature`].
     pub callable_signature: Option<CallableSignature>,
+    /// Declared range of a limited integer slot; see [`Slot::range`].
+    pub range: Option<IntRange>,
     /// Native or host-backed slot origin.
     pub origin: SlotOrigin,
     /// Class that originally introduced this slot.
@@ -2291,6 +2354,10 @@ pub struct GenericFunction {
     pub params: Vec<String>,
     /// Explicit parameter contracts in source order.
     pub param_kinds: Vec<GenericParamKind>,
+    /// Ranges of `limited(<integer>, ...)` parameters, parallel to
+    /// `param_kinds`; `None` where a parameter is not one. Every send checks
+    /// its argument against the range, so methods may assume it.
+    pub param_ranges: Vec<Option<IntRange>>,
     /// Arity.
     pub arity: usize,
     /// Zero-based parameter index used for nominal method dispatch.
@@ -2301,6 +2368,9 @@ pub struct GenericFunction {
     pub result_kinds: Vec<ValueKind>,
     /// Typed callable signatures for callable results, when declared.
     pub result_callable_sigs: Vec<Option<CallableSignature>>,
+    /// Ranges of `limited(<integer>, ...)` results, parallel to
+    /// `result_kinds`; every method checks its result against them.
+    pub result_ranges: Vec<Option<IntRange>>,
     /// Explicit declared result categories, when present. `None` means the
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
@@ -2367,6 +2437,10 @@ pub struct Method {
     pub body: Block,
     /// Result value categories in return order.
     pub result_kinds: Vec<ValueKind>,
+    /// Ranges the body checks its results against, parallel to
+    /// `result_kinds`: the method's own `limited(<integer>, ...)` result
+    /// types, or else its generic's.
+    pub result_ranges: Vec<Option<IntRange>>,
     /// Explicit declared result categories, when present. `None` means the
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
@@ -2392,6 +2466,11 @@ pub struct Function {
     pub param_kinds: Vec<ValueKind>,
     /// Typed callable signatures for callable parameters, when declared.
     pub param_callable_sigs: Vec<Option<CallableSignature>>,
+    /// Ranges of `limited(<integer>, ...)` parameters, parallel to
+    /// `param_kinds`. Every direct call checks its argument against the
+    /// range, and an indirect entry checks what it is passed, so the body
+    /// may assume it.
+    pub param_ranges: Vec<Option<IntRange>>,
     /// Local table containing parameters followed by `let` bindings.
     pub locals: Vec<Local>,
     /// Function body.
@@ -2400,6 +2479,10 @@ pub struct Function {
     pub result_kinds: Vec<ValueKind>,
     /// Typed callable signatures for callable results, when declared.
     pub result_callable_sigs: Vec<Option<CallableSignature>>,
+    /// Ranges of `limited(<integer>, ...)` results, parallel to
+    /// `result_kinds`; the body checks its results against them, so
+    /// callers may assume them.
+    pub result_ranges: Vec<Option<IntRange>>,
     /// Explicit declared result categories, when present. `None` means the
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
@@ -2412,7 +2495,7 @@ pub struct Function {
 }
 
 /// A check a callable's indirect entry makes on one parameter before its
-/// body relies on the parameter's declared class.
+/// body relies on the parameter's declared type.
 ///
 /// A caller holding an untyped `<callable>`, or one whose signature
 /// nothing checked, supplies whatever value it has, and the tape's
@@ -2420,7 +2503,10 @@ pub struct Function {
 /// callable value, a closure, or a block's exit procedure checks each
 /// parameter that names a class: an instance of it, or a class object
 /// naming it or a subclass. Unboxed numbers, booleans, and callables are
-/// register types the tape checks itself.
+/// register types the tape checks itself, but no register type holds a
+/// limited integer's range, so a `limited(<integer>, ...)` parameter is
+/// checked against it too: a direct call checks its argument itself, and
+/// an indirect caller may not know the range.
 ///
 /// Each check is a site of the definition whose sites number its body,
 /// after the body's own, so soft typing classifies it like any cast.
@@ -2441,6 +2527,8 @@ pub enum EntryTarget {
     Instance(ClassId),
     /// A class object naming the class or a subclass.
     ClassObject(ClassId),
+    /// An `<integer>` in the range.
+    Range(IntRange),
 }
 
 impl EntryTarget {
@@ -2473,6 +2561,9 @@ pub struct Closure {
     pub param_kinds: Vec<ValueKind>,
     /// Typed callable signatures for callable parameters, when declared.
     pub param_callable_sigs: Vec<Option<CallableSignature>>,
+    /// Ranges of `limited(<integer>, ...)` parameters, parallel to
+    /// `param_kinds`; the closure's entry checks them.
+    pub param_ranges: Vec<Option<IntRange>>,
     /// Captures read from the closure environment.
     pub captures: Vec<Capture>,
     /// Local table containing parameters followed by `let` bindings.
@@ -2483,6 +2574,9 @@ pub struct Closure {
     pub result_kinds: Vec<ValueKind>,
     /// Typed callable signatures for callable results, when declared.
     pub result_callable_sigs: Vec<Option<CallableSignature>>,
+    /// Ranges of `limited(<integer>, ...)` results, parallel to
+    /// `result_kinds`; the body checks its results against them.
+    pub result_ranges: Vec<Option<IntRange>>,
     /// Explicit declared result categories, when present. `None` means the
     /// source declaration has an open result contract and the concrete result
     /// categories are inferred for lowering.
@@ -2507,6 +2601,8 @@ pub struct Capture {
     pub kind: ValueKind,
     /// Typed callable signature when the capture is a typed callable value.
     pub callable_signature: Option<CallableSignature>,
+    /// The captured local's declared range; see [`Local::range`].
+    pub range: Option<IntRange>,
     /// Source span of the captured binding.
     pub span: Span,
 }
@@ -2543,6 +2639,11 @@ pub struct Local {
     pub kind: ValueKind,
     /// Typed callable signature when this local is a typed callable value.
     pub callable_signature: Option<CallableSignature>,
+    /// Declared range when this local is a `limited(<integer>, ...)`: every
+    /// value bound to it was checked against the range, so reads may assume
+    /// it. For a parameter, callers check their arguments, and an indirect
+    /// entry checks what it is passed.
+    pub range: Option<IntRange>,
     /// Source span of the binding name.
     pub span: Span,
 }
@@ -3268,13 +3369,14 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Runtime membership test for a limited integer type: whether the
-    /// value is an `<integer>` in the type's range.
+    /// Runtime membership test for a limited integer type, such as `<u32>`
+    /// or `limited(<integer>, min: 0)`: whether the value is an `<integer>`
+    /// in the type's range.
     InstanceOfLimited {
         /// Tested value.
         value: Box<Expr>,
-        /// Target type.
-        limited: LimitedInteger,
+        /// The type's range.
+        range: IntRange,
         /// Instance test site.
         site: SiteId,
         /// Source span.
@@ -3422,6 +3524,25 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Check that an integer is in a limited type's range: from source
+    /// `as(limited(<integer>, ...), n)`, or inserted where a value reaches a
+    /// declaration of a limited type (an argument for a limited parameter, a
+    /// `let` binding, a slot write, a constant, or a definition's result).
+    ///
+    /// The operand is an `<integer>`, `<i32>` or `<u32>`, and the result is
+    /// the `<integer>` it is. A value outside the range signals a
+    /// `<type-error>` whose `use-value` replacement is checked again, so the
+    /// result is always in range.
+    CheckRange {
+        /// Checked operand.
+        value: Box<Expr>,
+        /// Range the result is in.
+        range: IntRange,
+        /// Range check site.
+        site: SiteId,
+        /// Source span.
+        span: Span,
+    },
     /// Call of a built-in float function.
     FloatCall {
         /// Called builtin.
@@ -3507,6 +3628,7 @@ impl Expr {
             Self::ConstI64 { span, .. }
             | Self::ConstF64 { span, .. }
             | Self::Const32 { span, .. }
+            | Self::CheckRange { span, .. }
             | Self::ConstBool { span, .. }
             | Self::StringLiteral { span, .. }
             | Self::SymbolLiteral { span, .. }
@@ -3601,8 +3723,10 @@ struct FunctionSymbol {
     id: FunctionId,
     param_kinds: Vec<ValueKind>,
     param_callable_sigs: Vec<Option<CallableSignature>>,
+    param_ranges: Vec<Option<IntRange>>,
     return_kinds: Vec<ValueKind>,
     return_callable_sigs: Vec<Option<CallableSignature>>,
+    return_ranges: Vec<Option<IntRange>>,
     return_annotation: Option<Vec<ValueKind>>,
     span: Span,
 }
@@ -3617,6 +3741,52 @@ impl FunctionSymbol {
 struct ResolvedType {
     kind: ValueKind,
     callable_signature: Option<CallableSignature>,
+    /// The range a `limited(<integer>, ...)` type declares; `None` for
+    /// every other type, `<integer>` itself included.
+    range: Option<IntRange>,
+}
+
+/// A definition's resolved result annotation; see
+/// `Lowering::resolve_declared_results`.
+struct DeclaredResults {
+    /// The declared kinds, or `None` for an open result.
+    kinds: Option<Vec<ValueKind>>,
+    callable_sigs: Vec<Option<CallableSignature>>,
+    ranges: Vec<Option<IntRange>>,
+}
+
+/// Resolved types of a list of values, such as a result annotation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ResolvedResults {
+    kinds: Vec<ValueKind>,
+    callable_sigs: Vec<Option<CallableSignature>>,
+    ranges: Vec<Option<IntRange>>,
+}
+
+/// The values an integer `kind` holds: `<i32>`'s and `<u32>`'s ranges, or
+/// every `<integer>`.
+const fn integer_range_of(kind: NumericKind) -> IntRange {
+    match kind {
+        NumericKind::I32 => IntRange::I32,
+        NumericKind::U32 => IntRange::U32,
+        _ => IntRange::INTEGER,
+    }
+}
+
+/// Spells an `<integer>` range as source writes a limited type of kind
+/// `<integer>`: `limited(<integer>, min: 0, max: 255)`, leaving out an
+/// unbounded side. A range equal to `<i32>`'s is spelled out too, since
+/// `<i32>` names another representation.
+pub(crate) fn limited_type_name(range: IntRange) -> String {
+    let mut name = String::from("limited(<integer>");
+    if let Some(min) = range.min {
+        name.push_str(&format!(", min: {min}"));
+    }
+    if let Some(max) = range.max {
+        name.push_str(&format!(", max: {max}"));
+    }
+    name.push(')');
+    name
 }
 
 fn scalar_result_kind(kinds: &[ValueKind]) -> ValueKind {
@@ -3641,6 +3811,9 @@ struct ConstantSymbol {
     kind: ValueKind,
     callable_signature: Option<CallableSignature>,
     annotation: Option<ValueKind>,
+    /// The range a `limited(<integer>, ...)` annotation declares, which
+    /// the initializer is checked against.
+    range: Option<IntRange>,
     span: Span,
 }
 
@@ -3649,8 +3822,10 @@ struct GenericSymbol {
     name: String,
     id: GenericFunctionId,
     param_kinds: Vec<GenericParamKind>,
+    param_ranges: Vec<Option<IntRange>>,
     return_kinds: Vec<ValueKind>,
     return_callable_sigs: Vec<Option<CallableSignature>>,
+    return_ranges: Vec<Option<IntRange>>,
     return_annotation: Option<Vec<ValueKind>>,
     dispatch_param: usize,
     span: Span,
@@ -3673,6 +3848,8 @@ enum CallableResultCheck {
     Convert(NumericKind),
     /// An object result is cast to the class.
     Cast(ClassId),
+    /// An `<integer>` result is checked to be in the range.
+    Range(IntRange),
 }
 
 impl CallableResultCheck {
@@ -3680,7 +3857,7 @@ impl CallableResultCheck {
     fn wire_kind(&self) -> ValueKind {
         match *self {
             Self::Trusted(kind) => kind,
-            Self::Convert(_) => ValueKind::I64,
+            Self::Convert(_) | Self::Range(_) => ValueKind::I64,
             Self::Cast(_) => ValueKind::Object(OBJECT_CLASS_ID),
         }
     }
@@ -3699,6 +3876,12 @@ impl CallableResultCheck {
             Self::Cast(class) => Expr::Cast {
                 value: Box::new(value),
                 class,
+                site: SiteId::PENDING,
+                span,
+            },
+            Self::Range(range) => Expr::CheckRange {
+                value: Box::new(value),
+                range,
                 site: SiteId::PENDING,
                 span,
             },
@@ -3800,10 +3983,19 @@ impl FunctionContext {
             name,
             kind,
             callable_signature,
+            range: None,
             span,
         });
         self.visible_locals.push(true);
         id
+    }
+
+    /// Declares that `local` holds only values in `range`; see
+    /// [`Local::range`].
+    fn limit_local(&mut self, local: LocalId, range: Option<IntRange>) {
+        if let Some(local) = self.locals.get_mut(local.0 as usize) {
+            local.range = range;
+        }
     }
 
     fn find_local(&self, name: &str) -> Option<LocalId> {
@@ -3867,6 +4059,7 @@ impl FunctionContext {
             name: source.name,
             kind: source.kind,
             callable_signature: source.callable_signature,
+            range: source.range,
             span: source.span,
         });
         Some(id)
@@ -4140,6 +4333,7 @@ impl Lowering {
                             .map_or_else(|| "<object>".into(), ToString::to_string),
                         kind,
                         callable_signature: resolved.callable_signature,
+                        range: resolved.range,
                         origin: SlotOrigin::Native,
                         accessor: Accessor {
                             definition: slot.definition,
@@ -4214,6 +4408,7 @@ impl Lowering {
                         type_name: host_slot.type_name.clone(),
                         kind: host_slot.kind,
                         callable_signature: None,
+                        range: None,
                         origin: SlotOrigin::HostBacked {
                             host_class: host_class_id,
                             host_slot: host_slot_id,
@@ -4354,6 +4549,7 @@ impl Lowering {
                         type_name: slot.type_name.into(),
                         kind,
                         callable_signature: None,
+                        range: None,
                         origin: SlotOrigin::Native,
                         accessor: Accessor {
                             definition,
@@ -4470,12 +4666,12 @@ impl Lowering {
                     continue;
                 };
                 let mut ctx = FunctionContext::new();
-                let (slot_kind, slot_signature) = self
+                let (slot_kind, slot_signature, slot_range) = self
                     .classes
                     .get(lowered_class_index)
                     .and_then(|class| class.direct_slots.get(slot_index))
-                    .map_or((ValueKind::Error, None), |slot| {
-                        (slot.kind, slot.callable_signature.clone())
+                    .map_or((ValueKind::Error, None, None), |slot| {
+                        (slot.kind, slot.callable_signature.clone(), slot.range)
                     });
                 let value = adapt_literal(
                     self.lower_expr(&mut ctx, init_value),
@@ -4511,6 +4707,9 @@ impl Lowering {
                     );
                     self.diagnostics.extend(diagnostic);
                 }
+                // Every `make` that takes the default checks it, as it
+                // checks an init argument.
+                let value = self.limit_value(value, slot_kind, slot_range);
                 lowered_values.push((lowered_class_index, slot_index, value));
             }
         }
@@ -4610,6 +4809,7 @@ impl Lowering {
             type_name: slot.type_name.clone(),
             kind: slot.kind,
             callable_signature: slot.callable_signature.clone(),
+            range: slot.range,
             origin: slot.origin,
             source_class: owner,
             source_slot: slot.id,
@@ -4716,15 +4916,23 @@ impl Lowering {
                 );
             }
             let id = GenericFunctionId(u32::try_from(index).unwrap_or(u32::MAX));
-            let param_kinds = generic
+            let resolved_params = generic
                 .params
                 .iter()
                 .map(|param| {
                     param
                         .type_annotation
                         .as_ref()
-                        .map(|annotation| self.resolve_type_annotation(annotation))
+                        .map(|annotation| self.resolve_type_annotation_detail(annotation))
                 })
+                .collect::<Vec<_>>();
+            let param_ranges = resolved_params
+                .iter()
+                .map(|resolved| resolved.as_ref().and_then(|resolved| resolved.range))
+                .collect::<Vec<_>>();
+            let param_kinds = resolved_params
+                .into_iter()
+                .map(|resolved| resolved.map(|resolved| resolved.kind))
                 .collect::<Vec<_>>();
             for (param_index, kind) in param_kinds.iter().enumerate() {
                 if let Some(kind) = kind
@@ -4761,15 +4969,11 @@ impl Lowering {
                     );
                 }
             }
-            let (return_annotation, return_callable_sigs) =
-                generic.return_type.as_ref().map_or_else(
-                    || (None, vec![None; provisional_open_result_kinds().len()]),
-                    |annotation| {
-                        let (kinds, callable_sigs) =
-                            self.resolve_result_annotation_detail(annotation);
-                        (Some(kinds), callable_sigs)
-                    },
-                );
+            let DeclaredResults {
+                kinds: return_annotation,
+                callable_sigs: return_callable_sigs,
+                ranges: return_ranges,
+            } = self.resolve_declared_results(generic.return_type.as_ref());
             let return_kinds = return_annotation
                 .clone()
                 .unwrap_or_else(provisional_open_result_kinds);
@@ -4777,8 +4981,10 @@ impl Lowering {
                 name: generic.name.clone(),
                 id,
                 param_kinds: param_kinds.clone(),
+                param_ranges: param_ranges.clone(),
                 return_kinds: return_kinds.clone(),
                 return_callable_sigs: return_callable_sigs.clone(),
+                return_ranges: return_ranges.clone(),
                 return_annotation: return_annotation.clone(),
                 dispatch_param: 0,
                 span: generic.span,
@@ -4796,8 +5002,10 @@ impl Lowering {
                 arity: generic.params.len(),
                 dispatch_param: 0,
                 dispatch_params: (0..generic.params.len()).collect(),
+                param_ranges,
                 result_kinds: return_kinds,
                 result_callable_sigs: return_callable_sigs,
+                result_ranges: return_ranges,
                 return_annotation,
                 span: generic.span,
                 origin: GenericFunctionOrigin::Source,
@@ -4823,15 +5031,17 @@ impl Lowering {
                         slot.id,
                         slot.definition,
                         slot.name.clone(),
-                        slot.kind,
+                        (slot.kind, slot.range),
                         slot.span,
                     ))
                 })
             })
             .collect::<Vec<_>>();
 
-        for (class, slot, slot_definition, slot_name, slot_kind, slot_span) in slots {
-            let setter_name = slot_setter_name(&slot_name);
+        for (class, slot, slot_definition, slot_name, (slot_kind, _), slot_span) in &slots {
+            let (class, slot, slot_definition, slot_kind, slot_span) =
+                (*class, *slot, *slot_definition, *slot_kind, *slot_span);
+            let setter_name = slot_setter_name(slot_name);
             if self
                 .generic_symbols
                 .iter()
@@ -4839,6 +5049,26 @@ impl Lowering {
             {
                 continue;
             }
+            // Every class declaring a slot of this name shares the setter
+            // generic, and each one's setter method checks the value
+            // against its own slot's range unless the send already did. A
+            // send checks a range only when every such slot declares it, and
+            // a send's result is in the hull of their ranges.
+            let ranges = slots
+                .iter()
+                .filter(|other| other.3 == *slot_name)
+                .map(|other| other.4.1)
+                .collect::<Vec<_>>();
+            let shared = ranges
+                .iter()
+                .all(|range| *range == ranges[0])
+                .then_some(ranges[0])
+                .flatten();
+            let hull = ranges
+                .iter()
+                .copied()
+                .reduce(|left, right| left.zip(right).map(|(left, right)| left.hull(right)))
+                .flatten();
             let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
             let definition = DefinitionId::new(
                 self.source_file,
@@ -4848,12 +5078,15 @@ impl Lowering {
             );
             let param_kinds = vec![Some(slot_kind), Some(ValueKind::Any)];
             let origin = GenericFunctionOrigin::SlotSetter { class, slot };
+            let param_ranges = vec![shared, None];
             self.generic_symbols.push(GenericSymbol {
                 name: setter_name.clone(),
                 id,
                 param_kinds: param_kinds.clone(),
+                param_ranges: param_ranges.clone(),
                 return_kinds: vec![slot_kind],
                 return_callable_sigs: vec![None],
+                return_ranges: vec![hull],
                 return_annotation: Some(vec![slot_kind]),
                 dispatch_param: 1,
                 span: slot_span,
@@ -4864,11 +5097,13 @@ impl Lowering {
                 name: setter_name,
                 params: vec!["new-value".into(), "object".into()],
                 param_kinds,
+                param_ranges,
                 arity: 2,
                 dispatch_param: 1,
                 dispatch_params: vec![0, 1],
                 result_kinds: vec![slot_kind],
                 result_callable_sigs: vec![None],
+                result_ranges: vec![hull],
                 return_annotation: Some(vec![slot_kind]),
                 span: slot_span,
                 origin,
@@ -4898,8 +5133,10 @@ impl Lowering {
             name: name.into(),
             id,
             param_kinds: vec![None; arity],
+            param_ranges: vec![None; arity],
             return_kinds: result_kinds.clone(),
             return_callable_sigs: vec![None],
+            return_ranges: vec![None],
             return_annotation: Some(result_kinds.clone()),
             dispatch_param: 0,
             span: Span::default(),
@@ -4919,11 +5156,13 @@ impl Lowering {
                 .map(|name| (*name).into())
                 .collect(),
             param_kinds: vec![None; arity],
+            param_ranges: vec![None; arity],
             arity,
             dispatch_param: 0,
             dispatch_params: (0..arity).collect(),
             result_kinds: result_kinds.clone(),
             result_callable_sigs: vec![None],
+            result_ranges: vec![None],
             return_annotation: Some(result_kinds),
             span: Span::default(),
             origin: GenericFunctionOrigin::Numeric { operator },
@@ -5027,6 +5266,7 @@ impl Lowering {
                         result,
                         span: Span::default(),
                     },
+                    result_ranges: vec![None; result_kinds.len()],
                     result_kinds: result_kinds.clone(),
                     return_annotation: Some(result_kinds),
                     span: Span::default(),
@@ -5060,7 +5300,15 @@ impl Lowering {
 
         for (class, slot) in slots {
             let setter_name = slot_setter_name(&slot.name);
-            let Some(generic) = self.resolve_generic(&setter_name).map(|symbol| symbol.id) else {
+            let Some((generic, sent, returned)) =
+                self.resolve_generic(&setter_name).map(|symbol| {
+                    (
+                        symbol.id,
+                        symbol.param_ranges.first().copied().flatten(),
+                        symbol.return_ranges.first().copied().flatten(),
+                    )
+                })
+            else {
                 continue;
             };
             let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
@@ -5083,6 +5331,9 @@ impl Lowering {
                 None,
                 slot.span,
             );
+            // The send checked the new value against the generic's range,
+            // which other classes' slots of this name may not share.
+            ctx.limit_local(value_param, sent);
             let object_param = ctx.add_local(
                 DefinitionId::new(
                     self.source_file,
@@ -5095,7 +5346,20 @@ impl Lowering {
                 None,
                 slot.span,
             );
-            let body = Block {
+            let value = Expr::Local {
+                local: value_param,
+                result_kind: slot.kind,
+                callable_signature: None,
+                span: slot.span,
+            };
+            // The method writes only values in its own slot's range, so it
+            // checks one the send did not already confine to it.
+            let checked = match (slot.range, sent) {
+                (Some(own), Some(sent)) if own.includes(sent) => None,
+                (own, _) => own,
+            };
+            let value = self.limit_value(value, slot.kind, checked);
+            let mut body = Block {
                 lets: Vec::new(),
                 result: Expr::SlotWrite {
                     setter: definition,
@@ -5105,12 +5369,7 @@ impl Lowering {
                         callable_signature: None,
                         span: slot.span,
                     }),
-                    value: Box::new(Expr::Local {
-                        local: value_param,
-                        result_kind: slot.kind,
-                        callable_signature: None,
-                        span: slot.span,
-                    }),
+                    value: Box::new(value),
                     class,
                     slot: slot.id,
                     result_kind: slot.kind,
@@ -5118,6 +5377,18 @@ impl Lowering {
                 },
                 span: slot.span,
             };
+            // It returns the value it wrote, which a declared result range
+            // of the generic may not hold.
+            let written = slot.range.or(sent);
+            let result_check = returned
+                .filter(|returned| !written.is_some_and(|written| returned.includes(written)));
+            let result_kinds = self.check_result_ranges(
+                &mut ctx,
+                &mut body,
+                &[slot.kind],
+                &[None],
+                &[result_check],
+            );
             self.methods.push(Method {
                 id,
                 definition,
@@ -5128,7 +5399,8 @@ impl Lowering {
                 params: vec![value_param, object_param],
                 locals: ctx.locals,
                 body,
-                result_kinds: vec![slot.kind],
+                result_kinds,
+                result_ranges: vec![returned.or(slot.range)],
                 return_annotation: Some(vec![slot.kind]),
                 span: slot.span,
                 origin: MethodOrigin::SlotSetter {
@@ -5272,7 +5544,7 @@ impl Lowering {
                         )),
                 );
             }
-            let param_kinds = function
+            let params = function
                 .params
                 .iter()
                 .map(|param| {
@@ -5282,23 +5554,20 @@ impl Lowering {
                     )
                 })
                 .collect::<Vec<_>>();
-            let param_callable_sigs = param_kinds
+            let param_callable_sigs = params
                 .iter()
                 .map(|param| param.callable_signature.clone())
                 .collect::<Vec<_>>();
-            let param_kinds = param_kinds
+            let param_ranges = params.iter().map(|param| param.range).collect();
+            let param_kinds = params
                 .into_iter()
                 .map(|param| param.kind)
                 .collect::<Vec<_>>();
-            let (return_annotation, return_callable_sigs) =
-                function.return_type.as_ref().map_or_else(
-                    || (None, vec![None; provisional_open_result_kinds().len()]),
-                    |annotation| {
-                        let (kinds, callable_sigs) =
-                            self.resolve_result_annotation_detail(annotation);
-                        (Some(kinds), callable_sigs)
-                    },
-                );
+            let DeclaredResults {
+                kinds: return_annotation,
+                callable_sigs: return_callable_sigs,
+                ranges: return_ranges,
+            } = self.resolve_declared_results(function.return_type.as_ref());
             let return_kinds = return_annotation
                 .clone()
                 .unwrap_or_else(provisional_open_result_kinds);
@@ -5307,8 +5576,10 @@ impl Lowering {
                 id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
                 param_kinds,
                 param_callable_sigs,
+                param_ranges,
                 return_kinds,
                 return_callable_sigs,
+                return_ranges,
                 return_annotation,
                 span: function.span,
             });
@@ -5376,6 +5647,7 @@ impl Lowering {
                 callable_signature: annotation
                     .as_ref()
                     .and_then(|annotation| annotation.callable_signature.clone()),
+                range: annotation.as_ref().and_then(|annotation| annotation.range),
                 annotation: annotation.map(|annotation| annotation.kind),
                 span: constant.span,
             });
@@ -5453,6 +5725,11 @@ impl Lowering {
                 self.diagnostics.push(diagnostic);
             }
             let result_kind = expected_kind.unwrap_or(actual_kind);
+            let range = self
+                .constant_symbols
+                .get(index)
+                .and_then(|symbol| symbol.range);
+            let value = self.limit_value(value, result_kind, range);
             let callable_signature = expected_callable_signature.or(match actual_kind {
                 ValueKind::Callable => actual_callable_signature,
                 _ => None,
@@ -5711,7 +5988,11 @@ impl Lowering {
             let generic_kind = generic_symbol
                 .as_ref()
                 .and_then(|symbol| symbol.param_kinds.get(index).copied().flatten());
-            let (specializer, kind) = self.resolve_method_specializer(param, generic_kind);
+            let generic_range = generic_symbol
+                .as_ref()
+                .and_then(|symbol| symbol.param_ranges.get(index).copied().flatten());
+            let (specializer, kind) =
+                self.resolve_method_specializer(param, generic_kind, generic_range);
             // A specializer that did not resolve has been reported already.
             if let Some(expected) = generic_kind
                 && kind != ValueKind::Error
@@ -5741,6 +6022,12 @@ impl Lowering {
                 None,
                 param.span,
             );
+            // Every send checks the argument against the generic's range,
+            // whether the method restates it, widens it or specializes on
+            // `<integer>`, so the body may assume the generic's.
+            if kind == ValueKind::I64 {
+                ctx.limit_local(local, generic_range);
+            }
             params.push(local);
             specializers.push(specializer);
         }
@@ -5757,12 +6044,20 @@ impl Lowering {
             .flatten()
             .or_else(|| specializers.iter().copied().flatten().next())
             .unwrap_or(ClassId(u32::MAX));
-        let (return_annotation, annotated_callable_sigs) = method
+        let resolved_results = method
             .return_type
             .as_ref()
-            .map(|annotation| self.resolve_result_annotation_detail(annotation))
-            .unzip();
-        let body = self.lower_block(&mut ctx, &method.body, return_annotation.as_deref());
+            .map(|annotation| self.resolve_result_annotation_detail(annotation));
+        let (return_annotation, annotated_callable_sigs, annotated_ranges) = match resolved_results
+        {
+            Some(resolved) => (
+                Some(resolved.kinds),
+                Some(resolved.callable_sigs),
+                resolved.ranges,
+            ),
+            None => (None, None, Vec::new()),
+        };
+        let mut body = self.lower_block(&mut ctx, &method.body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
         let result_kinds = return_annotation
@@ -5822,8 +6117,49 @@ impl Lowering {
                     &result_callable_sigs,
                     mismatch,
                 ));
+                // A declared limited result, `<i32>` or `<u32>` must be
+                // within the generic's range too.
+                for (index, generic_range) in symbol.return_ranges.iter().enumerate() {
+                    let declared = return_annotation
+                        .as_ref()
+                        .and_then(|kinds| kinds.get(index).copied());
+                    let own = annotated_ranges.get(index).copied().flatten().or_else(|| {
+                        declared
+                            .and_then(NumericKind::of)
+                            .filter(|kind| matches!(kind, NumericKind::I32 | NumericKind::U32))
+                            .map(integer_range_of)
+                    });
+                    if let (Some(generic_range), Some(own)) = (generic_range, own)
+                        && !generic_range.includes(own)
+                    {
+                        let own = match declared {
+                            Some(kind @ (ValueKind::I32 | ValueKind::U32)) => self.kind_name(kind),
+                            _ => limited_type_name(own),
+                        };
+                        ctx.diagnostics
+                            .push(mismatch(limited_type_name(*generic_range), own));
+                    }
+                }
             }
         }
+        // The method checks what it returns against its own limited result
+        // types, or else its generic's, which every send trusts.
+        let result_ranges = (0..result_kinds.len())
+            .map(|index| {
+                annotated_ranges.get(index).copied().flatten().or_else(|| {
+                    generic_symbol
+                        .as_ref()
+                        .and_then(|symbol| symbol.return_ranges.get(index).copied().flatten())
+                })
+            })
+            .collect::<Vec<_>>();
+        let result_kinds = self.check_result_ranges(
+            &mut ctx,
+            &mut body,
+            &result_kinds,
+            &result_callable_sigs,
+            &result_ranges,
+        );
         self.diagnostics.extend(ctx.diagnostics);
         Method {
             id,
@@ -5836,6 +6172,7 @@ impl Lowering {
             locals: ctx.locals,
             body,
             result_kinds,
+            result_ranges,
             return_annotation,
             span: method.span,
             origin: MethodOrigin::Source,
@@ -5864,13 +6201,20 @@ impl Lowering {
                 .and_then(|symbol| symbol.param_callable_sigs.get(index))
                 .cloned()
                 .flatten();
-            params.push(ctx.add_local(
+            let local = ctx.add_local(
                 self.local_definition(function.definition, &param.name),
                 param.name.clone(),
                 kind,
                 callable_signature,
                 param.span,
-            ));
+            );
+            ctx.limit_local(
+                local,
+                symbol
+                    .as_ref()
+                    .and_then(|symbol| symbol.param_ranges.get(index).copied().flatten()),
+            );
+            params.push(local);
         }
 
         let return_annotation = symbol
@@ -5879,7 +6223,7 @@ impl Lowering {
         let annotated_return_callable_sigs = symbol
             .as_ref()
             .map_or_else(Vec::new, |symbol| symbol.return_callable_sigs.clone());
-        let body = self.lower_block(&mut ctx, &function.body, return_annotation.as_deref());
+        let mut body = self.lower_block(&mut ctx, &function.body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
         let result_kinds = return_annotation
@@ -5920,11 +6264,29 @@ impl Lowering {
         {
             symbol.return_kinds = result_kinds.clone();
             symbol.return_callable_sigs = result_callable_sigs.clone();
+            symbol.return_ranges = vec![None; result_kinds.len()];
         }
+        let result_ranges = match (&symbol, &return_annotation) {
+            (Some(symbol), Some(_)) => symbol.return_ranges.clone(),
+            _ => vec![None; result_kinds.len()],
+        };
+        let result_kinds = self.check_result_ranges(
+            &mut ctx,
+            &mut body,
+            &result_kinds,
+            &result_callable_sigs,
+            &result_ranges,
+        );
         self.diagnostics.extend(ctx.diagnostics);
-        let param_callable_sigs = symbol
-            .as_ref()
-            .map_or_else(Vec::new, |symbol| symbol.param_callable_sigs.clone());
+        let (param_callable_sigs, param_ranges) = symbol.as_ref().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |symbol| {
+                (
+                    symbol.param_callable_sigs.clone(),
+                    symbol.param_ranges.clone(),
+                )
+            },
+        );
 
         Function {
             id,
@@ -5933,10 +6295,12 @@ impl Lowering {
             params,
             param_kinds: symbol.map_or_else(Vec::new, |symbol| symbol.param_kinds),
             param_callable_sigs,
+            param_ranges,
             locals: ctx.locals,
             body,
             result_kinds,
             result_callable_sigs,
+            result_ranges,
             return_annotation,
             entry_checks: Vec::new(),
             span: function.span,
@@ -6030,6 +6394,8 @@ impl Lowering {
                         ctx.diagnostics.push(diagnostic);
                     }
                     let local_kind = expected_kind.unwrap_or(actual_kind);
+                    let range = expected_type.as_ref().and_then(|resolved| resolved.range);
+                    let value = self.limit_value(value, local_kind, range);
                     let callable_signature = expected_type
                         .and_then(|resolved| resolved.callable_signature)
                         .or(match actual_kind {
@@ -6049,10 +6415,11 @@ impl Lowering {
                         callable_signature,
                         binding.span,
                     );
+                    ctx.limit_local(id, range);
                     lets.push(Let {
                         local: id,
                         locals: vec![id],
-                        value: value.clone(),
+                        value,
                         span: local.span,
                     });
                 }
@@ -6162,6 +6529,7 @@ impl Lowering {
                             ctx.diagnostics.push(diagnostic);
                         }
                         let kind = expected_kind.unwrap_or(actual_kind);
+                        let range = expected_type.as_ref().and_then(|resolved| resolved.range);
                         let callable_signature = expected_type
                             .and_then(|resolved| resolved.callable_signature)
                             .or(match actual_kind {
@@ -6175,13 +6543,55 @@ impl Lowering {
                             callable_signature,
                             binding.span,
                         );
+                        ctx.limit_local(id, range);
                         local_ids.push(id);
                     }
+                    // Each limited binding checks its own value.
+                    let ranges = expected_kinds
+                        .iter()
+                        .map(|resolved| resolved.as_ref().and_then(|resolved| resolved.range))
+                        .collect::<Vec<_>>();
+                    let value = if bindings.len() == actual_kinds.len()
+                        && ranges.iter().any(Option::is_some)
+                        && !result_kinds_contain_error(&actual_kinds)
+                    {
+                        let checks = actual_kinds
+                            .iter()
+                            .zip(&ranges)
+                            .map(|(kind, range)| match range {
+                                Some(range)
+                                    if NumericKind::of(*kind)
+                                        .is_some_and(NumericKind::is_integer) =>
+                                {
+                                    CallableResultCheck::Range(*range)
+                                }
+                                _ => CallableResultCheck::Trusted(*kind),
+                            })
+                            .collect::<Vec<_>>();
+                        let kinds = checks
+                            .iter()
+                            .map(|check| match check {
+                                CallableResultCheck::Trusted(kind) => *kind,
+                                check => check.wire_kind(),
+                            })
+                            .collect::<Vec<_>>();
+                        self.check_values(
+                            ctx,
+                            value,
+                            &checks,
+                            &kinds,
+                            &actual_callable_sigs,
+                            "checked-binding",
+                            local.span,
+                        )
+                    } else {
+                        value
+                    };
                     let local_id = local_ids.first().copied().unwrap_or(LocalId(u32::MAX));
                     lets.push(Let {
                         local: local_id,
                         locals: local_ids,
-                        value: value.clone(),
+                        value,
                         span: local.span,
                     });
                 }
@@ -6328,16 +6738,16 @@ impl Lowering {
             } => self.lower_class_object(ctx, class_name, *span),
             ast::Expr::InstanceOf {
                 value,
-                class_name,
+                target,
                 span,
                 ..
-            } => self.lower_instance_of(ctx, value, class_name, *span),
+            } => self.lower_instance_of(ctx, value, target, *span),
             ast::Expr::Cast {
-                class_name,
+                target,
                 value,
                 span,
                 ..
-            } => self.lower_cast(ctx, value, class_name, *span),
+            } => self.lower_cast(ctx, value, target, *span),
             ast::Expr::Call {
                 callee, args, span, ..
             } => {
@@ -6467,9 +6877,16 @@ impl Lowering {
                                 ctx.diagnostics.push(diagnostic);
                             }
                         }
+                        // The caller checks each argument for a limited
+                        // parameter, where typing usually knows its range.
+                        let args = self.limit_args(
+                            lowered_args,
+                            &symbol.param_kinds,
+                            &symbol.param_ranges,
+                        );
                         return Expr::DirectCall {
                             function: symbol.id,
-                            args: lowered_args,
+                            args,
                             span: *span,
                         };
                     }
@@ -6577,10 +6994,18 @@ impl Lowering {
                                 );
                             }
                         }
+                        // Every send checks its arguments for limited
+                        // parameters, so methods may assume the ranges.
+                        let kinds = symbol
+                            .param_kinds
+                            .iter()
+                            .map(|kind| kind.unwrap_or(ValueKind::Any))
+                            .collect::<Vec<_>>();
+                        let args = self.limit_args(lowered_args, &kinds, &symbol.param_ranges);
                         return Expr::GenericCall {
                             site: SiteId::PENDING,
                             generic: symbol.id,
-                            args: lowered_args,
+                            args,
                             span: *span,
                         };
                     }
@@ -6925,6 +7350,7 @@ impl Lowering {
             params: Vec::new(),
             param_kinds: Vec::new(),
             param_callable_sigs: Vec::new(),
+            param_ranges: Vec::new(),
             captures: Vec::new(),
             locals: Vec::new(),
             body: Block {
@@ -6934,6 +7360,7 @@ impl Lowering {
             },
             result_kinds: vec![ValueKind::Error],
             result_callable_sigs: vec![None],
+            result_ranges: vec![None],
             return_annotation: None,
             entry_checks: Vec::new(),
             span,
@@ -6944,6 +7371,7 @@ impl Lowering {
         let mut param_ids = Vec::new();
         let mut param_kinds = Vec::new();
         let mut param_callable_sigs = Vec::new();
+        let mut param_ranges = Vec::new();
         for param in params {
             if closure_ctx.find_local(&param.name).is_some() {
                 closure_ctx.diagnostics.push(
@@ -6955,7 +7383,8 @@ impl Lowering {
                 self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::I64);
             param_kinds.push(resolved.kind);
             param_callable_sigs.push(resolved.callable_signature.clone());
-            param_ids.push(closure_ctx.add_local(
+            param_ranges.push(resolved.range);
+            let local = closure_ctx.add_local(
                 DefinitionId::new(
                     self.source_file,
                     DefinitionKind::Local,
@@ -6966,17 +7395,25 @@ impl Lowering {
                 resolved.kind,
                 resolved.callable_signature,
                 param.span,
-            ));
+            );
+            closure_ctx.limit_local(local, resolved.range);
+            param_ids.push(local);
         }
 
-        let (return_annotation, annotated_return_callable_sigs) = return_type.map_or_else(
-            || (None, Vec::new()),
-            |annotation| {
-                let (kinds, callable_sigs) = self.resolve_result_annotation_detail(annotation);
-                (Some(kinds), callable_sigs)
-            },
-        );
-        let lowered_body = self.lower_block(&mut closure_ctx, body, return_annotation.as_deref());
+        let (return_annotation, annotated_return_callable_sigs, annotated_ranges) =
+            match return_type {
+                Some(annotation) => {
+                    let resolved = self.resolve_result_annotation_detail(annotation);
+                    (
+                        Some(resolved.kinds),
+                        resolved.callable_sigs,
+                        resolved.ranges,
+                    )
+                }
+                None => (None, Vec::new(), Vec::new()),
+            };
+        let mut lowered_body =
+            self.lower_block(&mut closure_ctx, body, return_annotation.as_deref());
         let body_kinds = self.expr_kinds(&lowered_body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&lowered_body.result);
         let result_kinds = return_annotation
@@ -7015,6 +7452,18 @@ impl Lowering {
             }
         }
 
+        let result_ranges = if return_annotation.is_some() {
+            annotated_ranges
+        } else {
+            vec![None; result_kinds.len()]
+        };
+        let result_kinds = self.check_result_ranges(
+            &mut closure_ctx,
+            &mut lowered_body,
+            &result_kinds,
+            &result_callable_sigs,
+            &result_ranges,
+        );
         let captures = closure_ctx.captures.clone();
         self.diagnostics.extend(closure_ctx.diagnostics);
         if let Some(slot) = self.closures.get_mut(id.0 as usize) {
@@ -7023,11 +7472,13 @@ impl Lowering {
                 params: param_ids,
                 param_kinds: param_kinds.clone(),
                 param_callable_sigs: param_callable_sigs.clone(),
+                param_ranges: param_ranges.clone(),
                 captures: captures.clone(),
                 locals: closure_ctx.locals,
                 body: lowered_body,
                 result_kinds: result_kinds.clone(),
                 result_callable_sigs: result_callable_sigs.clone(),
+                result_ranges: result_ranges.clone(),
                 return_annotation,
                 entry_checks: Vec::new(),
                 span,
@@ -7037,8 +7488,10 @@ impl Lowering {
         let callable_signature = CallableSignature {
             params: param_kinds,
             param_sigs: param_callable_sigs,
+            param_ranges,
             results: result_kinds,
             result_sigs: result_callable_sigs,
+            result_ranges,
         };
         Expr::Closure {
             closure: id,
@@ -7674,25 +8127,24 @@ impl Lowering {
     /// as `called` declares; calls through it check what they rely on in
     /// turn.
     ///
-    /// The call itself produces each result at its check's wire kind. A
-    /// single checked result is wrapped in its conversion or cast, an
-    /// ordinary check site soft typing records and may later prove; several
-    /// are bound to temporaries of a block that checks each. When no check
-    /// can establish a result, this returns a
-    /// [`DiagnosticCode::UncheckedCallableResult`] error.
+    /// The call itself produces each result at its check's wire kind, and
+    /// [`Self::check_values`] checks them. When no check can establish a
+    /// result, this returns a [`DiagnosticCode::UncheckedCallableResult`]
+    /// error.
     fn checked_callable_call(
         &self,
         ctx: &mut FunctionContext,
         target: Expr,
         args: Vec<Expr>,
         called: CallableSignature,
-        check: fn(&Self, ValueKind) -> Option<CallableResultCheck>,
+        check: fn(&Self, ValueKind, Option<IntRange>) -> Option<CallableResultCheck>,
         span: Span,
     ) -> Result<Expr, Diagnostic> {
         let Some(checks) = called
             .results
             .iter()
-            .map(|kind| check(self, *kind))
+            .enumerate()
+            .map(|(index, kind)| check(self, *kind, called.result_range(index)))
             .collect::<Option<Vec<_>>>()
         else {
             return Err(
@@ -7701,82 +8153,220 @@ impl Lowering {
                 ),
             );
         };
-        let wire_kinds = checks
-            .iter()
-            .map(CallableResultCheck::wire_kind)
-            .collect::<Vec<_>>();
         let call = Expr::CallableCall {
             callable: Box::new(target),
             args,
             arg_kinds: called.params.clone(),
             result_callable_sigs: called.result_sigs.clone(),
-            result_kinds: wire_kinds.clone(),
+            result_kinds: checks.iter().map(CallableResultCheck::wire_kind).collect(),
             span,
         };
-        if let [check] = checks.as_slice() {
-            return Ok(check.apply(call, span));
+        Ok(self.check_values(
+            ctx,
+            call,
+            &checks,
+            &called.results,
+            &called.result_sigs,
+            "callable-result",
+            span,
+        ))
+    }
+
+    /// Checks each value `values` produces, at its check's wire kind, back
+    /// to `kinds`: a single checked value is wrapped in its check, an
+    /// ordinary site soft typing records and may later prove; several are
+    /// bound to temporaries of a block that checks each. `sigs` are the
+    /// values' callable signatures, and `tag` names the temporaries'
+    /// definitions.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the values, their checks, and what they are checked back to"
+    )]
+    fn check_values(
+        &self,
+        ctx: &mut FunctionContext,
+        values: Expr,
+        checks: &[CallableResultCheck],
+        kinds: &[ValueKind],
+        sigs: &[Option<CallableSignature>],
+        tag: &str,
+        span: Span,
+    ) -> Expr {
+        if let [check] = checks {
+            return check.apply(values, span);
         }
         if checks
             .iter()
             .all(|check| matches!(check, CallableResultCheck::Trusted(_)))
         {
-            return Ok(call);
+            return values;
         }
-        // Each value is checked on its own, so the call's results are bound
-        // to temporaries no source name can reach.
+        let sig = |index: usize| sigs.get(index).cloned().flatten();
+        // Each value is checked on its own, so the values are bound to
+        // temporaries no source name can reach.
         let scope = ctx.scope_start();
-        let temporaries = wire_kinds
+        let temporaries = checks
             .iter()
             .enumerate()
-            .map(|(index, kind)| {
+            .map(|(index, check)| {
                 ctx.add_local(
                     DefinitionId::new(
                         self.source_file,
                         DefinitionKind::Local,
                         "$result",
-                        &format!("callable-result:{}:{}:{index}", span.start, span.end),
+                        &format!("{tag}:{}:{}:{index}", span.start, span.end),
                     ),
                     format!("$result{index}"),
-                    *kind,
-                    called.result_sig(index).cloned(),
+                    check.wire_kind(),
+                    sig(index),
                     span,
                 )
             })
             .collect::<Vec<_>>();
         ctx.hide_locals_from(scope);
-        let values = temporaries
+        let checked = temporaries
             .iter()
-            .zip(&checks)
+            .zip(checks)
             .enumerate()
             .map(|(index, (local, check))| {
                 let value = Expr::Local {
                     local: *local,
                     result_kind: check.wire_kind(),
-                    callable_signature: called.result_sig(index).cloned(),
+                    callable_signature: sig(index),
                     span,
                 };
                 check.apply(value, span)
             })
             .collect();
-        Ok(Expr::Block {
+        Expr::Block {
             exit: None,
             body: Box::new(Block {
                 lets: vec![Let {
                     local: temporaries[0],
                     locals: temporaries,
-                    value: call,
+                    value: values,
                     span,
                 }],
                 result: Expr::Values {
-                    values,
-                    result_kinds: called.results,
+                    values: checked,
+                    result_kinds: kinds.to_vec(),
                     span,
                 },
                 span,
             }),
             cleanup: None,
             span,
-        })
+        }
+    }
+
+    /// Wraps `value` in a check against `range` when it reaches a
+    /// declaration of a `limited(<integer>, ...)` type of `kind`: an
+    /// argument for a limited parameter, a `let` binding, a slot value, or a
+    /// constant. A value that is not an integer has already been reported.
+    fn limit_value(&self, value: Expr, kind: ValueKind, range: Option<IntRange>) -> Expr {
+        let integer = NumericKind::of(self.expr_kind(&value)).is_some_and(NumericKind::is_integer);
+        match range {
+            Some(range) if kind == ValueKind::I64 && integer => {
+                let span = value.span();
+                Expr::CheckRange {
+                    value: Box::new(value),
+                    range,
+                    site: SiteId::PENDING,
+                    span,
+                }
+            }
+            _ => value,
+        }
+    }
+
+    /// Checks each of `args` that reaches a limited parameter of `kinds`
+    /// against its range; see [`Self::limit_value`].
+    fn limit_args(
+        &self,
+        args: Vec<Expr>,
+        kinds: &[ValueKind],
+        ranges: &[Option<IntRange>],
+    ) -> Vec<Expr> {
+        args.into_iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                let kind = kinds.get(index).copied().unwrap_or(ValueKind::Error);
+                self.limit_value(arg, kind, ranges.get(index).copied().flatten())
+            })
+            .collect()
+    }
+
+    /// Checks a definition's `body` result against the `ranges` that limit
+    /// its `kinds`, so callers may assume them, and returns the result kinds
+    /// it then has; see [`Self::check_values`].
+    ///
+    /// Any integer result is checked: an `<i32>` or `<u32>` whose own range
+    /// is not within the limit widens to the `<integer>` the check yields,
+    /// as a method's result may when its generic declares a limited one.
+    /// Results whose kind is in error are left alone.
+    fn check_result_ranges(
+        &self,
+        ctx: &mut FunctionContext,
+        body: &mut Block,
+        kinds: &[ValueKind],
+        sigs: &[Option<CallableSignature>],
+        ranges: &[Option<IntRange>],
+    ) -> Vec<ValueKind> {
+        if ranges.iter().all(Option::is_none) || result_kinds_contain_error(kinds) {
+            return kinds.to_vec();
+        }
+        let checks = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let own = NumericKind::of(*kind)
+                    .filter(|kind| kind.is_integer())
+                    .map(integer_range_of);
+                match (ranges.get(index).copied().flatten(), own) {
+                    (Some(range), Some(own)) if !range.includes(own) => {
+                        CallableResultCheck::Range(range)
+                    }
+                    _ => CallableResultCheck::Trusted(*kind),
+                }
+            })
+            .collect::<Vec<_>>();
+        if checks
+            .iter()
+            .all(|check| matches!(check, CallableResultCheck::Trusted(_)))
+        {
+            return kinds.to_vec();
+        }
+        let checked_kinds = checks
+            .iter()
+            .map(CallableResultCheck::wire_kind)
+            .collect::<Vec<_>>();
+        // A single limited result arrives as whatever integer the body
+        // produced; several pass through temporaries of the body's kinds.
+        let body_kinds = self.expr_kinds(&body.result);
+        let checks = if let [check] = checks.as_slice() {
+            vec![*check]
+        } else {
+            checks
+                .iter()
+                .zip(&body_kinds)
+                .map(|(check, kind)| match check {
+                    CallableResultCheck::Trusted(_) => CallableResultCheck::Trusted(*kind),
+                    check => *check,
+                })
+                .collect()
+        };
+        let span = body.result.span();
+        let result = core::mem::replace(&mut body.result, Expr::Error { span });
+        body.result = self.check_values(
+            ctx,
+            result,
+            &checks,
+            &checked_kinds,
+            sigs,
+            "checked-result",
+            span,
+        );
+        checked_kinds
     }
 
     /// Returns how one result of an untyped callable call reaches the call
@@ -7787,7 +8377,11 @@ impl Lowering {
     /// `object` register type, so a class result arrives as any object and
     /// is cast. Metaobject kinds name one class, generic, method or slot,
     /// which no cast can check.
-    fn untyped_result_check(&self, kind: ValueKind) -> Option<CallableResultCheck> {
+    fn untyped_result_check(
+        &self,
+        kind: ValueKind,
+        _range: Option<IntRange>,
+    ) -> Option<CallableResultCheck> {
         Some(match kind {
             ValueKind::I32 | ValueKind::U32 => {
                 CallableResultCheck::Convert(NumericKind::of(kind).unwrap_or(NumericKind::Integer))
@@ -7815,11 +8409,17 @@ impl Lowering {
     ///
     /// As [`Self::untyped_result_check`], except that a declared signature
     /// fixes a limited integer's register kind, which the tape checks at
-    /// the call.
-    fn signature_result_check(&self, kind: ValueKind) -> Option<CallableResultCheck> {
-        match kind {
-            ValueKind::I32 | ValueKind::U32 => Some(CallableResultCheck::Trusted(kind)),
-            kind => self.untyped_result_check(kind),
+    /// the call, and that a declared `limited(<integer>, ...)` result is
+    /// checked against its range, as a class result is cast.
+    fn signature_result_check(
+        &self,
+        kind: ValueKind,
+        range: Option<IntRange>,
+    ) -> Option<CallableResultCheck> {
+        match (kind, range) {
+            (ValueKind::I32 | ValueKind::U32, _) => Some(CallableResultCheck::Trusted(kind)),
+            (ValueKind::I64, Some(range)) => Some(CallableResultCheck::Range(range)),
+            (kind, _) => self.untyped_result_check(kind, None),
         }
     }
 
@@ -8148,10 +8748,8 @@ impl Lowering {
                 .condition_name
                 .clone()
                 .unwrap_or_else(|| "$condition".into()),
-            type_annotation: Some(ast::TypeAnnotation {
+            type_annotation: Some(ast::TypeExpr::Named {
                 name: restart.class_name.clone(),
-                class_object: false,
-                callable: None,
                 span: restart.condition_span,
             }),
             span: restart.condition_span,
@@ -8455,21 +9053,47 @@ impl Lowering {
         &mut self,
         ctx: &mut FunctionContext,
         value: &ast::Expr,
-        class_name: &str,
+        target: &ast::TypeExpr,
         span: Span,
     ) -> Expr {
         // A limited type's members are `<integer>`s in its range.
-        if let Some(limited) = LimitedInteger::from_name(class_name) {
-            return match self.lower_instance_of(ctx, value, "<integer>", span) {
+        let range = match target {
+            ast::TypeExpr::Named { name, .. } => {
+                LimitedInteger::from_name(name).map(IntRange::from)
+            }
+            target => match self.resolve_type_annotation_detail_in_context(ctx, target) {
+                ResolvedType {
+                    kind: ValueKind::I64,
+                    range,
+                    ..
+                } => Some(range.unwrap_or(IntRange::INTEGER)),
+                _ => {
+                    let _ = self.lower_expr(ctx, value);
+                    return Expr::Error { span };
+                }
+            },
+        };
+        let integer = ast::TypeExpr::Named {
+            name: BuiltinValueClass::Integer.name().into(),
+            span: target.span(),
+        };
+        if let Some(range) = range {
+            return match self.lower_instance_of(ctx, value, &integer, span) {
                 Expr::InstanceOf { value, .. } => Expr::InstanceOfLimited {
                     site: SiteId::PENDING,
                     value,
-                    limited,
+                    range,
                     span,
                 },
                 other => other,
             };
         }
+        let ast::TypeExpr::Named {
+            name: class_name, ..
+        } = target
+        else {
+            return Expr::Error { span };
+        };
         let Some(class) = self.resolve_class(class_name) else {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
@@ -8530,9 +9154,20 @@ impl Lowering {
         &mut self,
         ctx: &mut FunctionContext,
         value: &ast::Expr,
-        class_name: &str,
+        target: &ast::TypeExpr,
         span: Span,
     ) -> Expr {
+        let class_name = match target {
+            ast::TypeExpr::Named { name, .. } => name.as_str(),
+            target => {
+                let resolved = self.resolve_type_annotation_detail_in_context(ctx, target);
+                let value = self.lower_expr(ctx, value);
+                if resolved.kind != ValueKind::I64 {
+                    return Expr::Error { span };
+                }
+                return self.cast_to_range(ctx, value, resolved.range, span);
+            }
+        };
         if let Some(limited) = LimitedInteger::from_name(class_name) {
             let value = self.lower_expr(ctx, value);
             return self.cast_to_limited(ctx, value, limited, span);
@@ -8578,6 +9213,42 @@ impl Lowering {
             to,
             value: Box::new(value),
             span,
+        }
+    }
+
+    /// Lowers `as(limited(<integer>, ...), x)`: `x` as an `<integer>`, as
+    /// `as(<integer>, x)` would give it, checked to be in `range` (`None`
+    /// for every `<integer>`).
+    fn cast_to_range(
+        &mut self,
+        ctx: &mut FunctionContext,
+        value: Expr,
+        range: Option<IntRange>,
+        span: Span,
+    ) -> Expr {
+        let value = match self.expr_kind(&value) {
+            ValueKind::I64 | ValueKind::I32 | ValueKind::U32 | ValueKind::Error => value,
+            _ => {
+                let Some(integer) = self.builtin_value_class(BuiltinValueClass::Integer) else {
+                    return Expr::Error { span };
+                };
+                match self.cast_to_class(ctx, value, integer, span) {
+                    error @ Expr::Error { .. } => return error,
+                    integer => integer,
+                }
+            }
+        };
+        match range {
+            Some(range) => Expr::CheckRange {
+                value: Box::new(value),
+                range,
+                site: SiteId::PENDING,
+                span,
+            },
+            None => {
+                let from = NumericKind::of(self.expr_kind(&value)).unwrap_or(NumericKind::Integer);
+                promote_operand(value, from, NumericKind::Integer)
+            }
         }
     }
 
@@ -8747,7 +9418,7 @@ impl Lowering {
             init_args.push(InitArg {
                 keyword: field.name.clone(),
                 slot: slot.id,
-                value,
+                value: self.limit_value(value, slot.kind, slot.range),
                 span: field.span,
             });
         }
@@ -8956,6 +9627,8 @@ impl Lowering {
             );
             return Expr::Error { span };
         };
+        // The send checks the new value against a limited slot's range.
+        let value = self.limit_value(value, slot.kind, slot.range);
         Expr::GenericCall {
             site: SiteId::PENDING,
             generic: setter.id,
@@ -9068,7 +9741,7 @@ impl Lowering {
 
     fn expr_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
-            Expr::ConstI64 { .. } => ValueKind::I64,
+            Expr::ConstI64 { .. } | Expr::CheckRange { .. } => ValueKind::I64,
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
             Expr::Convert { to, .. } => to.value_kind(),
             Expr::FloatCall { builtin, args, .. } => {
@@ -9396,118 +10069,182 @@ impl Lowering {
 
     fn resolve_function_type_detail(
         &mut self,
-        annotation: Option<&ast::TypeAnnotation>,
+        annotation: Option<&ast::TypeExpr>,
         default: ValueKind,
     ) -> ResolvedType {
         annotation.map_or(
             ResolvedType {
                 kind: default,
                 callable_signature: None,
+                range: None,
             },
             |annotation| self.resolve_type_annotation_detail(annotation),
         )
     }
 
-    fn resolve_type_annotation(&mut self, annotation: &ast::TypeAnnotation) -> ValueKind {
-        self.resolve_type_annotation_detail(annotation).kind
-    }
-
-    fn resolve_type_annotation_detail(&mut self, annotation: &ast::TypeAnnotation) -> ResolvedType {
-        if let Some(callable) = &annotation.callable {
-            let signature = self.resolve_callable_type_annotation(callable);
-            return ResolvedType {
-                kind: ValueKind::Callable,
-                callable_signature: Some(signature),
-            };
-        }
-        ResolvedType {
-            kind: self.resolve_type_name(
-                &annotation.name,
-                annotation.class_object,
-                annotation.span,
-            ),
-            callable_signature: None,
-        }
+    fn resolve_type_annotation_detail(&mut self, annotation: &ast::TypeExpr) -> ResolvedType {
+        let mut diagnostics = Vec::new();
+        let resolved = self.resolve_type_expr(annotation, &mut diagnostics);
+        self.diagnostics.extend(diagnostics);
+        resolved
     }
 
     fn resolve_result_annotation_detail(
         &mut self,
         annotation: &ast::ResultAnnotation,
-    ) -> (Vec<ValueKind>, Vec<Option<CallableSignature>>) {
-        annotation
-            .values
-            .iter()
-            .map(|value| self.resolve_type_annotation_detail(value))
-            .map(|resolved| (resolved.kind, resolved.callable_signature))
-            .unzip()
+    ) -> ResolvedResults {
+        let mut diagnostics = Vec::new();
+        let resolved = self.resolve_result_types(&annotation.values, &mut diagnostics);
+        self.diagnostics.extend(diagnostics);
+        resolved
     }
 
-    fn resolve_callable_type_annotation(
+    /// Resolves a definition's result annotation: its declared kinds
+    /// (`None` for an open result, which the body's kinds fill in), and the
+    /// callable signatures and limited ranges beside them.
+    fn resolve_declared_results(
         &mut self,
-        annotation: &ast::CallableTypeAnnotation,
-    ) -> CallableSignature {
-        let (params, param_sigs) = annotation
-            .params
-            .iter()
-            .map(|param| self.resolve_type_annotation_detail(param))
-            .map(|resolved| (resolved.kind, resolved.callable_signature))
-            .unzip();
-        let (results, result_sigs) = self.resolve_result_annotation_detail(&annotation.results);
-        CallableSignature {
-            params,
-            param_sigs,
-            results,
-            result_sigs,
+        annotation: Option<&ast::ResultAnnotation>,
+    ) -> DeclaredResults {
+        match annotation {
+            Some(annotation) => {
+                let resolved = self.resolve_result_annotation_detail(annotation);
+                DeclaredResults {
+                    kinds: Some(resolved.kinds),
+                    callable_sigs: resolved.callable_sigs,
+                    ranges: resolved.ranges,
+                }
+            }
+            None => {
+                let open = provisional_open_result_kinds().len();
+                DeclaredResults {
+                    kinds: None,
+                    callable_sigs: vec![None; open],
+                    ranges: vec![None; open],
+                }
+            }
         }
     }
 
     fn resolve_type_annotation_detail_in_context(
         &self,
         ctx: &mut FunctionContext,
-        annotation: &ast::TypeAnnotation,
+        annotation: &ast::TypeExpr,
     ) -> ResolvedType {
-        if let Some(callable) = &annotation.callable {
-            let signature = self.resolve_callable_type_annotation_in_context(ctx, callable);
-            return ResolvedType {
-                kind: ValueKind::Callable,
-                callable_signature: Some(signature),
-            };
-        }
-        ResolvedType {
-            kind: self.resolve_type_name_with_sink(
-                &annotation.name,
-                annotation.class_object,
-                annotation.span,
-                &mut ctx.diagnostics,
-            ),
+        self.resolve_type_expr(annotation, &mut ctx.diagnostics)
+    }
+
+    /// Resolves a source type to the value kind sem gives it, the signature
+    /// of a callable type, and the range of a limited integer type,
+    /// reporting what does not resolve into `diagnostics`.
+    fn resolve_type_expr(
+        &self,
+        annotation: &ast::TypeExpr,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> ResolvedType {
+        let plain = |kind| ResolvedType {
+            kind,
             callable_signature: None,
+            range: None,
+        };
+        match annotation {
+            ast::TypeExpr::Named { name, span } => {
+                plain(self.resolve_type_name_with_sink(name, false, *span, diagnostics))
+            }
+            ast::TypeExpr::ClassObject { name, span } => {
+                plain(self.resolve_type_name_with_sink(name, true, *span, diagnostics))
+            }
+            ast::TypeExpr::Callable { signature, .. } => {
+                let params = self.resolve_result_types(&signature.params, diagnostics);
+                let results = self.resolve_result_types(&signature.results.values, diagnostics);
+                ResolvedType {
+                    kind: ValueKind::Callable,
+                    callable_signature: Some(CallableSignature {
+                        params: params.kinds,
+                        param_sigs: params.callable_sigs,
+                        param_ranges: params.ranges,
+                        results: results.kinds,
+                        result_sigs: results.callable_sigs,
+                        result_ranges: results.ranges,
+                    }),
+                    range: None,
+                }
+            }
+            ast::TypeExpr::Limited(limited) => match self.resolve_limited(limited, diagnostics) {
+                Some(range) => ResolvedType {
+                    kind: ValueKind::I64,
+                    callable_signature: None,
+                    range: (range != IntRange::INTEGER).then_some(range),
+                },
+                None => plain(ValueKind::Error),
+            },
         }
     }
 
-    fn resolve_callable_type_annotation_in_context(
+    fn resolve_result_types(
         &self,
-        ctx: &mut FunctionContext,
-        annotation: &ast::CallableTypeAnnotation,
-    ) -> CallableSignature {
-        let (params, param_sigs) = annotation
-            .params
-            .iter()
-            .map(|param| self.resolve_type_annotation_detail_in_context(ctx, param))
-            .map(|resolved| (resolved.kind, resolved.callable_signature))
-            .unzip();
-        let (results, result_sigs) = annotation
-            .results
-            .values
-            .iter()
-            .map(|result| self.resolve_type_annotation_detail_in_context(ctx, result))
-            .map(|resolved| (resolved.kind, resolved.callable_signature))
-            .unzip();
-        CallableSignature {
-            params,
-            param_sigs,
-            results,
-            result_sigs,
+        types: &[ast::TypeExpr],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> ResolvedResults {
+        let mut resolved = ResolvedResults::default();
+        for ty in types {
+            let ty = self.resolve_type_expr(ty, diagnostics);
+            resolved.kinds.push(ty.kind);
+            resolved.callable_sigs.push(ty.callable_signature);
+            resolved.ranges.push(ty.range);
         }
+        resolved
+    }
+
+    /// Resolves `limited(<integer>, min: m, max: n)` to its range, or reports
+    /// why it names no limited integer type and returns `None`.
+    ///
+    /// Only `<integer>` can be limited. `min:` and `max:` may each appear
+    /// once, with an `<integer>` literal, and the range must not be empty.
+    fn resolve_limited(
+        &self,
+        limited: &ast::LimitedTypeExpr,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Option<IntRange> {
+        let start = diagnostics.len();
+        if limited.base.name() != Some(BuiltinValueClass::Integer.name()) {
+            diagnostics.push(
+                Diagnostic::error(limited.base.span(), DiagnosticCode::LimitedTypeBase)
+                    .with_arg(DiagnosticArg::text("base", limited.base.to_string())),
+            );
+        }
+        let mut range = IntRange::INTEGER;
+        for (index, option) in limited.options.iter().enumerate() {
+            let repeated = limited.options[..index]
+                .iter()
+                .any(|earlier| earlier.keyword == option.keyword);
+            let bound = match option.keyword.as_str() {
+                "min" if !repeated => &mut range.min,
+                "max" if !repeated => &mut range.max,
+                _ => {
+                    diagnostics.push(
+                        Diagnostic::error(option.span, DiagnosticCode::LimitedTypeOption)
+                            .with_arg(DiagnosticArg::text("option", option.keyword.clone())),
+                    );
+                    continue;
+                }
+            };
+            match option.value {
+                Some(value) => *bound = Some(value),
+                None => diagnostics.push(
+                    Diagnostic::error(option.span, DiagnosticCode::LimitedTypeBound)
+                        .with_arg(DiagnosticArg::text("option", option.keyword.clone()))
+                        .with_arg(DiagnosticArg::text("bound", option.text.clone())),
+                ),
+            }
+        }
+        if range.is_empty() {
+            diagnostics.push(
+                Diagnostic::error(limited.span, DiagnosticCode::EmptyLimitedType)
+                    .with_arg(DiagnosticArg::text("type", limited_type_name(range))),
+            );
+        }
+        (diagnostics.len() == start).then_some(range)
     }
 
     /// Resolves a method parameter's specializer and the value kind the
@@ -9519,21 +10256,53 @@ impl Lowering {
     /// method on a `<double-float>` generic receives an f64); otherwise it
     /// receives the boxed `<object>` value that dispatch already classified.
     ///
-    /// A limited type such as `<u32>` is not a class, so it can only restate
-    /// the generic's own parameter type; it then specializes on `<integer>`.
+    /// A limited type such as `<u32>` or `limited(<integer>, min: 0)` is not
+    /// a class, so it can only restate the generic's own parameter type
+    /// (or, for `limited(<integer>, ...)`, a wider range); it then
+    /// specializes on `<integer>`. Unlike Dylan, methods do not dispatch on
+    /// ranges.
     fn resolve_method_specializer(
         &mut self,
         param: &ast::MethodParam,
         generic_kind: Option<ValueKind>,
+        generic_range: Option<IntRange>,
     ) -> (MethodSpecializer, ValueKind) {
         // Lowering to the AST reported a parameter it found no class for.
-        if param.class_name.is_empty() {
+        let Some(specializer) = &param.specializer else {
             return (Some(ClassId(u32::MAX)), ValueKind::Error);
-        }
-        if param.class_name == "<object>" {
+        };
+        let class_name = match specializer {
+            ast::TypeExpr::Named { name, .. } => name.as_str(),
+            limited => {
+                let resolved = self.resolve_type_annotation_detail(limited);
+                if resolved.kind == ValueKind::Error {
+                    return (Some(ClassId(u32::MAX)), ValueKind::Error);
+                }
+                // A method may accept more than its generic's range, as a
+                // parameter may widen, but never less: sends check only the
+                // generic's range, and dispatch does not select on ranges.
+                let widens = match (resolved.range, generic_range) {
+                    (None, _) => true,
+                    (Some(own), Some(sent)) => own.includes(sent),
+                    (Some(_), None) => false,
+                };
+                if generic_kind != Some(resolved.kind) || !widens {
+                    self.diagnostics.push(
+                        Diagnostic::error(param.span, DiagnosticCode::LimitedTypeSpecializer)
+                            .with_arg(DiagnosticArg::text("type", limited.to_string())),
+                    );
+                    return (Some(ClassId(u32::MAX)), ValueKind::Error);
+                }
+                return (
+                    self.builtin_value_class(BuiltinValueClass::Integer),
+                    resolved.kind,
+                );
+            }
+        };
+        if class_name == "<object>" {
             return (Some(OBJECT_CLASS_ID), ValueKind::Any);
         }
-        if let Some(limited) = LimitedInteger::from_name(&param.class_name) {
+        if let Some(limited) = LimitedInteger::from_name(class_name) {
             let kind = limited_integer_kind(limited);
             if generic_kind != Some(kind) {
                 self.diagnostics.push(
@@ -9544,10 +10313,10 @@ impl Lowering {
             }
             return (self.builtin_value_class(BuiltinValueClass::Integer), kind);
         }
-        let Some(class) = self.resolve_class(&param.class_name) else {
+        let Some(class) = self.resolve_class(class_name) else {
             self.diagnostics.push(
                 Diagnostic::error(param.span, DiagnosticCode::UnresolvedClass)
-                    .with_arg(DiagnosticArg::text("class", param.class_name.clone())),
+                    .with_arg(DiagnosticArg::text("class", class_name)),
             );
             return (Some(ClassId(u32::MAX)), ValueKind::Error);
         };
@@ -9816,8 +10585,10 @@ impl Lowering {
                     .map(|function| CallableSignature {
                         params: function.param_kinds.clone(),
                         param_sigs: function.param_callable_sigs.clone(),
+                        param_ranges: function.param_ranges.clone(),
                         results: function.return_kinds.clone(),
                         result_sigs: function.return_callable_sigs.clone(),
+                        result_ranges: function.return_ranges.clone(),
                     })
             }
             KnownCallable::GenericFunction(generic) => {
@@ -9827,9 +10598,11 @@ impl Lowering {
                         .collect::<Vec<_>>();
                     CallableSignature {
                         param_sigs: vec![None; params.len()],
+                        param_ranges: generic.param_ranges.clone(),
                         params,
                         results: generic.return_kinds.clone(),
                         result_sigs: generic.return_callable_sigs.clone(),
+                        result_ranges: generic.return_ranges.clone(),
                     }
                 })
             }
@@ -9839,8 +10612,10 @@ impl Lowering {
                 Some(CallableSignature {
                     params: vec![ValueKind::Object(class.id)],
                     param_sigs: vec![None],
+                    param_ranges: vec![None],
                     results: vec![slot.kind],
                     result_sigs: vec![slot.callable_signature.clone()],
+                    result_ranges: vec![slot.range],
                 })
             }
         }
@@ -9924,6 +10699,15 @@ impl Lowering {
                         SignatureMismatch::Incompatible
                     });
                 }
+                // A limited integer flows only into a range holding its own.
+                let holds = match (into.range, from.range) {
+                    (None, _) => true,
+                    (Some(into), Some(from)) => into.includes(from),
+                    (Some(_), None) => false,
+                };
+                if into.kind == ValueKind::I64 && !holds {
+                    return Some(variance());
+                }
                 // A value whose callers call it with a signature must have
                 // one it can be called as.
                 let into_signature = self.signature_value_signature(into)?;
@@ -9948,10 +10732,11 @@ impl Lowering {
     }
 
     fn signature_value_name(&self, value: SignatureValue<'_>) -> String {
-        value.signature.map_or_else(
-            || self.kind_name(value.kind),
-            |signature| self.callable_signature_name(signature),
-        )
+        match (value.signature, value.range) {
+            (Some(signature), _) => self.callable_signature_name(signature),
+            (None, Some(range)) if value.kind == ValueKind::I64 => limited_type_name(range),
+            (None, _) => self.kind_name(value.kind),
+        }
     }
 
     /// Returns the diagnostic for a callable of signature `actual` that
@@ -10069,24 +10854,12 @@ impl Lowering {
     }
 
     fn callable_signature_name(&self, signature: &CallableSignature) -> String {
-        let name = |kind: &ValueKind, nested: Option<&CallableSignature>| {
-            nested.map_or_else(
-                || self.kind_name(*kind),
-                |nested| self.callable_signature_name(nested),
-            )
-        };
-        let params = signature
-            .params
-            .iter()
-            .enumerate()
-            .map(|(index, kind)| name(kind, signature.param_sig(index)))
+        let params = (0..signature.params.len())
+            .map(|index| self.signature_value_name(signature.param_value(index)))
             .collect::<Vec<_>>()
             .join(", ");
-        let results = signature
-            .results
-            .iter()
-            .enumerate()
-            .map(|(index, kind)| name(kind, signature.result_sig(index)))
+        let results = (0..signature.results.len())
+            .map(|index| self.signature_value_name(signature.result_value(index)))
             .collect::<Vec<_>>();
         let results = match results.as_slice() {
             [] => "0 values".into(),
@@ -11242,6 +12015,133 @@ mod tests {
     }
 
     #[test]
+    fn limited_types_resolve_to_integers_with_ranges() {
+        let module = lower_source(
+            "define generic send(n :: limited(<integer>, min: 0));\n\
+             define method send(n :: limited(<integer>, min: 0))\n  n\nend;\n\
+             define function f(n :: limited(<integer>, min: -1, max: 255)) => limited(<integer>, max: 9)\n  \
+             let m :: limited(<integer>) = n;\n  0\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let function = &module.functions[0];
+        let byte = IntRange {
+            min: Some(-1),
+            max: Some(255),
+        };
+        assert_eq!(function.param_kinds, [ValueKind::I64]);
+        assert_eq!(function.param_ranges, [Some(byte)]);
+        assert_eq!(function.locals[0].range, Some(byte));
+        // `limited(<integer>)` is every `<integer>`.
+        assert_eq!(function.locals[1].range, None);
+        assert_eq!(
+            function.result_ranges,
+            [Some(IntRange {
+                min: None,
+                max: Some(9)
+            })]
+        );
+        let at_least_zero = IntRange {
+            min: Some(0),
+            max: None,
+        };
+        assert_eq!(module.generics[0].param_ranges, [Some(at_least_zero)]);
+        assert_eq!(module.methods[0].locals[0].range, Some(at_least_zero));
+        let contract = module.function_contract(function);
+        let names = contract
+            .params
+            .iter()
+            .chain(&contract.results)
+            .map(|value| value.display(&module).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "limited(<integer>, min: -1, max: 255)",
+                "limited(<integer>, max: 9)"
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_limited_types_that_name_no_range() {
+        type Case<'a> = (&'a str, DiagnosticCode, &'a [(&'a str, &'a str)]);
+        let cases: [Case<'_>; 6] = [
+            (
+                "limited(<string>, max: 1)",
+                DiagnosticCode::LimitedTypeBase,
+                &[("base", "<string>")],
+            ),
+            (
+                "limited(<integer>, size: 1)",
+                DiagnosticCode::LimitedTypeOption,
+                &[("option", "size")],
+            ),
+            (
+                "limited(<integer>, min: 1, min: 2)",
+                DiagnosticCode::LimitedTypeOption,
+                &[("option", "min")],
+            ),
+            (
+                "limited(<integer>, max: 1.5)",
+                DiagnosticCode::LimitedTypeBound,
+                &[("option", "max"), ("bound", "1.5")],
+            ),
+            (
+                "limited(<integer>, max: 99999999999999999999)",
+                DiagnosticCode::LimitedTypeBound,
+                &[("option", "max")],
+            ),
+            (
+                "limited(<integer>, min: 5, max: 4)",
+                DiagnosticCode::EmptyLimitedType,
+                &[("type", "limited(<integer>, min: 5, max: 4)")],
+            ),
+        ];
+        for (ty, code, args) in cases {
+            let module = lower_source(&format!("define function f(n :: {ty})\n  0\nend;"));
+            assert!(
+                has_diagnostic(&module, code, args),
+                "{ty}: {:?}",
+                module.diagnostics
+            );
+        }
+        // A method may accept more than its generic's range, but not less.
+        let wider = lower_source(
+            "define generic send(n :: limited(<integer>, min: 0, max: 9));\n\
+             define method send(n :: limited(<integer>, min: -5))\n  n\nend;",
+        );
+        assert_eq!(wider.diagnostics, Vec::new());
+        // Sends check the generic's range, which the body may assume.
+        assert_eq!(
+            wider.methods[0].locals[0].range,
+            Some(IntRange {
+                min: Some(0),
+                max: Some(9)
+            })
+        );
+        let module = lower_source(
+            "define generic send(n :: limited(<integer>, min: 0));\n\
+             define method send(n :: limited(<integer>, min: 1))\n  n\nend;",
+        );
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::LimitedTypeSpecializer,
+            &[("type", "limited(<integer>, min: 1)")]
+        ));
+        // A callable signature compares ranges as a contract does.
+        let module = lower_source(
+            "define function digit(n :: limited(<integer>, min: 0, max: 9)) => <integer>\n  n\nend;\n\
+             define function main() => <integer>\n  \
+             let f :: callable(<integer>) => <integer> = digit;\n  0\nend;",
+        );
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::CallableParameterVariance,
+            &[("accepted", "limited(<integer>, min: 0, max: 9)")]
+        ));
+    }
+
+    #[test]
     fn reports_typed_generic_contract_mismatches() {
         let bad_call = lower_source(
             "define generic area(x :: <object>) => <integer>;\n\
@@ -12155,12 +13055,10 @@ mod tests {
         );
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         let holder = class(&module, "<holder>");
-        let measure = CallableSignature {
-            params: vec![ValueKind::Object(class_id(&module, "<shape>"))],
-            param_sigs: vec![None],
-            results: vec![ValueKind::I64],
-            result_sigs: vec![None],
-        };
+        let measure = CallableSignature::flat(
+            vec![ValueKind::Object(class_id(&module, "<shape>"))],
+            vec![ValueKind::I64],
+        );
         assert_eq!(
             holder.direct_slots[0].callable_signature.as_ref(),
             Some(&measure)

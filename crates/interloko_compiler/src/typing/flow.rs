@@ -375,7 +375,19 @@ impl<'a> Analysis<'a> {
             let Some(span) = self.local(check.param).map(|local| local.span) else {
                 continue;
             };
-            let passed = self.fact(ReasonKind::IndirectEntry, span, Type::top(), Vec::new());
+            // A limited integer parameter's register holds an `<integer>`;
+            // an object register may hold anything.
+            let passed_type = match check.target {
+                sem::EntryTarget::Range(_) => self
+                    .local(check.param)
+                    .map_or_else(Type::top, |local| self.module.kind_type(local.kind)),
+                _ => Type::top(),
+            };
+            let passed = self.fact(ReasonKind::IndirectEntry, span, passed_type, Vec::new());
+            let check_kind = match check.target {
+                sem::EntryTarget::Range(_) => TypingCheck::Range,
+                _ => TypingCheck::Cast,
+            };
             let (decided, expected, assumes) = match check.target {
                 sem::EntryTarget::Instance(class) => {
                     let target = Type::of(Atom::Cone(class), self.module);
@@ -391,10 +403,18 @@ impl<'a> Analysis<'a> {
                     TypingExpectation::ClassObject(bound),
                     Vec::new(),
                 ),
+                sem::EntryTarget::Range(range) => {
+                    let target = range_type(self.module, range);
+                    (
+                        decide(self.module, env, &passed.ty, &target, RANGE_RULES),
+                        TypingExpectation::Type(target),
+                        Vec::new(),
+                    )
+                }
             };
             self.record(
                 check.site,
-                TypingCheck::Cast,
+                check_kind,
                 decided,
                 span,
                 expected,
@@ -518,6 +538,18 @@ impl<'a> Analysis<'a> {
         self.module.kind_type(self.module.expr_kind(expr))
     }
 
+    /// The type of a call `expr` whose callee declares `ranges` for its
+    /// results: sem's category, within the range of a single limited
+    /// result, which the callee checks before it returns.
+    fn limited_result(&self, expr: &sem::Expr, ranges: &[Option<IntRange>]) -> Type {
+        match ranges {
+            [Some(range)] => self
+                .bound(expr)
+                .meet(&range_type(self.module, *range), self.module),
+            _ => self.bound(expr),
+        }
+    }
+
     fn assume(&mut self, assumption: Assumption) -> ReasonId {
         if let Some((_, reason)) = self
             .assumptions
@@ -563,12 +595,17 @@ impl<'a> Analysis<'a> {
             .or_else(|| locals.iter().find(|candidate| candidate.id == local))
     }
 
+    /// The type `binding` declares: its kind's, within its limited range.
+    fn declared_type(&self, binding: &sem::Local) -> Type {
+        declared(self.module, binding.kind, binding.range)
+    }
+
     /// Binds `local` to its declared type.
     fn bind_declared(&mut self, env: &mut Env, local: LocalId) {
         let Some(binding) = self.local(local) else {
             return;
         };
-        let ty = self.module.kind_type(binding.kind);
+        let ty = self.declared_type(binding);
         let fact = self.fact(ReasonKind::Declared, binding.span, ty, Vec::new());
         self.define(env, Var::Local(local), fact);
     }
@@ -577,9 +614,7 @@ impl<'a> Analysis<'a> {
     fn assign(&mut self, env: &mut Env, local: LocalId, fact: Fact) {
         let fact = match self.local(local) {
             Some(binding) => {
-                let ty = fact
-                    .ty
-                    .meet(&self.module.kind_type(binding.kind), self.module);
+                let ty = fact.ty.meet(&self.declared_type(binding), self.module);
                 if ty == fact.ty {
                     fact
                 } else {
@@ -766,7 +801,7 @@ impl<'a> Analysis<'a> {
                     return self.declared(expr);
                 };
                 let source = contract_source(function.return_annotation.is_some());
-                let ty = self.bound(expr);
+                let ty = self.limited_result(expr, &function.result_ranges);
                 self.fact(
                     ReasonKind::Contract {
                         definition: function.definition,
@@ -794,7 +829,7 @@ impl<'a> Analysis<'a> {
                     return fact;
                 }
                 let source = contract_source(generic.return_annotation.is_some());
-                let ty = self.bound(expr);
+                let ty = self.limited_result(expr, &generic.result_ranges);
                 self.fact(
                     ReasonKind::Contract {
                         definition: generic.definition,
@@ -852,12 +887,12 @@ impl<'a> Analysis<'a> {
             }
             E::InstanceOfLimited {
                 value,
-                limited,
+                range,
                 site,
                 span,
             } => {
                 let value = self.eval(env, value);
-                let target = range_type(module, IntRange::from(*limited));
+                let target = range_type(module, *range);
                 let decided = decide(module, env, &value.ty, &target, RANGE_RULES);
                 self.record(
                     *site,
@@ -947,11 +982,18 @@ impl<'a> Analysis<'a> {
             E::AccessorCall {
                 accessor,
                 receiver,
+                class,
+                slot,
                 span,
                 ..
             } => {
                 let _ = self.eval(env, receiver);
-                let ty = self.bound(expr);
+                let range = module
+                    .classes
+                    .get(class.0 as usize)
+                    .and_then(|class| class.effective_slots.get(slot.0 as usize))
+                    .and_then(|slot| slot.range);
+                let ty = self.limited_result(expr, &[range]);
                 self.fact(
                     ReasonKind::Contract {
                         definition: *accessor,
@@ -966,12 +1008,19 @@ impl<'a> Analysis<'a> {
                 setter,
                 receiver,
                 value,
+                class,
+                slot,
                 span,
                 ..
             } => {
                 let _ = self.eval(env, receiver);
                 let _ = self.eval(env, value);
-                let ty = self.bound(expr);
+                let range = module
+                    .classes
+                    .get(class.0 as usize)
+                    .and_then(|class| class.effective_slots.get(slot.0 as usize))
+                    .and_then(|slot| slot.range);
+                let ty = self.limited_result(expr, &[range]);
                 self.fact(
                     ReasonKind::Contract {
                         definition: *setter,
@@ -1028,6 +1077,15 @@ impl<'a> Analysis<'a> {
                 let value = self.eval(env, value);
                 let bound = self.bound(expr);
                 self.convert(env, from, *to, value, *site, *span, bound)
+            }
+            E::CheckRange {
+                value,
+                range,
+                site,
+                span,
+            } => {
+                let value = self.eval(env, value);
+                self.check_range(env, value, *range, *site, *span)
             }
             E::Compare { lhs, rhs, .. }
             | E::MixedCompare { lhs, rhs, .. }
@@ -1124,7 +1182,7 @@ impl<'a> Analysis<'a> {
             &closure.captures,
         ));
         for capture in &closure.captures {
-            let declared = self.module.kind_type(capture.kind);
+            let declared = declared(self.module, capture.kind, capture.range);
             let fact = match env.get(Var::Local(capture.source)).cloned() {
                 Some(fact) => {
                     let ty = fact.ty.meet(&declared, self.module);
@@ -1350,12 +1408,12 @@ impl<'a> Analysis<'a> {
             }
             sem::Expr::InstanceOfLimited {
                 value,
-                limited,
+                range,
                 site,
                 span,
             } => {
                 if let Some(var) = var_of(value) {
-                    let target = range_type(module, IntRange::from(*limited));
+                    let target = range_type(module, *range);
                     self.narrow_by(when_true, when_false, var, &target, Some(*site), *span);
                 }
             }
@@ -1475,14 +1533,15 @@ impl<'a> Analysis<'a> {
     }
 
     /// The integer local or capture whose value `expr` is: the binding
-    /// itself, or an integer conversion of it that typing proved in range.
+    /// itself, or an integer conversion or range check of it that typing
+    /// proved in range.
     ///
     /// A conversion that may fail is not looked through: a failure signals
     /// a `<type-error>` whose `use-value` restart supplies some other value,
     /// so what the conversion yields says nothing about its operand.
     fn integer_var_of(&self, expr: &sem::Expr) -> Option<Var> {
         match expr {
-            sem::Expr::Convert { value, site, .. }
+            sem::Expr::Convert { value, site, .. } | sem::Expr::CheckRange { value, site, .. }
                 if is_integer_expr(self.module, value) && self.proved_here(*site) =>
             {
                 self.integer_var_of(value)
@@ -1526,7 +1585,7 @@ impl<'a> Analysis<'a> {
                 self.module,
                 IntRange::singleton(i64::from(*value)),
             )),
-            sem::Expr::Convert { value, site, .. }
+            sem::Expr::Convert { value, site, .. } | sem::Expr::CheckRange { value, site, .. }
                 if is_integer_expr(self.module, value) && self.proved_here(*site) =>
             {
                 self.peek(env, value)
@@ -1999,6 +2058,41 @@ impl<'a> Analysis<'a> {
         );
         self.fact(ReasonKind::Check { site }, span, ty, from_reasons)
     }
+
+    /// Classifies the check that the integer `value` is in a limited type's
+    /// `range`.
+    fn check_range(
+        &mut self,
+        env: &Env,
+        value: Fact,
+        range: IntRange,
+        site: SiteId,
+        span: Span,
+    ) -> Fact {
+        let module = self.module;
+        let target = range_type(module, range);
+        let decided = decide(module, env, &value.ty, &target, RANGE_RULES);
+        // A value out of range signals a `<type-error>` whose `use-value`
+        // replacement is checked again, so the result is always in range,
+        // but only a proved check keeps the operand's narrower range.
+        let ty = if decided.0 == TypingVerdict::Proved {
+            value.ty.meet(&target, module)
+        } else {
+            target.clone()
+        };
+        let from = vec![value.reason];
+        self.record(
+            site,
+            TypingCheck::Range,
+            decided,
+            span,
+            TypingExpectation::Type(target),
+            &[value],
+            Vec::new(),
+            None,
+        );
+        self.fact(ReasonKind::Check { site }, span, ty, from)
+    }
 }
 
 /// Rules for a check that relates one operand to an expected type, by
@@ -2143,6 +2237,16 @@ const fn representable(kind: NumericKind) -> IntRange {
     }
 }
 
+/// The type a declaration of `kind` gives its values: the kind's, within
+/// `range` when it declares a limited integer type.
+pub(super) fn declared(module: &sem::Module, kind: ValueKind, range: Option<IntRange>) -> Type {
+    let ty = module.kind_type(kind);
+    match range {
+        Some(range) => ty.meet(&range_type(module, range), module),
+        None => ty,
+    }
+}
+
 /// The check site an expression leaves, if any.
 const fn site_of(expr: &sem::Expr) -> Option<SiteId> {
     match expr {
@@ -2150,7 +2254,8 @@ const fn site_of(expr: &sem::Expr) -> Option<SiteId> {
         | sem::Expr::Cast { site, .. }
         | sem::Expr::InstanceOf { site, .. }
         | sem::Expr::InstanceOfLimited { site, .. }
-        | sem::Expr::Convert { site, .. } => Some(*site),
+        | sem::Expr::Convert { site, .. }
+        | sem::Expr::CheckRange { site, .. } => Some(*site),
         sem::Expr::Binary { site, .. } | sem::Expr::Negate { site, .. } => *site,
         _ => None,
     }
@@ -2233,6 +2338,7 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
             }
         }
         E::Convert { value: inner, .. }
+        | E::CheckRange { value: inner, .. }
         | E::Negate { value: inner, .. }
         | E::Signal {
             condition: inner, ..
