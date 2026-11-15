@@ -161,7 +161,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/type_errors/limited_argument_unhandled.loko"));
     assert!(out.contains("ok pass/no_applicable_method/unhandled.loko"));
     assert!(out.contains("ok pass/no_applicable_method/handled_by_exit.loko"));
-    assert!(out.contains("corpus: 427 passed, 0 failed, 427 total"));
+    assert!(out.contains("corpus: 428 passed, 0 failed, 428 total"));
 }
 
 #[test]
