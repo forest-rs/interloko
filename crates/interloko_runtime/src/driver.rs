@@ -14,8 +14,10 @@
 //! resuming the signal with values, or raising a restart, retry or abort at
 //! it so that every crossed cleanup runs.
 //!
-//! A run links [`CodeUnit`]s: it installs the entry unit, and a chooser may
-//! install replacements while a condition is unhandled. Generic sends ask
+//! A run links [`CodeUnit`]s: it starts from an entry unit installed in the
+//! VM, either by [`run`] or once by [`install`] for any number of
+//! [`run_installed`] calls, and a chooser may install replacements while a
+//! condition is unhandled. Generic sends ask
 //! the driver which method to call ([`crate::code::CODE_DISPATCH`]),
 //! and a retried frame calls the newest version of its function, while every
 //! frame keeps running the unit it entered.
@@ -29,7 +31,7 @@ use alloc::vec::Vec;
 
 use execution_tape::host::{Host, HostError, ValueRef};
 use execution_tape::program::ValueType;
-use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, Value};
+use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, UnitId, Value};
 use execution_tape::vm::{
     ActivationId, InstallError, InvocationInspection, InvocationOptions, PendingHostCall,
     PendingSuspension, RunStatus, TagError, Trap, TrapInfo, Vm,
@@ -135,6 +137,8 @@ pub enum LinkError {
     Install(InstallError),
     /// The unit cannot replace the code the run already installed.
     Mismatch(CodeMismatch),
+    /// The VM asked to run an [`Installed`] unit did not install it.
+    NotInstalled,
 }
 
 impl core::fmt::Display for LinkError {
@@ -145,21 +149,54 @@ impl core::fmt::Display for LinkError {
             Self::Mismatch(mismatch) => {
                 write!(formatter, "cannot replace running code: {mismatch}")
             }
+            Self::NotInstalled => formatter.write_str("the code is not installed in this VM"),
         }
     }
+}
+
+/// A code unit installed in one VM, to run there any number of times with
+/// [`run_installed`].
+#[derive(Clone, Debug)]
+pub struct Installed {
+    unit: UnitId,
+    code: Arc<CodeUnit>,
+}
+
+impl Installed {
+    /// The VM unit the code was installed as.
+    #[must_use]
+    pub const fn unit(&self) -> UnitId {
+        self.unit
+    }
+
+    /// The installed code.
+    #[must_use]
+    pub const fn code(&self) -> &Arc<CodeUnit> {
+        &self.code
+    }
+}
+
+/// Defines the control tags `code` imports, unless `vm` already has them,
+/// and installs `code` as a new VM unit.
+///
+/// Installing is explicit and never cached: every call adds a unit, which
+/// the VM keeps until it is dropped.
+pub fn install<H: Host>(vm: &mut Vm<H>, code: &Arc<CodeUnit>) -> Result<Installed, LinkError> {
+    define_tags(vm)?;
+    let unit = vm
+        .install(Arc::clone(&code.program))
+        .map_err(LinkError::Install)?;
+    Ok(Installed {
+        unit,
+        code: Arc::clone(code),
+    })
 }
 
 /// Installs `unit` in `vm` and runs its function `entry` with `args` to
 /// completion, servicing host requests.
 ///
-/// The driver defines the control tags the unit imports, unless the VM
-/// already has them, and installs the unit as a new VM unit; installing is
-/// explicit and never cached, so every run adds one unit. `options` may carry
-/// trace and access observers; the driver opts into yielded host calls and
-/// suspensions itself. Hard VM limits apply to the whole run.
-///
-/// A condition that no live handler accepts goes to `chooser` before anything
-/// unwinds.
+/// This is [`install`] followed by [`run_installed`], so every run adds one
+/// unit to `vm`.
 pub fn run<'a, H: RuntimeHost>(
     vm: &'a mut Vm<H>,
     unit: &Arc<CodeUnit>,
@@ -168,15 +205,42 @@ pub fn run<'a, H: RuntimeHost>(
     options: InvocationOptions<'a>,
     chooser: &mut dyn ConditionChooser,
 ) -> Result<RunOutcome, RunFailure> {
+    let installed = install(vm, unit).map_err(RunFailure::Link)?;
+    run_installed(vm, &installed, entry, args, options, chooser)
+}
+
+/// Runs function `entry` of code that [`install`] installed in `vm`, with
+/// `args`, to completion, servicing host requests.
+///
+/// `options` may carry trace and access observers; the driver opts into
+/// yielded host calls and suspensions itself. Hard VM limits apply to the
+/// whole run. Nothing of the run's control state outlives it: handler and
+/// exit bindings, handler searches and selected sends start empty every run.
+///
+/// A condition that no live handler accepts goes to `chooser` before anything
+/// unwinds. Code it installs stays in `vm` after the run.
+pub fn run_installed<'a, H: RuntimeHost>(
+    vm: &'a mut Vm<H>,
+    installed: &Installed,
+    entry: FuncId,
+    args: &'a [Value],
+    options: InvocationOptions<'a>,
+    chooser: &mut dyn ConditionChooser,
+) -> Result<RunOutcome, RunFailure> {
+    let unit = installed.unit;
+    if !vm
+        .units()
+        .program(unit)
+        .is_some_and(|program| Arc::ptr_eq(program, &installed.code.program))
+    {
+        return Err(RunFailure::Link(LinkError::NotInstalled));
+    }
     let tags = define_tags(vm).map_err(RunFailure::Link)?;
-    let installed = vm
-        .install(Arc::clone(&unit.program))
-        .map_err(|error| RunFailure::Link(LinkError::Install(error)))?;
     let mut units = UnitTable::default();
-    units.push(installed, Arc::clone(unit));
+    units.push(unit, Arc::clone(&installed.code));
     let mut invocation = vm
         .start(
-            FuncRef::new(installed, entry),
+            FuncRef::new(unit, entry),
             args,
             options.yield_host_calls().yield_suspensions(),
         )
