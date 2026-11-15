@@ -1,0 +1,28 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump lowered contains as <circle>
+
+// A closure is only ever entered indirectly, so a callable parameter's
+// declared signature is never checked against the callable it receives.
+// Its calls through that parameter cast class results.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function square-of(x :: <integer>) => <square>
+  make(<square>, side: x)
+end;
+
+define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
+  apply(f, g)
+end;
+
+define function main()
+  apply-untyped(function (g :: callable(<integer>) => <circle>) => <integer> g(1).radius end,
+                square-of)
+end;

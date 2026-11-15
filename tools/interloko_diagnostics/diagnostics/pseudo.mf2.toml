@@ -58,7 +58,7 @@
 "sem.limited-parameter-specializer" = "[ps] limited parameter specializer"
 "sem.apply-arity-mismatch" = "[ps] apply needs callable first"
 "sem.apply-target-type-mismatch" = "[ps] apply target got { $actual }, need { $expected }"
-"sem.unchecked-callable-result" = "[ps] untyped callable result { $expected } is uncheckable"
+"sem.unchecked-callable-result" = "[ps] callable value result { $expected } is uncheckable"
 "sem.callable-parameter-variance" = "[ps] { $actual } param { $index } takes only { $accepted }, not every { $passed } for { $expected }"
 "sem.callable-result-variance" = "[ps] { $actual } result { $index } may be any { $returned }, not only { $relied } for { $expected }"
 "sem.signal-condition-type-mismatch" = "[ps] signal condition got { $actual }, need object condition"

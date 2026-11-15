@@ -160,8 +160,8 @@ pub enum DiagnosticCode {
     ApplyArityMismatch,
     /// `apply` target is not a known callable.
     ApplyTargetTypeMismatch,
-    /// An untyped callable's results cannot be checked at runtime as the kinds
-    /// its call site expects.
+    /// A call through a `<callable>` value cannot check at runtime that its
+    /// results are the kinds the call site relies on.
     UncheckedCallableResult,
     /// A callable's parameter is narrower than the expected signature's, so
     /// it does not accept everything its callers may pass.

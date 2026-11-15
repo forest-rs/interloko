@@ -58,7 +58,7 @@
 "sem.limited-parameter-specializer" = "the generic declares this parameter { $type }; a method must specialize it as { $type } too, so its body computes with the same type"
 "sem.apply-arity-mismatch" = "apply expects a callable and arguments"
 "sem.apply-target-type-mismatch" = "apply target must be a { $expected }, got { $actual }"
-"sem.unchecked-callable-result" = "an untyped <callable> cannot be checked to return { $expected }; declare its signature with callable(...) => ..."
+"sem.unchecked-callable-result" = "a call through a <callable> value cannot be checked to return { $expected }; call the function by name instead"
 "sem.callable-parameter-variance" = "{ $actual } cannot be called as { $expected }: its parameter { $index } accepts only { $accepted }, but callers may pass any { $passed }"
 "sem.callable-result-variance" = "{ $actual } cannot be called as { $expected }: its result { $index } may be any { $returned }, but callers rely on { $relied }"
 "sem.signal-condition-type-mismatch" = "signal condition must be a known object"

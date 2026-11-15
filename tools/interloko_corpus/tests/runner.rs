@@ -149,7 +149,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/syntax/hyphenated_local_names.loko"));
     assert!(out.contains("ok fail/diagnostics/unresolved_hyphenated_local.loko"));
     assert!(out.contains("ok pass/conditions/guard_exit.loko"));
-    assert!(out.contains("corpus: 338 passed, 0 failed, 338 total"));
+    assert!(out.contains("corpus: 340 passed, 0 failed, 340 total"));
 }
 
 #[test]

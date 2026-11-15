@@ -591,10 +591,16 @@ single unit and compares nothing with units from earlier runs, so
 recompiling with no suspended frames, and running again, accepts any
 change.
 
-A callable value carries more than its type: code that applies it trusts a
-signature, either a declared `callable(<integer>) => <circle>` type or,
-for a value sem knows to be a particular function, generic or accessor,
-that definition's own signature. The type lattice's callable atom has no
+A callable value carries more than its type: code that applies it relies
+on a signature, either a declared `callable(<integer>) => <circle>` type
+or, for a value sem knows to be a particular function, generic or
+accessor, that definition's own signature. Only the known definition's
+signature is trusted outright. Nothing checks the callable a value of
+declared type holds against the declaration (it may have arrived through
+an untyped call), so a call through it relies only on the register kinds
+the signature fixes, which the VM checks, and casts each class result.
+Within one compile, sem accepts a callable for a declared type by the same
+rule a contract uses below. The type lattice's callable atom has no
 signature, so a contract records it beside the type, as a nested contract
 compared by the same rule. Inside a returned callable the rule applies as
 written (it may accept more and return less); inside a callable parameter
