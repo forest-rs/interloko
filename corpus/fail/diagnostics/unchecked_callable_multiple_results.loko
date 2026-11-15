@@ -2,9 +2,10 @@
 // expect: diagnostic code sem.unchecked-callable-result
 // expect: diagnostic contains cannot be checked to return 2 values (<circle>, <integer>)
 
-// Results needing a runtime check are checked one value at a time, so an
-// untyped callable expected to return several values must return ones the
-// tape's register types already establish, or declare its signature.
+// Results needing a runtime check are checked one value at a time, so a
+// callable value expected to return several values must return ones the
+// tape's register types already establish. Declaring its signature does not
+// help: nothing checks the callable a value holds against that signature.
 
 define class <circle> (<object>)
   slot radius :: <integer>;

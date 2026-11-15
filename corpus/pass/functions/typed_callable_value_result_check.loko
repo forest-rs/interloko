@@ -1,0 +1,40 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump sem contains callable-call result=object(c0)
+// expect: dump lowered contains as <circle>
+// expect: dump typing contains s0 cast checked rule=cast-narrowing
+
+// A parameter's declared signature is only what its callers were checked
+// against. `radius-through` is itself applied as an untyped `<callable>`,
+// so nothing checked the `g` it receives: here it returns a `<square>`.
+// A call through a callable value therefore casts a class result, as an
+// untyped call does, and the cast fails instead of `side` being read as
+// `radius`.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function radius-through(g :: callable(<circle>) => <circle>) => <integer>
+  let c :: <circle> = g(make(<circle>, radius: 3));
+  c.radius
+end;
+
+define function square-for(c :: <circle>) => <square>
+  make(<square>, side: 7)
+end;
+
+define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
+  apply(f, g)
+end;
+
+define function main()
+  apply-untyped(radius-through, square-for)
+end;

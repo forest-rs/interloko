@@ -3455,10 +3455,10 @@ impl GenericSymbol {
     }
 }
 
-/// How one result of an untyped callable call is checked back to the kind its
-/// call site expects.
+/// How one result of a call through a `<callable>` value is checked back to
+/// the kind its call site relies on.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum UntypedResultCheck {
+enum CallableResultCheck {
     /// The tape's register type already establishes the kind.
     Trusted(ValueKind),
     /// An `<integer>` result is converted, with a range check, to a limited
@@ -3468,7 +3468,7 @@ enum UntypedResultCheck {
     Cast(ClassId),
 }
 
-impl UntypedResultCheck {
+impl CallableResultCheck {
     /// Returns the kind the call itself produces, before the check.
     fn wire_kind(&self) -> ValueKind {
         match *self {
@@ -3485,6 +3485,9 @@ struct FunctionContext {
     capture_sources: Vec<Local>,
     captures: Vec<Capture>,
     active_restarts: Vec<ActiveRestart>,
+    /// Definitions of the block exit procedures bound in this body or, for
+    /// a closure, an enclosing one.
+    exit_definitions: Vec<DefinitionId>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -3517,19 +3520,42 @@ impl FunctionContext {
             capture_sources: Vec::new(),
             captures: Vec::new(),
             active_restarts: Vec::new(),
+            exit_definitions: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
 
-    fn for_closure(capture_sources: Vec<Local>) -> Self {
+    fn for_closure(capture_sources: Vec<Local>, exit_definitions: Vec<DefinitionId>) -> Self {
         Self {
             locals: Vec::new(),
             visible_locals: Vec::new(),
             capture_sources,
             captures: Vec::new(),
             active_restarts: Vec::new(),
+            exit_definitions,
             diagnostics: Vec::new(),
         }
+    }
+
+    /// Whether `target` names a block's exit procedure: the local a `block`
+    /// bound it to, or a closure's capture of that local.
+    fn is_block_exit(&self, target: &Expr) -> bool {
+        let definition = match target {
+            Expr::Local { local, .. } => self
+                .locals
+                .get(local.0 as usize)
+                .map(|local| local.definition),
+            Expr::Capture { capture, .. } => {
+                self.captures.get(capture.0 as usize).and_then(|capture| {
+                    self.capture_sources
+                        .iter()
+                        .find(|source| source.name == capture.name)
+                        .map(|source| source.definition)
+                })
+            }
+            _ => None,
+        };
+        definition.is_some_and(|definition| self.exit_definitions.contains(&definition))
     }
 
     fn add_local(
@@ -6522,7 +6548,8 @@ impl Lowering {
             span,
         });
 
-        let mut closure_ctx = FunctionContext::for_closure(ctx.visible_local_sources());
+        let mut closure_ctx =
+            FunctionContext::for_closure(ctx.visible_local_sources(), ctx.exit_definitions.clone());
         let mut param_ids = Vec::new();
         let mut param_kinds = Vec::new();
         let mut param_callable_sigs = Vec::new();
@@ -7151,15 +7178,40 @@ impl Lowering {
                     );
                 }
             }
-            let result_len = signature.results.len();
-            return Expr::CallableCall {
-                callable: Box::new(target),
-                args,
-                arg_kinds: signature.params,
-                result_kinds: signature.results,
-                result_callable_sigs: vec![None; result_len],
-                span,
-            };
+            // A block's exit procedure never returns, so nothing relies on
+            // its results.
+            if ctx.is_block_exit(&target) {
+                let result_len = signature.results.len();
+                return Expr::CallableCall {
+                    callable: Box::new(target),
+                    args,
+                    arg_kinds: signature.params,
+                    result_kinds: signature.results,
+                    result_callable_sigs: vec![None; result_len],
+                    span,
+                };
+            }
+            // Otherwise the signature is only the value's declared type, and
+            // nothing checked the callable it holds against it: the value may
+            // have arrived through an untyped call, whose callee entry checks
+            // only its own parameter classes. The tape enforces the register
+            // kinds the signature fixes, but every class shares the `object`
+            // register type, so class results are cast as for an untyped
+            // call. Arguments need nothing here: the callee's indirect entry
+            // checks the classes it relies on.
+            return self
+                .checked_callable_call(
+                    target,
+                    args,
+                    signature.params,
+                    &signature.results,
+                    Self::signature_result_check,
+                    span,
+                )
+                .unwrap_or_else(|diagnostic| {
+                    ctx.diagnostics.push(diagnostic);
+                    Expr::Error { span }
+                });
         }
         let Some(result_kinds) = expected_results else {
             ctx.diagnostics.push(
@@ -7190,29 +7242,60 @@ impl Lowering {
             .iter()
             .map(|arg| as_integer(self.expr_kind(arg)))
             .collect::<Vec<_>>();
+        self.checked_callable_call(
+            target,
+            args,
+            arg_kinds,
+            result_kinds,
+            Self::untyped_result_check,
+            span,
+        )
+        .unwrap_or_else(|diagnostic| {
+            ctx.diagnostics.push(diagnostic);
+            Expr::Error { span }
+        })
+    }
+
+    /// Builds a call through a `<callable>` value whose results the call site
+    /// relies on as `result_kinds`, checking each as `check` says.
+    ///
+    /// The call itself produces each result at its check's wire kind, and a
+    /// single checked result is wrapped in its conversion or cast: an
+    /// ordinary check site soft typing records and may later prove. Several
+    /// results are only accepted when the tape establishes all of them;
+    /// otherwise, or when no check can establish a result, this returns a
+    /// [`DiagnosticCode::UncheckedCallableResult`] error.
+    fn checked_callable_call(
+        &self,
+        target: Expr,
+        args: Vec<Expr>,
+        arg_kinds: Vec<ValueKind>,
+        result_kinds: &[ValueKind],
+        check: fn(&Self, ValueKind) -> Option<CallableResultCheck>,
+        span: Span,
+    ) -> Result<Expr, Diagnostic> {
         let checks = result_kinds
             .iter()
-            .map(|kind| self.untyped_result_check(*kind))
+            .map(|kind| check(self, *kind))
             .collect::<Option<Vec<_>>>();
         let checks = match checks {
             Some(checks)
                 if result_kinds.len() == 1
                     || checks
                         .iter()
-                        .all(|check| matches!(check, UntypedResultCheck::Trusted(_))) =>
+                        .all(|check| matches!(check, CallableResultCheck::Trusted(_))) =>
             {
                 checks
             }
             _ => {
-                ctx.diagnostics.push(
+                return Err(
                     Diagnostic::error(span, DiagnosticCode::UncheckedCallableResult).with_arg(
                         DiagnosticArg::text("expected", self.result_kinds_name(result_kinds)),
                     ),
                 );
-                return Expr::Error { span };
             }
         };
-        let wire_kinds = checks.iter().map(UntypedResultCheck::wire_kind).collect();
+        let wire_kinds = checks.iter().map(CallableResultCheck::wire_kind).collect();
         let call = Expr::CallableCall {
             callable: Box::new(target),
             args,
@@ -7221,21 +7304,21 @@ impl Lowering {
             result_kinds: wire_kinds,
             span,
         };
-        match checks.as_slice() {
-            [UntypedResultCheck::Convert(to)] => Expr::Convert {
+        Ok(match checks.as_slice() {
+            [CallableResultCheck::Convert(to)] => Expr::Convert {
                 site: SiteId::PENDING,
                 to: *to,
                 value: Box::new(call),
                 span,
             },
-            [UntypedResultCheck::Cast(class)] => Expr::Cast {
+            [CallableResultCheck::Cast(class)] => Expr::Cast {
                 value: Box::new(call),
                 class: *class,
                 site: SiteId::PENDING,
                 span,
             },
             _ => call,
-        }
+        })
     }
 
     /// Returns how one result of an untyped callable call reaches the call
@@ -7246,10 +7329,10 @@ impl Lowering {
     /// `object` register type, so a class result arrives as any object and
     /// is cast. Metaobject kinds name one class, generic, method or slot,
     /// which no cast can check.
-    fn untyped_result_check(&self, kind: ValueKind) -> Option<UntypedResultCheck> {
+    fn untyped_result_check(&self, kind: ValueKind) -> Option<CallableResultCheck> {
         Some(match kind {
             ValueKind::I32 | ValueKind::U32 => {
-                UntypedResultCheck::Convert(NumericKind::of(kind).unwrap_or(NumericKind::Integer))
+                CallableResultCheck::Convert(NumericKind::of(kind).unwrap_or(NumericKind::Integer))
             }
             ValueKind::Object(class)
             | ValueKind::String(class)
@@ -7257,15 +7340,29 @@ impl Lowering {
             | ValueKind::Vector(class)
                 if class != OBJECT_CLASS_ID =>
             {
-                UntypedResultCheck::Cast(class)
+                CallableResultCheck::Cast(class)
             }
             ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
             | ValueKind::SlotDescriptorObject { .. }
             | ValueKind::KnownCallable(_) => return None,
-            kind => UntypedResultCheck::Trusted(kind),
+            kind => CallableResultCheck::Trusted(kind),
         })
+    }
+
+    /// Returns how one result of a call through a callable value of a
+    /// declared signature reaches the signature's `kind`, or `None` when no
+    /// runtime check can establish it.
+    ///
+    /// As [`Self::untyped_result_check`], except that a declared signature
+    /// fixes a limited integer's register kind, which the tape checks at
+    /// the call.
+    fn signature_result_check(&self, kind: ValueKind) -> Option<CallableResultCheck> {
+        match kind {
+            ValueKind::I32 | ValueKind::U32 => Some(CallableResultCheck::Trusted(kind)),
+            kind => self.untyped_result_check(kind),
+        }
     }
 
     fn generic_callable_arg_kind(&self, generic: GenericFunctionId, index: usize) -> ValueKind {
@@ -7503,13 +7600,15 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("local", exit.name.clone())),
                 );
             }
+            let definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Local,
+                &exit.name,
+                &exit.id.raw().to_string(),
+            );
+            ctx.exit_definitions.push(definition);
             let local = ctx.add_local(
-                DefinitionId::new(
-                    self.source_file,
-                    DefinitionKind::Local,
-                    &exit.name,
-                    &exit.id.raw().to_string(),
-                ),
+                definition,
                 exit.name.clone(),
                 ValueKind::Callable,
                 Some(CallableSignature {
@@ -11213,6 +11312,47 @@ mod tests {
                 ("expected", "callable(<integer>) => <object>"),
                 ("actual", "callable(<integer>) => <circle>"),
             ]
+        ));
+    }
+
+    #[test]
+    fn calls_through_callable_values_cast_class_results() {
+        let module = lower_shapes(
+            "define function through(g :: callable(<integer>) => <circle>) => <integer>\n  \
+               let picked :: <circle> = block (return)\n    return(circle-of(2))\n  end;\n  \
+               g(1).radius + picked.radius\nend;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let circle = module
+            .classes
+            .iter()
+            .find(|class| class.name == "<circle>")
+            .expect("circle class")
+            .id;
+        let through = module
+            .functions
+            .iter()
+            .find(|function| function.name == "through")
+            .expect("through function");
+        let rendered = format!("{:?}", through.body);
+        // `g` returns whatever it was handed, so its result is cast; the exit
+        // procedure never returns, so its call is not.
+        assert_eq!(rendered.matches("Cast {").count(), 1, "{rendered}");
+        let Expr::Binary { lhs, .. } = &through.body.result else {
+            panic!("expected an addition: {rendered}");
+        };
+        let Expr::AccessorCall { receiver, .. } = lhs.as_ref() else {
+            panic!("expected a slot read: {rendered}");
+        };
+        assert!(matches!(
+            receiver.as_ref(),
+            Expr::Cast { class, value, .. }
+                if *class == circle
+                    && matches!(
+                        value.as_ref(),
+                        Expr::CallableCall { result_kinds, .. }
+                            if result_kinds == &[ValueKind::Object(OBJECT_CLASS_ID)]
+                    )
         ));
     }
 }
