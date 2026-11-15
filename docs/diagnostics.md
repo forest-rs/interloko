@@ -106,6 +106,24 @@ diagnostic codes, spans, labels, and args, but not rendered catalog output.
 That keeps incremental reuse stable when a user switches from `en` to
 `pseudo`, or from a built-in catalog to a project-specific override catalog.
 
+## Sealing
+
+Sealing has diagnostics where a definition contradicts itself, and refusals
+where something from outside the defining source tries to extend it:
+
+| Code or refusal | When |
+| --- | --- |
+| `ast.duplicate-adjective` | a definition repeats an adjective, as in `define sealed sealed class` |
+| `ast.conflicting-adjectives` | a definition has two that contradict each other: `sealed` and `open`, or `abstract` and `concrete` (args `adjective`, `other`) |
+| `sem.abstract-class-make` | `make` names an abstract class, which has no direct instances (arg `class`); a class value naming one at run time traps instead |
+| `MutationError::SealedGeneric` | an `add-method` session mutation targets a sealed generic, or a replayed one does after the new source sealed it |
+| `CodeMismatch::Assumption` | code installed under live frames would break a closed-world assumption the running code relies on: a sealed class gained or lost a direct subclass, changed abstractness or was unsealed, or an assumed method set changed |
+
+There is one compilation unit, so a source cannot violate its own sealing:
+every subclass and method it defines is part of the sealed set. Adjectives
+belong to the definitions that take them (classes take all four, generics
+`sealed` and `open`), and any other placement is a syntax error.
+
 ## Runtime Type Errors
 
 A runtime check that fails does not trap. It signals a `<type-error>`

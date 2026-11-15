@@ -112,7 +112,12 @@ specific `MutationError` variant so the affordance does not collapse
 distinct failure modes into a generic compile failure.
 
 1. The target `generic` id exists in the current sem module
-   (`UnknownGeneric`).
+   (`UnknownGeneric`), and is not sealed (`SealedGeneric`): a `define
+   sealed generic`'s methods are the ones its source defines, and a
+   built-in numeric generic's are sealed over `<real>`. A mutation comes
+   from outside the source, so it cannot add one, and replaying a log
+   onto a source that seals a generic the log extended fails at that
+   entry with the same cause.
 2. The candidate source compiles. Syntax-level diagnostics surface as
    `ParseFailed`.
 3. The candidate AST gained exactly one new method and no new classes,
@@ -794,6 +799,32 @@ pass. A limited result is checked by the callee before it returns, and
 callers compiled against it may elide checks that rely on it, so newer code
 may only narrow it. Calls that cannot see the range check it at the
 callee's indirect entry, which is part of the newer code itself.
+
+Proved code may also rely on the closed world: that a sealed class has
+exactly its direct subclasses (and, when abstract, no direct instances),
+as when a cast past an `instance?` test is dropped, or that a generic has
+exactly its methods, as when a send is linked. Each code unit lists the
+assumptions its lowering acted on, with source names
+(`CodeUnit::assumptions`), and an install checks every unit whose code may
+still run against them before the layout rule. One that breaks an
+assumption is refused as `CodeMismatch::Assumption`, which the break loop
+shows as, for example:
+
+```text
+running code assumes sealed abstract class <shape> has exactly direct subclasses
+{<circle>, <square>}, but the new code has sealed abstract class <shape> has exactly
+direct subclasses {<circle>, <square>, <triangle>}
+```
+
+Adding a subclass, removing one, changing abstractness and unsealing all
+break a sealed class's assumption; adding or removing a method, or
+unsealing a sealed generic, breaks a method set's. Classes and methods are
+part of the runtime layout, so the layout rule refuses all of these under
+live frames anyway; the assumption names the promise an edit would break.
+Code lowered under `off`, or that no proof touched, relies on no
+assumption, so the same edit is refused as a plain layout change, and an
+edit that keeps the layout, such as a body edit inside a sealed hierarchy,
+installs. A new run accepts any edit.
 
 A class object's kind is only a static bound, so a contract records a
 class object as any `<class>`. `make` on a class value allocates the class
