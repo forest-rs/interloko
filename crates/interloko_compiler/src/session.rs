@@ -4099,14 +4099,22 @@ fn artifact_fingerprint(
             {
                 for decision in &typed.decisions {
                     builder.mix_str(&format!(
-                        "{} {} {} {} {:?} {:?} {:?}",
+                        "{} {} {} {} {:?} {:?} {:?} {:?} {:?}",
                         decision.site,
                         decision.check.as_str(),
                         decision.verdict.as_str(),
                         decision.rule.as_str(),
                         decision.expected,
                         decision.actual,
+                        decision.because,
+                        decision.assumes,
                         decision.selected_method
+                    ));
+                }
+                for reason in &typed.reasons {
+                    builder.mix_str(&format!(
+                        "{:?} {:?} {:?}",
+                        reason.kind, reason.ty, reason.from
                     ));
                 }
             }
@@ -10672,8 +10680,9 @@ fn typing_policy_label(config: typing::TypingConfig) -> String {
         .map(|check| {
             let policy = config.policy(*check);
             format!(
-                "{}=checked:{},refuted:{}",
+                "{}=proved:{},checked:{},refuted:{}",
                 check.as_str(),
+                policy.proved.as_str(),
                 policy.checked.as_str(),
                 policy.refuted.as_str()
             )
@@ -10737,11 +10746,16 @@ fn project_typing(
     for decision in typed.decisions() {
         let owner = typing::definition_label(module, decision.owner);
         let expected = typing::expectation_label(module, &decision.expected);
-        let title = match &decision.expected {
-            typing::TypingExpectation::Dispatch { generic, .. } => {
+        let title = match (&decision.expected, decision.check) {
+            (typing::TypingExpectation::Dispatch { generic, .. }, _) => {
                 format!("dispatch {} in {owner}", generic_label(module, *generic))
             }
-            typing::TypingExpectation::Class(_) => format!("cast to {expected} in {owner}"),
+            (_, typing::TypingCheck::Instance) => format!("instance? {expected} in {owner}"),
+            (_, typing::TypingCheck::Range) => format!("range {expected} in {owner}"),
+            (_, typing::TypingCheck::Overflow) => format!("overflow {expected} in {owner}"),
+            (_, typing::TypingCheck::Dispatch | typing::TypingCheck::Cast) => {
+                format!("cast to {expected} in {owner}")
+            }
         };
         let severity = typed.severity(decision);
         let dispatch_site = typing_dispatch_site(decision, dispatch_sites)
@@ -10823,12 +10837,25 @@ fn explain_typing_decision(
             let _ = writeln!(out, "dispatch-site: {}", site.id);
         }
     }
+    if let Some(owner) = typed.definition(decision.owner) {
+        for (index, reason) in decision.because.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "because #{index}: {}",
+                owner.reason_chain(module, *reason)
+            );
+        }
+        for reason in &decision.assumes {
+            let _ = writeln!(out, "assumes: {}", owner.reason_chain(module, *reason));
+        }
+    }
     let _ = writeln!(
         out,
-        "severity: {} (config {} {} checked={} refuted={})",
+        "severity: {} (config {} {} proved={} checked={} refuted={})",
         typed.severity(decision).as_str(),
         typing::config_label(typed.config),
         decision.check.as_str(),
+        policy.proved.as_str(),
         policy.checked.as_str(),
         policy.refuted.as_str()
     );
@@ -15243,7 +15270,11 @@ mod tests {
         );
         assert_eq!(sites[0].span, sites[1].span);
 
-        let decisions = artifacts.typing.decisions().collect::<Vec<_>>();
+        let decisions = artifacts
+            .typing
+            .decisions()
+            .filter(|decision| decision.check == typing::TypingCheck::Dispatch)
+            .collect::<Vec<_>>();
         assert_eq!(decisions.len(), 3);
         for (decision, site) in decisions
             .iter()

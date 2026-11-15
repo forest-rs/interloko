@@ -1,0 +1,22 @@
+// expect: run 1
+// expect: diagnostics 1
+// expect: diagnostic code typing.instance-always-true
+// expect: diagnostic contains `instance?` test of <circle> against <shape> is always true
+// expect: dump typing contains s0 instance proved rule=instance-always
+
+// Every <circle> is a <shape>, so the test is always true and its else
+// branch is dead. The soft preset warns about decided `instance?` tests.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function round?(c :: <circle>) => <integer>
+  if instance?(c, <shape>) then 1 else 0 end
+end;
+
+define function main() => <integer>
+  round?(make(<circle>))
+end;

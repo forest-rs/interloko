@@ -1,5 +1,6 @@
 // expect: run 3.0
-// expect: diagnostics 0
+// expect: diagnostics 1
+// expect: diagnostic code typing.instance-always-true
 // expect: dump lowered contains weight#dispatch
 
 // `<float>` is abstract; literals are `<double-float>` instances. A method

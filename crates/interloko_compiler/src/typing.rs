@@ -9,36 +9,86 @@
 //! - generic dispatch picks a method from the arguments' runtime classes and
 //!   traps when no method applies;
 //! - `as(<class>, value)` tests the value's runtime class and traps when the
-//!   test fails.
+//!   test fails;
+//! - converting to a limited integer type traps when the value is out of
+//!   range, and integer arithmetic traps when it overflows.
 //!
-//! This module is the *soft* layer over those residual runtime checks. It
-//! classifies each one as an obligation with a [`TypingVerdict`]:
+//! This module is the *soft* layer over those residual runtime checks, plus
+//! the `instance?` tests whose outcome the types already decide. It
+//! classifies each one, per check site, as an obligation with a
+//! [`TypingVerdict`]:
 //!
-//! - [`TypingVerdict::Proved`]: the static types guarantee the check passes;
-//! - [`TypingVerdict::Checked`]: the outcome depends on runtime classes, so
+//! - [`TypingVerdict::Proved`]: the static types guarantee the check passes
+//!   (for an `instance?` test: it is always true);
+//! - [`TypingVerdict::Checked`]: the outcome depends on runtime values, so
 //!   the runtime check is what decides;
 //! - [`TypingVerdict::Refuted`]: the static types guarantee the check fails
-//!   whenever it is reached.
+//!   whenever it is reached (for an `instance?` test: it is always false).
 //!
-//! Verdicts are computed bidirectionally. Argument and operand types are
-//! *synthesized* ([`synthesize`]) as [`Type`]s of the shared lattice in
-//! [`interloko_model::types`]: sem's recorded category of each expression
-//! ([`sem::Module::expr_kind`]) mapped to the values it can hold
-//! ([`sem::Module::kind_type`]), narrowed by what the expression's shape
-//! proves, such as the exact class of a `make`. Each obligation then
-//! *checks* its operand against the expectation supplied by its context (a
-//! cast target or the generic's method specializers) with
-//! [`Type::relate`]; checking distributes over `if` and handler branches and
-//! joins the per-branch verdicts.
+//! # Flow typing
+//!
+//! Verdicts come from an abstract interpreter over sem's structured IR. The
+//! IR has no loops and no local assignment, so locals are immutable and no
+//! control-flow graph is needed: the interpreter walks each body once, in
+//! evaluation order, carrying an environment from locals and closure
+//! captures to [`Type`]s of the shared lattice in
+//! [`interloko_model::types`]. Slots are mutable, so slot reads are never
+//! narrowed.
+//!
+//! - **Transfer.** Literals have singleton types (integers have point
+//!   ranges), `make` has its exact class, a cast meets its operand with the
+//!   target, and integer arithmetic uses interval arithmetic, where a result
+//!   that may overflow has the full range of its kind. A call has its
+//!   callee's declared or sem-inferred result, never a type derived from the
+//!   callee's body, so a definition's typing depends only on its own body.
+//!   Anything else has the type of sem's category for the expression
+//!   ([`sem::Module::kind_type`]).
+//! - **Narrowing.** `instance?(x, C)` narrows `x` to `x ⊓ C` in the then
+//!   branch and to `x ∖ C` in the else branch ([`Type::minus`] is
+//!   conservative); a limited-type test does the same with ranges. Comparing
+//!   an integer local with another integer narrows the local's range in both
+//!   branches. A condition whose type is one boolean, such as a literal,
+//!   takes only its branch. A handler's condition local has the handler's
+//!   class.
+//! - **Joins.** `if` and `handle` join their branches. An expression that
+//!   cannot produce a value (a failed cast, a block exit call, a narrowing
+//!   that leaves no value) has type [`Type::bottom`]; code after it is
+//!   unreachable, and an unreachable branch drops out of the join. A `block`
+//!   joins its body's value with the arguments of every call to its exit
+//!   procedure; when the exit procedure escapes, with the block's declared
+//!   result.
+//! - **Loops.** There are none yet. [`widen_to_fixpoint`] is the documented
+//!   loop-head hook they will use.
+//!
+//! The pass checks every residual check against its expectation (a cast
+//! target, the generic's method specializers, a limited integer range) with
+//! [`Type::relate`]. Dispatch distributes over the members of a union, so a
+//! call on `type-union(exactly <circle>, exactly <square>)` is proved when
+//! each member has a method. A check that no value reaches is
+//! [`TypingVerdict::Proved`] with [`TypingRule::Unreachable`].
+//!
+//! # Provenance
+//!
+//! Every fact the interpreter derives carries a [`ReasonId`] into its
+//! definition's reason arena ([`DefinitionTyping::reasons`]). A
+//! [`Reason`] names how the fact arose (a declaration, a literal, a
+//! narrowing at a check site, a join...) and the reasons it was derived
+//! from, so a decision's [`TypingDecision::because`] chains explain each
+//! operand type back to its sources. Decisions also list the closed-world
+//! assumptions they rely on ([`TypingDecision::assumes`]); a later slice
+//! wires those into incremental invalidation.
+//!
+//! # Policy
 //!
 //! The pass is advisory. Its facts are recorded per enclosing definition
 //! ([`DefinitionTyping`]), each keyed by the check's [`SiteId`] within that
 //! definition, and never feed lowering, tape emission, or the runtime, which
 //! keep their own dynamic checks. [`TypingConfig`] maps each check and
 //! verdict to a [`TypingSeverity`]; the default reports refuted obligations
-//! as warnings and keeps runtime-checked ones silent. Changing
-//! the configuration re-derives diagnostics from the recorded decisions
-//! without re-checking ([`TypingArtifact::with_config`]).
+//! and statically decided `instance?` tests as warnings and keeps
+//! runtime-checked ones silent. Changing the configuration re-derives
+//! diagnostics from the recorded decisions without re-checking
+//! ([`TypingArtifact::with_config`]).
 //!
 //! The pass runs only when semantic lowering produced no diagnostics, so it
 //! never repeats or contradicts a hard semantic error.
@@ -48,32 +98,30 @@
 //! A [`Type`] is a normalized union of atoms: class cones and exact
 //! classes, `<integer>` ranges, booleans, metaobject singletons, and
 //! callables (see [`interloko_model::types`]). [`sem::Module`] is the
-//! [`ClassHierarchy`](interloko_model::types::ClassHierarchy) the lattice
-//! is computed against. Because a [`ValueKind`](sem::ValueKind) is a
-//! representation rather than a type, `<i32>` and `<u32>` values are
+//! [`ClassHierarchy`] the lattice is computed against. Because a
+//! [`ValueKind`](sem::ValueKind) is a representation rather than a type,
+//! `<i32>` and `<u32>` values are
 //! `<integer>` ranges, `<double-float>` and `<single-float>` values have
 //! exactly those closed classes, and abstract numeric classes (`<number>`,
 //! `<real>`, `<rational>`, `<float>`) are only ever cones.
 //!
-//! Synthesis keeps one invariant, checked in debug builds: the synthesized
-//! type of an expression is a subtype of
-//! `kind_type(expr_kind(expression))`. The soft pass only narrows what sem
-//! allowed; it never contradicts it. An operand that sem's own narrowing
-//! proves unreachable, such as a cast whose value can never have the target
-//! class, synthesizes [`Type::bottom`], which satisfies every expectation.
+//! Synthesis keeps one invariant, checked in debug builds: the type of an
+//! expression is a subtype of `kind_type(expr_kind(expression))`. The soft
+//! pass only narrows what sem allowed; it never contradicts it.
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use interloko_model::types::{Atom, Metaobject, Relation, Type};
+use interloko_model::types::{Atom, ClassHierarchy, IntRange, Type};
 
-use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, Severity};
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, DiagnosticLabel, Severity};
 use crate::identity::{DefinitionId, DefinitionKind};
 use crate::sem::{self, ClassId, GenericFunctionId, MethodId, SiteId};
 use crate::syntax::Span;
+
+mod flow;
 
 /// Residual runtime check classified by the soft typing pass.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -84,11 +132,28 @@ pub enum TypingCheck {
     /// A checked cast must find the target class in the value's runtime
     /// class chain.
     Cast,
+    /// An `instance?` test of a class. The test never traps; it is
+    /// [`TypingVerdict::Proved`] when always true and
+    /// [`TypingVerdict::Refuted`] when always false.
+    Instance,
+    /// A value must be within a limited integer range: a numeric conversion
+    /// (which traps when it is not) or an `instance?` test of a limited
+    /// integer type (which is false when it is not).
+    Range,
+    /// Integer arithmetic must not overflow its kind, and a shift count must
+    /// be in `0..=31`.
+    Overflow,
 }
 
 impl TypingCheck {
     /// Every check in canonical order.
-    pub const ALL: &'static [Self] = &[Self::Dispatch, Self::Cast];
+    pub const ALL: &'static [Self] = &[
+        Self::Dispatch,
+        Self::Cast,
+        Self::Instance,
+        Self::Range,
+        Self::Overflow,
+    ];
 
     /// Returns the stable label used in dumps, EOP records, and config names.
     #[must_use]
@@ -96,6 +161,9 @@ impl TypingCheck {
         match self {
             Self::Dispatch => "dispatch",
             Self::Cast => "cast",
+            Self::Instance => "instance",
+            Self::Range => "range",
+            Self::Overflow => "overflow",
         }
     }
 }
@@ -177,9 +245,12 @@ impl TypingSeverity {
 
 /// Reporting policy for one [`TypingCheck`].
 ///
-/// Proved obligations are never reported.
+/// Decisions about unreachable checks ([`TypingRule::Unreachable`]) are
+/// never reported, whatever the policy.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TypingPolicy {
+    /// Severity for obligations the static types prove.
+    pub proved: TypingSeverity,
     /// Severity for obligations the runtime check decides.
     pub checked: TypingSeverity,
     /// Severity for obligations that always fail when reached.
@@ -187,17 +258,29 @@ pub struct TypingPolicy {
 }
 
 impl TypingPolicy {
-    /// Creates a policy from per-verdict severities.
+    /// Creates a policy from the severities of runtime-checked and refuted
+    /// obligations; proved obligations stay silent.
     #[must_use]
     pub const fn new(checked: TypingSeverity, refuted: TypingSeverity) -> Self {
-        Self { checked, refuted }
+        Self {
+            proved: TypingSeverity::Silent,
+            checked,
+            refuted,
+        }
+    }
+
+    /// Returns this policy with proved obligations reported at `proved`.
+    #[must_use]
+    pub const fn with_proved(mut self, proved: TypingSeverity) -> Self {
+        self.proved = proved;
+        self
     }
 
     /// Returns the severity this policy assigns to `verdict`.
     #[must_use]
     pub const fn severity(self, verdict: TypingVerdict) -> TypingSeverity {
         match verdict {
-            TypingVerdict::Proved => TypingSeverity::Silent,
+            TypingVerdict::Proved => self.proved,
             TypingVerdict::Checked => self.checked,
             TypingVerdict::Refuted => self.refuted,
         }
@@ -214,20 +297,36 @@ pub struct TypingConfig {
     pub dispatch: TypingPolicy,
     /// Policy for checked cast obligations.
     pub cast: TypingPolicy,
+    /// Policy for `instance?` tests of a class.
+    pub instance: TypingPolicy,
+    /// Policy for limited integer range obligations.
+    pub range: TypingPolicy,
+    /// Policy for integer overflow and shift-count obligations.
+    pub overflow: TypingPolicy,
 }
 
 impl TypingConfig {
     /// Named presets accepted by [`Self::preset`], in canonical order.
     pub const PRESETS: &'static [&'static str] = &["soft", "silent", "strict"];
 
-    /// Warns about obligations that always fail; runtime-checked obligations
-    /// stay silent.
+    /// Warns about obligations that always fail and about `instance?` tests
+    /// whose outcome the types decide; runtime-checked obligations stay
+    /// silent.
+    ///
+    /// A decided `instance?` test warns because one of its branches is dead
+    /// or the test is redundant. Flow typing derives the decision only from
+    /// facts that hold on every execution, so the warning is never a false
+    /// alarm about the program's behavior, only about its intent, and it
+    /// usually marks a stale test after a type was tightened.
     #[must_use]
     pub const fn soft() -> Self {
         let policy = TypingPolicy::new(TypingSeverity::Silent, TypingSeverity::Warning);
         Self {
             dispatch: policy,
             cast: policy,
+            instance: policy.with_proved(TypingSeverity::Warning),
+            range: policy,
+            overflow: policy,
         }
     }
 
@@ -238,17 +337,32 @@ impl TypingConfig {
         Self {
             dispatch: policy,
             cast: policy,
+            instance: policy,
+            range: policy,
+            overflow: policy,
         }
     }
 
     /// Reports always-failing obligations as errors and runtime-checked
-    /// obligations as warnings.
+    /// obligations as warnings, with two exceptions.
+    ///
+    /// An `instance?` test never fails: a runtime-decided one is its normal
+    /// use and stays silent, and a decided one is dead code rather than a
+    /// failure, so it stays a warning. And almost every integer operation
+    /// on declared types may overflow, mostly because `<integer>` is held
+    /// in 64 bits, a limit of the current runtime rather than of the type;
+    /// warning on each would bury every other report, so runtime-checked
+    /// overflow stays silent while certain overflow is an error.
     #[must_use]
     pub const fn strict() -> Self {
         let policy = TypingPolicy::new(TypingSeverity::Warning, TypingSeverity::Error);
         Self {
             dispatch: policy,
             cast: policy,
+            instance: TypingPolicy::new(TypingSeverity::Silent, TypingSeverity::Warning)
+                .with_proved(TypingSeverity::Warning),
+            range: policy,
+            overflow: TypingPolicy::new(TypingSeverity::Silent, TypingSeverity::Error),
         }
     }
 
@@ -278,6 +392,9 @@ impl TypingConfig {
         match check {
             TypingCheck::Dispatch => self.dispatch,
             TypingCheck::Cast => self.cast,
+            TypingCheck::Instance => self.instance,
+            TypingCheck::Range => self.range,
+            TypingCheck::Overflow => self.overflow,
         }
     }
 
@@ -287,6 +404,9 @@ impl TypingConfig {
         match check {
             TypingCheck::Dispatch => self.dispatch = policy,
             TypingCheck::Cast => self.cast = policy,
+            TypingCheck::Instance => self.instance = policy,
+            TypingCheck::Range => self.range = policy,
+            TypingCheck::Overflow => self.overflow = policy,
         }
         self
     }
@@ -307,7 +427,8 @@ impl Default for TypingConfig {
 /// Expectation an obligation checks its operands against.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypingExpectation {
-    /// The value's runtime class must be `class` or one of its subclasses.
+    /// The value's runtime class must be `class` or one of its subclasses
+    /// (casts and `instance?` tests of a class).
     Class(ClassId),
     /// Some method of `generic` must apply to the arguments' runtime classes.
     Dispatch {
@@ -321,13 +442,16 @@ pub enum TypingExpectation {
         /// lowering rejects scalar arguments there.
         boxed_params: Vec<usize>,
     },
+    /// The value must be in this type: a conversion's target, a limited
+    /// integer range, the range an integer operation's result must fit in,
+    /// or the shift counts `0..=31`.
+    Type(Type),
 }
 
 /// Rule that produced a decision's verdict.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TypingRule {
-    /// A method applies to the static argument classes, and so to every
-    /// runtime subclass of them.
+    /// A method applies to every class the arguments may have.
     DispatchCovered,
     /// Methods apply only to some runtime classes the arguments may have.
     DispatchNeedsRuntimeClass,
@@ -335,13 +459,46 @@ pub enum TypingRule {
     DispatchNoApplicableMethod,
     /// The value's class is already the target class or a subclass of it.
     CastUpcast,
-    /// The value's class is a superclass of the target; the runtime test
+    /// The value may or may not have the target class; the runtime test
     /// decides.
     CastNarrowing,
     /// The value's runtime class can never be the target class.
     CastDisjoint,
-    /// Branches of a conditional operand reached different verdicts.
-    BranchesDisagree,
+    /// Every value the operand may have is an instance: the test is always
+    /// true.
+    InstanceAlways,
+    /// The operand may or may not be an instance; the runtime test decides.
+    InstanceSometimes,
+    /// No value the operand may have is an instance: the test is always
+    /// false.
+    InstanceNever,
+    /// Every value the operand may have is within the range.
+    RangeWithin,
+    /// The operand's values are partly within the range.
+    RangeOverlaps,
+    /// No value the operand may have is within the range.
+    RangeDisjoint,
+    /// A float converts to an integer only when it is integral and in
+    /// range, which the runtime check decides.
+    FloatToInteger,
+    /// The operation has no runtime check: a widening conversion, wrapping
+    /// arithmetic, or a bitwise function.
+    CannotTrap,
+    /// Interval arithmetic keeps the result within its kind.
+    OverflowImpossible,
+    /// Interval arithmetic allows results outside the kind.
+    OverflowPossible,
+    /// Interval arithmetic puts every result outside the kind.
+    OverflowCertain,
+    /// The shift count is always in `0..=31`.
+    ShiftCountInRange,
+    /// The shift count may be outside `0..=31`.
+    ShiftCountUnchecked,
+    /// The shift count is never in `0..=31`.
+    ShiftCountOutOfRange,
+    /// No value reaches the check: an earlier expression on every path to
+    /// it cannot produce a value. The check vacuously passes.
+    Unreachable,
 }
 
 impl TypingRule {
@@ -355,9 +512,172 @@ impl TypingRule {
             Self::CastUpcast => "cast-upcast",
             Self::CastNarrowing => "cast-narrowing",
             Self::CastDisjoint => "cast-disjoint",
-            Self::BranchesDisagree => "branches-disagree",
+            Self::InstanceAlways => "instance-always",
+            Self::InstanceSometimes => "instance-sometimes",
+            Self::InstanceNever => "instance-never",
+            Self::RangeWithin => "range-within",
+            Self::RangeOverlaps => "range-overlaps",
+            Self::RangeDisjoint => "range-disjoint",
+            Self::FloatToInteger => "float-to-integer",
+            Self::CannotTrap => "cannot-trap",
+            Self::OverflowImpossible => "overflow-impossible",
+            Self::OverflowPossible => "overflow-possible",
+            Self::OverflowCertain => "overflow-certain",
+            Self::ShiftCountInRange => "shift-count-in-range",
+            Self::ShiftCountUnchecked => "shift-count-unchecked",
+            Self::ShiftCountOutOfRange => "shift-count-out-of-range",
+            Self::Unreachable => "unreachable",
         }
     }
+}
+
+/// Index of a [`Reason`] in its definition's reason arena
+/// ([`DefinitionTyping::reasons`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct ReasonId(
+    /// Zero-based index into the arena.
+    pub u32,
+);
+
+impl core::fmt::Display for ReasonId {
+    /// Renders the id as `r<index>`, such as `r3`.
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "r{}", self.0)
+    }
+}
+
+/// Which branch of a test a narrowing applies to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Branch {
+    /// The branch taken when the test is true.
+    Then,
+    /// The branch taken when the test is false.
+    Else,
+}
+
+impl Branch {
+    /// Returns the stable label used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Then => "then",
+            Self::Else => "else",
+        }
+    }
+}
+
+/// Whether a contract was written in source or inferred by sem.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ContractSource {
+    /// The definition declares the contract.
+    Declared,
+    /// Sem inferred the contract from the definition's body.
+    Inferred,
+}
+
+impl ContractSource {
+    /// Returns the stable label used in dumps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
+/// A closed-world assumption a decision relies on: a fact about the module
+/// that holds now but that adding definitions could change.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Assumption {
+    /// The generic's method set is the one the decision consulted.
+    Generic(GenericFunctionId),
+    /// The closed class gains no subclasses, so its cone is exactly it.
+    Class(ClassId),
+}
+
+/// How a fact in a definition's flow analysis arose.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ReasonKind {
+    /// The type sem gives the expression or binding: a parameter or `let`
+    /// annotation, or the category of an expression the pass does not
+    /// refine.
+    Declared,
+    /// A literal value.
+    Literal,
+    /// A value built here: `make`, or a closure.
+    Constructed,
+    /// The result contract of a callee, accessor, or constant.
+    Contract {
+        /// Definition owning the contract.
+        definition: DefinitionId,
+        /// Whether the contract is declared or inferred.
+        source: ContractSource,
+    },
+    /// A test narrowed a local or capture in one of its branches.
+    Narrowed {
+        /// The `instance?` site, or `None` for an integer comparison, which
+        /// leaves no runtime check.
+        site: Option<SiteId>,
+        /// The branch the narrowing applies to.
+        branch: Branch,
+    },
+    /// A value that passed, or a boolean decided by, the runtime check at
+    /// `site`: a cast, a conversion, or an overflow check.
+    Check {
+        /// The check site.
+        site: SiteId,
+    },
+    /// Branches or paths that each supply a value were joined.
+    Joined,
+    /// A handler bound its condition local.
+    HandlerCondition {
+        /// Class of conditions the handler accepts.
+        specializer: ClassId,
+    },
+    /// Interval arithmetic on integer operands.
+    Interval,
+    /// A loop head widened its facts to reach a fixpoint.
+    Widened,
+    /// A call to a block's exit procedure: control leaves for the block's
+    /// end, so the call produces no value.
+    Exit,
+    /// A closed-world assumption the decisions citing it rely on.
+    ClosedWorld(Assumption),
+}
+
+impl ReasonKind {
+    /// Returns the stable label used in dumps, without details.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Literal => "literal",
+            Self::Constructed => "constructed",
+            Self::Contract { .. } => "contract",
+            Self::Narrowed { .. } => "narrowed",
+            Self::Check { .. } => "check",
+            Self::Joined => "joined",
+            Self::HandlerCondition { .. } => "handler-condition",
+            Self::Interval => "interval",
+            Self::Widened => "widened",
+            Self::Exit => "exit",
+            Self::ClosedWorld(_) => "closed-world",
+        }
+    }
+}
+
+/// One step of provenance for a fact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Reason {
+    /// How the fact arose.
+    pub kind: ReasonKind,
+    /// Source span of the expression or binding that produced the fact.
+    pub span: Span,
+    /// The type the fact gives.
+    pub ty: Type,
+    /// Reasons this one was derived from, in operand order.
+    pub from: Vec<ReasonId>,
 }
 
 /// One classified runtime check.
@@ -381,9 +701,17 @@ pub struct TypingDecision {
     pub span: Span,
     /// Expectation supplied by the check's context.
     pub expected: TypingExpectation,
-    /// Synthesized operand types: one per argument for dispatch, one value
-    /// for a cast.
+    /// Operand types: one per argument for dispatch, the value for a cast,
+    /// `instance?` test, or conversion, and both operands (one for
+    /// negation) for integer arithmetic, where the exact result that is
+    /// checked against the expectation follows from them by interval
+    /// arithmetic.
     pub actual: Vec<Type>,
+    /// One reason per `actual` type, in the owner's reason arena.
+    pub because: Vec<ReasonId>,
+    /// Closed-world assumptions ([`ReasonKind::ClosedWorld`]) the verdict
+    /// relies on, in the owner's reason arena.
+    pub assumes: Vec<ReasonId>,
     /// Method a dispatch statically selects when every argument's exact
     /// runtime class is known.
     pub selected_method: Option<MethodId>,
@@ -392,15 +720,33 @@ pub struct TypingDecision {
 /// Typing decisions for one top-level definition.
 ///
 /// This is the unit of recomputation: a definition's decisions depend only on
-/// its own body and the module's class and method tables.
+/// its own body and the module's class, method, and contract tables.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefinitionTyping {
     /// Stable identity of the definition.
     pub definition: DefinitionId,
     /// Kind of the definition.
     pub kind: DefinitionKind,
-    /// Decisions in evaluation order.
+    /// Decisions in check-site order, which is evaluation order.
     pub decisions: Vec<TypingDecision>,
+    /// Reason arena the decisions' [`ReasonId`]s index.
+    pub reasons: Vec<Reason>,
+}
+
+impl DefinitionTyping {
+    /// Returns the reason `id` names, if it is in this definition's arena.
+    #[must_use]
+    pub fn reason(&self, id: ReasonId) -> Option<&Reason> {
+        self.reasons.get(id.0 as usize)
+    }
+
+    /// Renders the reason chain rooted at `id`, as in [`TypingArtifact::dump`].
+    #[must_use]
+    pub fn reason_chain(&self, module: &sem::Module, id: ReasonId) -> String {
+        let mut out = String::new();
+        write_reason_chain(&mut out, module, &self.reasons, id, 0);
+        out
+    }
 }
 
 /// Whether the pass examined the module.
@@ -449,24 +795,32 @@ impl TypingArtifact {
             .flat_map(|definition| definition.decisions.iter())
     }
 
+    /// Returns the typing of `definition`, if it was checked.
+    #[must_use]
+    pub fn definition(&self, definition: DefinitionId) -> Option<&DefinitionTyping> {
+        self.definitions
+            .iter()
+            .find(|typed| typed.definition == definition)
+    }
+
     /// Returns the decision for check site `site` of `owner`, if present.
     #[must_use]
     pub fn decision(&self, owner: DefinitionId, site: SiteId) -> Option<&TypingDecision> {
-        self.definitions
-            .iter()
-            .find(|definition| definition.definition == owner)
-            .and_then(|definition| {
-                definition
-                    .decisions
-                    .iter()
-                    .find(|decision| decision.site == site)
-            })
+        self.definition(owner).and_then(|definition| {
+            definition
+                .decisions
+                .iter()
+                .find(|decision| decision.site == site)
+        })
     }
 
     /// Returns the severity the artifact's configuration assigns to
     /// `decision`.
     #[must_use]
     pub const fn severity(&self, decision: &TypingDecision) -> TypingSeverity {
+        if matches!(decision.rule, TypingRule::Unreachable) {
+            return TypingSeverity::Silent;
+        }
         self.config.severity(decision.check, decision.verdict)
     }
 
@@ -480,6 +834,12 @@ impl TypingArtifact {
 
     /// Renders the artifact as a stable text dump: configuration, status,
     /// then one line per decision grouped by definition.
+    ///
+    /// Each decision line ends with `because=`, the reason chain of each
+    /// actual type (separated by `; `), and `assumes=` when the verdict
+    /// relies on closed-world assumptions. A chain renders a reason as
+    /// `kind(details)@start..end type`, followed by ` <- ` and the reasons
+    /// it was derived from (several in braces, separated by ` | `).
     #[must_use]
     pub fn dump(&self, module: &sem::Module) -> String {
         let mut out = String::new();
@@ -497,8 +857,9 @@ impl TypingArtifact {
             let policy = self.config.policy(*check);
             let _ = writeln!(
                 out,
-                "  policy {} checked={} refuted={}",
+                "  policy {} proved={} checked={} refuted={}",
                 check.as_str(),
+                policy.proved.as_str(),
                 policy.checked.as_str(),
                 policy.refuted.as_str()
             );
@@ -515,11 +876,7 @@ impl TypingArtifact {
     #[must_use]
     pub fn dump_definition(&self, module: &sem::Module, definition: DefinitionId) -> String {
         let mut out = String::new();
-        match self
-            .definitions
-            .iter()
-            .find(|typed| typed.definition == definition)
-        {
+        match self.definition(definition) {
             Some(typed) => self.write_definition(&mut out, module, typed),
             None => {
                 let _ = writeln!(
@@ -541,7 +898,7 @@ impl TypingArtifact {
             definition_label(module, typed.definition)
         );
         for decision in &typed.decisions {
-            let _ = writeln!(
+            let _ = write!(
                 out,
                 "    {} {} {} rule={} span={}..{} expected={} actual={} severity={}",
                 decision.site,
@@ -554,6 +911,30 @@ impl TypingArtifact {
                 type_name_list(module, &decision.actual),
                 self.severity(decision).as_str()
             );
+            if !decision.because.is_empty() {
+                let because = decision
+                    .because
+                    .iter()
+                    .map(|reason| typed.reason_chain(module, *reason))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let _ = write!(out, " because={because}");
+            }
+            if !decision.assumes.is_empty() {
+                let assumes = decision
+                    .assumes
+                    .iter()
+                    .map(|reason| {
+                        typed.reason(*reason).map_or_else(
+                            || format!("{reason}"),
+                            |reason| reason_label(module, reason),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = write!(out, " assumes={assumes}");
+            }
+            out.push('\n');
         }
     }
 
@@ -571,8 +952,11 @@ impl TypingArtifact {
     ) -> Self {
         let diagnostics = definitions
             .iter()
-            .flat_map(|definition| definition.decisions.iter())
-            .filter_map(|decision| decision_diagnostic(module, config, decision))
+            .flat_map(|definition| {
+                definition.decisions.iter().filter_map(move |decision| {
+                    decision_diagnostic(module, config, definition, decision)
+                })
+            })
             .collect();
         Self {
             config,
@@ -615,490 +999,309 @@ pub fn check_definition(
     module: &sem::Module,
     definition: DefinitionId,
 ) -> Option<DefinitionTyping> {
-    let mut checker = Checker {
-        module,
-        owner: definition,
-        decisions: Vec::new(),
-    };
+    let mut analysis = flow::Analysis::new(module, definition);
     let kind = if let Some(function) = module
         .functions
         .iter()
         .find(|function| function.definition == definition)
     {
-        checker.block(&function.body);
+        analysis.body(&function.locals, &function.params, &function.body);
         DefinitionKind::Function
     } else if let Some(method) = module
         .methods
         .iter()
         .find(|method| method.definition == definition)
     {
-        checker.block(&method.body);
+        analysis.body(&method.locals, &method.params, &method.body);
         DefinitionKind::Method
     } else {
         let constant = module
             .constants
             .iter()
             .find(|constant| constant.definition == definition)?;
-        checker.expr(&constant.value);
+        let _ = analysis.detached(&constant.value);
         DefinitionKind::Constant
     };
+    let (decisions, reasons) = analysis.finish();
     Some(DefinitionTyping {
         definition,
         kind,
-        decisions: checker.decisions,
+        decisions,
+        reasons,
     })
 }
 
-/// Synthesizes the static type of `expr`.
+/// Synthesizes the static type of `expr` outside any flow context.
 ///
-/// The result is `kind_type(expr_kind(expr))` narrowed by what the
-/// expression's shape proves, and never wider than it.
+/// Locals and captures have the categories sem recorded at their use sites;
+/// everything else follows the transfer rules of the flow analysis. The
+/// result is `kind_type(expr_kind(expr))` narrowed by what the expression's
+/// shape proves, and never wider than it.
 #[must_use]
 pub fn synthesize(module: &sem::Module, expr: &sem::Expr) -> Type {
-    let bound = module.kind_type(module.expr_kind(expr));
-    let Some(narrowed) = structural_type(module, expr, &bound) else {
-        return bound;
-    };
-    debug_assert!(
-        narrowed.is_subtype(&bound, module),
-        "soft type {} of {expr:?} is not within sem's {}",
-        type_name(module, &narrowed),
-        type_name(module, &bound),
+    let owner = DefinitionId::new(
+        module.source_file,
+        DefinitionKind::Function,
+        "<synthesize>",
+        "",
     );
-    narrowed
+    flow::Analysis::new(module, owner).detached(expr)
 }
 
-/// Alternatives explored before a conditional operand collapses to its
-/// synthesized type.
-const MAX_ALTERNATIVES: usize = 8;
+/// Iterations [`widen_to_fixpoint`] runs before giving up on convergence.
+pub const MAX_FIXPOINT_ITERATIONS: usize = 64;
 
-/// Argument-type tuples explored before a dispatch falls back to synthesized
-/// argument types.
-const MAX_DISPATCH_TUPLES: usize = 16;
-
-struct Checker<'module> {
-    module: &'module sem::Module,
-    owner: DefinitionId,
-    decisions: Vec<TypingDecision>,
-}
-
-impl Checker<'_> {
-    fn block(&mut self, block: &sem::Block) {
-        for binding in &block.lets {
-            self.expr(&binding.value);
-        }
-        self.expr(&block.result);
-    }
-
-    fn expr(&mut self, expr: &sem::Expr) {
-        match expr {
-            sem::Expr::GenericCall {
-                generic,
-                args,
-                span,
-                site,
-            } => {
-                for arg in args {
-                    self.expr(arg);
-                }
-                self.dispatch(*generic, args, *span, *site);
-            }
-            sem::Expr::Cast {
-                value,
-                class,
-                span,
-                site,
-            } => {
-                self.expr(value);
-                self.cast(value, *class, *span, *site);
-            }
-            sem::Expr::Closure { closure, .. } => {
-                if let Some(closure) = self.module.closures.get(closure.0 as usize) {
-                    self.block(&closure.body);
-                }
-            }
-            _ => for_each_child(expr, |child| self.expr(child)),
-        }
-    }
-
-    fn cast(&mut self, value: &sem::Expr, class: ClassId, span: Span, site: SiteId) {
-        let target = Type::of(Atom::Cone(class), self.module);
-        let verdicts = alternatives(self.module, value)
-            .into_iter()
-            .map(|alternative| verdict(alternative.relate(&target, self.module)))
+/// Loop-head fixpoint hook for flow typing.
+///
+/// The IR has no loops yet, so the flow analysis never calls this; it is
+/// the documented point where loop support will plug in. `entry` holds the
+/// types of the loop-carried locals on entry, and `step` runs the loop body
+/// once from head types and returns their types at the back edge. The head
+/// is the join of the entry and every back edge, widened
+/// ([`Type::widen`]) after each step so integer bounds jump to the
+/// `<i32>`, `<u32>`, and 64-bit thresholds and the iteration terminates.
+/// Facts a loop head produces carry [`ReasonKind::Widened`].
+///
+/// Returns the head types, or [`Type::top`] for every local if the
+/// iteration has not converged after [`MAX_FIXPOINT_ITERATIONS`] steps.
+pub fn widen_to_fixpoint<H: ClassHierarchy + ?Sized>(
+    hierarchy: &H,
+    entry: Vec<Type>,
+    mut step: impl FnMut(&[Type]) -> Vec<Type>,
+) -> Vec<Type> {
+    let mut head = entry;
+    for _ in 0..MAX_FIXPOINT_ITERATIONS {
+        let back = step(&head);
+        let next = head
+            .iter()
+            .zip(back.iter().chain(core::iter::repeat(&Type::top())))
+            .map(|(head, back)| head.join(back, hierarchy).widen())
             .collect::<Vec<_>>();
-        let (verdict, rule) = joined(TypingCheck::Cast, &verdicts);
-        self.decisions.push(TypingDecision {
-            owner: self.owner,
-            site,
-            check: TypingCheck::Cast,
-            verdict,
-            rule,
-            span,
-            expected: TypingExpectation::Class(class),
-            actual: vec![synthesize(self.module, value)],
-            selected_method: None,
-        });
+        if next == head {
+            return head;
+        }
+        head = next;
     }
-
-    fn dispatch(
-        &mut self,
-        generic: GenericFunctionId,
-        args: &[sem::Expr],
-        span: Span,
-        site: SiteId,
-    ) {
-        let methods = self
-            .module
-            .methods
-            .iter()
-            .filter(|method| method.generic == generic)
-            .collect::<Vec<_>>();
-        let specializers = methods
-            .iter()
-            .map(|method| {
-                method
-                    .specializers
-                    .iter()
-                    .map(|specializer| specializer_type(self.module, *specializer))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let actual = args
-            .iter()
-            .map(|arg| synthesize(self.module, arg))
-            .collect::<Vec<_>>();
-        let per_arg = args
-            .iter()
-            .map(|arg| alternatives(self.module, arg))
-            .collect::<Vec<_>>();
-        let tuple_count = per_arg
-            .iter()
-            .try_fold(1_usize, |count, options| count.checked_mul(options.len()))
-            .unwrap_or(usize::MAX);
-        let tuples = if tuple_count <= MAX_DISPATCH_TUPLES {
-            cartesian(&per_arg)
-        } else {
-            vec![actual.clone()]
-        };
-
-        let verdicts = tuples
-            .iter()
-            .map(|tuple| {
-                let relation = specializers
-                    .iter()
-                    .filter(|specializers| specializers.len() == tuple.len())
-                    .map(|specializers| {
-                        specializers.iter().zip(tuple).fold(
-                            Relation::Always,
-                            |acc, (specializer, arg)| {
-                                all_hold(acc, arg.relate(specializer, self.module))
-                            },
-                        )
-                    })
-                    .fold(Relation::Never, any_holds);
-                verdict(relation)
-            })
-            .collect::<Vec<_>>();
-        let (verdict, rule) = joined(TypingCheck::Dispatch, &verdicts);
-
-        let selected_method = actual
-            .iter()
-            .map(|arg| arg.exact_class(self.module))
-            .collect::<Option<Vec<_>>>()
-            .and_then(
-                |exact| match self.module.select_method_for_classes(generic, &exact) {
-                    sem::MethodSelection::Selected(method) => Some(method),
-                    sem::MethodSelection::None | sem::MethodSelection::Ambiguous => None,
-                },
-            );
-        self.decisions.push(TypingDecision {
-            owner: self.owner,
-            site,
-            check: TypingCheck::Dispatch,
-            verdict,
-            rule,
-            span,
-            expected: TypingExpectation::Dispatch {
-                generic,
-                methods: methods.iter().map(|method| method.id).collect(),
-                boxed_params: (0..args.len())
-                    .filter(|index| self.module.generic_param_boxes_scalars(generic, *index))
-                    .collect(),
-            },
-            actual,
-            selected_method,
-        });
-    }
-}
-
-/// Joins per-alternative verdicts and names the rule that decided them.
-fn joined(check: TypingCheck, verdicts: &[TypingVerdict]) -> (TypingVerdict, TypingRule) {
-    let Some((first, rest)) = verdicts.split_first() else {
-        return (TypingVerdict::Checked, TypingRule::BranchesDisagree);
-    };
-    if rest.iter().any(|verdict| verdict != first) {
-        let verdict = rest.iter().fold(*first, |acc, verdict| acc.join(*verdict));
-        return (verdict, TypingRule::BranchesDisagree);
-    }
-    let rule = match (check, first) {
-        (TypingCheck::Dispatch, TypingVerdict::Proved) => TypingRule::DispatchCovered,
-        (TypingCheck::Dispatch, TypingVerdict::Checked) => TypingRule::DispatchNeedsRuntimeClass,
-        (TypingCheck::Dispatch, TypingVerdict::Refuted) => TypingRule::DispatchNoApplicableMethod,
-        (TypingCheck::Cast, TypingVerdict::Proved) => TypingRule::CastUpcast,
-        (TypingCheck::Cast, TypingVerdict::Checked) => TypingRule::CastNarrowing,
-        (TypingCheck::Cast, TypingVerdict::Refuted) => TypingRule::CastDisjoint,
-    };
-    (*first, rule)
-}
-
-/// Combines relations to expectations that must all hold.
-const fn all_hold(left: Relation, right: Relation) -> Relation {
-    match (left, right) {
-        (Relation::Never, _) | (_, Relation::Never) => Relation::Never,
-        (Relation::Maybe, _) | (_, Relation::Maybe) => Relation::Maybe,
-        (Relation::Always, Relation::Always) => Relation::Always,
-    }
-}
-
-/// Combines relations to alternative expectations where any one suffices.
-const fn any_holds(left: Relation, right: Relation) -> Relation {
-    match (left, right) {
-        (Relation::Always, _) | (_, Relation::Always) => Relation::Always,
-        (Relation::Maybe, _) | (_, Relation::Maybe) => Relation::Maybe,
-        (Relation::Never, Relation::Never) => Relation::Never,
-    }
-}
-
-/// Verdict for a check whose operand relates to its expectation this way.
-const fn verdict(relation: Relation) -> TypingVerdict {
-    match relation {
-        Relation::Always => TypingVerdict::Proved,
-        Relation::Maybe => TypingVerdict::Checked,
-        Relation::Never => TypingVerdict::Refuted,
-    }
-}
-
-/// Values a method specializer accepts; a missing specializer accepts
-/// every value.
-fn specializer_type(module: &sem::Module, specializer: sem::MethodSpecializer) -> Type {
-    specializer.map_or_else(Type::top, |class| Type::of(Atom::Cone(class), module))
-}
-
-/// Check-mode operand types: conditional operands contribute one type per
-/// branch, everything else its synthesized type.
-fn alternatives(module: &sem::Module, expr: &sem::Expr) -> Vec<Type> {
-    let mut out = Vec::new();
-    collect_alternatives(module, expr, &mut out);
-    if out.len() > MAX_ALTERNATIVES {
-        return vec![synthesize(module, expr)];
-    }
-    out
-}
-
-fn collect_alternatives(module: &sem::Module, expr: &sem::Expr, out: &mut Vec<Type>) {
-    if out.len() > MAX_ALTERNATIVES {
-        return;
-    }
-    match expr {
-        sem::Expr::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_alternatives(module, then_branch, out);
-            collect_alternatives(module, else_branch, out);
-        }
-        sem::Expr::Handle { body, restart, .. } => {
-            collect_alternatives(module, body, out);
-            collect_alternatives(module, &restart.body, out);
-        }
-        sem::Expr::Block { body, .. } => collect_alternatives(module, &body.result, out),
-        _ => out.push(synthesize(module, expr)),
-    }
-}
-
-fn cartesian(per_arg: &[Vec<Type>]) -> Vec<Vec<Type>> {
-    let mut tuples = vec![Vec::new()];
-    for options in per_arg {
-        let mut next = Vec::with_capacity(tuples.len().saturating_mul(options.len()));
-        for tuple in &tuples {
-            for option in options {
-                let mut extended = tuple.clone();
-                extended.push(option.clone());
-                next.push(extended);
-            }
-        }
-        tuples = next;
-    }
-    tuples
-}
-
-/// Narrows `bound`, the type of the expression's sem category, by what the
-/// expression's shape proves. Returns `None` when the shape adds nothing.
-fn structural_type(module: &sem::Module, expr: &sem::Expr, bound: &Type) -> Option<Type> {
-    match expr {
-        sem::Expr::MakeObject { class_id, .. } => Some(Type::of(Atom::Exact(*class_id), module)),
-        sem::Expr::ClassObject { class, .. } => {
-            Some(Type::of(Atom::Singleton(Metaobject::Class(*class)), module))
-        }
-        // The cast passes exactly the values of its operand that have the
-        // target class; sem's category of the cast is that class.
-        sem::Expr::Cast { value, .. } => Some(synthesize(module, value).meet(bound, module)),
-        sem::Expr::ConstantRef { constant, .. } => module
-            .constants
-            .get(constant.0 as usize)
-            .map(|constant| synthesize(module, &constant.value)),
-        sem::Expr::Values { values, .. } => match values.as_slice() {
-            [value] => Some(synthesize(module, value)),
-            _ => None,
-        },
-        sem::Expr::If {
-            then_branch,
-            else_branch,
-            ..
-        } => Some(synthesize(module, then_branch).join(&synthesize(module, else_branch), module)),
-        sem::Expr::Handle { body, restart, .. } => {
-            Some(synthesize(module, body).join(&synthesize(module, &restart.body), module))
-        }
-        // An exit procedure can supply the block's value, so only a block
-        // without one has its body's type.
-        sem::Expr::Block {
-            exit: None, body, ..
-        } => Some(synthesize(module, &body.result)),
-        _ => None,
-    }
-}
-
-fn for_each_child(expr: &sem::Expr, mut visit: impl FnMut(&sem::Expr)) {
-    match expr {
-        sem::Expr::VectorLiteral {
-            elements: items, ..
-        }
-        | sem::Expr::Values { values: items, .. }
-        | sem::Expr::IntrinsicCall { args: items, .. }
-        | sem::Expr::HostCall { args: items, .. }
-        | sem::Expr::DirectCall { args: items, .. }
-        | sem::Expr::GenericCall { args: items, .. }
-        | sem::Expr::FloatCall { args: items, .. } => items.iter().for_each(visit),
-        sem::Expr::CallableCall { callable, args, .. } => {
-            visit(callable);
-            args.iter().for_each(visit);
-        }
-        sem::Expr::Convert { value: inner, .. }
-        | sem::Expr::Negate { value: inner, .. }
-        | sem::Expr::Signal {
-            condition: inner, ..
-        }
-        | sem::Expr::ClassOf { object: inner, .. }
-        | sem::Expr::InstanceOf { value: inner, .. }
-        | sem::Expr::InstanceOfLimited { value: inner, .. }
-        | sem::Expr::Cast { value: inner, .. }
-        | sem::Expr::AccessorCall {
-            receiver: inner, ..
-        } => visit(inner),
-        sem::Expr::MakeObject { class, fields, .. } => {
-            visit(class);
-            for field in fields {
-                visit(&field.value);
-            }
-        }
-        sem::Expr::SlotWrite {
-            receiver, value, ..
-        } => {
-            visit(receiver);
-            visit(value);
-        }
-        sem::Expr::Binary { lhs, rhs, .. }
-        | sem::Expr::Compare { lhs, rhs, .. }
-        | sem::Expr::MixedCompare { lhs, rhs, .. }
-        | sem::Expr::ValueEqual { lhs, rhs, .. } => {
-            visit(lhs);
-            visit(rhs);
-        }
-        sem::Expr::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            visit(condition);
-            visit(then_branch);
-            visit(else_branch);
-        }
-        sem::Expr::Handle { body, restart, .. } => {
-            visit(body);
-            if let Some(guard) = &restart.guard {
-                visit(guard);
-            }
-            visit(&restart.body);
-        }
-        sem::Expr::Block { body, cleanup, .. } => {
-            for block in core::iter::once(body).chain(cleanup) {
-                for binding in &block.lets {
-                    visit(&binding.value);
-                }
-                visit(&block.result);
-            }
-        }
-        sem::Expr::ConstI64 { .. }
-        | sem::Expr::ConstF64 { .. }
-        | sem::Expr::Const32 { .. }
-        | sem::Expr::ConstBool { .. }
-        | sem::Expr::StringLiteral { .. }
-        | sem::Expr::SymbolLiteral { .. }
-        | sem::Expr::Local { .. }
-        | sem::Expr::Capture { .. }
-        | sem::Expr::ConstantRef { .. }
-        | sem::Expr::ClassObject { .. }
-        | sem::Expr::KnownCallable { .. }
-        | sem::Expr::Closure { .. }
-        | sem::Expr::GenericFunctionObject { .. }
-        | sem::Expr::Error { .. } => {}
-    }
+    head.iter().map(|_| Type::top()).collect()
 }
 
 fn decision_diagnostic(
     module: &sem::Module,
     config: TypingConfig,
+    typed: &DefinitionTyping,
     decision: &TypingDecision,
 ) -> Option<Diagnostic> {
+    if matches!(decision.rule, TypingRule::Unreachable) {
+        return None;
+    }
     let severity = config
         .severity(decision.check, decision.verdict)
         .diagnostic_severity()?;
-    let code = match (decision.check, decision.verdict) {
-        (_, TypingVerdict::Proved) => return None,
-        (TypingCheck::Dispatch, TypingVerdict::Checked) => {
-            DiagnosticCode::TypingDispatchRuntimeChecked
-        }
-        (TypingCheck::Dispatch, TypingVerdict::Refuted) => {
-            DiagnosticCode::TypingDispatchNoApplicableMethod
-        }
-        (TypingCheck::Cast, TypingVerdict::Checked) => DiagnosticCode::TypingCastRuntimeChecked,
-        (TypingCheck::Cast, TypingVerdict::Refuted) => DiagnosticCode::TypingCastAlwaysFails,
-    };
+    let code = diagnostic_code(decision.check, decision.verdict);
     let diagnostic = match severity {
         Severity::Warning => Diagnostic::warning(decision.span, code),
         Severity::Error => Diagnostic::error(decision.span, code),
     };
+    let actual = type_name_list(module, &decision.actual);
     let diagnostic = match &decision.expected {
         TypingExpectation::Dispatch { generic, .. } => diagnostic
             .with_arg(DiagnosticArg::text(
                 "generic",
                 generic_name(module, *generic),
             ))
-            .with_arg(DiagnosticArg::text(
-                "arguments",
-                type_name_list(module, &decision.actual),
-            )),
+            .with_arg(DiagnosticArg::text("arguments", actual)),
         TypingExpectation::Class(class) => diagnostic
             .with_arg(DiagnosticArg::text("expected", class_name(module, *class)))
-            .with_arg(DiagnosticArg::text(
-                "actual",
-                type_name_list(module, &decision.actual),
-            )),
+            .with_arg(DiagnosticArg::text("actual", actual)),
+        TypingExpectation::Type(expected) => {
+            let diagnostic = diagnostic
+                .with_arg(DiagnosticArg::text("expected", type_name(module, expected)))
+                .with_arg(DiagnosticArg::text("actual", actual));
+            match operation_name(module, typed, decision) {
+                Some(operation) => diagnostic.with_arg(DiagnosticArg::text("operation", operation)),
+                None => diagnostic,
+            }
+        }
     };
-    Some(diagnostic.with_arg(DiagnosticArg::text("rule", decision.rule.as_str())))
+    let mut diagnostic = diagnostic.with_arg(DiagnosticArg::text("rule", decision.rule.as_str()));
+    if decision.verdict == TypingVerdict::Refuted {
+        for label in provenance_labels(module, typed, decision) {
+            diagnostic = diagnostic.with_label(label);
+        }
+    }
+    Some(diagnostic)
+}
+
+const fn diagnostic_code(check: TypingCheck, verdict: TypingVerdict) -> DiagnosticCode {
+    use DiagnosticCode as C;
+    match (check, verdict) {
+        (TypingCheck::Dispatch, TypingVerdict::Proved) => C::TypingDispatchProved,
+        (TypingCheck::Dispatch, TypingVerdict::Checked) => C::TypingDispatchRuntimeChecked,
+        (TypingCheck::Dispatch, TypingVerdict::Refuted) => C::TypingDispatchNoApplicableMethod,
+        (TypingCheck::Cast, TypingVerdict::Proved) => C::TypingCastAlwaysSucceeds,
+        (TypingCheck::Cast, TypingVerdict::Checked) => C::TypingCastRuntimeChecked,
+        (TypingCheck::Cast, TypingVerdict::Refuted) => C::TypingCastAlwaysFails,
+        (TypingCheck::Instance, TypingVerdict::Proved) => C::TypingInstanceAlwaysTrue,
+        (TypingCheck::Instance, TypingVerdict::Checked) => C::TypingInstanceRuntimeChecked,
+        (TypingCheck::Instance, TypingVerdict::Refuted) => C::TypingInstanceAlwaysFalse,
+        (TypingCheck::Range, TypingVerdict::Proved) => C::TypingRangeAlwaysWithin,
+        (TypingCheck::Range, TypingVerdict::Checked) => C::TypingRangeRuntimeChecked,
+        (TypingCheck::Range, TypingVerdict::Refuted) => C::TypingRangeAlwaysOutside,
+        (TypingCheck::Overflow, TypingVerdict::Proved) => C::TypingOverflowImpossible,
+        (TypingCheck::Overflow, TypingVerdict::Checked) => C::TypingOverflowRuntimeChecked,
+        (TypingCheck::Overflow, TypingVerdict::Refuted) => C::TypingOverflowCertain,
+    }
+}
+
+/// Names the operation of an overflow decision, such as `+` or
+/// `shift-left`, from the expression at its site.
+fn operation_name(
+    module: &sem::Module,
+    typed: &DefinitionTyping,
+    decision: &TypingDecision,
+) -> Option<String> {
+    if decision.check != TypingCheck::Overflow {
+        return None;
+    }
+    flow::operation_at(module, typed.definition, decision.site)
+}
+
+/// Most secondary labels a refutation draws from its reason chains.
+const MAX_PROVENANCE_LABELS: usize = 3;
+
+/// Secondary labels pointing at the sources of a refuted decision's operand
+/// types: declarations, literals, constructions, narrowings, and checks,
+/// nearest first.
+fn provenance_labels(
+    module: &sem::Module,
+    typed: &DefinitionTyping,
+    decision: &TypingDecision,
+) -> Vec<DiagnosticLabel> {
+    let mut labels: Vec<DiagnosticLabel> = Vec::new();
+    let mut queue = decision.because.clone();
+    let mut seen = Vec::new();
+    while let Some(id) = (!queue.is_empty()).then(|| queue.remove(0)) {
+        if labels.len() >= MAX_PROVENANCE_LABELS {
+            break;
+        }
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+        let Some(reason) = typed.reason(id) else {
+            continue;
+        };
+        queue.extend(reason.from.iter().copied());
+        let ty = type_name(module, &reason.ty);
+        let message = match &reason.kind {
+            ReasonKind::Declared => format!("declared as {ty} here"),
+            ReasonKind::Literal => format!("literal of type {ty}"),
+            ReasonKind::Constructed => format!("constructed as {ty} here"),
+            ReasonKind::Contract { .. } => format!("result contract gives {ty}"),
+            ReasonKind::Narrowed { branch, .. } => {
+                format!("narrowed to {ty} in the {} branch", branch.as_str())
+            }
+            ReasonKind::Check { .. } => format!("checked as {ty} here"),
+            ReasonKind::HandlerCondition { .. } => format!("handler binds {ty}"),
+            ReasonKind::Interval => format!("computed as {ty}"),
+            ReasonKind::Widened => format!("widened to {ty}"),
+            ReasonKind::Exit => "control leaves here".into(),
+            ReasonKind::Joined | ReasonKind::ClosedWorld(_) => continue,
+        };
+        if reason.span == decision.span
+            || reason.span.start == reason.span.end
+            || labels.iter().any(|label| label.span == reason.span)
+        {
+            continue;
+        }
+        labels.push(DiagnosticLabel::secondary(reason.span, message));
+    }
+    labels
+}
+
+/// Deepest reason chain a dump renders before eliding the rest.
+const MAX_CHAIN_DEPTH: usize = 8;
+
+fn write_reason_chain(
+    out: &mut String,
+    module: &sem::Module,
+    reasons: &[Reason],
+    id: ReasonId,
+    depth: usize,
+) {
+    let Some(reason) = reasons.get(id.0 as usize) else {
+        let _ = write!(out, "{id}");
+        return;
+    };
+    out.push_str(&reason_label(module, reason));
+    if reason.from.is_empty() {
+        return;
+    }
+    out.push_str(" <- ");
+    if depth >= MAX_CHAIN_DEPTH {
+        out.push_str("...");
+        return;
+    }
+    match reason.from.as_slice() {
+        [parent] => write_reason_chain(out, module, reasons, *parent, depth + 1),
+        parents => {
+            out.push('{');
+            for (index, parent) in parents.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(" | ");
+                }
+                write_reason_chain(out, module, reasons, *parent, depth + 1);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// Renders one reason as `kind(details)@start..end type`.
+fn reason_label(module: &sem::Module, reason: &Reason) -> String {
+    let mut label = String::from(reason.kind.as_str());
+    match &reason.kind {
+        ReasonKind::Contract { source, .. } => {
+            let _ = write!(label, "({})", source.as_str());
+        }
+        ReasonKind::Narrowed { site, branch } => match site {
+            Some(site) => {
+                let _ = write!(label, "({site},{})", branch.as_str());
+            }
+            None => {
+                let _ = write!(label, "({})", branch.as_str());
+            }
+        },
+        ReasonKind::Check { site } => {
+            let _ = write!(label, "({site})");
+        }
+        ReasonKind::HandlerCondition { specializer } => {
+            let _ = write!(label, "({})", class_name(module, *specializer));
+        }
+        ReasonKind::ClosedWorld(Assumption::Generic(generic)) => {
+            let _ = write!(label, "(generic {})", generic_name(module, *generic));
+            return label;
+        }
+        ReasonKind::ClosedWorld(Assumption::Class(class)) => {
+            let _ = write!(label, "(class {})", class_name(module, *class));
+            return label;
+        }
+        ReasonKind::Declared
+        | ReasonKind::Literal
+        | ReasonKind::Constructed
+        | ReasonKind::Joined
+        | ReasonKind::Interval
+        | ReasonKind::Widened
+        | ReasonKind::Exit => {}
+    }
+    let _ = write!(
+        label,
+        "@{}..{} {}",
+        reason.span.start,
+        reason.span.end,
+        type_name(module, &reason.ty)
+    );
+    label
 }
 
 /// Returns a source-level name for a synthesized type, such as `<circle>`,
@@ -1128,8 +1331,8 @@ pub fn config_label(config: TypingConfig) -> &'static str {
     config.preset_name().unwrap_or("custom")
 }
 
-/// Returns a source-level label for an expectation, such as `<circle>` or
-/// `dispatch area`.
+/// Returns a source-level label for an expectation, such as `<circle>`,
+/// `dispatch area methods=2`, or `<i32>`.
 #[must_use]
 pub fn expectation_label(module: &sem::Module, expected: &TypingExpectation) -> String {
     match expected {
@@ -1154,6 +1357,7 @@ pub fn expectation_label(module: &sem::Module, expected: &TypingExpectation) -> 
             }
             label
         }
+        TypingExpectation::Type(ty) => type_name(module, ty),
     }
 }
 
@@ -1210,488 +1414,16 @@ fn class_name(module: &sem::Module, class: ClassId) -> String {
         .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone())
 }
 
-#[cfg(test)]
-mod tests {
-    use interloko_model::types::ClassHierarchy;
-
-    use super::*;
-    use crate::grammar_frontend;
-    use crate::identity::SourceFileId;
-    use crate::{ast, sem};
-
-    fn module(source: &str) -> sem::Module {
-        let tree = grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
-        sem::lower(&ast::lower(&tree))
-    }
-
-    const SHAPES: &str = "define class <shape> (<object>)\nend;\n\
-         define class <circle> (<shape>)\nend;\n\
-         define class <square> (<shape>)\nend;\n\
-         define class <label> (<object>)\nend;\n\
-         define generic area(x);\n\
-         define method area(c :: <circle>)\n  1\nend;\n\
-         define method area(s :: <square>)\n  2\nend;\n";
-
-    fn decisions_for(source: &str) -> (sem::Module, TypingArtifact) {
-        let module = module(source);
-        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
-        let artifact = analyze(&module, TypingConfig::soft());
-        (module, artifact)
-    }
-
-    fn main_decisions(module: &sem::Module, artifact: &TypingArtifact) -> Vec<TypingDecision> {
-        let main = module
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .expect("main");
-        artifact
-            .definitions
-            .iter()
-            .find(|definition| definition.definition == main.definition)
-            .map(|definition| definition.decisions.clone())
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn dispatch_on_a_covered_class_is_proved_and_selects_statically() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function main()\n  area(make(<circle>))\nend;"
-        ));
-        let decisions = main_decisions(&module, &artifact);
-        assert_eq!(decisions.len(), 1);
-        let decision = &decisions[0];
-        assert_eq!(decision.check, TypingCheck::Dispatch);
-        assert_eq!(decision.verdict, TypingVerdict::Proved);
-        assert_eq!(decision.rule, TypingRule::DispatchCovered);
-        assert_eq!(decision.selected_method, Some(module.methods[0].id));
-        // `area` specializes only on source classes, so it never boxes.
-        assert!(matches!(
-            &decision.expected,
-            TypingExpectation::Dispatch { boxed_params, .. } if boxed_params.is_empty()
-        ));
-        assert!(artifact.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn dispatch_on_a_superclass_is_runtime_checked_and_silent_by_default() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function measure(s :: <shape>)\n  area(s)\nend;\n\
-             define function main()\n  measure(make(<circle>))\nend;"
-        ));
-        let decision = artifact
-            .decisions()
-            .find(|decision| decision.check == TypingCheck::Dispatch)
-            .expect("dispatch decision");
-        assert_eq!(decision.verdict, TypingVerdict::Checked);
-        assert_eq!(decision.rule, TypingRule::DispatchNeedsRuntimeClass);
-        assert_eq!(decision.selected_method, None);
-        assert!(artifact.diagnostics.is_empty());
-
-        let strict = artifact.with_config(&module, TypingConfig::strict());
-        assert_eq!(strict.diagnostics.len(), 1);
-        assert_eq!(
-            strict.diagnostics[0].code,
-            DiagnosticCode::TypingDispatchRuntimeChecked
-        );
-        assert_eq!(strict.diagnostics[0].severity, Severity::Warning);
-        assert_eq!(strict.definitions, artifact.definitions);
-    }
-
-    #[test]
-    fn dispatch_with_no_possible_method_is_refuted_and_warns() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function main()\n  \
-             if 1 < 2 then area(make(<circle>)) else area(make(<shape>)) end\nend;"
-        ));
-        let decisions = main_decisions(&module, &artifact);
-        let verdicts = decisions
-            .iter()
-            .map(|decision| decision.verdict)
-            .collect::<Vec<_>>();
-        assert_eq!(verdicts, [TypingVerdict::Proved, TypingVerdict::Refuted]);
-        assert_eq!(decisions[1].rule, TypingRule::DispatchNoApplicableMethod);
-        assert_eq!(artifact.diagnostics.len(), 1);
-        let diagnostic = &artifact.diagnostics[0];
-        assert_eq!(
-            diagnostic.code,
-            DiagnosticCode::TypingDispatchNoApplicableMethod
-        );
-        assert_eq!(diagnostic.severity, Severity::Warning);
-        assert_eq!(diagnostic.span, decisions[1].span);
-        assert!(
-            diagnostic
-                .args
-                .iter()
-                .any(|arg| arg.name == "arguments" && arg.value.render() == "exactly <shape>")
-        );
-    }
-
-    #[test]
-    fn dispatch_on_an_unrelated_class_is_refuted() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function name(l :: <label>)\n  area(l)\nend;\n\
-             define function main()\n  0\nend;"
-        ));
-        let decision = artifact.decisions().next().expect("decision");
-        assert_eq!(decision.verdict, TypingVerdict::Refuted);
-        assert_eq!(type_name(&module, &decision.actual[0]), "<label>");
-    }
-
-    #[test]
-    fn casts_are_classified_as_upcast_narrowing_or_disjoint() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function up()\n  as(<shape>, make(<circle>))\nend;\n\
-             define function down(s :: <shape>)\n  as(<circle>, s)\nend;\n\
-             define function never()\n  as(<circle>, make(<shape>))\nend;\n\
-             define function main()\n  0\nend;"
-        ));
-        let verdict_of = |name: &str| {
-            let function = module
-                .functions
-                .iter()
-                .find(|function| function.name == name)
-                .expect("function");
-            artifact
-                .decision(function.definition, SiteId(0))
-                .map(|decision| (decision.verdict, decision.rule))
-                .expect("cast decision")
-        };
-        assert_eq!(
-            verdict_of("up"),
-            (TypingVerdict::Proved, TypingRule::CastUpcast)
-        );
-        assert_eq!(
-            verdict_of("down"),
-            (TypingVerdict::Checked, TypingRule::CastNarrowing)
-        );
-        assert_eq!(
-            verdict_of("never"),
-            (TypingVerdict::Refuted, TypingRule::CastDisjoint)
-        );
-        let codes = artifact
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.code)
-            .collect::<Vec<_>>();
-        assert_eq!(codes, [DiagnosticCode::TypingCastAlwaysFails]);
-    }
-
-    #[test]
-    fn checking_distributes_over_conditional_operands() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function pick(s :: <shape>)\n  \
-             as(<circle>, if 1 < 2 then make(<shape>) else s end)\nend;\n\
-             define function main()\n  0\nend;"
-        ));
-        let pick = &module.functions[0];
-        let decision = artifact
-            .decision(pick.definition, SiteId(0))
-            .expect("decision");
-        assert_eq!(decision.verdict, TypingVerdict::Checked);
-        assert_eq!(decision.rule, TypingRule::BranchesDisagree);
-    }
-
-    #[test]
-    fn closure_bodies_are_checked_under_their_enclosing_definition() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function main()\n  \
-             let f :: <callable> = function () => <integer>\n    area(make(<shape>))\n  end;\n  0\nend;"
-        ));
-        let decisions = main_decisions(&module, &artifact);
-        assert_eq!(decisions.len(), 1);
-        assert_eq!(decisions[0].verdict, TypingVerdict::Refuted);
-    }
-
-    #[test]
-    fn dump_lists_policy_and_decisions_by_definition() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function main()\n  area(make(<shape>))\nend;"
-        ));
-        let dump = artifact.dump(&module);
-        assert!(dump.starts_with(
-            "typing config=soft status=checked decisions=1 proved=0 checked=0 refuted=1\n"
-        ));
-        assert!(dump.contains("  policy dispatch checked=silent refuted=warning\n"));
-        assert!(dump.contains(" function main\n"));
-        assert!(dump.contains("s0 dispatch refuted rule=dispatch-no-applicable-method span="));
-        assert!(
-            dump.contains(
-                "expected=dispatch area methods=2 actual=exactly <shape> severity=warning"
-            )
-        );
-    }
-
-    const FLOATS: &str = "define generic size-of(x);\n\
-         define method size-of(x :: <double-float>)\n  1\nend;\n\
-         define method size-of(x :: <integer>)\n  2\nend;\n\
-         define generic magnitude(x);\n\
-         define method magnitude(x :: <float>)\n  5\nend;\n\
-         define generic whole(x);\n\
-         define method whole(x :: <integer>)\n  x\nend;\n";
-
-    fn verdicts_of(
-        module: &sem::Module,
-        artifact: &TypingArtifact,
-        name: &str,
-    ) -> Vec<TypingVerdict> {
-        let function = module
-            .functions
-            .iter()
-            .find(|function| function.name == name)
-            .expect("function");
-        artifact
-            .definitions
-            .iter()
-            .find(|definition| definition.definition == function.definition)
-            .map(|definition| {
-                definition
-                    .decisions
-                    .iter()
-                    .map(|decision| decision.verdict)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn float_values_have_exact_double_float_class_under_abstract_float() {
-        let (module, artifact) = decisions_for(&format!(
-            "{FLOATS}define function main()\n  \
-             if 1 < 2 then size-of(2.5) + magnitude(2.5) else whole(2.5) end\nend;"
-        ));
-        let double_float = module
-            .builtin_value_class(sem::BuiltinValueClass::DoubleFloat)
-            .expect("double-float");
-        let float = module
-            .builtin_value_class(sem::BuiltinValueClass::Float)
-            .expect("float");
-        assert!(module.is_closed(double_float));
-        assert!(!module.is_closed(float));
-        let integer = module
-            .builtin_value_class(sem::BuiltinValueClass::Integer)
-            .expect("integer");
-        let rational = module
-            .builtin_value_class(sem::BuiltinValueClass::Rational)
-            .expect("rational");
-        assert!(module.is_closed(integer));
-        assert!(!module.is_closed(rational));
-        assert!(module.is_same_or_subclass(integer, rational));
-
-        assert_eq!(
-            verdicts_of(&module, &artifact, "main"),
-            [
-                TypingVerdict::Proved,
-                TypingVerdict::Proved,
-                TypingVerdict::Refuted
-            ]
-        );
-        let refuted = artifact
-            .decisions()
-            .find(|decision| decision.verdict == TypingVerdict::Refuted)
-            .expect("refuted dispatch");
-        assert_eq!(refuted.actual[0].exact_class(&module), Some(double_float));
-        // `whole` specializes on `<integer>`, so its parameter carries boxed
-        // scalars; the decision records sem's boxing choice.
-        assert!(matches!(
-            &refuted.expected,
-            TypingExpectation::Dispatch { boxed_params, .. } if boxed_params == &[0]
-        ));
-        assert_eq!(type_name(&module, &refuted.actual[0]), "<double-float>");
-    }
-
-    #[test]
-    fn float_casts_are_proved_checked_or_refuted() {
-        let (module, artifact) = decisions_for(&format!(
-            "{FLOATS}define function to-float(x :: <object>) => <double-float>\n  \
-             as(<double-float>, x)\nend;\n\
-             define function up(x :: <double-float>) => <object>\n  as(<float>, x)\nend;\n\
-             define function never() => <double-float>\n  \
-             as(<double-float>, as(<object>, \"text\"))\nend;\n\
-             define function on-object(x :: <object>)\n  size-of(x)\nend;\n\
-             define function main()\n  0\nend;"
-        ));
-        assert_eq!(
-            verdicts_of(&module, &artifact, "to-float"),
-            [TypingVerdict::Checked]
-        );
-        assert_eq!(
-            verdicts_of(&module, &artifact, "up"),
-            [TypingVerdict::Proved]
-        );
-        assert_eq!(
-            verdicts_of(&module, &artifact, "never"),
-            [TypingVerdict::Proved, TypingVerdict::Refuted]
-        );
-        assert_eq!(
-            verdicts_of(&module, &artifact, "on-object"),
-            [TypingVerdict::Checked]
-        );
-        let codes = artifact
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.code)
-            .collect::<Vec<_>>();
-        assert_eq!(codes, [DiagnosticCode::TypingCastAlwaysFails]);
-    }
-
-    #[test]
-    fn limited_integer_operands_keep_their_range() {
-        let (module, artifact) = decisions_for(
-            "define generic weight(x);\n\
-             define method weight(x :: <integer>) => <integer>\n  1\nend;\n\
-             define function frames() => <u32>\n  5\nend;\n\
-             define function main() => <integer>\n  \
-             let step = 3i32 + 4;\n  weight(step) + weight(frames()) + weight(7)\nend;",
-        );
-        let decisions = main_decisions(&module, &artifact);
-        let actual = decisions
-            .iter()
-            .map(|decision| type_name_list(&module, &decision.actual))
-            .collect::<Vec<_>>();
-        assert_eq!(actual, ["<i32>", "<u32>", "<integer>"]);
-        assert!(
-            decisions
-                .iter()
-                .all(|decision| decision.verdict == TypingVerdict::Proved)
-        );
-        let integer = module
-            .builtin_value_class(sem::BuiltinValueClass::Integer)
-            .expect("integer");
-        assert!(
-            decisions
-                .iter()
-                .all(|decision| decision.actual[0].exact_class(&module) == Some(integer))
-        );
-    }
-
-    #[test]
-    fn a_cast_that_always_fails_leaves_no_values_downstream() {
-        // sem types the cast as `<circle>`; its operand is exactly
-        // `<shape>`, so no value gets through and the dispatch on it is
-        // unreachable rather than refuted.
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function main()\n  area(as(<circle>, make(<shape>)))\nend;"
-        ));
-        let decisions = main_decisions(&module, &artifact);
-        assert_eq!(decisions.len(), 2);
-        assert_eq!(decisions[0].check, TypingCheck::Cast);
-        assert_eq!(decisions[0].verdict, TypingVerdict::Refuted);
-        assert_eq!(decisions[1].check, TypingCheck::Dispatch);
-        assert!(decisions[1].actual[0].is_bottom());
-        assert_eq!(decisions[1].verdict, TypingVerdict::Proved);
-        assert_eq!(type_name(&module, &decisions[1].actual[0]), "type-union()");
-        assert_eq!(artifact.diagnostics.len(), 1);
-    }
-
-    #[test]
-    fn synthesis_joins_branches_and_stays_within_sem() {
-        let (module, artifact) = decisions_for(&format!(
-            "{SHAPES}define function pick(s :: <shape>)\n  \
-             as(<shape>, if 1 < 2 then as(<shape>, make(<circle>)) \
-             else as(<shape>, make(<square>)) end)\nend;\n\
-             define function same()\n  \
-             as(<shape>, if 1 < 2 then make(<circle>) else make(<circle>) end)\nend;\n\
-             define function main()\n  0\nend;"
-        ));
-        let actual = |name: &str| {
-            let function = module
-                .functions
-                .iter()
-                .find(|function| function.name == name)
-                .expect("function");
-            // The outer cast is checked after the casts inside it.
-            let decision = artifact
-                .definitions
-                .iter()
-                .find(|typed| typed.definition == function.definition)
-                .and_then(|typed| typed.decisions.last())
-                .expect("decision");
-            type_name(&module, &decision.actual[0])
-        };
-        assert_eq!(
-            actual("pick"),
-            "type-union(exactly <circle>, exactly <square>)"
-        );
-        assert_eq!(actual("same"), "exactly <circle>");
-        for function in &module.functions {
-            let kind = module.expr_kind(&function.body.result);
-            let ty = synthesize(&module, &function.body.result);
-            assert!(ty.is_subtype(&module.kind_type(kind), &module));
-        }
-    }
-
-    #[test]
-    fn semantic_errors_block_the_pass() {
-        let module = module("define function main() => <integer>\n  #t\nend;");
-        assert!(!module.diagnostics.is_empty());
-        let artifact = analyze(&module, TypingConfig::soft());
-        assert_eq!(
-            artifact.status,
-            TypingStatus::BlockedBySemanticDiagnostics {
-                count: module.diagnostics.len()
-            }
-        );
-        assert!(artifact.definitions.is_empty());
-        assert!(artifact.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn configuration_presets_and_policies() {
-        assert_eq!(TypingConfig::default(), TypingConfig::soft());
-        for name in TypingConfig::PRESETS {
-            let config = TypingConfig::preset(name).expect("preset");
-            assert_eq!(config.preset_name(), Some(*name));
-        }
-        assert_eq!(TypingConfig::preset("loud"), None);
-        let soft = TypingConfig::soft();
-        assert_eq!(
-            soft.severity(TypingCheck::Dispatch, TypingVerdict::Refuted),
-            TypingSeverity::Warning
-        );
-        assert_eq!(
-            soft.severity(TypingCheck::Cast, TypingVerdict::Checked),
-            TypingSeverity::Silent
-        );
-        let custom = soft.with_policy(
-            TypingCheck::Cast,
-            TypingPolicy::new(TypingSeverity::Warning, TypingSeverity::Error),
-        );
-        assert_eq!(custom.preset_name(), None);
-        assert_eq!(custom.dispatch, soft.dispatch);
-        assert_eq!(
-            custom.severity(TypingCheck::Cast, TypingVerdict::Refuted),
-            TypingSeverity::Error
-        );
-        for verdict in TypingVerdict::ALL {
-            assert_eq!(
-                TypingConfig::strict().severity(TypingCheck::Dispatch, TypingVerdict::Proved),
-                TypingSeverity::Silent
-            );
-            assert_eq!(verdict.join(*verdict), *verdict);
-        }
-        assert_eq!(
-            TypingVerdict::Proved.join(TypingVerdict::Refuted),
-            TypingVerdict::Checked
-        );
-    }
-
-    #[test]
-    fn decisions_are_independent_of_other_definitions() {
-        let base = format!(
-            "{SHAPES}define function measure(s :: <shape>)\n  area(s)\nend;\n\
-             define function main()\n  area(make(<shape>))\nend;"
-        );
-        let (module, artifact) = decisions_for(&base);
-        let measure = module.functions[0].definition;
-        let alone = check_definition(&module, measure).expect("measure typing");
-        assert_eq!(
-            Some(&alone),
-            artifact
-                .definitions
-                .iter()
-                .find(|definition| definition.definition == measure)
-        );
-        assert_eq!(alone.kind, DefinitionKind::Function);
-    }
+/// Values a method specializer accepts; a missing specializer accepts
+/// every value.
+fn specializer_type(module: &sem::Module, specializer: sem::MethodSpecializer) -> Type {
+    specializer.map_or_else(Type::top, |class| Type::of(Atom::Cone(class), module))
 }
+
+/// Returns the type of the integers in `range`.
+fn range_type(module: &sem::Module, range: IntRange) -> Type {
+    Type::of(Atom::Integer(range), module)
+}
+
+#[cfg(test)]
+mod tests;

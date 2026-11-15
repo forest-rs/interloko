@@ -1,0 +1,35 @@
+// expect: run 4
+// expect: diagnostics 0
+// expect: dump typing contains s1 dispatch proved rule=dispatch-covered
+// expect: dump typing contains actual=exactly <square>
+// expect: dump typing contains because=narrowed(s0,else)
+
+// `shape` is one of two exact classes, so the else branch of
+// `instance?(shape, <circle>)` knows it is a <square>: the call of `sides`,
+// which has no <circle> method, is proved rather than left to the runtime.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define generic sides(x);
+
+define method sides(s :: <square>) => <integer>
+  4
+end;
+
+define function count(round? :: <boolean>) => <integer>
+  let circle :: <shape> = make(<circle>);
+  let square :: <shape> = make(<square>);
+  let shape = if round? then circle else square end;
+  if instance?(shape, <circle>) then 0 else sides(shape) end
+end;
+
+define function main() => <integer>
+  count(#t) + count(#f)
+end;

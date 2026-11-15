@@ -1,0 +1,16 @@
+// expect: run 1000i32
+// expect: diagnostics 0
+// expect: dump typing contains overflow proved rule=overflow-impossible
+// expect: dump typing contains overflow checked rule=overflow-possible
+// expect: dump typing contains because=narrowed(then)@
+
+// Below 1000, `i + 1` cannot leave <i32>, so its overflow check is proved;
+// the unguarded `i + 2` may overflow and stays runtime-checked.
+
+define function step(i :: <i32>) => <i32>
+  if i < 1000 then i + 1 else i + 2 end
+end;
+
+define function main() => <i32>
+  step(999)
+end;

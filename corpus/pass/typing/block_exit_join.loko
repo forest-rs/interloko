@@ -1,0 +1,42 @@
+// expect: run 34
+// expect: diagnostics 0
+// expect: dump typing contains s0 dispatch proved rule=dispatch-covered
+// expect: dump typing contains actual=type-union(exactly <circle>, exactly <square>)
+// expect: dump typing contains because=joined@
+
+// A block's value is its body's value or an argument of a call to its exit
+// procedure. Soft typing joins both, so `area` is proved on the result even
+// though the exit call leaves the `if` early.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>) => <integer>
+  3
+end;
+
+define method area(s :: <square>) => <integer>
+  4
+end;
+
+define function choose(n :: <integer>) => <integer>
+  let square :: <shape> = make(<square>);
+  let shape :: <shape> = block (return)
+    let circle :: <shape> = make(<circle>);
+    let picked = if n > 10 then return(circle) else square end;
+    picked
+  end;
+  area(shape)
+end;
+
+define function main() => <integer>
+  choose(20) * 10 + choose(1)
+end;
