@@ -163,6 +163,12 @@ pub enum DiagnosticCode {
     /// An untyped callable's results cannot be checked at runtime as the kinds
     /// its call site expects.
     UncheckedCallableResult,
+    /// A callable's parameter is narrower than the expected signature's, so
+    /// it does not accept everything its callers may pass.
+    CallableParameterVariance,
+    /// A callable's result is wider than the expected signature's, so it may
+    /// return what its callers do not expect.
+    CallableResultVariance,
     /// A signal expression is not a known condition object.
     SignalConditionTypeMismatch,
     /// A handle body and restart handler have incompatible result kinds.
@@ -334,6 +340,8 @@ impl DiagnosticCode {
         Self::ApplyArityMismatch,
         Self::ApplyTargetTypeMismatch,
         Self::UncheckedCallableResult,
+        Self::CallableParameterVariance,
+        Self::CallableResultVariance,
         Self::SignalConditionTypeMismatch,
         Self::HandleRestartResultMismatch,
         Self::BlockExitResultMismatch,
@@ -455,6 +463,8 @@ impl DiagnosticCode {
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
             Self::UncheckedCallableResult => "sem.unchecked-callable-result",
+            Self::CallableParameterVariance => "sem.callable-parameter-variance",
+            Self::CallableResultVariance => "sem.callable-result-variance",
             Self::SignalConditionTypeMismatch => "sem.signal-condition-type-mismatch",
             Self::HandleRestartResultMismatch => "sem.handle-restart-result-mismatch",
             Self::BlockExitResultMismatch => "sem.block-exit-result-mismatch",
@@ -577,6 +587,8 @@ impl DiagnosticCode {
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,
             "sem.unchecked-callable-result" => Self::UncheckedCallableResult,
+            "sem.callable-parameter-variance" => Self::CallableParameterVariance,
+            "sem.callable-result-variance" => Self::CallableResultVariance,
             "sem.signal-condition-type-mismatch" => Self::SignalConditionTypeMismatch,
             "sem.handle-restart-result-mismatch" => Self::HandleRestartResultMismatch,
             "sem.block-exit-result-mismatch" => Self::BlockExitResultMismatch,

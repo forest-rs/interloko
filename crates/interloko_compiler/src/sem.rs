@@ -12,7 +12,7 @@ use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
 
-use interloko_model::contract::{CallableContract, Contract, ValueContract};
+use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
 
 pub use interloko_model::{
@@ -1623,6 +1623,50 @@ fn join_arm_kinds(
         .zip(rhs)
         .map(|(lhs, rhs)| join_arm_kind(*lhs, *rhs, &holds))
         .collect()
+}
+
+/// Why a callable's signature cannot stand in for an expected one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SignatureMismatch {
+    /// The arities differ, a pair of kinds is held in different register
+    /// types, or a pair is unrelated.
+    Incompatible,
+    /// A parameter or result would match the other way round: a parameter
+    /// narrower than the one expected, or a result wider.
+    Variance {
+        /// The parameter or result.
+        position: ContractPosition,
+        /// Its kind in the expected signature.
+        expected: ValueKind,
+        /// Its kind in the callable's own signature.
+        actual: ValueKind,
+    },
+}
+
+/// Returns whether values of kinds `lhs` and `rhs` are held in the same
+/// tape register type, so a callable signature may name either without
+/// conversion: every class and metaobject shares the `object` type, and
+/// every callable the closure type.
+fn shares_register_type(lhs: ValueKind, rhs: ValueKind) -> bool {
+    let object = |kind| {
+        matches!(
+            kind,
+            ValueKind::String(_)
+                | ValueKind::Symbol(_)
+                | ValueKind::Vector(_)
+                | ValueKind::Object(_)
+                | ValueKind::ClassObject(_)
+                | ValueKind::GenericFunctionObject(_)
+                | ValueKind::MethodObject(_)
+                | ValueKind::SlotDescriptorObject { .. }
+        )
+    };
+    let callable = |kind| matches!(kind, ValueKind::Callable | ValueKind::KnownCallable(_));
+    lhs == rhs
+        || matches!(lhs, ValueKind::Error)
+        || matches!(rhs, ValueKind::Error)
+        || (object(lhs) && object(rhs))
+        || (callable(lhs) && callable(rhs))
 }
 
 /// Returns the value category of a limited integer type.
@@ -4997,8 +5041,17 @@ impl Lowering {
                 && !self
                     .callable_signatures_match(Some(expected), actual_callable_signature.as_ref())
             {
-                self.diagnostics.push(
-                    Diagnostic::error(constant.value.span(), DiagnosticCode::ConstantTypeMismatch)
+                let diagnostic = self
+                    .callable_variance_diagnostic(
+                        constant.value.span(),
+                        expected,
+                        actual_callable_signature.as_ref(),
+                    )
+                    .unwrap_or_else(|| {
+                        Diagnostic::error(
+                            constant.value.span(),
+                            DiagnosticCode::ConstantTypeMismatch,
+                        )
                         .with_arg(DiagnosticArg::text("constant", constant.name.clone()))
                         .with_arg(DiagnosticArg::text(
                             "expected",
@@ -5010,8 +5063,9 @@ impl Lowering {
                                 || self.kind_name(actual_kind),
                                 |signature| self.callable_signature_name(signature),
                             ),
-                        )),
-                );
+                        ))
+                    });
+                self.diagnostics.push(diagnostic);
             }
             let result_kind = expected_kind.unwrap_or(actual_kind);
             let callable_signature = expected_callable_signature.or(match actual_kind {
@@ -5533,24 +5587,31 @@ impl Lowering {
                             actual_callable_signature.as_ref(),
                         )
                     {
-                        ctx.diagnostics.push(
-                            Diagnostic::error(
+                        let diagnostic = self
+                            .callable_variance_diagnostic(
                                 local.value.span(),
-                                DiagnosticCode::LocalTypeMismatch,
+                                expected,
+                                actual_callable_signature.as_ref(),
                             )
-                            .with_arg(DiagnosticArg::text("local", binding.name.clone()))
-                            .with_arg(DiagnosticArg::text(
-                                "expected",
-                                self.callable_signature_name(expected),
-                            ))
-                            .with_arg(DiagnosticArg::text(
-                                "actual",
-                                actual_callable_signature.as_ref().map_or_else(
-                                    || self.kind_name(actual_kind),
-                                    |signature| self.callable_signature_name(signature),
-                                ),
-                            )),
-                        );
+                            .unwrap_or_else(|| {
+                                Diagnostic::error(
+                                    local.value.span(),
+                                    DiagnosticCode::LocalTypeMismatch,
+                                )
+                                .with_arg(DiagnosticArg::text("local", binding.name.clone()))
+                                .with_arg(DiagnosticArg::text(
+                                    "expected",
+                                    self.callable_signature_name(expected),
+                                ))
+                                .with_arg(DiagnosticArg::text(
+                                    "actual",
+                                    actual_callable_signature.as_ref().map_or_else(
+                                        || self.kind_name(actual_kind),
+                                        |signature| self.callable_signature_name(signature),
+                                    ),
+                                ))
+                            });
+                        ctx.diagnostics.push(diagnostic);
                     }
                     let local_kind = expected_kind.unwrap_or(actual_kind);
                     let callable_signature = expected_type
@@ -5656,24 +5717,33 @@ impl Lowering {
                                 actual_callable_signature.as_ref(),
                             )
                         {
-                            ctx.diagnostics.push(
-                                Diagnostic::error(
+                            let diagnostic = self
+                                .callable_variance_diagnostic(
                                     local.value.span(),
-                                    DiagnosticCode::LocalTypeMismatch,
+                                    expected,
+                                    actual_callable_signature.as_ref(),
                                 )
-                                .with_arg(DiagnosticArg::text("local", binding.name.clone()))
-                                .with_arg(DiagnosticArg::text(
-                                    "expected",
-                                    self.callable_signature_name(expected),
-                                ))
-                                .with_arg(DiagnosticArg::text(
-                                    "actual",
-                                    actual_callable_signature.as_ref().map_or_else(
-                                        || self.kind_name(actual_kind),
-                                        |signature| self.callable_signature_name(signature),
-                                    ),
-                                )),
-                            );
+                                .unwrap_or_else(|| {
+                                    Diagnostic::error(
+                                        local.value.span(),
+                                        DiagnosticCode::LocalTypeMismatch,
+                                    )
+                                    .with_arg(DiagnosticArg::text("local", binding.name.clone()))
+                                    .with_arg(DiagnosticArg::text(
+                                        "expected",
+                                        self.callable_signature_name(expected),
+                                    ))
+                                    .with_arg(
+                                        DiagnosticArg::text(
+                                            "actual",
+                                            actual_callable_signature.as_ref().map_or_else(
+                                                || self.kind_name(actual_kind),
+                                                |signature| self.callable_signature_name(signature),
+                                            ),
+                                        ),
+                                    )
+                                });
+                            ctx.diagnostics.push(diagnostic);
                         }
                         let kind = expected_kind.unwrap_or(actual_kind);
                         let callable_signature = expected_type
@@ -5940,35 +6010,45 @@ impl Lowering {
                                 .param_callable_sigs
                                 .get(index)
                                 .and_then(|signature| signature.as_ref())
+                                && let actual_signature = self.expr_callable_signature(arg)
                                 && !self.callable_signatures_match(
                                     Some(expected),
-                                    self.expr_callable_signature(arg).as_ref(),
+                                    actual_signature.as_ref(),
                                 )
                             {
-                                ctx.diagnostics.push(
-                                    Diagnostic::error(
+                                let diagnostic = self
+                                    .callable_variance_diagnostic(
                                         arg.span(),
-                                        DiagnosticCode::FunctionArgumentTypeMismatch,
+                                        expected,
+                                        actual_signature.as_ref(),
                                     )
-                                    .with_arg(DiagnosticArg::text("function", callee.clone()))
-                                    .with_arg(DiagnosticArg::unsigned(
-                                        "argument_index",
-                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
-                                    ))
-                                    .with_arg(DiagnosticArg::text(
-                                        "expected",
-                                        self.callable_signature_name(expected),
-                                    ))
-                                    .with_arg(
-                                        DiagnosticArg::text(
-                                            "actual",
-                                            self.expr_callable_signature(arg).as_ref().map_or_else(
-                                                || self.kind_name(actual),
-                                                |signature| self.callable_signature_name(signature),
+                                    .unwrap_or_else(|| {
+                                        Diagnostic::error(
+                                            arg.span(),
+                                            DiagnosticCode::FunctionArgumentTypeMismatch,
+                                        )
+                                        .with_arg(DiagnosticArg::text("function", callee.clone()))
+                                        .with_arg(DiagnosticArg::unsigned(
+                                            "argument_index",
+                                            u64::try_from(index + 1).unwrap_or(u64::MAX),
+                                        ))
+                                        .with_arg(DiagnosticArg::text(
+                                            "expected",
+                                            self.callable_signature_name(expected),
+                                        ))
+                                        .with_arg(
+                                            DiagnosticArg::text(
+                                                "actual",
+                                                actual_signature.as_ref().map_or_else(
+                                                    || self.kind_name(actual),
+                                                    |signature| {
+                                                        self.callable_signature_name(signature)
+                                                    },
+                                                ),
                                             ),
-                                        ),
-                                    ),
-                                );
+                                        )
+                                    });
+                                ctx.diagnostics.push(diagnostic);
                             }
                         }
                         return Expr::DirectCall {
@@ -6874,8 +6954,17 @@ impl Lowering {
             {
                 let actual_signature = self.expr_callable_signature(arg);
                 if !self.callable_signatures_match(Some(expected), actual_signature.as_ref()) {
-                    ctx.diagnostics.push(
-                        Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                    let diagnostic = self
+                        .callable_variance_diagnostic(
+                            arg.span(),
+                            expected,
+                            actual_signature.as_ref(),
+                        )
+                        .unwrap_or_else(|| {
+                            Diagnostic::error(
+                                arg.span(),
+                                DiagnosticCode::FunctionArgumentTypeMismatch,
+                            )
                             .with_arg(DiagnosticArg::text("function", symbol.name.clone()))
                             .with_arg(DiagnosticArg::unsigned(
                                 "argument_index",
@@ -6891,8 +6980,9 @@ impl Lowering {
                                     || self.kind_name(actual),
                                     |signature| self.callable_signature_name(signature),
                                 ),
-                            )),
-                    );
+                            ))
+                        });
+                    ctx.diagnostics.push(diagnostic);
                 }
             }
         }
@@ -9124,20 +9214,127 @@ impl Lowering {
         let Some(actual) = actual else {
             return false;
         };
-        expected.params.len() == actual.params.len()
-            && expected.results.len() == actual.results.len()
-            && expected
-                .params
-                .iter()
-                .copied()
-                .zip(actual.params.iter().copied())
-                .all(|(expected, actual)| self.kinds_match(expected, actual))
-            && self.result_kinds_match(&expected.results, &actual.results)
-            // A callable's ABI fixes its register kinds, and nothing adapts
-            // an `<i32>` signature to an `<integer>` one, so integer types
-            // must match exactly.
-            && !integer_types_differ(&expected.params, &actual.params)
-            && !integer_types_differ(&expected.results, &actual.results)
+        self.callable_signature_mismatch(expected, actual).is_none()
+    }
+
+    /// Returns why a callable of signature `actual` cannot be called as
+    /// `expected`, or `None` when it can.
+    ///
+    /// Callable subtyping is [`Contract::check_replaces`]'s rule: each
+    /// parameter must accept at least every value callers may pass
+    /// (contravariance) and each result must be at most what callers rely
+    /// on (covariance). A parameter or result that is itself a callable is
+    /// a plain `<callable>` here, since a signature records no nested one;
+    /// calls through it check what they rely on. On top of that, a
+    /// callable's ABI fixes its register kinds and nothing adapts one
+    /// signature to another, so each pair must also share a register type:
+    /// `<i32>` does not stand in for `<integer>`, nor a class for
+    /// `<object>`, though every class shares one.
+    fn callable_signature_mismatch(
+        &self,
+        expected: &CallableSignature,
+        actual: &CallableSignature,
+    ) -> Option<SignatureMismatch> {
+        if expected.params.len() != actual.params.len()
+            || expected.results.len() != actual.results.len()
+        {
+            return Some(SignatureMismatch::Incompatible);
+        }
+        let params = expected.params.iter().zip(&actual.params).enumerate().map(
+            |(index, (expected, actual))| {
+                // The callee's parameter must accept what callers pass.
+                (
+                    ContractPosition::Parameter(index),
+                    *expected,
+                    *actual,
+                    *actual,
+                    *expected,
+                )
+            },
+        );
+        let results = expected
+            .results
+            .iter()
+            .zip(&actual.results)
+            .enumerate()
+            .map(|(index, (expected, actual))| {
+                // Callers must accept what the callee returns.
+                (
+                    ContractPosition::Result(index),
+                    *expected,
+                    *actual,
+                    *expected,
+                    *actual,
+                )
+            });
+        params
+            .chain(results)
+            .find_map(|(position, expected, actual, wider, narrower)| {
+                if !shares_register_type(expected, actual) {
+                    return Some(SignatureMismatch::Incompatible);
+                }
+                if self.kinds_match(wider, narrower) {
+                    return None;
+                }
+                Some(if self.kinds_match(narrower, wider) {
+                    SignatureMismatch::Variance {
+                        position,
+                        expected,
+                        actual,
+                    }
+                } else {
+                    SignatureMismatch::Incompatible
+                })
+            })
+    }
+
+    /// Returns the diagnostic for a callable of signature `actual` that
+    /// cannot be called as `expected` because one of its parameters or
+    /// results is the wrong way round, or `None` when the mismatch is of
+    /// another kind, which the caller reports in its own terms.
+    fn callable_variance_diagnostic(
+        &self,
+        span: Span,
+        expected: &CallableSignature,
+        actual: Option<&CallableSignature>,
+    ) -> Option<Diagnostic> {
+        let Some(SignatureMismatch::Variance {
+            position,
+            expected: expected_kind,
+            actual: actual_kind,
+        }) = self.callable_signature_mismatch(expected, actual?)
+        else {
+            return None;
+        };
+        let (code, index, names) = match position {
+            ContractPosition::Parameter(index) => (
+                DiagnosticCode::CallableParameterVariance,
+                index,
+                [("accepted", actual_kind), ("passed", expected_kind)],
+            ),
+            ContractPosition::Result(index) => (
+                DiagnosticCode::CallableResultVariance,
+                index,
+                [("returned", actual_kind), ("relied", expected_kind)],
+            ),
+        };
+        let mut diagnostic = Diagnostic::error(span, code)
+            .with_arg(DiagnosticArg::text(
+                "expected",
+                self.callable_signature_name(expected),
+            ))
+            .with_arg(DiagnosticArg::text(
+                "actual",
+                self.callable_signature_name(actual?),
+            ))
+            .with_arg(DiagnosticArg::unsigned(
+                "index",
+                u64::try_from(index + 1).unwrap_or(u64::MAX),
+            ));
+        for (name, kind) in names {
+            diagnostic = diagnostic.with_arg(DiagnosticArg::text(name, self.kind_name(kind)));
+        }
+        Some(diagnostic)
     }
 
     fn callable_signature_name(&self, signature: &CallableSignature) -> String {
@@ -10916,5 +11113,106 @@ mod tests {
 
         let copied = first;
         assert_eq!(copied, first);
+    }
+
+    const SHAPES: &str = "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define function radius-of(c :: <circle>) => <integer>\n  c.radius\nend;\n\
+         define function size-of(s :: <shape>) => <integer>\n  1\nend;\n\
+         define function circle-of(x :: <integer>) => <circle>\n  make(<circle>, radius: x)\nend;\n\
+         define function shape-of(x :: <integer>) => <shape>\n  make(<circle>, radius: x)\nend;\n";
+
+    fn lower_shapes(rest: &str) -> Module {
+        lower_source(&format!("{SHAPES}{rest}"))
+    }
+
+    #[test]
+    fn callable_parameters_are_contravariant_everywhere_signatures_meet() {
+        let parameter = [
+            ("expected", "callable(<shape>) => <integer>"),
+            ("actual", "callable(<circle>) => <integer>"),
+            ("index", "1"),
+            ("accepted", "<circle>"),
+            ("passed", "<shape>"),
+        ];
+        for site in [
+            "define function f(g :: callable(<shape>) => <integer>)\n  1\nend;\n\
+             define function main()\n  f(radius-of)\nend;",
+            "define function f(g :: callable(<shape>) => <integer>)\n  1\nend;\n\
+             define function main()\n  apply(f, radius-of)\nend;",
+            "define function main()\n  let g :: callable(<shape>) => <integer> = radius-of;\n  1\nend;",
+            "define function two()\n  values(radius-of, 1)\nend;\n\
+             define function main()\n  let (g :: callable(<shape>) => <integer>, n :: <integer>) = two();\n  n\nend;",
+            "define constant k :: callable(<shape>) => <integer> = radius-of;\n\
+             define function main()\n  1\nend;",
+        ] {
+            let module = lower_shapes(site);
+            assert_eq!(
+                module.diagnostics.len(),
+                1,
+                "{site}: {:?}",
+                module.diagnostics
+            );
+            assert!(
+                has_diagnostic(
+                    &module,
+                    DiagnosticCode::CallableParameterVariance,
+                    &parameter
+                ),
+                "{site}: {:?}",
+                module.diagnostics
+            );
+        }
+
+        let widened = lower_shapes(
+            "define function f(g :: callable(<circle>) => <integer>)\n  1\nend;\n\
+             define function main()\n  let g :: callable(<circle>) => <integer> = size-of;\n  f(size-of)\nend;",
+        );
+        assert!(widened.diagnostics.is_empty(), "{:?}", widened.diagnostics);
+    }
+
+    #[test]
+    fn callable_results_are_covariant() {
+        let wider = lower_shapes(
+            "define function main()\n  let g :: callable(<integer>) => <circle> = shape-of;\n  1\nend;",
+        );
+        assert!(has_diagnostic(
+            &wider,
+            DiagnosticCode::CallableResultVariance,
+            &[
+                ("expected", "callable(<integer>) => <circle>"),
+                ("actual", "callable(<integer>) => <shape>"),
+                ("index", "1"),
+                ("returned", "<shape>"),
+                ("relied", "<circle>"),
+            ]
+        ));
+
+        let narrower = lower_shapes(
+            "define function main()\n  let g :: callable(<integer>) => <shape> = circle-of;\n  1\nend;",
+        );
+        assert!(
+            narrower.diagnostics.is_empty(),
+            "{:?}",
+            narrower.diagnostics
+        );
+    }
+
+    #[test]
+    fn callable_signatures_keep_register_types() {
+        // `<object>` is boxed and a class is not, so no signature names one
+        // for the other, though the subtyping alone would allow it.
+        let boxed = lower_shapes(
+            "define function f(g :: callable(<integer>) => <object>)\n  1\nend;\n\
+             define function main()\n  f(circle-of)\nend;",
+        );
+        assert!(has_diagnostic(
+            &boxed,
+            DiagnosticCode::FunctionArgumentTypeMismatch,
+            &[
+                ("expected", "callable(<integer>) => <object>"),
+                ("actual", "callable(<integer>) => <circle>"),
+            ]
+        ));
     }
 }

@@ -1,0 +1,22 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.callable-result-variance
+// expect: diagnostic contains callable(<integer>) => <shape> cannot be called as callable(<integer>) => <circle>: its result 1 may be any <shape>, but callers rely on <circle>
+
+// A callable result is covariant: callers of `f` rely on a `<circle>`, so a
+// function that may return any `<shape>` cannot stand in for it.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define function some-shape(x :: <integer>) => <shape>
+  make(<circle>, radius: x)
+end;
+
+define function main()
+  let f :: callable(<integer>) => <circle> = some-shape;
+  f(3).radius
+end;

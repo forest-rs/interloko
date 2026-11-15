@@ -5161,6 +5161,24 @@ impl<'module> BodyLowering<'module> {
         ) {
             return Ok(value);
         }
+        // Sem accepts a callable for another signature when its parameters
+        // are at least as wide and its results at most as wide, and every
+        // pair shares a register type, so the value only changes its static
+        // signature. Calls through it check the class results they rely on.
+        if let (ValueKind::Function(Some(actual)), ValueKind::Function(Some(wanted)))
+        | (ValueKind::Closure(Some(actual)), ValueKind::Closure(Some(wanted))) =
+            (value.kind, expected)
+            && let (Some(actual), Some(wanted)) = (
+                self.ids.call_sigs.get(actual.0 as usize),
+                self.ids.call_sigs.get(wanted.0 as usize),
+            )
+            && callable_registers_agree(actual, wanted)
+        {
+            return Ok(Value {
+                kind: expected,
+                ..value
+            });
+        }
         if let (ValueKind::Object(Some(actual)), ValueKind::Object(Some(expected_class))) =
             (value.kind, expected)
             && self.module.is_same_or_subclass(actual, expected_class)
@@ -6495,6 +6513,41 @@ fn sorted_methods<'module>(
         }
     });
     methods
+}
+
+/// Returns whether callables of signatures `lhs` and `rhs` take and return
+/// their values in the same register types, which is all the tape checks of
+/// a callable's signature.
+fn callable_registers_agree(lhs: &CallableSignature, rhs: &CallableSignature) -> bool {
+    lhs.params.len() == rhs.params.len()
+        && lhs.rets.len() == rhs.rets.len()
+        && lhs
+            .params
+            .iter()
+            .zip(&rhs.params)
+            .chain(lhs.rets.iter().zip(&rhs.rets))
+            .all(|(lhs, rhs)| shares_register_type(*lhs, *rhs))
+}
+
+/// Returns whether values of lowered kinds `lhs` and `rhs` are held in the
+/// same tape register type: every object and metaobject kind shares one, as
+/// do functions and closures of any signature.
+fn shares_register_type(lhs: ValueKind, rhs: ValueKind) -> bool {
+    let object = |kind| {
+        matches!(
+            kind,
+            ValueKind::Object(_)
+                | ValueKind::ClassObject(_)
+                | ValueKind::GenericFunctionObject(_)
+                | ValueKind::MethodObject(_)
+                | ValueKind::SlotDescriptorObject
+        )
+    };
+    match (lhs, rhs) {
+        (ValueKind::Function(_), ValueKind::Function(_))
+        | (ValueKind::Closure(_), ValueKind::Closure(_)) => true,
+        _ => lhs == rhs || (object(lhs) && object(rhs)),
+    }
 }
 
 /// Returns the class a callable's indirect entry must check a `kind`

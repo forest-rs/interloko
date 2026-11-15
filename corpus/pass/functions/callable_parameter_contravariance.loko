@@ -1,0 +1,25 @@
+// expect: run 10
+// expect: diagnostics 0
+
+// A function that accepts any `<shape>` can be called wherever a
+// `callable(<circle>) => ...` is expected: callers pass only circles, and a
+// parameter may be wider than the one they were checked against.
+
+define class <shape> (<object>)
+  slot size :: <integer>;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function size-of(s :: <shape>) => <integer>
+  s.size
+end;
+
+define function circle-size(f :: callable(<circle>) => <integer>) => <integer>
+  f(make(<circle>, size: 10))
+end;
+
+define function main()
+  circle-size(size-of)
+end;
