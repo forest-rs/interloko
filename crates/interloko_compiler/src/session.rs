@@ -3957,10 +3957,12 @@ pub struct DispatchSiteRecord {
     pub static_argument_kind: Option<sem::ValueKind>,
     /// Static kind of each dispatch argument.
     pub static_argument_kinds: Vec<sem::ValueKind>,
-    /// Exact static runtime class, when the call argument is an exact
-    /// construction/cast expression.
+    /// Exact runtime class of the first dispatch argument, when its flow
+    /// type has one.
     pub exact_static_class: Option<sem::ClassId>,
-    /// Exact static runtime classes for dispatch arguments known at compile time.
+    /// Exact runtime class of each dispatch argument, when its flow type
+    /// has one: the operand types of the typing decision at the same owner
+    /// and site, so the record and the decision never disagree.
     pub exact_static_classes: Vec<Option<sem::ClassId>>,
     /// Whether the runtime class is still needed to choose the method.
     pub runtime_needed: bool,
@@ -4736,10 +4738,24 @@ fn make_dispatch_site(
         .iter()
         .map(|arg| module.expr_kind(arg))
         .collect::<Vec<_>>();
-    let exact_static_classes = args
-        .iter()
-        .map(|arg| exact_static_class(module, arg))
-        .collect::<Vec<_>>();
+    // The typing decision at the same owner and site is the one source of
+    // argument types: an argument has an exact class only when its flow type
+    // has one. Without a decision (typing blocked by semantic errors), no
+    // class is known statically.
+    let exact_static_classes = artifacts
+        .typing
+        .decision(owner.definition, site)
+        .filter(|decision| decision.check == typing::TypingCheck::Dispatch)
+        .map_or_else(
+            || alloc::vec![None; args.len()],
+            |decision| {
+                decision
+                    .actual
+                    .iter()
+                    .map(|ty| ty.exact_class(module))
+                    .collect()
+            },
+        );
     let static_argument_kind = static_argument_kinds.first().copied();
     let exact_static_class = exact_static_classes.first().copied().flatten();
     let runtime_needed = exact_static_classes.iter().any(Option::is_none)
@@ -5240,47 +5256,6 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
         );
     }
     out
-}
-
-fn exact_static_class(module: &sem::Module, expr: &sem::Expr) -> Option<sem::ClassId> {
-    match expr {
-        sem::Expr::ConstI64 { .. } => module.builtin_value_class(sem::BuiltinValueClass::Integer),
-        sem::Expr::ConstF64 { .. } => {
-            module.builtin_value_class(sem::BuiltinValueClass::DoubleFloat)
-        }
-        sem::Expr::Const32 { value, .. } => module.builtin_value_class(match value {
-            sem::Number32::I32(_) | sem::Number32::U32(_) => sem::BuiltinValueClass::Integer,
-            sem::Number32::F32(_) => sem::BuiltinValueClass::SingleFloat,
-        }),
-        sem::Expr::MakeObject { class_id, .. } => Some(*class_id),
-        sem::Expr::StringLiteral { class, .. }
-        | sem::Expr::SymbolLiteral { class, .. }
-        | sem::Expr::VectorLiteral { class, .. } => Some(*class),
-        sem::Expr::ConstantRef { constant, .. } => module
-            .constants
-            .get(constant.0 as usize)
-            .and_then(|constant| exact_static_class(module, &constant.value)),
-        // A call's result is only bounded by its kind's class, which names
-        // its exact class only when that class is closed (`<integer>`, say).
-        sem::Expr::CallableCall { result_kinds, .. } => match result_kinds.as_slice() {
-            [kind] => module
-                .value_kind_class(*kind)
-                .filter(|class| interloko_model::types::ClassHierarchy::is_closed(module, *class)),
-            _ => None,
-        },
-        sem::Expr::Cast { value, .. } => exact_static_class(module, value),
-        sem::Expr::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_class = exact_static_class(module, then_branch)?;
-            let else_class = exact_static_class(module, else_branch)?;
-            (then_class == else_class).then_some(then_class)
-        }
-        sem::Expr::Block { body, .. } => exact_static_class(module, &body.result),
-        _ => None,
-    }
 }
 
 fn class_label(module: &sem::Module, class_id: sem::ClassId) -> String {
@@ -14722,6 +14697,84 @@ mod tests {
             cache_action(&shifted, QueryArtifact::DefinitionTyping(main)),
             Some(CacheAction::Reused)
         );
+    }
+
+    /// Asserts that every dispatch record reads its argument classes from
+    /// the typing decision at the same owner and site.
+    fn assert_dispatch_records_agree_with_typing(artifacts: &SessionArtifacts) {
+        for record in artifacts.dispatch_sites() {
+            let decision = artifacts
+                .typing
+                .decision(record.owner.definition, record.site)
+                .expect("every dispatch record has a typing decision");
+            assert_eq!(decision.check, typing::TypingCheck::Dispatch);
+            assert_eq!(decision.span, record.span);
+            let exact = decision
+                .actual
+                .iter()
+                .map(|ty| ty.exact_class(&artifacts.sem))
+                .collect::<Vec<_>>();
+            assert_eq!(record.exact_static_classes, exact, "{}", record.id);
+            if exact.iter().all(Option::is_some) {
+                assert_eq!(
+                    record.selected_method, decision.selected_method,
+                    "{}",
+                    record.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_records_take_argument_classes_from_typing_decisions() {
+        let artifacts = CompilerSession::compile_source(
+            "dispatch.loko",
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define generic area(x);\n\
+             define method area(s :: <shape>)\n  1\nend;\n\
+             define method area(c :: <circle>)\n  7\nend;\n\
+             define function main() => <integer>\n  \
+             let maker :: callable() => <shape> = function () => <shape> make(<circle>) end;\n  \
+             let s :: <shape> = make(<circle>);\n  \
+             area(maker()) + area(s)\nend;",
+            RuntimeMode::RunMain,
+        );
+        assert!(
+            artifacts.diagnostics.is_empty(),
+            "{:?}",
+            artifacts.diagnostics
+        );
+        assert!(matches!(
+            artifacts.runtime_result,
+            Some(RuntimeResult::Returned(FunctionValue::Integer(14)))
+        ));
+        let records = artifacts.dispatch_sites();
+        let [called, local] = records.as_slice() else {
+            panic!("two dispatch records: {records:?}");
+        };
+        // A callable declared to return <shape> may return any subclass, so
+        // its result has no exact class and dispatch stays at run time.
+        assert_eq!(called.exact_static_classes, [None]);
+        assert!(called.runtime_needed);
+        assert_eq!(called.selected_method, None);
+        // A local bound to a `make` has that exact class, as flow typing
+        // knows, even though its declared type is wider.
+        let circle = artifacts
+            .sem
+            .classes
+            .iter()
+            .find(|class| class.name == "<circle>")
+            .expect("<circle>")
+            .id;
+        assert_eq!(local.exact_static_classes, [Some(circle)]);
+        assert_eq!(local.selected_method, Some(artifacts.sem.methods[1].id));
+        assert_dispatch_records_agree_with_typing(&artifacts);
+        assert_dispatch_records_agree_with_typing(&CompilerSession::compile_source(
+            "typing.loko",
+            SHAPES_WITH_UNTAKEN_REFUTED_CALL,
+            RuntimeMode::CompileOnly,
+        ));
     }
 
     #[test]
