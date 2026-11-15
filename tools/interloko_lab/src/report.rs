@@ -2832,6 +2832,11 @@ fn artifact_stage_relation(artifact: QueryArtifact) -> &'static str {
         QueryArtifact::TypingConfig => "artifact-stage:typing-config",
         QueryArtifact::DefinitionTyping(_) => "artifact-stage:definition-typing",
         QueryArtifact::Typing => "artifact-stage:typing",
+        QueryArtifact::DefinitionSem(_) => "artifact-stage:definition-sem",
+        QueryArtifact::Contract(_) => "artifact-stage:contract",
+        QueryArtifact::MethodTable(_) => "artifact-stage:method-table",
+        QueryArtifact::ClassCone(_) => "artifact-stage:class-cone",
+        QueryArtifact::CodegenPolicy => "artifact-stage:codegen-policy",
     }
 }
 

@@ -747,6 +747,50 @@ impl DefinitionTyping {
         write_reason_chain(&mut out, module, &self.reasons, id, 0);
         out
     }
+
+    /// Returns what these decisions were derived from outside the
+    /// definition's own body, read from the reason arena.
+    ///
+    /// The flow analysis records a [`ReasonKind::Contract`] for every callee,
+    /// accessor, and constant whose contract it consults, and a
+    /// [`ReasonKind::ClosedWorld`] for every assumption a verdict relies on,
+    /// so the arena names every such input. The incremental graph turns them
+    /// into dependency edges.
+    #[must_use]
+    pub fn inputs(&self) -> TypingInputs {
+        let mut inputs = TypingInputs::default();
+        for reason in &self.reasons {
+            match reason.kind {
+                ReasonKind::Contract { definition, .. } => inputs.contracts.push(definition),
+                ReasonKind::ClosedWorld(Assumption::Generic(generic)) => {
+                    inputs.generics.push(generic);
+                }
+                ReasonKind::ClosedWorld(Assumption::Class(class)) => inputs.classes.push(class),
+                _ => {}
+            }
+        }
+        inputs.contracts.sort_unstable();
+        inputs.contracts.dedup();
+        inputs.generics.sort_unstable_by_key(|generic| generic.0);
+        inputs.generics.dedup();
+        inputs.classes.sort_unstable_by_key(|class| class.0);
+        inputs.classes.dedup();
+        inputs
+    }
+}
+
+/// The inputs one definition's typing decisions read beyond its own body:
+/// see [`DefinitionTyping::inputs`]. Each list is sorted and free of
+/// duplicates.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TypingInputs {
+    /// Definitions whose contracts a reason cites: callees, accessors,
+    /// setters, and constants.
+    pub contracts: Vec<DefinitionId>,
+    /// Generics whose method set a verdict assumes is closed.
+    pub generics: Vec<GenericFunctionId>,
+    /// Closed classes a verdict assumes gain no subclasses.
+    pub classes: Vec<ClassId>,
 }
 
 /// Whether the pass examined the module.

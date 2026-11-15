@@ -491,18 +491,25 @@ cached query results are reused.
 `MutationOutcome::affected_artifacts` reports the dependency-graph truth,
 not what was reused from cache. The list contains:
 
-- top-level pipeline artifacts that genuinely change: `Source`,
-  `GrammarParse`, `Parse`, `Ast`, `Bind`, `Diagnostics`,
-  `LoweredModule`, `TapeProgram`, `RuntimeResult`;
-- the inserted method's per-method artifacts:
-  `MethodLookup(new)`, `MethodLowering(new)`, `MethodTape(new)`;
-- the affected generic's `GenericDispatcher`.
+- the front of the pipeline, which re-runs because the source was
+  appended to: `Source`, `GrammarParse`, `Parse`, `Ast`, `Bind`;
+- everything the artifact graph reaches from the inserted method's
+  `DefinitionSem(new)`: its `MethodLookup`, `MethodLowering`, `MethodTape`,
+  `Contract`, and `DefinitionTyping`; the affected generic's
+  `GenericDispatcher` and `MethodTable`; the `DefinitionTyping` of every
+  definition that sends to the generic, since their dispatch verdicts
+  assume its method table; and `Typing`, `Diagnostics`, `LoweredModule`,
+  `TapeProgram`, `RuntimeResult`.
 
-The list omits `EnvironmentResolution` and `GrammarStack` (the grammar
-environment is unchanged), and omits per-method artifacts for all other
-methods and per-generic artifacts for all other generics. For artifacts
-not in `affected_artifacts`, post-mutation outputs are byte-equal to
-pre-mutation outputs.
+The drain stops at contracts and method tables whose value the mutation
+leaves unchanged (early cutoff), so a generic contract the new method does
+not change re-derives without reaching its callers. The list omits
+`EnvironmentResolution` and `GrammarStack` (the grammar environment is
+unchanged), and omits per-method artifacts for all other methods,
+per-generic artifacts for all other generics, and the typing of
+definitions that do not send to the generic. For artifacts not in
+`affected_artifacts`, post-mutation outputs are byte-equal to pre-mutation
+outputs.
 
 CLI and EOP wording must not claim cache reuse. The word "reused" is
 reserved for a future `RecomputeStrategy::IncrementalReuse` variant that
@@ -521,7 +528,7 @@ cargo run -p interloko_lab -- invoke-affordance \
 Outcome line:
 
 ```text
-applied add-method mutation_id=0 inserted_method=m1 affected_artifacts=13 strategy=full-candidate-rebuild
+applied add-method mutation_id=0 inserted_method=m1 affected_artifacts=20 strategy=full-candidate-rebuild log_size=1
 ```
 
 Failure paths print structured rejection messages, for example:

@@ -2,13 +2,49 @@
 //!
 //! Interloko owns artifacts and scheduling. This module only maps compiler query
 //! artifacts into `invalidation` keys and exposes affected-order drains.
+//!
+//! # Early cutoff
+//!
+//! Some artifacts are firewalls: [`QueryArtifact::has_early_cutoff`]. When a
+//! drain reaches one, the caller says whether its value actually changed, and
+//! an unchanged firewall stops the drain there. A body edit that keeps a
+//! callee's [`QueryArtifact::Contract`] therefore stops at the contract and
+//! never reaches its callers' typing.
+//!
+//! # Typing edges
+//!
+//! A [`QueryArtifact::DefinitionTyping`] depends on its own
+//! [`QueryArtifact::DefinitionSem`], on the contracts its reasons cite, on
+//! the [`QueryArtifact::MethodTable`] of every generic its verdicts assume
+//! closed, and on the [`QueryArtifact::ClassCone`] of every closed class they
+//! assume. These edges come from the typing artifact the graph is built with
+//! ([`crate::typing::DefinitionTyping::inputs`]); when typing did not run,
+//! the graph has none of them.
+//!
+//! Lowering trusts the same contracts at each call, so a method's
+//! [`QueryArtifact::MethodLowering`] (and, for functions and constants, the
+//! [`QueryArtifact::LoweredModule`]) depends on the contracts its body cites.
+//! Lowering does not read typing decisions or the
+//! [`QueryArtifact::CodegenPolicy`] yet, so neither has a lowering edge: the
+//! policy is an input with no dependents until lowering consults it.
+//!
+//! [`QueryArtifact::has_early_cutoff`]: crate::incremental::QueryArtifact::has_early_cutoff
+//! [`QueryArtifact::Contract`]: crate::incremental::QueryArtifact::Contract
+//! [`QueryArtifact::DefinitionTyping`]: crate::incremental::QueryArtifact::DefinitionTyping
+//! [`QueryArtifact::DefinitionSem`]: crate::incremental::QueryArtifact::DefinitionSem
+//! [`QueryArtifact::MethodTable`]: crate::incremental::QueryArtifact::MethodTable
+//! [`QueryArtifact::ClassCone`]: crate::incremental::QueryArtifact::ClassCone
+//! [`QueryArtifact::MethodLowering`]: crate::incremental::QueryArtifact::MethodLowering
+//! [`QueryArtifact::LoweredModule`]: crate::incremental::QueryArtifact::LoweredModule
+//! [`QueryArtifact::CodegenPolicy`]: crate::incremental::QueryArtifact::CodegenPolicy
 
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec, vec::Vec};
 
-use invalidation::{Channel, InvalidationTracker, LazyPolicy};
+use invalidation::{AddDependency, Channel, InvalidationTracker, LazyPolicy};
 
 use crate::identity::{ArtifactKey, ArtifactKind, DefinitionId, SourceFileId};
 use crate::sem::{MethodId, Module};
+use crate::typing::TypingArtifact;
 
 const COMPILER: Channel = Channel::new(0);
 
@@ -53,6 +89,25 @@ pub enum QueryArtifact {
     /// Session-owned soft typing configuration input. Changing it re-derives
     /// typing diagnostics without re-checking any definition.
     TypingConfig,
+    /// Semantic output of one function, method, generic, or constant: its
+    /// signature and body as binding resolved them.
+    DefinitionSem(DefinitionId),
+    /// Type contract of one definition: what code compiled against it
+    /// trusts. For a function, method, or generic this is
+    /// [`crate::sem::Module::contract`]; for a constant, the type its value
+    /// is inferred to have; for a slot, its accessor's result. Has early
+    /// cutoff: a body edit that keeps the contract stops here.
+    Contract(DefinitionId),
+    /// Method table of one generic: its methods and their specializers,
+    /// which a dispatch verdict assumes closed. Has early cutoff.
+    MethodTable(DefinitionId),
+    /// Cone of one class: whether it is closed and which classes it holds,
+    /// which a verdict about a closed class assumes. Has early cutoff.
+    ClassCone(DefinitionId),
+    /// Session-owned codegen policy input
+    /// ([`crate::lower::CodegenPolicy`]). Lowering does not consult it yet,
+    /// so nothing depends on it.
+    CodegenPolicy,
 }
 
 /// A query artifact and its stable external key.
@@ -74,70 +129,94 @@ pub struct ArtifactEdge {
 }
 
 impl QueryArtifact {
+    /// Returns the stable artifact kind.
+    #[must_use]
+    pub const fn kind(self) -> ArtifactKind {
+        match self {
+            Self::Source => ArtifactKind::Source,
+            Self::EnvironmentResolution => ArtifactKind::EnvironmentResolution,
+            Self::GrammarStack => ArtifactKind::GrammarStack,
+            Self::GrammarParse => ArtifactKind::GrammarParse,
+            Self::Parse => ArtifactKind::Parse,
+            Self::Ast => ArtifactKind::Ast,
+            Self::Bind => ArtifactKind::Bind,
+            Self::Diagnostics => ArtifactKind::Diagnostics,
+            Self::MethodLookup(_) => ArtifactKind::MethodLookup,
+            Self::MethodLowering(_) => ArtifactKind::MethodLowering,
+            Self::MethodTape(_) => ArtifactKind::MethodTape,
+            Self::GenericDispatcher(_) => ArtifactKind::GenericDispatcher,
+            Self::LoweredModule => ArtifactKind::LoweredModule,
+            Self::TapeProgram => ArtifactKind::TapeProgram,
+            Self::RuntimeResult => ArtifactKind::RuntimeResult,
+            Self::DefinitionTyping(_) => ArtifactKind::DefinitionTyping,
+            Self::Typing => ArtifactKind::Typing,
+            Self::TypingConfig => ArtifactKind::TypingConfig,
+            Self::DefinitionSem(_) => ArtifactKind::DefinitionSem,
+            Self::Contract(_) => ArtifactKind::Contract,
+            Self::MethodTable(_) => ArtifactKind::MethodTable,
+            Self::ClassCone(_) => ArtifactKind::ClassCone,
+            Self::CodegenPolicy => ArtifactKind::CodegenPolicy,
+        }
+    }
+
+    /// Returns the definition this artifact belongs to, if it is
+    /// per-definition.
+    #[must_use]
+    pub const fn definition(self) -> Option<DefinitionId> {
+        match self {
+            Self::MethodLookup(id)
+            | Self::MethodLowering(id)
+            | Self::MethodTape(id)
+            | Self::GenericDispatcher(id)
+            | Self::DefinitionTyping(id)
+            | Self::DefinitionSem(id)
+            | Self::Contract(id)
+            | Self::MethodTable(id)
+            | Self::ClassCone(id) => Some(id),
+            Self::Source
+            | Self::EnvironmentResolution
+            | Self::GrammarStack
+            | Self::GrammarParse
+            | Self::Parse
+            | Self::Ast
+            | Self::Bind
+            | Self::Diagnostics
+            | Self::LoweredModule
+            | Self::TapeProgram
+            | Self::RuntimeResult
+            | Self::Typing
+            | Self::TypingConfig
+            | Self::CodegenPolicy => None,
+        }
+    }
+
+    /// Whether a drain stops at this artifact when its value is unchanged.
+    ///
+    /// These are the firewalls between one definition and the definitions
+    /// that rely on it: a contract, a generic's method table, and a class's
+    /// cone. See [`QueryInvalidation::changed_with_cutoff`].
+    #[must_use]
+    pub const fn has_early_cutoff(self) -> bool {
+        matches!(
+            self,
+            Self::Contract(_) | Self::MethodTable(_) | Self::ClassCone(_)
+        )
+    }
+
     /// Returns the stable label used by dumps and presentation tools.
     #[must_use]
     pub fn label(self) -> String {
-        match self {
-            Self::Source => ArtifactKind::Source.as_str().into(),
-            Self::EnvironmentResolution => ArtifactKind::EnvironmentResolution.as_str().into(),
-            Self::GrammarStack => ArtifactKind::GrammarStack.as_str().into(),
-            Self::GrammarParse => ArtifactKind::GrammarParse.as_str().into(),
-            Self::Parse => ArtifactKind::Parse.as_str().into(),
-            Self::Ast => ArtifactKind::Ast.as_str().into(),
-            Self::Bind => ArtifactKind::Bind.as_str().into(),
-            Self::Diagnostics => ArtifactKind::Diagnostics.as_str().into(),
-            Self::MethodLookup(id) => format!("{} {id}", ArtifactKind::MethodLookup.as_str()),
-            Self::MethodLowering(id) => format!("{} {id}", ArtifactKind::MethodLowering.as_str()),
-            Self::MethodTape(id) => format!("{} {id}", ArtifactKind::MethodTape.as_str()),
-            Self::GenericDispatcher(id) => {
-                format!("{} {id}", ArtifactKind::GenericDispatcher.as_str())
-            }
-            Self::LoweredModule => ArtifactKind::LoweredModule.as_str().into(),
-            Self::TapeProgram => ArtifactKind::TapeProgram.as_str().into(),
-            Self::RuntimeResult => ArtifactKind::RuntimeResult.as_str().into(),
-            Self::DefinitionTyping(id) => {
-                format!("{} {id}", ArtifactKind::DefinitionTyping.as_str())
-            }
-            Self::Typing => ArtifactKind::Typing.as_str().into(),
-            Self::TypingConfig => ArtifactKind::TypingConfig.as_str().into(),
+        let kind = self.kind().as_str();
+        match self.definition() {
+            Some(id) => format!("{kind} {id}"),
+            None => kind.into(),
         }
     }
 
     /// Returns the stable artifact key for this query artifact in `source_file`.
     #[must_use]
     pub fn key(self, source_file: SourceFileId) -> ArtifactKey {
-        match self {
-            Self::Source => ArtifactKey::new(source_file, ArtifactKind::Source, None),
-            Self::EnvironmentResolution => {
-                ArtifactKey::new(source_file, ArtifactKind::EnvironmentResolution, None)
-            }
-            Self::GrammarStack => ArtifactKey::new(source_file, ArtifactKind::GrammarStack, None),
-            Self::GrammarParse => ArtifactKey::new(source_file, ArtifactKind::GrammarParse, None),
-            Self::Parse => ArtifactKey::new(source_file, ArtifactKind::Parse, None),
-            Self::Ast => ArtifactKey::new(source_file, ArtifactKind::Ast, None),
-            Self::Bind => ArtifactKey::new(source_file, ArtifactKind::Bind, None),
-            Self::Diagnostics => ArtifactKey::new(source_file, ArtifactKind::Diagnostics, None),
-            Self::MethodLookup(id) => {
-                ArtifactKey::new(source_file, ArtifactKind::MethodLookup, Some(id))
-            }
-            Self::MethodLowering(id) => {
-                ArtifactKey::new(source_file, ArtifactKind::MethodLowering, Some(id))
-            }
-            Self::MethodTape(id) => {
-                ArtifactKey::new(source_file, ArtifactKind::MethodTape, Some(id))
-            }
-            Self::GenericDispatcher(id) => {
-                ArtifactKey::new(source_file, ArtifactKind::GenericDispatcher, Some(id))
-            }
-            Self::LoweredModule => ArtifactKey::new(source_file, ArtifactKind::LoweredModule, None),
-            Self::TapeProgram => ArtifactKey::new(source_file, ArtifactKind::TapeProgram, None),
-            Self::RuntimeResult => ArtifactKey::new(source_file, ArtifactKind::RuntimeResult, None),
-            Self::DefinitionTyping(id) => {
-                ArtifactKey::new(source_file, ArtifactKind::DefinitionTyping, Some(id))
-            }
-            Self::Typing => ArtifactKey::new(source_file, ArtifactKind::Typing, None),
-            Self::TypingConfig => ArtifactKey::new(source_file, ArtifactKind::TypingConfig, None),
-        }
+        ArtifactKey::new(source_file, self.kind(), self.definition())
     }
 }
 
@@ -153,18 +232,26 @@ pub struct QueryInvalidation {
     /// [`SessionArtifacts`]: crate::session::SessionArtifacts
     tracker: Box<InvalidationTracker<usize>>,
     artifacts: Vec<(ArtifactKey, QueryArtifact)>,
+    /// Tracker key of each artifact, by stable key.
+    indices: BTreeMap<ArtifactKey, usize>,
     edges: Vec<ArtifactEdge>,
     methods: Vec<DefinitionId>,
 }
 
 impl QueryInvalidation {
-    /// Builds a query invalidation graph for a semantic module.
+    /// Builds the query invalidation graph for a semantic module and the
+    /// typing artifact checked against it.
+    ///
+    /// The typing artifact supplies the edges into each definition's typing
+    /// and lowering from the contracts, method tables, and class cones it
+    /// relies on. A blocked typing artifact supplies none.
     #[must_use]
-    pub fn for_module(module: &Module) -> Self {
+    pub fn for_module(module: &Module, typing: &TypingArtifact) -> Self {
         let mut this = Self {
             source_file: module.source_file,
             tracker: Box::new(InvalidationTracker::new()),
             artifacts: Vec::new(),
+            indices: BTreeMap::new(),
             edges: Vec::new(),
             methods: module
                 .methods
@@ -189,13 +276,39 @@ impl QueryInvalidation {
         this.add(QueryArtifact::TapeProgram, QueryArtifact::Bind);
         this.add(QueryArtifact::TapeProgram, QueryArtifact::LoweredModule);
         this.add(QueryArtifact::RuntimeResult, QueryArtifact::TapeProgram);
+        // An input with no dependents until lowering consults it.
+        this.track(QueryArtifact::CodegenPolicy);
+
+        for generic in &module.generics {
+            let generic = generic.definition;
+            this.add(QueryArtifact::DefinitionSem(generic), QueryArtifact::Bind);
+            this.add(
+                QueryArtifact::GenericDispatcher(generic),
+                QueryArtifact::DefinitionSem(generic),
+            );
+            this.add(
+                QueryArtifact::Contract(generic),
+                QueryArtifact::DefinitionSem(generic),
+            );
+            this.add(QueryArtifact::MethodTable(generic), QueryArtifact::Bind);
+        }
 
         for method in &module.methods {
+            let generic = module.generics.get(method.generic.0 as usize);
             let method = method.definition;
+            this.add(QueryArtifact::DefinitionSem(method), QueryArtifact::Bind);
             this.add(QueryArtifact::MethodLookup(method), QueryArtifact::Bind);
+            this.add(
+                QueryArtifact::MethodLookup(method),
+                QueryArtifact::DefinitionSem(method),
+            );
             this.add(
                 QueryArtifact::MethodLowering(method),
                 QueryArtifact::MethodLookup(method),
+            );
+            this.add(
+                QueryArtifact::MethodLowering(method),
+                QueryArtifact::DefinitionSem(method),
             );
             this.add(
                 QueryArtifact::MethodTape(method),
@@ -209,28 +322,54 @@ impl QueryInvalidation {
                 QueryArtifact::TapeProgram,
                 QueryArtifact::MethodTape(method),
             );
+            this.add(
+                QueryArtifact::Contract(method),
+                QueryArtifact::DefinitionSem(method),
+            );
+            let Some(generic) = generic else {
+                continue;
+            };
+            this.add(
+                QueryArtifact::GenericDispatcher(generic.definition),
+                QueryArtifact::MethodLookup(method),
+            );
+            this.add(
+                QueryArtifact::MethodTable(generic.definition),
+                QueryArtifact::MethodLookup(method),
+            );
+            // A method's results are its generic's.
+            this.add(
+                QueryArtifact::Contract(method),
+                QueryArtifact::Contract(generic.definition),
+            );
+            // An open result is inferred from every method's body.
+            if generic.return_annotation.is_none() {
+                this.add(
+                    QueryArtifact::Contract(generic.definition),
+                    QueryArtifact::DefinitionSem(method),
+                );
+            }
         }
 
-        let typed_definitions = module
-            .functions
-            .iter()
-            .map(|function| function.definition)
-            .chain(module.methods.iter().map(|method| method.definition))
-            .chain(module.constants.iter().map(|constant| constant.definition));
-        for definition in typed_definitions {
+        for function in &module.functions {
+            let function = function.definition;
+            this.add(QueryArtifact::DefinitionSem(function), QueryArtifact::Bind);
             this.add(
-                QueryArtifact::DefinitionTyping(definition),
-                QueryArtifact::Bind,
+                QueryArtifact::LoweredModule,
+                QueryArtifact::DefinitionSem(function),
             );
             this.add(
-                QueryArtifact::Typing,
-                QueryArtifact::DefinitionTyping(definition),
+                QueryArtifact::Contract(function),
+                QueryArtifact::DefinitionSem(function),
             );
         }
-        for method in &module.methods {
+
+        for constant in &module.constants {
+            let constant = constant.definition;
+            this.add(QueryArtifact::DefinitionSem(constant), QueryArtifact::Bind);
             this.add(
-                QueryArtifact::DefinitionTyping(method.definition),
-                QueryArtifact::MethodLookup(method.definition),
+                QueryArtifact::LoweredModule,
+                QueryArtifact::DefinitionSem(constant),
             );
         }
 
@@ -245,17 +384,135 @@ impl QueryInvalidation {
             );
         }
 
-        for method in &module.methods {
-            let Some(generic) = module.generics.get(method.generic.0 as usize) else {
-                continue;
-            };
-            this.add(
-                QueryArtifact::GenericDispatcher(generic.definition),
-                QueryArtifact::MethodLookup(method.definition),
+        this.add_typing_edges(module, typing);
+        this
+    }
+
+    /// Adds the edges the typing artifact names: into each definition's
+    /// typing, into the lowering that trusts the same contracts, and into
+    /// each constant's inferred contract.
+    fn add_typing_edges(&mut self, module: &Module, typing: &TypingArtifact) {
+        let is_constant = |definition: DefinitionId| {
+            module
+                .constants
+                .iter()
+                .any(|constant| constant.definition == definition)
+        };
+        let is_method = |definition: DefinitionId| {
+            module
+                .methods
+                .iter()
+                .any(|method| method.definition == definition)
+        };
+        for typed in &typing.definitions {
+            let definition = typed.definition;
+            let inputs = typed.inputs();
+            self.add(
+                QueryArtifact::DefinitionTyping(definition),
+                QueryArtifact::DefinitionSem(definition),
             );
+            self.add(
+                QueryArtifact::Typing,
+                QueryArtifact::DefinitionTyping(definition),
+            );
+            let lowering = if is_method(definition) {
+                QueryArtifact::MethodLowering(definition)
+            } else {
+                QueryArtifact::LoweredModule
+            };
+            for cited in inputs.contracts {
+                self.add_contract_node(module, cited);
+                self.add(
+                    QueryArtifact::DefinitionTyping(definition),
+                    QueryArtifact::Contract(cited),
+                );
+                // Lowering trusts a constant's binding category, not the
+                // type typing infers for its value.
+                let trusted = if is_constant(cited) {
+                    QueryArtifact::DefinitionSem(cited)
+                } else {
+                    QueryArtifact::Contract(cited)
+                };
+                self.add(lowering, trusted);
+            }
+            for generic in inputs.generics {
+                if let Some(generic) = module.generics.get(generic.0 as usize) {
+                    self.add(
+                        QueryArtifact::DefinitionTyping(definition),
+                        QueryArtifact::MethodTable(generic.definition),
+                    );
+                }
+            }
+            for class in inputs.classes {
+                if let Some(class) = module.classes.get(class.0 as usize) {
+                    self.add(
+                        QueryArtifact::ClassCone(class.definition),
+                        QueryArtifact::Bind,
+                    );
+                    self.add(
+                        QueryArtifact::DefinitionTyping(definition),
+                        QueryArtifact::ClassCone(class.definition),
+                    );
+                }
+            }
         }
 
-        this
+        // A constant's contract is the type typing infers for its value,
+        // which follows every constant it reads and every other contract
+        // those values cite. Constants may read each other in a cycle, so
+        // the closure is over their sem output rather than their contracts.
+        for constant in &module.constants {
+            let mut closure = vec![constant.definition];
+            let mut index = 0;
+            while let Some(current) = closure.get(index).copied() {
+                index += 1;
+                self.add(
+                    QueryArtifact::Contract(constant.definition),
+                    QueryArtifact::DefinitionSem(current),
+                );
+                let Some(typed) = typing.definition(current) else {
+                    continue;
+                };
+                for cited in typed.inputs().contracts {
+                    if is_constant(cited) {
+                        if !closure.contains(&cited) {
+                            closure.push(cited);
+                        }
+                    } else {
+                        self.add_contract_node(module, cited);
+                        self.add(
+                            QueryArtifact::Contract(constant.definition),
+                            QueryArtifact::Contract(cited),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ensures a cited contract has its own dependencies. Function, method,
+    /// generic, and constant contracts already do; anything else is a slot
+    /// accessor's, which binding derives from its class.
+    fn add_contract_node(&mut self, module: &Module, definition: DefinitionId) {
+        let known = module
+            .functions
+            .iter()
+            .any(|function| function.definition == definition)
+            || module
+                .methods
+                .iter()
+                .any(|method| method.definition == definition)
+            || module
+                .generics
+                .iter()
+                .any(|generic| generic.definition == definition)
+            || module
+                .constants
+                .iter()
+                .any(|constant| constant.definition == definition);
+        if !known {
+            self.add(QueryArtifact::Contract(definition), QueryArtifact::Bind);
+        }
     }
 
     /// Returns this graph's source file identity.
@@ -288,6 +545,12 @@ impl QueryInvalidation {
         &self.edges
     }
 
+    /// Returns whether `artifact` is a node of this graph.
+    #[must_use]
+    pub fn contains(&self, artifact: QueryArtifact) -> bool {
+        self.index_of(artifact).is_some()
+    }
+
     /// Marks source text changed and drains affected artifacts in dependency order.
     pub fn source_changed(&mut self) -> Vec<QueryArtifact> {
         self.mark_and_drain(QueryArtifact::Source)
@@ -305,8 +568,12 @@ impl QueryInvalidation {
     }
 
     /// Marks one method definition changed and drains affected artifacts.
+    ///
+    /// Without knowing what changed, every firewall is assumed changed: the
+    /// drain reaches every sender of the method's generic. Use
+    /// [`Self::changed_with_cutoff`] when the old and new values are known.
     pub fn method_definition_changed(&mut self, method: DefinitionId) -> Vec<QueryArtifact> {
-        self.mark_and_drain(QueryArtifact::MethodLookup(method))
+        self.mark_and_drain(QueryArtifact::DefinitionSem(method))
     }
 
     /// Marks the typing configuration changed and drains affected artifacts.
@@ -318,25 +585,76 @@ impl QueryInvalidation {
         self.mark_and_drain(QueryArtifact::TypingConfig)
     }
 
+    /// Marks the codegen policy changed and drains affected artifacts.
+    ///
+    /// Lowering does not consult the policy yet, so only the policy itself
+    /// is affected.
+    pub fn codegen_policy_changed(&mut self) -> Vec<QueryArtifact> {
+        self.mark_and_drain(QueryArtifact::CodegenPolicy)
+    }
+
+    /// Marks `roots` changed and drains the artifacts they affect, in
+    /// dependency order, with early cutoff.
+    ///
+    /// An artifact is affected when it is a root, or when one of its
+    /// dependencies is affected and passes the change on. Every dependency
+    /// passes a change on except an early-cutoff artifact
+    /// ([`QueryArtifact::has_early_cutoff`]) for which `unchanged` returns
+    /// true: it is affected (it had to be re-derived) but its value is the
+    /// same, so its dependents are not. Roots that are not in the graph are
+    /// ignored.
+    pub fn changed_with_cutoff(
+        &mut self,
+        roots: &[QueryArtifact],
+        mut unchanged: impl FnMut(QueryArtifact) -> bool,
+    ) -> Vec<QueryArtifact> {
+        let roots: Vec<usize> = roots
+            .iter()
+            .filter_map(|root| self.index_of(*root))
+            .collect();
+        for root in &roots {
+            self.tracker.mark_with(*root, COMPILER, &LazyPolicy);
+        }
+        let order: Vec<usize> = self.tracker.drain_affected_sorted(COMPILER).collect();
+        let mut passes_on = vec![None::<bool>; self.artifacts.len()];
+        let mut affected = Vec::new();
+        for key in order {
+            let reached = roots.contains(&key)
+                || self
+                    .tracker
+                    .graph()
+                    .dependencies(key, COMPILER)
+                    .any(|dependency| passes_on.get(dependency).copied().flatten() == Some(true));
+            if !reached {
+                continue;
+            }
+            let artifact = self.artifact_for_key(key);
+            let cut_off = artifact.has_early_cutoff() && unchanged(artifact);
+            if let Some(slot) = passes_on.get_mut(key) {
+                *slot = Some(!cut_off);
+            }
+            affected.push(artifact);
+        }
+        affected
+    }
+
     fn mark_and_drain(&mut self, artifact: QueryArtifact) -> Vec<QueryArtifact> {
-        let key = self.track(artifact);
-        self.tracker.mark_with(key, COMPILER, &LazyPolicy);
-        let keys: Vec<_> = self.tracker.drain_affected_sorted(COMPILER).collect();
-        keys.into_iter()
-            .map(|key| self.artifact_for_key(key))
-            .collect()
+        self.changed_with_cutoff(&[artifact], |_| false)
     }
 
     fn add(&mut self, dependent: QueryArtifact, dependency: QueryArtifact) {
-        let dependent = self.track(dependent);
-        let dependency = self.track(dependency);
-        self.edges.push(ArtifactEdge {
-            dependent: self.artifact_for_key(dependent),
-            dependency: self.artifact_for_key(dependency),
-        });
-        self.tracker
-            .add_dependency(dependent, dependency, COMPILER)
+        let dependent_key = self.track(dependent);
+        let dependency_key = self.track(dependency);
+        let added = self
+            .tracker
+            .add_dependency(dependent_key, dependency_key, COMPILER)
             .expect("compiler query graph must remain acyclic");
+        if added == AddDependency::Added {
+            self.edges.push(ArtifactEdge {
+                dependent,
+                dependency,
+            });
+        }
     }
 
     fn artifact_for_key(&self, key: usize) -> QueryArtifact {
@@ -345,17 +663,18 @@ impl QueryInvalidation {
             .map_or(QueryArtifact::TapeProgram, |(_, artifact)| *artifact)
     }
 
+    fn index_of(&self, artifact: QueryArtifact) -> Option<usize> {
+        self.indices.get(&artifact.key(self.source_file)).copied()
+    }
+
     fn track(&mut self, artifact: QueryArtifact) -> usize {
         let key = artifact.key(self.source_file);
-        if let Some(index) = self
-            .artifacts
-            .iter()
-            .position(|(existing, _)| *existing == key)
-        {
-            return index;
+        if let Some(index) = self.indices.get(&key) {
+            return *index;
         }
         let index = self.artifacts.len();
         self.artifacts.push((key, artifact));
+        self.indices.insert(key, index);
         index
     }
 }
@@ -363,7 +682,12 @@ impl QueryInvalidation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast, grammar_frontend, identity::SourceFileId, sem};
+    use crate::{ast, grammar_frontend, identity::SourceFileId, sem, typing};
+
+    fn graph(module: &sem::Module) -> QueryInvalidation {
+        let typing = typing::analyze(module, typing::TypingConfig::default());
+        QueryInvalidation::for_module(module, &typing)
+    }
 
     fn lower_source(source: &str) -> sem::Module {
         lower_file(SourceFileId::ANONYMOUS, source)
@@ -389,7 +713,7 @@ mod tests {
         let square = module.methods[1].definition;
         let area = module.generics[0].definition;
 
-        let mut invalidation = QueryInvalidation::for_module(&module);
+        let mut invalidation = graph(&module);
         let affected = invalidation.method_changed(MethodId(0));
 
         assert!(affected.contains(&QueryArtifact::MethodLookup(circle)));
@@ -406,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn method_change_retypes_only_that_definition() {
+    fn method_change_retypes_senders_only_when_the_method_table_changes() {
         let module = lower_source(
             "define class <circle> (<object>)\nend;\n\
              define class <square> (<object>)\nend;\n\
@@ -418,23 +742,125 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         let circle = module.methods[0].definition;
         let square = module.methods[1].definition;
+        let area = module.generics[0].definition;
         let main = module.functions[0].definition;
+        let mut invalidation = graph(&module);
+        assert!(invalidation.artifact_edges().contains(&ArtifactEdge {
+            dependent: QueryArtifact::DefinitionTyping(main),
+            dependency: QueryArtifact::MethodTable(area),
+        }));
 
-        let mut invalidation = QueryInvalidation::for_module(&module);
-        let affected = invalidation.method_changed(MethodId(0));
-
+        // A body edit keeps the method table and the generic's contract.
+        let affected =
+            invalidation.changed_with_cutoff(&[QueryArtifact::DefinitionSem(circle)], |_| true);
         assert!(affected.contains(&QueryArtifact::DefinitionTyping(circle)));
+        assert!(affected.contains(&QueryArtifact::MethodTable(area)));
         assert!(affected.contains(&QueryArtifact::Typing));
         assert!(affected.contains(&QueryArtifact::Diagnostics));
         assert!(!affected.contains(&QueryArtifact::DefinitionTyping(square)));
         assert!(!affected.contains(&QueryArtifact::DefinitionTyping(main)));
+
+        // Without knowing the values, the drain assumes the table changed.
+        let affected = invalidation.method_changed(MethodId(0));
+        assert!(affected.contains(&QueryArtifact::DefinitionTyping(main)));
+        assert!(!affected.contains(&QueryArtifact::DefinitionTyping(square)));
+    }
+
+    #[test]
+    fn callee_contract_is_a_firewall_for_caller_typing_and_lowering() {
+        let module = lower_source(
+            "define function helper(x :: <integer>)\n  x + 1\nend;\n\
+             define generic area(x);\n\
+             define method area(x :: <integer>)\n  helper(x)\nend;\n\
+             define function main()\n  helper(2)\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let helper = module.functions[0].definition;
+        let main = module.functions[1].definition;
+        let method = module.methods[0].definition;
+        let mut invalidation = graph(&module);
+        for edge in [
+            (
+                QueryArtifact::DefinitionTyping(main),
+                QueryArtifact::Contract(helper),
+            ),
+            (
+                QueryArtifact::MethodLowering(method),
+                QueryArtifact::Contract(helper),
+            ),
+            (
+                QueryArtifact::LoweredModule,
+                QueryArtifact::Contract(helper),
+            ),
+        ] {
+            assert!(
+                invalidation.artifact_edges().contains(&ArtifactEdge {
+                    dependent: edge.0,
+                    dependency: edge.1,
+                }),
+                "{edge:?}"
+            );
+        }
+
+        let body_only =
+            invalidation.changed_with_cutoff(&[QueryArtifact::DefinitionSem(helper)], |_| true);
+        assert!(body_only.contains(&QueryArtifact::DefinitionTyping(helper)));
+        assert!(body_only.contains(&QueryArtifact::Contract(helper)));
+        assert!(!body_only.contains(&QueryArtifact::DefinitionTyping(main)));
+        assert!(!body_only.contains(&QueryArtifact::DefinitionTyping(method)));
+        assert!(!body_only.contains(&QueryArtifact::MethodLowering(method)));
+
+        let contract =
+            invalidation.changed_with_cutoff(&[QueryArtifact::DefinitionSem(helper)], |_| false);
+        assert!(contract.contains(&QueryArtifact::DefinitionTyping(main)));
+        assert!(contract.contains(&QueryArtifact::DefinitionTyping(method)));
+        assert!(contract.contains(&QueryArtifact::MethodLowering(method)));
+    }
+
+    #[test]
+    fn constant_contracts_follow_the_constants_they_read_even_in_a_cycle() {
+        let module = lower_source(
+            "define constant a = b + 1;\n\
+             define constant b = a + 1;\n\
+             define constant c = 3;\n\
+             define function main()\n  a\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let a = module.constants[0].definition;
+        let b = module.constants[1].definition;
+        let c = module.constants[2].definition;
+        let main = module.functions[0].definition;
+        let mut invalidation = graph(&module);
+
+        let affected =
+            invalidation.changed_with_cutoff(&[QueryArtifact::DefinitionSem(b)], |_| false);
+        assert!(affected.contains(&QueryArtifact::Contract(a)));
+        assert!(affected.contains(&QueryArtifact::DefinitionTyping(main)));
+        assert!(!affected.contains(&QueryArtifact::Contract(c)));
+    }
+
+    #[test]
+    fn codegen_policy_is_an_input_nothing_reads_yet() {
+        let module = lower_source("define function main()\n  1\nend;");
+        let mut invalidation = graph(&module);
+        assert!(invalidation.contains(QueryArtifact::CodegenPolicy));
+        assert!(
+            invalidation
+                .artifact_edges()
+                .iter()
+                .all(|edge| edge.dependency != QueryArtifact::CodegenPolicy)
+        );
+        assert_eq!(
+            invalidation.codegen_policy_changed(),
+            [QueryArtifact::CodegenPolicy]
+        );
     }
 
     #[test]
     fn typing_config_change_skips_definition_checks_and_lowering() {
         let module = lower_source("define function main()\n  1\nend;");
         let main = module.functions[0].definition;
-        let mut invalidation = QueryInvalidation::for_module(&module);
+        let mut invalidation = graph(&module);
         let affected = invalidation.typing_config_changed();
 
         assert_eq!(
@@ -456,7 +882,7 @@ mod tests {
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;",
         );
-        let mut invalidation = QueryInvalidation::for_module(&module);
+        let mut invalidation = graph(&module);
         let affected = invalidation.source_changed();
 
         assert!(affected.contains(&QueryArtifact::Source));
@@ -496,8 +922,8 @@ mod tests {
             .expect("circle method definition should keep its stable id");
         assert_ne!(edited_circle.id, MethodId(0));
 
-        let before_graph = QueryInvalidation::for_module(&before);
-        let edited_graph = QueryInvalidation::for_module(&edited);
+        let before_graph = graph(&before);
+        let edited_graph = graph(&edited);
         let before_key = before_graph.key_for(QueryArtifact::MethodLookup(circle_method));
         let edited_key =
             edited_graph.key_for(QueryArtifact::MethodLookup(edited_circle.definition));
