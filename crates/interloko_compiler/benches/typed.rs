@@ -21,6 +21,11 @@
 //!   unboxed `<integer>` under either policy, so the branch unboxes once
 //!   and computes on `i64`s. Its baseline boxes and passes the same value
 //!   to a function that does not test it.
+//! - `generic send`: `weight(c)` on a `<circle>` local sends to a generic
+//!   with one method. Off asks the runtime which method to call (its cache
+//!   answers after the first send) and calls it indirectly; proved calls the
+//!   method through a relinkable tape link. Its baseline makes the same
+//!   object and passes it to a function.
 //!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
@@ -98,6 +103,30 @@ define function passed(d :: <integer>) => <integer>
   if d = 0 then ignore(as(<object>, d)) else passed(d - 1) + passed(d - 1) end
 end;
 
+define generic weight(s :: <shape>) => <integer>;
+
+define method weight(c :: <circle>) => <integer>
+  1
+end;
+
+define function send-weight() => <integer>
+  let c = make(<circle>, radius: 1);
+  weight(c)
+end;
+
+define function call-area() => <integer>
+  let c = make(<circle>, radius: 1);
+  area(c)
+end;
+
+define function sent(d :: <integer>) => <integer>
+  if d = 0 then send-weight() else sent(d - 1) + sent(d - 1) end
+end;
+
+define function called(d :: <integer>) => <integer>
+  if d = 0 then call-area() else called(d - 1) + called(d - 1) end
+end;
+
 define function convert(d :: <integer>) => <integer>
   if d = 0 then as(<integer>, as(<i32>, d)) + 1 else convert(d - 1) + convert(d - 1) end
 end;
@@ -161,6 +190,7 @@ fn costs(policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("proved cast", net("cast", "made")),
         ("range conversion", net("convert", "plain")),
         ("tested arithmetic", net("tested", "passed")),
+        ("generic send", net("sent", "called")),
     ]
 }
 
