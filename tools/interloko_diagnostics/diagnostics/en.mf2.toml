@@ -121,4 +121,5 @@
 "type-error.entry" = "a value passed to a callable is not of its parameter's class"
 "type-error.range" = "a number is outside the range of the type it must convert to"
 "type-error.overflow" = "integer arithmetic produced a result its type cannot represent"
+"dispatch.no-applicable-method" = "a generic send found no method for its arguments"
 "session.unknown-source" = "session source file id is unknown"

@@ -19,7 +19,7 @@ use interloko_model::{ClassId, MethodId};
 use crate::code::{CodeUnit, Definition, FrameCode};
 use crate::control::{BindingToken, RestartDescriptor};
 use crate::driver::LinkError;
-use crate::{InterlokoHost, TypeErrorReport};
+use crate::{InterlokoHost, NoApplicableMethodReport, TypeErrorReport};
 
 /// One initialized register of a suspended frame.
 #[derive(Clone, Debug)]
@@ -98,10 +98,13 @@ pub struct UnhandledCondition<'a> {
     pub condition: Obj,
     /// Its exact class.
     pub class: ClassId,
-    /// Whether a failed runtime check signalled the condition, a
-    /// `<type-error>` whose [`OfferedRestart::UseValue`] continues that
-    /// check, rather than the program's own `signal`, whose `use-value`
-    /// is what the `signal` expression returns.
+    /// Whether the runtime signalled the condition for a check that failed,
+    /// rather than the program's own `signal`, whose `use-value` is what the
+    /// `signal` expression returns. It is then a `<type-error>` whose
+    /// [`OfferedRestart::UseValue`] continues the failed type check
+    /// ([`Self::type_error`]), or a `<no-applicable-method>` whose
+    /// `use-value` is the result of the send that found no method
+    /// ([`Self::no_applicable_method`]).
     pub failed_check: bool,
     /// Runtime objects, classes and slots, for presenting the condition.
     pub runtime: &'a InterlokoHost,
@@ -132,6 +135,27 @@ impl UnhandledCondition<'_> {
             return None;
         }
         self.runtime.type_error_report(self.condition)
+    }
+
+    /// What a send that found no applicable method reports, when one
+    /// signalled the condition: the stable code, the generic, and the
+    /// arguments with their classes. A `<no-applicable-method>` the program
+    /// signalled itself is an ordinary condition and reports nothing here.
+    ///
+    /// [`OfferedRestart::UseValue`] supplies the send's results instead, of
+    /// the generic's result kinds. The generic's dispatcher checks each one
+    /// against the generic's declared result type (its class, or its
+    /// `limited` range) as an entry check: a replacement that is not of it
+    /// signals a `<type-error>`, and so on until one passes, so the code
+    /// after the send only sees results that keep the generic's contract.
+    /// A result known to be one particular callable is not offered: the
+    /// dispatcher returns that callable, its only value.
+    #[must_use]
+    pub fn no_applicable_method(&self) -> Option<NoApplicableMethodReport> {
+        if !self.failed_check {
+            return None;
+        }
+        self.runtime.no_applicable_method_report(self.condition)
     }
 }
 

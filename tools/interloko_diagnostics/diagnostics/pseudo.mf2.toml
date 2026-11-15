@@ -121,4 +121,5 @@
 "type-error.entry" = "[ps] entry type error"
 "type-error.range" = "[ps] range type error"
 "type-error.overflow" = "[ps] overflow type error"
+"dispatch.no-applicable-method" = "[ps] no applicable method"
 "session.unknown-source" = "[ps] source file id unknown"

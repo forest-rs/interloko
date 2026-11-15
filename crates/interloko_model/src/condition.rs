@@ -1,5 +1,5 @@
 //! The condition classes the language kernel defines, and the stable codes
-//! of the runtime type errors it signals.
+//! of the runtime errors it signals.
 //!
 //! Conditions are ordinary objects: any instance can be signalled, and a
 //! handler names the class it accepts. The kernel adds a small hierarchy so
@@ -11,12 +11,20 @@
 //!   <condition>
 //!     <error>
 //!       <type-error>
+//!       <no-applicable-method>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
 //! rejected, the type it expected, where the check is, and a stable
-//! [`TypeErrorKind`] code. Its slots are read-only, so it adds no setter
-//! generics to a program.
+//! [`TypeErrorKind`] code. A `<no-applicable-method>` reports a generic
+//! send that found no method for its arguments: the generic, the arguments
+//! and the stable code [`NO_APPLICABLE_METHOD_CODE`]. Their slots are
+//! read-only, so they add no setter generics to a program.
+//!
+//! A send never finds several equally specific methods: a module whose
+//! methods could be ambiguous for some arguments does not compile
+//! (`sem.ambiguous-generic-method-dispatch`), and code installed during a
+//! run keeps its methods, so there is no ambiguous-dispatch condition.
 
 /// A condition class the language kernel defines in every module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -28,11 +36,22 @@ pub enum ConditionClass {
     Error,
     /// `<type-error>`: a runtime type check failed.
     TypeError,
+    /// `<no-applicable-method>`: a generic send found no method for its
+    /// arguments.
+    NoApplicableMethod,
 }
 
 impl ConditionClass {
     /// Every kernel condition class, superclasses first.
-    pub const ALL: &'static [Self] = &[Self::Condition, Self::Error, Self::TypeError];
+    ///
+    /// Classes are appended, never inserted, so adding one moves no other
+    /// class's id.
+    pub const ALL: &'static [Self] = &[
+        Self::Condition,
+        Self::Error,
+        Self::TypeError,
+        Self::NoApplicableMethod,
+    ];
 
     /// Returns the Loko-visible class name.
     #[must_use]
@@ -41,6 +60,7 @@ impl ConditionClass {
             Self::Condition => "<condition>",
             Self::Error => "<error>",
             Self::TypeError => "<type-error>",
+            Self::NoApplicableMethod => "<no-applicable-method>",
         }
     }
 
@@ -51,6 +71,7 @@ impl ConditionClass {
             b"<condition>" => Some(Self::Condition),
             b"<error>" => Some(Self::Error),
             b"<type-error>" => Some(Self::TypeError),
+            b"<no-applicable-method>" => Some(Self::NoApplicableMethod),
             _ => None,
         }
     }
@@ -62,7 +83,7 @@ impl ConditionClass {
         match self {
             Self::Condition => None,
             Self::Error => Some(Self::Condition),
-            Self::TypeError => Some(Self::Error),
+            Self::TypeError | Self::NoApplicableMethod => Some(Self::Error),
         }
     }
 
@@ -72,6 +93,7 @@ impl ConditionClass {
         match self {
             Self::Condition | Self::Error => &[],
             Self::TypeError => &TYPE_ERROR_SLOTS,
+            Self::NoApplicableMethod => &NO_APPLICABLE_METHOD_SLOTS,
         }
     }
 }
@@ -140,6 +162,60 @@ impl TypeErrorSlot {
     }
 }
 
+/// The slots of `<no-applicable-method>`, in layout order:
+/// [`NoApplicableMethodSlot`] indexes them.
+pub const NO_APPLICABLE_METHOD_SLOTS: [ConditionSlot; 3] = [
+    ConditionSlot {
+        name: "no-applicable-method-generic",
+        type_name: "<generic-function>",
+        init_keyword: "generic",
+    },
+    ConditionSlot {
+        name: "no-applicable-method-arguments",
+        type_name: "<vector>",
+        init_keyword: "arguments",
+    },
+    ConditionSlot {
+        name: "no-applicable-method-code",
+        type_name: "<string>",
+        init_keyword: "code",
+    },
+];
+
+/// One slot of `<no-applicable-method>`, by its position in
+/// [`NO_APPLICABLE_METHOD_SLOTS`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum NoApplicableMethodSlot {
+    /// The generic function the send called, as its `<generic-function>`
+    /// metaobject.
+    Generic,
+    /// The send's arguments, in order, as a `<vector>`. A callable
+    /// argument, which is not an `<object>` and so cannot be an element,
+    /// appears as the symbol `#<callable>`; it never selects a method.
+    Arguments,
+    /// The stable code, [`NO_APPLICABLE_METHOD_CODE`] when the runtime
+    /// signalled the condition.
+    Code,
+}
+
+impl NoApplicableMethodSlot {
+    /// Returns the slot's index in [`NO_APPLICABLE_METHOD_SLOTS`] and in the
+    /// layout of `<no-applicable-method>`, whose superclasses declare no
+    /// slots.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Generic => 0,
+            Self::Arguments => 1,
+            Self::Code => 2,
+        }
+    }
+}
+
+/// The stable code of a `<no-applicable-method>` the runtime signals, in
+/// the diagnostic code scheme (`area.name`) with `dispatch` as its area.
+pub const NO_APPLICABLE_METHOD_CODE: &str = "dispatch.no-applicable-method";
+
 /// What kind of runtime check a `<type-error>` reports.
 ///
 /// Each kind has a stable code in the diagnostic code scheme
@@ -153,8 +229,10 @@ pub enum TypeErrorKind {
     Cast,
     /// A callable's argument is not of its parameter's class, checked where
     /// the callable is entered through a value whose signature the caller
-    /// could not see; or an exit procedure's value is not of its block's
-    /// class. Code `type-error.entry`.
+    /// could not see; an exit procedure's value is not of its block's
+    /// class; or a `use-value` replacement for a send that found no
+    /// applicable method is not of its generic's result class. Code
+    /// `type-error.entry`.
     Entry,
     /// A number is outside a limited type's range: converting to `<i32>`,
     /// a float to an integer it does not equal, a shift count outside
@@ -215,6 +293,32 @@ mod tests {
         );
         assert_eq!(slots[TypeErrorSlot::Site.index()].name, "type-error-site");
         assert_eq!(slots[TypeErrorSlot::Code.index()].name, "type-error-code");
+    }
+
+    #[test]
+    fn no_applicable_method_slots_follow_their_indices() {
+        let slots = ConditionClass::NoApplicableMethod.slots();
+        assert_eq!(
+            ConditionClass::NoApplicableMethod.superclass(),
+            Some(ConditionClass::Error)
+        );
+        assert_eq!(
+            slots[NoApplicableMethodSlot::Generic.index()].name,
+            "no-applicable-method-generic"
+        );
+        assert_eq!(
+            slots[NoApplicableMethodSlot::Arguments.index()].name,
+            "no-applicable-method-arguments"
+        );
+        assert_eq!(
+            slots[NoApplicableMethodSlot::Code.index()].name,
+            "no-applicable-method-code"
+        );
+        assert!(
+            TypeErrorKind::ALL
+                .iter()
+                .all(|kind| kind.code() != NO_APPLICABLE_METHOD_CODE)
+        );
     }
 
     #[test]

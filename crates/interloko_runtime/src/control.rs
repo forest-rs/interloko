@@ -54,6 +54,12 @@ pub const CONDITION_GUARD_UNWOUND: &str = "interloko.condition.guard_unwound";
 /// becomes the condition's value; several (the operands of an overflowing
 /// operation) a `<vector>` of them.
 pub const CONDITION_TYPE_ERROR: &str = "interloko.condition.type_error";
+/// Host symbol that makes the `<no-applicable-method>` a send that found no
+/// method signals: `(generic, arguments) -> condition`, where `generic` is
+/// the generic's id in the runtime layout and `arguments` a `<vector>` of
+/// the send's arguments. A generic's dispatcher, which every such send
+/// reaches, makes the request.
+pub const CONDITION_NO_APPLICABLE_METHOD: &str = "interloko.condition.no_applicable_method";
 /// Host symbol that pops the innermost dynamic binding by token.
 pub const CONTROL_POP: &str = "interloko.control.pop";
 /// Host symbol that pushes a block exit point and returns its token.
@@ -89,6 +95,7 @@ pub fn is_control_symbol(symbol: &str) -> bool {
             | CONDITION_GUARD_RESULT
             | CONDITION_GUARD_UNWOUND
             | CONDITION_TYPE_ERROR
+            | CONDITION_NO_APPLICABLE_METHOD
             | CONTROL_POP
             | CONTROL_PUSH_EXIT
             | CONTROL_CHECK_EXIT
@@ -234,10 +241,13 @@ pub enum ControlFault {
         /// The condition object. It belongs to the run's turn, so it stays
         /// readable until the embedding finishes or aborts that turn, as
         /// [`crate::InterlokoHost::type_error_report`] does for a
-        /// `<type-error>`.
+        /// `<type-error>` and
+        /// [`crate::InterlokoHost::no_applicable_method_report`] for a
+        /// `<no-applicable-method>`.
         condition: Obj,
-        /// Whether a failed runtime check signalled the condition, rather
-        /// than the program's own `signal`.
+        /// Whether the runtime signalled the condition for a check that
+        /// failed, a runtime type check or a send that found no applicable
+        /// method, rather than the program's own `signal`.
         failed_check: bool,
     },
     /// A block exit was invoked after its block's extent ended.
@@ -276,6 +286,9 @@ pub struct ControlStats {
     pub sends: u64,
     /// Sends answered from the dispatch cache.
     pub send_cache_hits: u64,
+    /// Sends that found no applicable method and signalled
+    /// `<no-applicable-method>`.
+    pub failed_sends: u64,
 }
 
 /// The dynamic binding stack of one run.
@@ -350,6 +363,10 @@ impl ControlState {
         if cache_hit {
             self.stats.send_cache_hits = self.stats.send_cache_hits.saturating_add(1);
         }
+    }
+
+    pub(crate) fn note_failed_send(&mut self) {
+        self.stats.failed_sends = self.stats.failed_sends.saturating_add(1);
     }
 
     pub(crate) fn note_searched(&mut self) {
@@ -430,6 +447,16 @@ pub fn type_error_signature(values: &[ValueType]) -> HostSig {
     args.push(ValueType::U64);
     HostSig {
         args,
+        rets: alloc::vec![object_type()],
+    }
+}
+
+/// Host signature for [`CONDITION_NO_APPLICABLE_METHOD`]: `(generic,
+/// arguments) -> condition`.
+#[must_use]
+pub fn no_applicable_method_signature() -> HostSig {
+    HostSig {
+        args: alloc::vec![ValueType::U64, object_type()],
         rets: alloc::vec![object_type()],
     }
 }

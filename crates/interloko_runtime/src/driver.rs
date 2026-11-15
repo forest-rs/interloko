@@ -49,10 +49,10 @@ use crate::chooser::{
 use crate::code::{CODE_DISPATCH, CodeMismatch, CodeUnit, Definition, UnitTable, method_link};
 use crate::control::{
     ABORT_TAG, BindingKind, BindingToken, CHECK_FAILED_TAG, CONDITION_GUARD,
-    CONDITION_GUARD_RESULT, CONDITION_GUARD_UNWOUND, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL,
-    CONDITION_TYPE_ERROR, CONTROL_CHECK_EXIT, CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault,
-    ControlState, ControlStats, RESTART_TAG, RETRY_TAG, RestartDescriptor, is_control_symbol,
-    restart_payload, retry_payload,
+    CONDITION_GUARD_RESULT, CONDITION_GUARD_UNWOUND, CONDITION_NO_APPLICABLE_METHOD,
+    CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONDITION_TYPE_ERROR, CONTROL_CHECK_EXIT,
+    CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats, RESTART_TAG,
+    RETRY_TAG, RestartDescriptor, is_control_symbol, restart_payload, retry_payload,
 };
 
 /// A [`Host`] backed by an [`InterlokoHost`], which the driver consults for
@@ -453,8 +453,9 @@ struct Driver<'a> {
     tags: VmTags,
     state: ControlState,
     searches: Vec<Search>,
-    /// The `<type-error>` the last request made for a failed check, which
-    /// the check's code signals next.
+    /// The `<type-error>` or `<no-applicable-method>` the last request
+    /// made for a failed check or send, which the code that asked signals
+    /// next.
     made_check_error: Option<Obj>,
     /// The condition of a failed check's signal that found no handler, which
     /// suspends next.
@@ -481,8 +482,8 @@ struct Search {
     stack_len: usize,
     /// Binding whose guard is running on the signalling stack.
     guarding: Option<usize>,
-    /// Whether a failed runtime check signalled the condition, rather than
-    /// the program.
+    /// Whether a failed runtime check or send signalled the condition,
+    /// rather than the program.
     failed_check: bool,
 }
 
@@ -520,7 +521,7 @@ impl SendKey {
 struct Signalled {
     condition: Obj,
     class: ClassId,
-    /// Whether a failed runtime check signalled it.
+    /// Whether a failed runtime check or send signalled it.
     failed_check: bool,
 }
 
@@ -647,8 +648,9 @@ impl Driver<'_> {
 
     /// Answers a generic send with the function its arguments select from
     /// the newest unit: a method, or the generic's dispatcher when the
-    /// unit's dispatch table cannot decide, so the dispatcher's own checks
-    /// and traps apply.
+    /// unit's dispatch table cannot decide or selects nothing, so the
+    /// dispatcher's own checks apply and a send that finds no method
+    /// signals its `<no-applicable-method>` there.
     fn dispatch<H: RuntimeHost>(
         &mut self,
         mut pending: PendingHostCall<'_, '_, H>,
@@ -810,6 +812,21 @@ impl Driver<'_> {
                     .with_runtime(|runtime| runtime.make_type_error(&site, values))
                 {
                     Ok(condition) => {
+                        self.made_check_error = Some(condition);
+                        Action::Complete(alloc::vec![Value::Obj(condition)])
+                    }
+                    Err(_) => Action::Fail(ControlFault::MalformedRequest),
+                }
+            }
+            (CONDITION_NO_APPLICABLE_METHOD, [Value::U64(generic), arguments @ Value::Obj(_)]) => {
+                let Some(generic) = u32::try_from(*generic).ok().map(GenericFunctionId) else {
+                    return Action::Fail(ControlFault::MalformedRequest);
+                };
+                match pending.host_mut().with_runtime(|runtime| {
+                    runtime.make_no_applicable_method(generic, arguments.clone())
+                }) {
+                    Ok(condition) => {
+                        self.state.note_failed_send();
                         self.made_check_error = Some(condition);
                         Action::Complete(alloc::vec![Value::Obj(condition)])
                     }
