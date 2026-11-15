@@ -749,6 +749,16 @@ impl Module {
         select_method_for_classes_in_methods(&self.classes, &self.methods, generic, actuals)
     }
 
+    /// Returns the kernel condition class `condition`, which every module
+    /// defines.
+    #[must_use]
+    pub fn condition_class(&self, condition: ConditionClass) -> Option<ClassId> {
+        self.classes
+            .iter()
+            .find(|class| class.origin == ClassOrigin::Condition { class: condition })
+            .map(|class| class.id)
+    }
+
     /// Returns the class metaobject for a built-in value class, when this
     /// module's environment defines it.
     #[must_use]
@@ -7729,6 +7739,12 @@ impl Lowering {
         }
     }
 
+    /// Whether `actual` is the object kind of the built-in class `class`,
+    /// as a value declared with that class's name has.
+    fn is_builtin_instance(&self, actual: ValueKind, class: BuiltinValueClass) -> bool {
+        matches!(actual, ValueKind::Object(id) if Some(id) == self.builtin_value_class(class))
+    }
+
     fn intrinsic_arg_matches(&self, intrinsic: Intrinsic, index: usize, actual: ValueKind) -> bool {
         if actual == ValueKind::Error {
             return true;
@@ -7770,11 +7786,15 @@ impl Lowering {
                 actual,
                 ValueKind::SlotDescriptorObject { .. } | ValueKind::Any
             ),
+            // A value declared `<generic-function>`, such as a
+            // `<no-applicable-method>`'s generic, is the metaobject too.
             (Intrinsic::GenericFunctionName | Intrinsic::GenericFunctionMethods, 0) => {
                 matches!(actual, ValueKind::GenericFunctionObject(_) | ValueKind::Any)
+                    || self.is_builtin_instance(actual, BuiltinValueClass::GenericFunction)
             }
             (Intrinsic::MethodGenericFunction | Intrinsic::MethodSpecializers, 0) => {
                 matches!(actual, ValueKind::MethodObject(_) | ValueKind::Any)
+                    || self.is_builtin_instance(actual, BuiltinValueClass::Method)
             }
             (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => {
                 matches!(actual, ValueKind::Vector(_) | ValueKind::Any)
@@ -11830,6 +11850,33 @@ mod tests {
                 .generics
                 .iter()
                 .all(|generic| !generic.name.starts_with("type-error-"))
+        );
+        // `<no-applicable-method>` comes last, so no other class id moves.
+        let no_method = class(&module, "<no-applicable-method>");
+        assert_eq!(no_method.superclass, Some(error));
+        assert_eq!(no_method.id.0, type_error.id.0 + 1);
+        assert_eq!(no_method.id.0 as usize, module.classes.len() - 1);
+        let kinds = no_method
+            .effective_slots
+            .iter()
+            .map(|slot| (slot.name.as_str(), slot.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    "no-applicable-method-generic",
+                    ValueKind::Object(class_id(&module, "<generic-function>"))
+                ),
+                (
+                    "no-applicable-method-arguments",
+                    ValueKind::Vector(class_id(&module, "<vector>"))
+                ),
+                (
+                    "no-applicable-method-code",
+                    ValueKind::String(class_id(&module, "<string>"))
+                ),
+            ]
         );
     }
 

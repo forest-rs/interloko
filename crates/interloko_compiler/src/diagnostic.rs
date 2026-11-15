@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::syntax::Span;
-use interloko_model::condition::TypeErrorKind;
+use interloko_model::condition::{NO_APPLICABLE_METHOD_CODE, TypeErrorKind};
 
 /// Diagnostic severity.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -297,6 +297,10 @@ pub enum DiagnosticCode {
     /// Integer arithmetic overflowed its kind. See
     /// [`TypeErrorKind::Overflow`].
     TypeErrorOverflow,
+    /// A generic send found no method for its arguments' classes. An
+    /// unhandled `<no-applicable-method>` the runtime signalled ends the run
+    /// with this code, [`NO_APPLICABLE_METHOD_CODE`].
+    DispatchNoApplicableMethod,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -426,6 +430,7 @@ impl DiagnosticCode {
         Self::TypeErrorEntry,
         Self::TypeErrorRange,
         Self::TypeErrorOverflow,
+        Self::DispatchNoApplicableMethod,
         Self::SessionUnknownSource,
     ];
 
@@ -557,6 +562,7 @@ impl DiagnosticCode {
             Self::TypeErrorEntry => TypeErrorKind::Entry.code(),
             Self::TypeErrorRange => TypeErrorKind::Range.code(),
             Self::TypeErrorOverflow => TypeErrorKind::Overflow.code(),
+            Self::DispatchNoApplicableMethod => NO_APPLICABLE_METHOD_CODE,
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -689,6 +695,7 @@ impl DiagnosticCode {
             "type-error.entry" => Self::TypeErrorEntry,
             "type-error.range" => Self::TypeErrorRange,
             "type-error.overflow" => Self::TypeErrorOverflow,
+            "dispatch.no-applicable-method" => Self::DispatchNoApplicableMethod,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })

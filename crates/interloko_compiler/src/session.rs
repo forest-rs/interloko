@@ -21992,6 +21992,7 @@ end;
                 bindings_searched: 4,
                 sends: 0,
                 send_cache_hits: 0,
+                failed_sends: 0,
             }
         );
     }
