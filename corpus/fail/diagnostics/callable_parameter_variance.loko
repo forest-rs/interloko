@@ -1,0 +1,29 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.callable-parameter-variance
+// expect: diagnostic contains callable(<circle>) => <integer> cannot be called as callable(<shape>) => <integer>: its parameter 1 accepts only <circle>, but callers may pass any <shape>
+
+// A callable parameter is contravariant: `call-on-square` may pass any
+// `<shape>` to `f`, so a function of `<circle>` cannot stand in for it.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function call-on-square(f :: callable(<shape>) => <integer>) => <integer>
+  f(make(<square>, side: 7))
+end;
+
+define function main()
+  call-on-square(radius-of)
+end;

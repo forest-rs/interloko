@@ -1,0 +1,26 @@
+// expect: run 7
+// expect: diagnostics 0
+
+// A function returning a `<circle>` can be called wherever a
+// `callable(...) => <shape>` is expected: a result may be narrower than the
+// one callers rely on.
+
+define class <shape> (<object>)
+  slot size :: <integer>;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function circle-of(x :: <integer>) => <circle>
+  make(<circle>, size: x)
+end;
+
+define function shape-size(f :: callable(<integer>) => <shape>) => <integer>
+  f(7).size
+end;
+
+define function main()
+  let g :: callable(<integer>) => <shape> = circle-of;
+  if g(1).size = 1 then shape-size(circle-of) else 0 end
+end;
