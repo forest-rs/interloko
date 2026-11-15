@@ -339,4 +339,38 @@ mod tests {
             "uncategorized diagnostic"
         );
     }
+
+    #[test]
+    fn internal_compiler_errors_render_their_detail() {
+        let lowering = interloko_compiler::lower::LowerError::InvalidSemantic {
+            message: "if condition is not bool".into(),
+            span: None,
+        }
+        .diagnostic()
+        .expect("an internal lowering failure is reported");
+        let emission = interloko_compiler::tape::TapeError::Build {
+            message: "verifier rejected f0".into(),
+        }
+        .diagnostic()
+        .expect("an internal emission failure is reported");
+
+        let english = DiagnosticRenderer::english().expect("english catalog compiles");
+        assert_eq!(
+            english.render(&lowering).expect("diagnostic renders"),
+            "internal compiler error: lowering rejected a checked program: if condition is not bool"
+        );
+        assert_eq!(
+            english.render(&emission).expect("diagnostic renders"),
+            "internal compiler error: execution tape builder rejected the emitted program: verifier rejected f0"
+        );
+        let pseudo = DiagnosticRenderer::pseudo().expect("pseudo catalog compiles");
+        for diagnostic in [&lowering, &emission] {
+            assert!(
+                pseudo
+                    .render(diagnostic)
+                    .expect("diagnostic renders")
+                    .starts_with("[ps] compiler bug:")
+            );
+        }
+    }
 }

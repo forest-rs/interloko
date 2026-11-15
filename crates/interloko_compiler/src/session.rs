@@ -1814,8 +1814,14 @@ impl SessionArtifacts {
         let (typing, elapsed_nanos) =
             measure_elapsed(|| self.typing.with_config(&self.sem, config));
         timings.record(QueryArtifact::Typing, elapsed_nanos);
-        let (diagnostics, elapsed_nanos) =
-            measure_elapsed(|| aggregate_diagnostics(&self.sem, &typing));
+        let (diagnostics, elapsed_nanos) = measure_elapsed(|| {
+            aggregate_diagnostics(
+                &self.sem,
+                &typing,
+                self.lower_error.as_ref(),
+                self.tape_error.as_ref(),
+            )
+        });
         timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
         artifacts.typing = typing;
         artifacts.diagnostics = diagnostics;
@@ -1882,6 +1888,20 @@ impl SessionArtifacts {
     #[must_use]
     pub fn has_errors(&self) -> bool {
         self.diagnostics.iter().any(Diagnostic::is_error)
+    }
+
+    /// Returns true when lowering or tape emission failed after semantic
+    /// analysis accepted the program: an internal compiler error, which the
+    /// aggregated diagnostics report with a `lower.*` or `tape.*` code.
+    #[must_use]
+    pub fn emission_failed(&self) -> bool {
+        matches!(
+            self.lower_error,
+            Some(lower::LowerError::InvalidSemantic { .. })
+        ) || matches!(
+            self.tape_error,
+            Some(tape::TapeError::InvalidLowered { .. } | tape::TapeError::Build { .. })
+        )
     }
 
     /// Returns inspectable generic dispatch-site records in traversal order.
@@ -5386,8 +5406,6 @@ pub(crate) fn compile_file_with_registries(
     timings.record(QueryArtifact::Bind, elapsed_nanos);
     let (typing, elapsed_nanos) = measure_elapsed(|| typing::analyze(&sem, typing_config));
     timings.record(QueryArtifact::Typing, elapsed_nanos);
-    let (diagnostics, elapsed_nanos) = measure_elapsed(|| aggregate_diagnostics(&sem, &typing));
-    timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
     let invalidation = QueryInvalidation::for_module(&sem, &typing);
 
     let ((lowered, lower_error), elapsed_nanos) = measure_elapsed(|| match lower::lower(&sem) {
@@ -5403,6 +5421,10 @@ pub(crate) fn compile_file_with_registries(
         None => (None, None),
     });
     timings.record(QueryArtifact::TapeProgram, elapsed_nanos);
+    let (diagnostics, elapsed_nanos) = measure_elapsed(|| {
+        aggregate_diagnostics(&sem, &typing, lower_error.as_ref(), tape_error.as_ref())
+    });
+    timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
     let ((runtime_result, runtime_trace), elapsed_nanos) = measure_elapsed(|| match mode {
         RuntimeMode::CompileOnly => (None, None),
         RuntimeMode::RunMain => (
@@ -5445,12 +5467,24 @@ pub(crate) fn compile_file_with_registries(
 }
 
 /// Aggregates every compile stage's diagnostics into the session's single
-/// diagnostic list: semantic diagnostics first, then soft typing findings.
-fn aggregate_diagnostics(sem: &sem::Module, typing: &typing::TypingArtifact) -> Vec<Diagnostic> {
+/// diagnostic list: semantic diagnostics first, then soft typing findings,
+/// then any internal lowering or tape emission failure.
+///
+/// A program semantic analysis accepted must lower and emit. When it does
+/// not, the failure is a compiler bug, and it is reported here as an error
+/// diagnostic rather than left for callers to notice a missing tape.
+fn aggregate_diagnostics(
+    sem: &sem::Module,
+    typing: &typing::TypingArtifact,
+    lower_error: Option<&lower::LowerError>,
+    tape_error: Option<&tape::TapeError>,
+) -> Vec<Diagnostic> {
     sem.diagnostics
         .iter()
         .chain(&typing.diagnostics)
         .cloned()
+        .chain(lower_error.and_then(lower::LowerError::diagnostic))
+        .chain(tape_error.and_then(tape::TapeError::diagnostic))
         .collect()
 }
 
@@ -13331,6 +13365,43 @@ fn indent_line(out: &mut String, indent: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_lowering_failures_reach_the_session_diagnostics() {
+        let mut artifacts = CompilerSession::compile_source(
+            "ice.loko",
+            "define function main()\n  if #t then 1 else 2 end\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert!(!artifacts.has_errors());
+        assert!(!artifacts.emission_failed());
+        // Break an invariant semantic analysis guarantees, so lowering fails
+        // on a program the earlier stages accepted.
+        let sem::Expr::If { condition, .. } = &mut artifacts.sem.functions[0].body.result else {
+            panic!("main is an if");
+        };
+        let span = condition.span();
+        **condition = sem::Expr::ConstI64 { value: 1, span };
+        let lower_error = lower::lower(&artifacts.sem).expect_err("lowering fails");
+
+        let diagnostics =
+            aggregate_diagnostics(&artifacts.sem, &artifacts.typing, Some(&lower_error), None);
+        let [diagnostic] = diagnostics.as_slice() else {
+            panic!("expected one diagnostic, got {diagnostics:?}");
+        };
+        assert!(diagnostic.is_error());
+        assert_eq!(diagnostic.code, DiagnosticCode::LowerInvalidSemantic);
+        assert_eq!(diagnostic.span, artifacts.sem.functions[0].span);
+
+        artifacts.lowered = None;
+        artifacts.tape = None;
+        artifacts.lower_error = Some(lower_error);
+        assert!(artifacts.emission_failed());
+        // Re-deriving diagnostics keeps the failure.
+        let artifacts = artifacts.with_typing_config(typing::TypingConfig::default());
+        assert!(artifacts.has_errors());
+        assert_eq!(artifacts.diagnostics, diagnostics);
+    }
 
     /// `SessionArtifacts` is moved, cloned and returned by value through the
     /// compiler and the REPL, and an unoptimized frame keeps a separate slot

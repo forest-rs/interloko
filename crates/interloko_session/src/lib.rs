@@ -37,7 +37,8 @@ pub enum SessionError {
     Compilation {
         /// Structured source diagnostics, without localized prose.
         diagnostics: Vec<Diagnostic>,
-        /// Whether failure happened after source diagnostics, during emission.
+        /// Whether lowering or tape emission failed on accepted source; the
+        /// diagnostics then carry the internal-compiler-error report.
         emission_failed: bool,
     },
     /// The compiler rejected a domain mutation.
@@ -223,7 +224,7 @@ fn compile(
     );
     if !artifacts.diagnostics.is_empty() || artifacts.tape.is_none() {
         return Err(SessionError::Compilation {
-            emission_failed: artifacts.tape.is_none() && artifacts.diagnostics.is_empty(),
+            emission_failed: artifacts.emission_failed(),
             diagnostics: artifacts.diagnostics,
         });
     }
