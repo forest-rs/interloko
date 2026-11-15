@@ -16,7 +16,7 @@ use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
 use interloko_runtime::RuntimeLayout;
-use interloko_runtime::code::{DispatchCase, GenericDispatch};
+use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
 use interloko_runtime::control::{RestartDescriptor, RestartParameter};
 
 /// Durable function identifier within a lowered module.
@@ -113,6 +113,9 @@ pub struct Module {
     /// Runtime method selection for each generic, in generic id order;
     /// `None` leaves sends to the generic's dispatcher.
     pub dispatch: Vec<Option<GenericDispatch>>,
+    /// The contract of each generic, method and source function, which the
+    /// lowered code trusts at its calls; see [`sem::Module::contract`].
+    pub contracts: Contracts,
 }
 
 /// A host-backed function signature lowered to backend value categories.
@@ -1676,6 +1679,7 @@ impl<'module> Lowering<'module> {
             functions,
             main,
             dispatch,
+            contracts: contracts(self.module),
         })
     }
 
@@ -6024,6 +6028,27 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
             Ok(ValueKind::Closure(None))
         }
         sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
+    }
+}
+
+/// The contracts lowering trusts, in the order a code unit records them.
+fn contracts(module: &sem::Module) -> Contracts {
+    Contracts {
+        generics: module
+            .generics
+            .iter()
+            .map(|generic| module.generic_contract(generic))
+            .collect(),
+        methods: module
+            .methods
+            .iter()
+            .map(|method| module.method_contract(method))
+            .collect(),
+        functions: module
+            .functions
+            .iter()
+            .map(|function| (function.name.clone(), module.function_contract(function)))
+            .collect(),
     }
 }
 

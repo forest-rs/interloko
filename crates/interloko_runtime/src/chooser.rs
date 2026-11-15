@@ -62,7 +62,9 @@ pub enum OfferedRestart<'a> {
     },
     /// Unwind to a frame whose [`FrameCode::is_retryable`] holds and call
     /// the newest version of its function there, with the frame's own
-    /// arguments; its result returns to the frame's caller.
+    /// arguments; its result returns to the frame's caller. A frame whose
+    /// definition's newest code changed its signature or broke its contract
+    /// is not retryable; [`FrameCode::retry_refusal`] says why.
     Retry,
     /// Unwind the whole run, running every crossed cleanup.
     Abort,
@@ -101,7 +103,10 @@ pub enum Choice {
     UseValue(Vec<Value>),
     /// Install replacement code while every frame stays suspended, then be
     /// asked again. Frames keep the code they run; generic sends and retries
-    /// take the newest. The unit must keep the run's runtime layout.
+    /// take the newest. The unit must keep the run's runtime layout and each
+    /// generic's signature and contract
+    /// ([`CodeUnit::check_replaces`]); otherwise it is refused and
+    /// [`UnhandledCondition::refused`] says why.
     Install(Arc<CodeUnit>),
     /// Invoke [`OfferedRestart::Retry`] on the frame with this activation.
     Retry {

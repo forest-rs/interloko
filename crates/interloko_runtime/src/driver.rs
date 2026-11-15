@@ -882,13 +882,13 @@ impl Driver {
         else {
             return Action::Fail(ControlFault::InvalidChoice);
         };
+        // `is_retryable` holds only when the newest code keeps the frame's
+        // signature and contract (`FrameCode::retry_refusal`): the frame's
+        // arguments go to it and its results return to the frame's caller.
         let code = &frames[index].code;
         let Some(current) = code.current.filter(|_| code.is_retryable()) else {
             return Action::Fail(ControlFault::InvalidChoice);
         };
-        if self.units.signature(current) != self.units.signature(code.func) {
-            return Action::Fail(ControlFault::InvalidChoice);
-        }
         let crossed = frames[..index]
             .iter()
             .filter(|frame| {
