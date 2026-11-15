@@ -1,0 +1,18 @@
+// expect: run 10
+// expect: diagnostics 0
+
+// A branch of a subclass joins a branch of its superclass at the superclass,
+// whichever branch comes first.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 5;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function main() => <integer>
+  let c :: <boolean> = #f;
+  (if c then make(<shape>) else make(<circle>) end).size
+    + (if c then make(<circle>) else make(<shape>) end).size
+end;

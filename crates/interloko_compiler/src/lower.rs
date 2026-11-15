@@ -3118,7 +3118,8 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    /// Lowers a `block` expression.
+    /// Lowers a `block` expression whose results have the semantic kinds
+    /// `result_kinds`: the join of the body's results and the exit's.
     ///
     /// Without an exit or cleanup the body is lowered inline. Otherwise the
     /// body runs in a region. An exit pushes an exit point, binds a closure
@@ -3131,6 +3132,7 @@ impl<'module> BodyLowering<'module> {
     /// the one in flight.
     fn lower_block_expr_results(
         &mut self,
+        result_kinds: &[sem::ValueKind],
         exit: Option<&sem::BlockExit>,
         body: &sem::Block,
         cleanup: Option<&sem::Block>,
@@ -3140,6 +3142,11 @@ impl<'module> BodyLowering<'module> {
             self.lower_lets(&body.lets)?;
             return self.lower_results_expr(&body.result);
         }
+        // Values leaving through the exit arrive with the exit's own kinds.
+        let exit_kinds = exit
+            .map(|exit| self.value_kinds(&exit.result_kinds))
+            .transpose()?
+            .unwrap_or_default();
         let exit = exit.map(|exit| self.bind_exit(exit, span)).transpose()?;
         let unwind_label = self.alloc_label();
         let exit_label = self.alloc_label();
@@ -3158,17 +3165,23 @@ impl<'module> BodyLowering<'module> {
         self.lower_lets(&body.lets)?;
         let body_values = self.lower_results_expr(&body.result)?;
         self.instructions.push(Instr::LeaveRegion);
-        let results = body_values
-            .iter()
-            .map(|value| self.alloc(value.kind))
+        let results = self
+            .value_kinds(result_kinds)?
+            .into_iter()
+            .map(|kind| self.alloc(kind))
             .collect::<Vec<_>>();
+        if body_values.len() != results.len() {
+            return Err(invalid_semantic(
+                "block body arity does not match its result",
+            ));
+        }
 
         let mut reachable = body_values.iter().all(|value| value.reachable);
         if reachable {
             reachable = self.leave_block(exit.as_ref(), cleanup, span)?;
         }
         if reachable {
-            self.move_results(&results, &body_values, body.result.span());
+            self.move_results(&results, &body_values, body.result.span())?;
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -3189,9 +3202,9 @@ impl<'module> BodyLowering<'module> {
 
         if let Some(exit) = &exit {
             let target = self.alloc(ValueKind::U64);
-            let exited = results
+            let exited = exit_kinds
                 .iter()
-                .map(|result| self.alloc(result.kind))
+                .map(|kind| self.alloc(*kind))
                 .collect::<Vec<_>>();
             let thrown = self.alloc(ValueKind::Exn);
             let mut params = vec![target.reg];
@@ -3225,7 +3238,7 @@ impl<'module> BodyLowering<'module> {
                     span,
                 });
                 self.instructions.push(Instr::Label { label: mine_label });
-                self.move_results(&results, &exited, span);
+                self.move_results(&results, &exited, span)?;
                 self.instructions.push(Instr::Jump {
                     label: join_label,
                     span,
@@ -3299,14 +3312,24 @@ impl<'module> BodyLowering<'module> {
         }
     }
 
-    fn move_results(&mut self, results: &[Value], values: &[Value], span: Span) {
+    /// Moves one arm's values into the result registers of a join (an `if`,
+    /// a `handle`, a `block`), converting each to the join's kind: an arm may
+    /// produce a narrower kind than the join semantic analysis gave it.
+    fn move_results(
+        &mut self,
+        results: &[Value],
+        values: &[Value],
+        span: Span,
+    ) -> Result<(), LowerError> {
         for (result, value) in results.iter().zip(values) {
+            let value = self.coerce_value(*value, result.kind, span)?;
             self.instructions.push(Instr::Move {
                 dst: result.reg,
                 src: value.reg,
                 span,
             });
         }
+        Ok(())
     }
 
     /// Lowers a cleanup body for effect, returning whether control can
@@ -3875,10 +3898,15 @@ impl<'module> BodyLowering<'module> {
                 {
                     return Ok(self.unbox(value, *class, kind, *span));
                 }
+                // A static upcast needs no check, but the value now has the
+                // cast's class, as semantic analysis says: joins compare it.
                 if let ValueKind::Object(Some(actual)) = value.kind
                     && self.module.is_same_or_subclass(actual, *class)
                 {
-                    return Ok(value);
+                    return Ok(Value {
+                        kind: ValueKind::Object(Some(*class)),
+                        ..value
+                    });
                 }
                 let result = self.alloc(ValueKind::Object(Some(*class)));
                 self.instructions.push(Instr::CastObject {
@@ -4196,29 +4224,11 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
-            sem::Expr::If {
-                condition,
-                refinement: _,
-                then_branch,
-                else_branch,
-                span,
-            } => self.lower_if(condition, then_branch, else_branch, *span),
-            sem::Expr::Handle {
-                body,
-                restart,
-                span,
-            } => self.lower_handle(body, restart, *span),
-            sem::Expr::Block {
-                exit,
-                body,
-                cleanup,
-                span,
-            } => {
-                let mut results =
-                    self.lower_block_expr_results(exit.as_ref(), body, cleanup.as_deref(), *span)?;
+            sem::Expr::If { .. } | sem::Expr::Handle { .. } | sem::Expr::Block { .. } => {
+                let mut results = self.lower_results_expr(expr)?;
                 if results.len() != 1 {
                     return Err(invalid_semantic(
-                        "multiple-value block used in a scalar expression",
+                        "multiple-value join used in a scalar expression",
                     ));
                 }
                 Ok(results.remove(0))
@@ -4319,7 +4329,10 @@ impl<'module> BodyLowering<'module> {
                 then_branch,
                 else_branch,
                 span,
-            } => self.lower_results_if(condition, then_branch, else_branch, *span),
+            } => {
+                let result_kinds = self.module.expr_kinds(expr);
+                self.lower_results_if(&result_kinds, condition, then_branch, else_branch, *span)
+            }
             sem::Expr::Handle {
                 body,
                 restart,
@@ -4330,13 +4343,25 @@ impl<'module> BodyLowering<'module> {
                 body,
                 cleanup,
                 span,
-            } => self.lower_block_expr_results(exit.as_ref(), body, cleanup.as_deref(), *span),
+            } => {
+                let result_kinds = self.module.expr_kinds(expr);
+                self.lower_block_expr_results(
+                    &result_kinds,
+                    exit.as_ref(),
+                    body,
+                    cleanup.as_deref(),
+                    *span,
+                )
+            }
             _ => Ok(vec![self.lower_expr(expr)?]),
         }
     }
 
+    /// Lowers an `if` whose result has the semantic join `result_kinds` of
+    /// its branches; each branch converts its values to that join.
     fn lower_results_if(
         &mut self,
+        result_kinds: &[sem::ValueKind],
         condition: &sem::Expr,
         then_branch: &sem::Expr,
         else_branch: &sem::Expr,
@@ -4359,19 +4384,17 @@ impl<'module> BodyLowering<'module> {
 
         self.instructions.push(Instr::Label { label: then_label });
         let then_values = self.lower_results_expr(then_branch)?;
-        let results = then_values
-            .iter()
-            .map(|value| self.alloc(value.kind))
+        let results = self
+            .value_kinds(result_kinds)?
+            .into_iter()
+            .map(|kind| self.alloc(kind))
             .collect::<Vec<_>>();
+        if then_values.len() != results.len() {
+            return Err(invalid_semantic("if branch result arities differ"));
+        }
         let then_reachable = then_values.iter().all(|value| value.reachable);
         if then_reachable {
-            for (result, value) in results.iter().zip(&then_values) {
-                self.instructions.push(Instr::Move {
-                    dst: result.reg,
-                    src: value.reg,
-                    span: then_branch.span(),
-                });
-            }
+            self.move_results(&results, &then_values, then_branch.span())?;
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -4383,20 +4406,9 @@ impl<'module> BodyLowering<'module> {
         if else_values.len() != results.len() {
             return Err(invalid_semantic("if branch result arities differ"));
         }
-        for (else_value, result) in else_values.iter().zip(&results) {
-            if else_value.kind != result.kind {
-                return Err(invalid_semantic("if branch result kinds differ"));
-            }
-        }
         let else_reachable = else_values.iter().all(|value| value.reachable);
         if else_reachable {
-            for (result, value) in results.iter().zip(&else_values) {
-                self.instructions.push(Instr::Move {
-                    dst: result.reg,
-                    src: value.reg,
-                    span: else_branch.span(),
-                });
-            }
+            self.move_results(&results, &else_values, else_branch.span())?;
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -4902,83 +4914,6 @@ impl<'module> BodyLowering<'module> {
         Ok(results)
     }
 
-    fn lower_if(
-        &mut self,
-        condition: &sem::Expr,
-        then_branch: &sem::Expr,
-        else_branch: &sem::Expr,
-        span: Span,
-    ) -> Result<Value, LowerError> {
-        let condition = self.lower_expr(condition)?;
-        if condition.kind != ValueKind::Bool {
-            return Err(invalid_semantic("if condition is not bool"));
-        }
-
-        let then_label = self.alloc_label();
-        let else_label = self.alloc_label();
-        let join_label = self.alloc_label();
-        self.instructions.push(Instr::Branch {
-            cond: condition.reg,
-            then_label,
-            else_label,
-            span,
-        });
-
-        self.instructions.push(Instr::Label { label: then_label });
-        let then_value = self.lower_expr(then_branch)?;
-        let result = self.alloc(then_value.kind);
-        if then_value.reachable {
-            self.instructions.push(Instr::Move {
-                dst: result.reg,
-                src: then_value.reg,
-                span: then_branch.span(),
-            });
-            self.instructions.push(Instr::Jump {
-                label: join_label,
-                span,
-            });
-        }
-
-        self.instructions.push(Instr::Label { label: else_label });
-        let else_value = self.lower_expr(else_branch)?;
-        if else_value.kind != result.kind {
-            return Err(invalid_semantic("if branch result kinds differ"));
-        }
-        if else_value.reachable {
-            self.instructions.push(Instr::Move {
-                dst: result.reg,
-                src: else_value.reg,
-                span: else_branch.span(),
-            });
-            self.instructions.push(Instr::Jump {
-                label: join_label,
-                span,
-            });
-        }
-
-        self.instructions.push(Instr::Label { label: join_label });
-        Ok(Value {
-            reg: result.reg,
-            kind: result.kind,
-            reachable: then_value.reachable || else_value.reachable,
-        })
-    }
-
-    fn lower_handle(
-        &mut self,
-        body: &sem::Expr,
-        restart: &sem::Restart,
-        span: Span,
-    ) -> Result<Value, LowerError> {
-        let mut results = self.lower_handle_results(body, restart, span)?;
-        if results.len() != 1 {
-            return Err(invalid_semantic(
-                "multiple-value handle used in a scalar expression",
-            ));
-        }
-        Ok(results.remove(0))
-    }
-
     /// Lowers `handle` as a dynamic handler binding around a protected body.
     ///
     /// The body runs in a region whose clauses pop the binding on every
@@ -5037,24 +4972,13 @@ impl<'module> BodyLowering<'module> {
         if body_values.len() != results.len() {
             return Err(invalid_semantic("handle body arity does not match restart"));
         }
-        for (body_value, result) in body_values.iter().zip(&results) {
-            if body_value.kind != result.kind {
-                return Err(invalid_semantic("handle body kind does not match restart"));
-            }
-        }
         let body_reachable = body_values.iter().all(|value| value.reachable);
         if body_reachable {
             self.instructions.push(Instr::PopBinding {
                 token: token.reg,
                 span,
             });
-            for (result, body_value) in results.iter().zip(&body_values) {
-                self.instructions.push(Instr::Move {
-                    dst: result.reg,
-                    src: body_value.reg,
-                    span: body.span(),
-                });
-            }
+            self.move_results(&results, &body_values, body.span())?;
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -5132,22 +5056,9 @@ impl<'module> BodyLowering<'module> {
         if restart_values.len() != results.len() {
             return Err(invalid_semantic("restart arity does not match handle"));
         }
-        for (restart_value, result) in restart_values.iter().zip(&results) {
-            if restart_value.kind != result.kind {
-                return Err(invalid_semantic(
-                    "restart result kind does not match handle",
-                ));
-            }
-        }
         let restart_reachable = restart_values.iter().all(|value| value.reachable);
         if restart_reachable {
-            for (result, restart_value) in results.iter().zip(&restart_values) {
-                self.instructions.push(Instr::Move {
-                    dst: result.reg,
-                    src: restart_value.reg,
-                    span: restart.body.span(),
-                });
-            }
+            self.move_results(&results, &restart_values, restart.body.span())?;
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -7745,6 +7656,47 @@ mod tests {
         assert!(dump.contains("slot.read %r"));
         assert!(dump.contains("<bad>.fallback"));
         assert!(dump.contains(" = mov "));
+    }
+
+    #[test]
+    fn joins_lower_at_the_kind_semantic_analysis_gave_them() {
+        // Each branch is a `<shape>` after its cast, but holds a different
+        // subclass; the `if`, the `handle` and the `block` all produce the
+        // `<shape>` semantic analysis joined them at.
+        let module = lower_source(
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define class <square> (<shape>)\nend;\n\
+             define class <oops> (<object>)\nend;\n\
+             define function by-if(c :: <boolean>)\n  \
+               if c then as(<shape>, make(<circle>)) else as(<shape>, make(<square>)) end\nend;\n\
+             define function by-handle(c :: <boolean>)\n  \
+               handle if c then signal(make(<oops>)) else make(<circle>) end\n  \
+               with restart e :: <oops> as(<shape>, make(<square>)) end\nend;\n\
+             define function by-block(c :: <boolean>) => <shape>\n  \
+               block (return) if c then return(make(<square>)) else make(<circle>) end end\nend;",
+        );
+
+        for name in ["by-if", "by-handle", "by-block"] {
+            let function = module
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .expect("function was lowered");
+            assert_eq!(
+                function.ret,
+                ValueKind::Object(Some(sem::ClassId(1))),
+                "{name}"
+            );
+            // Every branch is statically a `<shape>`: no runtime cast.
+            assert!(
+                !function
+                    .instructions
+                    .iter()
+                    .any(|instr| matches!(instr, Instr::CastObject { .. })),
+                "{name}"
+            );
+        }
     }
 
     #[test]

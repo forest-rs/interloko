@@ -1022,9 +1022,10 @@ impl Module {
     ///
     /// This reads the categories semantic lowering already recorded on the
     /// expression tree (call result contracts, refined local kinds, cast
-    /// targets) and does not re-check anything. Expressions that produce zero
-    /// or several values, and `if` expressions whose branches disagree, report
-    /// [`ValueKind::Error`].
+    /// targets) and does not re-check anything. An `if`, and a `block` with an
+    /// exit, report the join of their arms: the arm category that holds the
+    /// other's values. Expressions that produce zero or several values, and
+    /// joins whose arms do not join, report [`ValueKind::Error`].
     #[must_use]
     pub fn expr_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
@@ -1076,7 +1077,7 @@ impl Module {
                     scalar_result_kind(&generic.result_kinds)
                 }),
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
-            Expr::Block { body, .. } => self.expr_kind(&body.result),
+            Expr::Block { .. } => scalar_result_kind(&self.expr_kinds(expr)),
             Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
             Expr::Cast { class, .. } => self
                 .builtin_value_kind(*class)
@@ -1087,16 +1088,69 @@ impl Module {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                let then_kind = self.expr_kind(then_branch);
-                if then_kind == self.expr_kind(else_branch) {
-                    then_kind
-                } else {
-                    ValueKind::Error
-                }
-            }
+            } => join_arm_kind(
+                self.expr_kind(then_branch),
+                self.expr_kind(else_branch),
+                |expected, actual| self.kind_holds(expected, actual),
+            )
+            .unwrap_or(ValueKind::Error),
             Expr::Error { .. } => ValueKind::Error,
         }
+    }
+
+    /// Returns the value categories `expr` produces, in order.
+    ///
+    /// This is [`Module::expr_kind`] for expressions that may produce several
+    /// values: `values(...)`, calls, `signal`, `handle`, and the `if` and
+    /// `block` joins over them. A join whose arms do not join reports one
+    /// [`ValueKind::Error`].
+    #[must_use]
+    pub fn expr_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
+        let join = |lhs: &[ValueKind], rhs: &[ValueKind]| {
+            join_arm_kinds(lhs, rhs, |expected, actual| {
+                self.kind_holds(expected, actual)
+            })
+            .unwrap_or_else(|| vec![ValueKind::Error])
+        };
+        match expr {
+            Expr::Values { result_kinds, .. }
+            | Expr::CallableCall { result_kinds, .. }
+            | Expr::Signal { result_kinds, .. } => result_kinds.clone(),
+            Expr::DirectCall { function, .. } => {
+                self.functions.get(function.0 as usize).map_or_else(
+                    || vec![ValueKind::Error],
+                    |function| function.result_kinds.clone(),
+                )
+            }
+            Expr::GenericCall { generic, .. } => self.generics.get(generic.0 as usize).map_or_else(
+                || vec![ValueKind::Error],
+                |generic| generic.result_kinds.clone(),
+            ),
+            Expr::Handle { restart, .. } => restart.result_kinds.clone(),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => join(&self.expr_kinds(then_branch), &self.expr_kinds(else_branch)),
+            Expr::Block {
+                exit: Some(exit),
+                body,
+                ..
+            } => join(&self.expr_kinds(&body.result), &exit.result_kinds),
+            Expr::Block { body, .. } => self.expr_kinds(&body.result),
+            _ => vec![self.expr_kind(expr)],
+        }
+    }
+
+    /// Returns whether values of category `actual` may flow where `expected`
+    /// is required; the relation semantic checking used to build this module.
+    fn kind_holds(&self, expected: ValueKind, actual: ValueKind) -> bool {
+        kind_holds(
+            expected,
+            actual,
+            |class, ancestor| self.is_same_or_subclass(class, ancestor),
+            |kind| self.value_kind_class(kind),
+        )
     }
 }
 
@@ -1484,6 +1538,91 @@ fn integer_types_differ(lhs: &[ValueKind], rhs: &[ValueKind]) -> bool {
             && NumericKind::of(*lhs).is_some_and(NumericKind::is_integer)
             && NumericKind::of(*rhs).is_some_and(NumericKind::is_integer)
     })
+}
+
+/// Returns whether every value of category `actual` is also a value of
+/// category `expected`, so `actual` may flow where `expected` is required.
+///
+/// `class_of` names the nominal class that bounds a category's values, and
+/// `is_same_or_subclass` walks the class chain. [`ValueKind::Error`] matches
+/// anything, because the erroneous expression has already been reported.
+fn kind_holds(
+    expected: ValueKind,
+    actual: ValueKind,
+    is_same_or_subclass: impl Fn(ClassId, ClassId) -> bool,
+    class_of: impl Fn(ValueKind) -> Option<ClassId>,
+) -> bool {
+    (matches!(expected, ValueKind::Any)
+        && !matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_)))
+        || (matches!(expected, ValueKind::Callable)
+            && matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_)))
+        || matches!((expected, actual), (ValueKind::Object(expected), ValueKind::Object(actual)) if is_same_or_subclass(actual, expected))
+        || class_of(actual).is_some_and(|actual| matches!(expected, ValueKind::Object(expected) if is_same_or_subclass(actual, expected)))
+        || expected == actual
+        // `<i32>` and `<u32>` are subtypes of `<integer>`; they widen
+        // exactly.
+        || matches!(
+            (expected, actual),
+            (ValueKind::I64, ValueKind::I32 | ValueKind::U32)
+        )
+        || matches!(expected, ValueKind::Error)
+        || matches!(actual, ValueKind::Error)
+}
+
+/// Returns the category of a value that comes from one of two control-flow
+/// arms, such as the branches of an `if`: the arm category that holds the
+/// other's values, or `None` when neither does.
+///
+/// Lowering gives the joined expression this category and converts each arm
+/// to it, so `holds` must be the same relation semantic checking accepts
+/// elsewhere. An erroneous arm makes the join erroneous.
+fn join_arm_kind(
+    lhs: ValueKind,
+    rhs: ValueKind,
+    holds: impl Fn(ValueKind, ValueKind) -> bool,
+) -> Option<ValueKind> {
+    if lhs == rhs {
+        return Some(lhs);
+    }
+    if lhs == ValueKind::Error || rhs == ValueKind::Error {
+        return Some(ValueKind::Error);
+    }
+    // An unboxed number does not become an abstract numeric object such as
+    // `<number>`, which has no single representation to convert it to.
+    let unboxed = |kind| {
+        matches!(
+            kind,
+            ValueKind::I64 | ValueKind::F64 | ValueKind::I32 | ValueKind::U32 | ValueKind::F32
+        )
+    };
+    if (unboxed(lhs) && matches!(rhs, ValueKind::Object(_)))
+        || (unboxed(rhs) && matches!(lhs, ValueKind::Object(_)))
+    {
+        return None;
+    }
+    if holds(lhs, rhs) {
+        Some(lhs)
+    } else if holds(rhs, lhs) {
+        Some(rhs)
+    } else {
+        None
+    }
+}
+
+/// Joins two result lists position by position with [`join_arm_kind`].
+/// Lists of different lengths do not join.
+fn join_arm_kinds(
+    lhs: &[ValueKind],
+    rhs: &[ValueKind],
+    holds: impl Fn(ValueKind, ValueKind) -> bool,
+) -> Option<Vec<ValueKind>> {
+    if lhs.len() != rhs.len() {
+        return None;
+    }
+    lhs.iter()
+        .zip(rhs)
+        .map(|(lhs, rhs)| join_arm_kind(*lhs, *rhs, &holds))
+        .collect()
 }
 
 /// Returns the value category of a limited integer type.
@@ -3183,9 +3322,10 @@ pub struct Restart {
     pub guard: Option<Box<Expr>>,
     /// Handler body evaluated when a matching condition is signaled.
     pub body: Box<Expr>,
-    /// Handler result categories.
+    /// Result categories of the whole `handle`: the join of the protected
+    /// body's results and the handler body's results.
     pub result_kinds: Vec<ValueKind>,
-    /// Typed callable signatures for handler results, when known.
+    /// Typed callable signatures for those results, when known.
     pub result_callable_sigs: Vec<Option<CallableSignature>>,
     /// Source span.
     pub span: Span,
@@ -5062,15 +5202,20 @@ impl Lowering {
             .collect()
     }
 
+    /// Joins one inferred result position across two methods: the method
+    /// kind that holds the other's values, as an `if` joins its branches,
+    /// else the top category the two share.
     fn join_result_kind(&self, current: ValueKind, next: ValueKind) -> Option<ValueKind> {
-        if current == next {
-            return Some(current);
-        }
         if current == ValueKind::Error {
             return Some(next);
         }
         if next == ValueKind::Error {
             return Some(current);
+        }
+        if let Some(joined) = join_arm_kind(current, next, |expected, actual| {
+            self.kinds_match(expected, actual)
+        }) {
+            return Some(joined);
         }
         if self.is_callable_kind(current) && self.is_callable_kind(next) {
             return Some(ValueKind::Callable);
@@ -6119,7 +6264,7 @@ impl Lowering {
                 }
                 let then_kinds = self.expr_kinds(&then_branch);
                 let else_kinds = self.expr_kinds(&else_branch);
-                if !self.result_kinds_match(&then_kinds, &else_kinds)
+                if self.join_arm_kinds(&then_kinds, &else_kinds).is_none()
                     && !result_kinds_contain_error(&then_kinds)
                     && !result_kinds_contain_error(&else_kinds)
                 {
@@ -7197,10 +7342,10 @@ impl Lowering {
         self.adopt_divergent_kinds(&mut body, &restart_body);
 
         let body_kinds = self.expr_kinds(&body);
+        let joined = self.join_arm_kinds(&body_kinds, &restart_kinds);
         // Both sides already fixed the restart's result kinds, so integer
         // types must agree exactly here; nothing widens one to the other.
-        if (!self.result_kinds_match(&body_kinds, &restart_kinds)
-            || integer_types_differ(&body_kinds, &restart_kinds))
+        if (joined.is_none() || integer_types_differ(&body_kinds, &restart_kinds))
             && !result_kinds_contain_error(&body_kinds)
             && !result_kinds_contain_error(&restart_kinds)
         {
@@ -7217,6 +7362,15 @@ impl Lowering {
             );
         }
 
+        // The handle produces whichever arm runs, so its results are the
+        // join; the handler's callable signatures describe them only while
+        // the join is the handler's own kinds.
+        let result_kinds = joined.unwrap_or_else(|| restart_kinds.clone());
+        let result_callable_sigs = if result_kinds == restart_kinds {
+            restart_callable_sigs
+        } else {
+            vec![None; result_kinds.len()]
+        };
         Expr::Handle {
             body: Box::new(body),
             restart: Restart {
@@ -7224,8 +7378,8 @@ impl Lowering {
                 condition_local,
                 guard,
                 body: Box::new(restart_body),
-                result_kinds: restart_kinds,
-                result_callable_sigs: restart_callable_sigs,
+                result_kinds,
+                result_callable_sigs,
                 span: restart.span,
             },
             span,
@@ -7294,8 +7448,12 @@ impl Lowering {
                 let result = core::mem::replace(&mut body.result, Expr::Error { span });
                 body.result = promote_operand(result, from, NumericKind::Integer);
             }
+            // The block produces the body's values or the exit's, so the two
+            // must join; the block's result kinds are that join.
             let body_kinds = self.expr_kinds(&body.result);
-            if !self.result_kinds_match(&body_kinds, &exit.result_kinds)
+            if self
+                .join_arm_kinds(&body_kinds, &exit.result_kinds)
+                .is_none()
                 && !result_kinds_contain_error(&body_kinds)
             {
                 ctx.diagnostics.push(
@@ -8266,17 +8424,14 @@ impl Lowering {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                let then_kind = self.expr_kind(then_branch);
-                let else_kind = self.expr_kind(else_branch);
-                if then_kind == else_kind {
-                    then_kind
-                } else {
-                    ValueKind::Error
-                }
-            }
+            } => join_arm_kind(
+                self.expr_kind(then_branch),
+                self.expr_kind(else_branch),
+                |expected, actual| self.kinds_match(expected, actual),
+            )
+            .unwrap_or(ValueKind::Error),
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
-            Expr::Block { body, .. } => self.expr_kind(&body.result),
+            Expr::Block { .. } => scalar_result_kind(&self.expr_kinds(expr)),
             Expr::Error { .. } => ValueKind::Error,
         }
     }
@@ -8302,16 +8457,19 @@ impl Lowering {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                let then_kinds = self.expr_kinds(then_branch);
-                if then_kinds == self.expr_kinds(else_branch) {
-                    then_kinds
-                } else {
-                    vec![ValueKind::Error]
-                }
-            }
+            } => self
+                .join_arm_kinds(&self.expr_kinds(then_branch), &self.expr_kinds(else_branch))
+                .unwrap_or_else(|| vec![ValueKind::Error]),
             Expr::Signal { result_kinds, .. } => result_kinds.clone(),
             Expr::Handle { restart, .. } => restart.result_kinds.clone(),
+            // Values leaving through the exit join the body's own results.
+            Expr::Block {
+                exit: Some(exit),
+                body,
+                ..
+            } => self
+                .join_arm_kinds(&self.expr_kinds(&body.result), &exit.result_kinds)
+                .unwrap_or_else(|| vec![ValueKind::Error]),
             Expr::Block { body, .. } => self.expr_kinds(&body.result),
             _ => vec![self.expr_kind(expr)],
         }
@@ -8782,26 +8940,19 @@ impl Lowering {
     }
 
     fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
-        (matches!(expected, ValueKind::Any)
-            && !matches!(
-                actual,
-                ValueKind::Callable | ValueKind::KnownCallable(_)
-            ))
-            || (matches!(expected, ValueKind::Callable)
-                && matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_)))
-            || matches!((expected, actual), (ValueKind::Object(expected), ValueKind::Object(actual)) if self.is_same_or_subclass(actual, expected))
-            || self
-                .value_kind_class(actual)
-                .is_some_and(|actual| matches!(expected, ValueKind::Object(expected) if self.is_same_or_subclass(actual, expected)))
-            || expected == actual
-            // `<i32>` and `<u32>` are subtypes of `<integer>`; they widen
-            // exactly.
-            || matches!(
-                (expected, actual),
-                (ValueKind::I64, ValueKind::I32 | ValueKind::U32)
-            )
-            || matches!(expected, ValueKind::Error)
-            || matches!(actual, ValueKind::Error)
+        kind_holds(
+            expected,
+            actual,
+            |class, ancestor| self.is_same_or_subclass(class, ancestor),
+            |kind| self.value_kind_class(kind),
+        )
+    }
+
+    /// Joins the result kinds of two control-flow arms; see [`join_arm_kinds`].
+    fn join_arm_kinds(&self, lhs: &[ValueKind], rhs: &[ValueKind]) -> Option<Vec<ValueKind>> {
+        join_arm_kinds(lhs, rhs, |expected, actual| {
+            self.kinds_match(expected, actual)
+        })
     }
 
     fn generic_specializer_matches(

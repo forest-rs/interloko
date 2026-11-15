@@ -1,0 +1,25 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump sem contains result=object(<shape>)
+
+// Each branch casts a different subclass up to `<shape>`, so the `if` is a
+// `<shape>`. The casts are static: they change the value's class, not the
+// value, and lowering gives the `if` the class semantic analysis did.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 3;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define function pick(c :: <boolean>) => <shape>
+  if c then as(<shape>, make(<circle>)) else as(<shape>, make(<square>, size: 4)) end
+end;
+
+define function main() => <integer>
+  pick(#t).size + pick(#f).size
+end;

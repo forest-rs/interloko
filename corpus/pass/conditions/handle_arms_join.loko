@@ -1,0 +1,46 @@
+// expect: run 15
+// expect: diagnostics 0
+
+// A `handle` produces its body's values or its handler's, so its result is
+// the join of the two: here `<shape>`, whichever arm holds the subclass.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 5;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define class <oops> (<object>)
+end;
+
+define function cast-arms(c :: <boolean>) => <shape>
+  handle
+    if c then signal(make(<oops>)) else as(<shape>, make(<circle>)) end
+  with restart e :: <oops>
+    as(<shape>, make(<square>))
+  end
+end;
+
+define function narrow-body(c :: <boolean>) => <shape>
+  handle
+    if c then signal(make(<oops>)) else make(<circle>) end
+  with restart e :: <oops>
+    as(<shape>, make(<square>))
+  end
+end;
+
+define function narrow-handler(c :: <boolean>)
+  handle
+    if c then signal(make(<oops>)) else make(<shape>) end
+  with restart e :: <oops>
+    make(<circle>)
+  end
+end;
+
+define function main() => <integer>
+  cast-arms(#t).size + narrow-body(#f).size + narrow-handler(#t).size
+end;

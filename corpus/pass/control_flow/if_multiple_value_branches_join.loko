@@ -1,0 +1,27 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// Multiple-value branches join position by position.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 5;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define function pick(c :: <boolean>)
+  if c then
+    values(as(<shape>, make(<circle>)), 1)
+  else
+    values(as(<shape>, make(<square>)), 2)
+  end
+end;
+
+define function main() => <integer>
+  let (s :: <shape>, n :: <integer>) = pick(#f);
+  s.size + n - 1
+end;
