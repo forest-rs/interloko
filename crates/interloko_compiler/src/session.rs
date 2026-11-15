@@ -1728,9 +1728,12 @@ pub enum MutationError {
         /// Underlying runtime layout error.
         error: RuntimeLayoutError,
     },
-    /// The target is a built-in numeric generic. Its methods on numbers are
-    /// sealed (see [`sem::GenericFunctionOrigin::admits_method`]), and Loko
-    /// method source cannot name it yet, so no method can be added.
+    /// The target generic is sealed, so no method can be added to it from
+    /// outside its source: either the source declares it `define sealed
+    /// generic`, or it is a built-in numeric generic, whose methods on
+    /// numbers are sealed (see
+    /// [`sem::GenericFunctionOrigin::admits_method`]) and which Loko method
+    /// source cannot name yet.
     SealedGeneric {
         /// Target generic id supplied by the caller.
         generic: sem::GenericFunctionId,
@@ -3002,10 +3005,13 @@ impl SessionArtifacts {
             .get(generic.0 as usize)
             .ok_or(MutationError::UnknownGeneric { generic })?
             .clone();
+        // A session mutation comes from outside the source, which a sealed
+        // generic's methods are confined to.
         if matches!(
             target_generic.origin,
             sem::GenericFunctionOrigin::Numeric { .. }
-        ) {
+        ) || target_generic.sealing.is_sealed()
+        {
             return Err(MutationError::SealedGeneric { generic });
         }
 
@@ -7568,6 +7574,16 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
     }
 }
 
+/// Labels a class's sealing and abstractness, as `sealing=sealed
+/// abstract=yes`.
+fn sem_class_sealing_label(class: &sem::Class) -> String {
+    format!(
+        "sealing={} abstract={}",
+        class.sealing.as_str(),
+        if class.is_abstract { "yes" } else { "no" }
+    )
+}
+
 fn dump_sem(module: &sem::Module) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "sem {}", module.source_file);
@@ -7576,7 +7592,7 @@ fn dump_sem(module: &sem::Module) -> String {
         let superclass_chain = sem_superclass_chain_label(module, class.id);
         let _ = writeln!(
             out,
-            "class c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={}",
+            "class c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={} {}",
             class.id.0,
             class.definition,
             class.name,
@@ -7584,7 +7600,8 @@ fn dump_sem(module: &sem::Module) -> String {
             class.finalized,
             class.direct_slots.len(),
             class.effective_slots.len(),
-            sem_initialization_plan_summary(module, class)
+            sem_initialization_plan_summary(module, class),
+            sem_class_sealing_label(class)
         );
         for slot in &class.direct_slots {
             let _ = writeln!(
@@ -7677,13 +7694,14 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "generic g{} {} {}({params}) result={} return={return_annotation} dispatch-params={} origin={}",
+            "generic g{} {} {}({params}) result={} return={return_annotation} dispatch-params={} origin={} sealing={}",
             generic.id.0,
             generic.definition,
             generic.name,
             sem_kind_list_label(module, &generic.result_kinds),
             dispatch_params_label(&generic.dispatch_params),
-            sem_generic_origin_label(generic.origin)
+            sem_generic_origin_label(generic.origin),
+            generic.sealing.as_str()
         );
     }
     for method in &module.methods {
@@ -7925,7 +7943,7 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
         let superclass_chain = sem_superclass_chain_label(module, class.id);
         let _ = writeln!(
             out,
-            "  c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={} runtime={runtime_kind}",
+            "  c{} {} {} origin={} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={} runtime={runtime_kind} {}",
             class.id.0,
             class.definition,
             class.name,
@@ -7933,7 +7951,8 @@ fn dump_mop(artifacts: &SessionArtifacts) -> String {
             class.finalized,
             class.direct_slots.len(),
             class.effective_slots.len(),
-            sem_initialization_plan_summary(module, class)
+            sem_initialization_plan_summary(module, class),
+            sem_class_sealing_label(class)
         );
         let _ = writeln!(out, "    direct-slots:");
         for slot in &class.direct_slots {
@@ -11318,14 +11337,15 @@ fn project_environment_class(
         ]),
         execution: None,
         inspection: format!(
-            "definition={} class-id=c{} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={} accepted-keywords={} initialize-methods=deferred override=explicit-init-args-over-defaults runtime={runtime_kind}",
+            "definition={} class-id=c{} superclass={superclass} chain={superclass_chain} finalized={} direct-slots={} effective-slots={} init-plan={} accepted-keywords={} initialize-methods=deferred override=explicit-init-args-over-defaults runtime={runtime_kind} {}",
             class.definition,
             class.id.0,
             class.finalized,
             class.direct_slots.len(),
             class.effective_slots.len(),
             sem_initialization_plan_summary(module, class),
-            sem_initialization_keywords(class)
+            sem_initialization_keywords(class),
+            sem_class_sealing_label(class)
         ),
     }));
 
@@ -11449,7 +11469,8 @@ fn project_environment_generic(
         .join(";");
     let generated = !matches!(generic.origin, sem::GenericFunctionOrigin::Source);
     let mut affordances = Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::ShowDispatch]);
-    if !generated {
+    // A sealed generic takes no method from outside its source.
+    if !generated && !generic.sealing.is_sealed() {
         affordances.push(Aff::AddMethod);
     }
     sink.emit(environment_object(EnvironmentObjectParts {
@@ -11478,10 +11499,11 @@ fn project_environment_generic(
             dispatch_params_label(&generic.dispatch_params)
         )),
         inspection: format!(
-            "definition={} generic-id=g{} origin={} dispatch={dispatch}",
+            "definition={} generic-id=g{} origin={} dispatch={dispatch} sealing={}",
             generic.definition,
             generic.id.0,
-            sem_generic_origin_label(generic.origin)
+            sem_generic_origin_label(generic.origin),
+            generic.sealing.as_str()
         ),
     }));
 }
@@ -13709,9 +13731,10 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 name: class.name.clone(),
             },
             fingerprint: format!(
-                "class:{}:{}:super={}:direct={}:effective={}",
+                "class:{}:{}:{}:super={}:direct={}:effective={}",
                 class.name,
                 sem_class_origin_label(class.origin),
+                sem_class_sealing_label(class),
                 sem_superclass_label(module, class.superclass),
                 class
                     .direct_slots
@@ -13858,8 +13881,9 @@ fn definition_sem_fingerprint(module: &sem::Module, definition: DefinitionId) ->
 /// infers from the methods.
 fn generic_definition_fingerprint(module: &sem::Module, generic: &sem::GenericFunction) -> String {
     format!(
-        "generic:{}:{}:{}:{}:contract={:?}",
+        "generic:{}:{}:{}:{}:{}:contract={:?}",
         generic.name,
+        generic.sealing.as_str(),
         generic
             .param_kinds
             .iter()
@@ -19776,6 +19800,142 @@ end;
     }
 
     #[test]
+    fn a_sealed_generic_takes_no_method_from_a_session_mutation() {
+        let source =
+            MUTATION_FIXTURE.replace("define generic area(x);", "define sealed generic area(x);");
+        let mut artifacts =
+            CompilerSession::compile_source("sealed_area.loko", &source, RuntimeMode::CompileOnly);
+        assert!(!artifacts.has_errors());
+        let area = generic_id(&artifacts, "area");
+        let generic = artifacts
+            .environment_objects()
+            .into_iter()
+            .find(|object| object.id.as_str() == format!("generic:g{}", area.0))
+            .expect("generic object");
+        assert!(
+            !generic
+                .affordances
+                .contains(EnvironmentAffordance::AddMethod),
+            "a sealed generic offers no add-method"
+        );
+        assert!(generic.inspection.detail.ends_with(" sealing=sealed"));
+
+        let result = artifacts.apply_mutation(SessionMutation::AddMethod {
+            generic: area,
+            method_source: "define method area(s :: <square>)\n  s.side * s.side\nend;".into(),
+        });
+        assert!(matches!(
+            result,
+            Err(MutationError::SealedGeneric { generic }) if generic == area
+        ));
+        assert_eq!(artifacts.mutations().len(), 0);
+    }
+
+    #[test]
+    fn sealing_a_generic_that_session_mutations_extended_fails_their_replay() {
+        let artifacts = fixture_with_two_session_mutations();
+        let sealed = artifacts
+            .pristine_source
+            .replace("define generic area(x);", "define sealed generic area(x);");
+        let outcome = artifacts.replay_against(&build_source_file(&sealed));
+        let failure = outcome.failed.expect("the first add-method is refused");
+        assert_eq!(failure.log_index, 0);
+        assert!(matches!(
+            failure.cause,
+            MutationError::SealedGeneric { generic } if generic == generic_id(&artifacts, "area")
+        ));
+        assert!(outcome.applied.is_empty());
+    }
+
+    #[test]
+    fn an_abstract_class_has_no_direct_instances() {
+        let source = "define abstract class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 1;\nend;\n\
+             define function direct() => <shape>\n  make(<shape>)\nend;";
+        let artifacts =
+            CompilerSession::compile_source("abstract.loko", source, RuntimeMode::CompileOnly);
+        let codes = artifacts
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(codes, [DiagnosticCode::AbstractClassMake]);
+
+        // A class value may name a subclass, so `make` on one bounded by an
+        // abstract class compiles, and only concrete classes are candidates:
+        // a value naming the abstract class itself traps.
+        let source = "define abstract class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\n  slot radius :: <integer>, init-value: 1;\nend;\n\
+             define function build(c :: class <shape>) => <shape>\n  make(c)\nend;\n\
+             define function circle() => <integer>\n  as(<circle>, build(<circle>)).radius\nend;\n\
+             define function shape() => <integer>\n  as(<circle>, build(<shape>)).radius\nend;";
+        let artifacts =
+            CompilerSession::compile_source("abstract.loko", source, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let candidates = artifacts
+            .sem
+            .functions
+            .iter()
+            .find(|function| function.name == "build")
+            .and_then(|function| match &function.body.result {
+                sem::Expr::MakeRuntimeClass { candidates, .. } => Some(
+                    candidates
+                        .iter()
+                        .map(|candidate| {
+                            artifacts.sem.classes[candidate.class.0 as usize]
+                                .name
+                                .clone()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            });
+        assert_eq!(candidates, Some(vec!["<circle>".to_string()]));
+        assert!(matches!(
+            run_scalar(&artifacts, "circle"),
+            Ok(FunctionValue::Integer(1))
+        ));
+        assert!(run_scalar(&artifacts, "shape").is_err());
+    }
+
+    #[test]
+    fn sealing_reaches_the_runtime_layout_and_its_hierarchy() {
+        use interloko_model::types::ClassHierarchy;
+
+        let source = "define sealed abstract class <shape> (<object>)\nend;\n\
+             define sealed class <circle> (<shape>)\nend;\n\
+             define class <square> (<shape>)\nend;\n\
+             define sealed generic area(s :: <shape>);";
+        let artifacts =
+            CompilerSession::compile_source("sealed.loko", source, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let sem = &artifacts.sem;
+        let layout = &artifacts.code_unit().expect("tape").layout;
+        let class = |name: &str| layout.class_id(name).expect("class");
+        let (shape, circle, square) = (class("<shape>"), class("<circle>"), class("<square>"));
+        for hierarchy in [sem as &dyn ClassHierarchy, layout as &dyn ClassHierarchy] {
+            assert_eq!(
+                hierarchy.sealed_subclasses(shape),
+                Some(vec![circle, square])
+            );
+            assert_eq!(hierarchy.sealed_subclasses(circle), Some(Vec::new()));
+            assert_eq!(hierarchy.sealed_subclasses(square), None);
+            assert!(hierarchy.is_abstract(shape));
+            assert!(!hierarchy.is_abstract(circle));
+            // A sealed concrete class with no subclasses is closed.
+            assert!(hierarchy.is_closed(circle));
+            assert!(!hierarchy.is_closed(shape));
+            assert!(!hierarchy.is_closed(square));
+        }
+        assert_eq!(
+            layout
+                .generic(sem.generics[0].id)
+                .map(|generic| generic.sealing),
+            Some(Sealing::Sealed)
+        );
+    }
+
+    #[test]
     fn apply_add_method_rejects_extra_class_definition() {
         let mut artifacts = mutation_fixture();
         let area = generic_id(&artifacts, "area");
@@ -20936,6 +21096,7 @@ end;
     use alloc::vec;
     use interloko_model::condition::TypeErrorKind;
     use interloko_model::contract::{Contract, ContractBreak, ContractPosition};
+    use interloko_model::sealing::Sealing;
     use interloko_runtime::chooser::{Choice, OfferedRestart, UnhandledCondition};
 
     const UNHANDLED_SAMPLE: &str = "define class <bad-sample> (<object>)\n  slot value :: <double-float>;\nend;\n\

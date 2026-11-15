@@ -1,7 +1,8 @@
 grammar base-loko
 rule source-file = definition*
 rule definition = class-definition | generic-definition | method-definition | function-definition | constant-definition
-rule class-definition = `define` `class` type-definition-name superclass? slot-declaration* `end` `;`?
+rule class-definition = `define` class-adjective* `class` type-definition-name superclass? slot-declaration* `end` `;`?
+rule class-adjective = `sealed` | `open` | `abstract` | `concrete`
 rule type-definition-name = type-name
 rule superclass = `(` superclass-type `)`
 rule superclass-type = type-name
@@ -16,11 +17,12 @@ rule init-keyword-option = `init-keyword` `:` slot-keyword
 rule required-init-keyword-option = `required-init-keyword` `:` slot-keyword
 rule extension-slot-option = name `:` slot-keyword
 rule slot-keyword = name `:`
-rule generic-definition = `define` `generic` value-definition-name `(` parameter-list? `)` result-annotation? `;`
+rule generic-definition = `define` generic-adjective* `generic` value-definition-name `(` parameter-list? `)` result-annotation? `;`
 rule method-definition = `define` `method` value-definition-name `(` parameter-list? `)` result-annotation? body `end` `;`?
 rule function-definition = `define` `function` value-definition-name `(` parameter-list? `)` result-annotation? body `end` `;`?
 rule constant-definition = `define` `constant` value-definition-name type-annotation? `=` expression `;`
 rule value-definition-name = name
+rule generic-adjective = `sealed` | `open`
 rule parameter-list = trailing-list-of<parameter, `,`>
 rule parameter = parameter-name type-annotation?
 rule parameter-name = name

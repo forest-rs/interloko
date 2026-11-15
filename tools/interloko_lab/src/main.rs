@@ -1294,7 +1294,7 @@ fn format_mutation_error(error: &MutationError) -> String {
         }
         MutationError::SealedGeneric { generic } => {
             format!(
-                "generic g{} is a sealed built-in numeric generic",
+                "generic g{} is sealed: its methods are the ones its source defines",
                 generic.0
             )
         }

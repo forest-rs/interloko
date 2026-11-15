@@ -247,6 +247,8 @@ mod tests {
             name: name.into(),
             kind: HostObjectKind::Native,
             superclass,
+            sealing: interloko_model::sealing::Sealing::Open,
+            is_abstract: false,
             slots,
         }
     }

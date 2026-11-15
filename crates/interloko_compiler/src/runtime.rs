@@ -32,6 +32,8 @@ pub fn runtime_layout_from_sem(module: &sem::Module) -> RtRuntimeLayout {
                     sem::ClassOrigin::HostBacked { .. } => RtHostObjectKind::HostBacked,
                 },
                 superclass: class.superclass,
+                sealing: class.sealing,
+                is_abstract: class.is_abstract,
                 slots: class
                     .effective_slots
                     .iter()
@@ -56,6 +58,7 @@ pub fn runtime_layout_from_sem(module: &sem::Module) -> RtRuntimeLayout {
             .map(|generic| RtRuntimeGeneric {
                 name: generic.name.clone(),
                 arity: generic.arity,
+                sealing: generic.sealing,
                 methods: module
                     .methods
                     .iter()

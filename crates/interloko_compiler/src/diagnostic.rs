@@ -76,6 +76,11 @@ pub enum DiagnosticCode {
     AstInvalidSignal,
     /// `:=` was used with something other than an object slot target.
     AstInvalidSlotAssignment,
+    /// A definition repeats an adjective, as in `define sealed sealed class`.
+    AstDuplicateAdjective,
+    /// A definition has two adjectives that contradict each other, such as
+    /// `sealed` and `open`, or `abstract` and `concrete`.
+    AstConflictingAdjectives,
     /// A source definition duplicates an existing definition.
     DuplicateDefinition,
     /// A class inherits from an unknown superclass.
@@ -205,6 +210,8 @@ pub enum DiagnosticCode {
     HostBackedMake,
     /// A built-in value class was passed to `make`.
     BuiltinValueMake,
+    /// `make` names an abstract class, which has no direct instances.
+    AbstractClassMake,
     /// A construction keyword appears more than once.
     DuplicateInitKeyword,
     /// A construction keyword is not accepted by the class.
@@ -325,6 +332,8 @@ impl DiagnosticCode {
         Self::AstInvalidCast,
         Self::AstInvalidSignal,
         Self::AstInvalidSlotAssignment,
+        Self::AstDuplicateAdjective,
+        Self::AstConflictingAdjectives,
         Self::DuplicateDefinition,
         Self::UnresolvedSuperclass,
         Self::InvalidPrimitiveSuperclass,
@@ -387,6 +396,7 @@ impl DiagnosticCode {
         Self::MakeClassArgumentTypeMismatch,
         Self::HostBackedMake,
         Self::BuiltinValueMake,
+        Self::AbstractClassMake,
         Self::DuplicateInitKeyword,
         Self::UnknownInitKeyword,
         Self::SlotInitializerTypeMismatch,
@@ -455,6 +465,8 @@ impl DiagnosticCode {
             Self::AstInvalidCast => "ast.invalid-cast",
             Self::AstInvalidSignal => "ast.invalid-signal",
             Self::AstInvalidSlotAssignment => "ast.invalid-slot-assignment",
+            Self::AstDuplicateAdjective => "ast.duplicate-adjective",
+            Self::AstConflictingAdjectives => "ast.conflicting-adjectives",
             Self::DuplicateDefinition => "sem.duplicate-definition",
             Self::UnresolvedSuperclass => "sem.unresolved-superclass",
             Self::InvalidPrimitiveSuperclass => "sem.invalid-primitive-superclass",
@@ -519,6 +531,7 @@ impl DiagnosticCode {
             Self::MakeClassArgumentTypeMismatch => "sem.make-class-argument-type-mismatch",
             Self::HostBackedMake => "sem.host-backed-make",
             Self::BuiltinValueMake => "sem.builtin-value-make",
+            Self::AbstractClassMake => "sem.abstract-class-make",
             Self::DuplicateInitKeyword => "sem.duplicate-init-keyword",
             Self::UnknownInitKeyword => "sem.unknown-init-keyword",
             Self::SlotInitializerTypeMismatch => "sem.slot-initializer-type-mismatch",
@@ -588,6 +601,8 @@ impl DiagnosticCode {
             "ast.invalid-cast" => Self::AstInvalidCast,
             "ast.invalid-signal" => Self::AstInvalidSignal,
             "ast.invalid-slot-assignment" => Self::AstInvalidSlotAssignment,
+            "ast.duplicate-adjective" => Self::AstDuplicateAdjective,
+            "ast.conflicting-adjectives" => Self::AstConflictingAdjectives,
             "sem.duplicate-definition" => Self::DuplicateDefinition,
             "sem.unresolved-superclass" => Self::UnresolvedSuperclass,
             "sem.invalid-primitive-superclass" => Self::InvalidPrimitiveSuperclass,
@@ -652,6 +667,7 @@ impl DiagnosticCode {
             "sem.make-class-argument-type-mismatch" => Self::MakeClassArgumentTypeMismatch,
             "sem.host-backed-make" => Self::HostBackedMake,
             "sem.builtin-value-make" => Self::BuiltinValueMake,
+            "sem.abstract-class-make" => Self::AbstractClassMake,
             "sem.duplicate-init-keyword" => Self::DuplicateInitKeyword,
             "sem.unknown-init-keyword" => Self::UnknownInitKeyword,
             "sem.slot-initializer-type-mismatch" => Self::SlotInitializerTypeMismatch,
