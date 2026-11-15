@@ -7744,14 +7744,15 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "generic g{} {} {}({params}) result={} return={return_annotation} dispatch-params={} origin={} sealing={}",
+            "generic g{} {} {}({params}) result={} return={return_annotation} dispatch-params={} origin={} sealing={}{}",
             generic.id.0,
             generic.definition,
             generic.name,
             sem_kind_list_label(module, &generic.result_kinds),
             dispatch_params_label(&generic.dispatch_params),
             sem_generic_origin_label(generic.origin),
-            generic.sealing.as_str()
+            generic.sealing.as_str(),
+            strict_label(generic.strict)
         );
     }
     for method in &module.methods {
@@ -7761,13 +7762,14 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "method m{} {} generic=g{} specializers={} result={} return={return_annotation} origin={}",
+            "method m{} {} generic=g{} specializers={} result={} return={return_annotation} origin={}{}",
             method.id.0,
             method.definition,
             method.generic.0,
             sem_specializer_vector_label(module, &method.specializers),
             sem_kind_list_label(module, &method.result_kinds),
-            sem_method_origin_label(method.origin)
+            sem_method_origin_label(method.origin),
+            strict_label(method.strict)
         );
         dump_sem_locals(module, &mut out, &method.locals, 2);
         dump_sem_block(&mut out, &method.body, 2);
@@ -7775,11 +7777,12 @@ fn dump_sem(module: &sem::Module) -> String {
     for constant in &module.constants {
         let _ = writeln!(
             out,
-            "constant k{} {} {} result={}",
+            "constant k{} {} {} result={}{}",
             constant.id.0,
             constant.definition,
             constant.name,
-            sem_kind_label(module, constant.result_kind)
+            sem_kind_label(module, constant.result_kind),
+            strict_label(constant.strict)
         );
         dump_sem_expr(&mut out, &constant.value, 2);
     }
@@ -7841,16 +7844,23 @@ fn dump_sem(module: &sem::Module) -> String {
         );
         let _ = writeln!(
             out,
-            "function f{} {} {}({params}) result={} return={return_annotation}",
+            "function f{} {} {}({params}) result={} return={return_annotation}{}",
             function.id.0,
             function.definition,
             function.name,
-            sem_kind_list_label(module, &function.result_kinds)
+            sem_kind_list_label(module, &function.result_kinds),
+            strict_label(function.strict)
         );
         dump_sem_locals(module, &mut out, &function.locals, 2);
         dump_sem_block(&mut out, &function.body, 2);
     }
     out
+}
+
+/// ` strict` for a definition declared `strict`, and nothing otherwise, so
+/// dumps of code that never opts in are unchanged.
+const fn strict_label(strict: bool) -> &'static str {
+    if strict { " strict" } else { "" }
 }
 
 fn dump_mop(artifacts: &SessionArtifacts) -> String {
@@ -13989,7 +13999,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Generic,
                 name: generic.name.clone(),
             },
-            fingerprint: generic_definition_fingerprint(module, generic),
+            fingerprint: format!(
+                "{}{}",
+                generic_definition_fingerprint(module, generic),
+                strict_label(generic.strict)
+            ),
         });
     }
     for method in &module.methods {
@@ -13999,7 +14013,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Method,
                 name: method_definition_name(module, method),
             },
-            fingerprint: method_definition_fingerprint(module, method),
+            fingerprint: format!(
+                "{}{}",
+                method_definition_fingerprint(module, method),
+                strict_label(method.strict)
+            ),
         });
     }
     for function in &module.functions {
@@ -14009,7 +14027,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Function,
                 name: function.name.clone(),
             },
-            fingerprint: function_definition_fingerprint(module, function),
+            fingerprint: format!(
+                "{}{}",
+                function_definition_fingerprint(module, function),
+                strict_label(function.strict)
+            ),
         });
     }
     for constant in &module.constants {
@@ -14019,7 +14041,11 @@ fn definitions(module: &sem::Module) -> Vec<DefinitionFingerprint> {
                 kind: DefinitionKind::Constant,
                 name: constant.name.clone(),
             },
-            fingerprint: constant_definition_fingerprint(module, constant),
+            fingerprint: format!(
+                "{}{}",
+                constant_definition_fingerprint(module, constant),
+                strict_label(constant.strict)
+            ),
         });
     }
     definitions

@@ -49,6 +49,10 @@ pub struct Function {
     pub return_type: Option<ResultAnnotation>,
     /// Function body.
     pub body: Block,
+    /// `define strict ...`: typing must prove every check the compiler
+    /// inserts into this definition's body (see [`crate::typing`]'s
+    /// *Strict typing*), rather than leave it to the runtime.
+    pub strict: bool,
     /// Source span.
     pub span: Span,
 }
@@ -66,6 +70,10 @@ pub struct Constant {
     pub type_annotation: Option<TypeExpr>,
     /// Initializer expression.
     pub value: Expr,
+    /// `define strict ...`: typing must prove every check the compiler
+    /// inserts into this definition's body (see [`crate::typing`]'s
+    /// *Strict typing*), rather than leave it to the runtime.
+    pub strict: bool,
     /// Source span.
     pub span: Span,
 }
@@ -344,6 +352,9 @@ pub struct Generic {
     /// `define sealed generic` or the default `open`: whether the generic
     /// may gain methods from outside its source.
     pub sealing: Sealing,
+    /// `define strict generic`: every method of the generic is held to
+    /// strict typing, as if each were `define strict method`.
+    pub strict: bool,
     /// Source span.
     pub span: Span,
 }
@@ -376,6 +387,10 @@ pub struct Method {
     pub return_type: Option<ResultAnnotation>,
     /// Method body.
     pub body: Block,
+    /// `define strict ...`: typing must prove every check the compiler
+    /// inserts into this definition's body (see [`crate::typing`]'s
+    /// *Strict typing*), rather than leave it to the runtime.
+    pub strict: bool,
     /// Source span.
     pub span: Span,
 }
@@ -907,6 +922,7 @@ struct Lowering<'tree> {
 struct Adjectives {
     sealing: Sealing,
     is_abstract: bool,
+    strict: bool,
 }
 
 impl<'tree> Lowering<'tree> {
@@ -1008,13 +1024,15 @@ impl<'tree> Lowering<'tree> {
                 continue;
             }
             let opposite = match *word {
-                "sealed" => "open",
-                "open" => "sealed",
-                "abstract" => "concrete",
-                "concrete" => "abstract",
-                _ => continue,
+                "sealed" => Some("open"),
+                "open" => Some("sealed"),
+                "abstract" => Some("concrete"),
+                "concrete" => Some("abstract"),
+                _ => None,
             };
-            if earlier.iter().any(|(_, other)| *other == opposite) {
+            if let Some(opposite) = opposite
+                && earlier.iter().any(|(_, other)| *other == opposite)
+            {
                 self.diagnostics.push(
                     Diagnostic::error(*span, DiagnosticCode::AstConflictingAdjectives)
                         .with_arg(DiagnosticArg::text("adjective", *word))
@@ -1025,6 +1043,7 @@ impl<'tree> Lowering<'tree> {
             match *word {
                 "sealed" => adjectives.sealing = Sealing::Sealed,
                 "abstract" => adjectives.is_abstract = true,
+                "strict" => adjectives.strict = true,
                 _ => {}
             }
         }
@@ -1193,14 +1212,15 @@ impl<'tree> Lowering<'tree> {
             }
         }
 
-        let sealing = self.adjectives(node, TokenKind::Generic).sealing;
+        let adjectives = self.adjectives(node, TokenKind::Generic);
         Generic {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Generic, &name, ""),
             name,
             params,
             return_type,
-            sealing,
+            sealing: adjectives.sealing,
+            strict: adjectives.strict,
             span: node.span,
         }
     }
@@ -1246,6 +1266,7 @@ impl<'tree> Lowering<'tree> {
             .collect::<Vec<_>>()
             .join(",");
         let definition = self.definition(DefinitionKind::Method, &name, &specializers);
+        let strict = self.adjectives(node, TokenKind::Method).strict;
         Method {
             id: self.ast_id(node),
             definition,
@@ -1253,6 +1274,7 @@ impl<'tree> Lowering<'tree> {
             params,
             return_type,
             body,
+            strict,
             span: node.span,
         }
     }
@@ -1308,6 +1330,7 @@ impl<'tree> Lowering<'tree> {
             span: node.span,
         });
 
+        let strict = self.adjectives(node, TokenKind::Function).strict;
         Function {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Function, &name, ""),
@@ -1315,6 +1338,7 @@ impl<'tree> Lowering<'tree> {
             params,
             return_type,
             body,
+            strict,
             span: node.span,
         }
     }
@@ -1338,12 +1362,14 @@ impl<'tree> Lowering<'tree> {
                 id: self.ast_id(node),
                 span: node.span,
             });
+        let strict = self.adjectives(node, TokenKind::Constant).strict;
         Constant {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Constant, &name, ""),
             name,
             type_annotation,
             value,
+            strict,
             span: node.span,
         }
     }
@@ -2993,6 +3019,7 @@ impl FrontendFormLowering {
                 params: Vec::new(),
                 return_type: None,
                 body: self.lower_function_body(form, region_slug, form_index),
+                strict: false,
                 span: form.source_span,
             }),
             FrontendFormKind::Class(class) => module.classes.push(Class {
@@ -3290,6 +3317,71 @@ mod tests {
         assert!(!tree.diagnostics.is_empty(), "a generic cannot be abstract");
         let tree = parse("define sealed function f() => <integer>\n  1\nend;");
         assert!(!tree.diagnostics.is_empty(), "a function cannot be sealed");
+        let tree = parse("define strict class <c> (<object>)\nend;");
+        assert!(!tree.diagnostics.is_empty(), "a class cannot be strict");
+    }
+
+    #[test]
+    fn strict_marks_functions_methods_generics_and_constants() {
+        let tree = parse(
+            "define strict sealed generic area(s :: <object>) => <integer>;\n\
+             define generic name(s :: <object>);\n\
+             define strict method name(s :: <object>) => <integer>\n  1\nend;\n\
+             define method area(s :: <object>) => <integer>\n  2\nend;\n\
+             define strict function f() => <integer>\n  3\nend;\n\
+             define function g() => <integer>\n  4\nend;\n\
+             define strict constant $k = 5;\n\
+             define constant $j = 6;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        assert_eq!(
+            module
+                .generics
+                .iter()
+                .map(|generic| (generic.name.as_str(), generic.strict))
+                .collect::<Vec<_>>(),
+            [("area", true), ("name", false)]
+        );
+        assert_eq!(module.generics[0].sealing, Sealing::Sealed);
+        assert_eq!(
+            module
+                .methods
+                .iter()
+                .map(|method| (method.name.as_str(), method.strict))
+                .collect::<Vec<_>>(),
+            [("name", true), ("area", false)]
+        );
+        assert_eq!(
+            module
+                .functions
+                .iter()
+                .map(|function| (function.name.as_str(), function.strict))
+                .collect::<Vec<_>>(),
+            [("f", true), ("g", false)]
+        );
+        assert_eq!(
+            module
+                .constants
+                .iter()
+                .map(|constant| (constant.name.as_str(), constant.strict))
+                .collect::<Vec<_>>(),
+            [("$k", true), ("$j", false)]
+        );
+
+        let module = lower(&parse(
+            "define strict strict function f() => <integer>\n  1\nend;",
+        ));
+        assert_eq!(
+            module
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect::<Vec<_>>(),
+            [DiagnosticCode::AstDuplicateAdjective]
+        );
+        assert!(module.functions[0].strict);
     }
 
     #[test]
