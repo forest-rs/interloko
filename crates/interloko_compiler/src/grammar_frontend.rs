@@ -3036,22 +3036,27 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "generic-adjective",
-            "`sealed` | `open`",
+            "`sealed` | `open` | `strict`",
             "ast.rs:Lowering::lower_generic",
         ),
         (
+            "definition-adjective",
+            "`strict`",
+            "ast.rs:Lowering::adjectives",
+        ),
+        (
             "method-definition",
-            "`define method` value-definition-name parameter-list result-annotation? body `end`",
+            "`define` definition-adjective* `method` value-definition-name parameter-list result-annotation? body `end`",
             "syntax.rs:Parser::parse_method",
         ),
         (
             "function-definition",
-            "`define function` value-definition-name parameter-list result-annotation? body `end`",
+            "`define` definition-adjective* `function` value-definition-name parameter-list result-annotation? body `end`",
             "syntax.rs:Parser::parse_function",
         ),
         (
             "constant-definition",
-            "`define constant` value-definition-name type-annotation? `=` expression `;`",
+            "`define` definition-adjective* `constant` value-definition-name type-annotation? `=` expression `;`",
             "base_loko_primary::BaseLokoCstBuilder::build_constant",
         ),
         (
@@ -4294,7 +4299,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 55);
+        assert_eq!(grammar.effective_rules.len(), 56);
 
         assert!(
             !records

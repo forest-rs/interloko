@@ -18,11 +18,12 @@ rule required-init-keyword-option = `required-init-keyword` `:` slot-keyword
 rule extension-slot-option = name `:` slot-keyword
 rule slot-keyword = name `:`
 rule generic-definition = `define` generic-adjective* `generic` value-definition-name `(` parameter-list? `)` result-annotation? `;`
-rule method-definition = `define` `method` value-definition-name `(` parameter-list? `)` result-annotation? body `end` `;`?
-rule function-definition = `define` `function` value-definition-name `(` parameter-list? `)` result-annotation? body `end` `;`?
-rule constant-definition = `define` `constant` value-definition-name type-annotation? `=` expression `;`
+rule method-definition = `define` definition-adjective* `method` value-definition-name `(` parameter-list? `)` result-annotation? body `end` `;`?
+rule function-definition = `define` definition-adjective* `function` value-definition-name `(` parameter-list? `)` result-annotation? body `end` `;`?
+rule constant-definition = `define` definition-adjective* `constant` value-definition-name type-annotation? `=` expression `;`
 rule value-definition-name = name
-rule generic-adjective = `sealed` | `open`
+rule generic-adjective = `sealed` | `open` | `strict`
+rule definition-adjective = `strict`
 rule parameter-list = trailing-list-of<parameter, `,`>
 rule parameter = parameter-name type-annotation?
 rule parameter-name = name

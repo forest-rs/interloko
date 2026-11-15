@@ -2434,6 +2434,9 @@ pub struct GenericFunction {
     /// generics are [`Sealing::Open`]; what they admit is
     /// [`GenericFunctionOrigin::admits_method`]'s.
     pub sealing: Sealing,
+    /// `define strict generic`: every method of the generic is held to
+    /// strict typing. Built-in generics are never strict.
+    pub strict: bool,
 }
 
 /// Origin of a semantic method metaobject.
@@ -2504,6 +2507,11 @@ pub struct Method {
     pub span: Span,
     /// Source or synthesized origin.
     pub origin: MethodOrigin,
+    /// `define strict method`: typing must prove the checks the compiler
+    /// inserts into the body (see [`crate::typing`]). A method of a strict
+    /// generic is held to strict typing too; see
+    /// [`crate::typing::strictness`].
+    pub strict: bool,
 }
 
 /// Semantic function body and local table.
@@ -2545,6 +2553,9 @@ pub struct Function {
     /// Checks the function's indirect entry makes, when the function is
     /// used as a value; empty otherwise. Direct calls trust its contract.
     pub entry_checks: Vec<EntryCheck>,
+    /// `define strict function`: typing must prove the checks the compiler
+    /// inserts into the body (see [`crate::typing`]).
+    pub strict: bool,
     /// Source span.
     pub span: Span,
 }
@@ -2677,6 +2688,9 @@ pub struct Constant {
     pub result_kind: ValueKind,
     /// Typed callable signature when the constant is a typed callable value.
     pub callable_signature: Option<CallableSignature>,
+    /// `define strict constant`: typing must prove the checks the compiler
+    /// inserts into the initializer (see [`crate::typing`]).
+    pub strict: bool,
     /// Source span.
     pub span: Span,
 }
@@ -5075,6 +5089,7 @@ impl Lowering {
                 span: generic.span,
                 origin: GenericFunctionOrigin::Source,
                 sealing: generic.sealing,
+                strict: generic.strict,
             });
         }
     }
@@ -5174,6 +5189,7 @@ impl Lowering {
                 span: slot_span,
                 origin,
                 sealing: Sealing::Open,
+                strict: false,
             });
         }
     }
@@ -5234,6 +5250,7 @@ impl Lowering {
             span: Span::default(),
             origin: GenericFunctionOrigin::Numeric { operator },
             sealing: Sealing::Open,
+            strict: false,
         });
         self.numeric_generics.push((operator, id));
         id
@@ -5339,6 +5356,7 @@ impl Lowering {
                     return_annotation: Some(result_kinds),
                     span: Span::default(),
                     origin: MethodOrigin::Numeric { operator },
+                    strict: false,
                 });
             }
         }
@@ -5475,6 +5493,7 @@ impl Lowering {
                     class,
                     slot: slot.id,
                 },
+                strict: false,
             });
         }
     }
@@ -5813,6 +5832,7 @@ impl Lowering {
                 value,
                 result_kind,
                 callable_signature,
+                strict: constant.strict,
                 span: constant.span,
             });
         }
@@ -6244,6 +6264,7 @@ impl Lowering {
             return_annotation,
             span: method.span,
             origin: MethodOrigin::Source,
+            strict: method.strict,
         }
     }
 
@@ -6371,6 +6392,7 @@ impl Lowering {
             result_ranges,
             return_annotation,
             entry_checks: Vec::new(),
+            strict: function.strict,
             span: function.span,
         }
     }
