@@ -21,11 +21,14 @@
 //!   whenever it is reached.
 //!
 //! Verdicts are computed bidirectionally. Argument and operand types are
-//! *synthesized* from facts sem already recorded ([`sem::Module::expr_kind`])
-//! plus the exact runtime class when it is statically known
-//! ([`StaticType`]). Each obligation then *checks* its operand against the
-//! expectation supplied by its context (a cast target or the generic's method
-//! specializers); checking distributes over `if` and handler branches and
+//! *synthesized* ([`synthesize`]) as [`Type`]s of the shared lattice in
+//! [`interloko_model::types`]: sem's recorded category of each expression
+//! ([`sem::Module::expr_kind`]) mapped to the values it can hold
+//! ([`sem::Module::kind_type`]), narrowed by what the expression's shape
+//! proves, such as the exact class of a `make`. Each obligation then
+//! *checks* its operand against the expectation supplied by its context (a
+//! cast target or the generic's method specializers) with
+//! [`Type::relate`]; checking distributes over `if` and handler branches and
 //! joins the per-branch verdicts.
 //!
 //! The pass is advisory. Its facts are recorded per enclosing definition
@@ -39,22 +42,24 @@
 //! The pass runs only when semantic lowering produced no diagnostics, so it
 //! never repeats or contradicts a hard semantic error.
 //!
-//! # Scalar value kinds
+//! # Types
 //!
-//! The pass has no type representation of its own: [`StaticType`] is a
-//! [`ValueKind`] plus an optional exact class. Scalars reach it through their
-//! classes: [`ValueKind::F64`] is bounded by `<double-float>` and
-//! [`ValueKind::F32`] by `<single-float>` via
-//! [`sem::Module::value_kind_class`], and those classes are exact because
-//! nothing inherits from them. [`ValueKind::I32`] and [`ValueKind::U32`] are
-//! limited `<integer>` types rather than classes, so they are bounded by
-//! `<integer>`, which is what their values are. Abstract numeric classes (`<number>`, `<real>`,
-//! `<rational>`, `<float>`) have built-in subclasses, so they are only ever upper bounds.
-//! A new scalar kind needs the same class mapping in
-//! [`sem::Module::value_kind_class`] and [`sem::Module::builtin_value_kind`];
-//! a kind without a runtime class must also be placed in the class-less arm
-//! of this module's specializer fit, which matches [`ValueKind`]
-//! exhaustively for that reason.
+//! A [`Type`] is a normalized union of atoms: class cones and exact
+//! classes, `<integer>` ranges, booleans, metaobject singletons, and
+//! callables (see [`interloko_model::types`]). [`sem::Module`] is the
+//! [`ClassHierarchy`](interloko_model::types::ClassHierarchy) the lattice
+//! is computed against. Because a [`ValueKind`](sem::ValueKind) is a
+//! representation rather than a type, `<i32>` and `<u32>` values are
+//! `<integer>` ranges, `<double-float>` and `<single-float>` values have
+//! exactly those closed classes, and abstract numeric classes (`<number>`,
+//! `<real>`, `<rational>`, `<float>`) are only ever cones.
+//!
+//! Synthesis keeps one invariant, checked in debug builds: the synthesized
+//! type of an expression is a subtype of
+//! `kind_type(expr_kind(expression))`. The soft pass only narrows what sem
+//! allowed; it never contradicts it. An operand that sem's own narrowing
+//! proves unreachable, such as a cast whose value can never have the target
+//! class, synthesizes [`Type::bottom`], which satisfies every expectation.
 
 use alloc::format;
 use alloc::string::String;
@@ -62,9 +67,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use interloko_model::types::{Atom, Metaobject, Relation, Type};
+
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, Severity};
 use crate::identity::{DefinitionId, DefinitionKind};
-use crate::sem::{self, ClassId, ClassOrigin, GenericFunctionId, MethodId, ValueKind};
+use crate::sem::{self, ClassId, GenericFunctionId, MethodId};
 use crate::syntax::Span;
 
 /// Residual runtime check classified by the soft typing pass.
@@ -296,21 +303,6 @@ impl Default for TypingConfig {
     }
 }
 
-/// Synthesized static type of one expression.
-///
-/// `kind` is the category semantic lowering recorded; for class-shaped kinds
-/// it is an upper bound on the runtime class. `exact_class` is the runtime
-/// class itself when it is statically known: a `make` of a known class, or a
-/// value of a class that cannot be subclassed (built-in value classes and
-/// host-backed classes).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct StaticType {
-    /// Semantic value category.
-    pub kind: ValueKind,
-    /// Exact runtime class, when statically known.
-    pub exact_class: Option<ClassId>,
-}
-
 /// Expectation an obligation checks its operands against.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypingExpectation {
@@ -390,7 +382,7 @@ pub struct TypingDecision {
     pub expected: TypingExpectation,
     /// Synthesized operand types: one per argument for dispatch, one value
     /// for a cast.
-    pub actual: Vec<StaticType>,
+    pub actual: Vec<Type>,
     /// Method a dispatch statically selects when every argument's exact
     /// runtime class is known.
     pub selected_method: Option<MethodId>,
@@ -553,7 +545,7 @@ impl TypingArtifact {
                 decision.span.start,
                 decision.span.end,
                 expectation_label(module, &decision.expected),
-                static_type_name_list(module, &decision.actual),
+                type_name_list(module, &decision.actual),
                 self.severity(decision).as_str()
             );
         }
@@ -652,13 +644,22 @@ pub fn check_definition(
 }
 
 /// Synthesizes the static type of `expr`.
+///
+/// The result is `kind_type(expr_kind(expr))` narrowed by what the
+/// expression's shape proves, and never wider than it.
 #[must_use]
-pub fn synthesize(module: &sem::Module, expr: &sem::Expr) -> StaticType {
-    let kind = module.expr_kind(expr);
-    StaticType {
-        kind,
-        exact_class: exact_class(module, expr, kind),
-    }
+pub fn synthesize(module: &sem::Module, expr: &sem::Expr) -> Type {
+    let bound = module.kind_type(module.expr_kind(expr));
+    let Some(narrowed) = structural_type(module, expr, &bound) else {
+        return bound;
+    };
+    debug_assert!(
+        narrowed.is_subtype(&bound, module),
+        "soft type {} of {expr:?} is not within sem's {}",
+        type_name(module, &narrowed),
+        type_name(module, &bound),
+    );
+    narrowed
 }
 
 /// Alternatives explored before a conditional operand collapses to its
@@ -709,9 +710,10 @@ impl Checker<'_> {
     }
 
     fn cast(&mut self, value: &sem::Expr, class: ClassId, span: Span) {
+        let target = Type::of(Atom::Cone(class), self.module);
         let verdicts = alternatives(self.module, value)
             .into_iter()
-            .map(|alternative| fit(self.module, alternative, Some(class)).verdict())
+            .map(|alternative| verdict(alternative.relate(&target, self.module)))
             .collect::<Vec<_>>();
         let (verdict, rule) = joined(TypingCheck::Cast, &verdicts);
         self.decisions.push(TypingDecision {
@@ -734,6 +736,16 @@ impl Checker<'_> {
             .iter()
             .filter(|method| method.generic == generic)
             .collect::<Vec<_>>();
+        let specializers = methods
+            .iter()
+            .map(|method| {
+                method
+                    .specializers
+                    .iter()
+                    .map(|specializer| specializer_type(self.module, *specializer))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         let actual = args
             .iter()
             .map(|arg| synthesize(self.module, arg))
@@ -755,26 +767,26 @@ impl Checker<'_> {
         let verdicts = tuples
             .iter()
             .map(|tuple| {
-                methods
+                let relation = specializers
                     .iter()
-                    .filter(|method| method.specializers.len() == tuple.len())
-                    .map(|method| {
-                        method.specializers.iter().zip(tuple).fold(
-                            Fit::Always,
+                    .filter(|specializers| specializers.len() == tuple.len())
+                    .map(|specializers| {
+                        specializers.iter().zip(tuple).fold(
+                            Relation::Always,
                             |acc, (specializer, arg)| {
-                                acc.meet(fit(self.module, *arg, *specializer))
+                                all_hold(acc, arg.relate(specializer, self.module))
                             },
                         )
                     })
-                    .fold(Fit::Never, Fit::best)
-                    .verdict()
+                    .fold(Relation::Never, any_holds);
+                verdict(relation)
             })
             .collect::<Vec<_>>();
         let (verdict, rule) = joined(TypingCheck::Dispatch, &verdicts);
 
         let selected_method = actual
             .iter()
-            .map(|arg| arg.exact_class)
+            .map(|arg| arg.exact_class(self.module))
             .collect::<Option<Vec<_>>>()
             .and_then(
                 |exact| match self.module.select_method_for_classes(generic, &exact) {
@@ -822,96 +834,42 @@ fn joined(check: TypingCheck, verdicts: &[TypingVerdict]) -> (TypingVerdict, Typ
     (*first, rule)
 }
 
-/// How an operand relates to one class expectation.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Fit {
-    /// Every runtime value of the operand satisfies the expectation.
-    Always,
-    /// Some runtime values may satisfy it.
-    Maybe,
-    /// No runtime value of the operand satisfies it.
-    Never,
-}
-
-impl Fit {
-    /// Combines expectations that must all hold.
-    const fn meet(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Never, _) | (_, Self::Never) => Self::Never,
-            (Self::Maybe, _) | (_, Self::Maybe) => Self::Maybe,
-            (Self::Always, Self::Always) => Self::Always,
-        }
-    }
-
-    /// Combines alternatives where any one suffices.
-    const fn best(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Always, _) | (_, Self::Always) => Self::Always,
-            (Self::Maybe, _) | (_, Self::Maybe) => Self::Maybe,
-            (Self::Never, Self::Never) => Self::Never,
-        }
-    }
-
-    /// Verdict for a check whose expectation relates to its operand this way.
-    const fn verdict(self) -> TypingVerdict {
-        match self {
-            Self::Always => TypingVerdict::Proved,
-            Self::Maybe => TypingVerdict::Checked,
-            Self::Never => TypingVerdict::Refuted,
-        }
+/// Combines relations to expectations that must all hold.
+const fn all_hold(left: Relation, right: Relation) -> Relation {
+    match (left, right) {
+        (Relation::Never, _) | (_, Relation::Never) => Relation::Never,
+        (Relation::Maybe, _) | (_, Relation::Maybe) => Relation::Maybe,
+        (Relation::Always, Relation::Always) => Relation::Always,
     }
 }
 
-/// Relates an operand to a specializer or cast target.
-///
-/// `None` and `<object>` accept every value.
-fn fit(module: &sem::Module, operand: StaticType, expected: Option<ClassId>) -> Fit {
-    let Some(expected) = expected else {
-        return Fit::Always;
-    };
-    if expected == sem::OBJECT_CLASS_ID {
-        return Fit::Always;
+/// Combines relations to alternative expectations where any one suffices.
+const fn any_holds(left: Relation, right: Relation) -> Relation {
+    match (left, right) {
+        (Relation::Always, _) | (_, Relation::Always) => Relation::Always,
+        (Relation::Maybe, _) | (_, Relation::Maybe) => Relation::Maybe,
+        (Relation::Never, Relation::Never) => Relation::Never,
     }
-    if let Some(exact) = operand.exact_class {
-        return if module.is_same_or_subclass(exact, expected) {
-            Fit::Always
-        } else {
-            Fit::Never
-        };
+}
+
+/// Verdict for a check whose operand relates to its expectation this way.
+const fn verdict(relation: Relation) -> TypingVerdict {
+    match relation {
+        Relation::Always => TypingVerdict::Proved,
+        Relation::Maybe => TypingVerdict::Checked,
+        Relation::Never => TypingVerdict::Refuted,
     }
-    if let Some(bound) = module.value_kind_class(operand.kind) {
-        return if module.is_same_or_subclass(bound, expected) {
-            Fit::Always
-        } else if module.classes_may_overlap(bound, expected) {
-            Fit::Maybe
-        } else {
-            Fit::Never
-        };
-    }
-    // Class-less categories. Listed exhaustively so a new value kind must
-    // decide where it belongs.
-    match operand.kind {
-        ValueKind::Any | ValueKind::Error => Fit::Maybe,
-        ValueKind::Bool | ValueKind::Callable | ValueKind::KnownCallable(_) => Fit::Never,
-        ValueKind::I64
-        | ValueKind::F64
-        | ValueKind::I32
-        | ValueKind::U32
-        | ValueKind::F32
-        | ValueKind::String(_)
-        | ValueKind::Symbol(_)
-        | ValueKind::Vector(_)
-        | ValueKind::Object(_)
-        | ValueKind::ClassObject(_)
-        | ValueKind::GenericFunctionObject(_)
-        | ValueKind::MethodObject(_)
-        | ValueKind::SlotDescriptorObject { .. } => Fit::Maybe,
-    }
+}
+
+/// Values a method specializer accepts; a missing specializer accepts
+/// every value.
+fn specializer_type(module: &sem::Module, specializer: sem::MethodSpecializer) -> Type {
+    specializer.map_or_else(Type::top, |class| Type::of(Atom::Cone(class), module))
 }
 
 /// Check-mode operand types: conditional operands contribute one type per
 /// branch, everything else its synthesized type.
-fn alternatives(module: &sem::Module, expr: &sem::Expr) -> Vec<StaticType> {
+fn alternatives(module: &sem::Module, expr: &sem::Expr) -> Vec<Type> {
     let mut out = Vec::new();
     collect_alternatives(module, expr, &mut out);
     if out.len() > MAX_ALTERNATIVES {
@@ -920,7 +878,7 @@ fn alternatives(module: &sem::Module, expr: &sem::Expr) -> Vec<StaticType> {
     out
 }
 
-fn collect_alternatives(module: &sem::Module, expr: &sem::Expr, out: &mut Vec<StaticType>) {
+fn collect_alternatives(module: &sem::Module, expr: &sem::Expr, out: &mut Vec<Type>) {
     if out.len() > MAX_ALTERNATIVES {
         return;
     }
@@ -942,14 +900,14 @@ fn collect_alternatives(module: &sem::Module, expr: &sem::Expr, out: &mut Vec<St
     }
 }
 
-fn cartesian(per_arg: &[Vec<StaticType>]) -> Vec<Vec<StaticType>> {
+fn cartesian(per_arg: &[Vec<Type>]) -> Vec<Vec<Type>> {
     let mut tuples = vec![Vec::new()];
     for options in per_arg {
         let mut next = Vec::with_capacity(tuples.len().saturating_mul(options.len()));
         for tuple in &tuples {
             for option in options {
                 let mut extended = tuple.clone();
-                extended.push(*option);
+                extended.push(option.clone());
                 next.push(extended);
             }
         }
@@ -958,60 +916,40 @@ fn cartesian(per_arg: &[Vec<StaticType>]) -> Vec<Vec<StaticType>> {
     tuples
 }
 
-fn exact_class(module: &sem::Module, expr: &sem::Expr, kind: ValueKind) -> Option<ClassId> {
-    let structural = match expr {
-        sem::Expr::MakeObject { class_id, .. } => Some(*class_id),
-        sem::Expr::Cast { value, .. } => synthesize(module, value).exact_class,
+/// Narrows `bound`, the type of the expression's sem category, by what the
+/// expression's shape proves. Returns `None` when the shape adds nothing.
+fn structural_type(module: &sem::Module, expr: &sem::Expr, bound: &Type) -> Option<Type> {
+    match expr {
+        sem::Expr::MakeObject { class_id, .. } => Some(Type::of(Atom::Exact(*class_id), module)),
+        sem::Expr::ClassObject { class, .. } => {
+            Some(Type::of(Atom::Singleton(Metaobject::Class(*class)), module))
+        }
+        // The cast passes exactly the values of its operand that have the
+        // target class; sem's category of the cast is that class.
+        sem::Expr::Cast { value, .. } => Some(synthesize(module, value).meet(bound, module)),
         sem::Expr::ConstantRef { constant, .. } => module
             .constants
             .get(constant.0 as usize)
-            .and_then(|constant| synthesize(module, &constant.value).exact_class),
+            .map(|constant| synthesize(module, &constant.value)),
         sem::Expr::Values { values, .. } => match values.as_slice() {
-            [value] => synthesize(module, value).exact_class,
+            [value] => Some(synthesize(module, value)),
             _ => None,
         },
         sem::Expr::If {
             then_branch,
             else_branch,
             ..
-        } => same_exact_class(module, then_branch, else_branch),
-        sem::Expr::Handle { body, restart, .. } => same_exact_class(module, body, &restart.body),
-        sem::Expr::Block { body, .. } => synthesize(module, &body.result).exact_class,
+        } => Some(synthesize(module, then_branch).join(&synthesize(module, else_branch), module)),
+        sem::Expr::Handle { body, restart, .. } => {
+            Some(synthesize(module, body).join(&synthesize(module, &restart.body), module))
+        }
+        // An exit procedure can supply the block's value, so only a block
+        // without one has its body's type.
+        sem::Expr::Block {
+            exit: None, body, ..
+        } => Some(synthesize(module, &body.result)),
         _ => None,
-    };
-    structural.or_else(|| {
-        module
-            .value_kind_class(kind)
-            .filter(|class| class_is_sealed(module, *class))
-    })
-}
-
-fn same_exact_class(module: &sem::Module, left: &sem::Expr, right: &sem::Expr) -> Option<ClassId> {
-    let left = synthesize(module, left).exact_class?;
-    let right = synthesize(module, right).exact_class?;
-    (left == right).then_some(left)
-}
-
-/// Source classes cannot inherit from built-in value classes or host-backed
-/// classes, so such a class is sealed when no other built-in class inherits
-/// from it either; a value bounded by a sealed class has exactly that class.
-///
-/// The check is structural rather than a list of names: abstract built-ins
-/// such as `<number>`, `<real>`, `<rational>`, and `<float>` have built-in subclasses and
-/// so are never treated as exact, while concrete leaves such as `<integer>`
-/// and `<double-float>` are.
-fn class_is_sealed(module: &sem::Module, class: ClassId) -> bool {
-    let closed = module.classes.get(class.0 as usize).is_some_and(|class| {
-        matches!(
-            class.origin,
-            ClassOrigin::BuiltinValue { .. } | ClassOrigin::HostBacked { .. }
-        )
-    });
-    closed
-        && !module
-            .classes
-            .iter()
-            .any(|other| other.superclass == Some(class))
+    }
 }
 
 fn for_each_child(expr: &sem::Expr, mut visit: impl FnMut(&sem::Expr)) {
@@ -1133,60 +1071,32 @@ fn decision_diagnostic(
             ))
             .with_arg(DiagnosticArg::text(
                 "arguments",
-                static_type_name_list(module, &decision.actual),
+                type_name_list(module, &decision.actual),
             )),
         TypingExpectation::Class(class) => diagnostic
             .with_arg(DiagnosticArg::text("expected", class_name(module, *class)))
             .with_arg(DiagnosticArg::text(
                 "actual",
-                static_type_name_list(module, &decision.actual),
+                type_name_list(module, &decision.actual),
             )),
     };
     Some(diagnostic.with_arg(DiagnosticArg::text("rule", decision.rule.as_str())))
 }
 
-/// Returns a source-level name for a synthesized type, such as `<circle>` or
-/// `exactly <circle>`.
+/// Returns a source-level name for a synthesized type, such as `<circle>`,
+/// `exactly <circle>`, or `<i32>`.
 #[must_use]
-pub fn static_type_name(module: &sem::Module, ty: StaticType) -> String {
-    if let Some(exact) = ty.exact_class {
-        // A sealed class already names exactly one runtime class.
-        return if class_is_sealed(module, exact) {
-            class_name(module, exact)
-        } else {
-            format!("exactly {}", class_name(module, exact))
-        };
-    }
-    match ty.kind {
-        ValueKind::Any => "<object>".into(),
-        ValueKind::Bool => "<boolean>".into(),
-        ValueKind::Callable | ValueKind::KnownCallable(_) => "<callable>".into(),
-        ValueKind::Error => "<error>".into(),
-        ValueKind::I64
-        | ValueKind::F64
-        | ValueKind::I32
-        | ValueKind::U32
-        | ValueKind::F32
-        | ValueKind::String(_)
-        | ValueKind::Symbol(_)
-        | ValueKind::Vector(_)
-        | ValueKind::Object(_)
-        | ValueKind::ClassObject(_)
-        | ValueKind::GenericFunctionObject(_)
-        | ValueKind::MethodObject(_)
-        | ValueKind::SlotDescriptorObject { .. } => module
-            .value_kind_class(ty.kind)
-            .map_or_else(|| "<object>".into(), |class| class_name(module, class)),
-    }
+pub fn type_name(module: &sem::Module, ty: &Type) -> String {
+    format!("{}", ty.display(module))
 }
 
 /// Returns a source-level name for a list of synthesized types: the single
 /// name for one type, a parenthesized list otherwise.
 #[must_use]
-pub fn static_type_name_list(module: &sem::Module, types: &[StaticType]) -> String {
+pub fn type_name_list(module: &sem::Module, types: &[Type]) -> String {
     let names = types
         .iter()
-        .map(|ty| static_type_name(module, *ty))
+        .map(|ty| type_name(module, ty))
         .collect::<Vec<_>>();
     match names.as_slice() {
         [name] => name.clone(),
@@ -1284,6 +1194,8 @@ fn class_name(module: &sem::Module, class: ClassId) -> String {
 
 #[cfg(test)]
 mod tests {
+    use interloko_model::types::ClassHierarchy;
+
     use super::*;
     use crate::grammar_frontend;
     use crate::identity::SourceFileId;
@@ -1405,7 +1317,7 @@ mod tests {
         ));
         let decision = artifact.decisions().next().expect("decision");
         assert_eq!(decision.verdict, TypingVerdict::Refuted);
-        assert_eq!(static_type_name(&module, decision.actual[0]), "<label>");
+        assert_eq!(type_name(&module, &decision.actual[0]), "<label>");
     }
 
     #[test]
@@ -1534,16 +1446,16 @@ mod tests {
         let float = module
             .builtin_value_class(sem::BuiltinValueClass::Float)
             .expect("float");
-        assert!(class_is_sealed(&module, double_float));
-        assert!(!class_is_sealed(&module, float));
+        assert!(module.is_closed(double_float));
+        assert!(!module.is_closed(float));
         let integer = module
             .builtin_value_class(sem::BuiltinValueClass::Integer)
             .expect("integer");
         let rational = module
             .builtin_value_class(sem::BuiltinValueClass::Rational)
             .expect("rational");
-        assert!(class_is_sealed(&module, integer));
-        assert!(!class_is_sealed(&module, rational));
+        assert!(module.is_closed(integer));
+        assert!(!module.is_closed(rational));
         assert!(module.is_same_or_subclass(integer, rational));
 
         assert_eq!(
@@ -1558,17 +1470,14 @@ mod tests {
             .decisions()
             .find(|decision| decision.verdict == TypingVerdict::Refuted)
             .expect("refuted dispatch");
-        assert_eq!(refuted.actual[0].exact_class, Some(double_float));
+        assert_eq!(refuted.actual[0].exact_class(&module), Some(double_float));
         // `whole` specializes on `<integer>`, so its parameter carries boxed
         // scalars; the decision records sem's boxing choice.
         assert!(matches!(
             &refuted.expected,
             TypingExpectation::Dispatch { boxed_params, .. } if boxed_params == &[0]
         ));
-        assert_eq!(
-            static_type_name(&module, refuted.actual[0]),
-            "<double-float>"
-        );
+        assert_eq!(type_name(&module, &refuted.actual[0]), "<double-float>");
     }
 
     #[test]
@@ -1604,6 +1513,92 @@ mod tests {
             .map(|diagnostic| diagnostic.code)
             .collect::<Vec<_>>();
         assert_eq!(codes, [DiagnosticCode::TypingCastAlwaysFails]);
+    }
+
+    #[test]
+    fn limited_integer_operands_keep_their_range() {
+        let (module, artifact) = decisions_for(
+            "define generic weight(x);\n\
+             define method weight(x :: <integer>) => <integer>\n  1\nend;\n\
+             define function frames() => <u32>\n  5\nend;\n\
+             define function main() => <integer>\n  \
+             let step = 3i32 + 4;\n  weight(step) + weight(frames()) + weight(7)\nend;",
+        );
+        let decisions = main_decisions(&module, &artifact);
+        let actual = decisions
+            .iter()
+            .map(|decision| type_name_list(&module, &decision.actual))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, ["<i32>", "<u32>", "<integer>"]);
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| decision.verdict == TypingVerdict::Proved)
+        );
+        let integer = module
+            .builtin_value_class(sem::BuiltinValueClass::Integer)
+            .expect("integer");
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| decision.actual[0].exact_class(&module) == Some(integer))
+        );
+    }
+
+    #[test]
+    fn a_cast_that_always_fails_leaves_no_values_downstream() {
+        // sem types the cast as `<circle>`; its operand is exactly
+        // `<shape>`, so no value gets through and the dispatch on it is
+        // unreachable rather than refuted.
+        let (module, artifact) = decisions_for(&format!(
+            "{SHAPES}define function main()\n  area(as(<circle>, make(<shape>)))\nend;"
+        ));
+        let decisions = main_decisions(&module, &artifact);
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].check, TypingCheck::Cast);
+        assert_eq!(decisions[0].verdict, TypingVerdict::Refuted);
+        assert_eq!(decisions[1].check, TypingCheck::Dispatch);
+        assert!(decisions[1].actual[0].is_bottom());
+        assert_eq!(decisions[1].verdict, TypingVerdict::Proved);
+        assert_eq!(type_name(&module, &decisions[1].actual[0]), "type-union()");
+        assert_eq!(artifact.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn synthesis_joins_branches_and_stays_within_sem() {
+        let (module, artifact) = decisions_for(&format!(
+            "{SHAPES}define function pick(s :: <shape>)\n  \
+             as(<shape>, if 1 < 2 then as(<shape>, make(<circle>)) \
+             else as(<shape>, make(<square>)) end)\nend;\n\
+             define function same()\n  \
+             as(<shape>, if 1 < 2 then make(<circle>) else make(<circle>) end)\nend;\n\
+             define function main()\n  0\nend;"
+        ));
+        let actual = |name: &str| {
+            let function = module
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .expect("function");
+            // The outer cast is checked after the casts inside it.
+            let decision = artifact
+                .definitions
+                .iter()
+                .find(|typed| typed.definition == function.definition)
+                .and_then(|typed| typed.decisions.last())
+                .expect("decision");
+            type_name(&module, &decision.actual[0])
+        };
+        assert_eq!(
+            actual("pick"),
+            "type-union(exactly <circle>, exactly <square>)"
+        );
+        assert_eq!(actual("same"), "exactly <circle>");
+        for function in &module.functions {
+            let kind = module.expr_kind(&function.body.result);
+            let ty = synthesize(&module, &function.body.result);
+            assert!(ty.is_subtype(&module.kind_type(kind), &module));
+        }
     }
 
     #[test]

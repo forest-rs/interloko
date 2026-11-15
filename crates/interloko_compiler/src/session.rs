@@ -10793,7 +10793,7 @@ fn project_typing(
                 decision.owner,
                 decision.span.start,
                 decision.span.end,
-                typing::static_type_name_list(module, &decision.actual),
+                typing::type_name_list(module, &decision.actual),
                 severity.as_str(),
             ),
         });
@@ -10836,7 +10836,7 @@ fn explain_typing_decision(
     let _ = writeln!(
         out,
         "actual: {}",
-        typing::static_type_name_list(module, &decision.actual)
+        typing::type_name_list(module, &decision.actual)
     );
     if let typing::TypingExpectation::Dispatch { methods, .. } = &decision.expected {
         for method in methods {
