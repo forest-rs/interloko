@@ -625,6 +625,49 @@ fn a_limited_test_bounds_arithmetic_on_the_unboxed_local() {
 }
 
 #[test]
+fn a_proved_numeric_send_has_its_method_result() {
+    let (module, artifact) = decisions_for(
+        "define function main(d :: <integer>) => <integer>\n  \
+         as(<integer>, (as(<object>, d) + 1) + 2)\nend;",
+    );
+    let [inner, outer] = checks_of(&module, &artifact, "main", TypingCheck::Dispatch)
+        .try_into()
+        .expect("two sends");
+    assert_eq!(inner.verdict, TypingVerdict::Proved);
+    // The second send sees the first's result as the `<integer>` its
+    // method returns, not the generic's `<object>`, so it is proved too.
+    assert_eq!(outer.verdict, TypingVerdict::Proved);
+    assert_eq!(type_name(&module, &outer.actual[0]), "<integer>");
+    assert!(
+        chain(&module, &artifact, &outer, 0).starts_with(&format!("dispatched({})@", inner.site)),
+        "{}",
+        chain(&module, &artifact, &outer, 0)
+    );
+    // The cast relies on the method set the sends' results come from.
+    let main = typed(&module, &artifact, "main");
+    let [cast] = checks_of(&module, &artifact, "main", TypingCheck::Cast)
+        .into_iter()
+        .filter(|cast| {
+            cast.expected
+                == TypingExpectation::Class(
+                    module
+                        .builtin_value_class(sem::BuiltinValueClass::Integer)
+                        .expect("integer"),
+                )
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one cast to <integer>");
+    let TypingExpectation::Dispatch { generic, .. } = &inner.expected else {
+        panic!("a dispatch expectation");
+    };
+    assert!(
+        main.dependencies(&cast)
+            .contains(&TypingDependency::Methods(*generic))
+    );
+}
+
+#[test]
 fn integer_comparisons_narrow_both_branches() {
     let (module, artifact) = decisions_for(
         "define function f(n :: <integer>) => <i32>\n  \

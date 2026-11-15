@@ -55,6 +55,13 @@ struct Fact {
     reason: ReasonId,
 }
 
+/// The method a proved dispatch selects, and the reasons it relies on.
+#[derive(Clone, Debug)]
+struct Selected {
+    method: sem::MethodId,
+    because: Vec<ReasonId>,
+}
+
 /// A binding the environment tracks.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Var {
@@ -777,10 +784,15 @@ impl<'a> Analysis<'a> {
                 span,
             } => {
                 let facts = self.eval_all(env, args);
-                self.dispatch(env, *generic, &facts, *span, *site);
+                let selected = self.dispatch(env, *generic, &facts, *span, *site);
                 let Some(generic) = module.generics.get(generic.0 as usize) else {
                     return self.declared(expr);
                 };
+                if let Some(fact) = selected
+                    .and_then(|selected| self.numeric_result(expr, generic, selected, *site))
+                {
+                    return fact;
+                }
                 let source = contract_source(generic.return_annotation.is_some());
                 let ty = self.bound(expr);
                 self.fact(
@@ -1588,6 +1600,11 @@ impl<'a> Analysis<'a> {
         });
     }
 
+    /// Records the dispatch decision for a send of `generic` on `args`.
+    ///
+    /// Returns the method typing proved every call selects, with the
+    /// reasons the selection relies on (the arguments and the closed-world
+    /// assumptions), when there is one.
     fn dispatch(
         &mut self,
         env: &Env,
@@ -1595,7 +1612,7 @@ impl<'a> Analysis<'a> {
         args: &[Fact],
         span: Span,
         site: SiteId,
-    ) {
+    ) -> Option<Selected> {
         let module = self.module;
         let methods = module
             .methods
@@ -1655,6 +1672,17 @@ impl<'a> Analysis<'a> {
         let mut assumes = vec![self.assume(Assumption::Generic(generic))];
         let types = actual.iter().collect::<Vec<_>>();
         assumes.extend(self.class_assumptions(&types));
+        let selected = (decided == (TypingVerdict::Proved, TypingRule::DispatchCovered))
+            .then_some(selected_method)
+            .flatten()
+            .map(|method| Selected {
+                method,
+                because: args
+                    .iter()
+                    .map(|fact| fact.reason)
+                    .chain(assumes.iter().copied())
+                    .collect(),
+            });
         self.record(
             site,
             TypingCheck::Dispatch,
@@ -1671,6 +1699,50 @@ impl<'a> Analysis<'a> {
             assumes,
             selected_method,
         );
+        selected
+    }
+
+    /// The result of a send to a built-in numeric generic whose method
+    /// `selected` names: the type of the method's result category, such as
+    /// `<integer>` for `<integer> + <integer>`, instead of the generic's
+    /// `<object>` contract.
+    ///
+    /// A numeric generic is sealed over `<real>` and its methods come from
+    /// the promotion rules, so the method set fixes what the send runs; the
+    /// fact cites the dispatch's closed-world assumption. This is what lets
+    /// a chain of such sends stay proved, and unboxed, link by link.
+    fn numeric_result(
+        &mut self,
+        expr: &sem::Expr,
+        generic: &sem::GenericFunction,
+        selected: Selected,
+        site: SiteId,
+    ) -> Option<Fact> {
+        if !matches!(generic.origin, sem::GenericFunctionOrigin::Numeric { .. }) {
+            return None;
+        }
+        let method = self.module.methods.get(selected.method.0 as usize)?;
+        let [kind] = method.result_kinds.as_slice() else {
+            return None;
+        };
+        if method.generic != generic.id
+            || !matches!(method.origin, sem::MethodOrigin::Numeric { .. })
+        {
+            return None;
+        }
+        let ty = self
+            .module
+            .kind_type(*kind)
+            .meet(&self.bound(expr), self.module);
+        if ty.is_bottom() {
+            return None;
+        }
+        Some(self.fact(
+            ReasonKind::Dispatched { site },
+            expr.span(),
+            ty,
+            selected.because,
+        ))
     }
 
     #[expect(

@@ -4235,35 +4235,17 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::GenericCall {
                 generic,
                 args,
-                site,
                 span,
+                ..
             } => {
                 let generic_info = self
                     .module
                     .generics
                     .get(generic.0 as usize)
                     .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
-                if let Some(method) = self.inline_numeric_method(generic_info, *site) {
-                    let values = args
-                        .iter()
-                        .map(|arg| self.lower_expr(arg))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(result) =
-                        self.lower_inline_numeric(method, generic_info, &values, *span)?
-                    {
-                        self.record(*site, CheckCodegen::Inlined);
-                        return Ok(result);
-                    }
-                    let mut regs = Vec::with_capacity(values.len());
-                    for (index, (value, arg)) in values.into_iter().zip(args).enumerate() {
-                        regs.push(
-                            self.coerce_generic_arg(value, generic_info, index, arg.span())?
-                                .reg,
-                        );
-                    }
-                    let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
-                    self.send(generic_info, regs, vec![result.reg], *span)?;
-                    return Ok(result);
+                if let Some(result) = self.lower_numeric_send(expr)? {
+                    let kind = self.value_kind(generic_info.result_kinds[0])?;
+                    return self.coerce_value(result, kind, *span);
                 }
                 let args = self.lower_generic_args(args, generic_info)?;
                 if generic_info.result_kinds.len() != 1 {
@@ -4382,7 +4364,18 @@ impl<'module> BodyLowering<'module> {
                 site,
                 span,
             } => {
-                let value = self.lower_expr(value)?;
+                // A proved numeric send already has its method's result, so
+                // a cast to that result's class has nothing to unbox.
+                let value = match self.lower_numeric_send(value)? {
+                    Some(result)
+                        if *class == sem::OBJECT_CLASS_ID
+                            || is_scalar_value_class(self.module, result.kind, *class) =>
+                    {
+                        result
+                    }
+                    Some(result) => self.box_any(result, *span)?,
+                    None => self.lower_expr(value)?,
+                };
                 if *class == sem::OBJECT_CLASS_ID {
                     return self.box_any(value, *span);
                 }
@@ -5877,17 +5870,69 @@ impl<'module> BodyLowering<'module> {
             .then_some(method)
     }
 
+    /// Lowers `expr` if it is a send typing proved runs a built-in numeric
+    /// method (see [`Self::inline_numeric_method`]), and `None`, having
+    /// emitted nothing, otherwise.
+    ///
+    /// An inlined send's value is the method's own result, such as an
+    /// unboxed `i64`, not yet converted to the generic's `<object>`: the
+    /// caller converts it where it needs to. An operand that is itself such
+    /// a send passes its result on the same way, so a chain of proved sends
+    /// boxes only at its end. A send whose method cannot run inline after
+    /// all dispatches, and its value has the generic's kind.
+    fn lower_numeric_send(&mut self, expr: &sem::Expr) -> Result<Option<Value>, LowerError> {
+        let sem::Expr::GenericCall {
+            generic,
+            args,
+            site,
+            span,
+        } = expr
+        else {
+            return Ok(None);
+        };
+        let generic_info = self
+            .module
+            .generics
+            .get(generic.0 as usize)
+            .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
+        let Some(method) = self.inline_numeric_method(generic_info, *site) else {
+            return Ok(None);
+        };
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            let value = match self.lower_numeric_send(arg)? {
+                Some(value) => value,
+                None => self.lower_expr(arg)?,
+            };
+            values.push(value);
+        }
+        if let Some(result) = self.lower_inline_numeric(method, &values, *span)? {
+            self.record(*site, CheckCodegen::Inlined);
+            return Ok(Some(result));
+        }
+        let mut regs = Vec::with_capacity(values.len());
+        for (index, (value, arg)) in values.into_iter().zip(args).enumerate() {
+            regs.push(
+                self.coerce_generic_arg(value, generic_info, index, arg.span())?
+                    .reg,
+            );
+        }
+        let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
+        self.send(generic_info, regs, vec![result.reg], *span)?;
+        Ok(Some(result))
+    }
+
     /// Runs `method`'s body inline on `args`: each argument converts to its
     /// parameter's kind (unboxing a boxed number), the promotion rules'
-    /// operation runs directly, and the result converts to the generic's
-    /// kind (boxing it). The body's own checks, such as overflow, stay.
+    /// operation runs directly, and its result has the method's own kind;
+    /// the caller converts it to the generic's. The body's own checks, such
+    /// as overflow, stay.
     ///
     /// Returns `None`, having emitted nothing, when an argument has a kind
     /// that cannot convert to its parameter's.
     fn lower_inline_numeric(
         &mut self,
         method: &'module sem::Method,
-        generic: &sem::GenericFunction,
         args: &[Value],
         span: Span,
     ) -> Result<Option<Value>, LowerError> {
@@ -5935,8 +5980,7 @@ impl<'module> BodyLowering<'module> {
         self.source_locals = locals;
         self.local_regs = regs;
         self.owner = owner;
-        let kind = self.value_kind(generic.result_kinds[0])?;
-        Ok(Some(self.coerce_value(result?, kind, span)?))
+        result.map(Some)
     }
 
     fn coerce_value(
@@ -9019,6 +9063,19 @@ mod tests {
             "{both}"
         );
         assert!(both.contains("call l0(%r1)"), "{both}");
+    }
+
+    #[test]
+    fn a_chain_of_proved_numeric_sends_boxes_only_at_its_end() {
+        let source = "define function main() => <integer>\n  \
+            as(<integer>, (as(<object>, 20) + 1) + 2)\nend;";
+        let proved = function_dump(&lower_with_policy(source, CodegenPolicy::Proved), "main");
+        assert!(!proved.contains("select-method"), "{proved}");
+        assert_eq!(proved.matches("i64.add_ovf").count(), 2, "{proved}");
+        // Only `as(<object>, 20)` boxes, and only it unboxes; the sums pass
+        // from one send to the next, and to the cast, as `i64`s.
+        assert_eq!(proved.matches("box.any").count(), 1, "{proved}");
+        assert_eq!(proved.matches("unbox").count(), 1, "{proved}");
     }
 
     fn const_i64(function: &Function, reg: Register) -> Option<i64> {

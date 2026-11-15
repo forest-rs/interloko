@@ -663,6 +663,12 @@ pub enum ReasonKind {
         /// Class of conditions the handler accepts.
         specializer: ClassId,
     },
+    /// The result of a send whose method typing selected at `site`: a
+    /// built-in numeric method, whose result category the method set fixes.
+    Dispatched {
+        /// The dispatch site.
+        site: SiteId,
+    },
     /// Interval arithmetic on integer operands.
     Interval,
     /// A loop head widened its facts to reach a fixpoint.
@@ -689,6 +695,7 @@ impl ReasonKind {
             Self::Contract { .. } => "contract",
             Self::Narrowed { .. } => "narrowed",
             Self::Check { .. } => "check",
+            Self::Dispatched { .. } => "dispatched",
             Self::Joined => "joined",
             Self::HandlerCondition { .. } => "handler-condition",
             Self::Interval => "interval",
@@ -906,18 +913,23 @@ impl DefinitionTyping {
                     out.push(dependency);
                 }
             }
+            // A fact derived from a closed world, such as a numeric send's
+            // result, relies on it as the decision citing the fact does.
+            if let ReasonKind::ClosedWorld(assumption) = reason.kind {
+                let dependency = closed_world_dependency(assumption);
+                if !out.contains(&dependency) {
+                    out.push(dependency);
+                }
+            }
             queue.extend(reason.from.iter().copied());
         }
         for id in &decision.assumes {
-            let dependency = match self.reason(*id).map(|reason| &reason.kind) {
-                Some(ReasonKind::ClosedWorld(Assumption::Generic(generic))) => {
-                    TypingDependency::Methods(*generic)
-                }
-                Some(ReasonKind::ClosedWorld(Assumption::Class(class))) => {
-                    TypingDependency::Class(*class)
-                }
-                _ => continue,
+            let Some(ReasonKind::ClosedWorld(assumption)) =
+                self.reason(*id).map(|reason| &reason.kind)
+            else {
+                continue;
             };
+            let dependency = closed_world_dependency(*assumption);
             if !out.contains(&dependency) {
                 out.push(dependency);
             }
@@ -1458,6 +1470,7 @@ fn provenance_labels(
                 format!("narrowed to {ty} in the {} branch", branch.as_str())
             }
             ReasonKind::Check { .. } => format!("checked as {ty} here"),
+            ReasonKind::Dispatched { .. } => format!("the selected method gives {ty}"),
             ReasonKind::HandlerCondition { .. } => format!("handler binds {ty}"),
             ReasonKind::Interval => format!("computed as {ty}"),
             ReasonKind::Widened => format!("widened to {ty}"),
@@ -1474,6 +1487,14 @@ fn provenance_labels(
         labels.push(DiagnosticLabel::secondary(reason.span, message));
     }
     labels
+}
+
+/// What relying on a closed-world `assumption` makes a decision depend on.
+const fn closed_world_dependency(assumption: Assumption) -> TypingDependency {
+    match assumption {
+        Assumption::Generic(generic) => TypingDependency::Methods(generic),
+        Assumption::Class(class) => TypingDependency::Class(class),
+    }
 }
 
 /// Deepest reason chain a dump renders before eliding the rest.
@@ -1529,7 +1550,7 @@ fn reason_label(module: &sem::Module, reason: &Reason) -> String {
                 let _ = write!(label, "({})", branch.as_str());
             }
         },
-        ReasonKind::Check { site } => {
+        ReasonKind::Check { site } | ReasonKind::Dispatched { site } => {
             let _ = write!(label, "({site})");
         }
         ReasonKind::HandlerCondition { specializer } => {

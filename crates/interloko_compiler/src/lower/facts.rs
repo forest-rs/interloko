@@ -25,7 +25,9 @@
 //!   lowered into the body that reads it.
 //! - **A closed world** ([`crate::typing::Assumption`]): a generic's method
 //!   set or a closed class's cone. Both are part of the runtime layout, which
-//!   a unit installed under live frames must keep.
+//!   a unit installed under live frames must keep. A numeric send's result
+//!   ([`crate::typing::ReasonKind::Dispatched`]) is its selected method's,
+//!   which the method set fixes.
 //!
 //! So every fact lowering acts on is either local to the unit or backed by
 //! something install or retry already checks.
