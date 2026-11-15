@@ -19041,8 +19041,8 @@ end;
         // method promises what its generic does.
         let generic = &sem.generics[0];
         let expected = Contract {
-            params: vec![integer.clone()],
-            results: vec![circles.clone()],
+            params: vec![integer.clone().into()],
+            results: vec![circles.clone().into()],
         };
         assert_eq!(sem.contract(generic.definition), Some(expected.clone()));
         assert_eq!(
@@ -19058,7 +19058,7 @@ end;
             sem.contract(main.definition),
             Some(Contract {
                 params: Vec::new(),
-                results: vec![integer],
+                results: vec![integer.into()],
             })
         );
         assert_eq!(
@@ -19092,6 +19092,43 @@ end;
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn contracts_record_the_signatures_callers_call_callables_with() {
+        use interloko_model::contract::CallableContract;
+
+        // `again` returns itself; `use-it` declares the signature it calls
+        // its parameter with.
+        let source = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function again(n :: <integer>)\n  again\nend;\n\
+             define function use-it(f :: callable(<integer>) => <circle>) => <integer>\n  apply(f, 1).radius\nend;";
+        let artifacts =
+            CompilerSession::compile_source("callables.loko", source, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let sem = &artifacts.sem;
+        let layout = &artifacts.code_unit().expect("tape").layout;
+        let function = |name: &str| {
+            let function = sem
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .expect("function");
+            sem.contract(function.definition).expect("contract")
+        };
+        let again = function("again");
+        assert_eq!(
+            again.results[0].signature,
+            Some(CallableContract::Enclosing(0)),
+            "a self-returning function refers to its own contract"
+        );
+        assert_eq!(again.check_replaces(&again, layout), Ok(()));
+
+        let use_it = function("use-it");
+        assert_eq!(
+            use_it.params[0].display(layout).to_string(),
+            "callable(<integer>) => <circle>"
+        );
     }
 
     /// How [`run_across_an_edit`] answers the signal after the install.
@@ -19161,7 +19198,7 @@ end;
     ) -> (String, ContractPosition, String, String) {
         match mismatch {
             Some(interloko_runtime::code::CodeMismatch::Contract(mismatch)) => {
-                let ContractBreak::Type { position, .. } = mismatch.change else {
+                let ContractBreak::Value { position, .. } = mismatch.change else {
                     panic!("expected a type change, got {mismatch:?}");
                 };
                 (
@@ -19397,6 +19434,96 @@ end;
             )
         );
         assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    /// `maker` is an open generic whose method returns the function
+    /// `circle-of`, so sem infers its result as that known callable and
+    /// `main` applies it trusting `circle-of`'s signature: an `<integer>` in,
+    /// a `<circle>` out, whose `radius` it reads with no class check.
+    const MAKER: &str = "define class <oops> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define class <square> (<shape>)\n  slot side :: <integer>;\nend;\n\
+         define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+         define function circle-of(n :: <integer>) => <circle>\n  make(<circle>, radius: n)\nend;\n\
+         define function big-circle-of(n :: <integer>) => <circle>\n  make(<circle>, radius: n * 10)\nend;\n\
+         define function square-of(n :: <integer>) => <square>\n  make(<square>, side: n * 10)\nend;\n\
+         define generic maker(n :: <integer>);\n\
+         define method maker(n :: <integer>)\n  circle-of\nend;\n\
+         define function main() => <integer>\n  pause() + apply(maker(1), 3).radius\nend;";
+
+    #[test]
+    fn a_late_bound_send_must_not_return_a_callable_whose_result_class_changed() {
+        // The edit makes `maker` return `square-of`. The suspended `main`
+        // would apply it and read the <square>'s side as a <circle>'s radius.
+        let new = MAKER
+            .replace("  circle-of\nend", "  square-of\nend")
+            .replace("pause() + apply(maker(1), 3).radius", "pause()");
+        let seen = run_across_an_edit(MAKER, &new, resume());
+        assert_ne!(
+            seen.value,
+            Some(FunctionValue::Integer(30)),
+            "the old frame read the <square>'s side as a <circle>'s radius"
+        );
+        assert_eq!(
+            broken_contract(install_mismatch(&seen)),
+            (
+                "maker".into(),
+                ContractPosition::Result(0),
+                "callable(<integer>) => <circle>".into(),
+                "callable(<integer>) => <square>".into()
+            )
+        );
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    #[test]
+    fn install_refuses_a_returned_callable_whose_parameter_narrows() {
+        // Callers pass the callable `maker` returns an <integer>; the new one
+        // would accept only a <circle>.
+        let old = MAKER
+            .replace(
+                "define function main() => <integer>\n  pause() + apply(maker(1), 3).radius",
+                "define function radius-of(s :: <shape>) => <integer>\n  3\nend;\n\
+                 define function circle-radius(s :: <circle>) => <integer>\n  s.radius\nend;\n\
+                 define function main() => <integer>\n  pause() + apply(maker(1), make(<circle>, radius: 3))",
+            )
+            .replace("  circle-of\nend", "  radius-of\nend");
+        let new = old.replace("  radius-of\nend", "  circle-radius\nend");
+        let seen = run_across_an_edit(&old, &new, resume());
+        assert_eq!(
+            broken_contract(install_mismatch(&seen)),
+            (
+                "maker".into(),
+                ContractPosition::Result(0),
+                "callable(<shape>) => <integer>".into(),
+                "callable(<circle>) => <integer>".into()
+            )
+        );
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    #[test]
+    fn install_accepts_a_returned_callable_with_a_compatible_signature() {
+        // Another function with `circle-of`'s signature: the old `main`
+        // applies the new one.
+        let new = MAKER.replace("  circle-of\nend", "  big-circle-of\nend");
+        let seen = run_across_an_edit(MAKER, &new, resume());
+        assert_eq!(seen.refused, None);
+        assert_eq!(seen.value, Some(FunctionValue::Integer(30)));
+
+        // A callable that accepts more and returns less also stands in.
+        let old = MAKER
+            .replace(
+                "define function main() => <integer>\n  pause() + apply(maker(1), 3).radius",
+                "define function circle-radius(s :: <circle>) => <shape>\n  s\nend;\n\
+                 define function shape-itself(s :: <shape>) => <circle>\n  make(<circle>, radius: 30)\nend;\n\
+                 define function main() => <integer>\n  pause() + 0",
+            )
+            .replace("  circle-of\nend", "  circle-radius\nend");
+        let new = old.replace("  circle-radius\nend", "  shape-itself\nend");
+        let seen = run_across_an_edit(&old, &new, resume());
+        assert_eq!(seen.refused, None);
     }
 
     #[test]

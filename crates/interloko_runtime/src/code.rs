@@ -27,7 +27,9 @@
 //! method and function it defines ([`Contracts`]), and newer code may take
 //! over a definition from older code that is still running only when its
 //! contract keeps the older one's promise ([`Contract::check_replaces`]):
-//! parameters may widen and results may narrow.
+//! parameters may widen and results may narrow. A callable parameter or
+//! result also records the signature callers call it with, compared by the
+//! same rule.
 //!
 //! The rule applies exactly where code compiled against one unit can reach
 //! another unit's definition, which happens only within one run, after a
@@ -56,8 +58,7 @@ use execution_tape::host::HostSig;
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, UnitId};
 use execution_tape::verifier::VerifiedProgram;
-use interloko_model::contract::{Contract, ContractBreak, ContractPosition};
-use interloko_model::types::Type;
+use interloko_model::contract::{Contract, ContractBreak, ContractPosition, ValueContract};
 use interloko_model::{ClassId, GenericFunctionId, MethodId};
 
 use crate::RuntimeLayout;
@@ -232,8 +233,9 @@ pub struct ContractMismatch {
     pub name: String,
     /// The incompatible change.
     pub change: ContractBreak,
-    /// The old and new types of `change` written with the run's class
-    /// names, empty for [`ContractBreak::Arity`].
+    /// The old and new values of `change` written with the run's class
+    /// names, such as `<circle>` or `callable(<integer>) => <circle>`;
+    /// empty for [`ContractBreak::Arity`].
     pub types: (String, String),
 }
 
@@ -265,7 +267,7 @@ impl core::fmt::Display for ContractMismatch {
                     "{name} changed how many values it takes or returns"
                 )
             }
-            ContractBreak::Type {
+            ContractBreak::Value {
                 position: ContractPosition::Parameter(index),
                 ..
             } => write!(
@@ -273,7 +275,7 @@ impl core::fmt::Display for ContractMismatch {
                 "{name} would take {new} as argument {} where callers pass {old}",
                 index + 1
             ),
-            ContractBreak::Type {
+            ContractBreak::Value {
                 position: ContractPosition::Result(index),
                 ..
             } => write!(
@@ -370,7 +372,9 @@ impl CodeUnit {
         new.check_replaces(old, &self.layout).map_err(|change| {
             let types = match &change {
                 ContractBreak::Arity => (String::new(), String::new()),
-                ContractBreak::Type { old, new, .. } => (self.type_name(old), self.type_name(new)),
+                ContractBreak::Value { old, new, .. } => {
+                    (self.value_name(old), self.value_name(new))
+                }
             };
             CodeMismatch::Contract(Box::new(ContractMismatch {
                 definition: definition.clone(),
@@ -403,8 +407,8 @@ impl CodeUnit {
         }
     }
 
-    fn type_name(&self, ty: &Type) -> String {
-        alloc::format!("{}", ty.display(&self.layout))
+    fn value_name(&self, value: &ValueContract) -> String {
+        alloc::format!("{}", value.display(&self.layout))
     }
 
     /// Whether `func` here and `other_func` in `other` have the same
