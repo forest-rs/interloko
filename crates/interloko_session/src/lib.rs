@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use interloko_compiler::diagnostic::Diagnostic;
+use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::HostMetaRegistry;
 use interloko_compiler::session::{
     CompilerSession, DumpStage, EnvironmentObject, ExecutionTraceDetail, FunctionCallError,
@@ -92,7 +93,24 @@ impl Session {
         source: &str,
         host_registry: HostMetaRegistry,
     ) -> Result<Self, SessionError> {
-        let artifacts = compile(name, source, &host_registry)?;
+        Self::with_codegen_policy(name, source, host_registry, CodegenPolicy::default())
+    }
+
+    /// Compiles initial source with explicit declarations under an explicit
+    /// codegen policy, which later source replacements keep.
+    ///
+    /// The other constructors use [`CodegenPolicy::default`].
+    /// [`CodegenPolicy::Off`] keeps every runtime check, which helps when
+    /// debugging: under [`CodegenPolicy::Proved`] a numeric send typing
+    /// resolved runs inline, so it makes no dispatch, and a trap inside it is
+    /// reported at the call.
+    pub fn with_codegen_policy(
+        name: &str,
+        source: &str,
+        host_registry: HostMetaRegistry,
+        codegen_policy: CodegenPolicy,
+    ) -> Result<Self, SessionError> {
+        let artifacts = compile(name, source, &host_registry, codegen_policy)?;
         Ok(Self {
             revision: 0,
             artifacts,
@@ -104,6 +122,33 @@ impl Session {
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Codegen policy the accepted code was lowered under.
+    #[must_use]
+    pub const fn codegen_policy(&self) -> CodegenPolicy {
+        self.artifacts.codegen_policy()
+    }
+
+    /// Lowers the accepted revision again under `policy` and publishes it,
+    /// advancing the revision.
+    ///
+    /// Source, typing and the mutation log are kept; only the generated code
+    /// changes, and results and runtime outcome codes do not. Setting the
+    /// policy the code already has changes nothing and keeps the revision.
+    pub fn set_codegen_policy(
+        &mut self,
+        expected: u64,
+        policy: CodegenPolicy,
+    ) -> Result<u64, SessionError> {
+        let next = self.next_revision(expected)?;
+        if policy == self.codegen_policy() {
+            return Ok(self.revision);
+        }
+        let candidate = accepted(self.artifacts.with_codegen_policy(policy))?;
+        self.artifacts = candidate;
+        self.revision = next;
+        Ok(next)
     }
 
     /// Accepted compiler evidence, including source, grammar and artifact facts.
@@ -136,10 +181,16 @@ impl Session {
     ///
     /// Replacement starts a new source base and clears the previous base's mutation
     /// log. Callers wanting to retain mutations should use the compiler's explicit
-    /// replay facilities before choosing which source to publish.
+    /// replay facilities before choosing which source to publish. The candidate is
+    /// compiled under the session's current codegen policy.
     pub fn replace_source(&mut self, expected: u64, source: &str) -> Result<u64, SessionError> {
         let next = self.next_revision(expected)?;
-        let candidate = compile(&self.artifacts.source.name, source, &self.host_registry)?;
+        let candidate = compile(
+            &self.artifacts.source.name,
+            source,
+            &self.host_registry,
+            self.codegen_policy(),
+        )?;
         self.artifacts = candidate;
         self.revision = next;
         Ok(next)
@@ -215,13 +266,19 @@ fn compile(
     name: &str,
     source: &str,
     host: &HostMetaRegistry,
+    codegen_policy: CodegenPolicy,
 ) -> Result<SessionArtifacts, SessionError> {
-    let artifacts = CompilerSession::compile_source_with_host_registry(
-        name,
-        source,
-        RuntimeMode::CompileOnly,
-        host,
-    );
+    let mut compiler = CompilerSession::new();
+    compiler.set_codegen_policy(codegen_policy);
+    let file = compiler.add_source(name, source);
+    let artifacts = compiler
+        .compile_with_host_registry(file, RuntimeMode::CompileOnly, host)
+        .expect("source was just added");
+    accepted(artifacts)
+}
+
+/// Accepts artifacts with no diagnostics and an emitted tape.
+fn accepted(artifacts: SessionArtifacts) -> Result<SessionArtifacts, SessionError> {
     if !artifacts.diagnostics.is_empty() || artifacts.tape.is_none() {
         return Err(SessionError::Compilation {
             emission_failed: artifacts.emission_failed(),

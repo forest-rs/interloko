@@ -621,13 +621,14 @@ fn report_handles_plain_loko_sources() {
     let report_path = report.to_str().expect("report path should be utf8");
     let _ = fs::remove_file(&report);
 
-    let stdout = run_lab(&["report", path, "--output", report_path]);
+    let stdout = run_lab(&["report", path, "--output", report_path, "--codegen", "off"]);
     assert!(stdout.contains("wrote "));
 
     let html = fs::read_to_string(&report).expect("report should be written");
     let _ = fs::remove_file(&report);
 
     assert!(html.contains("generic_area.loko"));
+    assert!(html.contains("<span>Codegen</span><strong>off</strong>"));
     assert!(html.contains("returned 100"));
     assert!(html.contains("No staged regions were activated in this source."));
     assert!(html.contains("class:c0"));
@@ -1379,4 +1380,78 @@ fn show_types_and_contract_dependents_explain_flow_types() {
     );
     let record = run_lab(&["inspect", path, &decision]);
     assert!(record.contains("codegen=kept"), "{record}");
+}
+
+#[test]
+fn codegen_option_selects_the_policy_for_every_command() {
+    let source = fixture("inlined_overflow.loko");
+    let path = source.to_str().expect("fixture path should be utf8");
+
+    // `off` keeps the send; the overflow traps inside the `+` method.
+    let off = run_lab(&["trace", "--codegen", "off", path]);
+    assert!(off.contains("+#dispatch"), "{off}");
+    assert!(
+        off.contains("outcome: trapped: trap(3) at +#method0@"),
+        "{off}"
+    );
+
+    // `proved` runs the method inline, so the trap names `main` and the
+    // call's source position instead of the built-in method.
+    let proved = run_lab(&["trace", "--codegen=proved", path]);
+    assert!(!proved.contains("+#dispatch"), "{proved}");
+    assert!(
+        proved.contains("outcome: trapped: trap(3) at main@") && proved.contains(" (7:17)\n"),
+        "{proved}"
+    );
+
+    // Both runs end in the same outcome.
+    for policy in ["off", "proved"] {
+        let stderr = run_lab_failure(&["--codegen", policy, "run", path]);
+        assert!(
+            stderr.starts_with("runtime failed: runtime trap: integer overflow"),
+            "{policy}: {stderr}"
+        );
+    }
+
+    // The option may come before the command or among its arguments, and
+    // the session's typing configuration object reports it.
+    let lowered = run_lab(&["--codegen", "off", "dump", path, "--stage", "lowered"]);
+    assert!(lowered.contains("select-method"), "{lowered}");
+    let lowered = run_lab(&["dump", path, "--stage", "lowered", "--codegen", "proved"]);
+    assert!(!lowered.contains("select-method"), "{lowered}");
+    for policy in ["off", "proved"] {
+        let config = run_lab(&[
+            "inspect",
+            "--codegen",
+            policy,
+            path,
+            "typing-config:session",
+        ]);
+        assert!(
+            config.contains(&format!("  config=soft codegen={policy} ")),
+            "{config}"
+        );
+    }
+}
+
+#[test]
+fn codegen_option_rejects_unknown_missing_and_repeated_policies() {
+    let source = fixture("inlined_overflow.loko");
+    let path = source.to_str().expect("fixture path should be utf8");
+
+    let unknown = run_lab_failure(&["run", "--codegen", "fast", path]);
+    assert!(
+        unknown.contains("unknown codegen policy `fast`; expected off|proved"),
+        "{unknown}"
+    );
+    let missing = run_lab_failure(&["run", path, "--codegen"]);
+    assert!(
+        missing.contains("option `--codegen` requires a policy: off|proved"),
+        "{missing}"
+    );
+    let repeated = run_lab_failure(&["run", "--codegen", "off", "--codegen=proved", path]);
+    assert!(
+        repeated.contains("option `--codegen` may be given only once"),
+        "{repeated}"
+    );
 }

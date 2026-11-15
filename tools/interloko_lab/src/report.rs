@@ -111,6 +111,12 @@ fn render_hero(artifacts: &SessionArtifacts) -> String {
     );
     metric(
         &mut out,
+        "Codegen",
+        artifacts.codegen_policy().as_str(),
+        "metric--neutral",
+    );
+    metric(
+        &mut out,
         "Staged regions",
         &artifacts.grammar_parse.staged_regions.len().to_string(),
         if artifacts.grammar_parse.staged_regions.is_empty() {

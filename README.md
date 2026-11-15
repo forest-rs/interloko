@@ -254,6 +254,10 @@ cargo run -p interloko_lab -- affordances <file.loko> <object-id>
 cargo run -p interloko_lab -- diff <before.loko> <after.loko>
 ```
 
+Every command takes `--codegen off|proved`, anywhere in its arguments, to
+choose whether lowering acts on what soft typing proved; the REPL's
+`:codegen [off|proved]` shows or sets the same policy.
+
 Diagnostics can be rendered with the bundled catalogs or a custom catalog:
 
 ```sh

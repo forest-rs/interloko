@@ -918,3 +918,78 @@ fn repl_turns_keep_the_runtime_image_flat() {
         "{stdout}"
     );
 }
+
+#[test]
+fn codegen_command_shows_and_sets_the_policy() {
+    let (stdout, stderr) = run_repl(
+        "define function boom() => <integer>\n  \
+         as(<integer>, as(<object>, 9223372036854775807) + 1)\nend;\n\
+         :codegen off\n\
+         :dump lowered\n\
+         boom()\n\
+         :codegen proved\n\
+         :dump lowered\n\
+         boom()\n\
+         :codegen off\n\
+         :reset\n\
+         :codegen\n\
+         :codegen fast\n\
+         :codegen off proved\n\
+         :quit\n",
+    );
+
+    let sections: Vec<&str> = stdout.split("codegen ").collect();
+    assert_eq!(sections.len(), 5, "{stdout}");
+    // `off` keeps the numeric send; `proved` runs the method typing chose
+    // inline, without selecting it.
+    assert!(sections[1].starts_with("off\n"), "{stdout}");
+    assert!(sections[1].contains("select-method"), "{stdout}");
+    assert!(sections[2].starts_with("proved\n"), "{stdout}");
+    assert!(!sections[2].contains("select-method"), "{stdout}");
+    // `:reset` clears source but keeps the policy.
+    assert!(sections[3].starts_with("off\nreset\n"), "{stdout}");
+    assert_eq!(sections[4], "off\n", "{stdout}");
+
+    // The same outcome under both policies.
+    let errors: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("runtime error:"))
+        .collect();
+    assert_eq!(errors.len(), 2, "{stderr}");
+    assert!(
+        errors
+            .iter()
+            .all(|line| line.contains("runtime trap: integer overflow")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("error: unknown codegen policy `fast`; expected off|proved"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("usage: :codegen [off|proved]"), "{stderr}");
+}
+
+#[test]
+fn codegen_policy_cannot_change_while_a_break_waits() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/break_loop/raymarch.loko");
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {}\n:run main\n:codegen\n:codegen off\n:restart abort\n:codegen off\n:quit\n",
+        fixture.display()
+    ));
+
+    assert!(
+        stdout.contains("break [1]: no handler for <bad-sample>"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("error: :codegen cannot change the policy while break [1] is waiting"),
+        "{stderr}"
+    );
+    let shown: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("codegen "))
+        .collect();
+    assert_eq!(shown.len(), 2, "{stdout}");
+    assert_eq!(shown[1], "codegen off", "{stdout}");
+}

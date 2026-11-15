@@ -233,7 +233,12 @@ Each typing decision object carries, besides its verdict:
   without its check: wrapping arithmetic, a reinterpreting conversion) or
   `inlined` (a numeric dispatch replaced by its method's operation). Only
   the session's `CodegenPolicy::Proved` acts on typing; under the default
-  `CodegenPolicy::Off` every check is `kept`. `explain` names the policy.
+  `CodegenPolicy::Off` every check is `kept`. `explain` names the policy,
+  and says whether the generated code still performs the check or relies
+  on the decision. `typing-config:session` shows the policy beside the
+  typing configuration (`config=soft codegen=off ...`). `interloko_lab`
+  takes `--codegen off|proved` on every command, and the REPL's
+  `:codegen [off|proved]` shows or sets it.
 
 `contract:<definition-id>` objects show a definition's contract, the
 parameter and result types callers were compiled to rely on. Their

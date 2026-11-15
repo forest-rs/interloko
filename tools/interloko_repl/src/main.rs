@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
 use interloko_compiler::grammar_frontend;
 use interloko_compiler::identity::{ArtifactKey, SourceFileId};
+use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem;
 use interloko_compiler::session::{
     CallServices, DumpStage, EnvironmentAffordance, EnvironmentKind, EnvironmentObject,
@@ -47,6 +48,7 @@ const COMMANDS: &[&str] = &[
     ":reload",
     ":reset",
     ":clear",
+    ":codegen",
     ":cancel",
     ":clear-pending",
     ":pending",
@@ -340,6 +342,7 @@ impl Repl {
                 self.reset();
                 writeln!(stdout, "cleared")?;
             }
+            ":codegen" => self.codegen_command(&args, stdout, stderr)?,
             ":cancel" | ":clear-pending" => {
                 if self.cancel_pending_definition() {
                     writeln!(stdout, "cancelled pending definition")?;
@@ -1419,7 +1422,48 @@ impl Repl {
         Ok(())
     }
 
+    /// Shows the codegen policy, or sets it and lowers the accepted source
+    /// again under it.
+    fn codegen_command<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        match args {
+            [] => {}
+            [label] => {
+                let Some(policy) = CodegenPolicy::from_label(label) else {
+                    writeln!(
+                        stderr,
+                        "error: unknown codegen policy `{label}`; expected {}",
+                        codegen_policy_labels()
+                    )?;
+                    return Ok(());
+                };
+                self.set_codegen_policy(policy)?;
+            }
+            _ => {
+                writeln!(stderr, "usage: :codegen [{}]", codegen_policy_labels())?;
+                return Ok(());
+            }
+        }
+        writeln!(stdout, "codegen {}", self.session.codegen_policy().as_str())?;
+        Ok(())
+    }
+
+    fn set_codegen_policy(&mut self, policy: CodegenPolicy) -> Result<()> {
+        if policy == self.session.codegen_policy() {
+            return Ok(());
+        }
+        self.session.set_codegen_policy(policy);
+        if self.last_artifacts.is_some() {
+            self.restore_accepted_cache()?;
+        }
+        Ok(())
+    }
+
     fn reset(&mut self) {
+        let codegen_policy = self.session.codegen_policy();
         self.source_buffer.clear();
         self.pending_definition.clear();
         self.last_artifacts = None;
@@ -1429,6 +1473,7 @@ impl Repl {
         self.last_checkpoint = None;
         self.dirty = false;
         self.session = IncrementalCompilerSession::new();
+        self.session.set_codegen_policy(codegen_policy);
         self.session
             .add_source_with_id(self.source_file, SOURCE_NAME, "");
     }
@@ -2966,6 +3011,14 @@ const FORM_AFFORDANCES: &[&str] = &[
     "drop",
 ];
 
+fn codegen_policy_labels() -> String {
+    CodegenPolicy::ALL
+        .iter()
+        .map(|policy| policy.as_str())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 fn diagnostic_renderer() -> Result<DiagnosticRenderer> {
     if let Ok(path) = env::var("INTERLOKO_DIAGNOSTIC_CATALOG") {
         let source = fs::read_to_string(&path).map_err(|error| ReplError::Io {
@@ -2999,8 +3052,12 @@ fn help_text() -> &'static str {
   :load <file>                  replace accepted source from a Loko source file
   :write <file>                 write rendered accepted source to a Loko source file
   :reload                       reload the last loaded source file
-  :reset                        clear accepted source and cached artifacts
+  :reset                        clear accepted source and cached artifacts;
+                                keeps the codegen policy
   :clear                        alias for :reset
+  :codegen [off|proved]         show or set the codegen policy: `proved` (the
+                                default) acts on what soft typing proved, `off`
+                                keeps every runtime check
   :cancel                       cancel a pending multiline definition
   :clear-pending                alias for :cancel
   :pending                      show pending multiline definition
@@ -3333,6 +3390,10 @@ impl Completer for InterlokoCompleter {
                 ":dump" => DUMP_STAGES
                     .iter()
                     .map(|stage| (*stage).to_string())
+                    .collect(),
+                ":codegen" => CodegenPolicy::ALL
+                    .iter()
+                    .map(|policy| policy.as_str().to_string())
                     .collect(),
                 ":dispatch" => self
                     .state
