@@ -95,8 +95,29 @@
 //! narrowing at a check site, a join...) and the reasons it was derived
 //! from, so a decision's [`TypingDecision::because`] chains explain each
 //! operand type back to its sources. Decisions also list the closed-world
-//! assumptions they rely on ([`TypingDecision::assumes`]); a later slice
-//! wires those into incremental invalidation.
+//! assumptions they rely on ([`TypingDecision::assumes`]), which the
+//! incremental graph turns into dependency edges
+//! ([`DefinitionTyping::inputs`]).
+//!
+//! # Sealing
+//!
+//! A cone over a [sealed](interloko_model::sealing) class is the union of
+//! its pieces: the class's direct instances unless it is abstract, and the
+//! cone of each direct subclass. The pass relies on that only where it
+//! decides something the open reading cannot, and records an
+//! [`Assumption::Sealed`] each time: a dispatch over a sealed cone is
+//! covered when every piece has a method, and selects one when every piece
+//! is an exact class that selects the same method; a cast or `instance?`
+//! test is decided piece by piece; and an `instance?` test's else branch
+//! narrows a sealed cone to its other pieces, so a chain of tests over a
+//! sealed hierarchy ends in an unreachable branch. A sealed concrete class
+//! with no subclasses is closed, so its cone is exact.
+//!
+//! Distributing a dispatch stops at [`MAX_DISPATCH_TUPLES`] combinations,
+//! and a narrowing that would leave more than
+//! [`interloko_model::types::MAX_ATOMS`] pieces widens back to the cone, so
+//! a larger sealed hierarchy loses those proofs and keeps its runtime
+//! checks.
 //!
 //! Besides decisions, each definition keeps the fact of every binding where
 //! it is bound ([`DefinitionTyping::bindings`]), the reads a test narrowed
@@ -147,6 +168,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
+use interloko_model::sealing::ClosedWorld;
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Type};
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, DiagnosticLabel, Severity};
@@ -734,12 +756,25 @@ impl ContractSource {
 
 /// A closed-world assumption a decision relies on: a fact about the module
 /// that holds now but that adding definitions could change.
+///
+/// [`assumption_label`] renders one as a sentence, and
+/// [`closed_world`] as the record a code unit carries for its install
+/// checks.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Assumption {
-    /// The generic's method set is the one the decision consulted.
+    /// The generic's method set is the one the decision consulted. Every
+    /// generic's is fixed for the life of the code compiled against it, by
+    /// the runtime layout; a sealed generic's also takes no method from
+    /// outside its source.
     Generic(GenericFunctionId),
-    /// The closed class gains no subclasses, so its cone is exactly it.
+    /// The closed built-in or host class gains no subclasses, so its cone
+    /// is exactly it.
     Class(ClassId),
+    /// The sealed source class has exactly its current direct subclasses
+    /// and, when abstract, no direct instances: its cone is the union of its
+    /// pieces ([`interloko_model::types::sealed_pieces`]). For a sealed
+    /// class with no subclasses, that it stays closed.
+    Sealed(ClassId),
 }
 
 /// How a fact in a definition's flow analysis arose.
@@ -926,7 +961,10 @@ pub struct TypingDecision {
     /// One reason per `actual` type, in the owner's reason arena.
     pub because: Vec<ReasonId>,
     /// Closed-world assumptions ([`ReasonKind::ClosedWorld`]) the verdict
-    /// relies on, in the owner's reason arena.
+    /// relies on, in the owner's reason arena: those the check itself made,
+    /// such as splitting a sealed operand into its pieces, then those the
+    /// operands' reason chains cite, such as the sealing an `instance?`
+    /// test's else branch narrowed by.
     pub assumes: Vec<ReasonId>,
     /// Method a dispatch statically selects when every argument's exact
     /// runtime class is known.
@@ -1088,6 +1126,7 @@ impl DefinitionTyping {
                     inputs.generics.push(generic);
                 }
                 ReasonKind::ClosedWorld(Assumption::Class(class)) => inputs.classes.push(class),
+                ReasonKind::ClosedWorld(Assumption::Sealed(class)) => inputs.sealed.push(class),
                 _ => {}
             }
         }
@@ -1097,6 +1136,8 @@ impl DefinitionTyping {
         inputs.generics.dedup();
         inputs.classes.sort_unstable_by_key(|class| class.0);
         inputs.classes.dedup();
+        inputs.sealed.sort_unstable_by_key(|class| class.0);
+        inputs.sealed.dedup();
         inputs
     }
 }
@@ -1113,6 +1154,8 @@ pub struct TypingInputs {
     pub generics: Vec<GenericFunctionId>,
     /// Closed classes a verdict assumes gain no subclasses.
     pub classes: Vec<ClassId>,
+    /// Sealed classes a verdict assumes keep their direct subclasses.
+    pub sealed: Vec<ClassId>,
 }
 
 /// Whether the pass examined the module.
@@ -1435,6 +1478,68 @@ pub fn synthesize(module: &sem::Module, expr: &sem::Expr) -> Type {
     flow::Analysis::new(module, owner).detached(expr)
 }
 
+/// Argument tuples a dispatch distributes over before it checks whole
+/// argument types instead of their union members or sealed pieces. A send
+/// whose arguments split into more combinations, such as one over a sealed
+/// hierarchy with more than this many leaves, is left to the runtime.
+pub const MAX_DISPATCH_TUPLES: usize = 16;
+
+/// The exact argument classes a send may see, when every argument's type
+/// is a finite union of exact classes once its sealed cones are split
+/// ([`interloko_model::types::sealed_pieces`]) and there are at most
+/// [`MAX_DISPATCH_TUPLES`] combinations: every combination, and the sealed
+/// classes split to find them.
+///
+/// Typing selects a method for a send only when every combination selects
+/// it, and lowering links the send only when the runtime dispatch plan
+/// agrees for every combination.
+#[must_use]
+pub fn exact_class_tuples(
+    module: &sem::Module,
+    actual: &[Type],
+) -> Option<(Vec<Vec<ClassId>>, Vec<ClassId>)> {
+    let mut sealed = Vec::new();
+    let mut per_arg = Vec::with_capacity(actual.len());
+    for ty in actual {
+        let mut classes = Vec::new();
+        let mut pending = ty.atoms()?.to_vec();
+        while let Some(atom) = pending.pop() {
+            if let Atom::Cone(class) = atom
+                && let Some(pieces) = interloko_model::types::sealed_pieces(class, module)
+            {
+                if !sealed.contains(&class) {
+                    sealed.push(class);
+                }
+                pending.extend(pieces);
+                continue;
+            }
+            // A sealed leaf is exact because it has no subclasses.
+            if let Atom::Exact(leaf) = atom
+                && module
+                    .classes
+                    .get(leaf.0 as usize)
+                    .is_some_and(|record| record.sealing.is_sealed())
+                && !sealed.contains(&leaf)
+            {
+                sealed.push(leaf);
+            }
+            let class = Type::of(atom, module).exact_class(module)?;
+            if !classes.contains(&class) {
+                classes.push(class);
+            }
+        }
+        classes.sort_unstable_by_key(|class| class.0);
+        per_arg.push(classes);
+    }
+    let count = per_arg
+        .iter()
+        .try_fold(1_usize, |count, classes| count.checked_mul(classes.len()))?;
+    if count == 0 || count > MAX_DISPATCH_TUPLES {
+        return None;
+    }
+    Some((flow::product(&per_arg), sealed))
+}
+
 /// Iterations [`widen_to_fixpoint`] runs before giving up on convergence.
 pub const MAX_FIXPOINT_ITERATIONS: usize = 64;
 
@@ -1619,6 +1724,70 @@ const fn closed_world_dependency(assumption: Assumption) -> TypingDependency {
     match assumption {
         Assumption::Generic(generic) => TypingDependency::Methods(generic),
         Assumption::Class(class) => TypingDependency::Class(class),
+        Assumption::Sealed(class) => TypingDependency::Sealed(class),
+    }
+}
+
+/// Renders `assumption` as a sentence about the module as it is now, such
+/// as `sealed abstract class <shape> has exactly direct subclasses
+/// {<circle>, <square>}`, `generic area has exactly methods
+/// {area(<circle>)}`, or `class <double-float> has no subclasses`.
+#[must_use]
+pub fn assumption_label(module: &sem::Module, assumption: Assumption) -> String {
+    match closed_world(module, assumption) {
+        Some(record) => format!("{record}"),
+        None => match assumption {
+            Assumption::Class(class) => {
+                format!("class {} has no subclasses", class_name(module, class))
+            }
+            Assumption::Generic(generic) => format!("generic {}", generic_name(module, generic)),
+            Assumption::Sealed(class) => format!("sealed class {}", class_name(module, class)),
+        },
+    }
+}
+
+/// The record of `assumption` a code unit carries, with source names, so an
+/// install can check it against a newer runtime layout; `None` for a closed
+/// built-in or host class, which no source edit can extend, or for an
+/// assumption naming nothing in `module`.
+#[must_use]
+pub fn closed_world(module: &sem::Module, assumption: Assumption) -> Option<ClosedWorld> {
+    match assumption {
+        Assumption::Class(_) => None,
+        Assumption::Sealed(class) => {
+            let record = module.classes.get(class.0 as usize)?;
+            Some(ClosedWorld::SealedClass {
+                class: record.name.clone(),
+                subclasses: module
+                    .direct_subclasses(class)
+                    .into_iter()
+                    .map(|subclass| class_name(module, subclass))
+                    .collect(),
+                is_abstract: record.is_abstract,
+            })
+        }
+        Assumption::Generic(generic) => {
+            let record = module.generics.get(generic.0 as usize)?;
+            Some(ClosedWorld::Methods {
+                generic: record.name.clone(),
+                sealing: record.sealing,
+                methods: module
+                    .methods
+                    .iter()
+                    .filter(|method| method.generic == generic)
+                    .map(|method| format!("{}", MethodName(module, method.id)))
+                    .collect(),
+            })
+        }
+    }
+}
+
+/// Displays a method as `area(<circle>)`.
+struct MethodName<'a>(&'a sem::Module, MethodId);
+
+impl fmt::Display for MethodName<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        interloko_model::types::TypeNames::write_method(self.0, formatter, self.1)
     }
 }
 
@@ -1681,12 +1850,8 @@ fn reason_label(module: &sem::Module, reason: &Reason) -> String {
         ReasonKind::HandlerCondition { specializer } => {
             let _ = write!(label, "({})", class_name(module, *specializer));
         }
-        ReasonKind::ClosedWorld(Assumption::Generic(generic)) => {
-            let _ = write!(label, "(generic {})", generic_name(module, *generic));
-            return label;
-        }
-        ReasonKind::ClosedWorld(Assumption::Class(class)) => {
-            let _ = write!(label, "(class {})", class_name(module, *class));
+        ReasonKind::ClosedWorld(assumption) => {
+            let _ = write!(label, "({})", assumption_label(module, *assumption));
             return label;
         }
         ReasonKind::Declared

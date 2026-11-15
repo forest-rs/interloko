@@ -16,8 +16,14 @@
 //! A [`QueryArtifact::DefinitionTyping`] depends on its own
 //! [`QueryArtifact::DefinitionSem`], on the contracts its reasons cite, on
 //! the [`QueryArtifact::MethodTable`] of every generic its verdicts assume
-//! closed, and on the [`QueryArtifact::ClassCone`] of every closed class they
-//! assume. These edges come from the typing artifact the graph is built with
+//! closed, and on the [`QueryArtifact::ClassCone`] of every closed or sealed
+//! class they assume. A class cone covers the subclasses and their sealing,
+//! so it changes when a sealed class gains or loses a subclass or is
+//! sealed or unsealed (such class edits renumber classes and re-check every
+//! definition today, so the edge is what a finer drain will follow). A
+//! method table also depends on its generic's own sem output, so sealing or
+//! unsealing a generic, a local edit, reaches every decision that assumes
+//! its method set. These edges come from the typing artifact the graph is built with
 //! ([`crate::typing::DefinitionTyping::inputs`]); when typing did not run,
 //! the graph has none of them.
 //!
@@ -114,7 +120,8 @@ pub enum QueryArtifact {
     /// which a dispatch verdict assumes closed. Has early cutoff.
     MethodTable(DefinitionId),
     /// Cone of one class: whether it is closed and which classes it holds,
-    /// which a verdict about a closed class assumes. Has early cutoff.
+    /// each with its sealing and abstractness, which a verdict about a
+    /// closed or sealed class assumes. Has early cutoff.
     ClassCone(DefinitionId),
     /// Session-owned codegen policy input
     /// ([`crate::lower::CodegenPolicy`]): whether lowering acts on proved
@@ -337,6 +344,11 @@ impl QueryInvalidation {
                 QueryArtifact::DefinitionSem(generic),
             );
             this.add(QueryArtifact::MethodTable(generic), QueryArtifact::Bind);
+            // Sealing the generic changes what a dispatch over it assumes.
+            this.add(
+                QueryArtifact::MethodTable(generic),
+                QueryArtifact::DefinitionSem(generic),
+            );
         }
 
         for method in &module.methods {
@@ -529,7 +541,10 @@ impl QueryInvalidation {
                     );
                 }
             }
-            for class in inputs.classes {
+            // A closed class's cone, and a sealed class's pieces, are both
+            // read from its class cone, which covers every subclass and its
+            // sealing.
+            for class in inputs.classes.into_iter().chain(inputs.sealed) {
                 if let Some(class) = module.classes.get(class.0 as usize) {
                     self.add(
                         QueryArtifact::ClassCone(class.definition),

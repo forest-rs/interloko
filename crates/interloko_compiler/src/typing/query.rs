@@ -40,6 +40,9 @@ pub enum TypingDependency {
     Methods(GenericFunctionId),
     /// That the closed class gains no subclasses ([`super::Assumption::Class`]).
     Class(ClassId),
+    /// That the sealed class keeps its direct subclasses and abstractness
+    /// ([`super::Assumption::Sealed`]).
+    Sealed(ClassId),
 }
 
 /// What [`TypingArtifact::type_of`] asks about.
@@ -258,7 +261,15 @@ impl TypingArtifact {
     /// facts rely on, not every definition that could.
     #[must_use]
     pub fn contract_dependents(&self, definition: DefinitionId) -> Vec<&TypingDecision> {
-        let wanted = TypingDependency::Contract(definition);
+        self.dependents(TypingDependency::Contract(definition))
+    }
+
+    /// Returns the decisions that depend on `wanted`
+    /// ([`DefinitionTyping::dependencies`]), in module order: for a
+    /// [`TypingDependency::Sealed`] class, every decision relying on its
+    /// sealing, directly or through a narrowed operand.
+    #[must_use]
+    pub fn dependents(&self, wanted: TypingDependency) -> Vec<&TypingDecision> {
         self.definitions
             .iter()
             .flat_map(|typed| {

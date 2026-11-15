@@ -1389,12 +1389,26 @@ pub enum TypingFacet {
         /// as in the `because=` field of the typing dump.
         reasons: Vec<String>,
         /// What the verdict relies on outside its own body: cited contracts,
-        /// then method sets and closed classes.
+        /// then method sets and closed or sealed classes.
         /// [`SessionArtifacts::dependency_object_id`] names the EOP object
         /// of each.
         depends_on: Vec<typing::TypingDependency>,
+        /// The closed-world assumptions the verdict relies on
+        /// ([`typing::TypingDecision::assumes`]), each rendered as a
+        /// sentence such as `sealed abstract class <shape> has exactly
+        /// direct subclasses {<circle>, <square>}`.
+        assumes: Vec<String>,
         /// What generated code does with the check.
         codegen: CheckCodegen,
+    },
+    /// A sealed class's contract: the closed world its sealing promises,
+    /// which code compiled against it may rely on.
+    SealedClass {
+        /// The sealed class.
+        class: sem::ClassId,
+        /// Its direct subclasses and abstractness, as the source declares
+        /// them.
+        assumption: interloko_model::sealing::ClosedWorld,
     },
     /// A definition's type contract.
     Contract {
@@ -2242,6 +2256,13 @@ impl SessionArtifacts {
     #[must_use]
     pub fn explain_contract_dependents(&self, id: &str) -> Option<String> {
         let module = &self.sem;
+        if let Some(class) = module
+            .classes
+            .iter()
+            .find(|class| class.sealing.is_sealed() && contract_object_id(class.definition) == id)
+        {
+            return Some(self.explain_sealed_class_dependents(id, class));
+        }
         let (definition, contract) = module
             .functions
             .iter()
@@ -2281,11 +2302,40 @@ impl SessionArtifacts {
         Some(out)
     }
 
+    /// Renders a sealed class's contract object: its closed world and the
+    /// decisions relying on it.
+    fn explain_sealed_class_dependents(&self, id: &str, class: &sem::Class) -> String {
+        let module = &self.sem;
+        let dependents = self
+            .typing
+            .dependents(typing::TypingDependency::Sealed(class.id));
+        let mut out = String::new();
+        let _ = writeln!(out, "contract {id} of sealed class {}", class.name);
+        let _ = writeln!(
+            out,
+            "closed-world: {}",
+            typing::assumption_label(module, typing::Assumption::Sealed(class.id))
+        );
+        let _ = writeln!(out, "dependents: {}", dependents.len());
+        for decision in dependents {
+            let _ = writeln!(
+                out,
+                "  {} {} {} in {}",
+                typing_decision_object_id(decision),
+                decision.check.as_str(),
+                decision.verdict.as_str(),
+                typing::definition_label(module, decision.owner)
+            );
+        }
+        out
+    }
+
     /// Returns the id of the EOP object a typing dependency refers to:
     /// `contract:<definition>` for a function's, generic's, or method's
     /// contract, `constant:kN` or `accessor:cN.sM` for a constant's value or
-    /// a slot read, `generic:gN` for a method set, and `class:cN` for a
-    /// closed class.
+    /// a slot read, `generic:gN` for a method set, `class:cN` for a closed
+    /// built-in or host class, and `contract:<definition>` for a sealed
+    /// class, whose contract is its closed world.
     #[must_use]
     pub fn dependency_object_id(&self, dependency: typing::TypingDependency) -> String {
         typing_dependency_object_id(&self.sem, dependency)
@@ -9950,6 +10000,7 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
                 severity,
                 reasons,
                 depends_on: _,
+                assumes,
                 codegen,
             } => {
                 let _ = writeln!(
@@ -9964,6 +10015,12 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
                 for (index, reason) in reasons.iter().enumerate() {
                     let _ = writeln!(out, "  because #{index}: {reason}");
                 }
+                for assumption in assumes {
+                    let _ = writeln!(out, "  assumes: {assumption}");
+                }
+            }
+            TypingFacet::SealedClass { assumption, .. } => {
+                let _ = writeln!(out, "  closed-world: {assumption}");
             }
             TypingFacet::Contract { definition, .. } => {
                 let _ = writeln!(out, "  contract of {definition}");
@@ -11900,6 +11957,16 @@ fn project_typing_decision(
             .map(|reason| owner_typing.reason_chain(module, *reason))
             .collect(),
         depends_on,
+        assumes: decision
+            .assumes
+            .iter()
+            .filter_map(|reason| match owner_typing.reason(*reason)?.kind {
+                typing::ReasonKind::ClosedWorld(assumption) => {
+                    Some(typing::assumption_label(module, assumption))
+                }
+                _ => None,
+            })
+            .collect(),
         codegen,
     });
     sink.emit(object);
@@ -11916,15 +11983,30 @@ fn project_contracts(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObj
 
     let module = &artifacts.sem;
     let mut dependents = alloc::collections::BTreeMap::<DefinitionId, usize>::new();
+    let mut assumed = alloc::collections::BTreeMap::<DefinitionId, usize>::new();
     for owner in &artifacts.typing.definitions {
         for decision in &owner.decisions {
             for dependency in owner.dependencies(decision) {
-                if let typing::TypingDependency::Contract(definition) = dependency {
-                    *dependents.entry(definition).or_default() += 1;
+                match dependency {
+                    typing::TypingDependency::Contract(definition) => {
+                        *dependents.entry(definition).or_default() += 1;
+                    }
+                    typing::TypingDependency::Methods(generic) => {
+                        if let Some(generic) = module.generics.get(generic.0 as usize) {
+                            *assumed.entry(generic.definition).or_default() += 1;
+                        }
+                    }
+                    typing::TypingDependency::Sealed(class) => {
+                        if let Some(class) = module.classes.get(class.0 as usize) {
+                            *dependents.entry(class.definition).or_default() += 1;
+                        }
+                    }
+                    typing::TypingDependency::Class(_) => {}
                 }
             }
         }
     }
+    project_sealed_class_contracts(artifacts, &dependents, sink);
     let definitions = module
         .functions
         .iter()
@@ -11961,10 +12043,11 @@ fn project_contracts(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObj
             ]),
             execution: None,
             inspection: format!(
-                "definition={definition} params={} results={} dependents={}",
+                "definition={definition} params={} results={} dependents={}{}",
                 value_contract_list_label(module, &contract.params),
                 value_contract_list_label(module, &contract.results),
-                dependents.get(&definition).copied().unwrap_or(0)
+                dependents.get(&definition).copied().unwrap_or(0),
+                generic_closed_world_label(module, definition, &assumed)
             ),
         });
         object.source = SourceFacet::new(Some(artifacts.source.id), Some(definition), Some(span));
@@ -11975,6 +12058,98 @@ fn project_contracts(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObj
         object.typing = Some(TypingFacet::Contract {
             definition,
             contract,
+        });
+        sink.emit(object);
+    }
+}
+
+/// For a generic's contract object, ` sealing=<open|sealed> methods=N
+/// assumed-by=M`: whether its method set is sealed, how many methods it has,
+/// and how many decisions rely on that set. Empty for other definitions.
+fn generic_closed_world_label(
+    module: &sem::Module,
+    definition: DefinitionId,
+    assumed: &alloc::collections::BTreeMap<DefinitionId, usize>,
+) -> String {
+    let Some(generic) = module
+        .generics
+        .iter()
+        .find(|generic| generic.definition == definition)
+    else {
+        return String::new();
+    };
+    format!(
+        " sealing={} methods={} assumed-by={}",
+        generic.sealing.as_str(),
+        module
+            .methods
+            .iter()
+            .filter(|method| method.generic == generic.id)
+            .count(),
+        assumed.get(&definition).copied().unwrap_or(0)
+    )
+}
+
+/// Projects a contract object for each sealed class: the closed world its
+/// sealing promises, with `show-dependents` listing the decisions relying
+/// on it.
+fn project_sealed_class_contracts(
+    artifacts: &SessionArtifacts,
+    dependents: &alloc::collections::BTreeMap<DefinitionId, usize>,
+    sink: &mut dyn EnvironmentObjectSink,
+) {
+    use EnvironmentAffordance as Aff;
+
+    let module = &artifacts.sem;
+    for class in module
+        .classes
+        .iter()
+        .filter(|class| class.sealing.is_sealed())
+    {
+        let Some(assumption) = typing::closed_world(module, typing::Assumption::Sealed(class.id))
+        else {
+            continue;
+        };
+        let subclasses = module
+            .direct_subclasses(class.id)
+            .into_iter()
+            .map(|subclass| module.classes[subclass.0 as usize].name.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut object = environment_object(EnvironmentObjectParts {
+            id: contract_object_id(class.definition),
+            kind: EnvironmentKind::Contract,
+            meta_class: "<contract>",
+            origin: EnvironmentOrigin::CompilerGenerated,
+            storage: EnvironmentStorage::CachedArtifact,
+            title: format!("contract of sealed class {}", class.name),
+            affordances: Vec::from([
+                Aff::Inspect,
+                Aff::ShowDependents,
+                Aff::OpenSource,
+                Aff::DumpEop,
+            ]),
+            execution: None,
+            inspection: format!(
+                "definition={} class=class:c{} sealing=sealed abstract={} subclasses=[{subclasses}] dependents={}",
+                class.definition,
+                class.id.0,
+                if class.is_abstract { "yes" } else { "no" },
+                dependents.get(&class.definition).copied().unwrap_or(0)
+            ),
+        });
+        object.source = SourceFacet::new(
+            Some(artifacts.source.id),
+            Some(class.definition),
+            Some(class.span),
+        );
+        object.artifacts = artifact_facet(
+            artifacts.source.id,
+            &[QueryArtifact::Bind, QueryArtifact::Typing],
+        );
+        object.typing = Some(TypingFacet::SealedClass {
+            class: class.id,
+            assumption,
         });
         sink.emit(object);
     }
@@ -12150,6 +12325,13 @@ fn typing_dependency_object_id(
         }
         typing::TypingDependency::Methods(generic) => format!("generic:g{}", generic.0),
         typing::TypingDependency::Class(class) => format!("class:c{}", class.0),
+        // A sealed class's closed world is its contract.
+        typing::TypingDependency::Sealed(class) => {
+            module.classes.get(class.0 as usize).map_or_else(
+                || format!("class:c{}", class.0),
+                |class| contract_object_id(class.definition),
+            )
+        }
     }
 }
 
@@ -14015,7 +14197,8 @@ fn contract_fingerprint(module: &sem::Module, definition: DefinitionId) -> Strin
 }
 
 /// Fingerprint of a generic's method table, the value of
-/// [`QueryArtifact::MethodTable`]: each method and its specializers.
+/// [`QueryArtifact::MethodTable`]: whether the generic is sealed, then each
+/// method and its specializers.
 fn method_table_fingerprint(module: &sem::Module, generic: DefinitionId) -> String {
     let Some(generic) = module
         .generics
@@ -14024,17 +14207,19 @@ fn method_table_fingerprint(module: &sem::Module, generic: DefinitionId) -> Stri
     else {
         return "missing-method-table".into();
     };
-    module
+    let methods = module
         .methods
         .iter()
         .filter(|method| method.generic == generic.id)
         .map(|method| fingerprint_method_lookup(module, method.definition))
         .collect::<Vec<_>>()
-        .join(";")
+        .join(";");
+    format!("{}:{methods}", generic.sealing.as_str())
 }
 
-/// The classes in a class's cone, ancestors first walked by superclass.
-fn class_cone(module: &sem::Module, class: sem::ClassId) -> Vec<DefinitionId> {
+/// The classes in a class's cone with each one's sealing and
+/// abstractness, sorted by definition.
+fn class_cone(module: &sem::Module, class: sem::ClassId) -> Vec<(DefinitionId, String)> {
     let mut cone = Vec::new();
     for candidate in &module.classes {
         let mut current = Some(candidate.id);
@@ -14043,7 +14228,7 @@ fn class_cone(module: &sem::Module, class: sem::ClassId) -> Vec<DefinitionId> {
                 break;
             };
             if id == class {
-                cone.push(candidate.definition);
+                cone.push((candidate.definition, sem_class_sealing_label(candidate)));
                 break;
             }
             current = module
@@ -14057,7 +14242,9 @@ fn class_cone(module: &sem::Module, class: sem::ClassId) -> Vec<DefinitionId> {
 }
 
 /// Fingerprint of a class's cone, the value of [`QueryArtifact::ClassCone`]:
-/// whether the class is closed and which classes the cone holds.
+/// whether the class is closed and which classes the cone holds, each with
+/// its sealing and abstractness, which is what a sealed class's
+/// closed-world assumption reads.
 fn class_cone_fingerprint(module: &sem::Module, class: DefinitionId) -> String {
     let Some(class) = module.classes.iter().find(|item| item.definition == class) else {
         return "missing-class".into();
@@ -19117,6 +19304,119 @@ mod tests {
         let quiet = function_definition(&update.artifacts, "quiet");
         assert!(affected(&update, QueryArtifact::DefinitionTyping(main)));
         assert!(!affected(&update, QueryArtifact::DefinitionTyping(quiet)));
+    }
+
+    /// A sealed `<shape>` that `main` dispatches over, and a bystander.
+    const SEALED_PICK: &str = "define sealed abstract class <shape> (<object>)\nend;\n\
+        define sealed class <circle> (<shape>)\nend;\n\
+        define sealed class <square> (<shape>)\nend;\n\
+        define generic area(x);\n\
+        define method area(c :: <circle>)\n  7\nend;\n\
+        define method area(s :: <square>)\n  4\nend;\n\
+        define function main(s :: <shape>)\n  area(s)\nend;\n\
+        define function quiet(c :: <circle>)\n  1\nend;";
+
+    fn edit_sealed_pick(edited: &str) -> IncrementalUpdate {
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("sealed.loko", SEALED_PICK);
+        let first = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        assert!(first.artifacts.diagnostics.is_empty());
+        let update = session
+            .edit_and_compile(id, edited, RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert!(!update.artifacts.has_errors());
+        update
+    }
+
+    #[test]
+    fn editing_a_sealed_class_retypes_what_relied_on_its_subclasses() {
+        let class = |artifacts: &SessionArtifacts, name: &str| {
+            artifacts
+                .sem
+                .classes
+                .iter()
+                .find(|class| class.name == name)
+                .expect("class")
+                .definition
+        };
+        let report = |update: &IncrementalUpdate, artifact| {
+            cache_report(update, artifact)
+                .map(|report| (report.affected, report.action))
+                .expect("a report")
+        };
+        let dispatch = |artifacts: &SessionArtifacts| {
+            artifacts
+                .typing
+                .definition(function_definition(artifacts, "main"))
+                .expect("main")
+                .decisions[0]
+                .verdict
+        };
+
+        // `main`'s typing reads `<shape>`'s cone, which covers every
+        // subclass and its sealing.
+        let first =
+            CompilerSession::compile_source("sealed.loko", SEALED_PICK, RuntimeMode::CompileOnly);
+        let shape = class(&first, "<shape>");
+        let graph = first.dump_artifact_graph();
+        let edge = format!(
+            "{} <- {}",
+            artifact_label(QueryArtifact::DefinitionTyping(function_definition(
+                &first, "main"
+            ))),
+            artifact_label(QueryArtifact::ClassCone(shape))
+        );
+        assert!(graph.contains(&edge), "{graph}");
+        assert_eq!(dispatch(&first), typing::TypingVerdict::Proved);
+
+        // A class edit renumbers classes, so it re-checks every definition;
+        // a new subclass leaves a piece `area` has no method for.
+        let update = edit_sealed_pick(&format!(
+            "{SEALED_PICK}\ndefine class <triangle> (<shape>)\nend;"
+        ));
+        let main = function_definition(&update.artifacts, "main");
+        assert_eq!(
+            report(&update, QueryArtifact::DefinitionTyping(main)),
+            (true, CacheAction::Recomputed)
+        );
+        assert_eq!(dispatch(&update.artifacts), typing::TypingVerdict::Checked);
+
+        // So does removing one, which leaves the decision proved.
+        let update = edit_sealed_pick(
+            &SEALED_PICK
+                .replace("define sealed class <square> (<shape>)\nend;\n", "")
+                .replace("define method area(s :: <square>)\n  4\nend;\n", ""),
+        );
+        let main = function_definition(&update.artifacts, "main");
+        assert_eq!(
+            report(&update, QueryArtifact::DefinitionTyping(main)),
+            (true, CacheAction::Recomputed)
+        );
+        assert_eq!(dispatch(&update.artifacts), typing::TypingVerdict::Proved);
+
+        // And unsealing.
+        let update = edit_sealed_pick(&SEALED_PICK.replace(
+            "define sealed abstract class <shape>",
+            "define abstract class <shape>",
+        ));
+        assert_eq!(dispatch(&update.artifacts), typing::TypingVerdict::Checked);
+
+        // Sealing a generic is local to it, yet reaches every sender that
+        // assumes its method set, through the method table.
+        let update = edit_sealed_pick(
+            &SEALED_PICK.replace("define generic area(x);", "define sealed generic area(x);"),
+        );
+        let area = update.artifacts.sem.generics[0].definition;
+        assert_eq!(
+            report(&update, QueryArtifact::MethodTable(area)),
+            (true, CacheAction::Recomputed)
+        );
+        let main = function_definition(&update.artifacts, "main");
+        assert!(report(&update, QueryArtifact::DefinitionTyping(main)).0);
+        let quiet = function_definition(&update.artifacts, "quiet");
+        assert!(!report(&update, QueryArtifact::DefinitionTyping(quiet)).0);
     }
 
     #[test]

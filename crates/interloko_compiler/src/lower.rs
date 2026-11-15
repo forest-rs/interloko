@@ -3751,9 +3751,10 @@ impl<'module> BodyLowering<'module> {
 
     /// The method a send to `generic` at `site` may call through its link,
     /// with that method's function: typing proved the dispatch, the
-    /// argument classes are exact, the runtime table selects the same method
-    /// typing did, and the method takes the send's arguments and results
-    /// unchanged. The runtime layout, which every unit of a run shares, fixes
+    /// argument classes are exact or, once their sealed cones are split, a
+    /// few exact classes ([`typing::exact_class_tuples`]), the runtime table
+    /// selects the same method typing did for each of them, and the method
+    /// takes the send's arguments and results unchanged. The runtime layout, which every unit of a run shares, fixes
     /// which method those classes select, so the link need only follow the
     /// method's newest code.
     ///
@@ -3775,17 +3776,17 @@ impl<'module> BodyLowering<'module> {
         }
         let method = decision.selected_method?;
         let plan = self.ids.dispatch.get(generic.id.0 as usize)?.as_ref()?;
-        let exact = decision
-            .actual
-            .iter()
-            .map(|ty| ty.exact_class(self.module))
-            .collect::<Option<Vec<_>>>()?;
-        let case = plan.select(
-            |index| exact.get(index).copied(),
-            |class, specializer| self.module.is_same_or_subclass(class, specializer),
-        )?;
-        if case.method != method || !case.direct {
-            return None;
+        // Every class the arguments may have, once sealed cones are split,
+        // must select the method directly, as a request would.
+        let (tuples, _) = typing::exact_class_tuples(self.module, &decision.actual)?;
+        for exact in &tuples {
+            let case = plan.select(
+                |index| exact.get(index).copied(),
+                |class, specializer| self.module.is_same_or_subclass(class, specializer),
+            )?;
+            if case.method != method || !case.direct {
+                return None;
+            }
         }
         let callee = *self.ids.methods.get(method.0 as usize)?;
         Some((method, callee))

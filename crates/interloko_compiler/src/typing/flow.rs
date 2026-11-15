@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use interloko_model::types::{Atom, IntRange, Metaobject, Relation, Type};
+use interloko_model::types::{Atom, IntRange, Metaobject, Relation, Type, sealed_pieces};
 
 use super::{
     Assumption, Binding, BindingFact, Branch, ContractSource, Reason, ReasonId, ReasonKind,
@@ -26,10 +26,6 @@ use crate::sem::{
     NumericKind, SiteId, ValueKind,
 };
 use crate::syntax::Span;
-
-/// Argument-type tuples explored before a dispatch checks whole argument
-/// types instead of their union members.
-const MAX_DISPATCH_TUPLES: usize = 16;
 
 /// Nesting of constant references followed before a constant's type falls
 /// back to its sem category.
@@ -315,6 +311,9 @@ pub(super) struct Analysis<'a> {
     result: Option<ReasonId>,
     contexts: Vec<Context<'a>>,
     assumptions: Vec<(Assumption, ReasonId)>,
+    /// The closed-world reasons each reason's chain cites, parallel to
+    /// `reasons`.
+    cited: Vec<Vec<ReasonId>>,
     constants: Vec<Option<Type>>,
     depth: usize,
     probe: Option<(ProbeTarget, Option<ProbeHit>)>,
@@ -332,6 +331,7 @@ impl<'a> Analysis<'a> {
             result: None,
             contexts: Vec::new(),
             assumptions: Vec::new(),
+            cited: Vec::new(),
             constants: vec![None; module.constants.len()],
             depth: 0,
             probe: None,
@@ -391,12 +391,11 @@ impl<'a> Analysis<'a> {
             let (decided, expected, assumes) = match check.target {
                 sem::EntryTarget::Instance(class) => {
                     let target = Type::of(Atom::Cone(class), self.module);
-                    let assumes = self.class_assumptions(&[&passed.ty, &target]);
-                    (
-                        decide(self.module, env, &passed.ty, &target, CAST_RULES),
-                        TypingExpectation::Class(class),
-                        assumes,
-                    )
+                    let mut assumes = self.class_assumptions(&[&passed.ty, &target]);
+                    let (decided, sealed) =
+                        decide_sealed(self.module, env, &passed.ty, &target, CAST_RULES);
+                    assumes.extend(self.sealed_assumptions(&sealed));
+                    (decided, TypingExpectation::Class(class), assumes)
                 }
                 sem::EntryTarget::ClassObject(bound) => (
                     decide_class_object(self.module, env, &passed.ty, bound),
@@ -519,6 +518,20 @@ impl<'a> Analysis<'a> {
 
     fn reason(&mut self, kind: ReasonKind, span: Span, ty: &Type, from: Vec<ReasonId>) -> ReasonId {
         let id = ReasonId(u32::try_from(self.reasons.len()).unwrap_or(u32::MAX));
+        // A reason cites what the reasons it derives from cite. There are
+        // few assumptions per definition, so each list stays short.
+        let mut cited = Vec::new();
+        if matches!(kind, ReasonKind::ClosedWorld(_)) {
+            cited.push(id);
+        }
+        for parent in &from {
+            for assumption in self.cited.get(parent.0 as usize).into_iter().flatten() {
+                if !cited.contains(assumption) {
+                    cited.push(*assumption);
+                }
+            }
+        }
+        self.cited.push(cited);
         self.reasons.push(Reason {
             kind,
             span,
@@ -568,7 +581,8 @@ impl<'a> Analysis<'a> {
         reason
     }
 
-    /// Closed classes whose exactness the types rely on.
+    /// Closed classes whose exactness the types rely on. A source class is
+    /// closed only because it is sealed, so its assumption is its sealing.
     fn class_assumptions(&mut self, types: &[&Type]) -> Vec<ReasonId> {
         let mut classes: Vec<ClassId> = Vec::new();
         for ty in types {
@@ -583,7 +597,26 @@ impl<'a> Analysis<'a> {
         }
         classes
             .into_iter()
-            .map(|class| self.assume(Assumption::Class(class)))
+            .map(|class| {
+                let sealed = self
+                    .module
+                    .classes
+                    .get(class.0 as usize)
+                    .is_some_and(|record| record.sealing.is_sealed());
+                self.assume(if sealed {
+                    Assumption::Sealed(class)
+                } else {
+                    Assumption::Class(class)
+                })
+            })
+            .collect()
+    }
+
+    /// The assumptions that `classes` stay sealed as they are.
+    fn sealed_assumptions(&mut self, classes: &[ClassId]) -> Vec<ReasonId> {
+        classes
+            .iter()
+            .map(|class| self.assume(Assumption::Sealed(*class)))
             .collect()
     }
 
@@ -871,8 +904,10 @@ impl<'a> Analysis<'a> {
             } => {
                 let value = self.eval(env, value);
                 let target = Type::of(Atom::Cone(*class), module);
-                let assumes = self.class_assumptions(&[&value.ty, &target]);
-                let decided = decide(module, env, &value.ty, &target, INSTANCE_RULES);
+                let mut assumes = self.class_assumptions(&[&value.ty, &target]);
+                let (decided, sealed) =
+                    decide_sealed(module, env, &value.ty, &target, INSTANCE_RULES);
+                assumes.extend(self.sealed_assumptions(&sealed));
                 self.record(
                     *site,
                     TypingCheck::Instance,
@@ -914,8 +949,9 @@ impl<'a> Analysis<'a> {
             } => {
                 let value = self.eval(env, value);
                 let target = Type::of(Atom::Cone(*class), module);
-                let assumes = self.class_assumptions(&[&value.ty, &target]);
-                let decided = decide(module, env, &value.ty, &target, CAST_RULES);
+                let mut assumes = self.class_assumptions(&[&value.ty, &target]);
+                let (decided, sealed) = decide_sealed(module, env, &value.ty, &target, CAST_RULES);
+                assumes.extend(self.sealed_assumptions(&sealed));
                 // A failed cast signals a `<type-error>` whose `use-value`
                 // restart may supply any instance of the target, which the
                 // cast checks again, so only a proved cast keeps what is
@@ -925,7 +961,12 @@ impl<'a> Analysis<'a> {
                 } else {
                     self.bound(expr)
                 };
-                let from = vec![value.reason];
+                // A cast proved by splitting passes its value on relying on
+                // the same sealing.
+                let mut from = vec![value.reason];
+                if decided.0 == TypingVerdict::Proved {
+                    from.extend(self.sealed_assumptions(&sealed));
+                }
                 self.record(
                     *site,
                     TypingCheck::Cast,
@@ -1450,10 +1491,12 @@ impl<'a> Analysis<'a> {
     ) {
         let module = self.module;
         self.refine(when_true, var, site, Branch::Then, span, |ty| {
-            ty.meet(target, module)
+            (ty.meet(target, module), Vec::new())
         });
+        // What a sealed cone loses to the test leaves its other pieces.
         self.refine(when_false, var, site, Branch::Else, span, |ty| {
-            ty.minus(target, module)
+            let difference = ty.difference(target, module);
+            (difference.ty, difference.sealed)
         });
     }
 
@@ -1487,23 +1530,26 @@ impl<'a> Analysis<'a> {
         };
         let then_type = range_type(module, then_bound.range());
         self.refine(when_true, var, None, Branch::Then, span, |ty| {
-            ty.meet(&then_type, module)
+            (ty.meet(&then_type, module), Vec::new())
         });
         if op == CompareOp::Eq {
             if let Some(point) = other.point().and_then(|point| i64::try_from(point).ok()) {
                 let hole = range_type(module, IntRange::singleton(point));
                 self.refine(when_false, var, None, Branch::Else, span, |ty| {
-                    ty.minus(&hole, module)
+                    (ty.minus(&hole, module), Vec::new())
                 });
             }
         } else {
             let else_type = range_type(module, else_bound.range());
             self.refine(when_false, var, None, Branch::Else, span, |ty| {
-                ty.meet(&else_type, module)
+                (ty.meet(&else_type, module), Vec::new())
             });
         }
     }
 
+    /// Narrows `var` in `env` to what `narrow` returns for its current
+    /// type, which also names the sealed classes the narrowing relied on;
+    /// the narrowed fact cites their assumptions after the fact it narrows.
     fn refine(
         &mut self,
         env: &mut Env,
@@ -1511,21 +1557,18 @@ impl<'a> Analysis<'a> {
         site: Option<SiteId>,
         branch: Branch,
         span: Span,
-        narrow: impl FnOnce(&Type) -> Type,
+        narrow: impl FnOnce(&Type) -> (Type, Vec<ClassId>),
     ) {
         let Some(current) = env.get(var).cloned() else {
             return;
         };
-        let ty = narrow(&current.ty);
+        let (ty, sealed) = narrow(&current.ty);
         if ty == current.ty {
             return;
         }
-        let reason = self.reason(
-            ReasonKind::Narrowed { site, branch },
-            span,
-            &ty,
-            vec![current.reason],
-        );
+        let mut from = vec![current.reason];
+        from.extend(self.sealed_assumptions(&sealed));
+        let reason = self.reason(ReasonKind::Narrowed { site, branch }, span, &ty, from);
         if ty.is_bottom() {
             env.kill(reason);
         }
@@ -1679,9 +1722,15 @@ impl<'a> Analysis<'a> {
         span: Span,
         expected: TypingExpectation,
         operands: &[Fact],
-        assumes: Vec<ReasonId>,
+        mut assumes: Vec<ReasonId>,
         selected_method: Option<sem::MethodId>,
     ) {
+        // A verdict relies on whatever its operands' facts relied on.
+        for cited in self.cited_assumptions(operands) {
+            if !assumes.contains(&cited) {
+                assumes.push(cited);
+            }
+        }
         self.decisions.push(TypingDecision {
             owner: self.owner,
             site,
@@ -1695,6 +1744,25 @@ impl<'a> Analysis<'a> {
             assumes,
             selected_method,
         });
+    }
+
+    /// The closed-world assumptions the reason chains of `operands` cite,
+    /// in operand order.
+    fn cited_assumptions(&self, operands: &[Fact]) -> Vec<ReasonId> {
+        let mut out = Vec::new();
+        for operand in operands {
+            for assumption in self
+                .cited
+                .get(operand.reason.0 as usize)
+                .into_iter()
+                .flatten()
+            {
+                if !out.contains(assumption) {
+                    out.push(*assumption);
+                }
+            }
+        }
+        out
     }
 
     /// Records the dispatch decision for a send of `generic` on `args`.
@@ -1717,6 +1785,7 @@ impl<'a> Analysis<'a> {
             .filter(|method| method.generic == generic)
             .collect::<Vec<_>>();
         let actual = args.iter().map(|fact| fact.ty.clone()).collect::<Vec<_>>();
+        let mut sealed = Vec::new();
         let decided = if env.dead.is_some() {
             (TypingVerdict::Proved, TypingRule::Unreachable)
         } else {
@@ -1730,25 +1799,23 @@ impl<'a> Analysis<'a> {
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
-            let verdict = dispatch_tuples(module, &actual)
-                .iter()
-                .map(|tuple| {
-                    let relation = specializers
-                        .iter()
-                        .filter(|specializers| specializers.len() == tuple.len())
-                        .map(|specializers| {
-                            specializers.iter().zip(tuple).fold(
-                                Relation::Always,
-                                |acc, (specializer, arg)| {
-                                    all_hold(acc, arg.relate(specializer, module))
-                                },
-                            )
-                        })
-                        .fold(Relation::Never, any_holds);
-                    verdict_of(relation)
-                })
-                .reduce(TypingVerdict::join)
-                .unwrap_or(TypingVerdict::Checked);
+            // Distribute over union members first; while that leaves the
+            // runtime to decide, split the members' sealed cones one level
+            // further, so only the sealing that mattered is relied on.
+            let mut members = dispatch_members(module, &actual);
+            let mut verdict = dispatch_verdict(module, &specializers, &actual, &members);
+            while verdict == TypingVerdict::Checked {
+                let (next, split) = split_members(module, &members);
+                if split.is_empty() {
+                    break;
+                }
+                extend_unique(&mut sealed, split);
+                verdict = dispatch_verdict(module, &specializers, &actual, &next);
+                members = next;
+            }
+            if verdict == TypingVerdict::Checked {
+                sealed.clear();
+            }
             let rule = match verdict {
                 TypingVerdict::Proved => TypingRule::DispatchCovered,
                 TypingVerdict::Checked => TypingRule::DispatchNeedsRuntimeClass,
@@ -1756,19 +1823,33 @@ impl<'a> Analysis<'a> {
             };
             (verdict, rule)
         };
-        let selected_method = actual
-            .iter()
-            .map(|arg| arg.exact_class(module))
-            .collect::<Option<Vec<_>>>()
-            .and_then(
-                |exact| match module.select_method_for_classes(generic, &exact) {
-                    sem::MethodSelection::Selected(method) => Some(method),
-                    sem::MethodSelection::None | sem::MethodSelection::Ambiguous => None,
-                },
-            );
+        // A covered send selects one method when every class its arguments
+        // may have, once sealed cones are split, selects the same one.
+        let selected_method = (decided == (TypingVerdict::Proved, TypingRule::DispatchCovered))
+            .then(|| super::exact_class_tuples(module, &actual))
+            .flatten()
+            .and_then(|(tuples, split)| {
+                let mut chosen = None;
+                for tuple in &tuples {
+                    let sem::MethodSelection::Selected(method) =
+                        module.select_method_for_classes(generic, tuple)
+                    else {
+                        return None;
+                    };
+                    if chosen
+                        .replace(method)
+                        .is_some_and(|earlier| earlier != method)
+                    {
+                        return None;
+                    }
+                }
+                extend_unique(&mut sealed, split);
+                chosen
+            });
         let mut assumes = vec![self.assume(Assumption::Generic(generic))];
         let types = actual.iter().collect::<Vec<_>>();
         assumes.extend(self.class_assumptions(&types));
+        assumes.extend(self.sealed_assumptions(&sealed));
         let selected = (decided == (TypingVerdict::Proved, TypingRule::DispatchCovered))
             .then_some(selected_method)
             .flatten()
@@ -2135,6 +2216,29 @@ fn decide(
     }
 }
 
+/// Decides a check of `operand` against the class type `expected`, splitting
+/// the operand's sealed cones when that decides more
+/// ([`Type::relate_sealed`]); also returns the sealed classes the verdict
+/// relies on.
+fn decide_sealed(
+    module: &sem::Module,
+    env: &Env,
+    operand: &Type,
+    expected: &Type,
+    [always, maybe, never]: RelationRules,
+) -> ((TypingVerdict, TypingRule), Vec<ClassId>) {
+    if env.dead.is_some() {
+        return ((TypingVerdict::Proved, TypingRule::Unreachable), Vec::new());
+    }
+    let (relation, sealed) = operand.relate_sealed(expected, module);
+    let decided = match relation {
+        Relation::Always => (TypingVerdict::Proved, always),
+        Relation::Maybe => (TypingVerdict::Checked, maybe),
+        Relation::Never => (TypingVerdict::Refuted, never),
+    };
+    (decided, sealed)
+}
+
 /// Decides whether `operand` is a class object naming `bound` or one of
 /// its subclasses, by the cast rules.
 fn decide_class_object(
@@ -2184,10 +2288,10 @@ fn decide_class_object(
     }
 }
 
-/// Argument-type tuples a dispatch checks: one per combination of union
-/// members, or the whole types when there would be too many.
-fn dispatch_tuples(module: &sem::Module, actual: &[Type]) -> Vec<Vec<Type>> {
-    let per_arg = actual
+/// The members a dispatch distributes over, per argument: each union
+/// member on its own, or the whole type for [`Type::top`].
+fn dispatch_members(module: &sem::Module, actual: &[Type]) -> Vec<Vec<Type>> {
+    actual
         .iter()
         .map(|ty| match ty.atoms() {
             None => vec![ty.clone()],
@@ -2196,16 +2300,103 @@ fn dispatch_tuples(module: &sem::Module, actual: &[Type]) -> Vec<Vec<Type>> {
                 .map(|atom| Type::of(atom.clone(), module))
                 .collect(),
         })
-        .collect::<Vec<_>>();
-    let count = per_arg
+        .collect()
+}
+
+/// Replaces every member that is a cone over a sealed class by its pieces,
+/// one level; also returns the classes split.
+fn split_members(module: &sem::Module, members: &[Vec<Type>]) -> (Vec<Vec<Type>>, Vec<ClassId>) {
+    let mut split = Vec::new();
+    let next = members
+        .iter()
+        .map(|members| {
+            members
+                .iter()
+                .flat_map(|member| {
+                    if let Some([Atom::Cone(class)]) = member.atoms()
+                        && let Some(pieces) = sealed_pieces(*class, module)
+                    {
+                        if !split.contains(class) {
+                            split.push(*class);
+                        }
+                        // A sealed leaf piece is exact because it has no
+                        // subclasses.
+                        for piece in &pieces {
+                            if let Atom::Exact(leaf) = piece
+                                && module
+                                    .classes
+                                    .get(leaf.0 as usize)
+                                    .is_some_and(|record| record.sealing.is_sealed())
+                                && !split.contains(leaf)
+                            {
+                                split.push(*leaf);
+                            }
+                        }
+                        return pieces
+                            .into_iter()
+                            .map(|piece| Type::of(piece, module))
+                            .collect();
+                    }
+                    vec![member.clone()]
+                })
+                .collect()
+        })
+        .collect();
+    (next, split)
+}
+
+/// The verdict of a dispatch over every combination of `members`, or over
+/// the whole `actual` types when there are more than
+/// [`super::MAX_DISPATCH_TUPLES`] combinations.
+fn dispatch_verdict(
+    module: &sem::Module,
+    specializers: &[Vec<Type>],
+    actual: &[Type],
+    members: &[Vec<Type>],
+) -> TypingVerdict {
+    let count = members
         .iter()
         .try_fold(1_usize, |count, members| count.checked_mul(members.len()))
         .unwrap_or(usize::MAX);
-    if count > MAX_DISPATCH_TUPLES {
-        return vec![actual.to_vec()];
+    let tuples = if count > super::MAX_DISPATCH_TUPLES {
+        vec![actual.to_vec()]
+    } else {
+        product(members)
+    };
+    tuples
+        .iter()
+        .map(|tuple| {
+            let relation = specializers
+                .iter()
+                .filter(|specializers| specializers.len() == tuple.len())
+                .map(|specializers| {
+                    specializers
+                        .iter()
+                        .zip(tuple)
+                        .fold(Relation::Always, |acc, (specializer, arg)| {
+                            all_hold(acc, arg.relate(specializer, module))
+                        })
+                })
+                .fold(Relation::Never, any_holds);
+            verdict_of(relation)
+        })
+        .reduce(TypingVerdict::join)
+        .unwrap_or(TypingVerdict::Checked)
+}
+
+/// Appends the classes of `more` that `classes` lacks.
+fn extend_unique(classes: &mut Vec<ClassId>, more: Vec<ClassId>) {
+    for class in more {
+        if !classes.contains(&class) {
+            classes.push(class);
+        }
     }
+}
+
+/// Every tuple taking one member of each list, in order.
+pub(super) fn product<T: Clone>(lists: &[Vec<T>]) -> Vec<Vec<T>> {
     let mut tuples = vec![Vec::new()];
-    for members in &per_arg {
+    for members in lists {
         let mut next = Vec::with_capacity(tuples.len().saturating_mul(members.len()));
         for tuple in &tuples {
             for member in members {
