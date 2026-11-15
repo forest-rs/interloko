@@ -4423,6 +4423,13 @@ fn collect_dispatch_sites_in_expr(
     sites: &mut Vec<DispatchSiteRecord>,
 ) {
     match expr {
+        // A closure's calls belong to the definition that contains it,
+        // which numbers their check sites.
+        sem::Expr::Closure { closure, .. } => {
+            if let Some(closure) = artifacts.sem.closures.get(closure.0 as usize) {
+                collect_dispatch_sites_in_block(artifacts, owner, &closure.body, sites);
+            }
+        }
         sem::Expr::DirectCall { args, .. } | sem::Expr::HostCall { args, .. } => {
             for arg in args {
                 collect_dispatch_sites_in_expr(artifacts, owner, arg, sites);
@@ -4545,7 +4552,6 @@ fn collect_dispatch_sites_in_expr(
         | sem::Expr::ConstantRef { .. }
         | sem::Expr::ClassObject { .. }
         | sem::Expr::KnownCallable { .. }
-        | sem::Expr::Closure { .. }
         | sem::Expr::GenericFunctionObject { .. }
         | sem::Expr::Error { .. } => {}
     }
@@ -15294,6 +15300,43 @@ mod tests {
                 sites[1].owner.definition
             ))
         );
+    }
+
+    #[test]
+    fn dispatch_sites_include_calls_inside_closures() {
+        let source = "define class <shape> (<object>)\nend;\n\
+            define class <circle> (<shape>)\nend;\n\
+            define generic area(x);\n\
+            define method area(c :: <circle>) => <integer>\n  7\nend;\n\
+            define function main() => <integer>\n  \
+            let f :: <callable> = function () => <integer>\n    area(make(<circle>))\n  end;\n  \
+            area(make(<circle>))\nend;";
+        let artifacts =
+            CompilerSession::compile_source("closure.loko", source, RuntimeMode::CompileOnly);
+        assert!(
+            artifacts.diagnostics.is_empty(),
+            "{:?}",
+            artifacts.diagnostics
+        );
+        let sites = artifacts.dispatch_sites();
+        let owners = sites
+            .iter()
+            .map(|site| (site.owner.name.as_str(), site.site))
+            .collect::<Vec<_>>();
+        assert_eq!(owners, [("main", sem::SiteId(0)), ("main", sem::SiteId(1))]);
+        for decision in artifacts.typing.decisions() {
+            let explanation = artifacts
+                .explain_typing(&typing_decision_object_id(decision))
+                .expect("decision");
+            assert!(
+                explanation.contains("dispatch-site: dispatch:d"),
+                "{explanation}"
+            );
+            assert!(
+                explanation.contains("because #0: constructed@"),
+                "{explanation}"
+            );
+        }
     }
 
     #[test]
