@@ -21,6 +21,7 @@ use alloc::sync::Arc;
 use core::fmt::{self, Write as _};
 
 use execution_tape::opcode::Opcode;
+use execution_tape::program::Pc;
 use execution_tape::recording::{
     CallStack, HostOutcome, InstructionCapture, InstructionOutcome, InstructionStatus, Outcome,
     RecordLimits, RecordedValue, Recorder, Recording,
@@ -203,7 +204,7 @@ impl fmt::Display for TracedFunction<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.name() {
             Some(name) => formatter.write_str(name),
-            None => write!(formatter, "u{}:f{}", self.id.unit.0, self.id.func.0),
+            None => write!(formatter, "u{}:f{}", self.id.unit.0, self.id.func),
         }
     }
 }
@@ -214,7 +215,7 @@ pub struct TracedLocation<'a> {
     /// Function containing the instruction.
     pub function: TracedFunction<'a>,
     /// Instruction byte offset within the tape function.
-    pub pc: u32,
+    pub pc: Pc,
     /// Source position of the instruction's span, when resolvable.
     pub source: Option<SourcePosition>,
 }
@@ -697,7 +698,7 @@ impl<'a> ExecutionTraceView<'a> {
         let mut current = None;
         for entry in function.spans(program).ok()? {
             pc = pc.saturating_add(entry.pc_delta);
-            if pc > u64::from(location.pc) {
+            if pc > u64::from(location.pc.0) {
                 break;
             }
             current = Some(entry.span_id);

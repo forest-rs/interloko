@@ -14451,8 +14451,8 @@ mod tests {
             trap: TrapInfo {
                 unit: execution_tape::value::UnitId(0),
                 func: execution_tape::value::FuncId(3),
-                pc: 11,
-                span_id: Some(17),
+                pc: execution_tape::program::Pc(11),
+                span_id: execution_tape::program::SpanId::try_from(17).ok(),
                 trap: execution_tape::vm::Trap::HostCallFailed {
                     symbol: "interloko.slot_get".into(),
                     sig_hash: execution_tape::host::SigHash(456),
@@ -14494,7 +14494,7 @@ mod tests {
         assert!(foreign.render().contains(&format!(
             "invocation: u{}:f{}",
             entry.id().unit.0,
-            entry.id().func.0
+            entry.id().func
         )));
     }
 
@@ -20796,9 +20796,9 @@ end;
             .iter()
             .find_map(|artifacts| {
                 let program = artifacts.tape.as_ref()?.program().program();
-                program.function_name(func.0).map(String::from)
+                program.function_name(func).map(String::from)
             })
-            .unwrap_or_else(|| format!("f{}", func.0))
+            .unwrap_or_else(|| format!("f{func}"))
     }
 
     /// Installs the fixed shader while the signal is suspended, then retries

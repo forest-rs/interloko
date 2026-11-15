@@ -11,7 +11,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use execution_tape::asm::{Asm, Catch, FunctionAbi, FunctionSig, Label, ProgramBuilder};
+use execution_tape::asm::{Asm, Catch, FunctionAbi, FunctionSig, Label, ProgramBuilder, Reg};
 use execution_tape::contract::{Contract, ContractId};
 use execution_tape::host::HostSig;
 use execution_tape::program::{
@@ -27,6 +27,9 @@ use crate::syntax::Span;
 use interloko_runtime::code::CodeUnit;
 use interloko_runtime::control::ControlLayout;
 use interloko_runtime::{self as runtime, RuntimeLayout};
+
+/// The tape effect register, r0, which effectful instructions thread.
+const EFFECT: Reg = Reg(0);
 
 /// A verified tape program emitted from lowered Interloko IR.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1025,23 +1028,23 @@ impl<'a> FunctionEmitter<'a> {
             }
             lower::Instr::ConstI64 { dst, value, span } => {
                 self.set_span(*span);
-                self.asm.const_i64(dst.0, *value);
+                self.asm.const_i64(*dst, *value);
             }
             lower::Instr::ConstF64 { dst, value, span } => {
                 self.set_span(*span);
-                self.asm.const_f64(dst.0, value.to_f64());
+                self.asm.const_f64(*dst, value.to_f64());
             }
             lower::Instr::Const32 { dst, value, span } => {
                 self.set_span(*span);
                 match value {
-                    sem::Number32::I32(value) => self.asm.const_i32(dst.0, *value),
-                    sem::Number32::U32(value) => self.asm.const_u32(dst.0, *value),
-                    sem::Number32::F32(bits) => self.asm.const_f32_bits(dst.0, bits.to_bits()),
+                    sem::Number32::I32(value) => self.asm.const_i32(*dst, *value),
+                    sem::Number32::U32(value) => self.asm.const_u32(*dst, *value),
+                    sem::Number32::F32(bits) => self.asm.const_f32_bits(*dst, bits.to_bits()),
                 };
             }
             lower::Instr::Num32Unary { dst, op, src, span } => {
                 self.set_span(*span);
-                let (dst, src) = (dst.0, src.0);
+                let (dst, src) = (*dst, *src);
                 match op {
                     lower::Num32UnaryOp::F32Neg => self.asm.f32_neg(dst, src),
                     lower::Num32UnaryOp::F32Abs => self.asm.f32_abs(dst, src),
@@ -1082,7 +1085,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                let (dst, a, b) = (*dst, *lhs, *rhs);
                 match op {
                     lower::Num32BinaryOp::I32Add => self.asm.i32_add(dst, a, b),
                     lower::Num32BinaryOp::I32Sub => self.asm.i32_sub(dst, a, b),
@@ -1134,7 +1137,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                let (dst, overflow, a, b) = (dst.0, overflow.0, lhs.0, rhs.0);
+                let (dst, overflow, a, b) = (*dst, *overflow, *lhs, *rhs);
                 match op {
                     lower::Num32CheckedOp::I32AddOvf => self.asm.i32_add_ovf(dst, overflow, a, b),
                     lower::Num32CheckedOp::I32SubOvf => self.asm.i32_sub_ovf(dst, overflow, a, b),
@@ -1146,7 +1149,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             lower::Instr::ConstBool { dst, value, span } => {
                 self.set_span(*span);
-                self.asm.const_bool(dst.0, *value);
+                self.asm.const_bool(*dst, *value);
             }
             lower::Instr::StringLiteral {
                 dst, value, span, ..
@@ -1155,7 +1158,8 @@ impl<'a> FunctionEmitter<'a> {
                 let value_reg = self.alloc_temp(ValueType::Str);
                 self.set_span(*span);
                 self.asm.const_pool(value_reg, value_const);
-                self.asm.host_call(0, sig, 0, &[value_reg], &[dst.0]);
+                self.asm
+                    .host_call(EFFECT, sig, EFFECT, &[value_reg], &[*dst]);
             }
             lower::Instr::SymbolLiteral {
                 dst, name, span, ..
@@ -1164,15 +1168,16 @@ impl<'a> FunctionEmitter<'a> {
                 let name_reg = self.alloc_temp(ValueType::Str);
                 self.set_span(*span);
                 self.asm.const_pool(name_reg, name_const);
-                self.asm.host_call(0, sig, 0, &[name_reg], &[dst.0]);
+                self.asm
+                    .host_call(EFFECT, sig, EFFECT, &[name_reg], &[*dst]);
             }
             lower::Instr::ConstU64 { dst, value, span } => {
                 self.set_span(*span);
-                self.asm.const_u64(dst.0, *value);
+                self.asm.const_u64(*dst, *value);
             }
             lower::Instr::ConstClass { dst, class, span } => {
                 self.set_span(*span);
-                self.asm.const_u64(dst.0, u64::from(class.0));
+                self.asm.const_u64(*dst, u64::from(class.0));
             }
             lower::Instr::ConstFunction {
                 dst,
@@ -1186,7 +1191,7 @@ impl<'a> FunctionEmitter<'a> {
                     .copied()
                     .ok_or_else(|| invalid_lowered("function id is out of range"))?;
                 self.set_span(*span);
-                self.asm.const_func(dst.0, function);
+                self.asm.const_func(*dst, function);
             }
             lower::Instr::ClosureNew {
                 dst,
@@ -1204,8 +1209,8 @@ impl<'a> FunctionEmitter<'a> {
                 let env_reg = self.alloc_temp(ValueType::Agg);
                 self.set_span(*span);
                 self.asm.const_func(func_reg, function);
-                self.asm.tuple_new(env_reg, &reg_slice(captures));
-                self.asm.closure_new(dst.0, func_reg, env_reg);
+                self.asm.tuple_new(env_reg, captures);
+                self.asm.closure_new(*dst, func_reg, env_reg);
             }
             lower::Instr::CaptureGet {
                 dst,
@@ -1216,7 +1221,7 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.set_span(*span);
                 self.asm
-                    .tuple_get(dst.0, env.0, u32::try_from(*index).unwrap_or(u32::MAX));
+                    .tuple_get(*dst, *env, u32::try_from(*index).unwrap_or(u32::MAX));
             }
             lower::Instr::BoxValue {
                 dst,
@@ -1248,7 +1253,7 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 };
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[src.0], &[dst.0]);
+                self.asm.host_call(EFFECT, sig, EFFECT, &[*src], &[*dst]);
             }
             lower::Instr::I64Binary {
                 dst,
@@ -1259,7 +1264,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                let (dst, overflow, a, b) = (dst.0, overflow.0, lhs.0, rhs.0);
+                let (dst, overflow, a, b) = (*dst, *overflow, *lhs, *rhs);
                 match op {
                     lower::I64ArithOp::Add => self.asm.i64_add_ovf(dst, overflow, a, b),
                     lower::I64ArithOp::Sub => self.asm.i64_sub_ovf(dst, overflow, a, b),
@@ -1274,7 +1279,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                let (dst, a, b) = (*dst, *lhs, *rhs);
                 match op {
                     lower::I64ArithOp::Add => self.asm.i64_add(dst, a, b),
                     lower::I64ArithOp::Sub => self.asm.i64_sub(dst, a, b),
@@ -1289,7 +1294,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                let (dst, a, b) = (*dst, *lhs, *rhs);
                 match op {
                     lower::F64BinaryOp::Add => self.asm.f64_add(dst, a, b),
                     lower::F64BinaryOp::Sub => self.asm.f64_sub(dst, a, b),
@@ -1308,7 +1313,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                let (dst, a, b) = (*dst, *lhs, *rhs);
                 match op {
                     lower::I64BitOp::And => self.asm.i64_and(dst, a, b),
                     lower::I64BitOp::Or => self.asm.i64_or(dst, a, b),
@@ -1318,13 +1323,13 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::F64Unary { dst, op, src, span } => {
                 self.set_span(*span);
                 match op {
-                    lower::F64UnaryOp::Neg => self.asm.f64_neg(dst.0, src.0),
-                    lower::F64UnaryOp::Abs => self.asm.f64_abs(dst.0, src.0),
-                    lower::F64UnaryOp::Floor => self.asm.f64_floor(dst.0, src.0),
-                    lower::F64UnaryOp::Ceil => self.asm.f64_ceil(dst.0, src.0),
-                    lower::F64UnaryOp::Trunc => self.asm.f64_trunc(dst.0, src.0),
-                    lower::F64UnaryOp::Nearest => self.asm.f64_nearest(dst.0, src.0),
-                    lower::F64UnaryOp::Sqrt => self.asm.f64_sqrt(dst.0, src.0),
+                    lower::F64UnaryOp::Neg => self.asm.f64_neg(*dst, *src),
+                    lower::F64UnaryOp::Abs => self.asm.f64_abs(*dst, *src),
+                    lower::F64UnaryOp::Floor => self.asm.f64_floor(*dst, *src),
+                    lower::F64UnaryOp::Ceil => self.asm.f64_ceil(*dst, *src),
+                    lower::F64UnaryOp::Trunc => self.asm.f64_trunc(*dst, *src),
+                    lower::F64UnaryOp::Nearest => self.asm.f64_nearest(*dst, *src),
+                    lower::F64UnaryOp::Sqrt => self.asm.f64_sqrt(*dst, *src),
                 };
             }
             lower::Instr::FloatCall {
@@ -1334,9 +1339,8 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 let sig = self.abi.float_function(*function)?;
-                let args = reg_slice(args);
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &args, &[dst.0]);
+                self.asm.host_call(EFFECT, sig, EFFECT, args, &[*dst]);
             }
             lower::Instr::F64NotEqual {
                 dst,
@@ -1345,15 +1349,15 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                self.asm.f64_ne(dst.0, lhs.0, rhs.0);
+                self.asm.f64_ne(*dst, *lhs, *rhs);
             }
             lower::Instr::I64ToF64 { dst, src, span } => {
                 self.set_span(*span);
-                self.asm.i64_to_f64(dst.0, src.0);
+                self.asm.i64_to_f64(*dst, *src);
             }
             lower::Instr::F64ToI64 { dst, src, span } => {
                 self.set_span(*span);
-                self.asm.f64_to_i64(dst.0, src.0);
+                self.asm.f64_to_i64(*dst, *src);
             }
             lower::Instr::F64Compare {
                 dst,
@@ -1363,7 +1367,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                let (dst, a, b) = (dst.0, lhs.0, rhs.0);
+                let (dst, a, b) = (*dst, *lhs, *rhs);
                 match op {
                     sem::CompareOp::Eq => self.asm.f64_eq(dst, a, b),
                     sem::CompareOp::Lt => self.asm.f64_lt(dst, a, b),
@@ -1382,19 +1386,19 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 match op {
                     sem::CompareOp::Eq => {
-                        self.asm.i64_eq(dst.0, lhs.0, rhs.0);
+                        self.asm.i64_eq(*dst, *lhs, *rhs);
                     }
                     sem::CompareOp::Lt => {
-                        self.asm.i64_lt(dst.0, lhs.0, rhs.0);
+                        self.asm.i64_lt(*dst, *lhs, *rhs);
                     }
                     sem::CompareOp::Le => {
-                        self.asm.i64_le(dst.0, lhs.0, rhs.0);
+                        self.asm.i64_le(*dst, *lhs, *rhs);
                     }
                     sem::CompareOp::Gt => {
-                        self.asm.i64_gt(dst.0, lhs.0, rhs.0);
+                        self.asm.i64_gt(*dst, *lhs, *rhs);
                     }
                     sem::CompareOp::Ge => {
-                        self.asm.i64_ge(dst.0, lhs.0, rhs.0);
+                        self.asm.i64_ge(*dst, *lhs, *rhs);
                     }
                 }
             }
@@ -1407,7 +1411,7 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.set_span(*span);
                 self.asm
-                    .host_call(0, self.abi.value_eq, 0, &[lhs.0, rhs.0], &[dst.0]);
+                    .host_call(EFFECT, self.abi.value_eq, EFFECT, &[*lhs, *rhs], &[*dst]);
             }
             lower::Instr::Call {
                 dsts,
@@ -1421,10 +1425,8 @@ impl<'a> FunctionEmitter<'a> {
                     .get(callee.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_lowered("callee id is out of range"))?;
-                let args = reg_slice(args);
-                let dsts = reg_slice(dsts);
                 self.set_span(*span);
-                self.asm.call(0, callee, 0, &args, &dsts);
+                self.asm.call(EFFECT, callee, EFFECT, args, dsts);
             }
             lower::Instr::SelectMethod {
                 dst,
@@ -1445,8 +1447,8 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm.const_u64(generic_reg, u64::from(generic.0));
                 let mut operands = Vec::with_capacity(args.len() + 1);
                 operands.push(generic_reg);
-                operands.extend(args.iter().map(|arg| arg.0));
-                self.asm.host_call(0, sig, 0, &operands, &[dst.0]);
+                operands.extend(args);
+                self.asm.host_call(EFFECT, sig, EFFECT, &operands, &[*dst]);
             }
             lower::Instr::CallIndirect {
                 dsts,
@@ -1468,10 +1470,9 @@ impl<'a> FunctionEmitter<'a> {
                         ret_types,
                     })
                     .map_err(build_error)?;
-                let args = reg_slice(args);
-                let dsts = reg_slice(dsts);
                 self.set_span(*span);
-                self.asm.call_indirect(0, sig, callee.0, 0, &args, &dsts);
+                self.asm
+                    .call_indirect(EFFECT, sig, *callee, EFFECT, args, dsts);
             }
             lower::Instr::MakeObject {
                 dst,
@@ -1486,13 +1487,13 @@ impl<'a> FunctionEmitter<'a> {
                 let fields_reg = self.alloc_temp(ValueType::Agg);
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
-                self.asm.tuple_new(fields_reg, &reg_slice(fields));
+                self.asm.tuple_new(fields_reg, fields);
                 self.asm.host_call(
-                    0,
+                    EFFECT,
                     self.abi.make_object,
-                    0,
+                    EFFECT,
                     &[class_reg, fields_reg],
-                    &[dst.0],
+                    &[*dst],
                 );
             }
             lower::Instr::VectorLiteral {
@@ -1502,11 +1503,11 @@ impl<'a> FunctionEmitter<'a> {
                 ..
             } => {
                 let (sig, elem) = self.abi.vector_literal()?;
-                let elements = reg_slice(elements);
                 let aggregate = self.alloc_temp(ValueType::Agg);
                 self.set_span(*span);
-                self.asm.array_new(aggregate, elem, &elements);
-                self.asm.host_call(0, sig, 0, &[aggregate], &[dst.0]);
+                self.asm.array_new(aggregate, elem, elements);
+                self.asm
+                    .host_call(EFFECT, sig, EFFECT, &[aggregate], &[*dst]);
             }
             lower::Instr::RuntimeCall {
                 dst,
@@ -1516,9 +1517,8 @@ impl<'a> FunctionEmitter<'a> {
                 ..
             } => {
                 let sig = self.abi.runtime_call(*op)?;
-                let args = reg_slice(args);
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &args, &[dst.0]);
+                self.asm.host_call(EFFECT, sig, EFFECT, args, &[*dst]);
             }
             lower::Instr::HostCall {
                 dst,
@@ -1528,9 +1528,8 @@ impl<'a> FunctionEmitter<'a> {
                 ..
             } => {
                 let sig = self.abi.host_function(*function)?;
-                let args = reg_slice(args);
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &args, &[dst.0]);
+                self.asm.host_call(EFFECT, sig, EFFECT, args, &[*dst]);
             }
             lower::Instr::ReadSlot {
                 dst,
@@ -1551,7 +1550,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(slot_reg, u64::from(slot.0));
                 self.asm
-                    .host_call(0, sig, 0, &[receiver.0, slot_reg], &[dst.0]);
+                    .host_call(EFFECT, sig, EFFECT, &[*receiver, slot_reg], &[*dst]);
             }
             lower::Instr::WriteSlot {
                 dst,
@@ -1573,7 +1572,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(slot_reg, u64::from(slot.0));
                 self.asm
-                    .host_call(0, sig, 0, &[receiver.0, slot_reg, value.0], &[dst.0]);
+                    .host_call(EFFECT, sig, EFFECT, &[*receiver, slot_reg, *value], &[*dst]);
             }
             lower::Instr::ClassOf {
                 dst,
@@ -1587,7 +1586,7 @@ impl<'a> FunctionEmitter<'a> {
                     self.abi.class_of
                 };
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[object.0], &[dst.0]);
+                self.asm.host_call(EFFECT, sig, EFFECT, &[*object], &[*dst]);
             }
             lower::Instr::UnboxValue {
                 dst,
@@ -1606,7 +1605,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm
-                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
+                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
             }
             lower::Instr::InstanceOf {
                 dst,
@@ -1620,7 +1619,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm
-                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
+                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
             }
             lower::Instr::CastObject {
                 dst,
@@ -1634,7 +1633,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(class.0));
                 self.asm
-                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
+                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
             }
             lower::Instr::CastClassObject {
                 dst,
@@ -1648,7 +1647,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.const_u64(class_reg, u64::from(bound.0));
                 self.asm
-                    .host_call(0, sig, 0, &[value.0, class_reg], &[dst.0]);
+                    .host_call(EFFECT, sig, EFFECT, &[*value, class_reg], &[*dst]);
             }
             lower::Instr::EqU64 {
                 dst,
@@ -1657,7 +1656,7 @@ impl<'a> FunctionEmitter<'a> {
                 span,
             } => {
                 self.set_span(*span);
-                self.asm.u64_eq(dst.0, lhs.0, rhs.0);
+                self.asm.u64_eq(*dst, *lhs, *rhs);
             }
             lower::Instr::Branch {
                 cond,
@@ -1668,7 +1667,7 @@ impl<'a> FunctionEmitter<'a> {
                 let then_label = self.label(*then_label)?;
                 let else_label = self.label(*else_label)?;
                 self.set_span(*span);
-                self.asm.br(cond.0, then_label, else_label);
+                self.asm.br(*cond, then_label, else_label);
             }
             lower::Instr::Jump { label, span } => {
                 let label = self.label(*label)?;
@@ -1677,12 +1676,11 @@ impl<'a> FunctionEmitter<'a> {
             }
             lower::Instr::Move { dst, src, span } => {
                 self.set_span(*span);
-                self.asm.mov(dst.0, src.0);
+                self.asm.mov(*dst, *src);
             }
             lower::Instr::Return { values, span } => {
-                let values = reg_slice(values);
                 self.set_span(*span);
-                self.asm.ret(0, &values);
+                self.asm.ret(EFFECT, values);
             }
             lower::Instr::Trap { trap, span } => {
                 self.set_span(*span);
@@ -1704,18 +1702,24 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 match guard {
                     Some(guard) => {
-                        self.asm
-                            .host_call(0, guarded, 0, &[descriptor_reg, guard.0], &[dst.0]);
+                        self.asm.host_call(
+                            EFFECT,
+                            guarded,
+                            EFFECT,
+                            &[descriptor_reg, *guard],
+                            &[*dst],
+                        );
                     }
                     None => {
-                        self.asm.host_call(0, plain, 0, &[descriptor_reg], &[dst.0]);
+                        self.asm
+                            .host_call(EFFECT, plain, EFFECT, &[descriptor_reg], &[*dst]);
                     }
                 }
             }
             lower::Instr::PopBinding { token, span } => {
                 let sig = self.abi.control()?.pop;
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[token.0], &[]);
+                self.asm.host_call(EFFECT, sig, EFFECT, &[*token], &[]);
             }
             lower::Instr::Signal {
                 dsts,
@@ -1747,23 +1751,23 @@ impl<'a> FunctionEmitter<'a> {
             }
             lower::Instr::Rethrow { exception, span } => {
                 self.set_span(*span);
-                self.asm.throw_ref(0, exception.0);
+                self.asm.throw_ref(EFFECT, *exception);
             }
             lower::Instr::PushExit { dst, span } => {
                 let sig = self.abi.control()?.push_exit;
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[], &[dst.0]);
+                self.asm.host_call(EFFECT, sig, EFFECT, &[], &[*dst]);
             }
             lower::Instr::CheckExit { token, span } => {
                 let sig = self.abi.control()?.check_exit;
                 self.set_span(*span);
-                self.asm.host_call(0, sig, 0, &[token.0], &[]);
+                self.asm.host_call(EFFECT, sig, EFFECT, &[*token], &[]);
             }
             lower::Instr::Throw { tag, payload, span } => {
                 let tag = self.abi.tag(*tag)?;
                 self.set_span(*span);
                 self.builder
-                    .emit_throw(&mut self.asm, tag, &reg_slice(payload))
+                    .emit_throw(&mut self.asm, tag, payload)
                     .map_err(build_error)?;
             }
         }
@@ -1790,12 +1794,7 @@ impl<'a> FunctionEmitter<'a> {
     ///           throw_ref exn
     /// none:     dsts = suspend condition#n(condition)
     /// ```
-    fn emit_signal(
-        &mut self,
-        dsts: &[lower::Register],
-        condition: lower::Register,
-        span: Span,
-    ) -> Result<(), TapeError> {
+    fn emit_signal(&mut self, dsts: &[Reg], condition: Reg, span: Span) -> Result<(), TapeError> {
         let control = self.abi.control()?;
         let results = dsts
             .iter()
@@ -1816,28 +1815,34 @@ impl<'a> FunctionEmitter<'a> {
         let (search, run_guard, none) = (self.asm.label(), self.asm.label(), self.asm.label());
         let unwound = self.asm.block(&[escaped]);
         self.set_span(span);
-        self.asm.host_call(0, signal, 0, &[condition.0], &[pending]);
+        self.asm
+            .host_call(EFFECT, signal, EFFECT, &[condition], &[pending]);
         // Every block ends in a terminator: control never falls into a label.
         self.asm.jmp(search);
         self.asm.place(search).map_err(build_error)?;
         self.asm.br(pending, run_guard, none);
         self.asm.place(run_guard).map_err(build_error)?;
-        self.asm.host_call(0, guard, 0, &[], &[closure]);
+        self.asm.host_call(EFFECT, guard, EFFECT, &[], &[closure]);
         self.asm.begin_region(&[Catch::AllRef(unwound)]);
-        self.asm
-            .call_indirect(0, guard_call, closure, 0, &[condition.0], &[accepted]);
+        self.asm.call_indirect(
+            EFFECT,
+            guard_call,
+            closure,
+            EFFECT,
+            &[condition],
+            &[accepted],
+        );
         self.asm
             .end_region()
             .ok_or_else(|| invalid_lowered("guard region is not open"))?;
         self.asm
-            .host_call(0, guard_result, 0, &[accepted], &[pending]);
+            .host_call(EFFECT, guard_result, EFFECT, &[accepted], &[pending]);
         self.asm.jmp(search);
         self.asm.place(unwound).map_err(build_error)?;
-        self.asm.host_call(0, guard_unwound, 0, &[], &[]);
-        self.asm.throw_ref(0, escaped);
+        self.asm.host_call(EFFECT, guard_unwound, EFFECT, &[], &[]);
+        self.asm.throw_ref(EFFECT, escaped);
         self.asm.place(none).map_err(build_error)?;
-        self.asm
-            .suspend(0, tag, 0, &[condition.0], &reg_slice(dsts));
+        self.asm.suspend(EFFECT, tag, EFFECT, &[condition], dsts);
         Ok(())
     }
 
@@ -1848,11 +1853,11 @@ impl<'a> FunctionEmitter<'a> {
             .ok_or_else(|| invalid_lowered("label id is out of range"))
     }
 
-    fn register_type(&self, register: lower::Register) -> Result<ValueType, TapeError> {
+    fn register_type(&self, register: Reg) -> Result<ValueType, TapeError> {
         register_type(self.function, register)
     }
 
-    fn alloc_temp(&mut self, kind: ValueType) -> u32 {
+    fn alloc_temp(&mut self, kind: ValueType) -> Reg {
         self.asm.alloc_register(kind)
     }
 
@@ -1891,22 +1896,16 @@ impl<'a> FunctionEmitter<'a> {
     }
 }
 
-fn register_type(
-    function: &lower::Function,
-    register: lower::Register,
-) -> Result<ValueType, TapeError> {
-    register
-        .0
-        .checked_sub(1)
-        .and_then(|index| function.register_kinds.get(index as usize))
-        .copied()
+fn register_type(function: &lower::Function, register: Reg) -> Result<ValueType, TapeError> {
+    function
+        .register_kind(register)
         .map(value_type)
         .ok_or_else(|| invalid_lowered("register is out of range"))
 }
 
 fn labels_for(function: &lower::Function, asm: &mut Asm) -> Vec<Label> {
     let mut count = 0_usize;
-    let mut catch_params: Vec<(usize, &[lower::Register])> = Vec::new();
+    let mut catch_params: Vec<(usize, &[Reg])> = Vec::new();
     for instr in &function.instructions {
         match instr {
             lower::Instr::Label { label } => {
@@ -1939,15 +1938,11 @@ fn labels_for(function: &lower::Function, asm: &mut Asm) -> Vec<Label> {
     (0..count)
         .map(
             |index| match catch_params.iter().find(|(label, _)| *label == index) {
-                Some((_, params)) => asm.block(&reg_slice(params)),
+                Some((_, params)) => asm.block(params),
                 None => asm.label(),
             },
         )
         .collect()
-}
-
-fn reg_slice(regs: &[lower::Register]) -> Vec<u32> {
-    regs.iter().map(|reg| reg.0).collect()
 }
 
 fn invalid_lowered(message: &str) -> TapeError {
