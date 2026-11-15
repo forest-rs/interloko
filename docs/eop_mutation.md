@@ -742,7 +742,7 @@ dynamic send would. The VM always accepts these targets: the units took
 over from one another, so they share the layout and each generic's tape
 signature, and a link's target has its generic's signature. A chooser sees
 every linked send with the function it calls now
-(`UnhandledCondition::links`).
+(`UnhandledCondition::links`; the break loop's `:links` lists them).
 
 A callable value carries more than its type: code that applies it relies
 on a signature, either a declared `callable(<integer>) => <circle>` type

@@ -219,3 +219,40 @@ installed the edit as a new code unit; still running replaced code:
 > :restart retry frame:0
 0
 > :quit
+
+// Typing proves `weights.loko`'s `c` is a <circle>, so its three `weight`
+// sends call the method through one link instead of asking the runtime.
+// Installing an edit repoints every unit's link at the new method, so the
+// third send, made after the break, weighs 20: 10 + 10 + 0 + 20.
+
+=== repl: an edit repoints linked sends under a suspended signal
+
+> :load tests/fixtures/break_loop/weights.loko
+loaded tests/fixtures/break_loop/weights.loko (8 forms)
+> :run main
+break [1]: no handler for <too-heavy>; 2 frames suspended, nothing unwound
+frames (innermost first):
+  frame:0 check  u0:f0
+  frame:1 main  u0:f1
+restarts:
+  restart:0 use-value(<integer>)  the signal returns the value
+  restart:1 retry(frame)  call a frame's function again, with current definitions
+  restart:2 abort()  unwind to top level, running cleanups
+choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
+> :links
+linked sends (oldest unit first):
+  u0:link#1 weight(<circle>)  -> method u0:f3
+> :edit form:f5
+editing form:f5; enter a replacement definition
+> define method weight(s :: <circle>) => <integer>
+>   20
+> end;
+installed the edit as a new code unit; no suspended frame runs replaced code
+linked sends now call the new code; :links lists them
+> :links
+linked sends (oldest unit first):
+  u0:link#1 weight(<circle>)  -> method u1:f3
+  u1:link#1 weight(<circle>)  -> method u1:f3
+> :restart use-value 0
+40
+> :quit

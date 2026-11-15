@@ -2,6 +2,7 @@
 // expect: run 34
 // expect: diagnostics 0
 // expect: dump eop contains codegen=linked
+// expect: dump eop contains send=linked:area(<circle>)
 // expect: dump lowered contains linked-send m0
 // expect: dump lowered lacks select-method
 // expect: dump tape contains call.link

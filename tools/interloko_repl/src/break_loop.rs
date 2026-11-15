@@ -21,8 +21,9 @@ use std::io::Write;
 use execution_tape::program::ValueType;
 use execution_tape::value::Value;
 use interloko_runtime::chooser::{
-    Choice, ConditionChooser, FrameSnapshot, OfferedRestart, UnhandledCondition,
+    Choice, ConditionChooser, FrameSnapshot, LinkSnapshot, OfferedRestart, UnhandledCondition,
 };
+use interloko_runtime::code::Definition;
 
 use crate::{
     LineSource, PendingDefinitionState, Repl, ReplError, Result, pending_definition_state,
@@ -97,6 +98,7 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
             let args = words.collect::<Vec<_>>();
             match command {
                 ":frames" => self.print_frames(condition)?,
+                ":links" => self.print_links(condition)?,
                 ":restarts" => self.print_restarts(condition)?,
                 ":restart" => {
                     if let Some(choice) = self.restart(condition, &args)? {
@@ -171,6 +173,18 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
         Ok(())
     }
 
+    fn print_links(&mut self, condition: &UnhandledCondition<'_>) -> Result<()> {
+        if condition.links.is_empty() {
+            writeln!(self.stdout, "no linked sends; every send asks the runtime")?;
+            return Ok(());
+        }
+        writeln!(self.stdout, "linked sends (oldest unit first):")?;
+        for link in condition.links {
+            writeln!(self.stdout, "  {}", link_line(link))?;
+        }
+        Ok(())
+    }
+
     fn print_restarts(&mut self, condition: &UnhandledCondition<'_>) -> Result<()> {
         writeln!(self.stdout, "restarts:")?;
         for (index, restart) in condition.restarts.iter().enumerate() {
@@ -210,6 +224,12 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
         }
         for (index, frame) in superseded {
             writeln!(self.stdout, "  frame:{index} {}", frame_line(frame))?;
+        }
+        if !condition.links.is_empty() {
+            writeln!(
+                self.stdout,
+                "linked sends now call the new code; :links lists them"
+            )?;
         }
         Ok(())
     }
@@ -384,6 +404,18 @@ fn frame_line(frame: &FrameSnapshot) -> String {
     line
 }
 
+fn link_line(link: &LinkSnapshot) -> String {
+    let target = match &link.definition {
+        Some(Definition::Generic(_)) => "dispatcher",
+        Some(_) => "method",
+        None => "function",
+    };
+    format!(
+        "u{}:link#{} {}  -> {target} u{}:f{}",
+        link.unit.0, link.link.0, link.name, link.target.unit.0, link.target.func.0
+    )
+}
+
 fn restart_name(restart: &OfferedRestart<'_>) -> String {
     match restart {
         OfferedRestart::Handler { descriptor, .. } => descriptor.name.clone(),
@@ -481,6 +513,7 @@ fn help_text() -> &'static str {
     "break loop:
   :frames                       list the suspended frames, innermost first
   :restarts                     list the restarts on offer
+  :links                        list linked sends and the function each calls now
   :restart <n|name> [args...]   choose a restart: use-value <literal>, retry frame:<n>,
                                 abort, or a handle site's name
   :edit <form-id>               replace a form with the next definition and install it
