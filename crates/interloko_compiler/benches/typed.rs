@@ -16,6 +16,7 @@
 //!   same object without casting it.
 //! - `range conversion`: `as(<i32>, n)` on a small `<integer>`; proved code
 //!   keeps the low bits instead of testing the range.
+//! - `u32 conversion`: the same with `as(<u32>, n)`.
 //! - `tested arithmetic`: `x * x + x + 1` on a boxed `<object>` in the then
 //!   branch of `instance?(x, <integer>)`. Sem reads `x` there as an
 //!   unboxed `<integer>` under either policy, so the branch unboxes once
@@ -26,6 +27,13 @@
 //!   answers after the first send) and calls it indirectly; proved calls the
 //!   method through a relinkable tape link. Its baseline makes the same
 //!   object and passes it to a function.
+//!
+//! - `exact float`: `as(<integer>, f)` on an integral `<double-float>`.
+//!   Typing cannot prove a float integral, so both policies test it; the
+//!   case also pays for making the float from the leaf's `<integer>`.
+//! - `shift count`: `shift-left(x, n)` with an `<i32>` count typing knows
+//!   nothing about, so both policies test it is in 0..=31. Its baseline
+//!   calls a function with the same signature that returns `x`.
 //!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
@@ -130,6 +138,34 @@ end;
 define function convert(d :: <integer>) => <integer>
   if d = 0 then as(<integer>, as(<i32>, d)) + 1 else convert(d - 1) + convert(d - 1) end
 end;
+
+define function convert-unsigned(d :: <integer>) => <integer>
+  if d = 0 then
+    as(<integer>, as(<u32>, d)) + 1
+  else
+    convert-unsigned(d - 1) + convert-unsigned(d - 1)
+  end
+end;
+
+define function exact(d :: <integer>) => <integer>
+  if d = 0 then as(<integer>, as(<double-float>, d)) + 1 else exact(d - 1) + exact(d - 1) end
+end;
+
+define function shift-by(x :: <i32>, n :: <i32>) => <i32>
+  shift-left(x, n)
+end;
+
+define function keep(x :: <i32>, n :: <i32>) => <i32>
+  x
+end;
+
+define function shifted(d :: <integer>) => <integer>
+  if d = 0 then as(<integer>, shift-by(1i32, 3i32)) else shifted(d - 1) + shifted(d - 1) end
+end;
+
+define function kept(d :: <integer>) => <integer>
+  if d = 0 then as(<integer>, keep(1i32, 3i32)) else kept(d - 1) + kept(d - 1) end
+end;
 ";
 
 /// Cases recurse as a balanced binary tree this deep and operate at its
@@ -189,6 +225,9 @@ fn costs(policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("narrowed read", net("narrow", "plain")),
         ("proved cast", net("cast", "made")),
         ("range conversion", net("convert", "plain")),
+        ("u32 conversion", net("convert-unsigned", "plain")),
+        ("exact float", net("exact", "plain")),
+        ("shift count", net("shifted", "kept")),
         ("tested arithmetic", net("tested", "passed")),
         ("generic send", net("sent", "called")),
     ]
