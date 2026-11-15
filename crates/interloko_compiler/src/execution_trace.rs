@@ -204,7 +204,7 @@ impl fmt::Display for TracedFunction<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.name() {
             Some(name) => formatter.write_str(name),
-            None => write!(formatter, "u{}:f{}", self.id.unit.0, self.id.func),
+            None => write!(formatter, "u{}:f{}", self.id.unit, self.id.func),
         }
     }
 }
@@ -692,11 +692,10 @@ impl<'a> ExecutionTraceView<'a> {
     /// Finds the start offset of the source span covering `location`.
     fn span_start(&self, location: TraceLocation) -> Option<usize> {
         let unit = self.trace.recording.unit(location.unit)?;
-        let program = unit.program.program();
-        let function = program.functions.get(location.func.0 as usize)?;
+        let function = unit.program.function(location.func)?;
         let mut pc = 0_u64;
         let mut current = None;
-        for entry in function.spans(program).ok()? {
+        for entry in function.spans() {
             pc = pc.saturating_add(entry.pc_delta);
             if pc > u64::from(location.pc.0) {
                 break;

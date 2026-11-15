@@ -585,12 +585,7 @@ impl CodeUnit {
     }
 
     fn bytecode(&self, func: FuncId) -> Option<&[u8]> {
-        let program = self.program.program();
-        program
-            .functions
-            .get(func.0 as usize)?
-            .bytecode(program)
-            .ok()
+        Some(self.program.function(func)?.bytecode())
     }
 
     /// Argument and result kinds of `func`.

@@ -14927,7 +14927,7 @@ mod tests {
                 unit: execution_tape::value::UnitId(0),
                 func: execution_tape::value::FuncId(3),
                 pc: execution_tape::program::Pc(11),
-                span_id: execution_tape::program::SpanId::try_from(17).ok(),
+                span_id: Some(execution_tape::program::SpanId::new(17)),
                 trap: execution_tape::vm::Trap::HostCallFailed {
                     symbol: "interloko.slot_get".into(),
                     sig_hash: execution_tape::host::SigHash(456),
@@ -14968,7 +14968,7 @@ mod tests {
         assert!(entry.name().is_none());
         assert!(foreign.render().contains(&format!(
             "invocation: u{}:f{}",
-            entry.id().unit.0,
+            entry.id().unit,
             entry.id().func
         )));
     }
@@ -22599,11 +22599,11 @@ end;
              if round?(make(<circle>)) then a else b end",
         );
         let bytecode = |code: &CodeUnit, definition: &interloko_runtime::code::Definition| {
-            let program = code.program.program();
             let func = code.function(definition).expect("function");
-            program.functions[func.0 as usize]
-                .bytecode(program)
-                .expect("bytecode")
+            code.program
+                .function(func)
+                .expect("function")
+                .bytecode()
                 .to_vec()
         };
         let round = interloko_runtime::code::Definition::Generic(sem::GenericFunctionId(0));
@@ -24218,10 +24218,11 @@ end;
             assert_eq!(artifacts.diagnostics, Vec::new());
             let main = tape_function(&artifacts, "main");
             let code = artifacts.code_unit().expect("tape");
-            let program = code.program.program();
-            let bytes = program.functions[main.0 as usize]
-                .bytecode(program)
+            let bytes = code
+                .program
+                .function(main)
                 .expect("main has bytecode")
+                .bytecode()
                 .to_vec();
             (bytes, code.links.clone())
         };
