@@ -8,6 +8,7 @@ use std::path::Path;
 
 use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
 use interloko_compiler::identity::SourceFileId;
+use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{
     GenericFunctionId, HostClass, HostMetaRegistry, HostSlot, ValueKind,
 };
@@ -55,31 +56,76 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> Result<()> {
+    let (args, codegen) = take_codegen_option(args)?;
     let Some(command) = args.first().map(String::as_str) else {
         return Err(LabError::Usage(usage()));
     };
     match command {
-        "run" => command_run(&args),
-        "trace" => command_trace(&args),
-        "dump" => command_dump(&args),
-        "mop" => command_mop(&args),
-        "eop" => command_eop(&args),
-        "registry" => command_registry(&args),
-        "extensions" => command_extensions(&args),
-        "dispatch" => command_dispatch(&args),
-        "inspect" => command_inspect(&args),
-        "affordances" => command_affordances(&args),
-        "invoke-affordance" => command_invoke_affordance(&args),
-        "artifacts" => command_artifacts(&args),
-        "report" => command_report(&args),
-        "diff" => command_diff(&args),
+        "run" => command_run(&args, codegen),
+        "trace" => command_trace(&args, codegen),
+        "dump" => command_dump(&args, codegen),
+        "mop" => command_mop(&args, codegen),
+        "eop" => command_eop(&args, codegen),
+        "registry" => command_registry(&args, codegen),
+        "extensions" => command_extensions(&args, codegen),
+        "dispatch" => command_dispatch(&args, codegen),
+        "inspect" => command_inspect(&args, codegen),
+        "affordances" => command_affordances(&args, codegen),
+        "invoke-affordance" => command_invoke_affordance(&args, codegen),
+        "artifacts" => command_artifacts(&args, codegen),
+        "report" => command_report(&args, codegen),
+        "diff" => command_diff(&args, codegen),
         _ => Err(LabError::Usage(usage())),
     }
 }
 
-fn command_run(args: &[String]) -> Result<()> {
+/// Removes `--codegen <policy>` (or `--codegen=<policy>`) from anywhere in
+/// the arguments and returns the policy every compile of this command uses,
+/// the compiler's default when the option is absent.
+fn take_codegen_option(args: Vec<String>) -> Result<(Vec<String>, CodegenPolicy)> {
+    let mut rest = Vec::with_capacity(args.len());
+    let mut policy = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let label = if arg == "--codegen" {
+            iter.next().ok_or_else(|| {
+                LabError::Usage(format!(
+                    "option `--codegen` requires a policy: {}",
+                    codegen_policy_labels()
+                ))
+            })?
+        } else if let Some(label) = arg.strip_prefix("--codegen=") {
+            label.to_string()
+        } else {
+            rest.push(arg);
+            continue;
+        };
+        let parsed = CodegenPolicy::from_label(&label).ok_or_else(|| {
+            LabError::Usage(format!(
+                "unknown codegen policy `{label}`; expected {}",
+                codegen_policy_labels()
+            ))
+        })?;
+        if policy.replace(parsed).is_some() {
+            return Err(LabError::Usage(
+                "option `--codegen` may be given only once".into(),
+            ));
+        }
+    }
+    Ok((rest, policy.unwrap_or_default()))
+}
+
+fn codegen_policy_labels() -> String {
+    CodegenPolicy::ALL
+        .iter()
+        .map(|policy| policy.as_str())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn command_run(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, trace) = run_args(args)?;
-    let artifacts = compile_path(file, trace.runtime_mode())?;
+    let artifacts = compile_path(file, trace.runtime_mode(), codegen)?;
     print_diagnostics(&artifacts.diagnostics)?;
     match &artifacts.runtime_result {
         Some(RuntimeResult::Returned(value)) => {
@@ -94,57 +140,57 @@ fn command_run(args: &[String]) -> Result<()> {
     }
 }
 
-fn command_trace(args: &[String]) -> Result<()> {
+fn command_trace(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, trace) = trace_args(args)?;
-    let artifacts = compile_path(file, trace.runtime_mode())?;
+    let artifacts = compile_path(file, trace.runtime_mode(), codegen)?;
     print_diagnostics(&artifacts.diagnostics)?;
     print!("{}", artifacts.dump_execution_trace());
     Ok(())
 }
 
-fn command_dump(args: &[String]) -> Result<()> {
+fn command_dump(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, stage) = dump_args(args)?;
-    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&workbench.artifacts.diagnostics)?;
     print!("{}", workbench.dump_stage(stage));
     Ok(())
 }
 
-fn command_mop(args: &[String]) -> Result<()> {
+fn command_mop(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let file = single_file_arg(args)?;
-    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&artifacts.diagnostics)?;
     print!("{}", artifacts.dump_stage(DumpStage::Mop));
     Ok(())
 }
 
-fn command_eop(args: &[String]) -> Result<()> {
+fn command_eop(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let file = single_file_arg(args)?;
-    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&workbench.artifacts.diagnostics)?;
     print!("{}", workbench.dump_eop());
     Ok(())
 }
 
-fn command_registry(args: &[String]) -> Result<()> {
+fn command_registry(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let file = single_file_arg(args)?;
-    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&artifacts.diagnostics)?;
     print!("{}", artifacts.dump_grammar_registry());
     Ok(())
 }
 
-fn command_extensions(args: &[String]) -> Result<()> {
+fn command_extensions(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let file = single_file_arg(args)?;
-    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&artifacts.diagnostics)?;
     print!("{}", artifacts.dump_grammar_extensions());
     Ok(())
 }
 
-fn command_dispatch(args: &[String]) -> Result<()> {
+fn command_dispatch(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, dispatch_id) = dispatch_args(args)?;
-    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&artifacts.diagnostics)?;
     if let Some(dispatch_id) = dispatch_id {
         print!("{}", dispatch_explanation(&artifacts, dispatch_id)?);
@@ -154,44 +200,45 @@ fn command_dispatch(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn command_inspect(args: &[String]) -> Result<()> {
+fn command_inspect(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, object_id) = object_args(args)?;
-    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&workbench.artifacts.diagnostics)?;
     let object = workbench.object(object_id)?;
     print!("{}", format_environment_object(&object));
     Ok(())
 }
 
-fn command_affordances(args: &[String]) -> Result<()> {
+fn command_affordances(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, object_id) = object_args(args)?;
-    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&workbench.artifacts.diagnostics)?;
     let object = workbench.object(object_id)?;
     print!("{}", format_affordances(&object));
     Ok(())
 }
 
-fn command_invoke_affordance(args: &[String]) -> Result<()> {
+fn command_invoke_affordance(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, object_id, affordance, extra) = invoke_args(args)?;
-    invoke_affordance(file, object_id, affordance, extra)?;
+    invoke_affordance(file, object_id, affordance, extra, codegen)?;
     Ok(())
 }
 
-fn command_artifacts(args: &[String]) -> Result<()> {
+fn command_artifacts(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let file = single_file_arg(args)?;
-    let artifacts = compile_path(file, RuntimeMode::CompileOnly)?;
+    let artifacts = compile_path(file, RuntimeMode::CompileOnly, codegen)?;
     print!("{}", artifacts.dump_artifact_graph());
     Ok(())
 }
 
-fn command_report(args: &[String]) -> Result<()> {
+fn command_report(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     let (file, output) = report_args(args)?;
     let workbench = compile_workbench_path(
         file,
         RuntimeMode::RunMainTraced {
             detail: ExecutionTraceDetail::Boundaries,
         },
+        codegen,
     )?;
     report::write_report(Path::new(output), &workbench).map_err(|error| LabError::Io {
         path: output.into(),
@@ -201,7 +248,7 @@ fn command_report(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn command_diff(args: &[String]) -> Result<()> {
+fn command_diff(args: &[String], codegen: CodegenPolicy) -> Result<()> {
     if args.len() != 3 {
         return Err(LabError::Usage(
             "usage: interloko_lab diff <before.loko> <after.loko>".into(),
@@ -215,6 +262,7 @@ fn command_diff(args: &[String]) -> Result<()> {
         parse_grammar_environment(Path::new(&args[1]), &before, &grammar_registry)?;
     let after_grammar = parse_grammar_environment(Path::new(&args[2]), &after, &grammar_registry)?;
     let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
+    session.set_codegen_policy(codegen);
     session.add_source_with_id_and_grammar(source_file, &args[1], &before, before_grammar);
     let _ = session
         .compile(source_file, RuntimeMode::CompileOnly)
@@ -232,11 +280,15 @@ fn command_diff(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn compile_path(path: &str, mode: RuntimeMode) -> Result<SessionArtifacts> {
-    Ok(compile_workbench_path(path, mode)?.artifacts)
+fn compile_path(path: &str, mode: RuntimeMode, codegen: CodegenPolicy) -> Result<SessionArtifacts> {
+    Ok(compile_workbench_path(path, mode, codegen)?.artifacts)
 }
 
-fn compile_workbench_path(path: &str, mode: RuntimeMode) -> Result<CompiledWorkbench> {
+fn compile_workbench_path(
+    path: &str,
+    mode: RuntimeMode,
+    codegen: CodegenPolicy,
+) -> Result<CompiledWorkbench> {
     let source = read_path(path)?;
     let grammar_registry = GrammarFrontendRegistry::builtin();
     let grammar_environment =
@@ -244,6 +296,7 @@ fn compile_workbench_path(path: &str, mode: RuntimeMode) -> Result<CompiledWorkb
     let host_registry = parse_host_registry(Path::new(path), &source)?;
     let host_environment = parse_host_environment(Path::new(path), &source)?;
     let mut session = CompilerSession::with_grammar_registry(grammar_registry);
+    session.set_codegen_policy(codegen);
     let source_file = session.add_source_with_grammar(path, &source, grammar_environment);
     let artifacts = session
         .compile_with_host_registry(source_file, mode, &host_registry)
@@ -630,6 +683,7 @@ fn invoke_affordance(
     object_id: &str,
     affordance: EnvironmentAffordance,
     extra: &[String],
+    codegen: CodegenPolicy,
 ) -> Result<()> {
     if affordance == EnvironmentAffordance::Run {
         if !extra.is_empty() {
@@ -638,7 +692,7 @@ fn invoke_affordance(
                 affordance.as_str()
             )));
         }
-        let workbench = compile_workbench_path(file, RuntimeMode::RunMain)?;
+        let workbench = compile_workbench_path(file, RuntimeMode::RunMain, codegen)?;
         print_diagnostics(&workbench.artifacts.diagnostics)?;
         let object = workbench.object(object_id)?;
         ensure_object_has_affordance(&object, affordance)?;
@@ -647,7 +701,7 @@ fn invoke_affordance(
 
     if affordance == EnvironmentAffordance::AddMethod {
         let source_path = parse_add_method_args(extra)?;
-        return invoke_add_method(file, object_id, source_path);
+        return invoke_add_method(file, object_id, source_path, codegen);
     }
 
     if !extra.is_empty() {
@@ -657,7 +711,7 @@ fn invoke_affordance(
         )));
     }
 
-    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&workbench.artifacts.diagnostics)?;
     let object = workbench.object(object_id)?;
     ensure_object_has_affordance(&object, affordance)?;
@@ -968,8 +1022,13 @@ fn parse_add_method_args(extra: &[String]) -> Result<&str> {
     })
 }
 
-fn invoke_add_method(file: &str, object_id: &str, method_source_path: &str) -> Result<()> {
-    let mut workbench = compile_workbench_path(file, RuntimeMode::CompileOnly)?;
+fn invoke_add_method(
+    file: &str,
+    object_id: &str,
+    method_source_path: &str,
+    codegen: CodegenPolicy,
+) -> Result<()> {
+    let mut workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
     print_diagnostics(&workbench.artifacts.diagnostics)?;
     let object = workbench.object(object_id)?;
     ensure_object_has_affordance(&object, EnvironmentAffordance::AddMethod)?;
@@ -1383,7 +1442,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]\n  {binary} invoke-affordance <file.loko> <generic:gN> add-method --source <method.loko>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} [--codegen off|proved] COMMAND ...\n\ncommands:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]\n  {binary} invoke-affordance <file.loko> <generic:gN> add-method --source <method.loko>\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\noptions:\n  --codegen off|proved   codegen policy for every compile (default proved); may appear anywhere\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 

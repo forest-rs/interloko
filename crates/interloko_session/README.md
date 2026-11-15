@@ -55,6 +55,11 @@ traces come from the existing compiler/runtime interface.
   A runtime image that outlives calls (`SessionArtifacts::runtime`) is tied
   to one runtime layout, which an accepted edit may change, so it is not
   retained here.
+- The codegen policy decides whether lowering acts on what soft typing
+  proved. `with_codegen_policy` chooses it at construction (the other
+  constructors use the compiler's default), source replacement keeps it, and
+  `set_codegen_policy` lowers the accepted revision again under another one
+  as a revision-checked edit that keeps its source and mutation log.
 - Construction uses the compiler's builtin grammar environment. Custom staged
   grammar registry injection is not exposed by this initial session wrapper.
 - Filesystem, transport, UI, document composition and execution scheduling belong

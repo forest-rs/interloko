@@ -1,8 +1,9 @@
 //! Embedding contracts across accepted edits and explicit host behavior.
 
+use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{HostFunction, HostMetaRegistry, HostValueKind};
 use interloko_compiler::session::{
-    ExecutionTraceDetail, FunctionCallError, FunctionValue, HostFunctionFailure,
+    DumpStage, ExecutionTraceDetail, FunctionCallError, FunctionValue, HostFunctionFailure,
     HostFunctionHandler, SessionMutation,
 };
 use interloko_session::{Session, SessionError};
@@ -159,4 +160,54 @@ fn source_replacement_keeps_host_declarations_and_requires_an_explicit_handler()
         .unwrap();
     assert_eq!(result.value, FunctionValue::Integer(100));
     assert_eq!(session.revision(), 1);
+}
+
+#[test]
+fn codegen_policy_is_explicit_kept_by_replacement_and_changed_by_revision() {
+    // `step(i) + 2` may overflow as far as typing knows; `i + 1` cannot.
+    const SUM: &str = "define function step(i :: <integer>) => <integer>
+  if i < 1000 then if i > 0 then i + 1 else 0 end else 0 end
+end;
+define function answer() => <integer> step(999) + 2 end;";
+    let checked_adds = |session: &Session| {
+        session
+            .dump(DumpStage::Lowered)
+            .matches("i64.add_ovf")
+            .count()
+    };
+
+    let mut session =
+        Session::with_codegen_policy("sum.loko", SUM, HostMetaRegistry::new(), CodegenPolicy::Off)
+            .unwrap();
+    assert_eq!(session.codegen_policy(), CodegenPolicy::Off);
+    assert_eq!(checked_adds(&session), 2);
+
+    assert!(matches!(
+        session.set_codegen_policy(1, CodegenPolicy::Proved),
+        Err(SessionError::StaleRevision {
+            expected: 1,
+            actual: 0
+        })
+    ));
+    assert_eq!(
+        session.set_codegen_policy(0, CodegenPolicy::Off).unwrap(),
+        0
+    );
+    assert_eq!(
+        session
+            .set_codegen_policy(0, CodegenPolicy::Proved)
+            .unwrap(),
+        1
+    );
+    assert_eq!(session.codegen_policy(), CodegenPolicy::Proved);
+    assert_eq!(checked_adds(&session), 1);
+    assert_eq!(
+        session.call("answer", &[], None).unwrap().value,
+        FunctionValue::Integer(1002)
+    );
+
+    // Replacement compiles the candidate under the session's policy.
+    session.replace_source(1, SUM).unwrap();
+    assert_eq!(session.codegen_policy(), CodegenPolicy::Proved);
+    assert_eq!(checked_adds(&session), 1);
 }

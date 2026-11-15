@@ -9774,7 +9774,11 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
         EnvironmentKind::TypingConfig => {
             object.artifacts = artifact_facet(
                 source_file,
-                &[QueryArtifact::TypingConfig, QueryArtifact::Typing],
+                &[
+                    QueryArtifact::TypingConfig,
+                    QueryArtifact::CodegenPolicy,
+                    QueryArtifact::Typing,
+                ],
             );
         }
         // Contract objects carry their source and artifact facets from
@@ -11173,8 +11177,9 @@ fn project_typing(
         ]),
         execution: None,
         inspection: format!(
-            "config={} status={} decisions={} proved={} checked={} refuted={} {}",
+            "config={} codegen={} status={} decisions={} proved={} checked={} refuted={} {}",
             typing::config_label(typed.config),
+            artifacts.codegen_policy.as_str(),
             typed.status.as_str(),
             typed.decisions().count(),
             typed.count(typing::TypingVerdict::Proved),
@@ -11476,10 +11481,11 @@ fn explain_typing_decision(
         policy.checked.as_str(),
         policy.refuted.as_str()
     );
-    let _ = writeln!(
-        out,
-        "contract: advisory; the runtime still performs this check"
-    );
+    let contract = match artifacts.check_codegen(decision) {
+        CheckCodegen::Kept => "contract: advisory; the runtime still performs this check",
+        _ => "contract: relied on; the generated code acts on this decision instead of checking",
+    };
+    let _ = writeln!(out, "{contract}");
     out
 }
 
@@ -18382,6 +18388,60 @@ mod tests {
             CheckCodegen::Specialized
         );
         assert_eq!(off.artifacts.check_codegen(decision), CheckCodegen::Kept);
+    }
+
+    #[test]
+    fn typing_objects_name_the_codegen_policy_and_what_it_relies_on() {
+        let explain = |policy: lower::CodegenPolicy| {
+            let mut session = CompilerSession::new();
+            session.set_codegen_policy(policy);
+            let id = session.add_source("sum.loko", SMALL_SUM);
+            let artifacts = session
+                .compile(id, RuntimeMode::CompileOnly)
+                .expect("source was just added");
+            let objects = artifacts.environment_objects();
+            let config = eop_object(&objects, TYPING_CONFIG_OBJECT_ID);
+            let main = function_definition(&artifacts, "main");
+            let decision = artifacts
+                .typing
+                .decisions()
+                .find(|decision| decision.owner == main)
+                .expect("the sum is a check site");
+            (
+                config.inspection.detail.clone(),
+                artifacts
+                    .explain_typing(&typing_decision_object_id(decision))
+                    .expect("decision explanation"),
+            )
+        };
+
+        let (inspection, decision) = explain(lower::CodegenPolicy::Off);
+        assert!(
+            inspection.starts_with("config=soft codegen=off "),
+            "{inspection}"
+        );
+        assert!(
+            decision.contains("codegen: kept (policy off)\n"),
+            "{decision}"
+        );
+        assert!(
+            decision.contains("contract: advisory; the runtime still performs this check\n"),
+            "{decision}"
+        );
+
+        let (inspection, decision) = explain(lower::CodegenPolicy::Proved);
+        assert!(
+            inspection.starts_with("config=soft codegen=proved "),
+            "{inspection}"
+        );
+        assert!(
+            decision.contains("codegen: specialized (policy proved)\n"),
+            "{decision}"
+        );
+        assert!(
+            decision.contains("contract: relied on; the generated code acts on this decision"),
+            "{decision}"
+        );
     }
 
     #[test]

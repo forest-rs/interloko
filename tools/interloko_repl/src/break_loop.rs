@@ -115,6 +115,10 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
                 },
                 ":help" => writeln!(self.stdout, "{}", help_text())?,
                 ":quit" => return Ok(Choice::Abort),
+                ":codegen" if !args.is_empty() => writeln!(
+                    self.stderr,
+                    "error: :codegen cannot change the policy while break [1] is waiting"
+                )?,
                 ":run" | ":load" | ":reload" | ":reset" | ":clear" | ":drop-form" => writeln!(
                     self.stderr,
                     "error: {command} is not available while break [1] is waiting"
