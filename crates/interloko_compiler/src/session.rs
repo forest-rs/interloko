@@ -6382,7 +6382,7 @@ fn run_turn_body<'a>(
             }
             return Err(match failure {
                 RunFailure::Control {
-                    fault: ControlFault::UnhandledCondition { class },
+                    fault: ControlFault::UnhandledCondition { class, .. },
                     ..
                 } => FunctionCallError::UnhandledCondition {
                     class: tape

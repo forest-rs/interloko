@@ -44,10 +44,11 @@ use crate::chooser::{
 };
 use crate::code::{CODE_DISPATCH, CodeMismatch, CodeUnit, Definition, UnitTable};
 use crate::control::{
-    ABORT_TAG, BindingKind, BindingToken, CONDITION_GUARD, CONDITION_GUARD_RESULT,
-    CONDITION_GUARD_UNWOUND, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONTROL_CHECK_EXIT,
-    CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats, RESTART_TAG,
-    RETRY_TAG, RestartDescriptor, is_control_symbol, restart_payload, retry_payload,
+    ABORT_TAG, BindingKind, BindingToken, CHECK_FAILED_TAG, CONDITION_GUARD,
+    CONDITION_GUARD_RESULT, CONDITION_GUARD_UNWOUND, CONDITION_PUSH_HANDLER, CONDITION_SIGNAL,
+    CONDITION_TYPE_ERROR, CONTROL_CHECK_EXIT, CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault,
+    ControlState, ControlStats, RESTART_TAG, RETRY_TAG, RestartDescriptor, is_control_symbol,
+    restart_payload, retry_payload,
 };
 
 /// A [`Host`] backed by an [`InterlokoHost`], which the driver consults for
@@ -251,6 +252,8 @@ pub fn run_installed<'a, H: RuntimeHost>(
         tags,
         state: ControlState::default(),
         searches: Vec::new(),
+        made_check_error: None,
+        unhandled_check: None,
         fault: None,
     };
     loop {
@@ -293,6 +296,8 @@ fn define_tags<H: Host>(vm: &mut Vm<H>) -> Result<VmTags, LinkError> {
         Some(tag) => Ok(tag),
         None => vm.define_tag(name, payload).map_err(LinkError::Tag),
     };
+    // Only checking host calls raise it, and only the guest catches it.
+    define(CHECK_FAILED_TAG, &[])?;
     Ok(VmTags {
         restart: define(RESTART_TAG, &restart_payload())?,
         abort: define(ABORT_TAG, &[])?,
@@ -340,6 +345,12 @@ struct Driver {
     tags: VmTags,
     state: ControlState,
     searches: Vec<Search>,
+    /// The `<type-error>` the last request made for a failed check, which
+    /// the check's code signals next.
+    made_check_error: Option<Obj>,
+    /// The condition of a failed check's signal that found no handler, which
+    /// suspends next.
+    unhandled_check: Option<Obj>,
     fault: Option<ControlFault>,
 }
 
@@ -362,6 +373,9 @@ struct Search {
     stack_len: usize,
     /// Binding whose guard is running on the signalling stack.
     guarding: Option<usize>,
+    /// Whether a failed runtime check signalled the condition, rather than
+    /// the program.
+    failed_check: bool,
 }
 
 /// The classes that select a send, for up to [`SendKey::POSITIONS`]
@@ -391,6 +405,15 @@ impl SendKey {
             classes: key,
         })
     }
+}
+
+/// A suspended signal that no handler accepted.
+#[derive(Copy, Clone)]
+struct Signalled {
+    condition: Obj,
+    class: ClassId,
+    /// Whether a failed runtime check signalled it.
+    failed_check: bool,
 }
 
 /// Control tags as the VM raises and compares them.
@@ -468,7 +491,15 @@ impl Driver {
             Some((condition, class)) => {
                 self.state.note_unhandled();
                 let resume_types = suspension.result_types().to_vec();
-                self.unhandled(&mut suspension, condition, class, &resume_types, chooser)
+                // The guest suspends right after its search finds no
+                // handler, so this is that search's signal.
+                let failed_check = self.unhandled_check.take() == Some(condition);
+                let signal = Signalled {
+                    condition,
+                    class,
+                    failed_check,
+                };
+                self.unhandled(&mut suspension, signal, &resume_types, chooser)
             }
             None => Action::Fail(ControlFault::MalformedRequest),
         };
@@ -650,8 +681,33 @@ impl Driver {
                     next: live,
                     stack_len: live,
                     guarding: None,
+                    failed_check: self.made_check_error.take() == Some(condition),
                 });
                 self.step(pending)
+            }
+            (CONDITION_TYPE_ERROR, [values @ .., Value::U64(site)]) if !values.is_empty() => {
+                let unit = pending.unit();
+                let site = usize::try_from(*site).ok().and_then(|index| {
+                    self.units
+                        .get(unit)?
+                        .control
+                        .type_errors
+                        .get(index)
+                        .cloned()
+                });
+                let Some(site) = site else {
+                    return Action::Fail(ControlFault::MalformedRequest);
+                };
+                match pending
+                    .host_mut()
+                    .with_runtime(|runtime| runtime.make_type_error(&site, values))
+                {
+                    Ok(condition) => {
+                        self.made_check_error = Some(condition);
+                        Action::Complete(alloc::vec![Value::Obj(condition)])
+                    }
+                    Err(_) => Action::Fail(ControlFault::MalformedRequest),
+                }
             }
             (CONDITION_GUARD, []) => match self.guarding(&activation) {
                 Some(index) => match &self.state.bindings()[index].kind {
@@ -728,7 +784,9 @@ impl Driver {
             }
             return self.accept(index);
         }
-        self.searches.pop();
+        if let Some(search) = self.searches.pop() {
+            self.unhandled_check = search.failed_check.then_some(search.condition);
+        }
         Action::Complete(alloc::vec![Value::Bool(false)])
     }
 
@@ -790,11 +848,15 @@ impl Driver {
     fn unhandled<H: RuntimeHost>(
         &mut self,
         pending: &mut PendingSuspension<'_, '_, H>,
-        condition: Obj,
-        class: ClassId,
+        signal: Signalled,
         resume_types: &[ValueType],
         chooser: &mut dyn ConditionChooser,
     ) -> Action {
+        let Signalled {
+            condition,
+            class,
+            failed_check,
+        } = signal;
         let mut refused = None;
         loop {
             let frames = snapshot_frames(pending.inspect(), &self.units);
@@ -818,6 +880,7 @@ impl Driver {
                     chooser.choose(&UnhandledCondition {
                         condition,
                         class,
+                        failed_check,
                         runtime,
                         frames: &frames,
                         restarts: &restarts,
@@ -829,7 +892,11 @@ impl Driver {
                 Choice::Install(code) => refused = self.install(pending, code).err(),
                 Choice::Retry { frame } => return self.retry(&frames, &frame),
                 Choice::Unhandled => {
-                    return Action::Fail(ControlFault::UnhandledCondition { class });
+                    return Action::Fail(ControlFault::UnhandledCondition {
+                        class,
+                        condition,
+                        failed_check,
+                    });
                 }
                 Choice::Abort => return Action::Throw(self.tags.abort, Vec::new()),
                 Choice::UseValue(values) => {

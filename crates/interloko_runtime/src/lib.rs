@@ -17,6 +17,7 @@ pub mod driver;
 mod evacuate;
 mod region;
 mod turn;
+mod type_error;
 
 use alloc::string::String;
 use alloc::vec;
@@ -52,6 +53,7 @@ pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
 use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use turn::ImageRootId;
+pub use type_error::TypeErrorReport;
 
 /// Host-call symbol for object construction.
 pub const MAKE_OBJECT: &str = "interloko.make_object";
@@ -2292,7 +2294,7 @@ impl Host for InterlokoHost {
                 };
                 let class = runtime_class_id(*class_raw)?;
                 if !self.value_is_instance(ValueRef::Obj(*obj), class) {
-                    return Err(HostError::Failed);
+                    return Err(type_error::check_failed(&ctx));
                 }
                 rets[0] = match self.boxed_value(*obj)? {
                     value @ (Value::I64(_) | Value::F64(_) | Value::F32(_)) => value,
@@ -2351,7 +2353,7 @@ impl Host for InterlokoHost {
                             self.layout.is_same_or_subclass(object.class, class)
                         })
                     })
-                    .ok_or(HostError::Failed)?;
+                    .ok_or_else(|| type_error::check_failed(&ctx))?;
                 rets[0] = Value::Obj(obj);
                 Ok(0)
             }
@@ -2371,7 +2373,7 @@ impl Host for InterlokoHost {
                             )
                         })
                     })
-                    .ok_or(HostError::Failed)?;
+                    .ok_or_else(|| type_error::check_failed(&ctx))?;
                 rets[0] = Value::Obj(obj);
                 Ok(0)
             }
@@ -3878,6 +3880,114 @@ mod tests {
             access,
         )?;
         Ok(outputs)
+    }
+
+    /// Runs `as(class, object)` and returns 1 when it passes, 0 when the
+    /// program catches [`control::CHECK_FAILED_TAG`], which it imports when
+    /// `catches` holds.
+    fn run_checked_cast(
+        host: InterlokoHost,
+        object: Obj,
+        class: ClassId,
+        catches: bool,
+    ) -> Result<Vec<Value>, execution_tape::vm::TrapInfo> {
+        use execution_tape::asm::Catch;
+
+        let mut builder = ProgramBuilder::new();
+        let cast = builder.host_sig_for(CAST_OBJECT, cast_object_signature(object_type()));
+        let tag = catches.then(|| {
+            builder
+                .import_tag(control::CHECK_FAILED_TAG, &[])
+                .expect("tag import")
+        });
+        let mut asm = Asm::new();
+        asm.set_register_types(alloc::vec![
+            ValueType::Unit,
+            object_type(),
+            ValueType::U64,
+            object_type(),
+            ValueType::I64,
+        ]);
+        let failed = asm.label();
+        asm.const_u64(Reg(2), u64::from(class.0));
+        if let Some(tag) = tag {
+            asm.begin_region(&[Catch::Tag(tag, failed)]);
+        }
+        asm.host_call(Reg(0), cast, Reg(0), &[Reg(1), Reg(2)], &[Reg(3)]);
+        if tag.is_some() {
+            asm.end_region().expect("region closes");
+        }
+        asm.const_i64(Reg(4), 1);
+        asm.ret(Reg(0), &[Reg(4)]);
+        asm.place(failed).expect("label");
+        asm.const_i64(Reg(4), 0);
+        asm.ret(Reg(0), &[Reg(4)]);
+        let entry = builder
+            .push_function_checked(
+                asm,
+                FunctionSig {
+                    arg_types: vec![object_type()],
+                    ret_types: vec![ValueType::I64],
+                },
+            )
+            .expect("test tape should verify");
+        let program = builder
+            .build_verified()
+            .expect("test program should verify");
+        let mut vm = Vm::new(host, Limits::default());
+        vm.define_tag(control::CHECK_FAILED_TAG, &[])
+            .expect("tag defines");
+        let unit = vm.install(program).expect("test program should install");
+        let mut ctx = ExecutionContext::new();
+        let mut outputs = Vec::new();
+        vm.run_with_ctx(
+            &mut ctx,
+            FuncRef::new(unit, entry),
+            &[Value::Obj(object)],
+            &mut outputs,
+            TraceMask::NONE,
+            None,
+            None,
+        )?;
+        Ok(outputs)
+    }
+
+    #[test]
+    fn a_failed_cast_raises_the_check_failed_tag_its_program_imports() {
+        let square = |host: &mut InterlokoHost| {
+            object_of(
+                &host
+                    .make_object(ClassId(3), &[ValueRef::I64(1), ValueRef::I64(2)])
+                    .expect("square"),
+            )
+        };
+        let mut host = InterlokoHost::new_checked(dispatch_layout()).expect("layout");
+        let object = square(&mut host);
+        assert_eq!(
+            run_checked_cast(host, object, ClassId(1), true).expect("passes"),
+            [Value::I64(1)]
+        );
+        let mut host = InterlokoHost::new_checked(dispatch_layout()).expect("layout");
+        let object = square(&mut host);
+        assert_eq!(
+            run_checked_cast(host, object, ClassId(2), true).expect("caught"),
+            [Value::I64(0)]
+        );
+        // A program that does not import the tag traps as before.
+        let mut host = InterlokoHost::new_checked(dispatch_layout()).expect("layout");
+        let object = square(&mut host);
+        let trap = run_checked_cast(host, object, ClassId(2), false).expect_err("traps");
+        assert!(
+            matches!(
+                &trap.trap,
+                execution_tape::vm::Trap::HostCallFailed {
+                    symbol,
+                    error: HostError::Failed,
+                    ..
+                } if symbol.as_ref() == CAST_OBJECT
+            ),
+            "{trap:?}"
+        );
     }
 
     #[test]
