@@ -1,0 +1,34 @@
+// expect: run "radius 4"
+// expect: diagnostics 0
+// expect: dump sem contains as c1 site=s0
+// expect: dump lowered contains as <circle>
+// expect: dump lowered contains as <string>
+
+// A class result of an untyped `<callable>` is checked back to the class the
+// call site expects, built-in value classes included; a callable that keeps
+// the promise runs through the checks.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define function circle-of(x :: <integer>) => <circle>
+  make(<circle>, radius: x)
+end;
+
+define function label(x :: <integer>) => <string>
+  concatenate("radius ", integer-to-string(x))
+end;
+
+define function radius-via(f :: <callable>, x :: <integer>) => <integer>
+  let c :: <circle> = apply(f, x);
+  c.radius
+end;
+
+define function describe(f :: <callable>, x :: <integer>) => <string>
+  apply(f, x)
+end;
+
+define function main()
+  describe(label, radius-via(circle-of, 4))
+end;

@@ -1,0 +1,22 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unchecked-callable-result
+// expect: diagnostic contains cannot be checked to return class object <circle>
+
+// `class <circle>` names one class object, and no runtime cast can check an
+// untyped callable's result against that.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function circle-class(f :: <callable>) => class <circle>
+  apply(f)
+end;
+
+define function main()
+  make(circle-class(function () => class <square> <square> end), radius: 3).radius
+end;
