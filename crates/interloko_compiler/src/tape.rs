@@ -20,7 +20,7 @@ use execution_tape::program::{
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::lower;
 use crate::sem;
 use crate::syntax::Span;
@@ -85,6 +85,21 @@ impl TapeError {
             Self::Diagnostics { .. } => DiagnosticCode::TapeBlockedByDiagnostics,
             Self::InvalidLowered { .. } => DiagnosticCode::TapeInvalidLowered,
             Self::Build { .. } => DiagnosticCode::TapeBuildError,
+        }
+    }
+
+    /// Returns the internal-compiler-error diagnostic that reports this
+    /// failure, or `None` when emission stopped for diagnostics that were
+    /// already reported. Emission has no source position, so the
+    /// diagnostic's span is empty.
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<Diagnostic> {
+        match self {
+            Self::Diagnostics { .. } => None,
+            Self::InvalidLowered { message } | Self::Build { message } => Some(
+                Diagnostic::error(Span::default(), self.code())
+                    .with_arg(DiagnosticArg::text("detail", message.clone())),
+            ),
         }
     }
 }

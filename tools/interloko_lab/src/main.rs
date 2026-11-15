@@ -90,7 +90,7 @@ fn command_run(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some(result) => Err(LabError::Runtime(result.to_string())),
-        None => Err(LabError::Runtime("runtime was not requested".into())),
+        None => Err(LabError::Runtime(missing_runtime_reason(&artifacts))),
     }
 }
 
@@ -1041,6 +1041,16 @@ fn ensure_object_has_affordance(
     }
 }
 
+/// Explains a missing runtime result: compilation errors, already printed
+/// as diagnostics, stop `main` from running.
+fn missing_runtime_reason(artifacts: &SessionArtifacts) -> String {
+    if artifacts.has_errors() {
+        "main did not run because compilation failed".into()
+    } else {
+        "runtime was not requested".into()
+    }
+}
+
 fn print_runtime_result(artifacts: &SessionArtifacts) -> Result<()> {
     match &artifacts.runtime_result {
         Some(RuntimeResult::Returned(value)) => {
@@ -1048,7 +1058,7 @@ fn print_runtime_result(artifacts: &SessionArtifacts) -> Result<()> {
             Ok(())
         }
         Some(result) => Err(LabError::Runtime(result.to_string())),
-        None => Err(LabError::Runtime("runtime was not requested".into())),
+        None => Err(LabError::Runtime(missing_runtime_reason(artifacts))),
     }
 }
 

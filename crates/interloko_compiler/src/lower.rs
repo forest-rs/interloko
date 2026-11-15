@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::DefinitionId;
 use crate::runtime as runtime_bridge;
 use crate::sem;
@@ -1425,10 +1425,13 @@ pub enum LowerError {
         /// Diagnostics that must be reported to the caller.
         diagnostics: Vec<Diagnostic>,
     },
-    /// Semantic IR contained an invalid placeholder.
+    /// Semantic IR broke an invariant lowering relies on. Semantic analysis
+    /// accepted the program, so this is an internal compiler error.
     InvalidSemantic {
         /// Error details.
         message: String,
+        /// Span of the definition being lowered, when known.
+        span: Option<Span>,
     },
 }
 
@@ -1440,6 +1443,32 @@ impl LowerError {
             Self::Diagnostics { .. } => DiagnosticCode::LowerBlockedByDiagnostics,
             Self::InvalidSemantic { .. } => DiagnosticCode::LowerInvalidSemantic,
         }
+    }
+
+    /// Returns the internal-compiler-error diagnostic that reports this
+    /// failure, or `None` when lowering stopped for diagnostics that were
+    /// already reported.
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<Diagnostic> {
+        match self {
+            Self::Diagnostics { .. } => None,
+            Self::InvalidSemantic { message, span } => Some(
+                Diagnostic::error(span.unwrap_or_default(), self.code())
+                    .with_arg(DiagnosticArg::text("detail", message.clone())),
+            ),
+        }
+    }
+
+    /// Attributes an internal failure to the definition at `definition`,
+    /// unless it already names a span.
+    fn within(mut self, definition: Span) -> Self {
+        if let Self::InvalidSemantic {
+            span: span @ None, ..
+        } = &mut self
+        {
+            *span = Some(definition);
+        }
+        self
     }
 }
 
@@ -1659,13 +1688,22 @@ impl<'module> Lowering<'module> {
             if function.name == "main" {
                 main = Some(self.lower_function_id(function.id)?);
             }
-            functions.push(self.lower_function(function)?);
+            functions.push(
+                self.lower_function(function)
+                    .map_err(|error| error.within(function.span))?,
+            );
         }
         for method in &self.module.methods {
-            functions.push(self.lower_method(method)?);
+            functions.push(
+                self.lower_method(method)
+                    .map_err(|error| error.within(method.span))?,
+            );
         }
         for generic in &self.module.generics {
-            functions.push(self.lower_dispatcher(generic)?);
+            functions.push(
+                self.lower_dispatcher(generic)
+                    .map_err(|error| error.within(generic.span))?,
+            );
         }
         for accessor in &self.ids.accessors {
             functions.push(self.lower_accessor(*accessor)?);
@@ -1696,7 +1734,10 @@ impl<'module> Lowering<'module> {
             functions.push(self.lower_accessor_closure_thunk(*accessor)?);
         }
         for closure in &self.module.closures {
-            functions.push(self.lower_closure(closure)?);
+            functions.push(
+                self.lower_closure(closure)
+                    .map_err(|error| error.within(closure.span))?,
+            );
         }
         for thunk in &self.ids.exit_thunks {
             functions.push(self.lower_exit_thunk(thunk)?);
@@ -6572,6 +6613,7 @@ fn next_after_inputs(input_count: usize) -> u32 {
 fn invalid_semantic(message: &str) -> LowerError {
     LowerError::InvalidSemantic {
         message: message.into(),
+        span: None,
     }
 }
 
@@ -7703,6 +7745,48 @@ mod tests {
         assert!(dump.contains("slot.read %r"));
         assert!(dump.contains("<bad>.fallback"));
         assert!(dump.contains(" = mov "));
+    }
+
+    #[test]
+    fn internal_lowering_failures_report_the_definition_as_a_diagnostic() {
+        let tree = grammar_frontend::parse_file(
+            SourceFileId::ANONYMOUS,
+            "define function main()\n  if #t then 1 else 2 end\nend;",
+        )
+        .syntax;
+        let mut sem = sem::lower(&ast::lower(&tree));
+        // Semantic analysis guarantees a boolean condition; break that.
+        let main = &mut sem.functions[0];
+        let main_span = main.span;
+        let sem::Expr::If { condition, .. } = &mut main.body.result else {
+            panic!("main is an if");
+        };
+        let span = condition.span();
+        **condition = sem::Expr::ConstI64 { value: 1, span };
+
+        let error = lower(&sem).expect_err("an integer condition cannot lower");
+        assert_eq!(
+            error,
+            LowerError::InvalidSemantic {
+                message: "if condition is not bool".into(),
+                span: Some(main_span),
+            }
+        );
+        let diagnostic = error.diagnostic().expect("an internal failure is reported");
+        assert!(diagnostic.is_error());
+        assert_eq!(diagnostic.code, DiagnosticCode::LowerInvalidSemantic);
+        assert_eq!(diagnostic.span, main_span);
+        assert_eq!(
+            diagnostic.args,
+            vec![DiagnosticArg::text("detail", "if condition is not bool")]
+        );
+        assert_eq!(
+            LowerError::Diagnostics {
+                diagnostics: Vec::new()
+            }
+            .diagnostic(),
+            None
+        );
     }
 
     fn const_i64(function: &Function, reg: Register) -> Option<i64> {

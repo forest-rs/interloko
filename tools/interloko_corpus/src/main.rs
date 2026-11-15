@@ -563,7 +563,8 @@ fn check_case(case: &Case) -> Vec<String> {
                     failures.push(format!("expected run result {expected}, got {actual}"))
                 }
                 None => failures.push(format!(
-                    "expected run result {expected}, but main did not run"
+                    "expected run result {expected}, but {}",
+                    did_not_run(&artifacts)
                 )),
             },
             Expectation::RuntimeCode(expected) => match &artifacts.runtime_result {
@@ -572,7 +573,8 @@ fn check_case(case: &Case) -> Vec<String> {
                     "expected runtime outcome `{expected}`, got {actual}"
                 )),
                 None => failures.push(format!(
-                    "expected runtime outcome `{expected}`, but main did not run"
+                    "expected runtime outcome `{expected}`, but {}",
+                    did_not_run(&artifacts)
                 )),
             },
             Expectation::RunReports(text) => match &artifacts.runtime_result {
@@ -583,7 +585,8 @@ fn check_case(case: &Case) -> Vec<String> {
                     ));
                 }
                 None => failures.push(format!(
-                    "expected run result containing `{text}`, but main did not run"
+                    "expected run result containing `{text}`, but {}",
+                    did_not_run(&artifacts)
                 )),
             },
             Expectation::Diagnostics(expected) => {
@@ -636,6 +639,25 @@ fn check_case(case: &Case) -> Vec<String> {
     }
 
     failures
+}
+
+/// Explains a missing runtime result by the error codes that stopped
+/// compilation.
+fn did_not_run(artifacts: &interloko_compiler::session::SessionArtifacts) -> String {
+    let codes = artifacts
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_error())
+        .map(|diagnostic| diagnostic.code.to_string())
+        .collect::<Vec<_>>();
+    if codes.is_empty() {
+        "main did not run".into()
+    } else {
+        format!(
+            "main did not run: compilation failed with {}",
+            codes.join(", ")
+        )
+    }
 }
 
 fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::SessionArtifacts {

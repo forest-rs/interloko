@@ -909,6 +909,7 @@ mod tests {
         assert_eq!(
             crate::lower::LowerError::InvalidSemantic {
                 message: String::new(),
+                span: None,
             }
             .code(),
             DiagnosticCode::LowerInvalidSemantic
