@@ -1110,3 +1110,310 @@ fn strict_preset_reports_certain_but_not_possible_overflow() {
         TypingSeverity::Warning
     );
 }
+
+/// The definition of function `name`.
+fn function_definition(module: &sem::Module, name: &str) -> DefinitionId {
+    module
+        .functions
+        .iter()
+        .find(|function| function.name == name)
+        .expect("function")
+        .definition
+}
+
+/// The local of function `name` called `local`.
+fn local_of(module: &sem::Module, name: &str, local: &str) -> Binding {
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == name)
+        .expect("function");
+    Binding::Local(
+        function
+            .locals
+            .iter()
+            .find(|candidate| candidate.name == local)
+            .expect("local")
+            .id,
+    )
+}
+
+/// The span of the `occurrence`th match of `needle` in `source`.
+fn span_of(source: &str, needle: &str, occurrence: usize) -> Span {
+    let start = source
+        .match_indices(needle)
+        .nth(occurrence)
+        .expect("needle")
+        .0;
+    Span::new(start, start + needle.len())
+}
+
+#[test]
+fn type_of_a_narrowed_local_lists_its_narrowed_uses() {
+    let source = format!(
+        "{WHOLE}define function f(x :: <object>) => <integer>\n  \
+         if instance?(x, <integer>) then whole(x) else 0 end\nend;"
+    );
+    let (module, artifact) = decisions_for(&source);
+    let f = function_definition(&module, "f");
+    let report = artifact
+        .type_of(
+            &module,
+            &TypeSelector::Binding {
+                definition: f,
+                binding: local_of(&module, "f", "x"),
+            },
+        )
+        .expect("binding report");
+    assert_eq!(report.definition, f);
+    assert_eq!(type_name(&module, &report.ty), "<object>");
+    assert_eq!(report.declared, report.ty);
+    assert!(report.reason_chain(&module).starts_with("declared@"));
+    // Only the read in the then branch is narrower than the binding.
+    let [narrowed] = report.uses.as_slice() else {
+        panic!("one narrowed use: {:?}", report.uses);
+    };
+    let call = span_of(&source, "whole(x)", 1);
+    assert_eq!(narrowed.span, Span::new(call.start + 6, call.start + 7));
+    assert_eq!(type_name(&module, &narrowed.ty), "<integer>");
+    assert!(
+        report
+            .chain(&module, narrowed.reason)
+            .starts_with("narrowed(s0,then)@"),
+        "{}",
+        report.chain(&module, narrowed.reason)
+    );
+
+    // The same read, selected by its span, is an expression of that type.
+    let at_use = artifact
+        .type_of(&module, &TypeSelector::Span(narrowed.span))
+        .expect("span report");
+    assert_eq!(at_use.subject, TypeSubject::Expression { site: None });
+    assert_eq!(at_use.ty, narrowed.ty);
+    assert_eq!(at_use.rep, sem::ValueKind::Any);
+    assert_eq!(type_name(&module, &at_use.declared), "<object>");
+}
+
+#[test]
+fn type_of_a_handler_condition_is_the_handler_class() {
+    let source = "define class <problem> (<object>)\nend;\n\
+         define class <bad-radius> (<problem>)\nend;\n\
+         define generic describe(p);\n\
+         define method describe(p :: <problem>) => <integer>\n  7\nend;\n\
+         define function main() => <integer>\n  \
+         handle signal(make(<bad-radius>)) with restart e :: <problem> describe(e) end\nend;";
+    let (module, artifact) = decisions_for(source);
+    let main = function_definition(&module, "main");
+    let report = artifact
+        .type_of(
+            &module,
+            &TypeSelector::Binding {
+                definition: main,
+                binding: local_of(&module, "main", "e"),
+            },
+        )
+        .expect("binding report");
+    assert_eq!(type_name(&module, &report.ty), "<problem>");
+    assert!(
+        report
+            .reason_chain(&module)
+            .starts_with("handler-condition(<problem>)@")
+    );
+    // Selecting the binding's name finds the binding, not an expression.
+    let name = span_of(source, "e ::", 0);
+    let by_name = artifact
+        .type_of(
+            &module,
+            &TypeSelector::Span(Span::new(name.start, name.start + 1)),
+        )
+        .expect("span report");
+    assert_eq!(by_name.subject, report.subject);
+}
+
+#[test]
+fn type_of_a_block_is_the_join_of_its_exits() {
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function choose(n :: <integer>) => <integer>\n  \
+         let s :: <shape> = make(<square>);\n  \
+         let shape :: <shape> = block (return)\n    \
+         let c :: <shape> = make(<circle>);\n    \
+         let picked = if n > 10 then return(c) else s end;\n    picked\n  end;\n  \
+         area(shape)\nend;"
+    ));
+    let choose = function_definition(&module, "choose");
+    let report = artifact
+        .type_of(
+            &module,
+            &TypeSelector::Binding {
+                definition: choose,
+                binding: local_of(&module, "choose", "shape"),
+            },
+        )
+        .expect("binding report");
+    assert_eq!(
+        type_name(&module, &report.ty),
+        "type-union(exactly <circle>, exactly <square>)"
+    );
+    assert_eq!(type_name(&module, &report.declared), "<shape>");
+    let chain = report.reason_chain(&module);
+    assert!(chain.starts_with("joined@"), "{chain}");
+    assert!(chain.contains("constructed@"), "{chain}");
+    // The report owns a re-indexed provenance graph rooted at its reason.
+    assert_eq!(report.reason, ReasonId(0));
+    assert!(report.reasons.iter().all(|reason| {
+        reason
+            .from
+            .iter()
+            .all(|from| (from.0 as usize) < report.reasons.len())
+    }));
+
+    // The call's site reports the generic's result contract.
+    let call = artifact
+        .type_of(
+            &module,
+            &TypeSelector::Site {
+                definition: choose,
+                site: SiteId(0),
+            },
+        )
+        .expect("site report");
+    assert_eq!(
+        call.subject,
+        TypeSubject::Expression {
+            site: Some(SiteId(0))
+        }
+    );
+    assert!(
+        call.reason_chain(&module)
+            .starts_with("contract(inferred)@")
+    );
+}
+
+#[test]
+fn type_of_a_capture_is_its_source_fact_where_the_closure_is_made() {
+    let source = format!(
+        "{WHOLE}define function outer(x :: <object>) => <integer>\n  \
+         if instance?(x, <integer>) then\n    block ()\n      \
+         let f :: <callable> = function () => <integer>\n        whole(x)\n      end;\n      0\n    \
+         end\n  else 0 end\nend;"
+    );
+    let (module, artifact) = decisions_for(&source);
+    let outer = function_definition(&module, "outer");
+    let closure = module.closures[0].id;
+    let report = artifact
+        .type_of(
+            &module,
+            &TypeSelector::Binding {
+                definition: outer,
+                binding: Binding::Capture {
+                    closure,
+                    capture: module.closures[0].captures[0].id,
+                },
+            },
+        )
+        .expect("capture report");
+    assert_eq!(type_name(&module, &report.ty), "<integer>");
+    assert!(
+        report
+            .reason_chain(&module)
+            .starts_with("narrowed(s0,then)@")
+    );
+    let dump = artifact.dump_definition_types(&module, outer);
+    assert!(dump.contains("closure#0 capture x@"), "{dump}");
+    assert!(dump.contains("param x@"), "{dump}");
+    assert!(dump.contains("local f@"), "{dump}");
+}
+
+#[test]
+fn type_queries_explain_what_they_cannot_answer() {
+    let source = format!("{SHAPES}define function main()\n  area(make(<circle>))\nend;");
+    let (module, artifact) = decisions_for(&source);
+    let main = function_definition(&module, "main");
+    assert_eq!(
+        artifact.type_of(
+            &module,
+            &TypeSelector::Site {
+                definition: main,
+                site: SiteId(9)
+            }
+        ),
+        Err(TypeQueryError::UnknownSite(SiteId(9)))
+    );
+    assert_eq!(
+        artifact.type_of(
+            &module,
+            &TypeSelector::Binding {
+                definition: main,
+                binding: Binding::Local(LocalId(4)),
+            }
+        ),
+        Err(TypeQueryError::UnknownBinding(Binding::Local(LocalId(4))))
+    );
+    let outside = Span::new(0, 3);
+    assert_eq!(
+        artifact.type_of(&module, &TypeSelector::Span(outside)),
+        Err(TypeQueryError::NothingAtSpan(outside))
+    );
+    let blocked = module_with_errors();
+    let artifact = analyze(&blocked, TypingConfig::soft());
+    assert!(matches!(
+        artifact.type_of(&blocked, &TypeSelector::Span(Span::new(0, 1))),
+        Err(TypeQueryError::NotChecked(_))
+    ));
+}
+
+fn module_with_errors() -> sem::Module {
+    let module = module("define function main()\n  missing\nend;");
+    assert!(!module.diagnostics.is_empty());
+    module
+}
+
+#[test]
+fn decisions_depend_on_cited_contracts_and_assumptions() {
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function pick() => <shape>\n  make(<circle>)\nend;\n\
+         define function main()\n  area(pick())\nend;"
+    ));
+    let pick = function_definition(&module, "pick");
+    let main = typed(&module, &artifact, "main");
+    let [dispatch] = main.decisions.as_slice() else {
+        panic!("one decision");
+    };
+    let dependencies = main.dependencies(dispatch);
+    assert_eq!(
+        dependencies,
+        [
+            TypingDependency::Contract(pick),
+            TypingDependency::Methods(module.generics[0].id),
+        ]
+    );
+    let dependents = artifact.contract_dependents(pick);
+    assert_eq!(dependents, [dispatch]);
+    assert!(
+        artifact
+            .contract_dependents(function_definition(&module, "main"))
+            .is_empty()
+    );
+}
+
+#[test]
+fn dump_types_lists_bindings_uses_and_results() {
+    let (module, artifact) = decisions_for(&format!(
+        "{WHOLE}define function f(x :: <object>) => <integer>\n  \
+         let y :: <integer> = 5;\n  \
+         if instance?(x, <integer>) then whole(x) else y end\nend;"
+    ));
+    let dump = artifact.dump_types(&module);
+    assert!(
+        dump.starts_with("types status=checked definitions="),
+        "{dump}"
+    );
+    assert!(dump.contains("narrowed-uses=1"), "{dump}");
+    assert!(dump.contains("    param x@"), "{dump}");
+    assert!(
+        dump.contains(" singleton(5) declared=<integer> because=literal@"),
+        "{dump}"
+    );
+    assert!(dump.contains("      use @"), "{dump}");
+    assert!(dump.contains("    result "), "{dump}");
+}

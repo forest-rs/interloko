@@ -4211,6 +4211,13 @@ fn artifact_fingerprint(
                         reason.kind, reason.ty, reason.from
                     ));
                 }
+                for fact in &typed.bindings {
+                    builder.mix_str(&format!("{:?} {:?}", fact.binding, fact.reason));
+                }
+                for read in &typed.uses {
+                    builder.mix_str(&format!("{:?} {:?}", read.binding, read.reason));
+                }
+                builder.mix_str(&format!("{:?}", typed.result));
             }
         }
         QueryArtifact::DefinitionSem(definition) => {

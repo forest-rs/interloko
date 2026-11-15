@@ -16,12 +16,13 @@ use alloc::vec::Vec;
 use interloko_model::types::{Atom, IntRange, Relation, Type};
 
 use super::{
-    Assumption, Branch, ContractSource, Reason, ReasonId, ReasonKind, TypingCheck, TypingDecision,
-    TypingExpectation, TypingRule, TypingVerdict, range_type, specializer_type,
+    Assumption, Binding, BindingFact, Branch, ContractSource, Reason, ReasonId, ReasonKind,
+    TypingCheck, TypingDecision, TypingExpectation, TypingRule, TypingVerdict, UseFact, range_type,
+    specializer_type,
 };
 use crate::identity::DefinitionId;
 use crate::sem::{
-    self, BinaryOp, CaptureId, ClassId, CompareOp, GenericFunctionId, LocalId, Number32,
+    self, BinaryOp, CaptureId, ClassId, ClosureId, CompareOp, GenericFunctionId, LocalId, Number32,
     NumericKind, SiteId, ValueKind,
 };
 use crate::syntax::Span;
@@ -118,9 +119,83 @@ struct Exit {
 
 /// One function or closure body on the analysis stack.
 struct Context<'a> {
+    /// The closure whose body this is, or `None` for the definition's own
+    /// body.
+    closure: Option<ClosureId>,
     locals: &'a [sem::Local],
     captures: &'a [sem::Capture],
     exits: Vec<Exit>,
+    /// The reason of each local's binding fact, once bound.
+    bound_locals: Vec<Option<ReasonId>>,
+    /// The reason of each capture's binding fact, once bound.
+    bound_captures: Vec<Option<ReasonId>>,
+}
+
+impl<'a> Context<'a> {
+    fn new(
+        closure: Option<ClosureId>,
+        locals: &'a [sem::Local],
+        captures: &'a [sem::Capture],
+    ) -> Self {
+        Self {
+            closure,
+            locals,
+            captures,
+            exits: Vec::new(),
+            bound_locals: Vec::new(),
+            bound_captures: Vec::new(),
+        }
+    }
+
+    /// The binding `var` names in this body; only closures have captures.
+    const fn binding(&self, var: Var) -> Option<Binding> {
+        match (var, self.closure) {
+            (Var::Local(local), None) => Some(Binding::Local(local)),
+            (Var::Local(local), Some(closure)) => Some(Binding::ClosureLocal { closure, local }),
+            (Var::Capture(capture), Some(closure)) => Some(Binding::Capture { closure, capture }),
+            (Var::Capture(_), None) => None,
+        }
+    }
+
+    fn bound_slot(&mut self, var: Var) -> &mut Option<ReasonId> {
+        let (slots, index) = match var {
+            Var::Local(local) => (&mut self.bound_locals, local.0 as usize),
+            Var::Capture(capture) => (&mut self.bound_captures, capture.0 as usize),
+        };
+        if slots.len() <= index {
+            slots.resize(index + 1, None);
+        }
+        &mut slots[index]
+    }
+}
+
+/// What a probe run of the analysis looks for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum ProbeTarget {
+    /// The innermost expression whose span covers this span.
+    Span(Span),
+    /// The expression at this check site.
+    Site(SiteId),
+}
+
+/// The expression a probe found, with its fact.
+#[derive(Clone, Debug)]
+pub(super) struct ProbeHit {
+    pub(super) span: Span,
+    pub(super) site: Option<SiteId>,
+    pub(super) kind: ValueKind,
+    pub(super) ty: Type,
+    pub(super) reason: ReasonId,
+}
+
+/// Everything one run of the analysis records.
+pub(super) struct Finished {
+    pub(super) decisions: Vec<TypingDecision>,
+    pub(super) reasons: Vec<Reason>,
+    pub(super) bindings: Vec<BindingFact>,
+    pub(super) uses: Vec<UseFact>,
+    pub(super) result: Option<ReasonId>,
+    pub(super) probe: Option<ProbeHit>,
 }
 
 /// The integers an operand may hold; `None` bounds are unbounded. Bounds
@@ -228,10 +303,14 @@ pub(super) struct Analysis<'a> {
     owner: DefinitionId,
     decisions: Vec<TypingDecision>,
     reasons: Vec<Reason>,
+    bindings: Vec<BindingFact>,
+    uses: Vec<UseFact>,
+    result: Option<ReasonId>,
     contexts: Vec<Context<'a>>,
     assumptions: Vec<(Assumption, ReasonId)>,
     constants: Vec<Option<Type>>,
     depth: usize,
+    probe: Option<(ProbeTarget, Option<ProbeHit>)>,
 }
 
 impl<'a> Analysis<'a> {
@@ -241,11 +320,20 @@ impl<'a> Analysis<'a> {
             owner,
             decisions: Vec::new(),
             reasons: Vec::new(),
+            bindings: Vec::new(),
+            uses: Vec::new(),
+            result: None,
             contexts: Vec::new(),
             assumptions: Vec::new(),
             constants: vec![None; module.constants.len()],
             depth: 0,
+            probe: None,
         }
+    }
+
+    /// Makes this run also report the expression `target` selects.
+    pub(super) fn probe(&mut self, target: ProbeTarget) {
+        self.probe = Some((target, None));
     }
 
     /// Analyzes a function or method body whose parameters have their
@@ -256,37 +344,106 @@ impl<'a> Analysis<'a> {
         params: &[LocalId],
         body: &'a sem::Block,
     ) {
-        self.contexts.push(Context {
-            locals,
-            captures: &[],
-            exits: Vec::new(),
-        });
+        self.contexts.push(Context::new(None, locals, &[]));
         let mut env = Env::new(locals.len(), 0);
         for param in params {
             self.bind_declared(&mut env, *param);
         }
-        let _ = self.block(&mut env, body);
+        let result = self.block(&mut env, body);
+        self.result = Some(result.reason);
         self.contexts.pop();
     }
 
     /// Analyzes an expression outside any function body, such as a
     /// constant's initializer, and returns its type.
     pub(super) fn detached(&mut self, expr: &'a sem::Expr) -> Type {
-        self.contexts.push(Context {
-            locals: &[],
-            captures: &[],
-            exits: Vec::new(),
-        });
+        self.contexts.push(Context::new(None, &[], &[]));
         let mut env = Env::new(0, 0);
         let fact = self.eval(&mut env, expr);
+        self.result = Some(fact.reason);
         self.contexts.pop();
         fact.ty
     }
 
-    /// Returns the decisions in check-site order and the reason arena.
-    pub(super) fn finish(mut self) -> (Vec<TypingDecision>, Vec<Reason>) {
+    /// Returns the decisions in check-site order, the reason arena, and the
+    /// binding facts, in evaluation order.
+    pub(super) fn finish(mut self) -> Finished {
         self.decisions.sort_by_key(|decision| decision.site);
-        (self.decisions, self.reasons)
+        Finished {
+            decisions: self.decisions,
+            reasons: self.reasons,
+            bindings: self.bindings,
+            uses: self.uses,
+            result: self.result,
+            probe: self.probe.and_then(|(_, hit)| hit),
+        }
+    }
+
+    /// Binds `var` to `fact` and records the binding's fact the first time
+    /// it is bound.
+    fn define(&mut self, env: &mut Env, var: Var, fact: Fact) {
+        if let Some(context) = self.contexts.last_mut() {
+            let slot = context.bound_slot(var);
+            if slot.is_none() {
+                *slot = Some(fact.reason);
+                if let Some(binding) = context.binding(var) {
+                    self.bindings.push(BindingFact {
+                        binding,
+                        reason: fact.reason,
+                    });
+                }
+            }
+        }
+        env.set(var, fact);
+    }
+
+    /// Records a read of `var` whose fact differs from its binding fact.
+    fn record_use(&mut self, var: Var, span: Span, reason: ReasonId) {
+        let Some(context) = self.contexts.last_mut() else {
+            return;
+        };
+        match *context.bound_slot(var) {
+            Some(bound) if bound != reason => {
+                if let Some(binding) = context.binding(var) {
+                    self.uses.push(UseFact {
+                        binding,
+                        span,
+                        reason,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Offers an evaluated expression to the probe, if any.
+    fn observe(&mut self, expr: &sem::Expr, fact: &Fact) {
+        let Some((target, hit)) = &mut self.probe else {
+            return;
+        };
+        let span = expr.span();
+        let site = site_of(expr);
+        let found = match *target {
+            ProbeTarget::Site(wanted) => site == Some(wanted) && hit.is_none(),
+            // Expressions finish inner first, so among equal spans the
+            // first one seen is the innermost.
+            ProbeTarget::Span(wanted) => {
+                span.start <= wanted.start
+                    && wanted.end <= span.end
+                    && hit
+                        .as_ref()
+                        .is_none_or(|hit| span_len(span) < span_len(hit.span))
+            }
+        };
+        if found {
+            *hit = Some(ProbeHit {
+                span,
+                site,
+                kind: self.module.expr_kind(expr),
+                ty: fact.ty.clone(),
+                reason: fact.reason,
+            });
+        }
     }
 
     fn reason(&mut self, kind: ReasonKind, span: Span, ty: &Type, from: Vec<ReasonId>) -> ReasonId {
@@ -362,7 +519,7 @@ impl<'a> Analysis<'a> {
         };
         let ty = self.module.kind_type(binding.kind);
         let fact = self.fact(ReasonKind::Declared, binding.span, ty, Vec::new());
-        env.set(Var::Local(local), fact);
+        self.define(env, Var::Local(local), fact);
     }
 
     /// Binds `local` to `fact`, narrowed by the local's declared type.
@@ -383,7 +540,7 @@ impl<'a> Analysis<'a> {
         if fact.ty.is_bottom() {
             env.kill(fact.reason);
         }
-        env.set(Var::Local(local), fact);
+        self.define(env, Var::Local(local), fact);
     }
 
     fn block(&mut self, env: &mut Env, block: &'a sem::Block) -> Fact {
@@ -438,6 +595,7 @@ impl<'a> Analysis<'a> {
         if fact.ty.is_bottom() {
             env.kill(fact.reason);
         }
+        self.observe(expr, &fact);
         fact
     }
 
@@ -854,11 +1012,15 @@ impl<'a> Analysis<'a> {
         match env.get(var).cloned() {
             Some(fact) => {
                 let ty = fact.ty.meet(&at_use, self.module);
-                if ty == fact.ty {
+                let fact = if ty == fact.ty {
                     fact
                 } else {
                     self.fact(ReasonKind::Declared, span, ty, vec![fact.reason])
+                };
+                if env.dead.is_none() {
+                    self.record_use(var, span, fact.reason);
                 }
+                fact
             }
             None => self.fact(ReasonKind::Declared, span, at_use, Vec::new()),
         }
@@ -892,6 +1054,11 @@ impl<'a> Analysis<'a> {
         };
         let mut inner = Env::new(closure.locals.len(), closure.captures.len());
         inner.dead = env.dead;
+        self.contexts.push(Context::new(
+            Some(closure.id),
+            &closure.locals,
+            &closure.captures,
+        ));
         for capture in &closure.captures {
             let declared = self.module.kind_type(capture.kind);
             let fact = match env.get(Var::Local(capture.source)).cloned() {
@@ -905,13 +1072,8 @@ impl<'a> Analysis<'a> {
                 }
                 None => self.fact(ReasonKind::Declared, capture.span, declared, Vec::new()),
             };
-            inner.set(Var::Capture(capture.id), fact);
+            self.define(&mut inner, Var::Capture(capture.id), fact);
         }
-        self.contexts.push(Context {
-            locals: &closure.locals,
-            captures: &closure.captures,
-            exits: Vec::new(),
-        });
         for param in &closure.params {
             self.bind_declared(&mut inner, *param);
         }
@@ -1052,7 +1214,7 @@ impl<'a> Analysis<'a> {
                 ty,
                 Vec::new(),
             );
-            handler_env.set(Var::Local(local), fact);
+            self.define(&mut handler_env, Var::Local(local), fact);
         }
         let handler_fact = self.eval(&mut handler_env, &restart.body);
         let body_env = core::mem::replace(env, Env::new(0, 0));
@@ -1078,6 +1240,7 @@ impl<'a> Analysis<'a> {
             let when_true = self.join_env(then_true, else_true, *span);
             let when_false = self.join_env(then_false, else_false, *span);
             *env = self.join_env(when_true.clone(), when_false.clone(), *span);
+            self.observe(expr, &fact);
             return (fact, when_true, when_false);
         }
         let fact = self.eval(env, expr);
@@ -1773,6 +1936,23 @@ const fn representable(kind: NumericKind) -> IntRange {
         NumericKind::U32 => IntRange::U32,
         NumericKind::Integer | NumericKind::Float | NumericKind::SingleFloat => INTEGER_REGISTER,
     }
+}
+
+/// The check site an expression leaves, if any.
+const fn site_of(expr: &sem::Expr) -> Option<SiteId> {
+    match expr {
+        sem::Expr::GenericCall { site, .. }
+        | sem::Expr::Cast { site, .. }
+        | sem::Expr::InstanceOf { site, .. }
+        | sem::Expr::InstanceOfLimited { site, .. }
+        | sem::Expr::Convert { site, .. } => Some(*site),
+        sem::Expr::Binary { site, .. } | sem::Expr::Negate { site, .. } => *site,
+        _ => None,
+    }
+}
+
+const fn span_len(span: Span) -> usize {
+    span.end.saturating_sub(span.start)
 }
 
 fn var_of(expr: &sem::Expr) -> Option<Var> {
