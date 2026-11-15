@@ -1,0 +1,33 @@
+// typing: silent
+// expect: run 21
+// expect: diagnostics 0
+// expect: dump typing contains s1 instance proved rule=instance-always
+// expect: dump typing contains s2 cast proved rule=unreachable
+
+// A chain of `instance?` tests over a sealed hierarchy runs out of
+// pieces: the second test is always true where it runs, and the branch
+// after it is unreachable. (The soft preset would warn about the redundant
+// test; this case is silent.)
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function size(s :: <shape>) => <integer>
+  if instance?(s, <circle>) then
+    1
+  else
+    if instance?(s, <square>) then 20 else as(<circle>, s).radius end
+  end
+end;
+
+define function main() => <integer>
+  size(make(<circle>, radius: 7)) + size(make(<square>, side: 2))
+end;

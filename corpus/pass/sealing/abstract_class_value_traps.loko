@@ -1,0 +1,19 @@
+// expect: runtime code runtime.trap
+
+// A class value naming the abstract class itself is no candidate for
+// `make`, so making it traps.
+
+define abstract class <shape> (<object>)
+  slot size :: <integer>, init-value: 3;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function build(c :: class <shape>) => <shape>
+  make(c)
+end;
+
+define function main() => <integer>
+  build(<shape>).size
+end;

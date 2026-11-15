@@ -1,0 +1,30 @@
+// codegen: proved
+// expect: run 4
+// expect: diagnostics 0
+// expect: dump typing contains actual=<circle>
+// expect: dump typing contains closed-world(sealed class <circle> has no subclasses)
+// expect: dump eop contains codegen=linked
+// expect: dump lowered contains linked-send
+// expect: dump lowered lacks select-method
+
+// A sealed class with no subclasses is closed, so a `<circle>` parameter
+// is exactly a <circle>: the send selects its method statically and calls
+// it through a link instead of asking the runtime.
+
+define sealed class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define generic area(c :: <circle>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  c.radius * c.radius
+end;
+
+define function measure(c :: <circle>) => <integer>
+  area(c)
+end;
+
+define function main() => <integer>
+  measure(make(<circle>, radius: 2))
+end;

@@ -1,0 +1,9 @@
+// expect: diagnostics 1
+// expect: diagnostic contains abstract class `<shape>` has no direct instances
+
+define abstract class <shape> (<object>)
+end;
+
+define function main()
+  make(<shape>)
+end;

@@ -1,0 +1,12 @@
+// expect: diagnostics 2
+// expect: diagnostic contains `open` contradicts `sealed`
+// expect: diagnostic contains `sealed` is written twice
+
+define sealed open class <shape> (<object>)
+end;
+
+define sealed sealed generic area(s :: <shape>);
+
+define function main() => <integer>
+  1
+end;

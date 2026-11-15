@@ -1,0 +1,21 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump sem contains sealing=open abstract=yes
+
+// An abstract class has no direct instances, but a class value bounded by
+// it may name a concrete subclass, which `make` constructs.
+
+define abstract class <shape> (<object>)
+  slot size :: <integer>, init-value: 3;
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function build(c :: class <shape>) => <shape>
+  make(c)
+end;
+
+define function main() => <integer>
+  build(<circle>).size
+end;
