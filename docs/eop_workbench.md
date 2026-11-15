@@ -232,13 +232,10 @@ Each typing decision object carries, besides its verdict:
   reuses its operand, an untested shift count), `specialized` (the operation
   without its check: wrapping arithmetic, a reinterpreting conversion) or
   `inlined` (a numeric dispatch replaced by its method's operation). Only
-  the session's `CodegenPolicy::Proved` acts on typing; under the default
+  `CodegenPolicy::Proved`, the default, acts on typing; under
   `CodegenPolicy::Off` every check is `kept`. `explain` names the policy,
   and says whether the generated code still performs the check or relies
-  on the decision. `typing-config:session` shows the policy beside the
-  typing configuration (`config=soft codegen=off ...`). `interloko_lab`
-  takes `--codegen off|proved` on every command, and the REPL's
-  `:codegen [off|proved]` shows or sets it.
+  on the decision. See [Codegen Policy](#codegen-policy).
 
 `contract:<definition-id>` objects show a definition's contract, the
 parameter and result types callers were compiled to rely on. Their
@@ -252,6 +249,66 @@ cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/typ
 Dependents are read from the recorded reasons, so they are what the current
 facts rely on rather than a dependency graph; a method's contract is cited by
 nothing, since sends rely on their generic's contract.
+
+## Codegen Policy
+
+The codegen policy decides whether lowering acts on what soft typing
+proved. It is a session input of its own, beside the typing configuration,
+and `typing-config:session` shows both (`config=soft codegen=proved ...`):
+
+- `proved` (the default) drops or specializes each check typing proved, as
+  the `codegen` facet of its decision records;
+- `off` ignores typing facts, so the generated code keeps every runtime
+  check and is what lowering emits without typing. Use it when debugging
+  the dispatch and check machinery itself, or to compare against `proved`.
+
+Switch it with `--codegen off|proved` on any `interloko_lab` command (before
+the command or among its arguments), with `:codegen [off|proved]` in the
+REPL (with no argument it shows the policy; it is kept across `:reset` and
+cannot change while a break waits), with `Session::with_codegen_policy` and
+`Session::set_codegen_policy` in `interloko_session`, with
+`set_codegen_policy` on the compiler sessions, or with a corpus case's
+`// codegen:` header:
+
+```sh
+cargo run -p interloko_lab -- trace --codegen off tools/interloko_lab/fixtures/inlined_overflow.loko
+cargo run -p interloko_lab -- trace tools/interloko_lab/fixtures/inlined_overflow.loko
+```
+
+Both policies compute the same results and end in the same runtime outcome
+codes; the corpus runs every case under both and fails if they differ. What
+differs is what the generated code does on the way, and so what tools
+observe:
+
+- **Fewer sends.** A numeric send whose method typing selected runs that
+  method's operation inline, and a proved cast or narrowed read makes no
+  `interloko.cast_object` call. Execution traces show fewer host calls and
+  activations (no `interloko.code.dispatch`, `+#dispatch` or `+#method0`
+  for an inlined `+`), and the driver's `ControlStats::sends` and
+  `send_cache_hits` count fewer sends. Dispatch-site records (`dispatch:dN`)
+  still describe every send in the source; the decision's `codegen=inlined`
+  says the run makes no dispatch there.
+- **Trap locations.** A trap inside inlined numeric code, such as the
+  overflow check the inlined `+` keeps, is raised by the caller's code at
+  the call's span. Under `off` the same overflow traps inside the built-in
+  method, whose code has no source of its own:
+
+  ```text
+  off:    outcome: trapped: trap(3) at +#method0@17 (1:1) from +#dispatch@96 (1:1) from main@44 (7:17)
+  proved: outcome: trapped: trap(3) at main@52 (7:17)
+  ```
+
+  The one-line run result likewise points into the caller
+  (`runtime trap: integer overflow (trap at u0:f0 pc=52 span=...)`, where
+  `u0:f0` is `main`) instead of the built-in method; `trace` names the
+  function and resolves the span to a line and column.
+- **Lowered and tape dumps** lack the dropped checks: `i64.add` instead of
+  `i64.add_ovf` and its trap branch, no `select-method` for an inlined send,
+  a constant instead of an `instance?` test.
+
+Code lowered under either policy hot-swaps the same way: the install and
+retry checks in [`eop_mutation.md`](eop_mutation.md) protect what proved code
+relies on.
 
 ## Explicit Host Projection
 

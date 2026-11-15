@@ -993,3 +993,11 @@ fn codegen_policy_cannot_change_while_a_break_waits() {
     assert_eq!(shown.len(), 2, "{stdout}");
     assert_eq!(shown[1], "codegen off", "{stdout}");
 }
+
+#[test]
+fn codegen_policy_defaults_to_proved() {
+    let (stdout, stderr) = run_repl(":codegen\n:quit\n");
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(stdout, "codegen proved\n");
+}

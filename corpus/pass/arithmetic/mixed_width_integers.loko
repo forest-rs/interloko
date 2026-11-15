@@ -2,10 +2,14 @@
 // expect: diagnostics 0
 // expect: dump lowered contains i32.to_i64
 // expect: dump lowered contains u32.to_i64
-// expect: dump lowered contains i64.add_ovf
+// expect: dump lowered contains = i64.add %r
+// expect: dump lowered lacks i64.add_ovf
+// expect: dump eop contains codegen=specialized
 
 // Integers of different types compute as `<integer>`, where the exact
-// result fits even though it fits neither 32-bit type.
+// result fits even though it fits neither 32-bit type. Soft typing proves
+// the sum of an `<i32>` and a `<u32>` cannot overflow 64 bits, so the
+// addition has no overflow check.
 define function main() => <integer>
   let a :: <i32> = 2147483647;
   let b :: <u32> = 4294967295;
