@@ -559,7 +559,8 @@ as the type annotation of `target`, a stable binding or result id
 add-method's candidate-and-swap flow, checking in order:
 
 1. `type_source` lexes as a type: type names, `class`, `callable`,
-   parentheses, commas, and `=>` (`InvalidTypeSource`).
+   `limited` with its `min:` and `max:` integer bounds, parentheses,
+   commas, and `=>` (`InvalidTypeSource`).
 2. The target names a parameter, `let` binding, closure parameter,
    result, or constant value in the current source
    (`UnknownAnnotationTarget`).
@@ -763,6 +764,19 @@ is recorded as a reference to the enclosing contract, and a contract
 holding such a reference must stay equal. Register kinds inside a
 signature (an `<i32>` where an `<integer>` was) are not compared here;
 the VM traps a call whose closure has a different signature.
+
+A `limited(<integer>, min: m, max: n)` parameter or result is part of the
+contract as the range it is, so the same rule compares ranges: a parameter
+may accept a wider range and a result may promise a narrower one. That is
+what keeps the checks it moves sound. A caller checks each argument for a
+limited parameter against the range it was compiled against (or proves
+it, under `proved`), and the callee assumes its own range, so newer code
+that narrows a parameter's range would assume more than old callers
+checked, and is refused; newer code that widens it accepts everything they
+pass. A limited result is checked by the callee before it returns, and
+callers compiled against it may elide checks that rely on it, so newer code
+may only narrow it. Calls that cannot see the range check it at the
+callee's indirect entry, which is part of the newer code itself.
 
 A class object's kind is only a static bound, so a contract records a
 class object as any `<class>`. `make` on a class value allocates the class
