@@ -1,0 +1,27 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// A parameter declared `<object>` takes any `<object>` value, including a
+// boxed one: the send unboxes it for a dispatcher that takes runtime
+// objects, and one that holds a number finds no method.
+
+define class <thing> (<object>)
+end;
+
+define generic describe(x :: <object>) => <integer>;
+
+define method describe(t :: <thing>) => <integer>
+  1
+end;
+
+define function described(x :: <object>) => <integer>
+  handle
+    describe(x)
+  with restart e :: <no-applicable-method>
+    2
+  end
+end;
+
+define function main() => <integer>
+  described(as(<object>, make(<thing>))) + described(as(<object>, 42))
+end;

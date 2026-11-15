@@ -10574,9 +10574,15 @@ impl Lowering {
 
     fn generic_argument_matches(&self, expected: ValueKind, actual: ValueKind) -> bool {
         match expected {
+            // A boxed `<object>` is an `<object>` too. A parameter whose
+            // methods all specialize on object classes takes runtime
+            // objects, so a send unboxes it, and finds no method when it
+            // holds a number. A number itself is rejected here: no method
+            // can ever take it.
             ValueKind::Any => matches!(
                 actual,
-                ValueKind::Object(_)
+                ValueKind::Any
+                    | ValueKind::Object(_)
                     | ValueKind::String(_)
                     | ValueKind::Symbol(_)
                     | ValueKind::Vector(_)
