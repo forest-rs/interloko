@@ -11,6 +11,7 @@
 "ast.slot-init-value-requires-expression" = "slot option `{ $option }` requires an expression"
 "ast.unsupported-slot-option" = "unsupported slot option `{ $option }`"
 "ast.invalid-method-specializer" = "method parameters must include explicit specializers"
+"ast.annotation-not-class" = "{ $position } `{ $name }` is declared { $type }, but it must name a class"
 "ast.invalid-instance-of" = "invalid instance? form"
 "ast.invalid-cast" = "invalid as form"
 "ast.invalid-signal" = "signal expects exactly one condition"

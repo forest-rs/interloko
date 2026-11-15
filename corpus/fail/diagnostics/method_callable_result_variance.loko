@@ -1,0 +1,28 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.callable-parameter-variance
+// expect: diagnostic contains callable(<circle>) => <integer> cannot be called as callable(<shape>) => <integer>
+
+// Every send trusts the generic's declared result, so each method must
+// return a callable that can be called as it says: here callers may hand
+// the result any `<shape>`, but `radius-of` accepts only `<circle>`.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define generic measurer(s :: <shape>) => callable(<shape>) => <integer>;
+
+define method measurer(s :: <shape>)
+  radius-of
+end;
+
+define function main()
+  0
+end;

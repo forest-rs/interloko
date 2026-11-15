@@ -11,6 +11,7 @@
 "ast.slot-init-value-requires-expression" = "[ps] expression required by slot option { $option }"
 "ast.unsupported-slot-option" = "[ps] slot option not supported: { $option }"
 "ast.invalid-method-specializer" = "[ps] method parameters need specializers"
+"ast.annotation-not-class" = "[ps] { $position } { $name } needs a class, not { $type }"
 "ast.invalid-instance-of" = "[ps] instance? form is invalid"
 "ast.invalid-cast" = "[ps] as form is invalid"
 "ast.invalid-signal" = "[ps] signal condition count is invalid"

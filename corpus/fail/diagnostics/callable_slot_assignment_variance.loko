@@ -1,0 +1,32 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.callable-parameter-variance
+// expect: diagnostic contains callable(<circle>) => <integer> cannot be called as callable(<shape>) => <integer>: its parameter 1 accepts only <circle>, but callers may pass any <shape>
+
+// Reads of a typed callable slot are called with its declared signature, so
+// a write must satisfy it: a function of `<circle>` cannot stand in for one
+// callers may hand any `<shape>`.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <painter> (<object>)
+  slot paint :: callable(<shape>) => <integer>, init-keyword: paint:;
+end;
+
+define function any-size(s :: <shape>) => <integer>
+  1
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function main()
+  let p = make(<painter>, paint: any-size);
+  let ignored = p.paint := radius-of;
+  0
+end;

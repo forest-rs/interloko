@@ -1,0 +1,16 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.annotation-not-class
+// expect: diagnostic contains method parameter `f` is declared callable(<integer>) => <integer>, but it must name a class
+
+// A method specializes each parameter on a class. A callable type names
+// none, and was once read as its result type, `<integer>`.
+
+define generic run(f);
+
+define method run(f :: callable(<integer>) => <integer>)
+  0
+end;
+
+define function main()
+  0
+end;

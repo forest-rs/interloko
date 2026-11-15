@@ -1,0 +1,15 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.slot-initializer-type-mismatch
+// expect: diagnostic contains slot `on-click` expects <callable> but initializer has <integer>
+
+// A slot may hold a typed callable. The annotation was once read as its
+// result type, `<integer>`, so the slot silently held an integer.
+
+define class <button> (<object>)
+  slot on-click :: callable(<integer>) => <integer>, init-keyword: on-click:;
+end;
+
+define function main()
+  let b = make(<button>, on-click: 7);
+  0
+end;

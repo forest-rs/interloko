@@ -113,6 +113,45 @@ pub struct ResultAnnotation {
     pub span: Span,
 }
 
+impl core::fmt::Display for TypeAnnotation {
+    /// Writes the annotation as source would spell it: `<circle>`,
+    /// `class <shape>`, or `callable(<integer>) => <circle>`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Some(callable) = &self.callable {
+            f.write_str("callable(")?;
+            for (index, param) in callable.params.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(", ")?;
+                }
+                write!(f, "{param}")?;
+            }
+            return write!(f, ") => {}", callable.results);
+        }
+        if self.class_object {
+            f.write_str("class ")?;
+        }
+        f.write_str(&self.name)
+    }
+}
+
+impl core::fmt::Display for ResultAnnotation {
+    /// Writes the annotation as source would spell it: one value bare,
+    /// any other number parenthesized.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let [value] = self.values.as_slice() {
+            return write!(f, "{value}");
+        }
+        f.write_str("(")?;
+        for (index, value) in self.values.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{value}")?;
+        }
+        f.write_str(")")
+    }
+}
+
 /// Class definition with nominal slots.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Class {
@@ -145,11 +184,12 @@ pub struct Slot {
     pub definition: DefinitionId,
     /// Slot name.
     pub name: String,
-    /// Optional declared slot type name.
+    /// Optional declared slot type: a class, a class object, or a callable
+    /// signature.
     ///
     /// Missing types default to Dylan's top `<object>` value category during
     /// semantic lowering.
-    pub type_name: Option<String>,
+    pub type_annotation: Option<TypeAnnotation>,
     /// Source span for the optional slot type, or the slot name span when the
     /// declaration is untyped.
     pub type_span: Span,
@@ -248,7 +288,8 @@ pub struct MethodParam {
     /// Nominal class specializer.
     ///
     /// `<object>` is normalized by semantic lowering because the current
-    /// semantic top value is not a nominal class id.
+    /// semantic top value is not a nominal class id. Empty when the source
+    /// gave no class, which lowering to the AST has already reported.
     pub class_name: String,
     /// Source span.
     pub span: Span,
@@ -830,7 +871,7 @@ impl<'tree> Lowering<'tree> {
                 id: self.ast_id(node),
                 definition: self.definition(DefinitionKind::Slot, "", class_name),
                 name: String::new(),
-                type_name: None,
+                type_annotation: None,
                 type_span: node.span,
                 init_keyword: None,
                 init_keyword_span: node.span,
@@ -842,7 +883,12 @@ impl<'tree> Lowering<'tree> {
             };
         };
         let name = text.to_string();
-        let slot_type = self.first_token_text(node, TokenKind::TypeName);
+        let slot_type = node.children.iter().find_map(|child| match child {
+            CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::DoubleColon => {
+                self.type_annotation_after(node, *index)
+            }
+            _ => None,
+        });
         let mut init_keyword = None;
         let mut init_keyword_span = span;
         let mut required_init_keyword = false;
@@ -916,8 +962,10 @@ impl<'tree> Lowering<'tree> {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Slot, &name, class_name),
             name,
-            type_name: slot_type.map(|(_, text)| text.to_string()),
-            type_span: slot_type.map_or(span, |(span, _)| span),
+            type_span: slot_type
+                .as_ref()
+                .map_or(span, |annotation| annotation.span),
+            type_annotation: slot_type,
             init_keyword,
             init_keyword_span,
             required_init_keyword,
@@ -950,6 +998,7 @@ impl<'tree> Lowering<'tree> {
         let mut saw_generic_keyword = false;
         let mut params = Vec::new();
         let mut return_type = None;
+        let mut saw_result_arrow = false;
 
         for child in &node.children {
             match child {
@@ -963,7 +1012,12 @@ impl<'tree> Lowering<'tree> {
                 {
                     name = self.tree.tokens[*index].text(&self.tree.source).to_string();
                 }
-                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
+                CstElement::Token(index)
+                    if self.tree.tokens[*index].kind == TokenKind::Arrow && !saw_result_arrow =>
+                {
+                    // The first arrow introduces the result annotation; any
+                    // later one belongs to a callable type within it.
+                    saw_result_arrow = true;
                     return_type = self.result_annotation_after(node, *index);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
@@ -993,15 +1047,10 @@ impl<'tree> Lowering<'tree> {
             if let CstElement::Token(index) = child
                 && self.tree.tokens[*index].kind == TokenKind::Arrow
             {
+                // The first arrow introduces the result annotation; any
+                // later one belongs to a callable type within it.
                 return_type = self.result_annotation_after(node, *index);
-            }
-        }
-        for param in &params {
-            if param.class_name.is_empty() {
-                self.diagnostics.push(
-                    Diagnostic::error(param.span, DiagnosticCode::AstInvalidMethodSpecializer)
-                        .with_arg(DiagnosticArg::unsigned("actual_count", 0)),
-                );
+                break;
             }
         }
         let body = node
@@ -1040,6 +1089,7 @@ impl<'tree> Lowering<'tree> {
         let mut saw_function_keyword = false;
         let mut params = Vec::new();
         let mut return_type = None;
+        let mut saw_result_arrow = false;
         let mut body = None;
 
         for child in &node.children {
@@ -1056,7 +1106,12 @@ impl<'tree> Lowering<'tree> {
                 {
                     name = self.tree.tokens[*index].text(&self.tree.source).to_string();
                 }
-                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
+                CstElement::Token(index)
+                    if self.tree.tokens[*index].kind == TokenKind::Arrow && !saw_result_arrow =>
+                {
+                    // The first arrow introduces the result annotation; any
+                    // later one belongs to a callable type within it.
+                    saw_result_arrow = true;
                     return_type = self.result_annotation_after(node, *index);
                 }
                 CstElement::Token(_) => {}
@@ -1196,51 +1251,46 @@ impl<'tree> Lowering<'tree> {
         params
     }
 
-    fn lower_method_params(&self, node: &CstNode) -> Vec<MethodParam> {
+    fn lower_method_params(&mut self, node: &CstNode) -> Vec<MethodParam> {
+        let tokens = self.node_token_indices(node);
         let mut params = Vec::new();
         let mut index = 0;
-        while index < node.children.len() {
-            let CstElement::Token(name_index) = node.children[index] else {
-                index += 1;
-                continue;
-            };
-            if self.tree.tokens[name_index].kind != TokenKind::Ident {
+        while index < tokens.len() {
+            let token = self.tree.tokens[tokens[index]];
+            if token.kind != TokenKind::Ident {
                 index += 1;
                 continue;
             }
-            let name = self.tree.tokens[name_index]
-                .text(&self.tree.source)
-                .to_string();
-            let span = self.tree.tokens[name_index].span;
-            let class_name = node.children[index + 1..]
-                .iter()
-                .take_while(|child| {
-                    !matches!(
-                        child,
-                        CstElement::Token(token)
-                            if self.tree.tokens[*token].kind == TokenKind::Comma
-                    )
-                })
-                .find_map(|child| match child {
-                    CstElement::Token(type_index)
-                        if self.tree.tokens[*type_index].kind == TokenKind::TypeName =>
-                    {
-                        Some(
-                            self.tree.tokens[*type_index]
-                                .text(&self.tree.source)
-                                .to_string(),
-                        )
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let name = token.text(&self.tree.source).to_string();
+            let annotation = if tokens
+                .get(index + 1)
+                .is_some_and(|next| self.tree.tokens[*next].kind == TokenKind::DoubleColon)
+            {
+                self.type_annotation_from_tokens(&tokens, index + 2)
+            } else {
+                None
+            };
+            index = annotation.as_ref().map_or(index + 1, |(_, next)| *next);
+            // A method specializes each parameter on a class; a class object
+            // or callable type names no class to dispatch on.
+            let class_name = match annotation {
+                Some((annotation, _)) => {
+                    self.class_annotation_name(&annotation, "method parameter", &name)
+                }
+                None => {
+                    self.diagnostics.push(
+                        Diagnostic::error(token.span, DiagnosticCode::AstInvalidMethodSpecializer)
+                            .with_arg(DiagnosticArg::unsigned("actual_count", 0)),
+                    );
+                    String::new()
+                }
+            };
             params.push(MethodParam {
                 id: AstNodeId::child(node.id, 2, &name),
                 name,
                 class_name,
-                span,
+                span: token.span,
             });
-            index += 1;
         }
         params
     }
@@ -1428,11 +1478,17 @@ impl<'tree> Lowering<'tree> {
     fn lower_function_expr(&mut self, node: &CstNode) -> Expr {
         let mut params = Vec::new();
         let mut return_type = None;
+        let mut saw_result_arrow = false;
         let mut body = None;
 
         for child in &node.children {
             match child {
-                CstElement::Token(index) if self.tree.tokens[*index].kind == TokenKind::Arrow => {
+                CstElement::Token(index)
+                    if self.tree.tokens[*index].kind == TokenKind::Arrow && !saw_result_arrow =>
+                {
+                    // The first arrow introduces the result annotation; any
+                    // later one belongs to a callable type within it.
+                    saw_result_arrow = true;
                     return_type = self.result_annotation_after(node, *index);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
@@ -2262,9 +2318,25 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_restart(&mut self, node: &CstNode) -> Restart {
         let condition = self.first_restart_condition_name(node);
-        let class_name = self
-            .first_token_text(node, TokenKind::TypeName)
-            .map_or_else(String::new, |(_, text)| text.to_string());
+        // A restart binding its condition names the condition's class.
+        let class_name = match condition.and_then(|(_, name)| {
+            let marker = node.children.iter().find_map(|child| match child {
+                CstElement::Token(index)
+                    if self.tree.tokens[*index].kind == TokenKind::DoubleColon =>
+                {
+                    Some(*index)
+                }
+                _ => None,
+            })?;
+            Some((name, self.type_annotation_after(node, marker)?))
+        }) {
+            Some((name, annotation)) => {
+                self.class_annotation_name(&annotation, "restart parameter", name)
+            }
+            None => self
+                .first_token_text(node, TokenKind::TypeName)
+                .map_or_else(String::new, |(_, text)| text.to_string()),
+        };
         let body = node
             .children
             .iter()
@@ -2304,6 +2376,27 @@ impl<'tree> Lowering<'tree> {
             body: Box::new(body),
             span: node.span,
         }
+    }
+
+    /// Returns the class `annotation` names for the `position` called
+    /// `name`, which must name one, or reports a class object or callable
+    /// type there and returns an empty name.
+    fn class_annotation_name(
+        &mut self,
+        annotation: &TypeAnnotation,
+        position: &str,
+        name: &str,
+    ) -> String {
+        if annotation.callable.is_none() && !annotation.class_object {
+            return annotation.name.clone();
+        }
+        self.diagnostics.push(
+            Diagnostic::error(annotation.span, DiagnosticCode::AstAnnotationNotClass)
+                .with_arg(DiagnosticArg::text("position", position))
+                .with_arg(DiagnosticArg::text("name", name))
+                .with_arg(DiagnosticArg::text("type", annotation.to_string())),
+        );
+        String::new()
     }
 
     fn ast_id(&self, node: &CstNode) -> AstNodeId {
@@ -2690,7 +2783,12 @@ impl FrontendFormLowering {
             ),
             definition: self.definition(DefinitionKind::Slot, &slot.name, class_name),
             name: slot.name.clone(),
-            type_name: Some(slot.type_name.clone()),
+            type_annotation: Some(TypeAnnotation {
+                name: slot.type_name.clone(),
+                class_object: false,
+                callable: None,
+                span: slot.source_span,
+            }),
             type_span: slot.source_span,
             init_keyword: slot.init_keyword.clone(),
             init_keyword_span: slot.source_span,
@@ -2888,6 +2986,81 @@ mod tests {
     }
 
     #[test]
+    fn keeps_callable_and_class_object_types_in_every_annotation() {
+        let tree = parse(
+            "define class <shape> (<object>)\n  \
+             slot on-click :: callable(<integer>) => <integer>;\n  \
+             slot kind :: class <shape>, init-keyword: kind:;\nend;\n\
+             define generic pick(s) => callable(<integer>) => <integer>;\n\
+             define method pick(s :: <shape>) => (callable(<integer>) => <integer>)\n  1\nend;\n\
+             define function both() => (callable(<integer>) => (<integer>, <shape>), <integer>)\n  \
+             let f = function () => callable(<integer>) => <integer> 1 end;\n  1\nend;",
+        );
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let shown = |annotation: Option<&ResultAnnotation>| annotation.map(ToString::to_string);
+        let slots = &module.classes[0].slots;
+        assert_eq!(
+            slots[0].type_annotation.as_ref().map(ToString::to_string),
+            Some("callable(<integer>) => <integer>".into())
+        );
+        assert_eq!(
+            slots[1].type_annotation.as_ref().map(ToString::to_string),
+            Some("class <shape>".into())
+        );
+        assert_eq!(
+            shown(module.generics[0].return_type.as_ref()),
+            Some("callable(<integer>) => <integer>".into())
+        );
+        assert_eq!(
+            shown(module.methods[0].return_type.as_ref()),
+            Some("callable(<integer>) => <integer>".into())
+        );
+        let both = &module.functions[0];
+        assert_eq!(
+            shown(both.return_type.as_ref()),
+            Some("(callable(<integer>) => (<integer>, <shape>), <integer>)".into())
+        );
+        let Some(Expr::Function { return_type, .. }) =
+            both.body.lets.first().map(|binding| &binding.value)
+        else {
+            panic!("function expression");
+        };
+        assert_eq!(
+            shown(return_type.as_ref()),
+            Some("callable(<integer>) => <integer>".into())
+        );
+    }
+
+    #[test]
+    fn reports_class_object_and_callable_types_where_a_class_is_needed() {
+        let tree = parse(
+            "define generic run(f);\n\
+             define method run(f :: callable(<integer>) => <integer>)\n  0\nend;\n\
+             define method run(c :: class <shape>)\n  0\nend;",
+        );
+        let module = lower(&tree);
+        let codes = module
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [
+                DiagnosticCode::AstAnnotationNotClass,
+                DiagnosticCode::AstAnnotationNotClass
+            ]
+        );
+        assert!(
+            module
+                .methods
+                .iter()
+                .all(|method| method.params[0].class_name.is_empty())
+        );
+    }
+
+    #[test]
     fn lowers_constant_annotations() {
         let tree = parse("define constant $answer :: <integer> = 42;");
         let module = lower(&tree);
@@ -2990,7 +3163,10 @@ mod tests {
         assert_eq!(module.classes[0].superclass.as_deref(), Some("<object>"));
         assert_eq!(module.classes[0].slots[0].name, "radius");
         assert_eq!(
-            module.classes[0].slots[0].type_name.as_deref(),
+            module.classes[0].slots[0]
+                .type_annotation
+                .as_ref()
+                .map(|annotation| annotation.name.as_str()),
             Some("<integer>")
         );
         assert_eq!(
@@ -3009,7 +3185,10 @@ mod tests {
         assert!(module.classes[0].slots[0].init_value.is_none());
         assert_eq!(module.classes[0].slots[1].name, "valid?");
         assert_eq!(
-            module.classes[0].slots[1].type_name.as_deref(),
+            module.classes[0].slots[1]
+                .type_annotation
+                .as_ref()
+                .map(|annotation| annotation.name.as_str()),
             Some("<boolean>")
         );
         assert_eq!(
