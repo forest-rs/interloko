@@ -2077,6 +2077,7 @@ fn promote_operand(operand: Expr, from: NumericKind, to: NumericKind) -> Expr {
         site: SiteId::PENDING,
         to,
         value: Box::new(operand),
+        explicit: false,
         span,
     }
 }
@@ -3459,6 +3460,11 @@ pub enum Expr {
         class: ClassId,
         /// Cast check site.
         site: SiteId,
+        /// Whether source asked for the check with `as(...)`, rather than
+        /// the compiler inserting it where a value meets a declaration.
+        /// Strict typing keeps an explicit check, which is how strict code
+        /// checks deliberately, but must prove an inserted one.
+        explicit: bool,
         /// Source span.
         span: Span,
     },
@@ -3590,6 +3596,11 @@ pub enum Expr {
         value: Box<Expr>,
         /// Conversion check site.
         site: SiteId,
+        /// Whether source asked for the check with `as(...)`, rather than
+        /// the compiler inserting it where a value meets a declaration.
+        /// Strict typing keeps an explicit check, which is how strict code
+        /// checks deliberately, but must prove an inserted one.
+        explicit: bool,
         /// Source span.
         span: Span,
     },
@@ -3609,6 +3620,11 @@ pub enum Expr {
         range: IntRange,
         /// Range check site.
         site: SiteId,
+        /// Whether source asked for the check with `as(...)`, rather than
+        /// the compiler inserting it where a value meets a declaration.
+        /// Strict typing keeps an explicit check, which is how strict code
+        /// checks deliberately, but must prove an inserted one.
+        explicit: bool,
         /// Source span.
         span: Span,
     },
@@ -3940,18 +3956,21 @@ impl CallableResultCheck {
                 site: SiteId::PENDING,
                 to,
                 value: Box::new(value),
+                explicit: false,
                 span,
             },
             Self::Cast(class) => Expr::Cast {
                 value: Box::new(value),
                 class,
                 site: SiteId::PENDING,
+                explicit: false,
                 span,
             },
             Self::Range(range) => Expr::CheckRange {
                 value: Box::new(value),
                 range,
                 site: SiteId::PENDING,
+                explicit: false,
                 span,
             },
         }
@@ -8372,6 +8391,7 @@ impl Lowering {
                     value: Box::new(value),
                     range,
                     site: SiteId::PENDING,
+                    explicit: false,
                     span,
                 }
             }
@@ -9312,6 +9332,7 @@ impl Lowering {
             site: SiteId::PENDING,
             to,
             value: Box::new(value),
+            explicit: true,
             span,
         }
     }
@@ -9343,6 +9364,7 @@ impl Lowering {
                 value: Box::new(value),
                 range,
                 site: SiteId::PENDING,
+                explicit: true,
                 span,
             },
             None => {
@@ -9369,6 +9391,7 @@ impl Lowering {
                 site: SiteId::PENDING,
                 to,
                 value: Box::new(value),
+                explicit: true,
                 span,
             };
         }
@@ -9415,6 +9438,7 @@ impl Lowering {
             site: SiteId::PENDING,
             value: Box::new(value),
             class: class_id,
+            explicit: true,
             span,
         }
     }

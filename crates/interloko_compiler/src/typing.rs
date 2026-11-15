@@ -240,6 +240,53 @@ impl TypingCheck {
     }
 }
 
+/// Who asked for a runtime check, which decides whether strict typing must
+/// prove it (see *Strict typing* in the module documentation).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CheckOrigin {
+    /// The compiler inserted the check: a send's dispatch, integer
+    /// arithmetic's overflow check, a limited declaration's range check,
+    /// or the check of a value returned through a `<callable>`.
+    Implicit,
+    /// Source asked for the check with `as(...)`: a cast or conversion the
+    /// program makes deliberately.
+    Explicit,
+    /// An `instance?` test, of a class or a limited integer type, which
+    /// answers a question rather than failing.
+    Test,
+    /// The check a function, closure, or exit procedure reached through a
+    /// callable value makes on what it is passed ([`sem::EntryCheck`]): it
+    /// guards the body against callers typing cannot see.
+    Entry,
+}
+
+impl CheckOrigin {
+    /// Every origin in canonical order.
+    pub const ALL: &'static [Self] = &[Self::Implicit, Self::Explicit, Self::Test, Self::Entry];
+
+    /// Returns the stable label used in dumps and EOP records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Implicit => "implicit",
+            Self::Explicit => "explicit",
+            Self::Test => "test",
+            Self::Entry => "entry",
+        }
+    }
+
+    /// The origin of a cast, conversion, or range check, by whether source
+    /// wrote it as `as(...)`.
+    #[must_use]
+    pub const fn of(explicit: bool) -> Self {
+        if explicit {
+            Self::Explicit
+        } else {
+            Self::Implicit
+        }
+    }
+}
+
 /// Static classification of one runtime check.
 ///
 /// The three outcomes are ordered by information: a join of disagreeing
@@ -944,6 +991,9 @@ pub struct TypingDecision {
     pub site: SiteId,
     /// Kind of runtime check.
     pub check: TypingCheck,
+    /// Who asked for the check: the compiler, source, a test, or an
+    /// indirect entry.
+    pub origin: CheckOrigin,
     /// Classification of the check.
     pub verdict: TypingVerdict,
     /// Rule that produced the verdict.
@@ -1244,7 +1294,8 @@ impl TypingArtifact {
     /// Renders the artifact as a stable text dump: configuration, status,
     /// then one line per decision grouped by definition.
     ///
-    /// Each decision line ends with `because=`, the reason chain of each
+    /// Each decision line names its check's [`CheckOrigin`] (`origin=`) and
+    /// ends with `because=`, the reason chain of each
     /// actual type (separated by `; `), and `assumes=` when the verdict
     /// relies on closed-world assumptions. A chain renders a reason as
     /// `kind(details)@start..end type`, followed by ` <- ` and the reasons
@@ -1309,7 +1360,7 @@ impl TypingArtifact {
         for decision in &typed.decisions {
             let _ = write!(
                 out,
-                "    {} {} {} rule={} span={}..{} expected={} actual={} severity={}",
+                "    {} {} {} rule={} span={}..{} expected={} actual={} severity={} origin={}",
                 decision.site,
                 decision.check.as_str(),
                 decision.verdict.as_str(),
@@ -1318,7 +1369,8 @@ impl TypingArtifact {
                 decision.span.end,
                 expectation_label(module, &decision.expected),
                 type_name_list(module, &decision.actual),
-                self.severity(decision).as_str()
+                self.severity(decision).as_str(),
+                decision.origin.as_str()
             );
             if !decision.because.is_empty() {
                 let because = decision

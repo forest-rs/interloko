@@ -1770,3 +1770,50 @@ fn a_sealed_hierarchy_too_large_to_distribute_is_left_to_the_runtime() {
             .all(|label| !label.starts_with("sealed abstract class"))
     );
 }
+
+#[test]
+fn decisions_record_who_asked_for_each_check() {
+    let (module, artifact) = decisions_for(
+        "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define function small(n :: limited(<integer>, min: 0, max: 9)) => <integer>\n  n\nend;\n\
+         define function keep(s :: <circle>) => <circle>\n  s\nend;\n\
+         define function main(s :: <shape>, n :: <integer>, f :: <callable>) => <integer>\n  \
+           let c = as(<circle>, s);\n  \
+           let k :: <circle> = f(c);\n  \
+           let g = keep;\n  \
+           if instance?(s, <circle>) then small(n)\n  \
+           else small(as(limited(<integer>, min: 0, max: 9), n)) end\nend;",
+    );
+    let origins = |name: &str| {
+        artifact
+            .definition(function_definition(&module, name))
+            .expect("typed")
+            .decisions
+            .iter()
+            .map(|decision| (decision.check, decision.origin))
+            .collect::<Vec<_>>()
+    };
+    // `keep` is used as a value, so its indirect entry checks `s`.
+    assert_eq!(origins("keep"), [(TypingCheck::Cast, CheckOrigin::Entry)]);
+    assert_eq!(
+        origins("main"),
+        [
+            // `as(<circle>, s)`.
+            (TypingCheck::Cast, CheckOrigin::Explicit),
+            // The `<callable>`'s result reaching `k :: <circle>`.
+            (TypingCheck::Cast, CheckOrigin::Implicit),
+            (TypingCheck::Instance, CheckOrigin::Test),
+            // `n` reaching `small`'s limited parameter.
+            (TypingCheck::Range, CheckOrigin::Implicit),
+            // `as(limited(...), n)`, then its value reaching the parameter.
+            (TypingCheck::Range, CheckOrigin::Explicit),
+            (TypingCheck::Range, CheckOrigin::Implicit),
+        ]
+    );
+    assert!(
+        artifact
+            .dump(&module)
+            .contains("severity=silent origin=explicit")
+    );
+}
