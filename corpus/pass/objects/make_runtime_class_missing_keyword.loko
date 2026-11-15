@@ -1,0 +1,24 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// expect: dump sem contains missing=side:
+
+// `<square>` requires `side:`, which a `make` bounded by `<shape>` cannot
+// know to pass. The call compiles, since the value may name a `<shape>`,
+// but naming a `<square>` at run time traps instead of allocating a
+// `<shape>` or a `<square>` with an unset slot.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function twin(s :: <shape>) => <shape>
+  make(class-of(s))
+end;
+
+define function main() => <integer>
+  twin(make(<square>, side: 4)).size
+end;

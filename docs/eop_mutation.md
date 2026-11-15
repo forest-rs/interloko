@@ -598,9 +598,12 @@ holding such a reference must stay equal. Register kinds inside a
 signature (an `<i32>` where an `<integer>` was) are not compared here;
 the VM traps a call whose closure has a different signature.
 
-A class object's kind is only a static bound: `make` on one allocates the
-class sem resolved and never reads the value, so a contract records a
-class object as any `<class>`.
+A class object's kind is only a static bound, so a contract records a
+class object as any `<class>`. `make` on a class value allocates the class
+the value names, checked at run time against the classes the compiled code
+can construct, and its result is only known to be in the bound's cone; a
+class an edit introduces after the code was compiled traps rather than
+being built from a stale plan.
 
 ## Deferred
 

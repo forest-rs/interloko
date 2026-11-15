@@ -148,7 +148,9 @@ pub enum ValueKind {
     Vector(ClassId),
     /// Runtime object with statically known nominal class.
     Object(ClassId),
-    /// Class metaobject naming a statically known nominal class.
+    /// Class metaobject for this class or one of its subclasses: a class
+    /// literal names its class exactly, but `class-of` records only the
+    /// static bound of its operand.
     ClassObject(ClassId),
     /// Generic-function metaobject naming a statically known generic.
     GenericFunctionObject(GenericFunctionId),
@@ -1080,6 +1082,7 @@ impl Module {
                 .builtin_value_kind(*class)
                 .unwrap_or(ValueKind::Object(*class)),
             Expr::MakeObject { class_id, .. } => ValueKind::Object(*class_id),
+            Expr::MakeRuntimeClass { bound, .. } => ValueKind::Object(*bound),
             Expr::If {
                 then_branch,
                 else_branch,
@@ -1322,6 +1325,22 @@ impl<'a> SiteNumbering<'a> {
                         field.source == FieldInitSource::Explicit && field.slot == arg.slot
                     }) {
                         arg.value = field.value.clone();
+                    }
+                }
+            }
+            Expr::MakeRuntimeClass {
+                class,
+                init_args,
+                candidates,
+                ..
+            } => {
+                self.expr(class);
+                for arg in init_args {
+                    self.expr(&mut arg.value);
+                }
+                for candidate in candidates {
+                    for field in &mut candidate.defaults {
+                        self.expr(&mut field.value);
                     }
                 }
             }
@@ -2195,6 +2214,19 @@ pub enum FieldInitSource {
     Default,
 }
 
+/// One class a [`Expr::MakeRuntimeClass`] may allocate, with its plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MakeCandidate {
+    /// Candidate class: the bound or one of its native subclasses.
+    pub class: ClassId,
+    /// Default initializers, in initialization-plan order, for the slots no
+    /// explicit init argument fills.
+    pub defaults: Vec<FieldInit>,
+    /// The first init keyword this class requires that the call does not
+    /// pass. Such a class cannot be made here, so choosing it traps.
+    pub missing_keyword: Option<String>,
+}
+
 /// Explicit keyword argument supplied to `make`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InitArg {
@@ -2870,7 +2902,7 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Runtime object construction.
+    /// Runtime object construction of a class named by a class literal.
     MakeObject {
         /// Class object expression.
         class: Box<Expr>,
@@ -2880,6 +2912,28 @@ pub enum Expr {
         init_args: Vec<InitArg>,
         /// Planned field initializers in initialization-plan order.
         fields: Vec<FieldInit>,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime object construction of the class a class value names at run
+    /// time, such as `make(class-of(x))`.
+    ///
+    /// The value may name `bound` or any subclass, so the object allocated is
+    /// the value's own class, and the result is only known to be in `bound`'s
+    /// cone. Init arguments are checked against `bound` statically; each
+    /// candidate class completes them with its own defaults. A class value
+    /// outside the candidates, or a candidate needing an init keyword the
+    /// call does not pass, traps.
+    MakeRuntimeClass {
+        /// Class object expression.
+        class: Box<Expr>,
+        /// Static bound on the class the value names.
+        bound: ClassId,
+        /// Explicit init arguments in source order, evaluated once before the
+        /// class is chosen.
+        init_args: Vec<InitArg>,
+        /// Classes the value may name, in class id order.
+        candidates: Vec<MakeCandidate>,
         /// Source span.
         span: Span,
     },
@@ -3086,6 +3140,7 @@ impl Expr {
             | Self::InstanceOfLimited { span, .. }
             | Self::Cast { span, .. }
             | Self::MakeObject { span, .. }
+            | Self::MakeRuntimeClass { span, .. }
             | Self::AccessorCall { span, .. }
             | Self::SlotWrite { span, .. }
             | Self::Binary { span, .. }
@@ -7912,6 +7967,18 @@ impl Lowering {
             }
         }
 
+        // Only a class literal names its class exactly; any other class
+        // value (`class-of(x)`, a parameter, a local) may name a subclass of
+        // its bound, which is the class `make` must allocate.
+        if !matches!(class_expr, Expr::ClassObject { .. }) {
+            return Expr::MakeRuntimeClass {
+                class: Box::new(class_expr),
+                bound: class_id,
+                candidates: self.make_candidates(class_id, &init_args),
+                init_args,
+                span,
+            };
+        }
         Expr::MakeObject {
             class: Box::new(class_expr),
             class_id,
@@ -7919,6 +7986,52 @@ impl Lowering {
             fields: resolved,
             span,
         }
+    }
+
+    /// Returns every class a `make` on a class value bounded by `bound` may
+    /// allocate, each with the defaults that complete `init_args` for it.
+    ///
+    /// Subclasses keep their superclass's effective slots, in order, as a
+    /// prefix, so an init argument resolved against `bound` fills the same
+    /// slot id in every candidate. Built-in value and host-backed classes
+    /// cannot be made and are never candidates.
+    fn make_candidates(&self, bound: ClassId, init_args: &[InitArg]) -> Vec<MakeCandidate> {
+        self.classes
+            .iter()
+            .filter(|class| {
+                matches!(class.origin, ClassOrigin::Native | ClassOrigin::ObjectRoot)
+                    && self.is_same_or_subclass(class.id, bound)
+            })
+            .map(|class| {
+                let mut defaults = Vec::new();
+                let mut missing_keyword = None;
+                for step in &class.initialization_plan.steps {
+                    if init_args.iter().any(|arg| arg.slot == step.slot) {
+                        continue;
+                    }
+                    let Some(slot) = class.effective_slots.get(step.slot.0 as usize) else {
+                        continue;
+                    };
+                    match &slot.init_value {
+                        Some(init_value) => defaults.push(FieldInit {
+                            slot: step.slot,
+                            value: init_value.clone(),
+                            source: FieldInitSource::Default,
+                            span: init_value.span(),
+                        }),
+                        None => {
+                            missing_keyword
+                                .get_or_insert_with(|| format!("{}:", slot.init_keyword));
+                        }
+                    }
+                }
+                MakeCandidate {
+                    class: class.id,
+                    defaults,
+                    missing_keyword,
+                }
+            })
+            .collect()
     }
 
     fn lower_slot_read(
@@ -8148,6 +8261,7 @@ impl Lowering {
                     scalar_result_kind(&symbol.return_kinds)
                 }),
             Expr::MakeObject { class_id, .. } => ValueKind::Object(*class_id),
+            Expr::MakeRuntimeClass { bound, .. } => ValueKind::Object(*bound),
             Expr::If {
                 then_branch,
                 else_branch,

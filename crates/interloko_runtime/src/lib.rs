@@ -80,6 +80,8 @@ pub const VECTOR_LITERAL: &str = "interloko.literal.vector";
 pub const VALUE_EQ: &str = "interloko.value_eq";
 /// Host-call symbol for creating a class metaobject.
 pub const META_CLASS_OBJECT: &str = "interloko.meta.class_object";
+/// Host-call symbol for reading the class id a class metaobject names.
+pub const META_CLASS_ID: &str = "interloko.meta.class_id";
 /// Host-call symbol for creating a generic-function metaobject.
 pub const META_GENERIC_OBJECT: &str = "interloko.meta.generic_object";
 /// Host-call symbol for creating a method metaobject.
@@ -2030,6 +2032,13 @@ impl Host for InterlokoHost {
                 rets[0] = self.push_boxed_value(class);
                 Ok(0)
             }
+            META_CLASS_ID => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::U64(u64::from(self.meta_class_from_any(*arg)?.0));
+                Ok(0)
+            }
             MOP_CLASS_NAME => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
@@ -2838,6 +2847,15 @@ pub fn meta_class_object_signature() -> HostSig {
     HostSig {
         args: vec![ValueType::U64],
         rets: vec![object_type()],
+    }
+}
+
+/// Host signature for reading the class id a class metaobject names.
+#[must_use]
+pub fn meta_class_id_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type()],
+        rets: vec![ValueType::U64],
     }
 }
 

@@ -191,6 +191,8 @@ pub enum FunctionKind {
 pub enum RuntimeOp {
     /// Builds a class metaobject from a class id.
     ClassMetaObject,
+    /// Reads the class id a class metaobject names.
+    ClassMetaId,
     /// Builds a generic-function metaobject from a generic id.
     GenericMetaObject,
     /// Builds a method metaobject from a method id.
@@ -255,6 +257,12 @@ pub enum LokoTrap {
     IntegerOverflow,
     /// A `shift-left` or `shift-right` count was outside 0..=31.
     ShiftCountOutOfRange,
+    /// `make` on a class value named no class the call can construct: not
+    /// the call's static bound nor one of its subclasses.
+    MakeClassOutsideBound,
+    /// `make` on a class value named a class requiring an init keyword the
+    /// call does not pass.
+    MakeMissingInitKeyword,
 }
 
 impl LokoTrap {
@@ -264,6 +272,8 @@ impl LokoTrap {
         Self::InexactFloatToInteger,
         Self::IntegerOverflow,
         Self::ShiftCountOutOfRange,
+        Self::MakeClassOutsideBound,
+        Self::MakeMissingInitKeyword,
     ];
 
     /// Returns the tape trap code for this condition.
@@ -274,6 +284,8 @@ impl LokoTrap {
             Self::InexactFloatToInteger => 2,
             Self::IntegerOverflow => 3,
             Self::ShiftCountOutOfRange => 4,
+            Self::MakeClassOutsideBound => 5,
+            Self::MakeMissingInitKeyword => 6,
         }
     }
 
@@ -285,6 +297,8 @@ impl LokoTrap {
             2 => Some(Self::InexactFloatToInteger),
             3 => Some(Self::IntegerOverflow),
             4 => Some(Self::ShiftCountOutOfRange),
+            5 => Some(Self::MakeClassOutsideBound),
+            6 => Some(Self::MakeMissingInitKeyword),
             _ => None,
         }
     }
@@ -297,6 +311,8 @@ impl LokoTrap {
             Self::InexactFloatToInteger => "inexact float to integer conversion",
             Self::IntegerOverflow => "integer overflow",
             Self::ShiftCountOutOfRange => "shift count out of range",
+            Self::MakeClassOutsideBound => "make on a class outside the call's bound",
+            Self::MakeMissingInitKeyword => "make on a class needing a missing init keyword",
         }
     }
 
@@ -305,9 +321,11 @@ impl LokoTrap {
     pub const fn diagnostic_code(self) -> DiagnosticCode {
         match self {
             Self::IntegerOverflow => DiagnosticCode::RuntimeIntegerOverflow,
-            Self::NoApplicableMethod | Self::InexactFloatToInteger | Self::ShiftCountOutOfRange => {
-                DiagnosticCode::RuntimeTrap
-            }
+            Self::NoApplicableMethod
+            | Self::InexactFloatToInteger
+            | Self::ShiftCountOutOfRange
+            | Self::MakeClassOutsideBound
+            | Self::MakeMissingInitKeyword => DiagnosticCode::RuntimeTrap,
         }
     }
 }
@@ -2348,6 +2366,20 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
                 collect_known_callable_uses_in_expr(&field.value, uses);
             }
         }
+        sem::Expr::MakeRuntimeClass {
+            class,
+            init_args,
+            candidates,
+            ..
+        } => {
+            collect_known_callable_uses_in_expr(class, uses);
+            for arg in init_args {
+                collect_known_callable_uses_in_expr(&arg.value, uses);
+            }
+            for field in candidates.iter().flat_map(|candidate| &candidate.defaults) {
+                collect_known_callable_uses_in_expr(&field.value, uses);
+            }
+        }
         sem::Expr::AccessorCall { receiver, .. } => {
             collect_known_callable_uses_in_expr(receiver, uses);
         }
@@ -3813,16 +3845,7 @@ impl<'module> BodyLowering<'module> {
                         return Err(invalid_semantic("missing object field"));
                     };
                     let value = self.lower_expr(&field.value)?;
-                    let value = if slot.kind == sem::ValueKind::Any {
-                        self.box_any(value, field.span)?
-                    } else if slot.kind == sem::ValueKind::I64
-                        && matches!(value.kind, ValueKind::I32 | ValueKind::U32)
-                    {
-                        self.widen_integer(value, field.span)
-                    } else {
-                        value
-                    };
-                    field_regs.push(value.reg);
+                    field_regs.push(self.field_value(slot.kind, value, field.span)?.reg);
                 }
                 let result = self.alloc(ValueKind::Object(Some(*class_id)));
                 self.instructions.push(Instr::MakeObject {
@@ -3833,6 +3856,13 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::MakeRuntimeClass {
+                class,
+                bound,
+                init_args,
+                candidates,
+                span,
+            } => self.lower_make_runtime_class(class, *bound, init_args, candidates, *span),
             sem::Expr::AccessorCall {
                 receiver,
                 class,
@@ -4313,6 +4343,153 @@ impl<'module> BodyLowering<'module> {
                 ..result
             })
             .collect())
+    }
+
+    /// Lowers `make` on a class value: evaluates the class and the init
+    /// arguments once, then tests the value against each candidate class in
+    /// turn and allocates the one it names, completing its fields with that
+    /// class's defaults. A value naming no candidate, or a candidate that
+    /// needs an init keyword the call does not pass, traps.
+    fn lower_make_runtime_class(
+        &mut self,
+        class: &sem::Expr,
+        bound: sem::ClassId,
+        init_args: &[sem::InitArg],
+        candidates: &[sem::MakeCandidate],
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let class_value = self.lower_expr(class)?;
+        let bound_info = self
+            .module
+            .classes
+            .get(bound.0 as usize)
+            .ok_or_else(|| invalid_semantic("class id is out of range"))?;
+        let mut explicit = Vec::with_capacity(init_args.len());
+        for arg in init_args {
+            let slot = bound_info
+                .effective_slots
+                .get(arg.slot.0 as usize)
+                .ok_or_else(|| invalid_semantic("init argument slot is out of range"))?;
+            let value = self.lower_expr(&arg.value)?;
+            explicit.push((arg.slot, self.field_value(slot.kind, value, arg.span)?));
+        }
+        let class_id = self.alloc(ValueKind::U64);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: class_id.reg,
+            op: RuntimeOp::ClassMetaId,
+            args: vec![class_value.reg],
+            kind: ValueKind::U64,
+            span,
+        });
+        let result = self.alloc(ValueKind::Object(Some(bound)));
+        let done = self.alloc_label();
+        for candidate in candidates {
+            let candidate_id = self.alloc(ValueKind::U64);
+            self.instructions.push(Instr::ConstU64 {
+                dst: candidate_id.reg,
+                value: u64::from(candidate.class.0),
+                span,
+            });
+            let names_candidate = self.alloc(ValueKind::Bool);
+            self.instructions.push(Instr::EqU64 {
+                dst: names_candidate.reg,
+                lhs: class_id.reg,
+                rhs: candidate_id.reg,
+                span,
+            });
+            let chosen = self.alloc_label();
+            let next = self.alloc_label();
+            self.instructions.push(Instr::Branch {
+                cond: names_candidate.reg,
+                then_label: chosen,
+                else_label: next,
+                span,
+            });
+            self.instructions.push(Instr::Label { label: chosen });
+            if candidate.missing_keyword.is_some() {
+                self.instructions.push(Instr::Trap {
+                    trap: LokoTrap::MakeMissingInitKeyword,
+                    span,
+                });
+            } else {
+                let object = self.lower_make_candidate(candidate, &explicit, span)?;
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: object.reg,
+                    span,
+                });
+                self.instructions.push(Instr::Jump { label: done, span });
+            }
+            self.instructions.push(Instr::Label { label: next });
+        }
+        self.instructions.push(Instr::Trap {
+            trap: LokoTrap::MakeClassOutsideBound,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: done });
+        Ok(result)
+    }
+
+    /// Allocates one candidate of a `make` on a class value, taking explicit
+    /// fields from the already evaluated init arguments.
+    fn lower_make_candidate(
+        &mut self,
+        candidate: &sem::MakeCandidate,
+        explicit: &[(sem::SlotId, Value)],
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let class_info = self
+            .module
+            .classes
+            .get(candidate.class.0 as usize)
+            .ok_or_else(|| invalid_semantic("class id is out of range"))?;
+        let mut field_regs = Vec::with_capacity(class_info.initialization_plan.steps.len());
+        for step in &class_info.initialization_plan.steps {
+            if let Some((_, value)) = explicit.iter().find(|(slot, _)| *slot == step.slot) {
+                field_regs.push(value.reg);
+                continue;
+            }
+            let slot = class_info
+                .effective_slots
+                .get(step.slot.0 as usize)
+                .ok_or_else(|| invalid_semantic("initialization slot is out of range"))?;
+            let Some(field) = candidate
+                .defaults
+                .iter()
+                .find(|field| field.slot == step.slot)
+            else {
+                return Err(invalid_semantic("missing object field"));
+            };
+            let value = self.lower_expr(&field.value)?;
+            field_regs.push(self.field_value(slot.kind, value, field.span)?.reg);
+        }
+        let object = self.alloc(ValueKind::Object(Some(candidate.class)));
+        self.instructions.push(Instr::MakeObject {
+            dst: object.reg,
+            class: candidate.class,
+            fields: field_regs,
+            span,
+        });
+        Ok(object)
+    }
+
+    /// Adapts a field value to its slot's register kind: boxed for an
+    /// `<object>` slot, widened for a limited integer in an `<integer>` slot.
+    fn field_value(
+        &mut self,
+        slot_kind: sem::ValueKind,
+        value: Value,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        Ok(if slot_kind == sem::ValueKind::Any {
+            self.box_any(value, span)?
+        } else if slot_kind == sem::ValueKind::I64
+            && matches!(value.kind, ValueKind::I32 | ValueKind::U32)
+        {
+            self.widen_integer(value, span)
+        } else {
+            value
+        })
     }
 
     fn lower_class_meta_object(
@@ -6162,6 +6339,7 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::VectorSize => index == 0,
         RuntimeOp::VectorRef => index == 0,
         RuntimeOp::ClassMetaObject
+        | RuntimeOp::ClassMetaId
         | RuntimeOp::GenericMetaObject
         | RuntimeOp::MethodMetaObject
         | RuntimeOp::SlotDescriptorObject
@@ -6383,6 +6561,7 @@ pub fn control_tag_name(tag: ControlTag) -> String {
 fn runtime_op_name(op: RuntimeOp) -> &'static str {
     match op {
         RuntimeOp::ClassMetaObject => "class-object",
+        RuntimeOp::ClassMetaId => "class-id",
         RuntimeOp::GenericMetaObject => "generic-object",
         RuntimeOp::MethodMetaObject => "method-object",
         RuntimeOp::SlotDescriptorObject => "slot-descriptor-object",

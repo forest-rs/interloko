@@ -1,0 +1,32 @@
+// expect: run 213
+// expect: diagnostics 0
+// expect: dump sem contains make-runtime-class bound=c1
+// expect: dump lowered contains runtime.class-id
+// expect: dump typing contains instance checked rule=instance-sometimes
+
+// `make` on a class value allocates the class the value names, not the
+// static bound sem resolved: `class-of(s)` is a `<square>` here although
+// `s` is only known to be a `<shape>`. The explicit `size:` fills the
+// inherited slot, and `<square>`'s own default fills `side`. The result is
+// only known to be some `<shape>`, so the `instance?` stays a runtime test.
+
+define class <shape> (<object>)
+  slot size :: <integer>, init-value: 1;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>, init-value: 10;
+end;
+
+define function twin(s :: <shape>) => <shape>
+  make(class-of(s), size: 3)
+end;
+
+define function main() => <integer>
+  let copy = twin(make(<square>, size: 7));
+  if instance?(copy, <square>) then
+    as(<square>, copy).side * 20 + copy.size * 4 + 1
+  else
+    0
+  end
+end;
