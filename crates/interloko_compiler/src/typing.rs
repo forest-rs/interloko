@@ -78,6 +78,14 @@
 //! assumptions they rely on ([`TypingDecision::assumes`]); a later slice
 //! wires those into incremental invalidation.
 //!
+//! Besides decisions, each definition keeps the fact of every binding where
+//! it is bound ([`DefinitionTyping::bindings`]), the reads a test narrowed
+//! further ([`DefinitionTyping::uses`]), and its result
+//! ([`DefinitionTyping::result`]). These reuse reasons already in the
+//! arena, so they add one small entry per binding and narrowed read.
+//! Expression facts are not stored: [`TypingArtifact::type_of`] answers a
+//! site or span query by analyzing that one definition again.
+//!
 //! # Policy
 //!
 //! The pass is advisory. Its facts are recorded per enclosing definition
@@ -118,10 +126,15 @@ use interloko_model::types::{Atom, ClassHierarchy, IntRange, Type};
 
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, DiagnosticLabel, Severity};
 use crate::identity::{DefinitionId, DefinitionKind};
-use crate::sem::{self, ClassId, GenericFunctionId, MethodId, SiteId};
+use crate::sem::{
+    self, CaptureId, ClassId, ClosureId, GenericFunctionId, LocalId, MethodId, SiteId,
+};
 use crate::syntax::Span;
 
 mod flow;
+mod query;
+
+pub use query::{TypeQueryError, TypeReport, TypeSelector, TypeSubject, TypingDependency, UseType};
 
 /// Residual runtime check classified by the soft typing pass.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -680,6 +693,57 @@ pub struct Reason {
     pub from: Vec<ReasonId>,
 }
 
+/// A binding whose type flow typing records: a parameter or `let` local
+/// (including handler condition locals and block exit procedures), or a
+/// closure's capture.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Binding {
+    /// A local of the definition's own body.
+    Local(LocalId),
+    /// A local of a closure inside the definition. Closures number their
+    /// locals separately from their enclosing body.
+    ClosureLocal {
+        /// The closure.
+        closure: ClosureId,
+        /// The local within the closure.
+        local: LocalId,
+    },
+    /// A closure's capture, which holds its source's fact where the closure
+    /// is created.
+    Capture {
+        /// The closure.
+        closure: ClosureId,
+        /// The capture within the closure.
+        capture: CaptureId,
+    },
+}
+
+/// The fact flow typing gives a binding where it is bound.
+///
+/// Locals are immutable, so this fact holds for the binding's whole scope;
+/// a test can only narrow it further at particular uses ([`UseFact`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BindingFact {
+    /// The binding.
+    pub binding: Binding,
+    /// The reason, in the owner's arena, whose type is the binding's type.
+    pub reason: ReasonId,
+}
+
+/// A read of a binding whose type is narrower than its [`BindingFact`],
+/// because a test, a join, or sem's own category at the use refined it.
+///
+/// Reads that see the binding fact itself are not recorded.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct UseFact {
+    /// The binding read.
+    pub binding: Binding,
+    /// Source span of the read.
+    pub span: Span,
+    /// The reason, in the owner's arena, whose type the read has.
+    pub reason: ReasonId,
+}
+
 /// One classified runtime check.
 ///
 /// Decisions are configuration-independent facts; the reporting severity is
@@ -729,8 +793,16 @@ pub struct DefinitionTyping {
     pub kind: DefinitionKind,
     /// Decisions in check-site order, which is evaluation order.
     pub decisions: Vec<TypingDecision>,
-    /// Reason arena the decisions' [`ReasonId`]s index.
+    /// Reason arena the decisions' and facts' [`ReasonId`]s index.
     pub reasons: Vec<Reason>,
+    /// The fact of every binding the body binds, in evaluation order.
+    pub bindings: Vec<BindingFact>,
+    /// Reads of bindings narrower than their binding facts, in evaluation
+    /// order.
+    pub uses: Vec<UseFact>,
+    /// The reason whose type is the body's result (a constant's value), or
+    /// `None` when the definition has no body.
+    pub result: Option<ReasonId>,
 }
 
 impl DefinitionTyping {
@@ -738,6 +810,73 @@ impl DefinitionTyping {
     #[must_use]
     pub fn reason(&self, id: ReasonId) -> Option<&Reason> {
         self.reasons.get(id.0 as usize)
+    }
+
+    /// Returns the fact recorded for `binding`, if the body binds it.
+    #[must_use]
+    pub fn binding(&self, binding: Binding) -> Option<&BindingFact> {
+        self.bindings.iter().find(|fact| fact.binding == binding)
+    }
+
+    /// Returns the type of `binding` where it is bound.
+    #[must_use]
+    pub fn binding_type(&self, binding: Binding) -> Option<&Type> {
+        self.binding(binding)
+            .and_then(|fact| self.reason(fact.reason))
+            .map(|reason| &reason.ty)
+    }
+
+    /// Returns the type of the body's result.
+    #[must_use]
+    pub fn result_type(&self) -> Option<&Type> {
+        self.result
+            .and_then(|id| self.reason(id))
+            .map(|reason| &reason.ty)
+    }
+
+    /// Returns what `decision`'s verdict depends on beyond this body: the
+    /// contracts its operands' reason chains cite, in the order the chains
+    /// reach them, then its closed-world assumptions.
+    #[must_use]
+    pub fn dependencies(&self, decision: &TypingDecision) -> Vec<TypingDependency> {
+        let mut out = Vec::new();
+        let mut seen = alloc::vec![false; self.reasons.len()];
+        let mut queue = decision.because.clone();
+        let mut next = 0;
+        while let Some(id) = queue.get(next).copied() {
+            next += 1;
+            let Some(visited) = seen.get_mut(id.0 as usize) else {
+                continue;
+            };
+            if core::mem::replace(visited, true) {
+                continue;
+            }
+            let Some(reason) = self.reason(id) else {
+                continue;
+            };
+            if let ReasonKind::Contract { definition, .. } = reason.kind {
+                let dependency = TypingDependency::Contract(definition);
+                if !out.contains(&dependency) {
+                    out.push(dependency);
+                }
+            }
+            queue.extend(reason.from.iter().copied());
+        }
+        for id in &decision.assumes {
+            let dependency = match self.reason(*id).map(|reason| &reason.kind) {
+                Some(ReasonKind::ClosedWorld(Assumption::Generic(generic))) => {
+                    TypingDependency::Methods(*generic)
+                }
+                Some(ReasonKind::ClosedWorld(Assumption::Class(class))) => {
+                    TypingDependency::Class(*class)
+                }
+                _ => continue,
+            };
+            if !out.contains(&dependency) {
+                out.push(dependency);
+            }
+        }
+        out
     }
 
     /// Renders the reason chain rooted at `id`, as in [`TypingArtifact::dump`].
@@ -1043,7 +1182,21 @@ pub fn check_definition(
     module: &sem::Module,
     definition: DefinitionId,
 ) -> Option<DefinitionTyping> {
+    run_definition(module, definition, None).map(|(typed, _)| typed)
+}
+
+/// Checks one definition and, with a probe, also returns the expression it
+/// selects. The analysis is deterministic, so a probed run records the same
+/// facts, with the same reason ids, as [`check_definition`].
+fn run_definition(
+    module: &sem::Module,
+    definition: DefinitionId,
+    probe: Option<flow::ProbeTarget>,
+) -> Option<(DefinitionTyping, Option<flow::ProbeHit>)> {
     let mut analysis = flow::Analysis::new(module, definition);
+    if let Some(target) = probe {
+        analysis.probe(target);
+    }
     let kind = if let Some(function) = module
         .functions
         .iter()
@@ -1066,13 +1219,19 @@ pub fn check_definition(
         let _ = analysis.detached(&constant.value);
         DefinitionKind::Constant
     };
-    let (decisions, reasons) = analysis.finish();
-    Some(DefinitionTyping {
-        definition,
-        kind,
-        decisions,
-        reasons,
-    })
+    let finished = analysis.finish();
+    Some((
+        DefinitionTyping {
+            definition,
+            kind,
+            decisions: finished.decisions,
+            reasons: finished.reasons,
+            bindings: finished.bindings,
+            uses: finished.uses,
+            result: finished.result,
+        },
+        finished.probe,
+    ))
 }
 
 /// Synthesizes the static type of `expr` outside any flow context.
