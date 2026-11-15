@@ -15,6 +15,7 @@ use crate::syntax::{self, Span};
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
 
+pub use interloko_model::condition::ConditionClass;
 pub use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, LimitedInteger, MethodId, Number32,
     OBJECT_CLASS_ID, SingleFloatBits, SlotId,
@@ -496,6 +497,13 @@ pub enum ClassOrigin {
         /// Built-in value kind represented by this class.
         kind: BuiltinValueClass,
     },
+    /// Condition class supplied by the language kernel, such as
+    /// `<type-error>`. Its instances are native objects: programs make,
+    /// signal, handle, and subclass it as they do a source class.
+    Condition {
+        /// The kernel condition class.
+        class: ConditionClass,
+    },
     /// Class declared by the host-backed metaobject registry.
     HostBacked {
         /// Registry-local host-backed class id.
@@ -769,7 +777,10 @@ impl Module {
                     | BuiltinValueClass::Method
                     | BuiltinValueClass::SlotDescriptor,
             } => Some(ValueKind::Object(class)),
-            ClassOrigin::ObjectRoot | ClassOrigin::Native | ClassOrigin::HostBacked { .. } => None,
+            ClassOrigin::ObjectRoot
+            | ClassOrigin::Native
+            | ClassOrigin::Condition { .. }
+            | ClassOrigin::HostBacked { .. } => None,
         }
     }
 
@@ -4239,6 +4250,7 @@ impl Lowering {
         }
 
         self.collect_builtin_value_classes();
+        self.collect_condition_classes();
         self.resolve_superclasses(module);
     }
 
@@ -4292,6 +4304,108 @@ impl Lowering {
                 class.superclass = Some(superclass);
             }
         }
+    }
+
+    /// Adds the kernel condition classes after the built-in value classes,
+    /// so the ids of every other class stay as they were. Their slots are
+    /// read-only, with required init keywords, so they add no setter
+    /// generics.
+    fn collect_condition_classes(&mut self) {
+        for condition in ConditionClass::ALL {
+            let name = condition.name();
+            if let Some(previous) = self.classes.iter().find(|item| item.name == name) {
+                self.diagnostics.push(
+                    Diagnostic::error(previous.span, DiagnosticCode::DuplicateDefinition)
+                        .with_arg(DiagnosticArg::text("kind", "class"))
+                        .with_arg(DiagnosticArg::text("name", name.to_string()))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_start",
+                            u64::try_from(previous.span.start).unwrap_or(u64::MAX),
+                        ))
+                        .with_arg(DiagnosticArg::unsigned(
+                            "previous_end",
+                            u64::try_from(previous.span.end).unwrap_or(u64::MAX),
+                        )),
+                );
+            }
+            let class_id = ClassId(u32::try_from(self.classes.len()).unwrap_or(u32::MAX));
+            let superclass = match condition.superclass() {
+                Some(parent) => self.condition_class(parent),
+                None => Some(OBJECT_CLASS_ID),
+            };
+            let slots = condition
+                .slots()
+                .iter()
+                .enumerate()
+                .map(|(index, slot)| {
+                    let id = SlotId(u32::try_from(index).unwrap_or(u32::MAX));
+                    let definition = DefinitionId::new(
+                        self.source_file,
+                        DefinitionKind::Slot,
+                        slot.name,
+                        &format!("kernel:{name}"),
+                    );
+                    let kind = self.resolve_type_name(slot.type_name, false, Span::default());
+                    Slot {
+                        id,
+                        definition,
+                        name: slot.name.into(),
+                        type_name: slot.type_name.into(),
+                        kind,
+                        callable_signature: None,
+                        origin: SlotOrigin::Native,
+                        accessor: Accessor {
+                            definition,
+                            name: slot.name.into(),
+                            class: class_id,
+                            slot: id,
+                            result_kind: kind,
+                        },
+                        init_keyword: slot.init_keyword.into(),
+                        required_init_keyword: true,
+                        init_value: None,
+                        allocation: SlotAllocation::Instance,
+                        mutability: SlotMutability::Constant,
+                        span: Span::default(),
+                    }
+                })
+                .collect();
+            self.classes.push(Class {
+                id: class_id,
+                definition: DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Class,
+                    name,
+                    "kernel-condition",
+                ),
+                name: name.into(),
+                origin: ClassOrigin::Condition { class: *condition },
+                superclass,
+                finalized: false,
+                direct_slots: slots,
+                effective_slots: Vec::new(),
+                initialization_plan: InitializationPlan::default(),
+                span: Span::default(),
+            });
+        }
+    }
+
+    /// The id of a kernel condition class. Source slot types resolve before
+    /// the kernel classes are added after the built-in value classes, so
+    /// until then the id is the one it will get.
+    fn condition_class(&self, condition: ConditionClass) -> Option<ClassId> {
+        self.classes
+            .iter()
+            .find(|class| class.origin == ClassOrigin::Condition { class: condition })
+            .map(|class| class.id)
+            .or_else(|| {
+                let builtin = self.builtin_value_class(BuiltinValueClass::ALL.last()?.0)?;
+                let position = ConditionClass::ALL
+                    .iter()
+                    .position(|class| *class == condition)?;
+                let index = usize::try_from(builtin.0).ok()?.checked_add(1 + position)?;
+                Some(ClassId(u32::try_from(index).ok()?))
+            })
     }
 
     fn resolve_superclasses(&mut self, module: &ast::Module) {
@@ -9208,7 +9322,10 @@ impl Lowering {
                     | BuiltinValueClass::Method
                     | BuiltinValueClass::SlotDescriptor,
             } => Some(ValueKind::Object(class)),
-            ClassOrigin::ObjectRoot | ClassOrigin::Native | ClassOrigin::HostBacked { .. } => None,
+            ClassOrigin::ObjectRoot
+            | ClassOrigin::Native
+            | ClassOrigin::Condition { .. }
+            | ClassOrigin::HostBacked { .. } => None,
         }
     }
 
@@ -9533,7 +9650,9 @@ impl Lowering {
                 .map_or(ValueKind::Error, ValueKind::Object),
             name => self
                 .resolve_class(name)
-                .map(|class| ValueKind::Object(class.id))
+                .map(|class| class.id)
+                .or_else(|| self.condition_class(ConditionClass::from_name(name)?))
+                .map(ValueKind::Object)
                 .unwrap_or_else(|| {
                     diagnostics.push(
                         Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
@@ -10882,6 +11001,62 @@ mod tests {
         };
         assert_eq!(*class, point.id);
         assert_eq!(*slot, SlotId(0));
+    }
+
+    #[test]
+    fn defines_the_kernel_condition_classes_in_every_module() {
+        let module = lower_source(
+            "define class <bad-input> (<error>)\n  slot cause :: <type-error>;\nend;\n\
+             define function main()\n  make(<type-error>, value: 1, expected-type: \"<string>\", \
+             site: \"here\", code: \"type-error.cast\").type-error-site\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let condition = class_id(&module, "<condition>");
+        let error = class_id(&module, "<error>");
+        let type_error = class(&module, "<type-error>");
+        assert_eq!(class(&module, "<error>").superclass, Some(condition));
+        assert_eq!(type_error.superclass, Some(error));
+        assert_eq!(
+            type_error.origin,
+            ClassOrigin::Condition {
+                class: ConditionClass::TypeError
+            }
+        );
+        let names = type_error
+            .effective_slots
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "type-error-value",
+                "type-error-expected-type",
+                "type-error-site",
+                "type-error-code"
+            ]
+        );
+        assert!(
+            type_error
+                .direct_slots
+                .iter()
+                .all(|slot| slot.mutability == SlotMutability::Constant)
+        );
+        // A source slot names a kernel class before the kernel classes are
+        // added after the built-in value classes.
+        let bad_input = class(&module, "<bad-input>");
+        assert_eq!(bad_input.superclass, Some(error));
+        assert_eq!(
+            bad_input.direct_slots[0].kind,
+            ValueKind::Object(type_error.id)
+        );
+        assert!(
+            module
+                .generics
+                .iter()
+                .all(|generic| !generic.name.starts_with("type-error-"))
+        );
     }
 
     #[test]

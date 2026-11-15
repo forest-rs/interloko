@@ -11150,8 +11150,8 @@ fn project_environment_slot(
         id: format!("slot:c{}.s{}", class.id.0, slot.id.0),
         kind: EnvironmentKind::Slot,
         meta_class: "<slot>",
-        origin: eop_slot_origin(slot.origin),
-        storage: eop_slot_storage(slot.origin),
+        origin: eop_slot_origin(module, slot),
+        storage: eop_slot_storage(module, slot),
         title: format!("{}.{}", class.name, slot.name),
         affordances: Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::ShowAccessor]),
         execution: None,
@@ -11191,8 +11191,8 @@ fn project_environment_accessor(
         id: format!("accessor:c{}.s{}", class.id.0, slot.id.0),
         kind: EnvironmentKind::Accessor,
         meta_class: "<accessor>",
-        origin: eop_slot_origin(slot.origin),
-        storage: eop_slot_storage(slot.origin),
+        origin: eop_slot_origin(module, slot),
+        storage: eop_slot_storage(module, slot),
         title: slot.accessor.name.clone(),
         affordances: Vec::from([Aff::Inspect, Aff::DumpMop, Aff::DumpEop, Aff::ShowSlot]),
         execution: Some(format!(
@@ -12124,7 +12124,9 @@ fn eop_class_origin(origin: sem::ClassOrigin) -> EnvironmentOrigin {
     match origin {
         sem::ClassOrigin::ObjectRoot => EnvironmentOrigin::CompilerGenerated,
         sem::ClassOrigin::Native => EnvironmentOrigin::SourceAuthored,
-        sem::ClassOrigin::BuiltinValue { .. } => EnvironmentOrigin::CompilerGenerated,
+        sem::ClassOrigin::BuiltinValue { .. } | sem::ClassOrigin::Condition { .. } => {
+            EnvironmentOrigin::CompilerGenerated
+        }
         sem::ClassOrigin::HostBacked { .. } => EnvironmentOrigin::HostBacked,
     }
 }
@@ -12133,20 +12135,38 @@ fn eop_class_storage(origin: sem::ClassOrigin) -> EnvironmentStorage {
     match origin {
         sem::ClassOrigin::ObjectRoot => EnvironmentStorage::CachedArtifact,
         sem::ClassOrigin::Native => EnvironmentStorage::SourceDefined,
-        sem::ClassOrigin::BuiltinValue { .. } => EnvironmentStorage::CachedArtifact,
+        sem::ClassOrigin::BuiltinValue { .. } | sem::ClassOrigin::Condition { .. } => {
+            EnvironmentStorage::CachedArtifact
+        }
         sem::ClassOrigin::HostBacked { .. } => EnvironmentStorage::HostRegistry,
     }
 }
 
-fn eop_slot_origin(origin: sem::SlotOrigin) -> EnvironmentOrigin {
-    match origin {
+/// Whether `slot` was declared by a kernel condition class.
+fn kernel_slot(module: &sem::Module, slot: &sem::EffectiveSlot) -> bool {
+    module
+        .classes
+        .get(slot.source_class.0 as usize)
+        .is_some_and(|class| matches!(class.origin, sem::ClassOrigin::Condition { .. }))
+}
+
+/// A slot's EOP origin. Kernel condition classes declare native slots that
+/// no source authored.
+fn eop_slot_origin(module: &sem::Module, slot: &sem::EffectiveSlot) -> EnvironmentOrigin {
+    if kernel_slot(module, slot) {
+        return EnvironmentOrigin::CompilerGenerated;
+    }
+    match slot.origin {
         sem::SlotOrigin::Native => EnvironmentOrigin::SourceAuthored,
         sem::SlotOrigin::HostBacked { .. } => EnvironmentOrigin::HostBacked,
     }
 }
 
-fn eop_slot_storage(origin: sem::SlotOrigin) -> EnvironmentStorage {
-    match origin {
+fn eop_slot_storage(module: &sem::Module, slot: &sem::EffectiveSlot) -> EnvironmentStorage {
+    if kernel_slot(module, slot) {
+        return EnvironmentStorage::CachedArtifact;
+    }
+    match slot.origin {
         sem::SlotOrigin::Native => EnvironmentStorage::SourceDefined,
         sem::SlotOrigin::HostBacked { .. } => EnvironmentStorage::HostAdapter,
     }
@@ -13057,6 +13077,7 @@ fn sem_class_origin_label(origin: sem::ClassOrigin) -> String {
         sem::ClassOrigin::ObjectRoot => "object-root".into(),
         sem::ClassOrigin::Native => "native".into(),
         sem::ClassOrigin::BuiltinValue { kind } => format!("builtin-value({})", kind.name()),
+        sem::ClassOrigin::Condition { class } => format!("kernel-condition({})", class.name()),
         sem::ClassOrigin::HostBacked { host_class } => {
             format!("host-backed(hc{})", host_class.0)
         }

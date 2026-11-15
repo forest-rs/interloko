@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::syntax::Span;
+use interloko_model::condition::TypeErrorKind;
 
 /// Diagnostic severity.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -276,6 +277,20 @@ pub enum DiagnosticCode {
     RuntimeAborted,
     /// The runtime ended a run for a reason the session does not classify.
     RuntimeFailed,
+    /// A runtime cast check failed: a value is not an instance of the class
+    /// the cast expects. An unhandled `<type-error>` of
+    /// [`TypeErrorKind::Cast`] ends the run with this code.
+    TypeErrorCast,
+    /// A callable's entry check failed: an argument is not of its
+    /// parameter's class, or an exit value not of its block's class. See
+    /// [`TypeErrorKind::Entry`].
+    TypeErrorEntry,
+    /// A runtime range check failed: a number is outside a limited type's
+    /// range. See [`TypeErrorKind::Range`].
+    TypeErrorRange,
+    /// Integer arithmetic overflowed its kind. See
+    /// [`TypeErrorKind::Overflow`].
+    TypeErrorOverflow,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -398,6 +413,10 @@ impl DiagnosticCode {
         Self::RuntimeExpiredExit,
         Self::RuntimeAborted,
         Self::RuntimeFailed,
+        Self::TypeErrorCast,
+        Self::TypeErrorEntry,
+        Self::TypeErrorRange,
+        Self::TypeErrorOverflow,
         Self::SessionUnknownSource,
     ];
 
@@ -522,6 +541,10 @@ impl DiagnosticCode {
             Self::RuntimeExpiredExit => "runtime.expired-exit",
             Self::RuntimeAborted => "runtime.aborted",
             Self::RuntimeFailed => "runtime.failed",
+            Self::TypeErrorCast => TypeErrorKind::Cast.code(),
+            Self::TypeErrorEntry => TypeErrorKind::Entry.code(),
+            Self::TypeErrorRange => TypeErrorKind::Range.code(),
+            Self::TypeErrorOverflow => TypeErrorKind::Overflow.code(),
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -647,9 +670,26 @@ impl DiagnosticCode {
             "runtime.expired-exit" => Self::RuntimeExpiredExit,
             "runtime.aborted" => Self::RuntimeAborted,
             "runtime.failed" => Self::RuntimeFailed,
+            "type-error.cast" => Self::TypeErrorCast,
+            "type-error.entry" => Self::TypeErrorEntry,
+            "type-error.range" => Self::TypeErrorRange,
+            "type-error.overflow" => Self::TypeErrorOverflow,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })
+    }
+}
+
+impl From<TypeErrorKind> for DiagnosticCode {
+    /// The code an unhandled `<type-error>` of `kind` ends a run with: its
+    /// own stable code.
+    fn from(kind: TypeErrorKind) -> Self {
+        match kind {
+            TypeErrorKind::Cast => Self::TypeErrorCast,
+            TypeErrorKind::Entry => Self::TypeErrorEntry,
+            TypeErrorKind::Range => Self::TypeErrorRange,
+            TypeErrorKind::Overflow => Self::TypeErrorOverflow,
+        }
     }
 }
 

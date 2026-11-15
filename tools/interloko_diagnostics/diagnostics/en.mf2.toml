@@ -114,4 +114,8 @@
 "runtime.expired-exit" = "a block exit was called after its block returned"
 "runtime.aborted" = "a condition chooser aborted the run"
 "runtime.failed" = "the runtime ended the run for an unclassified reason"
+"type-error.cast" = "a value is not an instance of the class a cast expects"
+"type-error.entry" = "a value passed to a callable is not of its parameter's class"
+"type-error.range" = "a number is outside the range of the type it must convert to"
+"type-error.overflow" = "integer arithmetic produced a result its type cannot represent"
 "session.unknown-source" = "session source file id is unknown"
