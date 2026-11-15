@@ -4579,6 +4579,10 @@ pub struct DispatchSiteRecord {
     pub rejected: Vec<DispatchMethodRejection>,
     /// Lowered dispatcher function name.
     pub lowered_dispatcher: String,
+    /// The tape link the send calls its method through, such as
+    /// `area(<circle>)`, when typing selected the method and lowering
+    /// devirtualized the send; `None` when the runtime selects it.
+    pub link: Option<String>,
     /// Related query artifact reports.
     pub related_artifacts: Vec<ArtifactReport>,
 }
@@ -5421,6 +5425,21 @@ fn make_dispatch_site(
         || format!("g{}#dispatch", generic_id.0),
         |generic| format!("{}#dispatch", generic.name),
     );
+    let linked = artifacts.lowered.as_ref().is_some_and(|lowered| {
+        lowered.check_codegen(owner.definition, site) == lower::CheckCodegen::Linked
+    });
+    // A linked send calls the link of the method typing selected.
+    let link = artifacts
+        .tape
+        .as_ref()
+        .filter(|_| linked)
+        .zip(selected_method)
+        .and_then(|(tape, method)| {
+            tape.program()
+                .program()
+                .link_name(interloko_runtime::code::method_link(method))
+                .map(String::from)
+        });
     DispatchSiteRecord {
         id: format!("dispatch:d{global_index}"),
         key: dispatch_site_key(
@@ -5444,6 +5463,7 @@ fn make_dispatch_site(
         applicable,
         rejected,
         lowered_dispatcher,
+        link,
         related_artifacts: dispatch_site_artifacts(artifacts, generic_id),
     }
 }
@@ -5792,7 +5812,7 @@ fn dump_dispatch_sites(artifacts: &SessionArtifacts) -> String {
         );
         let _ = writeln!(
             out,
-            "  {} key={} owner={} {} span={}..{} generic={} static-args={} runtime-needed={} selected={}",
+            "  {} key={} owner={} {} span={}..{} generic={} static-args={} runtime-needed={} selected={} send={}",
             site.id,
             site.key,
             site.owner.kind.as_str(),
@@ -5802,10 +5822,19 @@ fn dump_dispatch_sites(artifacts: &SessionArtifacts) -> String {
             generic,
             static_kinds,
             site.runtime_needed,
-            selected
+            selected,
+            send_label(site)
         );
     }
     out
+}
+
+/// How a dispatch site's generated code sends: through its tape link, or by
+/// asking the runtime.
+fn send_label(site: &DispatchSiteRecord) -> String {
+    site.link
+        .as_ref()
+        .map_or_else(|| "dynamic".into(), |link| format!("linked:{link}"))
 }
 
 fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord) -> String {
@@ -5885,6 +5914,21 @@ fn explain_dispatch_site(artifacts: &SessionArtifacts, site: &DispatchSiteRecord
     }
     let _ = writeln!(out, "  lowering:");
     let _ = writeln!(out, "    dispatcher: {}", site.lowered_dispatcher);
+    match &site.link {
+        Some(link) => {
+            let _ = writeln!(
+                out,
+                "    send: linked through link {link}, which calls the selected method and is \
+                 repointed at the newest code's selection when a run installs a unit"
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "    send: dynamic; the runtime selects the method on every call"
+            );
+        }
+    }
     let _ = writeln!(out, "    order:");
     for method in dispatch_methods(module, site.generic) {
         let _ = writeln!(
@@ -11546,8 +11590,10 @@ fn project_environment_dispatch_site(
             Aff::OpenSource,
         ]),
         execution: Some(format!(
-            "dispatcher={} runtime-needed={} selected={selected}",
-            site.lowered_dispatcher, site.runtime_needed
+            "dispatcher={} runtime-needed={} selected={selected} send={}",
+            site.lowered_dispatcher,
+            site.runtime_needed,
+            send_label(site)
         )),
         inspection: format!(
             "key={} owner={} {} site={} span={}..{} generic={} contract={} static-args={} exact-classes={} applicable={} rejected={} artifacts={artifact_keys}",
@@ -12061,6 +12107,10 @@ fn explain_typing_decision(
     );
     let contract = match artifacts.check_codegen(decision) {
         CheckCodegen::Kept => "contract: advisory; the runtime still performs this check",
+        CheckCodegen::Linked => {
+            "contract: relied on; the send calls the selected method through a link, which the \
+             runtime repoints at the newest code's selection whenever a run installs a unit"
+        }
         _ => "contract: relied on; the generated code acts on this decision instead of checking",
     };
     let _ = writeln!(out, "{contract}");

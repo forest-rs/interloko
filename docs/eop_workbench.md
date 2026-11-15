@@ -238,7 +238,9 @@ Each typing decision object carries, besides its verdict:
   a constant `instance?` test, possibly with its dead branch, a cast that
   reuses its operand, an untested shift count), `specialized` (the operation
   without its check: wrapping arithmetic, a reinterpreting conversion) or
-  `inlined` (a numeric dispatch replaced by its method's operation). Only
+  `inlined` (a numeric dispatch replaced by its method's operation), or
+  `linked` (a dispatch whose method typing selected calls it through a
+  relinkable link: no method selection or indirect call). Only
   `CodegenPolicy::Proved`, the default, acts on typing; under
   `CodegenPolicy::Off` every check is `kept`. `explain` names the policy,
   and says whether the generated code still performs the check or relies
@@ -342,7 +344,7 @@ span, not by site number, since an annotation can add a check (a typed
 preview annotate target=binding:def…:s annotation=<circle> previous=<shape> (not applied)
 typing delta: changed=2 added=0 removed=0 unchanged=1
   verdicts proved 0->2 checked 3->1 refuted 0->0
-  codegen kept 3->2 elided 0->1 specialized 0->0 inlined 0->0
+  codegen kept 3->2 elided 0->1 specialized 0->0 inlined 0->0 linked 0->0
   typing:def…:s0 instance verdict=checked->proved codegen=kept->elided severity=silent->warning
   typing:def…:s1 dispatch verdict=checked->proved codegen=kept severity=silent
 ```
@@ -432,6 +434,23 @@ observe:
   says the run makes no dispatch there. Typing gives an inlined send's
   result its method's class, so in a chain such as `(x + 1) + 2` on a boxed
   `x` every send is inlined and the sums stay unboxed until the chain ends.
+- **Linked sends.** Any other send whose method typing selected from its
+  arguments' exact classes calls that method through an `execution_tape`
+  link (`call.link`) instead of asking the runtime (`select-method`, the
+  `interloko.code.dispatch` host call) and calling indirectly. A program
+  declares one link per method, named after its generic and specializers
+  (`area(<circle>)`), so a link's id is its method's and no edit renumbers
+  it. The decision's codegen is `linked`, and the dispatch site record shows
+  `send=linked:area(<circle>)` where a dynamic send shows `send=dynamic`;
+  `dump-tape` lists the program's links. The send stays late-bound:
+  installing code repoints every link at the new code, and each run points
+  them back at its entry unit, so a linked send goes where a dynamic one
+  would (see [`eop_mutation.md`](eop_mutation.md)); the break loop's
+  `:links` shows where each points now. Execution traces show `call.link`
+  instead of the host call and `call.indirect`, and the driver's
+  `ControlStats::sends` counts only dynamic sends. A linked send costs about
+  what a direct function call does; the `typed` bench's `generic send` case
+  compares it with a dynamic one.
 - **Failure locations.** A check inside inlined numeric code, such as the
   overflow check the inlined `+` keeps, signals its `<type-error>` from the
   caller's code at the call's span. Under `off` the same overflow signals

@@ -1,0 +1,30 @@
+// A <circle>'s weight is sent three times through one link: typing proves
+// `c` is a <circle>. `check` signals between the second and third sends.
+
+define class <too-heavy> (<object>)
+end;
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define generic weight(s :: <shape>) => <integer>;
+
+define method weight(s :: <shape>) => <integer>
+  1
+end;
+
+define method weight(s :: <circle>) => <integer>
+  10
+end;
+
+define function check(w :: <integer>) => <integer>
+  if w > 50 then signal(make(<too-heavy>)) else w end
+end;
+
+define function main() => <integer>
+  let c = make(<circle>);
+  weight(c) + weight(c) + check(100) + weight(c)
+end;
