@@ -577,6 +577,7 @@ impl ControlAbi {
                 | lower::Instr::CastClassObject { .. }
                 | lower::Instr::UnboxValue { .. }
                 | lower::Instr::SignalTypeError { .. }
+                | lower::Instr::UnboxObject { .. }
                 | lower::Instr::NoApplicableMethod { .. } => uses_control = true,
                 lower::Instr::Throw { tag, .. } if *tag != lower::ControlTag::Retry => {
                     uses_control = true;
@@ -2027,6 +2028,29 @@ impl<'a> FunctionEmitter<'a> {
                     .map(|dst| self.register_type(*dst))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.emit_signal(&results, dsts, *condition, *span)?;
+            }
+            lower::Instr::UnboxObject {
+                dst,
+                value,
+                otherwise,
+                span,
+            } => {
+                // The cast to `<object>` accepts any runtime object and
+                // raises the check-failed tag for a scalar.
+                let check_failed = self.abi.control()?.check_failed;
+                let sig = self.cast_sig(lower::ValueKind::Any)?;
+                let class = self.alloc_temp(ValueType::U64);
+                let otherwise = self.label(*otherwise)?;
+                self.set_span(*span);
+                self.asm
+                    .const_u64(class, u64::from(interloko_model::OBJECT_CLASS_ID.0));
+                self.asm
+                    .begin_region(&[Catch::Tag(check_failed, otherwise)]);
+                self.asm
+                    .host_call(EFFECT, sig, EFFECT, &[*value, class], &[*dst]);
+                self.asm
+                    .end_region()
+                    .ok_or_else(|| invalid_lowered("unbox region is not open"))?;
             }
             lower::Instr::NoApplicableMethod {
                 dst,

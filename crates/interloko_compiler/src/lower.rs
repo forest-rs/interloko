@@ -1660,6 +1660,19 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Unboxes the runtime object a boxed `<object>` holds into `dst`, or,
+    /// when it holds a scalar, continues at `otherwise` with `dst` unset.
+    UnboxObject {
+        /// Destination object register.
+        dst: Reg,
+        /// Boxed `<object>` register.
+        value: Reg,
+        /// Where execution continues when the value is not a runtime
+        /// object.
+        otherwise: LabelId,
+        /// Source span.
+        span: Span,
+    },
     /// Makes the `<no-applicable-method>` a send to `generic` signals when
     /// no method accepts `arguments`: a generic's dispatcher, after its last
     /// method failed to match.
@@ -3716,15 +3729,76 @@ impl<'module> BodyLowering<'module> {
 
     /// Sends to a generic function: the runtime selects the method, unless
     /// typing proved which one at `site` ([`Self::send_link`]).
+    ///
+    /// A dispatched parameter no method specializes on a scalar class takes
+    /// a runtime object, not a boxed `<object>`. An argument that is a
+    /// boxed `<object>` ([`ValueKind::Any`]) is unboxed to the object it
+    /// holds after every argument is evaluated; when one holds a scalar
+    /// instead, no method can apply, and the send signals its
+    /// `<no-applicable-method>` here with the arguments as given.
     fn send(
+        &mut self,
+        generic: &sem::GenericFunction,
+        args: Vec<Value>,
+        dsts: Vec<Reg>,
+        span: Span,
+        site: Option<sem::SiteId>,
+    ) -> Result<(), LowerError> {
+        let boxed = args
+            .iter()
+            .enumerate()
+            .filter(|(index, arg)| {
+                arg.kind == ValueKind::Any
+                    && matches!(
+                        dispatcher_param_kind(self.module, generic, *index),
+                        ValueKind::Object(_)
+                    )
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let mut regs = args.iter().map(|arg| arg.reg).collect::<Vec<_>>();
+        if boxed.is_empty() {
+            return self.send_regs(generic, regs, dsts, span, site);
+        }
+        let (scalar, join) = (self.alloc_label(), self.alloc_label());
+        for index in boxed {
+            let object = self.alloc(dispatcher_param_kind(self.module, generic, index));
+            self.instructions.push(Instr::UnboxObject {
+                dst: object.reg,
+                value: args[index].reg,
+                otherwise: scalar,
+                span,
+            });
+            regs[index] = object.reg;
+        }
+        self.send_regs(generic, regs, dsts.clone(), span, site)?;
+        self.instructions.push(Instr::Jump { label: join, span });
+        self.instructions.push(Instr::Label { label: scalar });
+        let results = self.emit_no_applicable_method(generic, &args, span)?;
+        for (dst, result) in dsts.into_iter().zip(results) {
+            self.instructions.push(Instr::Move {
+                dst,
+                src: result,
+                span,
+            });
+        }
+        self.instructions.push(Instr::Jump { label: join, span });
+        self.instructions.push(Instr::Label { label: join });
+        Ok(())
+    }
+
+    /// Sends `args`, already of the kinds the dispatcher takes.
+    fn send_regs(
         &mut self,
         generic: &sem::GenericFunction,
         args: Vec<Reg>,
         dsts: Vec<Reg>,
         span: Span,
-        site: sem::SiteId,
+        site: Option<sem::SiteId>,
     ) -> Result<(), LowerError> {
-        if let Some((method, callee)) = self.send_link(generic, site) {
+        if let Some(site) = site
+            && let Some((method, callee)) = self.send_link(generic, site)
+        {
             self.record(site, CheckCodegen::Linked);
             self.instructions.push(Instr::LinkedSend {
                 dsts,
@@ -4184,7 +4258,30 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         generic: &sem::GenericFunction,
     ) -> Result<(), LowerError> {
-        let span = generic.span;
+        let arguments = (0..generic.arity)
+            .map(|index| Value {
+                reg: register_at(index),
+                kind: dispatcher_param_kind(self.module, generic, index),
+                reachable: true,
+            })
+            .collect::<Vec<_>>();
+        let values = self.emit_no_applicable_method(generic, &arguments, generic.span)?;
+        self.instructions.push(Instr::Return {
+            values,
+            span: generic.span,
+        });
+        Ok(())
+    }
+
+    /// Signals the `<no-applicable-method>` of a send to `generic` with
+    /// `arguments`, and returns the registers of the results that stand in
+    /// for the send's, as [`Self::signal_no_applicable_method`] describes.
+    fn emit_no_applicable_method(
+        &mut self,
+        generic: &sem::GenericFunction,
+        arguments: &[Value],
+        span: Span,
+    ) -> Result<Vec<Reg>, LowerError> {
         let vector_class = self
             .module
             .builtin_value_class(sem::BuiltinValueClass::Vector)
@@ -4193,13 +4290,15 @@ impl<'module> BodyLowering<'module> {
             .module
             .condition_class(sem::ConditionClass::NoApplicableMethod)
             .ok_or_else(|| invalid_semantic("module has no <no-applicable-method> class"))?;
-        let mut elements = Vec::with_capacity(generic.arity);
-        for index in 0..generic.arity {
-            let kind = dispatcher_param_kind(self.module, generic, index);
+        let mut elements = Vec::with_capacity(arguments.len());
+        for argument in arguments {
             // No `<vector>` can hold a callable, which is not an `<object>`
             // and never selects a method, so the symbol `#<callable>`
             // stands in for it.
-            let argument = if matches!(kind, ValueKind::Closure(_) | ValueKind::Function(_)) {
+            let argument = if matches!(
+                argument.kind,
+                ValueKind::Closure(_) | ValueKind::Function(_)
+            ) {
                 let class = self
                     .module
                     .builtin_value_class(sem::BuiltinValueClass::Symbol)
@@ -4213,11 +4312,7 @@ impl<'module> BodyLowering<'module> {
                 });
                 symbol
             } else {
-                Value {
-                    reg: register_at(index),
-                    kind,
-                    reachable: true,
-                }
+                *argument
             };
             elements.push(self.box_any(argument, span)?.reg);
         }
@@ -4283,8 +4378,7 @@ impl<'module> BodyLowering<'module> {
             self.next_reg = register_at(self.register_kinds.len());
             values.push(checked);
         }
-        self.instructions.push(Instr::Return { values, span });
-        Ok(())
+        Ok(values)
     }
 
     fn emit_specializer_match(
@@ -4669,7 +4763,7 @@ impl<'module> BodyLowering<'module> {
                     ));
                 }
                 let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
-                self.send(generic_info, args, vec![result.reg], *span, *site)?;
+                self.send(generic_info, args, vec![result.reg], *span, Some(*site))?;
                 Ok(result)
             }
             sem::Expr::CallableCall {
@@ -5340,7 +5434,7 @@ impl<'module> BodyLowering<'module> {
                     args,
                     results.iter().map(|result| result.reg).collect(),
                     *span,
-                    *site,
+                    Some(*site),
                 )?;
                 Ok(results)
             }
@@ -6277,18 +6371,19 @@ impl<'module> BodyLowering<'module> {
         &mut self,
         args: &[sem::Expr],
         generic: &sem::GenericFunction,
-    ) -> Result<Vec<Reg>, LowerError> {
+    ) -> Result<Vec<Value>, LowerError> {
         let mut lowered = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let value = self.lower_expr(arg)?;
-            let value = self.coerce_generic_arg(value, generic, index, arg.span())?;
-            lowered.push(value.reg);
+            lowered.push(self.coerce_generic_arg(value, generic, index, arg.span())?);
         }
         Ok(lowered)
     }
 
     /// Converts argument `index` of a send to `generic` to the kind the
-    /// send passes it at.
+    /// send passes it at, except that a boxed `<object>` for a parameter
+    /// the dispatcher takes as a runtime object stays boxed: [`Self::send`]
+    /// unboxes it once every argument is evaluated.
     fn coerce_generic_arg(
         &mut self,
         value: Value,
@@ -6304,6 +6399,11 @@ impl<'module> BodyLowering<'module> {
         let target = dispatcher_param_kind(self.module, generic, index);
         let dispatched = generic.dispatch_params.contains(&index);
         match *expected {
+            Some(sem::ValueKind::Any) | None
+                if value.kind == ValueKind::Any && matches!(target, ValueKind::Object(_)) =>
+            {
+                Ok(value)
+            }
             Some(sem::ValueKind::Any) if dispatched => self.coerce_value(value, target, span),
             Some(expected) => {
                 let expected = self.value_kind(expected)?;
@@ -6395,13 +6495,10 @@ impl<'module> BodyLowering<'module> {
         }
         let mut regs = Vec::with_capacity(values.len());
         for (index, (value, arg)) in values.into_iter().zip(args).enumerate() {
-            regs.push(
-                self.coerce_generic_arg(value, generic_info, index, arg.span())?
-                    .reg,
-            );
+            regs.push(self.coerce_generic_arg(value, generic_info, index, arg.span())?);
         }
         let result = self.alloc(self.value_kind(generic_info.result_kinds[0])?);
-        self.send(generic_info, regs, vec![result.reg], *span, *site)?;
+        self.send(generic_info, regs, vec![result.reg], *span, Some(*site))?;
         Ok(Some(result))
     }
 
@@ -9091,6 +9188,15 @@ impl Module {
             }
             Instr::PopBinding { token, span } => {
                 write!(f, "  control.pop %{token}")?;
+                fmt_span(f, *span)
+            }
+            Instr::UnboxObject {
+                dst,
+                value,
+                otherwise,
+                span,
+            } => {
+                write!(f, "  %{dst} = unbox object %{value} else {otherwise}")?;
                 fmt_span(f, *span)
             }
             Instr::NoApplicableMethod {
