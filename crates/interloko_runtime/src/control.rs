@@ -23,9 +23,10 @@ use core::ops::Range;
 
 use execution_tape::host::HostSig;
 use execution_tape::program::{TagId, ValueType};
-use execution_tape::value::{UnitId, Value};
+use execution_tape::value::{Obj, UnitId, Value};
 use execution_tape::vm::ActivationId;
 use interloko_model::ClassId;
+use interloko_model::condition::TypeErrorKind;
 
 use crate::object_type;
 
@@ -47,6 +48,11 @@ pub const CONDITION_GUARD_RESULT: &str = "interloko.condition.guard_result";
 /// Host symbol that ends the signalling activation's search because its
 /// guard exited by an exception, which the guest raises again afterwards.
 pub const CONDITION_GUARD_UNWOUND: &str = "interloko.condition.guard_unwound";
+/// Host symbol that makes the `<type-error>` a failed runtime check signals:
+/// `(values..., site) -> condition`, where `site` indexes the calling unit's
+/// [`ControlLayout::type_errors`]. One value becomes the condition's value;
+/// several (the operands of an overflowing operation) a `<vector>` of them.
+pub const CONDITION_TYPE_ERROR: &str = "interloko.condition.type_error";
 /// Host symbol that pops the innermost dynamic binding by token.
 pub const CONTROL_POP: &str = "interloko.control.pop";
 /// Host symbol that pushes a block exit point and returns its token.
@@ -62,6 +68,13 @@ pub const ABORT_TAG: &str = "interloko.abort";
 /// VM tag raised to retry a frame, with payload [`retry_payload`]:
 /// `(retry frames still to cross, function to call instead)`.
 pub const RETRY_TAG: &str = "interloko.retry";
+/// VM tag, with no payload, that a checking host call raises instead of
+/// failing when its check rejects the value and the calling program
+/// imports the tag: [`crate::CAST_OBJECT`], [`crate::CAST_CLASS_OBJECT`]
+/// and [`crate::UNBOX_VALUE`]. The program catches it around the call and
+/// signals a `<type-error>` ([`CONDITION_TYPE_ERROR`]); a passing check
+/// costs what it did.
+pub const CHECK_FAILED_TAG: &str = "interloko.check_failed";
 
 /// Whether `symbol` is a control request serviced by [`crate::driver`]
 /// rather than by a [`execution_tape::host::Host`].
@@ -74,6 +87,7 @@ pub fn is_control_symbol(symbol: &str) -> bool {
             | CONDITION_GUARD
             | CONDITION_GUARD_RESULT
             | CONDITION_GUARD_UNWOUND
+            | CONDITION_TYPE_ERROR
             | CONTROL_POP
             | CONTROL_PUSH_EXIT
             | CONTROL_CHECK_EXIT
@@ -116,16 +130,51 @@ pub struct RestartDescriptor {
     pub span: Range<usize>,
 }
 
+/// Static description of one runtime check that signals a `<type-error>`
+/// when it fails.
+///
+/// The condition records the site's kind as its stable code, its expected
+/// type, and its site, so a handler, a chooser or an agent can tie a
+/// failure at run time to the check, and to the typing decision when soft
+/// typing classified the check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeErrorSite {
+    /// What kind of check failed; its stable code.
+    pub kind: TypeErrorKind,
+    /// The expected type, printed with the program's class names, such as
+    /// `<circle>`, `<i32>` or `subclass(<shape>)`.
+    pub expected: String,
+    /// Where the check is, in one of these forms:
+    ///
+    /// - `typing:<definition>:s<n>`, the EOP id of the typing decision that
+    ///   classified the check;
+    /// - `entry:<function>:<index>`, source parameter `index` of the lowered
+    ///   function `function` (such as `exit#3`, `closure#0` or a callable
+    ///   thunk), for an entry check typing does not classify;
+    /// - `check:<definition>@<start>..<end>`, a check typing does not
+    ///   classify, by the definition whose code makes it and its span;
+    /// - `check@<start>..<end>`, the same in generated code no definition
+    ///   owns.
+    pub site: String,
+    /// Source byte range of the checked expression, empty when the check
+    /// has no source of its own.
+    pub span: Range<usize>,
+}
+
 /// Control metadata of one emitted program.
 ///
-/// Programs import the shared control tags ([`RESTART_TAG`], [`RETRY_TAG`])
-/// by name, so every unit of a run throws and catches the same exceptions.
-/// The driver defines them, with [`ABORT_TAG`], before it installs a unit.
+/// Programs import the shared control tags ([`RESTART_TAG`], [`RETRY_TAG`],
+/// and [`CHECK_FAILED_TAG`] when they check) by name, so every unit of a
+/// run throws and catches the same exceptions. The driver defines them,
+/// with [`ABORT_TAG`], before it installs a unit.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ControlLayout {
     /// Restart sites, indexed by the descriptor operand of
     /// [`CONDITION_PUSH_HANDLER`].
     pub restarts: Vec<RestartDescriptor>,
+    /// Checks that signal a `<type-error>` when they fail, indexed by the
+    /// site operand of [`CONDITION_TYPE_ERROR`].
+    pub type_errors: Vec<TypeErrorSite>,
     /// The program's condition tags: an unhandled signal suspends on one,
     /// with payload `(condition)` and its own result types as the tag's
     /// results. No guest code handles them, so each suspension reaches the
@@ -170,6 +219,14 @@ pub enum ControlFault {
     UnhandledCondition {
         /// Exact runtime class of the signalled condition.
         class: ClassId,
+        /// The condition object. It belongs to the run's turn, so it stays
+        /// readable until the embedding finishes or aborts that turn, as
+        /// [`crate::InterlokoHost::type_error_report`] does for a
+        /// `<type-error>`.
+        condition: Obj,
+        /// Whether a failed runtime check signalled the condition, rather
+        /// than the program's own `signal`.
+        failed_check: bool,
     },
     /// A block exit was invoked after its block's extent ended.
     ExpiredExit {
@@ -351,6 +408,18 @@ pub fn guard_unwound_signature() -> HostSig {
 #[must_use]
 pub fn condition_payload() -> [ValueType; 1] {
     [object_type()]
+}
+
+/// Host signature for [`CONDITION_TYPE_ERROR`] with offending values of
+/// types `values`: `(values..., site) -> condition`.
+#[must_use]
+pub fn type_error_signature(values: &[ValueType]) -> HostSig {
+    let mut args = values.to_vec();
+    args.push(ValueType::U64);
+    HostSig {
+        args,
+        rets: alloc::vec![object_type()],
+    }
 }
 
 /// Host signature for [`CONTROL_POP`]: `(token) -> ()`.

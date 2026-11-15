@@ -15,10 +15,10 @@ use execution_tape::value::{Obj, Value};
 use execution_tape::vm::{ActivationId, PausedFrame};
 use interloko_model::ClassId;
 
-use crate::InterlokoHost;
 use crate::code::{CodeUnit, FrameCode};
 use crate::control::{BindingToken, RestartDescriptor};
 use crate::driver::LinkError;
+use crate::{InterlokoHost, TypeErrorReport};
 
 /// One initialized register of a suspended frame.
 #[derive(Clone, Debug)]
@@ -76,6 +76,11 @@ pub struct UnhandledCondition<'a> {
     pub condition: Obj,
     /// Its exact class.
     pub class: ClassId,
+    /// Whether a failed runtime check signalled the condition, a
+    /// `<type-error>` whose [`OfferedRestart::UseValue`] continues that
+    /// check, rather than the program's own `signal`, whose `use-value`
+    /// is what the `signal` expression returns.
+    pub failed_check: bool,
     /// Runtime objects, classes and slots, for presenting the condition.
     pub runtime: &'a InterlokoHost,
     /// Live frames, innermost (the signaller) first. Nothing has unwound.
@@ -84,6 +89,25 @@ pub struct UnhandledCondition<'a> {
     pub restarts: &'a [OfferedRestart<'a>],
     /// Why the chooser's last [`Choice::Install`] was refused, if it was.
     pub refused: Option<&'a LinkError>,
+}
+
+impl UnhandledCondition<'_> {
+    /// What a failed runtime check reports, when one signalled the
+    /// condition: the stable code, the expected type, the rejected value
+    /// and the check's site. A `<type-error>` the program signalled itself
+    /// is an ordinary condition and reports nothing here.
+    ///
+    /// [`OfferedRestart::UseValue`] supplies what the checked operation
+    /// produces instead: a number of the operation's result type, which is
+    /// all such a check establishes, or, for a cast, an object that the
+    /// cast checks again.
+    #[must_use]
+    pub fn type_error(&self) -> Option<TypeErrorReport> {
+        if !self.failed_check {
+            return None;
+        }
+        self.runtime.type_error_report(self.condition)
+    }
 }
 
 /// A chooser's answer.

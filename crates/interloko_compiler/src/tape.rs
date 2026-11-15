@@ -180,6 +180,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         layout: module.runtime.clone(),
         control: ControlLayout {
             restarts: module.restarts.clone(),
+            type_errors: Vec::new(),
             conditions: abi
                 .control
                 .as_ref()
