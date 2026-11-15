@@ -1,0 +1,17 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 300 is not of type limited(<integer>, min: 0, max: 255) at typing:def
+// expect: diagnostics 0
+
+// The caller checks the argument against `byte`'s range and signals a
+// `<type-error>` at its own call site when it is outside.
+define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n
+end;
+
+define function feed(x :: <integer>) => <integer>
+  byte(x)
+end;
+
+define function main() => <integer>
+  feed(300)
+end;

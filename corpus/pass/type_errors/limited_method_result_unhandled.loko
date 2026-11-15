@@ -1,0 +1,20 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 100 is not of type limited(<integer>, min: 0, max: 9) at typing:def
+// expect: diagnostics 0
+
+// A method returns what its generic promises, so an `<i32>` result is
+// widened and checked against the generic's limited range before it
+// returns, as an `<integer>` one would be.
+define function digit(n :: limited(<integer>, min: 0, max: 9)) => <integer>
+  n
+end;
+
+define generic g(n :: <integer>) => limited(<integer>, min: 0, max: 9);
+
+define method g(n :: <integer>)
+  as(<i32>, n)
+end;
+
+define function main() => <integer>
+  digit(g(100))
+end;

@@ -1,0 +1,15 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.generic-method-result-type-mismatch
+// expect: diagnostic contains result <i32> does not satisfy generic return limited(<integer>, min: 0, max: 9)
+
+// A method's declared result must be within its generic's: `<i32>` holds
+// values a digit does not.
+define generic g(n :: <integer>) => limited(<integer>, min: 0, max: 9);
+
+define method g(n :: <integer>) => <i32>
+  as(<i32>, n)
+end;
+
+define function main() => <integer>
+  g(1)
+end;

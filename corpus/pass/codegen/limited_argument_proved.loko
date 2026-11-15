@@ -1,0 +1,21 @@
+// codegen: proved
+// expect: run 200
+// expect: diagnostics 0
+// expect: dump typing contains range proved rule=range-within
+// expect: dump eop contains codegen=elided
+// expect: dump lowered lacks signal type-error.range
+
+// The caller checks an argument for a limited parameter, where typing knows
+// its range: `n` is between 0 and 100 here, so no check is emitted. Inside
+// `double`, `n + n` cannot overflow, since `n` is at most 255.
+define function double(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n + n
+end;
+
+define function clamp(n :: <integer>) => <integer>
+  if n < 0 then 0 else if n > 100 then 100 else double(n) end end
+end;
+
+define function main() => <integer>
+  clamp(100)
+end;

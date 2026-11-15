@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.limited-type-base
+// expect: diagnostic contains `limited` limits <integer>, not <string>
+
+// Only `<integer>` can be limited to a range.
+define function main(s :: limited(<string>, max: 3))
+  0
+end;

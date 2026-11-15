@@ -1,0 +1,17 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 300 is not of type limited(<integer>, min: 0, max: 255) at typing:def
+// expect: diagnostics 0
+
+// A call through a callable value cannot see `byte`'s range, so `byte`'s
+// indirect entry checks the argument instead.
+define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n
+end;
+
+define function call(f :: <callable>, x :: <integer>) => <integer>
+  apply(f, x) + 0
+end;
+
+define function main() => <integer>
+  call(byte, 300)
+end;

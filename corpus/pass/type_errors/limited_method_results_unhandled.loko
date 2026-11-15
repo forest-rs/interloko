@@ -1,0 +1,19 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 100 is not of type limited(<integer>, min: 0, max: 9) at typing:def
+// expect: diagnostics 0
+
+// Each of several results is checked against its limited type.
+define function digit(n :: limited(<integer>, min: 0, max: 9)) => <integer>
+  n
+end;
+
+define generic g(n :: <integer>) => (limited(<integer>, min: 0, max: 9), <integer>);
+
+define method g(n :: <integer>)
+  values(as(<i32>, n), 1)
+end;
+
+define function main() => <integer>
+  let (a, b) = g(100);
+  digit(a) + b
+end;
