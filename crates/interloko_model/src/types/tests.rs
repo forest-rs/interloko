@@ -744,3 +744,227 @@ fn display_uses_source_names() {
         "type-union(exactly <circle>, <boolean>, <callable>)"
     );
 }
+
+/// [`Toy`] with `<shape>` sealed and abstract, holding `<circle>`,
+/// `<square>`, `<triangle>` and `<ellipse>`, and `<circle>` sealed, holding
+/// `<filled-circle>`.
+struct Sealed;
+
+impl ClassHierarchy for Sealed {
+    fn superclass(&self, class: ClassId) -> Option<ClassId> {
+        Toy.superclass(class)
+    }
+
+    fn is_closed(&self, class: ClassId) -> bool {
+        Toy.is_closed(class)
+    }
+
+    fn builtin_class(&self, class: BuiltinValueClass) -> Option<ClassId> {
+        Toy.builtin_class(class)
+    }
+
+    fn sealed_subclasses(&self, class: ClassId) -> Option<Vec<ClassId>> {
+        match class {
+            SHAPE => Some(Vec::from([CIRCLE, SQUARE, TRIANGLE, ELLIPSE])),
+            CIRCLE => Some(Vec::from([FILLED])),
+            _ => None,
+        }
+    }
+
+    fn is_abstract(&self, class: ClassId) -> bool {
+        class == SHAPE
+    }
+}
+
+/// The samples a type holds when `<shape>` is abstract, so no sample is a
+/// direct `<shape>` instance.
+fn sealed_members(ty: &Type) -> u64 {
+    let direct_shape = samples()
+        .iter()
+        .position(|sample| *sample == Sample::Instance(SHAPE))
+        .expect("a <shape> sample");
+    members(ty) & !(1 << direct_shape)
+}
+
+#[test]
+fn relating_sealed_cones_splits_them_only_when_that_decides() {
+    let types = closure();
+    for operand in &types {
+        for expected in &types {
+            let (relation, sealed) = operand.relate_sealed(expected, &Sealed);
+            let (inner, outer) = (sealed_members(operand), sealed_members(expected));
+            match relation {
+                Relation::Always => assert_eq!(inner & !outer, 0, "{operand:?} {expected:?}"),
+                Relation::Never => assert_eq!(inner & outer, 0, "{operand:?} {expected:?}"),
+                Relation::Maybe => assert!(sealed.is_empty()),
+            }
+            if !sealed.is_empty() {
+                assert_eq!(operand.relate(expected, &Sealed), Relation::Maybe);
+            } else {
+                assert_eq!(relation, operand.relate(expected, &Sealed));
+            }
+        }
+    }
+    // `<shape>` is exactly its four subclasses' cones; `<circle>` need not
+    // be split to see that, so only `<shape>`'s sealing is relied on.
+    let pieces = Type::union(
+        [
+            Atom::Cone(CIRCLE),
+            Atom::Cone(SQUARE),
+            Atom::Cone(TRIANGLE),
+            Atom::Cone(ELLIPSE),
+        ],
+        &Sealed,
+    );
+    let shape = Type::of(Atom::Cone(SHAPE), &Sealed);
+    assert_eq!(shape.relate(&pieces, &Sealed), Relation::Maybe);
+    assert_eq!(
+        shape.relate_sealed(&pieces, &Sealed),
+        (Relation::Always, Vec::from([SHAPE]))
+    );
+    // Open classes are never split.
+    assert_eq!(
+        shape.relate_sealed(&pieces, &Toy),
+        (Relation::Maybe, Vec::new())
+    );
+    let circles = Type::union([Atom::Cone(CIRCLE), Atom::Cone(LABEL)], &Sealed);
+    assert_eq!(
+        circles.relate_sealed(&Type::of(Atom::Exact(CIRCLE), &Sealed), &Sealed),
+        (Relation::Maybe, Vec::new())
+    );
+}
+
+#[test]
+fn difference_splits_sealed_cones_soundly() {
+    let types = closure();
+    for a in &types {
+        for b in &types {
+            let difference = a.difference(b, &Sealed);
+            assert!(difference.ty.is_subtype(a, &Sealed), "{a:?} - {b:?}");
+            assert!(
+                difference.ty.is_subtype(&a.minus(b, &Sealed), &Sealed),
+                "{a:?} - {b:?}"
+            );
+            assert_eq!(
+                sealed_members(a) & !sealed_members(b) & !sealed_members(&difference.ty),
+                0,
+                "{a:?} - {b:?}"
+            );
+            if difference.sealed.is_empty() {
+                assert_eq!(difference.ty, a.minus(b, &Sealed));
+            }
+        }
+    }
+    let shape = Type::of(Atom::Cone(SHAPE), &Sealed);
+    let circle = Type::of(Atom::Cone(CIRCLE), &Sealed);
+    let rest = shape.difference(&circle, &Sealed);
+    assert_eq!(
+        rest.ty.atoms(),
+        Some(
+            &[
+                Atom::Cone(TRIANGLE),
+                Atom::Cone(ELLIPSE),
+                Atom::Exact(SQUARE)
+            ][..]
+        )
+    );
+    assert_eq!(rest.sealed, [SHAPE]);
+    // Removing every piece leaves nothing; removing a filled circle
+    // splits `<circle>` too, leaving its direct instances.
+    let others = Type::union(
+        [
+            Atom::Exact(SQUARE),
+            Atom::Cone(TRIANGLE),
+            Atom::Cone(ELLIPSE),
+        ],
+        &Sealed,
+    );
+    assert!(rest.ty.difference(&others, &Sealed).ty.is_bottom());
+    let filled = shape.difference(&Type::of(Atom::Cone(FILLED), &Sealed), &Sealed);
+    assert_eq!(filled.sealed, [SHAPE, CIRCLE]);
+    assert!(
+        filled
+            .ty
+            .atoms()
+            .is_some_and(|atoms| atoms.contains(&Atom::Exact(CIRCLE)))
+    );
+    // Without sealing, nothing is carved out.
+    assert_eq!(
+        shape.difference(&circle, &Toy),
+        Difference {
+            ty: shape.clone(),
+            sealed: Vec::new()
+        }
+    );
+}
+
+/// A sealed abstract `<fan>` with ten open subclasses, more than a union
+/// holds.
+struct Fan;
+
+const FAN: ClassId = ClassId(1);
+
+impl ClassHierarchy for Fan {
+    fn superclass(&self, class: ClassId) -> Option<ClassId> {
+        match class.0 {
+            0 => None,
+            1 => Some(OBJECT),
+            _ => Some(FAN),
+        }
+    }
+
+    fn is_closed(&self, _class: ClassId) -> bool {
+        false
+    }
+
+    fn builtin_class(&self, _class: BuiltinValueClass) -> Option<ClassId> {
+        None
+    }
+
+    fn sealed_subclasses(&self, class: ClassId) -> Option<Vec<ClassId>> {
+        (class == FAN).then(|| (2..12).map(ClassId).collect())
+    }
+
+    fn is_abstract(&self, class: ClassId) -> bool {
+        class == FAN
+    }
+}
+
+#[test]
+fn a_difference_with_too_many_pieces_widens_back_to_the_cone() {
+    // Beside another atom, nine pieces widen past the cone; the difference
+    // then keeps what plain subtraction does and relies on nothing.
+    let mixed = Type::union([Atom::Cone(FAN), Atom::Boolean(true)], &Fan);
+    let first = Type::of(Atom::Cone(ClassId(2)), &Fan);
+    assert_eq!(
+        mixed.difference(&first, &Fan),
+        Difference {
+            ty: mixed.minus(&first, &Fan),
+            sealed: Vec::new()
+        }
+    );
+
+    let fan = Type::of(Atom::Cone(FAN), &Fan);
+    let first = Type::of(Atom::Cone(ClassId(2)), &Fan);
+    // Nine pieces remain, more than `MAX_ATOMS`, so the union widens to
+    // `<fan>` again and relies on nothing.
+    assert_eq!(
+        fan.difference(&first, &Fan),
+        Difference {
+            ty: fan.clone(),
+            sealed: Vec::new()
+        }
+    );
+    // An expected union of every piece widens to `<fan>` itself, so plain
+    // relating decides; one of fewer pieces cannot cover it.
+    let all = (2..12).map(|class| Atom::Cone(ClassId(class)));
+    assert_eq!(
+        fan.relate_sealed(&Type::union(all, &Fan), &Fan),
+        (Relation::Always, Vec::new())
+    );
+    let most = Type::union((2..9).map(|class| Atom::Cone(ClassId(class))), &Fan);
+    assert_eq!(
+        fan.relate_sealed(&most, &Fan),
+        (Relation::Maybe, Vec::new())
+    );
+}

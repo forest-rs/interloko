@@ -18,8 +18,27 @@
 //! Classes come from a [`ClassHierarchy`]. Inheritance is single, so two
 //! cones over unrelated classes are disjoint. The lattice is open-world: a
 //! class that is not [closed](ClassHierarchy::is_closed) may gain
-//! subclasses, so a cone is never covered by its known subclasses. It also
-//! does not model abstract classes: every class may have direct instances.
+//! subclasses, so a cone is never covered by its known subclasses, and the
+//! normal form below never relies on more than closed classes.
+//!
+//! # Sealed classes
+//!
+//! A [sealed](ClassHierarchy::sealed_subclasses) class has exactly the
+//! direct subclasses the hierarchy lists, so its cone is the finite union of
+//! its *pieces*: its own direct instances (none when it is
+//! [abstract](ClassHierarchy::is_abstract)) and the cone of each direct
+//! subclass. Relying on that is a closed-world assumption, so the lattice
+//! never does it implicitly: [`sealed_pieces`], [`Type::relate_sealed`]
+//! and [`Type::difference`] split sealed cones on request, and the latter
+//! two report the classes whose sealing they relied on, for the caller to
+//! record. A sealed class with no subclasses that is not abstract
+//! is closed, which the hierarchy reports through
+//! [`ClassHierarchy::is_closed`] like any other closed class.
+//!
+//! A split is never stored as a union: the pieces of a large sealed
+//! hierarchy would not fit in [`MAX_ATOMS`]. A difference that leaves more
+//! pieces than that is widened like any other union, back to the cone it
+//! started from, so the narrowing is lost but stays sound.
 //!
 //! # Normal form
 //!
@@ -73,6 +92,22 @@ pub trait ClassHierarchy {
     /// Returns the class of a built-in value class, when the hierarchy
     /// defines it.
     fn builtin_class(&self, class: BuiltinValueClass) -> Option<ClassId>;
+
+    /// Returns the direct subclasses of `class` when it is sealed: the only
+    /// direct subclasses it will ever have. Returns `None` for a class that
+    /// may gain subclasses, which is every class unless the hierarchy says
+    /// otherwise.
+    fn sealed_subclasses(&self, class: ClassId) -> Option<Vec<ClassId>> {
+        let _ = class;
+        None
+    }
+
+    /// Returns whether `class` is abstract: it has no direct instances, only
+    /// those of its subclasses. No class is unless the hierarchy says so.
+    fn is_abstract(&self, class: ClassId) -> bool {
+        let _ = class;
+        false
+    }
 
     /// Returns whether `class` is `ancestor` or inherits from it.
     fn is_same_or_subclass(&self, class: ClassId, ancestor: ClassId) -> bool {
@@ -381,6 +416,17 @@ pub enum Relation {
     Never,
 }
 
+/// A sealing-aware difference; see [`Type::difference`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Difference {
+    /// The values of the minuend that are not values of the subtrahend, as
+    /// far as the lattice can carve them out.
+    pub ty: Type,
+    /// The sealed classes the result relies on: empty when splitting sealed
+    /// cones removed nothing [`Type::minus`] would not.
+    pub sealed: Vec<ClassId>,
+}
+
 /// A static type: a normalized set of runtime values.
 ///
 /// See the [module documentation](self) for the atoms and the normal form.
@@ -474,8 +520,53 @@ impl Type {
     /// The result is conservative: it may keep values of `other` that the
     /// lattice cannot carve out, such as `<shape>` minus `<circle>`, which
     /// stays `<shape>`. Integer ranges and booleans are removed exactly.
+    ///
+    /// Sealed cones are not split; [`Self::difference`] does.
     #[must_use]
     pub fn minus<H: ClassHierarchy + ?Sized>(&self, other: &Self, hierarchy: &H) -> Self {
+        self.subtract(other, hierarchy, None)
+    }
+
+    /// Returns a type holding every value of `self` that is not a value of
+    /// `other`, splitting a cone over a sealed class into its pieces when
+    /// `other` removes some of them, such as `<shape>` minus `<circle>`,
+    /// which is `<square>` when `<shape>` is sealed and abstract with
+    /// subclasses `<circle>` and `<square>`.
+    ///
+    /// The result is at most [`Self::minus`]'s, and [`Difference::sealed`]
+    /// names the sealed classes it relies on when it is smaller: each class
+    /// split, and each sealed leaf whose piece is exact because it has no
+    /// subclasses. A result with more than [`MAX_ATOMS`] pieces is widened
+    /// like any union; when that is no smaller than [`Self::minus`]'s, the
+    /// difference is [`Self::minus`]'s and relies on nothing.
+    #[must_use]
+    pub fn difference<H: ClassHierarchy + ?Sized>(
+        &self,
+        other: &Self,
+        hierarchy: &H,
+    ) -> Difference {
+        let mut sealed = Vec::new();
+        let ty = self.subtract(other, hierarchy, Some(&mut sealed));
+        let minus = self.minus(other, hierarchy);
+        // Widening the pieces past `MAX_ATOMS` may land above what plain
+        // subtraction keeps; that relies on nothing and gains nothing.
+        if sealed.is_empty() || ty == minus || !ty.is_subtype(&minus, hierarchy) {
+            return Difference {
+                ty: minus,
+                sealed: Vec::new(),
+            };
+        }
+        Difference { ty, sealed }
+    }
+
+    /// [`Self::minus`], splitting sealed cones when `sealed` collects the
+    /// classes split.
+    fn subtract<H: ClassHierarchy + ?Sized>(
+        &self,
+        other: &Self,
+        hierarchy: &H,
+        mut sealed: Option<&mut Vec<ClassId>>,
+    ) -> Self {
         let removed = match &other.0 {
             Repr::Top => return Self::bottom(),
             Repr::Union(atoms) if atoms.is_empty() => return self.clone(),
@@ -485,11 +576,25 @@ impl Type {
             return Self::top();
         };
         let mut out = Vec::with_capacity(kept.len());
-        for atom in kept {
+        let mut pending = kept.iter().rev().cloned().collect::<Vec<_>>();
+        while let Some(atom) = pending.pop() {
+            let atom = &atom;
             if removed
                 .iter()
                 .any(|removed| atom.is_within(removed, hierarchy))
             {
+                continue;
+            }
+            // A sealed cone that loses some of its values is replaced by its
+            // pieces, each subtracted in turn.
+            if let (Atom::Cone(class), Some(split)) = (atom, sealed.as_deref_mut())
+                && removed
+                    .iter()
+                    .any(|removed| atom.meet(removed, hierarchy).is_some())
+                && let Some(pieces) = sealed_pieces(*class, hierarchy)
+            {
+                record_split(*class, &pieces, hierarchy, split);
+                pending.extend(pieces.into_iter().rev());
                 continue;
             }
             match atom {
@@ -509,6 +614,54 @@ impl Type {
             }
         }
         normalize(out, hierarchy)
+    }
+
+    /// Relates an operand of this type to `expected` like [`Self::relate`],
+    /// and when that is [`Relation::Maybe`], splits each of the operand's
+    /// cones that relates [`Relation::Maybe`] and is over a sealed class
+    /// into its pieces ([`sealed_pieces`]), recursively, relating each
+    /// piece on its own.
+    ///
+    /// Returns the relation and the sealed classes it relies on, which are
+    /// empty unless splitting decided what [`Self::relate`] could not. Only
+    /// cones whose relation was undecided are split, so a class is listed
+    /// only when its sealing mattered.
+    #[must_use]
+    pub fn relate_sealed<H: ClassHierarchy + ?Sized>(
+        &self,
+        expected: &Self,
+        hierarchy: &H,
+    ) -> (Relation, Vec<ClassId>) {
+        let relation = self.relate(expected, hierarchy);
+        let (Relation::Maybe, Some(atoms)) = (relation, self.atoms()) else {
+            return (relation, Vec::new());
+        };
+        let mut sealed = Vec::new();
+        let mut always = true;
+        let mut never = true;
+        let mut pending = atoms.to_vec();
+        while let Some(atom) = pending.pop() {
+            match Self::of(atom.clone(), hierarchy).relate(expected, hierarchy) {
+                Relation::Always => never = false,
+                Relation::Never => always = false,
+                Relation::Maybe => {
+                    let Atom::Cone(class) = atom else {
+                        return (relation, Vec::new());
+                    };
+                    let Some(pieces) = sealed_pieces(class, hierarchy) else {
+                        return (relation, Vec::new());
+                    };
+                    record_split(class, &pieces, hierarchy, &mut sealed);
+                    pending.extend(pieces);
+                }
+            }
+        }
+        match (always, never) {
+            // Every piece holds only expected values, or there are none.
+            (true, _) => (Relation::Always, sealed),
+            (false, true) => (Relation::Never, sealed),
+            (false, false) => (Relation::Maybe, Vec::new()),
+        }
     }
 
     /// Returns whether every value of `self` is a value of `other`.
@@ -825,6 +978,50 @@ fn bound_size<H: ClassHierarchy + ?Sized>(mut atoms: Vec<Atom>, hierarchy: &H) -
         }
     }
     normalize(rest.into_iter().chain(bound.map(Atom::Cone)), hierarchy)
+}
+
+/// Records that `class` was split into `pieces`, and that each piece that
+/// is exact only because its class is a sealed leaf relies on that sealing
+/// too.
+fn record_split<H: ClassHierarchy + ?Sized>(
+    class: ClassId,
+    pieces: &[Atom],
+    hierarchy: &H,
+    sealed: &mut Vec<ClassId>,
+) {
+    let leaves = pieces.iter().filter_map(|piece| match piece {
+        Atom::Exact(leaf) if *leaf != class && hierarchy.sealed_subclasses(*leaf).is_some() => {
+            Some(*leaf)
+        }
+        _ => None,
+    });
+    for split in core::iter::once(class).chain(leaves) {
+        if !sealed.contains(&split) {
+            sealed.push(split);
+        }
+    }
+}
+
+/// Returns the pieces of the cone over `class` when it is sealed, or `None`
+/// when it is open: its direct instances unless it is abstract, then the
+/// cone of each direct subclass, each canonical and non-empty. Their union
+/// is the cone, as long as the class stays sealed with these subclasses.
+#[must_use]
+pub fn sealed_pieces<H: ClassHierarchy + ?Sized>(
+    class: ClassId,
+    hierarchy: &H,
+) -> Option<Vec<Atom>> {
+    let subclasses = hierarchy.sealed_subclasses(class)?;
+    let own = (!hierarchy.is_abstract(class)).then_some(Atom::Exact(class));
+    let pieces = own
+        .into_iter()
+        .chain(subclasses.into_iter().map(Atom::Cone))
+        .filter_map(|atom| match canonical(atom, hierarchy) {
+            Canonical::Atom(atom) => Some(atom),
+            Canonical::Top | Canonical::Empty => None,
+        })
+        .collect();
+    Some(pieces)
 }
 
 fn least_common_superclass<H: ClassHierarchy + ?Sized>(
