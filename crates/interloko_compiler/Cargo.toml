@@ -28,3 +28,8 @@ workspace = true
 name = "control"
 harness = false
 required-features = ["std"]
+
+[[bench]]
+name = "calls"
+harness = false
+required-features = ["std"]
