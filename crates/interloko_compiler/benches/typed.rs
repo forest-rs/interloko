@@ -16,6 +16,11 @@
 //!   same object without casting it.
 //! - `range conversion`: `as(<i32>, n)` on a small `<integer>`; proved code
 //!   keeps the low bits instead of testing the range.
+//! - `tested arithmetic`: `x * x + x + 1` on a boxed `<object>` in the then
+//!   branch of `instance?(x, <integer>)`. Sem reads `x` there as an
+//!   unboxed `<integer>` under either policy, so the branch unboxes once
+//!   and computes on `i64`s. Its baseline boxes and passes the same value
+//!   to a function that does not test it.
 //!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
@@ -75,6 +80,22 @@ end;
 
 define function cast(d :: <integer>) => <integer>
   if d = 0 then cast-shape() else cast(d - 1) + cast(d - 1) end
+end;
+
+define function poly(x :: <object>) => <integer>
+  if instance?(x, <integer>) then as(<integer>, x * x + x + 1) else 0 end
+end;
+
+define function ignore(x :: <object>) => <integer>
+  1
+end;
+
+define function tested(d :: <integer>) => <integer>
+  if d = 0 then poly(as(<object>, d)) else tested(d - 1) + tested(d - 1) end
+end;
+
+define function passed(d :: <integer>) => <integer>
+  if d = 0 then ignore(as(<object>, d)) else passed(d - 1) + passed(d - 1) end
 end;
 
 define function convert(d :: <integer>) => <integer>
@@ -139,6 +160,7 @@ fn costs(policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("narrowed read", net("narrow", "plain")),
         ("proved cast", net("cast", "made")),
         ("range conversion", net("convert", "plain")),
+        ("tested arithmetic", net("tested", "passed")),
     ]
 }
 
