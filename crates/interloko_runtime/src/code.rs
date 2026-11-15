@@ -16,7 +16,38 @@
 //! When the table cannot decide (scalar dispatch, or a method that needs its
 //! arguments converted), the answer is the newest unit's compiled dispatcher.
 //! Direct calls to source functions stay within the caller's unit.
+//!
+//! # Contracts
+//!
+//! Compiled code trusts the types its compiler resolved: a send whose
+//! generic was inferred to return `<circle>` reads the result's slots as a
+//! `<circle>`'s, and a function whose parameter is declared `:: <circle>`
+//! reads its argument the same way. A tape signature erases both to
+//! `object`, so each unit also carries the [`Contract`] of every generic,
+//! method and function it defines ([`Contracts`]), and newer code may take
+//! over a definition from older code that is still running only when its
+//! contract keeps the older one's promise ([`Contract::check_replaces`]):
+//! parameters may widen and results may narrow.
+//!
+//! The rule applies exactly where code compiled against one unit can reach
+//! another unit's definition, which happens only within one run, after a
+//! chooser installs a unit while frames are suspended:
+//!
+//! - a generic send is late-bound, so an old frame may send to the newest
+//!   unit's methods; [`CodeUnit::check_replaces`] refuses a unit that
+//!   changes a generic's contract incompatibly;
+//! - a retried frame calls the newest version of its function or method,
+//!   with the frame's own arguments, and returns to the frame's old caller;
+//!   such a retry is refused ([`FrameCode::retry_refusal`]) when that
+//!   definition's contract changed incompatibly.
+//!
+//! Direct function calls stay within their unit, so a unit that changes a
+//! function's contract installs, and only retrying a frame of the old
+//! function is refused. A run starts from one unit and checks nothing
+//! against units from earlier runs, so recompiling and running again
+//! accepts any change.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -25,6 +56,8 @@ use execution_tape::host::HostSig;
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, UnitId};
 use execution_tape::verifier::VerifiedProgram;
+use interloko_model::contract::{Contract, ContractBreak, ContractPosition};
+use interloko_model::types::Type;
 use interloko_model::{ClassId, GenericFunctionId, MethodId};
 
 use crate::RuntimeLayout;
@@ -112,6 +145,41 @@ pub struct CodeUnit {
     /// Runtime method selection of each generic, in layout generic order;
     /// `None` leaves the choice to the generic's dispatcher.
     pub dispatch: Vec<Option<GenericDispatch>>,
+    /// What code compiled against each definition relies on. A definition
+    /// with no contract here (as in a unit built without any) is checked
+    /// by its signature alone.
+    pub contracts: Contracts,
+}
+
+/// The [`Contract`] of each definition a [`CodeUnit`] implements, as its
+/// compiler resolved them.
+///
+/// Types name classes by their ids in the unit's [`RuntimeLayout`], which is
+/// the hierarchy they are compared in.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Contracts {
+    /// Contract of each generic, in layout generic order.
+    pub generics: Vec<Contract>,
+    /// Contract of each method, in layout method order.
+    pub methods: Vec<Contract>,
+    /// Contract of each source function, by name.
+    pub functions: Vec<(String, Contract)>,
+}
+
+impl Contracts {
+    /// The contract of `definition`, if the unit records one.
+    #[must_use]
+    pub fn get(&self, definition: &Definition) -> Option<&Contract> {
+        match definition {
+            Definition::Generic(generic) => self.generics.get(generic.0 as usize),
+            Definition::Method(method) => self.methods.get(method.0 as usize),
+            Definition::Function(name) => self
+                .functions
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .map(|(_, contract)| contract),
+        }
+    }
 }
 
 /// The source definition a tape function implements.
@@ -134,18 +202,39 @@ impl Definition {
     }
 }
 
-/// Why a unit cannot replace the code a run already installed.
+/// Why a unit cannot replace the code a run already installed, or why a
+/// frame cannot be retried with the newest code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodeMismatch {
     /// The units disagree on classes, slots, generics or methods, so objects
     /// and dispatch would change meaning under live frames.
     Layout,
-    /// A generic's dispatcher takes or returns different kinds, so sends from
-    /// older units could not call it.
-    GenericSignature {
-        /// The generic whose signature changed.
-        generic: GenericFunctionId,
+    /// A definition takes or returns different value kinds, so code
+    /// compiled against the older one could not call the newer one.
+    Signature {
+        /// The definition whose signature changed.
+        definition: Definition,
+        /// Its name, for messages.
+        name: String,
     },
+    /// A definition's contract changed in a way code compiled against the
+    /// older one could observe.
+    Contract(Box<ContractMismatch>),
+}
+
+/// A contract change that code compiled against the older contract could
+/// observe; see [`Contract::check_replaces`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractMismatch {
+    /// The definition whose contract changed.
+    pub definition: Definition,
+    /// Its name, for messages.
+    pub name: String,
+    /// The incompatible change.
+    pub change: ContractBreak,
+    /// The old and new types of `change` written with the run's class
+    /// names, empty for [`ContractBreak::Arity`].
+    pub types: (String, String),
 }
 
 impl core::fmt::Display for CodeMismatch {
@@ -154,9 +243,44 @@ impl core::fmt::Display for CodeMismatch {
             Self::Layout => {
                 formatter.write_str("the runtime layout changed (classes, slots or methods)")
             }
-            Self::GenericSignature { generic } => {
-                write!(formatter, "generic #{} changed its signature", generic.0)
+            Self::Signature { name, .. } => {
+                write!(
+                    formatter,
+                    "{name} changed the value kinds it takes or returns"
+                )
             }
+            Self::Contract(mismatch) => write!(formatter, "{mismatch}"),
+        }
+    }
+}
+
+impl core::fmt::Display for ContractMismatch {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (old, new) = &self.types;
+        let name = &self.name;
+        match self.change {
+            ContractBreak::Arity => {
+                write!(
+                    formatter,
+                    "{name} changed how many values it takes or returns"
+                )
+            }
+            ContractBreak::Type {
+                position: ContractPosition::Parameter(index),
+                ..
+            } => write!(
+                formatter,
+                "{name} would take {new} as argument {} where callers pass {old}",
+                index + 1
+            ),
+            ContractBreak::Type {
+                position: ContractPosition::Result(index),
+                ..
+            } => write!(
+                formatter,
+                "{name} would return {new} as result {} where callers expect {old}",
+                index + 1
+            ),
         }
     }
 }
@@ -198,22 +322,91 @@ impl CodeUnit {
         }
     }
 
-    /// Checks that this unit can take over from `older` in one run.
+    /// Checks that this unit can take over from `older` in one run, while
+    /// frames running `older` (or units it took over from) are suspended.
+    ///
+    /// The layouts must be equal. Every generic must keep its signature and
+    /// keep its contract's promise, because sends from older frames reach
+    /// this unit's methods. Methods and functions are not checked here:
+    /// older frames reach them only by a retry, which the run checks then.
     pub fn check_replaces(&self, older: &Self) -> Result<(), CodeMismatch> {
         if self.layout != older.layout || self.generics.len() != older.generics.len() {
             return Err(CodeMismatch::Layout);
         }
-        for (index, (new, old)) in self.generics.iter().zip(&older.generics).enumerate() {
-            if self.signature(*new) != older.signature(*old) {
-                return Err(CodeMismatch::GenericSignature {
-                    generic: GenericFunctionId(index_u32(index)),
-                });
-            }
+        for index in 0..self.generics.len() {
+            let definition = Definition::Generic(GenericFunctionId(index_u32(index)));
+            self.check_takes_over(&definition, older)?;
         }
         Ok(())
     }
 
-    /// Argument and result kinds of `func`.
+    /// Checks that this unit's `definition` can be called by code compiled
+    /// against `older`'s: the same signature and a contract that keeps the
+    /// older one's promise.
+    pub fn check_takes_over(
+        &self,
+        definition: &Definition,
+        older: &Self,
+    ) -> Result<(), CodeMismatch> {
+        let name = || self.definition_name(definition);
+        let (Some(new_func), Some(old_func)) =
+            (self.function(definition), older.function(definition))
+        else {
+            return Err(CodeMismatch::Layout);
+        };
+        if self.signature(new_func) != older.signature(old_func) {
+            return Err(CodeMismatch::Signature {
+                definition: definition.clone(),
+                name: name(),
+            });
+        }
+        let (Some(new), Some(old)) = (
+            self.contracts.get(definition),
+            older.contracts.get(definition),
+        ) else {
+            // A unit without contracts makes no promise to compare.
+            return Ok(());
+        };
+        new.check_replaces(old, &self.layout).map_err(|change| {
+            let types = match &change {
+                ContractBreak::Arity => (String::new(), String::new()),
+                ContractBreak::Type { old, new, .. } => (self.type_name(old), self.type_name(new)),
+            };
+            CodeMismatch::Contract(Box::new(ContractMismatch {
+                definition: definition.clone(),
+                name: name(),
+                change,
+                types,
+            }))
+        })
+    }
+
+    /// The source name of `definition`: a generic's or function's name, or
+    /// a method's tape function name such as `area#method0`.
+    #[must_use]
+    pub fn definition_name(&self, definition: &Definition) -> String {
+        let program_name = || {
+            self.function(definition)
+                .and_then(|func| self.program.program().function_name(func.0))
+                .map(String::from)
+        };
+        match definition {
+            Definition::Generic(generic) => self
+                .layout
+                .generic(*generic)
+                .map(|generic| generic.name.clone())
+                .unwrap_or_else(|| alloc::format!("generic#{}", generic.0)),
+            Definition::Method(method) => {
+                program_name().unwrap_or_else(|| alloc::format!("method#{}", method.0))
+            }
+            Definition::Function(name) => name.clone(),
+        }
+    }
+
+    fn type_name(&self, ty: &Type) -> String {
+        alloc::format!("{}", ty.display(&self.layout))
+    }
+
     /// Whether `func` here and `other_func` in `other` have the same
     /// signature and bytecode. Unchanged definitions recompile identically
     /// unless an edit renumbered what their code refers to.
@@ -232,6 +425,7 @@ impl CodeUnit {
             .ok()
     }
 
+    /// Argument and result kinds of `func`.
     pub(crate) fn signature(&self, func: FuncId) -> Option<Signature> {
         let program = self.program.program();
         let function = program.functions.get(func.0 as usize)?;
@@ -258,6 +452,11 @@ pub struct FrameCode {
     /// Whether that function's code differs from the code this frame runs:
     /// a newer unit changed the definition under the frame.
     pub superseded: bool,
+    /// Why the frame cannot be retried with `current`, when a newer unit
+    /// changed the definition's signature or broke its contract: the retry
+    /// would pass the frame's arguments to the new code and return its
+    /// results to the frame's caller, both compiled against the old one.
+    pub retry_refusal: Option<CodeMismatch>,
 }
 
 impl FrameCode {
@@ -265,6 +464,7 @@ impl FrameCode {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         self.current.is_some()
+            && self.retry_refusal.is_none()
             && self
                 .definition
                 .as_ref()
@@ -306,10 +506,6 @@ impl UnitTable {
             .find_map(|(unit, code)| Some(FuncRef::new(*unit, code.function(definition)?)))
     }
 
-    pub(crate) fn signature(&self, func: FuncRef) -> Option<Signature> {
-        self.get(func.unit)?.signature(func.func)
-    }
-
     pub(crate) fn frame(&self, func: FuncRef) -> FrameCode {
         let definition = self
             .get(func.unit)
@@ -330,12 +526,22 @@ impl UnitTable {
                 .function_name(func.func.0)
                 .map(String::from)
         });
+        let retry_refusal = match (&definition, current) {
+            (Some(definition), Some(current)) if current != func && definition.is_retryable() => {
+                match (self.get(current.unit), self.get(func.unit)) {
+                    (Some(new), Some(old)) => new.check_takes_over(definition, old).err(),
+                    _ => Some(CodeMismatch::Layout),
+                }
+            }
+            _ => None,
+        };
         FrameCode {
             func,
             name,
             definition,
             current,
             superseded,
+            retry_refusal,
         }
     }
 }

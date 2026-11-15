@@ -18367,6 +18367,7 @@ end;
     }
 
     use alloc::vec;
+    use interloko_model::contract::{Contract, ContractBreak, ContractPosition};
     use interloko_runtime::chooser::{Choice, OfferedRestart, UnhandledCondition};
 
     const UNHANDLED_SAMPLE: &str = "define class <bad-sample> (<object>)\n  slot value :: <double-float>;\nend;\n\
@@ -19008,6 +19009,416 @@ end;
                 None,
             ]
         );
+    }
+
+    /// An open generic whose only method returns a `<circle>`, so sem infers
+    /// `make-shape`'s result as `<circle>` and `main` reads `radius` with no
+    /// runtime class check. `pause` signals `<oops>`, giving the chooser a
+    /// suspension in which to install an edit.
+    const SHAPES: &str = "define class <oops> (<object>)\nend;\n\
+         define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+         define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+         define generic make-shape(n :: <integer>);\n\
+         define method make-shape(n :: <integer>)\n  make(<circle>, radius: n)\nend;\n\
+         define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+         define function main() => <integer>\n  pause() + make-shape(3).radius\nend;";
+
+    #[test]
+    fn contracts_record_the_kinds_lowering_trusts() {
+        use interloko_model::types::{Atom, ClassHierarchy, IntRange, Type};
+        use interloko_model::{BuiltinValueClass, ClassId};
+
+        let artifacts =
+            CompilerSession::compile_source("shapes.loko", SHAPES, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let sem = &artifacts.sem;
+        let code = artifacts.code_unit().expect("tape");
+        let circle = code.layout.class_id("<circle>").expect("circle");
+        let integer = Type::of(Atom::Integer(IntRange::INTEGER), sem);
+        let circles = Type::of(Atom::Cone(circle), sem);
+
+        // The open generic's result is inferred from its one method, and the
+        // method promises what its generic does.
+        let generic = &sem.generics[0];
+        let expected = Contract {
+            params: vec![integer.clone()],
+            results: vec![circles.clone()],
+        };
+        assert_eq!(sem.contract(generic.definition), Some(expected.clone()));
+        assert_eq!(
+            sem.contract(sem.methods[0].definition),
+            Some(expected.clone())
+        );
+        let main = sem
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main");
+        assert_eq!(
+            sem.contract(main.definition),
+            Some(Contract {
+                params: Vec::new(),
+                results: vec![integer],
+            })
+        );
+        assert_eq!(
+            sem.contract(sem.classes[circle.0 as usize].definition),
+            None
+        );
+
+        // The code unit carries them, and its layout compares them as sem
+        // does.
+        let make_shape = interloko_runtime::code::Definition::Generic(generic.id);
+        assert_eq!(code.contracts.get(&make_shape), Some(&expected));
+        for (index, class) in sem.classes.iter().enumerate() {
+            let id = ClassId(u32::try_from(index).expect("class id"));
+            assert_eq!(
+                code.layout.superclass(id),
+                sem.superclass(id),
+                "{}",
+                class.name
+            );
+            assert_eq!(
+                code.layout.is_closed(id),
+                sem.is_closed(id),
+                "{}",
+                class.name
+            );
+        }
+        for (kind, name) in BuiltinValueClass::ALL {
+            assert_eq!(
+                ClassHierarchy::builtin_class(&code.layout, *kind),
+                ClassHierarchy::builtin_class(sem, *kind),
+                "{name}"
+            );
+        }
+    }
+
+    /// How [`run_across_an_edit`] answers the signal after the install.
+    enum Then {
+        /// Choose this.
+        Choose(Choice),
+        /// Retry the suspended frame with this name.
+        Retry(&'static str),
+    }
+
+    /// What a run saw across an edit.
+    #[derive(Debug)]
+    struct AcrossAnEdit {
+        /// Why the install was refused, if it was.
+        refused: Option<driver::LinkError>,
+        /// Why retrying the chosen frame was refused, if it was.
+        retry_refused: Option<interloko_runtime::code::CodeMismatch>,
+        /// `main`'s value, or `None` when the run failed.
+        value: Option<FunctionValue>,
+    }
+
+    /// Runs `old`'s `main`, installs `new` at the first unhandled signal,
+    /// answers the second with `then`, and resumes any later one with 0.
+    fn run_across_an_edit(old: &str, new: &str, then: Then) -> AcrossAnEdit {
+        let old = CompilerSession::compile_source("shapes.loko", old, RuntimeMode::CompileOnly);
+        let new = CompilerSession::compile_source("shapes.loko", new, RuntimeMode::CompileOnly);
+        assert_eq!(old.diagnostics, Vec::new());
+        assert_eq!(new.diagnostics, Vec::new());
+        let mut asked = 0;
+        let mut refused = None;
+        let mut retry_refused = None;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            match (asked, &then) {
+                (1, _) => Choice::Install(new.code_unit().expect("tape")),
+                (2, Then::Choose(choice)) => {
+                    refused = condition.refused.cloned();
+                    choice.clone()
+                }
+                (2, Then::Retry(name)) => {
+                    refused = condition.refused.cloned();
+                    let frame = condition
+                        .frames
+                        .iter()
+                        .find(|frame| frame.code.name.as_deref() == Some(*name))
+                        .expect("the frame to retry is suspended");
+                    retry_refused = frame.code.retry_refusal.clone();
+                    Choice::Retry {
+                        frame: frame.frame.activation.clone(),
+                    }
+                }
+                _ => Choice::UseValue(vec![Value::I64(0)]),
+            }
+        });
+        let value = call_with_chooser(&old, &mut chooser).ok();
+        AcrossAnEdit {
+            refused,
+            retry_refused,
+            value,
+        }
+    }
+
+    /// The contract mismatch `refused` names, as (definition, position, old
+    /// type, new type).
+    fn broken_contract(
+        mismatch: Option<&interloko_runtime::code::CodeMismatch>,
+    ) -> (String, ContractPosition, String, String) {
+        match mismatch {
+            Some(interloko_runtime::code::CodeMismatch::Contract(mismatch)) => {
+                let ContractBreak::Type { position, .. } = mismatch.change else {
+                    panic!("expected a type change, got {mismatch:?}");
+                };
+                (
+                    mismatch.name.clone(),
+                    position,
+                    mismatch.types.0.clone(),
+                    mismatch.types.1.clone(),
+                )
+            }
+            other => panic!("expected a contract mismatch, got {other:?}"),
+        }
+    }
+
+    fn install_mismatch(seen: &AcrossAnEdit) -> Option<&interloko_runtime::code::CodeMismatch> {
+        match &seen.refused {
+            Some(driver::LinkError::Mismatch(mismatch)) => Some(mismatch),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_late_bound_send_must_not_return_a_class_its_caller_did_not_compile_for() {
+        // The edit makes `make-shape` return a <square>. The suspended `main`
+        // would read the <square>'s side as a <circle>'s radius, so the
+        // install is refused and `main` finishes on the old code.
+        let new = SHAPES
+            .replace("make(<circle>, radius: n)", "make(<square>, side: 40)")
+            .replace("pause() + make-shape(3).radius", "pause()");
+        let seen = run_across_an_edit(
+            SHAPES,
+            &new,
+            Then::Choose(Choice::UseValue(vec![Value::I64(0)])),
+        );
+        assert_eq!(
+            broken_contract(install_mismatch(&seen)),
+            (
+                "make-shape".into(),
+                ContractPosition::Result(0),
+                "<circle>".into(),
+                "<square>".into()
+            )
+        );
+        assert_eq!(
+            seen.refused.expect("refused").to_string(),
+            "cannot replace running code: make-shape would return <square> as result 1 \
+             where callers expect <circle>"
+        );
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    #[test]
+    fn a_retried_method_must_not_return_a_class_its_caller_did_not_compile_for() {
+        // The method pauses; the edit would make it return a <square> to the
+        // old `main`. The method's contract is its generic's, so the install
+        // is refused, and the retry runs the method's old code again.
+        let old = SHAPES
+            .replace(
+                "  make(<circle>, radius: n)\nend",
+                "  let p = pause();\n  make(<circle>, radius: n + p)\nend",
+            )
+            .replace("pause() + make-shape(3).radius", "make-shape(3).radius");
+        let new = old
+            .replace(
+                "  let p = pause();\n  make(<circle>, radius: n + p)",
+                "  make(<square>, side: 40)",
+            )
+            .replace("make-shape(3).radius", "0");
+        let seen = run_across_an_edit(&old, &new, Then::Retry("make-shape#method0"));
+        assert_eq!(broken_contract(install_mismatch(&seen)).0, "make-shape");
+        assert_eq!(seen.retry_refused, None, "nothing superseded the method");
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    /// Classes, a pausing function and `area` for retry tests.
+    const RETRY_AREA: &str = "define class <oops> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define class <square> (<shape>)\n  slot side :: <integer>;\nend;\n\
+         define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+         define function area(s :: <circle>) => <integer>\n  pause() + s.radius\nend;\n\
+         define function main() => <integer>\n  area(make(<circle>, radius: 3))\nend;";
+
+    #[test]
+    fn a_retry_must_not_pass_arguments_the_new_parameters_do_not_accept() {
+        // The edit retypes `area`'s parameter to <square>. Functions are
+        // called directly within their unit, so the edit installs, but a
+        // retry would pass the frame's <circle> to the new `area`, which
+        // would read its radius as a side: the retry is refused.
+        let new = RETRY_AREA
+            .replace(
+                "area(s :: <circle>) => <integer>\n  pause() + s.radius",
+                "area(s :: <square>) => <integer>\n  s.side * 10",
+            )
+            .replace("make(<circle>, radius: 3)", "make(<square>, side: 4)");
+        let seen = run_across_an_edit(RETRY_AREA, &new, Then::Retry("area"));
+        assert_eq!(seen.refused, None, "the edit installs");
+        assert_eq!(
+            broken_contract(seen.retry_refused.as_ref()),
+            (
+                "area".into(),
+                ContractPosition::Parameter(0),
+                "<circle>".into(),
+                "<square>".into()
+            )
+        );
+        assert_eq!(seen.value, None, "the refused retry is an invalid choice");
+    }
+
+    #[test]
+    fn a_retry_may_pass_arguments_to_a_widened_parameter() {
+        let new = RETRY_AREA.replace(
+            "area(s :: <circle>) => <integer>\n  pause() + s.radius",
+            "area(s :: <shape>) => <integer>\n  pause() + 7",
+        );
+        let seen = run_across_an_edit(RETRY_AREA, &new, Then::Retry("area"));
+        assert_eq!((seen.refused, seen.retry_refused), (None, None));
+        // The new `area` pauses again and resumes with 0.
+        assert_eq!(seen.value, Some(FunctionValue::Integer(7)));
+    }
+
+    #[test]
+    fn a_retry_must_not_return_a_wider_result_than_the_caller_expects() {
+        let old = RETRY_AREA.replace(
+            "define function main() => <integer>\n  area(make(<circle>, radius: 3))",
+            "define function grow(n :: <integer>) => <circle>\n  \
+                 make(<circle>, radius: n + pause())\nend;\n\
+                 define function main() => <integer>\n  grow(3).radius",
+        );
+        let new = old
+            .replace(
+                "grow(n :: <integer>) => <circle>\n  make(<circle>, radius: n + pause())",
+                "grow(n :: <integer>) => <shape>\n  make(<square>, side: 40)",
+            )
+            .replace("grow(3).radius", "0");
+        let seen = run_across_an_edit(&old, &new, Then::Retry("grow"));
+        assert_eq!(seen.refused, None);
+        assert_eq!(
+            broken_contract(seen.retry_refused.as_ref()),
+            (
+                "grow".into(),
+                ContractPosition::Result(0),
+                "<circle>".into(),
+                "<shape>".into()
+            )
+        );
+        assert_eq!(seen.value, None);
+    }
+
+    #[test]
+    fn a_retry_accepts_a_body_edit_that_keeps_the_contract() {
+        // `main` is edited but keeps `() => <integer>`; its retry runs the
+        // new body, which pauses again and resumes with 0.
+        let new = RETRY_AREA.replace(
+            "area(make(<circle>, radius: 3))",
+            "area(make(<circle>, radius: 3)) + 100",
+        );
+        let seen = run_across_an_edit(RETRY_AREA, &new, Then::Retry("main"));
+        assert_eq!((seen.refused, seen.retry_refused), (None, None));
+        assert_eq!(seen.value, Some(FunctionValue::Integer(103)));
+
+        // Unchanged code installs, supersedes nothing and is retryable.
+        let seen = run_across_an_edit(RETRY_AREA, RETRY_AREA, Then::Retry("area"));
+        assert_eq!((seen.refused, seen.retry_refused), (None, None));
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    /// `pick` declares a `<shape>` result and `size` a `<shape>` parameter;
+    /// `main` sends both after pausing.
+    const PICK: &str = "define class <oops> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\n  slot radius :: <integer>;\nend;\n\
+         define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+         define generic pick(n :: <integer>) => <shape>;\n\
+         define method pick(n :: <integer>) => <circle>\n  make(<circle>, radius: n)\nend;\n\
+         define generic size(s :: <shape>) => <integer>;\n\
+         define method size(s :: <circle>) => <integer>\n  s.radius\nend;\n\
+         define function main() => <integer>\n  pause() + size(pick(3))\nend;";
+
+    /// Resumes the pause with 0.
+    fn resume() -> Then {
+        Then::Choose(Choice::UseValue(vec![Value::I64(0)]))
+    }
+
+    #[test]
+    fn install_accepts_a_generic_whose_result_narrows() {
+        let new = PICK
+            .replace(
+                "pick(n :: <integer>) => <shape>;",
+                "pick(n :: <integer>) => <circle>;",
+            )
+            .replace("radius: n)", "radius: n * 10)");
+        let seen = run_across_an_edit(PICK, &new, resume());
+        assert_eq!(seen.refused, None);
+        // The old `main` sends `pick` to the new method.
+        assert_eq!(seen.value, Some(FunctionValue::Integer(30)));
+    }
+
+    #[test]
+    fn install_refuses_a_generic_whose_result_widens() {
+        let old = PICK.replace(
+            "pick(n :: <integer>) => <shape>;",
+            "pick(n :: <integer>) => <circle>;",
+        );
+        let seen = run_across_an_edit(&old, PICK, resume());
+        assert_eq!(
+            broken_contract(install_mismatch(&seen)),
+            (
+                "pick".into(),
+                ContractPosition::Result(0),
+                "<circle>".into(),
+                "<shape>".into()
+            )
+        );
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    #[test]
+    fn install_refuses_a_generic_whose_parameter_narrows() {
+        let new = PICK
+            .replace(
+                "size(s :: <shape>) => <integer>;",
+                "size(s :: <circle>) => <integer>;",
+            )
+            .replace("pause() + size(pick(3))", "pause()");
+        let seen = run_across_an_edit(PICK, &new, resume());
+        assert_eq!(
+            broken_contract(install_mismatch(&seen)),
+            (
+                "size".into(),
+                ContractPosition::Parameter(0),
+                "<shape>".into(),
+                "<circle>".into()
+            )
+        );
+        assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
+    }
+
+    #[test]
+    fn install_accepts_a_generic_whose_parameter_widens() {
+        let old = PICK
+            .replace(
+                "pick(n :: <integer>) => <shape>;",
+                "pick(n :: <integer>) => <circle>;",
+            )
+            .replace(
+                "size(s :: <shape>) => <integer>;",
+                "size(s :: <circle>) => <integer>;",
+            );
+        let new = old
+            .replace(
+                "size(s :: <circle>) => <integer>;",
+                "size(s :: <shape>) => <integer>;",
+            )
+            .replace("  s.radius\n", "  s.radius * 10\n");
+        let seen = run_across_an_edit(&old, &new, resume());
+        assert_eq!(seen.refused, None);
+        assert_eq!(seen.value, Some(FunctionValue::Integer(30)));
     }
 
     #[test]

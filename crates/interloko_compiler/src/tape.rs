@@ -172,6 +172,7 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         methods: vec![FuncId(0); module.runtime.methods.len()],
         functions: Vec::new(),
         dispatch: module.dispatch.clone(),
+        contracts: module.contracts.clone(),
     };
     for (function, func) in module.functions.iter().zip(&ids.functions) {
         let slot = match function.kind {
