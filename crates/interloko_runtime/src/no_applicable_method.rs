@@ -161,6 +161,8 @@ mod tests {
             name: name.into(),
             kind: HostObjectKind::Native,
             superclass,
+            sealing: interloko_model::sealing::Sealing::Open,
+            is_abstract: false,
             slots,
         }
     }
@@ -196,6 +198,8 @@ mod tests {
             name: name.into(),
             kind: HostObjectKind::BuiltinValue { kind },
             superclass: Some(OBJECT_CLASS_ID),
+            sealing: interloko_model::sealing::Sealing::Open,
+            is_abstract: false,
             slots: Vec::new(),
         };
         InterlokoHost::new_checked(RuntimeLayout {
@@ -217,6 +221,7 @@ mod tests {
             generics: vec![RuntimeGeneric {
                 name: "area".into(),
                 arity: 1,
+                sealing: interloko_model::sealing::Sealing::Open,
                 methods: vec![interloko_model::MethodId(0)],
             }],
             methods: vec![RuntimeMethod {

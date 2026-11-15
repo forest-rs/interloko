@@ -2991,8 +2991,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "class-definition",
-            "`define class` type-definition-name superclass? slot-declaration* `end`",
+            "`define` class-adjective* `class` type-definition-name superclass? slot-declaration* `end`",
             "syntax.rs:Parser::parse_class",
+        ),
+        (
+            "class-adjective",
+            "`sealed` | `open` | `abstract` | `concrete`",
+            "ast.rs:Lowering::lower_class",
         ),
         (
             "type-definition-name",
@@ -3026,8 +3031,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "generic-definition",
-            "`define generic` value-definition-name parameter-list result-annotation? `;`?",
+            "`define` generic-adjective* `generic` value-definition-name parameter-list result-annotation? `;`?",
             "syntax.rs:Parser::parse_generic",
+        ),
+        (
+            "generic-adjective",
+            "`sealed` | `open`",
+            "ast.rs:Lowering::lower_generic",
         ),
         (
             "method-definition",
@@ -4284,7 +4294,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 53);
+        assert_eq!(grammar.effective_rules.len(), 55);
 
         assert!(
             !records

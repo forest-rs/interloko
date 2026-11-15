@@ -12,6 +12,7 @@ use crate::grammar_frontend::{
 };
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::{CstElement, CstKind, CstNode, Span, SyntaxTree, TokenKind};
+use interloko_model::sealing::Sealing;
 use interloko_model::{FloatBits, Number32, SingleFloatBits};
 
 /// AST module containing function definitions.
@@ -261,6 +262,12 @@ pub struct Class {
     /// Source span for the explicit superclass name, or the class name span
     /// when no superclass was written.
     pub superclass_span: Span,
+    /// `define sealed class` or the default `open`: whether the class may
+    /// gain direct subclasses from outside its source.
+    pub sealing: Sealing,
+    /// `define abstract class`: the class has no direct instances. The
+    /// default, `concrete`, may be written too.
+    pub is_abstract: bool,
     /// Slot declarations in source order.
     pub slots: Vec<Slot>,
     /// Source span.
@@ -334,6 +341,9 @@ pub struct Generic {
     pub params: Vec<GenericParam>,
     /// Optional declared result value types.
     pub return_type: Option<ResultAnnotation>,
+    /// `define sealed generic` or the default `open`: whether the generic
+    /// may gain methods from outside its source.
+    pub sealing: Sealing,
     /// Source span.
     pub span: Span,
 }
@@ -892,6 +902,13 @@ struct Lowering<'tree> {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// The adjectives of one definition; see `Lowering::adjectives`.
+#[derive(Default)]
+struct Adjectives {
+    sealing: Sealing,
+    is_abstract: bool,
+}
+
 impl<'tree> Lowering<'tree> {
     fn lower_module(&mut self) -> Module {
         let classes = self
@@ -947,15 +964,71 @@ impl<'tree> Lowering<'tree> {
         for slot in node.child_nodes(CstKind::SlotDecl) {
             slots.push(self.lower_slot(&name, slot));
         }
+        let adjectives = self.adjectives(node, TokenKind::Class);
         Class {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Class, &name, ""),
             name,
             superclass,
             superclass_span,
+            sealing: adjectives.sealing,
+            is_abstract: adjectives.is_abstract,
             slots,
             span: node.span,
         }
+    }
+
+    /// Reads the adjectives written between `define` and the definition
+    /// keyword `keyword`, such as `sealed abstract` in `define sealed
+    /// abstract class`, reporting a repeated adjective or two that
+    /// contradict each other. The grammar admits only the adjectives the
+    /// definition takes.
+    fn adjectives(&mut self, node: &CstNode, keyword: TokenKind) -> Adjectives {
+        let mut seen: Vec<(Span, &'tree str)> = Vec::new();
+        for child in &node.children {
+            let CstElement::Token(index) = child else {
+                continue;
+            };
+            let token = self.tree.tokens[*index];
+            if token.kind == keyword {
+                break;
+            }
+            if token.kind == TokenKind::Ident {
+                seen.push((token.span, token.text(&self.tree.source)));
+            }
+        }
+        let mut adjectives = Adjectives::default();
+        for (index, (span, word)) in seen.iter().enumerate() {
+            let earlier = &seen[..index];
+            if earlier.iter().any(|(_, other)| other == word) {
+                self.diagnostics.push(
+                    Diagnostic::error(*span, DiagnosticCode::AstDuplicateAdjective)
+                        .with_arg(DiagnosticArg::text("adjective", *word)),
+                );
+                continue;
+            }
+            let opposite = match *word {
+                "sealed" => "open",
+                "open" => "sealed",
+                "abstract" => "concrete",
+                "concrete" => "abstract",
+                _ => continue,
+            };
+            if earlier.iter().any(|(_, other)| *other == opposite) {
+                self.diagnostics.push(
+                    Diagnostic::error(*span, DiagnosticCode::AstConflictingAdjectives)
+                        .with_arg(DiagnosticArg::text("adjective", *word))
+                        .with_arg(DiagnosticArg::text("other", opposite)),
+                );
+                continue;
+            }
+            match *word {
+                "sealed" => adjectives.sealing = Sealing::Sealed,
+                "abstract" => adjectives.is_abstract = true,
+                _ => {}
+            }
+        }
+        adjectives
     }
 
     fn lower_slot(&mut self, class_name: &str, node: &CstNode) -> Slot {
@@ -1120,12 +1193,14 @@ impl<'tree> Lowering<'tree> {
             }
         }
 
+        let sealing = self.adjectives(node, TokenKind::Generic).sealing;
         Generic {
             id: self.ast_id(node),
             definition: self.definition(DefinitionKind::Generic, &name, ""),
             name,
             params,
             return_type,
+            sealing,
             span: node.span,
         }
     }
@@ -2930,6 +3005,8 @@ impl FrontendFormLowering {
                 name: class.name.clone(),
                 superclass: Some(class.superclass.clone()),
                 superclass_span: form.source_span,
+                sealing: Sealing::Open,
+                is_abstract: false,
                 slots: class
                     .slots
                     .iter()
@@ -3134,6 +3211,85 @@ mod tests {
 
     fn parse_file(source_file: SourceFileId, source: &str) -> syntax::SyntaxTree {
         grammar_frontend::parse_file(source_file, source).syntax
+    }
+
+    #[test]
+    fn definition_adjectives_set_sealing_and_abstractness() {
+        let tree = parse(
+            "define sealed abstract class <shape> (<object>)\nend;\n\
+             define open concrete class <circle> (<shape>)\nend;\n\
+             define class <square> (<shape>)\nend;\n\
+             define sealed generic area(s :: <shape>) => <integer>;\n\
+             define open generic name(s :: <shape>);\n\
+             define generic size(s :: <shape>);",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let classes = module
+            .classes
+            .iter()
+            .map(|class| (class.name.as_str(), class.sealing, class.is_abstract))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classes,
+            [
+                ("<shape>", Sealing::Sealed, true),
+                ("<circle>", Sealing::Open, false),
+                ("<square>", Sealing::Open, false),
+            ]
+        );
+        let generics = module
+            .generics
+            .iter()
+            .map(|generic| (generic.name.as_str(), generic.sealing))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            generics,
+            [
+                ("area", Sealing::Sealed),
+                ("name", Sealing::Open),
+                ("size", Sealing::Open)
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_or_contradictory_adjectives_are_reported() {
+        let tree = parse(
+            "define sealed open class <a> (<object>)\nend;\n\
+             define abstract abstract class <b> (<object>)\nend;\n\
+             define concrete abstract class <c> (<object>)\nend;\n\
+             define open sealed generic g(x);",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        let reported = module
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reported,
+            [
+                DiagnosticCode::AstConflictingAdjectives,
+                DiagnosticCode::AstDuplicateAdjective,
+                DiagnosticCode::AstConflictingAdjectives,
+                DiagnosticCode::AstConflictingAdjectives,
+            ]
+        );
+        // The first adjective of a contradictory pair is the one kept.
+        assert_eq!(module.classes[0].sealing, Sealing::Sealed);
+        assert!(!module.classes[2].is_abstract);
+        assert_eq!(module.generics[0].sealing, Sealing::Open);
+    }
+
+    #[test]
+    fn adjectives_belong_only_to_the_definitions_that_take_them() {
+        let tree = parse("define abstract generic g(x);");
+        assert!(!tree.diagnostics.is_empty(), "a generic cannot be abstract");
+        let tree = parse("define sealed function f() => <integer>\n  1\nend;");
+        assert!(!tree.diagnostics.is_empty(), "a function cannot be sealed");
     }
 
     #[test]

@@ -33,6 +33,7 @@ use execution_tape::host::{
 use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 
+use interloko_model::sealing::Sealing;
 use interloko_model::types::{ClassHierarchy, TypeNames};
 use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID,
@@ -387,6 +388,11 @@ pub struct RuntimeClass {
     pub kind: HostObjectKind,
     /// Runtime superclass, if this class inherits from another native class.
     pub superclass: Option<ClassId>,
+    /// Whether the class's direct subclasses are exactly the ones this
+    /// layout lists; see [`ClassHierarchy::sealed_subclasses`].
+    pub sealing: Sealing,
+    /// Whether the class has no direct instances.
+    pub is_abstract: bool,
     /// Slots in semantic slot order.
     pub slots: Vec<RuntimeSlot>,
 }
@@ -502,6 +508,9 @@ pub struct RuntimeGeneric {
     /// Number of positional parameters the generic declares. Every method
     /// listed under this generic must have exactly this many specializers.
     pub arity: usize,
+    /// Whether the generic's methods are exactly the ones this layout lists
+    /// and nothing from outside its source may add one.
+    pub sealing: Sealing,
     /// Method ids implementing this generic in semantic order.
     pub methods: Vec<MethodId>,
 }
@@ -563,6 +572,12 @@ pub enum RuntimeError {
         class: ClassId,
         /// Actual runtime class kind.
         kind: HostObjectKind,
+    },
+    /// Native object construction was requested for an abstract class,
+    /// which has no direct instances.
+    ClassIsAbstract {
+        /// Requested class.
+        class: ClassId,
     },
     /// Host-backed object installation was requested for a non-host-backed class.
     ClassIsNotHostBacked {
@@ -996,6 +1011,18 @@ impl RuntimeLayout {
         self.classes.get(class.0 as usize)
     }
 
+    /// Returns the classes whose direct superclass is `class`, in class id
+    /// order.
+    #[must_use]
+    pub fn direct_subclasses(&self, class: ClassId) -> Vec<ClassId> {
+        self.classes
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| other.superclass == Some(class))
+            .map(|(index, _)| ClassId(u32::try_from(index).unwrap_or(u32::MAX)))
+            .collect()
+    }
+
     /// Returns superclass ids from direct superclass up to `<object>`.
     #[must_use]
     pub fn superclass_chain(&self, class: ClassId) -> Option<Vec<ClassId>> {
@@ -1395,18 +1422,28 @@ impl ClassHierarchy for RuntimeLayout {
         self.class(class)?.superclass
     }
 
-    /// A built-in value or host-backed class is closed unless another class
-    /// inherits from it, as in the compiler.
+    /// A built-in value or host-backed class, or a sealed concrete native
+    /// class, is closed unless another class inherits from it, as in the
+    /// compiler.
     fn is_closed(&self, class: ClassId) -> bool {
-        self.class(class).is_some_and(|runtime| {
-            matches!(
-                runtime.kind,
-                HostObjectKind::BuiltinValue { .. } | HostObjectKind::HostBacked
-            )
+        self.class(class).is_some_and(|runtime| match runtime.kind {
+            HostObjectKind::BuiltinValue { .. } | HostObjectKind::HostBacked => true,
+            HostObjectKind::Native => runtime.sealing.is_sealed() && !runtime.is_abstract,
         }) && !self
             .classes
             .iter()
             .any(|other| other.superclass == Some(class))
+    }
+
+    fn sealed_subclasses(&self, class: ClassId) -> Option<Vec<ClassId>> {
+        self.class(class)?
+            .sealing
+            .is_sealed()
+            .then(|| self.direct_subclasses(class))
+    }
+
+    fn is_abstract(&self, class: ClassId) -> bool {
+        self.class(class).is_some_and(|runtime| runtime.is_abstract)
     }
 
     fn builtin_class(&self, kind: BuiltinValueClass) -> Option<ClassId> {
@@ -1611,6 +1648,11 @@ impl InterlokoHost {
                 class,
                 kind: class_info.kind,
             });
+        }
+        // Typing reads a sealed abstract class's cone without its own
+        // instances, so none may exist.
+        if class_info.is_abstract {
+            return Err(RuntimeError::ClassIsAbstract { class });
         }
         if fields.len() != class_info.slots.len() {
             return Err(RuntimeError::FieldArityMismatch {
@@ -3061,6 +3103,8 @@ mod tests {
             name: name.into(),
             kind: HostObjectKind::Native,
             superclass,
+            sealing: Sealing::Open,
+            is_abstract: false,
             slots,
         }
     }
@@ -3077,6 +3121,8 @@ mod tests {
             name: name.into(),
             kind: HostObjectKind::HostBacked,
             superclass,
+            sealing: Sealing::Open,
+            is_abstract: false,
             slots,
         }
     }
@@ -3110,6 +3156,7 @@ mod tests {
             generics: vec![RuntimeGeneric {
                 name: "score".into(),
                 arity: 1,
+                sealing: Sealing::Open,
                 methods: vec![MethodId(0), MethodId(1), MethodId(2)],
             }],
             methods: vec![
@@ -3153,6 +3200,21 @@ mod tests {
             panic!("expected an object, got {value:?}");
         };
         *object
+    }
+
+    #[test]
+    fn an_abstract_class_is_never_allocated() {
+        let mut layout = dispatch_layout();
+        layout.classes[1].is_abstract = true;
+        let mut host = InterlokoHost::new_checked(layout).expect("layout");
+        assert_eq!(
+            host.make_object(ClassId(1), &[ValueRef::I64(1)]),
+            Err(RuntimeError::ClassIsAbstract { class: ClassId(1) })
+        );
+        assert!(
+            host.make_object(ClassId(2), &[ValueRef::I64(1), ValueRef::I64(2)])
+                .is_ok()
+        );
     }
 
     #[test]

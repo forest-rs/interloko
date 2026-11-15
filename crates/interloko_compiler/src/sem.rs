@@ -13,6 +13,7 @@ use crate::promotion;
 use crate::syntax::{self, Span};
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
+use interloko_model::sealing::Sealing;
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
 
 pub use interloko_model::condition::ConditionClass;
@@ -674,6 +675,17 @@ pub enum MethodSelection {
 }
 
 impl Module {
+    /// Returns the classes whose direct superclass is `class`, in class id
+    /// order.
+    #[must_use]
+    pub fn direct_subclasses(&self, class: ClassId) -> Vec<ClassId> {
+        self.classes
+            .iter()
+            .filter(|other| other.superclass == Some(class))
+            .map(|other| other.id)
+            .collect()
+    }
+
     /// Returns true when `actual` is the same class as `expected` or inherits
     /// from it through Interloko's single nominal superclass chain.
     #[must_use]
@@ -1301,14 +1313,19 @@ impl ClassHierarchy for Module {
     /// built-ins such as `<number>`, `<real>`, `<rational>`, and `<float>`
     /// have built-in subclasses and so are never closed, while concrete
     /// leaves such as `<integer>` and `<double-float>` are.
+    ///
+    /// A source class is closed when it is sealed, not abstract, and has no
+    /// subclasses: its cone is exactly its own instances.
     fn is_closed(&self, class: ClassId) -> bool {
-        let sealed_origin = self.classes.get(class.0 as usize).is_some_and(|class| {
-            matches!(
-                class.origin,
-                ClassOrigin::BuiltinValue { .. } | ClassOrigin::HostBacked { .. }
-            )
-        });
-        sealed_origin
+        let closed_origin =
+            self.classes
+                .get(class.0 as usize)
+                .is_some_and(|class| match class.origin {
+                    ClassOrigin::BuiltinValue { .. } | ClassOrigin::HostBacked { .. } => true,
+                    ClassOrigin::Native => class.sealing.is_sealed() && !class.is_abstract,
+                    ClassOrigin::ObjectRoot | ClassOrigin::Condition { .. } => false,
+                });
+        closed_origin
             && !self
                 .classes
                 .iter()
@@ -1317,6 +1334,21 @@ impl ClassHierarchy for Module {
 
     fn builtin_class(&self, class: BuiltinValueClass) -> Option<ClassId> {
         self.builtin_value_class(class)
+    }
+
+    /// A sealed source class's direct subclasses, in class id order.
+    fn sealed_subclasses(&self, class: ClassId) -> Option<Vec<ClassId>> {
+        self.classes
+            .get(class.0 as usize)?
+            .sealing
+            .is_sealed()
+            .then(|| self.direct_subclasses(class))
+    }
+
+    fn is_abstract(&self, class: ClassId) -> bool {
+        self.classes
+            .get(class.0 as usize)
+            .is_some_and(|class| class.is_abstract)
     }
 
     fn is_same_or_subclass(&self, class: ClassId, ancestor: ClassId) -> bool {
@@ -2194,6 +2226,14 @@ pub struct Class {
     pub origin: ClassOrigin,
     /// Resolved direct superclass, or `None` for the `<object>` root/default.
     pub superclass: Option<ClassId>,
+    /// Whether the class's direct subclasses are exactly those its source
+    /// defines. Only source classes can be sealed; kernel and host classes
+    /// are [`Sealing::Open`], and those that are closed are closed by
+    /// origin instead ([`ClassHierarchy::is_closed`]).
+    pub sealing: Sealing,
+    /// Whether the class has no direct instances, so `make` cannot
+    /// construct it.
+    pub is_abstract: bool,
     /// Whether effective slot finalization completed for this class.
     pub finalized: bool,
     /// Direct source slot definitions.
@@ -2389,6 +2429,11 @@ pub struct GenericFunction {
     pub span: Span,
     /// Source or synthesized origin.
     pub origin: GenericFunctionOrigin,
+    /// Whether the generic's methods are exactly those its source defines,
+    /// so no session mutation or installed code may add one. Built-in
+    /// generics are [`Sealing::Open`]; what they admit is
+    /// [`GenericFunctionOrigin::admits_method`]'s.
+    pub sealing: Sealing,
 }
 
 /// Origin of a semantic method metaobject.
@@ -4281,6 +4326,8 @@ impl Lowering {
             name: "<object>".into(),
             origin: ClassOrigin::ObjectRoot,
             superclass: None,
+            sealing: Sealing::Open,
+            is_abstract: false,
             finalized: false,
             direct_slots: Vec::new(),
             effective_slots: Vec::new(),
@@ -4311,6 +4358,8 @@ impl Lowering {
                 name: class.name.clone(),
                 origin: ClassOrigin::Native,
                 superclass: Some(OBJECT_CLASS_ID),
+                sealing: class.sealing,
+                is_abstract: class.is_abstract,
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
@@ -4447,6 +4496,8 @@ impl Lowering {
                     host_class: host_class_id,
                 },
                 superclass: Some(OBJECT_CLASS_ID),
+                sealing: Sealing::Open,
+                is_abstract: false,
                 finalized: false,
                 direct_slots: slots,
                 effective_slots: Vec::new(),
@@ -4489,6 +4540,8 @@ impl Lowering {
                 name: (*name).to_string(),
                 origin: ClassOrigin::BuiltinValue { kind: *kind },
                 superclass: Some(OBJECT_CLASS_ID),
+                sealing: Sealing::Open,
+                is_abstract: false,
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
@@ -4588,6 +4641,8 @@ impl Lowering {
                 name: name.into(),
                 origin: ClassOrigin::Condition { class: *condition },
                 superclass,
+                sealing: Sealing::Open,
+                is_abstract: false,
                 finalized: false,
                 direct_slots: slots,
                 effective_slots: Vec::new(),
@@ -5019,6 +5074,7 @@ impl Lowering {
                 return_annotation,
                 span: generic.span,
                 origin: GenericFunctionOrigin::Source,
+                sealing: generic.sealing,
             });
         }
     }
@@ -5117,6 +5173,7 @@ impl Lowering {
                 return_annotation: Some(vec![slot_kind]),
                 span: slot_span,
                 origin,
+                sealing: Sealing::Open,
             });
         }
     }
@@ -5176,6 +5233,7 @@ impl Lowering {
             return_annotation: Some(result_kinds),
             span: Span::default(),
             origin: GenericFunctionOrigin::Numeric { operator },
+            sealing: Sealing::Open,
         });
         self.numeric_generics.push((operator, id));
         id
@@ -9491,6 +9549,17 @@ impl Lowering {
                 span,
             };
         }
+        if self
+            .classes
+            .get(class_id.0 as usize)
+            .is_some_and(|class| class.is_abstract)
+        {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::AbstractClassMake)
+                    .with_arg(DiagnosticArg::text("class", class_name)),
+            );
+            return Expr::Error { span };
+        }
         Expr::MakeObject {
             class: Box::new(class_expr),
             class_id,
@@ -9506,12 +9575,15 @@ impl Lowering {
     /// Subclasses keep their superclass's effective slots, in order, as a
     /// prefix, so an init argument resolved against `bound` fills the same
     /// slot id in every candidate. Built-in value and host-backed classes
-    /// cannot be made and are never candidates.
+    /// cannot be made and are never candidates, and neither are abstract
+    /// classes, which have no direct instances: a class value naming one
+    /// traps as one outside the candidates does.
     fn make_candidates(&self, bound: ClassId, init_args: &[InitArg]) -> Vec<MakeCandidate> {
         self.classes
             .iter()
             .filter(|class| {
                 matches!(class.origin, ClassOrigin::Native | ClassOrigin::ObjectRoot)
+                    && !class.is_abstract
                     && self.is_same_or_subclass(class.id, bound)
             })
             .map(|class| {
