@@ -678,7 +678,8 @@ impl Repl {
         W: Write,
         E: Write,
     {
-        let mut chooser = break_loop::BreakLoop::new(self, source, stdout, stderr);
+        let mut chooser =
+            break_loop::BreakLoop::new(self, artifacts.code_unit(), source, stdout, stderr);
         let result = runtime.call_function_with(
             artifacts,
             name,

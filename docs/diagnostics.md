@@ -116,7 +116,7 @@ failed:
 | Code | Check |
 | --- | --- |
 | `type-error.cast` | a value is not an instance of the class an `as` (or a boxed `<object>` read as a number) expects |
-| `type-error.entry` | an object argument passed through an untyped `<callable>` is not of its parameter's class, or an exit procedure's value is not of its block's class (a scalar of the wrong representation still traps; see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
+| `type-error.entry` | an object argument passed through an untyped `<callable>` is not of its parameter's class, an exit procedure's value is not of its block's class, or a `use-value` replacing a failed send's result is not of its generic's result class (a scalar of the wrong representation still traps; see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
 | `type-error.range` | a number is outside a limited type's range: a conversion to `<i32>`/`<u32>`, a float converted to an integer it does not equal, a shift count outside `0..=31`, or an argument, binding, slot value, constant or result outside its `limited(<integer>, ...)` type |
 | `type-error.overflow` | integer arithmetic produced a result its type cannot represent |
 
@@ -135,7 +135,8 @@ rejected value, the printed expected type, and the check's site:
 - `check:<definition>@<start>..<end>` for a check typing does not
   classify, by the definition whose code makes it and the check's span,
   such as a dispatcher coercing an argument it has already selected a
-  method for;
+  method for, or checking a `use-value` that replaces a failed send's
+  results (at the generic's span);
 - `check@<start>..<end>` for the same in generated code no definition
   owns.
 
@@ -147,6 +148,30 @@ signals itself is an ordinary unhandled condition):
 ```text
 unhandled condition <type-error>: type-error.cast: {<square>} is not of type <circle> at typing:def…:s0
 ```
+
+## Failed Sends
+
+A generic send whose arguments no method accepts does not trap either. It
+signals a `<no-applicable-method>` whose code is
+`dispatch.no-applicable-method` (`interloko_model::condition::NO_APPLICABLE_METHOD_CODE`,
+mirrored as `DiagnosticCode::DispatchNoApplicableMethod`), in its
+`no-applicable-method-code` slot beside the generic and the arguments. It
+is the runtime counterpart of the advisory
+`typing.dispatch-no-applicable-method`, which soft typing reports where it
+can tell statically that a send always fails. Unhandled, the run ends with
+that code and the rendered outcome names the generic and the classes and
+values of the arguments:
+
+```text
+unhandled condition <no-applicable-method>: dispatch.no-applicable-method: no method of area applies to (<square>), called with ({<square>})
+```
+
+There is no code for an ambiguous send: methods that could be equally
+specific for some arguments are rejected when the module compiles
+(`sem.ambiguous-generic-method-dispatch`). The tape trap code a failed send
+used, 1, is retired with those of the failed type checks; `make` on a class
+value still traps (`runtime.trap`) when the class needs an init keyword the
+call cannot pass, which is not a dispatch failure.
 
 ## Corpus
 
