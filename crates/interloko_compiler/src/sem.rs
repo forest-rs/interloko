@@ -3671,6 +3671,26 @@ impl CallableResultCheck {
             Self::Cast(_) => ValueKind::Object(OBJECT_CLASS_ID),
         }
     }
+
+    /// Wraps `value`, of [`Self::wire_kind`], in its conversion or cast: an
+    /// ordinary check site soft typing records and may later prove.
+    fn apply(self, value: Expr, span: Span) -> Expr {
+        match self {
+            Self::Trusted(_) => value,
+            Self::Convert(to) => Expr::Convert {
+                site: SiteId::PENDING,
+                to,
+                value: Box::new(value),
+                span,
+            },
+            Self::Cast(class) => Expr::Cast {
+                value: Box::new(value),
+                class,
+                site: SiteId::PENDING,
+                span,
+            },
+        }
+    }
 }
 
 struct FunctionContext {
@@ -7476,7 +7496,14 @@ impl Lowering {
             // call. Arguments need nothing here: the callee's indirect entry
             // checks the classes it relies on.
             return self
-                .checked_callable_call(target, args, signature, Self::signature_result_check, span)
+                .checked_callable_call(
+                    ctx,
+                    target,
+                    args,
+                    signature,
+                    Self::signature_result_check,
+                    span,
+                )
                 .unwrap_or_else(|diagnostic| {
                     ctx.diagnostics.push(diagnostic);
                     Expr::Error { span }
@@ -7512,6 +7539,7 @@ impl Lowering {
             .map(|arg| as_integer(self.expr_kind(arg)))
             .collect::<Vec<_>>();
         self.checked_callable_call(
+            ctx,
             target,
             args,
             CallableSignature::flat(arg_kinds, result_kinds.to_vec()),
@@ -7530,65 +7558,108 @@ impl Lowering {
     /// as `called` declares; calls through it check what they rely on in
     /// turn.
     ///
-    /// The call itself produces each result at its check's wire kind, and a
-    /// single checked result is wrapped in its conversion or cast: an
-    /// ordinary check site soft typing records and may later prove. Several
-    /// results are only accepted when the tape establishes all of them;
-    /// otherwise, or when no check can establish a result, this returns a
+    /// The call itself produces each result at its check's wire kind. A
+    /// single checked result is wrapped in its conversion or cast, an
+    /// ordinary check site soft typing records and may later prove; several
+    /// are bound to temporaries of a block that checks each. When no check
+    /// can establish a result, this returns a
     /// [`DiagnosticCode::UncheckedCallableResult`] error.
     fn checked_callable_call(
         &self,
+        ctx: &mut FunctionContext,
         target: Expr,
         args: Vec<Expr>,
         called: CallableSignature,
         check: fn(&Self, ValueKind) -> Option<CallableResultCheck>,
         span: Span,
     ) -> Result<Expr, Diagnostic> {
-        let result_kinds = &called.results;
-        let checks = result_kinds
+        let Some(checks) = called
+            .results
             .iter()
             .map(|kind| check(self, *kind))
-            .collect::<Option<Vec<_>>>();
-        let checks = match checks {
-            Some(checks)
-                if result_kinds.len() == 1
-                    || checks
-                        .iter()
-                        .all(|check| matches!(check, CallableResultCheck::Trusted(_))) =>
-            {
-                checks
-            }
-            _ => {
-                return Err(
-                    Diagnostic::error(span, DiagnosticCode::UncheckedCallableResult).with_arg(
-                        DiagnosticArg::text("expected", self.result_kinds_name(result_kinds)),
-                    ),
-                );
-            }
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Err(
+                Diagnostic::error(span, DiagnosticCode::UncheckedCallableResult).with_arg(
+                    DiagnosticArg::text("expected", self.result_kinds_name(&called.results)),
+                ),
+            );
         };
-        let wire_kinds = checks.iter().map(CallableResultCheck::wire_kind).collect();
+        let wire_kinds = checks
+            .iter()
+            .map(CallableResultCheck::wire_kind)
+            .collect::<Vec<_>>();
         let call = Expr::CallableCall {
             callable: Box::new(target),
             args,
-            arg_kinds: called.params,
-            result_callable_sigs: called.result_sigs,
-            result_kinds: wire_kinds,
+            arg_kinds: called.params.clone(),
+            result_callable_sigs: called.result_sigs.clone(),
+            result_kinds: wire_kinds.clone(),
             span,
         };
-        Ok(match checks.as_slice() {
-            [CallableResultCheck::Convert(to)] => Expr::Convert {
-                site: SiteId::PENDING,
-                to: *to,
-                value: Box::new(call),
+        if let [check] = checks.as_slice() {
+            return Ok(check.apply(call, span));
+        }
+        if checks
+            .iter()
+            .all(|check| matches!(check, CallableResultCheck::Trusted(_)))
+        {
+            return Ok(call);
+        }
+        // Each value is checked on its own, so the call's results are bound
+        // to temporaries no source name can reach.
+        let scope = ctx.scope_start();
+        let temporaries = wire_kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                ctx.add_local(
+                    DefinitionId::new(
+                        self.source_file,
+                        DefinitionKind::Local,
+                        "$result",
+                        &format!("callable-result:{}:{}:{index}", span.start, span.end),
+                    ),
+                    format!("$result{index}"),
+                    *kind,
+                    called.result_sig(index).cloned(),
+                    span,
+                )
+            })
+            .collect::<Vec<_>>();
+        ctx.hide_locals_from(scope);
+        let values = temporaries
+            .iter()
+            .zip(&checks)
+            .enumerate()
+            .map(|(index, (local, check))| {
+                let value = Expr::Local {
+                    local: *local,
+                    result_kind: check.wire_kind(),
+                    callable_signature: called.result_sig(index).cloned(),
+                    span,
+                };
+                check.apply(value, span)
+            })
+            .collect();
+        Ok(Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                lets: vec![Let {
+                    local: temporaries[0],
+                    locals: temporaries,
+                    value: call,
+                    span,
+                }],
+                result: Expr::Values {
+                    values,
+                    result_kinds: called.results,
+                    span,
+                },
                 span,
-            },
-            [CallableResultCheck::Cast(class)] => Expr::Cast {
-                value: Box::new(call),
-                class: *class,
-                site: SiteId::PENDING,
-                span,
-            },
-            _ => call,
+            }),
+            cleanup: None,
+            span,
         })
     }
 
