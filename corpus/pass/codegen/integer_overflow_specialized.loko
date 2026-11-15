@@ -1,0 +1,18 @@
+// codegen: proved
+// expect: run 1002
+// expect: diagnostics 0
+// expect: dump typing contains overflow proved rule=overflow-impossible
+// expect: dump eop contains codegen=specialized
+// expect: dump lowered contains = i64.add %r
+
+// Between 0 and 1000, `i + 1` cannot overflow, so under `codegen: proved`
+// it is a plain `i64.add` with no overflow branch. `step(999) + 2` may
+// overflow as far as typing knows, and keeps its check.
+
+define function step(i :: <integer>) => <integer>
+  if i < 1000 then if i > 0 then i + 1 else 0 end else 0 end
+end;
+
+define function main() => <integer>
+  step(999) + 2
+end;

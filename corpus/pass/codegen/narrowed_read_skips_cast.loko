@@ -1,0 +1,29 @@
+// codegen: proved
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump typing contains instance checked rule=instance-sometimes
+// expect: dump lowered contains instance?
+// expect: dump lowered lacks = as
+
+// The `instance?` test stays: `s` may be any <shape>. In its then branch sem
+// reads `s` as a <circle>, which without typing costs a cast at the read.
+// Flow typing narrowed `s` by the same test, so under `codegen: proved` the
+// read reuses the register.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define function area(c :: <circle>) => <integer>
+  3
+end;
+
+define function measure(s :: <shape>) => <integer>
+  if instance?(s, <circle>) then area(s) else 0 end
+end;
+
+define function main() => <integer>
+  measure(make(<circle>))
+end;

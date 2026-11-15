@@ -149,7 +149,9 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/syntax/hyphenated_local_names.loko"));
     assert!(out.contains("ok fail/diagnostics/unresolved_hyphenated_local.loko"));
     assert!(out.contains("ok pass/conditions/guard_exit.loko"));
-    assert!(out.contains("corpus: 340 passed, 0 failed, 340 total"));
+    assert!(out.contains("ok pass/codegen/numeric_dispatch_inlined.loko"));
+    assert!(out.contains("ok pass/codegen/instance_drops_dead_branch.loko"));
+    assert!(out.contains("corpus: 353 passed, 0 failed, 353 total"));
 }
 
 #[test]
@@ -184,4 +186,44 @@ fn dump_prints_stage_text_for_one_case() {
 
     assert!(out.contains("lowered module"));
     assert!(out.contains("area#dispatch"));
+}
+
+#[test]
+fn dump_lowers_under_the_codegen_header() {
+    let file = corpus_file("pass/codegen/numeric_dispatch_inlined.loko");
+    let out = run_corpus(&[
+        "dump",
+        file.to_str().expect("corpus file path should be utf8"),
+        "--stage",
+        "lowered",
+    ]);
+
+    assert!(out.contains("lowered module"));
+    assert!(!out.contains("select-method"), "{out}");
+}
+
+#[test]
+fn check_rejects_an_unknown_codegen_policy() {
+    let dir = std::env::temp_dir().join(format!("interloko-corpus-codegen-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temporary corpus directory");
+    std::fs::write(
+        dir.join("bad.loko"),
+        "// codegen: fastest\n// expect: run 1\ndefine function main()\n  1\nend;\n",
+    )
+    .expect("temporary corpus case");
+    let output = Command::new(bin())
+        .args([
+            "check",
+            dir.to_str().expect("temporary path should be utf8"),
+        ])
+        .output()
+        .expect("interloko_corpus should run");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("codegen must be one of `off`, `proved`"),
+        "{stderr}"
+    );
 }

@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 
 use interloko_compiler::diagnostic::DiagnosticCode;
 use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
+use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
-    CompilerSession, DumpStage, FunctionValue, IncrementalCompilerSession, RuntimeMode, TurnStats,
+    CompilerSession, DumpStage, FunctionValue, IncrementalCompilerSession, RuntimeMode,
+    RuntimeResult, TurnStats,
 };
 use interloko_compiler::typing::TypingConfig;
 use interloko_diagnostics::DiagnosticRenderer;
@@ -106,6 +108,7 @@ fn heap_command(roots: &[String]) -> Result<Outcome> {
             let case = Case {
                 display_path: path.display().to_string(),
                 typing_config: parse_typing_config(&path, &source).unwrap_or_default(),
+                codegen_policy: parse_codegen_policy(&path, &source).unwrap_or_default(),
                 source,
                 expectations: Vec::new(),
                 host_registry,
@@ -184,6 +187,7 @@ fn dump_command(args: &[String]) -> Result<Outcome> {
         parse_grammar_environment(Path::new(&args[1]), &source, &grammar_registry)?;
     let mut session = CompilerSession::with_grammar_registry(grammar_registry);
     session.set_typing_config(parse_typing_config(Path::new(&args[1]), &source)?);
+    session.set_codegen_policy(parse_codegen_policy(Path::new(&args[1]), &source)?);
     let source_file = session.add_source_with_grammar(&args[1], &source, grammar_environment);
     let artifacts = session
         .compile_with_host_registry(source_file, RuntimeMode::CompileOnly, &host_registry)
@@ -202,6 +206,7 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
         let source = read_to_string(&path)?;
         let (expectations, host_registry, grammar_environment) = parse_header(&path, &source)?;
         let typing_config = parse_typing_config(&path, &source)?;
+        let codegen_policy = parse_codegen_policy(&path, &source)?;
         let display_path = display_path(root, &path);
         cases.push(Case {
             display_path,
@@ -210,6 +215,7 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
             host_registry,
             grammar_environment,
             typing_config,
+            codegen_policy,
         });
     }
     Ok(cases)
@@ -336,6 +342,34 @@ fn parse_typing_config(path: &Path, source: &str) -> Result<TypingConfig> {
         break;
     }
     Ok(config)
+}
+
+fn parse_codegen_policy(path: &Path, source: &str) -> Result<CodegenPolicy> {
+    let mut policy = CodegenPolicy::default();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// codegen:") {
+                policy = CodegenPolicy::from_label(rest.trim()).ok_or_else(|| {
+                    invalid_header(
+                        path,
+                        index + 1,
+                        &format!(
+                            "codegen must be one of {}",
+                            CodegenPolicy::ALL
+                                .iter()
+                                .map(|policy| format!("`{}`", policy.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    )
+                })?;
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(policy)
 }
 
 fn parse_grammar_selection(
@@ -514,12 +548,17 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
     }
 
     if let Some(rest) = input.strip_prefix("dump ") {
-        let Some((stage, text)) = rest.split_once(" contains ") else {
-            return Err(invalid_header(
-                path,
-                line,
-                "dump expectation must be `dump STAGE contains TEXT`",
-            ));
+        let (stage, text, lacks) = match (rest.split_once(" contains "), rest.split_once(" lacks "))
+        {
+            (Some((stage, text)), _) => (stage, text, false),
+            (None, Some((stage, text))) => (stage, text, true),
+            (None, None) => {
+                return Err(invalid_header(
+                    path,
+                    line,
+                    "dump expectation must be `dump STAGE contains TEXT` or `dump STAGE lacks TEXT`",
+                ));
+            }
         };
         let stage = parse_stage(stage).ok_or_else(|| {
             invalid_header(
@@ -528,9 +567,11 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
                 "dump stage must be syntax|ast|sem|mop|eop|lowered|tape|typing|types|all",
             )
         })?;
-        return Ok(Expectation::DumpContains {
-            stage,
-            text: text.into(),
+        let text = text.into();
+        return Ok(if lacks {
+            Expectation::DumpLacks { stage, text }
+        } else {
+            Expectation::DumpContains { stage, text }
         });
     }
 
@@ -635,10 +676,58 @@ fn check_case(case: &Case) -> Vec<String> {
                     failures.push(format!("expected {stage:?} dump containing `{text}`"));
                 }
             }
+            Expectation::DumpLacks { stage, text } => {
+                let dump = artifacts.dump_stage(*stage);
+                if dump.contains(text) {
+                    failures.push(format!("expected {stage:?} dump without `{text}`"));
+                }
+            }
         }
     }
 
+    if mode == RuntimeMode::RunMain {
+        failures.extend(differential_failure(case, &artifacts));
+    }
     failures
+}
+
+/// Runs a case under every codegen policy and reports when a run's result
+/// differs from the one under the case's own policy: acting on typing facts
+/// must never change what a program computes.
+fn differential_failure(
+    case: &Case,
+    artifacts: &interloko_compiler::session::SessionArtifacts,
+) -> Option<String> {
+    let expected = run_label(artifacts);
+    CodegenPolicy::ALL
+        .iter()
+        .copied()
+        .filter(|policy| *policy != case.codegen_policy)
+        .find_map(|policy| {
+            let other = compile_case_under(case, RuntimeMode::RunMain, policy);
+            let actual = run_label(&other);
+            (actual != expected).then(|| {
+                format!(
+                    "codegen {} ran to {expected}, but codegen {} ran to {actual}",
+                    case.codegen_policy.as_str(),
+                    policy.as_str()
+                )
+            })
+        })
+}
+
+/// A run's outcome as compared across codegen policies: its value, or how
+/// it failed. Where a trap happened (function, pc, span) is left out, since
+/// different code may trap at a different place for the same reason, such
+/// as an overflow in a numeric method that one policy runs inline.
+fn run_label(artifacts: &interloko_compiler::session::SessionArtifacts) -> String {
+    match &artifacts.runtime_result {
+        None => did_not_run(artifacts),
+        Some(result @ (RuntimeResult::Trap { .. } | RuntimeResult::Failed { .. })) => result
+            .code()
+            .map_or_else(|| result.to_string(), |code| format!("`{code}`")),
+        Some(result) => result.to_string(),
+    }
 }
 
 /// Explains a missing runtime result by the error codes that stopped
@@ -661,10 +750,19 @@ fn did_not_run(artifacts: &interloko_compiler::session::SessionArtifacts) -> Str
 }
 
 fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::SessionArtifacts {
+    compile_case_under(case, mode, case.codegen_policy)
+}
+
+fn compile_case_under(
+    case: &Case,
+    mode: RuntimeMode,
+    codegen_policy: CodegenPolicy,
+) -> interloko_compiler::session::SessionArtifacts {
     let grammar_registry = GrammarFrontendRegistry::builtin();
     if has_host_registry(&case.host_registry) {
         let mut session = CompilerSession::with_grammar_registry(grammar_registry);
         session.set_typing_config(case.typing_config);
+        session.set_codegen_policy(codegen_policy);
         let source_file = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
@@ -676,6 +774,7 @@ fn compile_case(case: &Case, mode: RuntimeMode) -> interloko_compiler::session::
     } else {
         let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
         session.set_typing_config(case.typing_config);
+        session.set_codegen_policy(codegen_policy);
         let source = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
@@ -765,6 +864,7 @@ enum Expectation {
     DiagnosticContains(String),
     DiagnosticCode(DiagnosticCode),
     DumpContains { stage: DumpStage, text: String },
+    DumpLacks { stage: DumpStage, text: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -775,6 +875,7 @@ struct Case {
     host_registry: HostMetaRegistry,
     grammar_environment: GrammarEnvironmentSelection,
     typing_config: TypingConfig,
+    codegen_policy: CodegenPolicy,
 }
 
 #[derive(Debug)]

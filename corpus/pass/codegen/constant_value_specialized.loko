@@ -1,0 +1,18 @@
+// codegen: proved
+// expect: run 43
+// expect: diagnostics 0
+// expect: dump eop contains codegen=specialized
+// expect: dump lowered lacks i64.add_ovf
+
+// A constant's value is lowered where it is read, so its own checks follow
+// the constant's typing: `base + 1` is between two literals and cannot
+// overflow, and neither can `limit() + 1` in `main`, which only sees the
+// constant's inferred type.
+
+define constant base = 41;
+
+define constant limit = base + 1;
+
+define function main() => <integer>
+  limit + 1
+end;

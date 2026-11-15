@@ -1,0 +1,12 @@
+// codegen: proved
+// expect: runtime code runtime.integer-overflow
+// expect: dump eop contains codegen=inlined
+// expect: dump lowered lacks select-method
+
+// The method a numeric dispatch runs inline keeps its own overflow check:
+// typing proved which method the send selects, not that its sum fits. The
+// trap is reported at the call, where the inlined addition now is.
+
+define function main() => <integer>
+  as(<integer>, as(<object>, 9223372036854775807) + 1)
+end;
