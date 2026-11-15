@@ -582,10 +582,12 @@ untyped `<callable>` passes each argument in the register type the call
 site has, and expects its results in the type its context needs. Objects
 and class objects share one register type, so their classes are checked at
 the callee's entry (`type-error.entry`) or on the result (`type-error.cast`).
-Scalars do not: applying a function that takes a `<double-float>` or an
-`<i32>` to an `<integer>`, or one that returns an `<object>` where a
-`<double-float>` is expected, fails the VM's own signature check at the
-call (`runtime.trap`, "type mismatch") before any Loko code runs. Making
+Scalars and boxed `<object>`s do not: applying a function that takes a
+`<double-float>` or an `<i32>` to an `<integer>`, one that returns an
+`<object>` where a `<double-float>` is expected, or one that takes a
+`<circle>` (or a generic that takes runtime objects) to an `<object>`
+value, fails the VM's own signature check at the call (`runtime.trap`,
+"type mismatch") before any Loko code runs. Making
 those signal needs every untyped callable call to box its scalars and
 every callable entry and result to check and unbox them, a calling
 convention change for all callable values, so it waits for its own slice.
@@ -620,6 +622,15 @@ keeps that method applicable, so it cannot fail; an inlined numeric send
 runs a method typing selected. The dispatcher signals after its last method
 fails to match, so a send that finds a method costs what it did. The driver
 counts the sends that fail (`ControlStats::failed_sends`).
+
+A parameter whose methods all specialize on object classes is passed as a
+runtime object, while an `<object>` value (a parameter or binding declared
+`<object>`, or `as(<object>, ...)`) is boxed and may hold a number. A
+send, including `apply` of a known generic, evaluates its arguments and
+then unboxes each such one; when one holds a number, no method can apply,
+and the send itself signals the condition, so the sender is the innermost
+frame. A number written directly is rejected when the program compiles
+(`sem.generic-argument-type-mismatch`), since no method can ever take it.
 
 An unhandled one suspends with every frame live, the dispatcher innermost
 (`area#dispatch`), and the driver marks it as a failed check's

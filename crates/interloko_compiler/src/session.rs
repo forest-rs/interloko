@@ -22177,21 +22177,22 @@ end;
     #[test]
     fn indirect_and_host_calls_check_limited_parameters_too() {
         // A callable value's caller cannot see `byte`'s range, so `byte`'s
-        // indirect entry checks it, and so do a closure's and a first-class
-        // generic's, which no body numbers.
-        for (call, owner, value) in [
-            ("apply(byte, x)", Some("byte"), "300"),
+        // indirect entry checks it, and so does a closure's. Applying a
+        // known generic sends, which checks the range at the call, where no
+        // typing decision classifies it.
+        for (call, (form, owner), value) in [
+            ("apply(byte, x)", ("typing", "byte"), "300"),
             (
                 "let f :: <callable> = byte;\n  apply(f, x) + 0",
-                Some("byte"),
+                ("typing", "byte"),
                 "300",
             ),
             (
                 "apply(function (n :: limited(<integer>, max: 9)) n end, x) + 0",
-                Some("feed"),
+                ("typing", "feed"),
                 "300",
             ),
-            ("apply(send, x - 400)", None, "-100"),
+            ("apply(send, x - 400)", ("check", "feed"), "-100"),
         ] {
             let source = format!(
                 "{LIMITED}\ndefine function feed(x :: <integer>) => <integer>\n  {call}\nend;"
@@ -22199,9 +22200,10 @@ end;
             let artifacts =
                 CompilerSession::compile_source("limited.loko", &source, RuntimeMode::CompileOnly);
             assert_eq!(artifacts.diagnostics, Vec::new(), "{call}");
-            let site = owner.map_or_else(
-                || "entry:send#closure:0".to_string(),
-                |owner| format!("typing:{}:", function_definition(&artifacts, owner)),
+            let separator = if form == "typing" { ':' } else { '@' };
+            let site = format!(
+                "{form}:{}{separator}",
+                function_definition(&artifacts, owner)
             );
             for policy in lower::CodegenPolicy::ALL {
                 let (reports, result) = run_limited(&artifacts, *policy, &[5]);
