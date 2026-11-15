@@ -5986,6 +5986,67 @@ impl<'module> BodyLowering<'module> {
             .ok_or_else(|| invalid_semantic("accessor function id is missing"))
     }
 
+    /// Applies a callable sem knows to be `generic`, such as
+    /// `apply(area, x)`: a send, as a call through the generic's value would
+    /// make, but with the arguments as given, so a boxed `<object>` reaches
+    /// dispatch (see [`Self::send`]) instead of a cast to the value's
+    /// parameter kind. The callable is still evaluated, for its effects.
+    fn lower_known_generic_call(
+        &mut self,
+        callable: &sem::Expr,
+        generic: sem::GenericFunctionId,
+        args: &[sem::Expr],
+        result_kinds: &[sem::ValueKind],
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let generic = self
+            .module
+            .generics
+            .get(generic.0 as usize)
+            .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
+        let _ = self.lower_expr(callable)?;
+        let mut values = self.lower_generic_args(args, generic)?;
+        // A send checks a limited parameter's range at its call site, which
+        // sem inserts for a direct send; an applied one is checked here.
+        for ((value, arg), range) in values.iter_mut().zip(args).zip(&generic.param_ranges) {
+            if let Some(range) = *range
+                && value.kind == ValueKind::I64
+            {
+                let type_error = self.type_error(
+                    TypeErrorKind::Range,
+                    range_expected(range),
+                    None,
+                    arg.span(),
+                );
+                *value = self.lower_range_check(*value, range, type_error, arg.span());
+            }
+        }
+        let args = values;
+        let results = self
+            .value_kinds(&generic.result_kinds)?
+            .into_iter()
+            .map(|kind| self.alloc(kind))
+            .collect::<Vec<_>>();
+        self.send(
+            generic,
+            args,
+            results.iter().map(|result| result.reg).collect(),
+            span,
+            None,
+        )?;
+        let kinds = self.value_kinds(result_kinds)?;
+        if kinds.len() != results.len() {
+            return Err(invalid_semantic(
+                "applied generic result arity does not match its signature",
+            ));
+        }
+        results
+            .into_iter()
+            .zip(kinds)
+            .map(|(result, kind)| self.coerce_value(result, kind, span))
+            .collect()
+    }
+
     fn lower_callable_call(
         &mut self,
         callable: &sem::Expr,
@@ -5994,6 +6055,13 @@ impl<'module> BodyLowering<'module> {
         result_kind: sem::ValueKind,
         span: Span,
     ) -> Result<Value, LowerError> {
+        if let sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) =
+            self.module.expr_kind(callable)
+        {
+            let mut results =
+                self.lower_known_generic_call(callable, generic, args, &[result_kind], span)?;
+            return Ok(results.remove(0));
+        }
         let callee = self.lower_expr(callable)?;
         if !matches!(callee.kind, ValueKind::Function(_) | ValueKind::Closure(_)) {
             return Err(invalid_semantic(
@@ -6030,6 +6098,11 @@ impl<'module> BodyLowering<'module> {
                 result_kinds[0],
                 span,
             )?]);
+        }
+        if let sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) =
+            self.module.expr_kind(callable)
+        {
+            return self.lower_known_generic_call(callable, generic, args, result_kinds, span);
         }
         let callee = self.lower_expr(callable)?;
         if !matches!(callee.kind, ValueKind::Function(_) | ValueKind::Closure(_)) {

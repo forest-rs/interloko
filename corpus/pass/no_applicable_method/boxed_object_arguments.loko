@@ -1,0 +1,42 @@
+// expect: run 33
+// expect: diagnostics 0
+
+// An `<object>` value is boxed, while `area`'s dispatcher takes runtime
+// objects: a send unboxes it, whether it is direct, through `apply`, or
+// through the generic as a known value, and dispatches on what it holds.
+// One that holds a number finds no method and signals, under either
+// codegen policy.
+
+define class <circle> (<object>)
+end;
+
+define generic area(x);
+
+define method area(c :: <circle>)
+  7
+end;
+
+define function direct(x :: <object>) => <integer>
+  area(x)
+end;
+
+define function applied(x :: <object>) => <integer>
+  apply(area, x)
+end;
+
+define function valued(x :: <object>) => <integer>
+  let g = area;
+  apply(g, x)
+end;
+
+define function guarded(x :: <object>) => <integer>
+  handle
+    direct(x) + applied(x) + valued(x)
+  with restart e :: <no-applicable-method>
+    12
+  end
+end;
+
+define function main() => <integer>
+  guarded(make(<circle>)) + guarded(as(<object>, 5))
+end;
