@@ -62,7 +62,9 @@ traces come from the existing compiler/runtime interface.
   `set_codegen_policy` lowers the accepted revision again under another one
   as a revision-checked edit that keeps its source and mutation log.
 - The typing configuration sets the severity each soft typing verdict is
-  reported at. `set_typing_config` changes it as a revision-checked edit that
+  reported at, and which definitions are held to strict typing beyond those
+  declared `strict`. A strict definition's unproved checks are errors, so a
+  source or configuration that leaves one is rejected like any other error. `set_typing_config` changes it as a revision-checked edit that
   keeps source, code and mutation log, and source replacement keeps it. Like
   the codegen policy it is a session input, not a mutation: rewind does not
   undo it. The result must still be accepted, so a configuration that turns a

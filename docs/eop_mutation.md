@@ -570,8 +570,9 @@ add-method's candidate-and-swap flow, checking in order:
    result, or constant value in the current source
    (`UnknownAnnotationTarget`).
 3. The edited source compiles without new errors (`ParseFailed`,
-   `SemanticFailed`). A type callers or the body violate, or a class
-   that does not exist, fails here; new warnings do not.
+   `SemanticFailed`). A type callers or the body violate, a class
+   that does not exist, or a check a strict definition can no longer
+   prove fails here; new warnings do not.
 4. The candidate defines the same classes, generics, functions, methods,
    and constants, and the target reads back with exactly the requested
    type (`InvalidTypeSource`), so text that smuggles in more than a type
@@ -586,6 +587,13 @@ any; the `SourceEdit` it made; and the `TypingDelta` comparing every
 typing decision before and after.
 `SessionArtifacts::preview_annotation(target, type_source)` returns the
 same `AnnotationOutcome` without swapping, logging, or using a mutation id.
+
+A strict error's annotation fix is this mutation:
+`SessionArtifacts::strict_fix_annotation(diagnostic_id, index)` returns
+its target and type, and the `apply-fix` and `preview-fix` affordances
+apply or preview it (see
+[`eop_workbench.md`](eop_workbench.md#strict-typing)). The delta counts
+errors, so it shows which strict errors the annotation resolves.
 
 Affected artifacts are computed as for add-method, from the annotated
 definition's `DefinitionSem`: a changed parameter or result type changes

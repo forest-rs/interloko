@@ -122,7 +122,51 @@ where something from outside the defining source tries to extend it:
 There is one compilation unit, so a source cannot violate its own sealing:
 every subclass and method it defines is part of the sealed set. Adjectives
 belong to the definitions that take them (classes take all four, generics
-`sealed` and `open`), and any other placement is a syntax error.
+`sealed`, `open` and `strict`, and functions, methods and constants
+`strict`), and any other placement is a syntax error.
+
+## Strict Typing
+
+Soft typing's findings are advice: `typing.*-runtime-checked` codes are
+silent by default and the checks stay in the code. A definition declared
+`strict` (or a method of a `strict` generic, or every definition under the
+`strict` typing policy) must instead prove the checks the compiler inserts
+into it, and each one typing cannot prove is an error:
+
+| Code | When |
+| --- | --- |
+| `typing.unproved-dispatch` | a send may find no method for its arguments' runtime classes |
+| `typing.unproved-cast` | a cast the compiler inserted may fail, such as the check of a value returned through an untyped `<callable>` |
+| `typing.unproved-range` | a value reaching a `limited(<integer>, ...)` declaration (an argument, binding, slot, constant or result) may be out of range |
+| `typing.unproved-overflow` | integer arithmetic may overflow, only under `strict.overflow=proved` |
+
+A check that always fails is an error in strict code too, with its soft
+code (`typing.cast-always-fails`, `typing.dispatch-no-applicable-method`,
+...); in soft code it stays a warning. An explicit `as`, an `instance?`
+test, and the check an indirect entry makes on what it is passed are not
+strict obligations: the first is deliberate, the second never fails, and
+the third guards the body against callers typing cannot see and blames
+them.
+
+Every typing finding carries the `decision` arg, the EOP id
+`typing:<definition>:s<n>` of the decision it reports, beside `expected`
+and `actual` (or `generic` and `arguments`, and `operation`) and the
+`rule`. A strict error adds `definition` (such as `function twice`) and
+`strict`, why it is strict (`declared`, `generic area is strict`, or
+`typing policy`); secondary labels pointing at where the operand types
+came from; and notes:
+
+- `because <reason chain>`, one per operand, in the format of the typing
+  dump's `because=`;
+- `fix: <edit>`, the edits that could prove the check: `annotate
+  parameter n as limited(<integer>, min: 0, max: 9)`, `test s with
+  instance? against <circle> or <square> first`, `declare <shape> sealed
+  abstract`, or `write as(<circle>, ...) to check deliberately`.
+
+Notes are facts for renderers, not catalog messages; `interloko_lab` and
+the REPL print them under the diagnostic. The EOP offers the fixes an
+annotation makes as `preview-fix` and `apply-fix` (see
+[`eop_workbench.md`](eop_workbench.md#strict-typing)).
 
 ## Runtime Type Errors
 
@@ -222,5 +266,6 @@ matched by its code too, as in `// expect: runtime code type-error.overflow`.
   the compiler core.
 - Terminal snippet and color rendering.
 - LSP diagnostic adaptation.
-- Fix-it edits and suggestions.
+- Fix-it edits beyond strict typing's annotation fixes, and machine-applicable
+  suggestions for other codes.
 - Warning levels beyond the current error-only severity model.
