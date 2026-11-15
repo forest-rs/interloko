@@ -1,10 +1,11 @@
 //! Wall-clock cost of one embedding call, and of the VM set-up inside it.
 //!
-//! Every call of a compiled function builds a VM, defines the control tags
-//! and installs the program before it runs anything. This reports a whole
-//! call of a function that returns a constant, next to that set-up alone, for
-//! a one-function program and for one with many classes, generics and
-//! functions, since installing interns the program's types and signatures.
+//! A fresh VM has to define the control tags and install the program before
+//! it runs anything. A runtime image keeps its VM between calls; a call on a
+//! fresh image builds one. This reports both for a function that returns a
+//! constant, next to that set-up alone, for a one-function program and for
+//! one with many classes, generics and functions, since installing interns
+//! the program's types and signatures.
 //! Run with `cargo bench -p interloko_compiler --features std --bench calls`.
 
 use std::fmt::Write as _;
@@ -15,9 +16,7 @@ use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::value::Value;
 use execution_tape::vm::{Limits, Vm};
 use interloko_compiler::session::{CompilerSession, RuntimeMode, SessionArtifacts};
-use interloko_runtime::control::{
-    ABORT_TAG, RESTART_TAG, RETRY_TAG, restart_payload, retry_payload,
-};
+use interloko_runtime::driver;
 
 const SAMPLES: usize = 15;
 const TARGET: Duration = Duration::from_millis(60);
@@ -94,10 +93,7 @@ fn report(label: &str, artifacts: &SessionArtifacts) {
     });
     let setup = measure(|| {
         let mut vm = Vm::new(NoHost, Limits::default());
-        vm.define_tag(RESTART_TAG, &restart_payload()).unwrap();
-        vm.define_tag(ABORT_TAG, &[]).unwrap();
-        vm.define_tag(RETRY_TAG, &retry_payload()).unwrap();
-        black_box(vm.install(code.program.clone()).unwrap());
+        black_box(driver::install(&mut vm, &code).unwrap());
         black_box(vm);
     });
     let functions = code.program.program().functions.len();
@@ -106,9 +102,9 @@ fn report(label: &str, artifacts: &SessionArtifacts) {
     println!("  runtime call        {:>9.0} ns", nanos(call));
     println!("  fresh-image call    {:>9.0} ns", nanos(fresh));
     println!(
-        "  vm new + tags + install {:>5.0} ns ({:.0}% of a runtime call)",
+        "  vm new + tags + install {:>5.0} ns ({:.0}% of a fresh-image call)",
         nanos(setup),
-        100.0 * setup.as_secs_f64() / call.as_secs_f64()
+        100.0 * setup.as_secs_f64() / fresh.as_secs_f64()
     );
     println!("  vm new alone        {:>9.0} ns", nanos(vm));
 }

@@ -8,6 +8,7 @@
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::{self, Write as _};
@@ -39,8 +40,9 @@ use crate::{ast, lower, sem, tape, typing};
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
 use interloko_runtime::chooser::{ConditionChooser, ReportUnhandled};
+use interloko_runtime::code::CodeUnit;
 use interloko_runtime::control::ControlFault;
-use interloko_runtime::driver::{self, RunFailure, RuntimeHost};
+use interloko_runtime::driver::{self, Installed, RunFailure, RuntimeHost};
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
@@ -386,11 +388,26 @@ pub struct FunctionCallOutcome {
 /// trap) persists, and runs each call as one *turn*: the call allocates into
 /// a nursery that is emptied when it returns or traps, so repeated calls do
 /// not grow the heap.
+///
+/// It also keeps the VM that runs the calls, with the program installed
+/// once, while calls keep passing the same artifacts. Calls with other
+/// artifacts get a VM of their own. Guest code cannot tell the kept VM from
+/// a fresh one: each call finds the call's program as its only unit and no
+/// aggregates, and the VM holds no host between calls.
 pub struct SessionRuntime {
     host: InterlokoHost,
+    vm: Option<ParkedVm>,
 }
 
 impl SessionRuntime {
+    /// A fresh runtime image for `tape`, with no VM yet.
+    fn new(tape: &tape::TapeModule) -> Self {
+        Self {
+            host: InterlokoHost::new(tape.runtime().clone()),
+            vm: None,
+        }
+    }
+
     /// Runs `function_name` from `artifacts` as one turn of this runtime.
     ///
     /// `artifacts` must have the runtime layout the image was created with;
@@ -416,8 +433,9 @@ impl SessionRuntime {
     /// Runs `function_name` as one turn of this runtime with embedding
     /// services; see [`SessionArtifacts::call_function_with`].
     ///
-    /// A chooser that hot-swaps code installs units into this call's VM
-    /// only; the turn stays open while it decides.
+    /// A chooser that hot-swaps code installs units for this call only: the
+    /// next call runs `artifacts` as compiled, on a new VM. The turn stays
+    /// open while the chooser decides.
     pub fn call_function_with<'a>(
         &mut self,
         artifacts: &'a SessionArtifacts,
@@ -437,7 +455,7 @@ impl SessionRuntime {
             &artifacts.sem,
             &artifacts.host_registry,
             tape,
-            &mut self.host,
+            self,
             function_name,
             arguments,
             trace,
@@ -2177,12 +2195,11 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        let mut runtime = InterlokoHost::new(tape.runtime().clone());
         call_function(
             &self.sem,
             &self.host_registry,
             tape,
-            &mut runtime,
+            &mut SessionRuntime::new(tape),
             function_name,
             arguments,
             trace,
@@ -2197,9 +2214,7 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        Ok(SessionRuntime {
-            host: InterlokoHost::new(tape.runtime().clone()),
-        })
+        Ok(SessionRuntime::new(tape))
     }
 
     /// Calls a direct function while serving declared scalar host functions
@@ -2219,12 +2234,11 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        let mut runtime = InterlokoHost::new(tape.runtime().clone());
         call_function(
             &self.sem,
             &self.host_registry,
             tape,
-            &mut runtime,
+            &mut SessionRuntime::new(tape),
             function_name,
             arguments,
             trace,
@@ -2241,10 +2255,8 @@ impl SessionArtifacts {
     /// [`interloko_runtime::chooser::Choice::Install`] to hot-swap edited
     /// definitions under the frames that are still running.
     #[must_use]
-    pub fn code_unit(&self) -> Option<alloc::sync::Arc<interloko_runtime::code::CodeUnit>> {
-        self.tape
-            .as_ref()
-            .map(|tape| alloc::sync::Arc::clone(&tape.code))
+    pub fn code_unit(&self) -> Option<Arc<CodeUnit>> {
+        self.tape.as_ref().map(|tape| Arc::clone(&tape.code))
     }
 
     /// Calls a direct function with embedding services: declared host
@@ -2264,12 +2276,11 @@ impl SessionArtifacts {
             .tape
             .as_ref()
             .ok_or(FunctionCallError::TapeUnavailable)?;
-        let mut runtime = InterlokoHost::new(tape.runtime().clone());
         call_function(
             &self.sem,
             &self.host_registry,
             tape,
-            &mut runtime,
+            &mut SessionRuntime::new(tape),
             function_name,
             arguments,
             trace,
@@ -5331,12 +5342,11 @@ fn run_main_with_trace(
     tape: &tape::TapeModule,
     trace: Option<ExecutionTraceDetail>,
 ) -> (RuntimeResult, Option<ExecutionTrace>) {
-    let mut runtime = InterlokoHost::new(tape.runtime().clone());
     match call_function(
         module,
         host_registry,
         tape,
-        &mut runtime,
+        &mut SessionRuntime::new(tape),
         "main",
         &[],
         trace,
@@ -5401,7 +5411,7 @@ fn runtime_result_for_main_error(
     }
 }
 
-/// Runs one call as one turn of `runtime`: allocations go to its nursery,
+/// Runs one call as one turn of `image`: allocations go to its nursery,
 /// and the turn is finished when the call returns or aborted when it fails.
 #[expect(
     clippy::too_many_arguments,
@@ -5411,12 +5421,13 @@ fn call_function<'a>(
     module: &sem::Module,
     host_registry: &'a sem::HostMetaRegistry,
     tape: &tape::TapeModule,
-    runtime: &mut InterlokoHost,
+    image: &mut SessionRuntime,
     function_name: &str,
     arguments: &[FunctionValue],
     trace: Option<ExecutionTraceDetail>,
     services: CallServices<'a>,
 ) -> Result<FunctionCallOutcome, FunctionCallError> {
+    let SessionRuntime { host: runtime, vm } = image;
     runtime
         .begin_turn()
         .map_err(|error| FunctionCallError::TurnFailed { error })?;
@@ -5425,6 +5436,7 @@ fn call_function<'a>(
         host_registry,
         tape,
         &mut *runtime,
+        vm,
         function_name,
         arguments,
         trace,
@@ -5470,6 +5482,7 @@ fn run_turn_body<'a>(
     host_registry: &'a sem::HostMetaRegistry,
     tape: &tape::TapeModule,
     runtime: &'a mut InterlokoHost,
+    vm: &mut Option<ParkedVm>,
     function_name: &str,
     arguments: &[FunctionValue],
     trace: Option<ExecutionTraceDetail>,
@@ -5538,20 +5551,29 @@ fn run_turn_body<'a>(
         runtime_arguments.push(value);
     }
 
-    let mut vm = Vm::new(host.clone(), Limits::default());
+    let parked = match vm.take() {
+        Some(parked) if Arc::ptr_eq(parked.installed.code(), &tape.code) => parked,
+        _ => ParkedVm::new(&tape.code).map_err(|error| FunctionCallError::Link { error })?,
+    };
     let mut capture = trace.map(|detail| TraceCapture::new(tape.program(), detail));
-    let mut options = InvocationOptions::default();
-    if let Some(capture) = capture.as_mut() {
-        options = options.trace(capture.mask(), capture.sink());
-    }
-    let run = driver::run(
-        &mut vm,
-        &tape.code,
-        entry,
-        &runtime_arguments,
-        options,
-        chooser,
-    );
+    // The call's host borrows the image for this call only; the parked VM
+    // runs on it and gets its idle host back before it is parked again.
+    let (mut lent, idle) = parked.vm.replace_host(host.clone());
+    let run = {
+        let mut options = InvocationOptions::default();
+        if let Some(capture) = capture.as_mut() {
+            options = options.trace(capture.mask(), capture.sink());
+        }
+        driver::run_installed(
+            &mut lent,
+            &parked.installed,
+            entry,
+            &runtime_arguments,
+            options,
+            chooser,
+        )
+    };
+    *vm = ParkedVm::park(lent.replace_host(idle).0, parked.installed);
     let output = match run {
         Ok(outcome) => outcome.outputs,
         Err(failure) => {
@@ -5615,8 +5637,55 @@ fn run_turn_body<'a>(
         }
     };
 
-    drop(vm);
     Ok((value, capture.map(TraceCapture::finish), output))
+}
+
+/// A VM kept by a [`SessionRuntime`] between calls, with the code installed
+/// in it.
+///
+/// Parking keeps only what a fresh VM for the same code would have: the
+/// control tags and the one installed unit. Calls lend it their own host.
+struct ParkedVm {
+    vm: Vm<Idle>,
+    installed: Installed,
+}
+
+impl ParkedVm {
+    fn new(code: &Arc<CodeUnit>) -> Result<Self, driver::LinkError> {
+        let mut vm = Vm::new(Idle, Limits::default());
+        let installed = driver::install(&mut vm, code)?;
+        Ok(Self { vm, installed })
+    }
+
+    /// Keeps `vm` for the next call of the same code, unless the call left
+    /// more than a fresh VM would hold.
+    fn park(mut vm: Vm<Idle>, installed: Installed) -> Option<Self> {
+        // A chooser hot-swapped code: VM units are never removed, so keeping
+        // the VM would keep every swapped-in unit for the image's lifetime.
+        if vm.units().len() != 1 {
+            return None;
+        }
+        // Aggregates reachable from a result outlive the run; the call has
+        // read its result, and the next call must not see them.
+        vm.aggregates_mut().clear();
+        Some(Self { vm, installed })
+    }
+}
+
+/// The host a parked VM holds; no guest code runs against it.
+struct Idle;
+
+impl Host for Idle {
+    fn call(
+        &mut self,
+        _symbol: &str,
+        _sig_hash: SigHash,
+        _args: &[ValueRef<'_>],
+        _rets: &mut [Value],
+        _context: HostContext<'_, '_>,
+    ) -> Result<u64, HostError> {
+        Err(HostError::UnknownSymbol)
+    }
 }
 
 #[derive(Clone)]
@@ -18922,5 +18991,185 @@ end;
         let value = call_with_chooser(&original, &mut chooser).expect("use-value resumes");
         assert_eq!(value, FunctionValue::Integer(40));
         assert_eq!(asked, 2);
+    }
+
+    const PARKED_PROGRAM: &str = "define class <problem> (<object>)\nend;\n\
+         define function one() => <integer>\n  1\nend;\n\
+         define function overflow(n :: <integer>) => <integer>\n  n + 9223372036854775807\nend;\n\
+         define function risky() => <integer>\n  signal(make(<problem>))\nend;\n\
+         define function make-exit() => <callable>\n  block (out)\n    out\n  end\nend;\n\
+         define function expired() => <integer>\n  \
+         let stale :: <callable> = make-exit();\n  \
+         let again :: <callable> = apply(stale, stale);\n  42\nend;";
+
+    /// The VM `runtime` parked after its last call.
+    fn parked(runtime: &SessionRuntime) -> &ParkedVm {
+        runtime.vm.as_ref().expect("the last call parked its VM")
+    }
+
+    /// Checks that `runtime` parked a VM a fresh one for `artifacts` would
+    /// match: their program as its only unit, and no aggregates.
+    fn assert_parked_fresh(runtime: &SessionRuntime, artifacts: &SessionArtifacts) {
+        let parked = parked(runtime);
+        let code = &artifacts.tape.as_ref().expect("tape").code;
+        assert!(Arc::ptr_eq(parked.installed.code(), code));
+        assert_eq!(parked.vm.units().len(), 1);
+        assert_eq!(parked.vm.aggregates().len_u32(), 0);
+    }
+
+    #[test]
+    fn runtime_calls_share_one_vm_that_looks_fresh_to_each() {
+        let artifacts = CompilerSession::compile_source(
+            "parked.loko",
+            PARKED_PROGRAM,
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut runtime = artifacts.runtime().expect("tape is available");
+        assert!(runtime.vm.is_none(), "the VM is built by the first call");
+        let one = runtime.call_function(&artifacts, "one", &[], None);
+        assert_eq!(one.expect("one runs").value, FunctionValue::Integer(1));
+        assert_parked_fresh(&runtime, &artifacts);
+
+        // Mark the parked VM, so later calls show whether they ran on it.
+        let marked = Limits {
+            fuel: Limits::default().fuel - 1,
+            ..Limits::default()
+        };
+        runtime.vm.as_mut().expect("parked").vm.set_limits(marked);
+        let on_marked = |runtime: &SessionRuntime| parked(runtime).vm.limits().fuel;
+
+        // A trap, an abort and an unhandled condition each end their call
+        // and leave the VM as reusable as a fresh one.
+        let trapped =
+            runtime.call_function(&artifacts, "overflow", &[FunctionValue::Integer(1)], None);
+        assert!(matches!(trapped, Err(FunctionCallError::Trap { .. })));
+        assert_parked_fresh(&runtime, &artifacts);
+        let mut abort = Scripted(|_: &UnhandledCondition<'_>| Choice::Abort);
+        let aborted = runtime.call_function_with(
+            &artifacts,
+            "risky",
+            &[],
+            None,
+            CallServices {
+                host_functions: None,
+                chooser: Some(&mut abort),
+            },
+        );
+        assert!(matches!(aborted, Err(FunctionCallError::Aborted { .. })));
+        assert_parked_fresh(&runtime, &artifacts);
+        let unhandled = runtime.call_function(&artifacts, "risky", &[], None);
+        assert!(matches!(
+            unhandled,
+            Err(FunctionCallError::UnhandledCondition { .. })
+        ));
+        assert_parked_fresh(&runtime, &artifacts);
+
+        // A closure returned from a call outlives the run as a VM aggregate;
+        // parking drops it, so no call sees another's aggregates.
+        let escaped = runtime.call_function(&artifacts, "make-exit", &[], None);
+        assert!(matches!(
+            escaped,
+            Err(FunctionCallError::UnsupportedResult { .. })
+        ));
+        assert_parked_fresh(&runtime, &artifacts);
+        // Exit points are run state: one that escaped its block is expired.
+        let expired = runtime.call_function(&artifacts, "expired", &[], None);
+        assert!(matches!(
+            expired,
+            Err(FunctionCallError::ExpiredExit { .. })
+        ));
+        assert_parked_fresh(&runtime, &artifacts);
+
+        let one = runtime.call_function(&artifacts, "one", &[], None);
+        assert_eq!(one.expect("one runs").value, FunctionValue::Integer(1));
+        assert_eq!(on_marked(&runtime), Limits::default().fuel - 1);
+    }
+
+    #[test]
+    fn runtime_vm_follows_the_artifacts_each_call_runs() {
+        let compile = |result: i64| {
+            CompilerSession::compile_source(
+                "parked.loko",
+                &format!("define function one() => <integer>\n  {result}\nend;"),
+                RuntimeMode::CompileOnly,
+            )
+        };
+        let (first, second) = (compile(1), compile(2));
+        let mut runtime = first.runtime().expect("tape is available");
+        for (artifacts, expected) in [(&first, 1), (&second, 2), (&first, 1)] {
+            let outcome = runtime.call_function(artifacts, "one", &[], None);
+            assert_eq!(
+                outcome.expect("one runs").value,
+                FunctionValue::Integer(expected)
+            );
+            assert_parked_fresh(&runtime, artifacts);
+        }
+    }
+
+    #[test]
+    fn installed_code_runs_only_in_the_vm_that_installed_it() {
+        let artifacts = CompilerSession::compile_source(
+            "parked.loko",
+            PARKED_PROGRAM,
+            RuntimeMode::CompileOnly,
+        );
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let entry = tape.functions[0];
+        let host = || InterlokoHost::new(tape.runtime().clone());
+        let mut installer = Vm::new(host(), Limits::default());
+        let installed = driver::install(&mut installer, &tape.code).expect("installs");
+        let run = |vm: &mut Vm<InterlokoHost>| {
+            driver::run_installed(
+                vm,
+                &installed,
+                entry,
+                &[],
+                InvocationOptions::default(),
+                &mut ReportUnhandled,
+            )
+        };
+        assert!(matches!(
+            run(&mut Vm::new(host(), Limits::default())),
+            Err(RunFailure::Link(driver::LinkError::NotInstalled))
+        ));
+        let outcome = run(&mut installer).expect("one runs");
+        assert_eq!(outcome.outputs, vec![Value::I64(1)]);
+    }
+
+    #[test]
+    fn hot_swapped_code_does_not_outlive_its_call() {
+        let (broken, fixed) = hot_swap_artifacts();
+        let mut runtime = broken.runtime().expect("tape is available");
+        let mut chooser = HotSwap {
+            fixed: &fixed,
+            asked: 0,
+            superseded: Vec::new(),
+        };
+        let swapped = runtime.call_function_with(
+            &broken,
+            "main",
+            &[],
+            None,
+            CallServices {
+                host_functions: None,
+                chooser: Some(&mut chooser),
+            },
+        );
+        assert_eq!(
+            swapped.expect("retry recovers").value,
+            FunctionValue::Float(0.5)
+        );
+        // VM units are never removed, so the VM that took the fixed code is
+        // not kept.
+        assert!(runtime.vm.is_none());
+
+        // The next call runs the artifacts as compiled, which signal.
+        let unswapped = runtime.call_function(&broken, "main", &[], None);
+        assert!(matches!(
+            unswapped,
+            Err(FunctionCallError::UnhandledCondition { .. })
+        ));
+        assert_parked_fresh(&runtime, &broken);
     }
 }
