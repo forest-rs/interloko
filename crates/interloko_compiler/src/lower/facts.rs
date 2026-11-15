@@ -153,8 +153,12 @@ fn relies_on_checked_inputs(typing: &DefinitionTyping, decision: &TypingDecision
             // a generic's is checked at install, a function's at retry, a
             // slot's by the layout; a constant's value is lowered inline.
             TypingDependency::Contract(_) => true,
-            // Fixed by the runtime layout, which an install must keep.
-            TypingDependency::Methods(_) | TypingDependency::Class(_) => true,
+            // Fixed by the runtime layout, which an install must keep. A
+            // unit records the sealed classes and method sets its code
+            // relies on, so a refused install names the one it would break.
+            TypingDependency::Methods(_)
+            | TypingDependency::Class(_)
+            | TypingDependency::Sealed(_) => true,
         })
 }
 

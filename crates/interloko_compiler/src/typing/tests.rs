@@ -1147,7 +1147,9 @@ fn dump_renders_reason_chains_and_assumptions() {
     assert!(dump.contains("because=narrowed(s0,then)@"), "{dump}");
     assert!(dump.contains("<circle> <- declared@"), "{dump}");
     assert!(
-        dump.contains(" assumes=closed-world(generic area)\n"),
+        dump.contains(
+            " assumes=closed-world(generic area has exactly methods {area(<circle>), area(<square>)})\n"
+        ),
         "{dump}"
     );
 }
@@ -1546,4 +1548,225 @@ fn dump_types_lists_bindings_uses_and_results() {
     );
     assert!(dump.contains("      use @"), "{dump}");
     assert!(dump.contains("    result "), "{dump}");
+}
+
+/// [`SHAPES`] with `<shape>` sealed and abstract and its two subclasses
+/// sealed, so `<shape>` is exactly a `<circle>` or a `<square>`.
+const SEALED_SHAPES: &str = "define sealed abstract class <shape> (<object>)\nend;\n\
+     define sealed class <circle> (<shape>)\nend;\n\
+     define sealed class <square> (<shape>)\nend;\n\
+     define class <label> (<object>)\nend;\n\
+     define sealed generic area(x);\n\
+     define method area(c :: <circle>)\n  1\nend;\n\
+     define method area(s :: <square>)\n  2\nend;\n";
+
+/// The decisions of the function named `name`, with its typing.
+fn function_typing<'a>(
+    module: &sem::Module,
+    artifact: &'a TypingArtifact,
+    name: &str,
+) -> &'a DefinitionTyping {
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == name)
+        .expect("function");
+    artifact
+        .definition(function.definition)
+        .expect("typed function")
+}
+
+/// The assumptions `decision` lists, as their labels.
+fn assumption_labels(
+    module: &sem::Module,
+    typed: &DefinitionTyping,
+    decision: &TypingDecision,
+) -> Vec<String> {
+    decision
+        .assumes
+        .iter()
+        .filter_map(|id| match typed.reason(*id)?.kind {
+            ReasonKind::ClosedWorld(assumption) => Some(assumption_label(module, assumption)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn dispatch_over_a_sealed_cone_is_covered_by_its_pieces() {
+    let measure = "define function measure(s :: <shape>)\n  area(s)\nend;";
+    // Open, a `<shape>` may be a subclass `area` has no method for.
+    let (module, artifact) = decisions_for(&format!("{SHAPES}{measure}"));
+    let typed = function_typing(&module, &artifact, "measure");
+    assert_eq!(typed.decisions[0].verdict, TypingVerdict::Checked);
+
+    let (module, artifact) = decisions_for(&format!("{SEALED_SHAPES}{measure}"));
+    let typed = function_typing(&module, &artifact, "measure");
+    let decision = &typed.decisions[0];
+    assert_eq!(
+        (decision.verdict, decision.rule),
+        (TypingVerdict::Proved, TypingRule::DispatchCovered)
+    );
+    // Two methods apply, so none is selected.
+    assert_eq!(decision.selected_method, None);
+    assert_eq!(
+        assumption_labels(&module, typed, decision),
+        [
+            "sealed generic area has exactly methods {area(<circle>), area(<square>)}",
+            "sealed abstract class <shape> has exactly direct subclasses {<circle>, <square>}",
+            "sealed class <circle> has no subclasses",
+            "sealed class <square> has no subclasses",
+        ]
+    );
+    let shape = module.classes[1].id;
+    assert!(
+        typed
+            .dependencies(decision)
+            .contains(&TypingDependency::Sealed(shape))
+    );
+    assert_eq!(
+        typed.inputs().sealed,
+        [shape, module.classes[2].id, module.classes[3].id]
+    );
+}
+
+#[test]
+fn a_send_whose_sealed_pieces_select_one_method_selects_it() {
+    let source = "define sealed abstract class <shape> (<object>)\nend;\n\
+         define sealed class <circle> (<shape>)\nend;\n\
+         define sealed class <square> (<shape>)\nend;\n\
+         define generic describe(s);\n\
+         define method describe(s :: <shape>)\n  1\nend;\n\
+         define function measure(s :: <shape>)\n  describe(s)\nend;";
+    let (module, artifact) = decisions_for(source);
+    let typed = function_typing(&module, &artifact, "measure");
+    let decision = &typed.decisions[0];
+    assert_eq!(decision.verdict, TypingVerdict::Proved);
+    assert_eq!(decision.selected_method, Some(module.methods[0].id));
+    // Covering needs no sealing; selecting does, including that each leaf
+    // piece has no subclasses of its own.
+    assert_eq!(
+        assumption_labels(&module, typed, decision),
+        [
+            "generic describe has exactly methods {describe(<shape>)}",
+            "sealed abstract class <shape> has exactly direct subclasses {<circle>, <square>}",
+            "sealed class <square> has no subclasses",
+            "sealed class <circle> has no subclasses",
+        ]
+    );
+    // Without sealing the subclasses, a piece is a cone and no method is
+    // selected.
+    let (module, artifact) =
+        decisions_for(&source.replace("define sealed class <circle>", "define class <circle>"));
+    let typed = function_typing(&module, &artifact, "measure");
+    assert_eq!(typed.decisions[0].verdict, TypingVerdict::Proved);
+    assert_eq!(typed.decisions[0].selected_method, None);
+}
+
+#[test]
+fn a_sealed_leaf_is_exact_so_its_sends_select_their_method() {
+    let source = format!("{SEALED_SHAPES}define function measure(c :: <circle>)\n  area(c)\nend;");
+    let (module, artifact) = decisions_for(&source);
+    let typed = function_typing(&module, &artifact, "measure");
+    let decision = &typed.decisions[0];
+    assert_eq!(decision.selected_method, Some(module.methods[0].id));
+    assert_eq!(type_name(&module, &decision.actual[0]), "<circle>");
+    assert!(
+        assumption_labels(&module, typed, decision)
+            .contains(&"sealed class <circle> has no subclasses".into())
+    );
+}
+
+#[test]
+fn an_instance_test_narrows_a_sealed_cone_to_its_other_pieces() {
+    let source = format!(
+        "{SEALED_SHAPES}define function side(s :: <shape>)\n  \
+         if instance?(s, <circle>) then 0 \
+         else if instance?(s, <square>) then 1 else area(s) end end\nend;"
+    );
+    let (module, artifact) = decisions_for(&source);
+    let typed = function_typing(&module, &artifact, "side");
+    let rules = typed
+        .decisions
+        .iter()
+        .map(|decision| decision.rule)
+        .collect::<Vec<_>>();
+    // The second test is always true where it runs, and the send after it
+    // is unreachable.
+    assert_eq!(
+        rules,
+        [
+            TypingRule::InstanceSometimes,
+            TypingRule::InstanceAlways,
+            TypingRule::Unreachable
+        ]
+    );
+    let shape_sealing =
+        "sealed abstract class <shape> has exactly direct subclasses {<circle>, <square>}";
+    assert!(assumption_labels(&module, typed, &typed.decisions[1]).contains(&shape_sealing.into()));
+    assert!(
+        typed
+            .reason_chain(&module, typed.decisions[1].because[0])
+            .starts_with("narrowed(s0,else)@")
+    );
+    // Open, the else branch keeps the whole cone.
+    let (module, artifact) = decisions_for(&source.replace("define sealed abstract", "define"));
+    let typed = function_typing(&module, &artifact, "side");
+    assert_eq!(typed.decisions[1].rule, TypingRule::InstanceSometimes);
+}
+
+#[test]
+fn a_cast_against_a_sealed_hierarchy_is_proved_or_refuted_by_its_pieces() {
+    let source = format!(
+        "{SEALED_SHAPES}define function circle(s :: <shape>)\n  \
+         if instance?(s, <square>) then 0 else area(as(<circle>, s)) end\nend;\n\
+         define function square(s :: <shape>)\n  \
+         if instance?(s, <square>) then 0 else area(as(<square>, s)) end\nend;"
+    );
+    let (module, artifact) = decisions_for(&source);
+    let cast = |name: &str| {
+        let typed = function_typing(&module, &artifact, name);
+        let decision = typed
+            .decisions
+            .iter()
+            .find(|decision| decision.check == TypingCheck::Cast)
+            .expect("cast")
+            .clone();
+        (decision.rule, assumption_labels(&module, typed, &decision))
+    };
+    let shape_sealing = String::from(
+        "sealed abstract class <shape> has exactly direct subclasses {<circle>, <square>}",
+    );
+    // Past the test, a `<shape>` can only be a `<circle>`.
+    let (rule, assumes) = cast("circle");
+    assert_eq!(rule, TypingRule::CastUpcast);
+    assert!(assumes.contains(&shape_sealing));
+    let (rule, assumes) = cast("square");
+    assert_eq!(rule, TypingRule::CastDisjoint);
+    assert!(assumes.contains(&shape_sealing));
+}
+
+#[test]
+fn a_sealed_hierarchy_too_large_to_distribute_is_left_to_the_runtime() {
+    let mut source = String::from("define sealed abstract class <shape> (<object>)\nend;\n");
+    let mut methods = String::new();
+    for index in 0..=MAX_DISPATCH_TUPLES {
+        let _ = write!(source, "define sealed class <s{index}> (<shape>)\nend;\n");
+        let _ = write!(
+            methods,
+            "define method area(s :: <s{index}>)\n  {index}\nend;\n"
+        );
+    }
+    source.push_str("define generic area(s);\n");
+    source.push_str(&methods);
+    source.push_str("define function measure(s :: <shape>)\n  area(s)\nend;");
+    let (module, artifact) = decisions_for(&source);
+    let typed = function_typing(&module, &artifact, "measure");
+    let decision = &typed.decisions[0];
+    assert_eq!(decision.verdict, TypingVerdict::Checked);
+    assert!(
+        assumption_labels(&module, typed, decision)
+            .iter()
+            .all(|label| !label.starts_with("sealed abstract class"))
+    );
 }
