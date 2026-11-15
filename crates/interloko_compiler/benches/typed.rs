@@ -35,6 +35,24 @@
 //!   nothing about, so both policies test it is in 0..=31. Its baseline
 //!   calls a function with the same signature that returns `x`.
 //!
+//! Three cases measure what sealing buys. The `sealed` column compiles the
+//! same program under `proved` with `<shape>` sealed and abstract and its
+//! subclasses sealed (see [`sealed`]):
+//!
+//! - `shape send`: `size-of(s)` on a `<shape>` parameter, whose only
+//!   method is on `<shape>`. Open, a subclass may override it, so the
+//!   runtime selects; sealed, every piece is an exact class selecting that
+//!   method, so the send is linked. Its baseline calls a function that
+//!   does the same work.
+//! - `leaf send`: `weight(c)` on a `<circle>` parameter. Open, `<circle>`
+//!   may gain subclasses; sealed with none, it is exact and the send is
+//!   linked. Same baseline.
+//! - `typecase cast`: `as(<square>, s).side` in the else branch of
+//!   `instance?(s, <circle>)`. Open, the cast is checked; sealed, the else
+//!   branch holds only `<square>`s and the cast is dropped. Its baseline
+//!   runs the same test and reads the slot through a `<square>` parameter
+//!   holding the same object.
+//!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
 use std::hint::black_box;
@@ -51,6 +69,10 @@ end;
 
 define class <circle> (<shape>)
   slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
 end;
 
 define function plain(d :: <integer>) => <integer>
@@ -159,6 +181,76 @@ define function keep(x :: <i32>, n :: <i32>) => <i32>
   x
 end;
 
+define generic size-of(s :: <shape>) => <integer>;
+
+define method size-of(s :: <shape>) => <integer>
+  1
+end;
+
+define function send-size(s :: <shape>) => <integer>
+  size-of(s)
+end;
+
+define function size-direct(s :: <shape>) => <integer>
+  1
+end;
+
+define function take-shape(s :: <shape>) => <integer>
+  size-direct(s)
+end;
+
+define function shape-sent(d :: <integer>) => <integer>
+  if d = 0 then send-size(make(<circle>, radius: 1)) else shape-sent(d - 1) + shape-sent(d - 1) end
+end;
+
+define function shape-called(d :: <integer>) => <integer>
+  if d = 0 then take-shape(make(<circle>, radius: 1)) else shape-called(d - 1) + shape-called(d - 1) end
+end;
+
+define function send-leaf(c :: <circle>) => <integer>
+  weight(c)
+end;
+
+define function weight-direct(c :: <circle>) => <integer>
+  1
+end;
+
+define function take-circle(c :: <circle>) => <integer>
+  weight-direct(c)
+end;
+
+define function leaf-sent(d :: <integer>) => <integer>
+  if d = 0 then send-leaf(make(<circle>, radius: 1)) else leaf-sent(d - 1) + leaf-sent(d - 1) end
+end;
+
+define function leaf-called(d :: <integer>) => <integer>
+  if d = 0 then take-circle(make(<circle>, radius: 1)) else leaf-called(d - 1) + leaf-called(d - 1) end
+end;
+
+define function square-side(s :: <shape>) => <integer>
+  if instance?(s, <circle>) then 0 else as(<square>, s).side end
+end;
+
+define function square-test(s :: <shape>, q :: <square>) => <integer>
+  if instance?(s, <circle>) then 0 else q.side end
+end;
+
+define function test-square(q :: <square>) => <integer>
+  square-test(q, q)
+end;
+
+define function side-square(q :: <square>) => <integer>
+  square-side(q)
+end;
+
+define function cast-past(d :: <integer>) => <integer>
+  if d = 0 then side-square(make(<square>, side: 1)) else cast-past(d - 1) + cast-past(d - 1) end
+end;
+
+define function test-only(d :: <integer>) => <integer>
+  if d = 0 then test-square(make(<square>, side: 1)) else test-only(d - 1) + test-only(d - 1) end
+end;
+
 define function shifted(d :: <integer>) => <integer>
   if d = 0 then as(<integer>, shift-by(1i32, 3i32)) else shifted(d - 1) + shifted(d - 1) end
 end;
@@ -204,11 +296,30 @@ fn measure(artifacts: &SessionArtifacts, runtime: &mut SessionRuntime, name: &st
     samples[SAMPLES / 2]
 }
 
-/// Net nanoseconds per leaf operation of each case under `policy`.
-fn costs(policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
+/// [`SOURCE`] with `<shape>` sealed and abstract and its subclasses
+/// sealed, so a `<shape>` is exactly a `<circle>` or a `<square>`.
+fn sealed() -> String {
+    SOURCE
+        .replace(
+            "define class <shape> (<object>)",
+            "define sealed abstract class <shape> (<object>)",
+        )
+        .replace(
+            "define class <circle> (<shape>)",
+            "define sealed class <circle> (<shape>)",
+        )
+        .replace(
+            "define class <square> (<shape>)",
+            "define sealed class <square> (<shape>)",
+        )
+}
+
+/// Net nanoseconds per leaf operation of each case of `source` under
+/// `policy`.
+fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
     let mut session = CompilerSession::new();
     session.set_codegen_policy(policy);
-    let id = session.add_source("typed.loko", SOURCE);
+    let id = session.add_source("typed.loko", source);
     let artifacts = session
         .compile(id, RuntimeMode::CompileOnly)
         .expect("source was just added");
@@ -230,14 +341,18 @@ fn costs(policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("shift count", net("shifted", "kept")),
         ("tested arithmetic", net("tested", "passed")),
         ("generic send", net("sent", "called")),
+        ("shape send", net("shape-sent", "shape-called")),
+        ("leaf send", net("leaf-sent", "leaf-called")),
+        ("typecase cast", net("cast-past", "test-only")),
     ]
 }
 
 fn main() {
-    let off = costs(CodegenPolicy::Off);
-    let proved = costs(CodegenPolicy::Proved);
-    println!("{:<19} {:>12} {:>12}", "", "off", "proved");
-    for ((label, off), (_, proved)) in off.iter().zip(&proved) {
-        println!("{label:<19} {off:>9.1} ns {proved:>9.1} ns/op");
+    let off = costs(SOURCE, CodegenPolicy::Off);
+    let proved = costs(SOURCE, CodegenPolicy::Proved);
+    let sealed = costs(&sealed(), CodegenPolicy::Proved);
+    println!("{:<19} {:>12} {:>12} {:>12}", "", "off", "proved", "sealed");
+    for (((label, off), (_, proved)), (_, sealed)) in off.iter().zip(&proved).zip(&sealed) {
+        println!("{label:<19} {off:>9.1} ns {proved:>9.1} ns {sealed:>9.1} ns/op");
     }
 }
