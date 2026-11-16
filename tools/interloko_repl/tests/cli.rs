@@ -1148,3 +1148,82 @@ fn strict_definitions_must_prove_their_checks_and_preview_before_opting_in() {
         "{stderr}"
     );
 }
+
+#[test]
+fn strict_errors_block_running_until_the_policy_changes() {
+    let (stdout, stderr) = run_repl(
+        "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic area(x);\n\
+         define method area(c :: <circle>)\n  7\nend;\n\
+         define function measure(s :: <shape>)\n  area(s)\nend;\n\
+         define function main()\n  measure(make(<circle>))\nend;\n\
+         :run main\n\
+         :typing strict\n\
+         :run main\n\
+         :invoke function:f1 run\n\
+         :typing soft\n\
+         :run main\n\
+         :quit\n",
+    );
+    // `main` runs under soft typing, is blocked by `measure`'s strict error
+    // whether run by name or through the EOP, and runs again once the
+    // policy no longer holds `measure` to strict typing.
+    assert_eq!(
+        stdout.lines().filter(|line| *line == "7").count(),
+        2,
+        "{stdout}"
+    );
+    let blocked = "error: `main` did not run: compilation reported 1 error: \
+                   diagnostic:d0 typing.unproved-dispatch at ";
+    assert_eq!(stderr.matches(blocked).count(), 2, "{stderr}");
+    assert!(stderr.contains("(typing:def"), "{stderr}");
+    assert!(
+        stderr.contains("    fix: declare <shape> sealed abstract"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("runtime error:"), "{stderr}");
+}
+
+#[test]
+fn break_loop_refuses_to_install_an_edit_with_strict_errors() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/break_loop/raymarch.loko");
+    let (stdout, stderr) = run_repl(&format!(
+        ":load {}\n:run main\n\
+         define function digit(d :: limited(<integer>, min: 0, max: 9)) => <integer>\n  d\nend;\n\
+         define strict function twice(n :: <integer>) => <integer>\n  digit(n) + digit(n)\nend;\n\
+         :restart abort\n:quit\n",
+        fixture.display()
+    ));
+    assert!(
+        stdout.contains("break [1]: no handler for <bad-sample>"),
+        "{stdout}"
+    );
+    // The clean definition installs; the strict one is refused with its
+    // errors' reasons and fixes, and the break keeps waiting.
+    assert_eq!(
+        stdout
+            .matches("installed the edit as a new code unit")
+            .count(),
+        1,
+        "{stdout}"
+    );
+    assert_eq!(
+        stderr.matches("Error typing.unproved-range").count(),
+        2,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("    fix: annotate parameter n as limited(<integer>, min: 0, max: 9)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("edit rejected; the definitions and break [1] are unchanged"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("aborted by the condition chooser"),
+        "{stderr}"
+    );
+}

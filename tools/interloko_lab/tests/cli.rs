@@ -1224,6 +1224,36 @@ fn invoke_affordance_add_method_reports_parse_failure() {
 }
 
 #[test]
+fn invoke_affordance_add_method_refuses_a_method_with_strict_errors() {
+    let target = fixture("annotate_shapes.loko");
+    let strict = fixture("add_method_strict_unproved.loko");
+
+    let stderr = run_lab_failure(&[
+        "invoke-affordance",
+        target.to_str().expect("fixture path should be utf8"),
+        "generic:g0",
+        "add-method",
+        "--source",
+        strict.to_str().expect("fixture path should be utf8"),
+    ]);
+
+    // The refusal prints the strict error it would add, with its decision
+    // and fix, then names its code.
+    assert!(stderr.contains("Error typing.unproved-range"), "{stderr}");
+    assert!(stderr.contains("(typing:def"), "{stderr}");
+    assert!(
+        stderr.contains("    fix: write as(limited(<integer>, min: 0, max: 9), ...)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "add-method mutation failed: semantic failure (1 new diagnostics: typing.unproved-range)"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn invoke_affordance_add_method_reports_duplicate_specializer() {
     let target = fixture("add_method_target.loko");
     let duplicate = fixture("add_method_duplicate_circle.loko");
@@ -1636,12 +1666,37 @@ fn strict_errors_preview_strictness_and_fixes_through_affordances() {
     let path = fixture("strict_digits.loko");
     let path = path.to_str().expect("fixture path should be utf8");
 
-    let (stdout, stderr) = run_lab_success(&["run", path]);
-    assert_eq!(stdout, "6\n");
+    // Strict errors block running like any compile error: the diagnostics
+    // carry the reasons and fixes, and the refusal names each error's
+    // diagnostic object, place and typing decision.
+    let stderr = run_lab_failure(&["run", path]);
     assert!(stderr.contains("Error typing.unproved-range"), "{stderr}");
     assert!(
         stderr.contains("    fix: annotate parameter n as limited(<integer>, min: 0, max: 9)"),
         "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "main did not run: compilation reported 2 errors: \
+             diagnostic:d0 typing.unproved-range at 302..303 (typing:def"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("; diagnostic:d1 typing.unproved-range at 313..314 (typing:def"),
+        "{stderr}"
+    );
+    let stderr = run_lab_failure(&["invoke-affordance", path, "function:f2", "run"]);
+    assert!(
+        stderr.contains("main did not run: compilation reported 2 errors"),
+        "{stderr}"
+    );
+    let (stdout, _) = run_lab_success(&["trace", path]);
+    assert!(
+        stdout.starts_with(
+            "execution trace unavailable: main did not run: compilation reported 2 errors"
+        ),
+        "{stdout}"
     );
 
     let affordances = run_lab(&["affordances", path, "diagnostic:d0"]);

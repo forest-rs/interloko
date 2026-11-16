@@ -20,6 +20,9 @@ Supported expectations:
   the type, so `run 42` does not match a string `"42"` or a float `42.0`.
   Floats match by exact value: `run nan` matches any NaN and `run -0.0`
   does not match `0.0`.
+- `run blocked`: compile with `main` requested, expecting compile errors to
+  keep it from running. Every error blocks running, error-severity typing
+  findings such as strict typing's included, though their code was lowered.
 - `runtime code CODE`: compile and run zero-argument `main`, expecting it to
   end in the runtime outcome with stable code `CODE`, such as
   `runtime.integer-overflow` or `runtime.unhandled-condition`.
@@ -39,7 +42,8 @@ Supported expectations:
   `silent`, `strict`) and settings such as `cast.checked=warning` or
   `strict.overflow=proved`. Typing findings are diagnostics and are counted
   by `diagnostics N`; soft ones are warnings, and a strict definition's
-  unproved checks are errors that still let `main` run.
+  unproved checks are errors, which keep `main` from running (`run
+  blocked`).
 - `// codegen: off|proved`: select the codegen policy the expectations are
   checked under (default `proved`, the compiler's default). Use `off` for a
   case about the code lowering emits without typing facts. Under `proved`, lowering drops or specializes
@@ -57,8 +61,8 @@ their expected value or runtime outcome. Use `corpus/fail` for programs that
 intentionally exercise diagnostics.
 
 `corpus/pass/strict` and `corpus/fail/strict` show strict typing: programs
-whose strict definitions prove every check they must, and one failing case
-per strict error.
+whose strict definitions prove every check they must, and failing cases for
+each strict error.
 
 `interloko_corpus strictness [corpus-root]` compiles every case as if the
 session held every definition to strict typing (`strict.scope=all`) and

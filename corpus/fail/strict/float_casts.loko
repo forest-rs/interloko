@@ -1,5 +1,5 @@
 // typing: strict
-// expect: run 1.5
+// expect: run blocked
 // expect: diagnostics 1
 // expect: diagnostic code typing.cast-always-fails
 // expect: dump typing contains cast checked rule=cast-narrowing
@@ -9,8 +9,9 @@
 
 // Under the strict preset, explicitly unboxing an `<object>` to
 // `<double-float>` stays a runtime check, while casting a boxed string
-// always fails, which is an error in strict code. Neither blocks running
-// `main`, and the checked cast succeeds.
+// always fails, which is an error in strict code. That error blocks running
+// `main`, as any compile error does, though the program was lowered; the
+// checked unbox itself runs in `pass/values/float_unbox_cast.loko`.
 
 define function to-float(x :: <object>) => <double-float>
   as(<double-float>, x)

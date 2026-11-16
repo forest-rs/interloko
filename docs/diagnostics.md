@@ -168,6 +168,44 @@ the REPL print them under the diagnostic. The EOP offers the fixes an
 annotation makes as `preview-fix` and `apply-fix` (see
 [`eop_workbench.md`](eop_workbench.md#strict-typing)).
 
+Strict errors are errors like any other, so they block running (see
+[Errors Block Running](#errors-block-running)).
+
+## Errors Block Running
+
+Every error-severity diagnostic keeps the program from running or being
+installed, whatever stage reported it: a semantic error, an internal
+lowering failure, or an error-severity typing finding. Warnings never do.
+Typing errors are the case where code exists to run: strictness and the
+typing policies change only how verdicts are reported, so a program with a
+strict error still lowers and emits tape, keeping the checks it could not
+prove. That code is not run:
+
+- `SessionArtifacts::check_runnable` is the one rule. Calls
+  (`call_function` and its variants), `runtime()`, a `SessionRuntime` call,
+  and `code_unit()` (the unit a chooser installs) refuse with
+  `FunctionCallError::CompilationFailed`, which lists each error with its
+  index in `SessionArtifacts::diagnostics` (its `diagnostic:d<n>` object);
+  `RuntimeMode::RunMain` leaves `runtime_result` empty.
+- The refusal reads `compilation reported 2 errors: diagnostic:d0
+  typing.unproved-range at 302..303 (typing:def…:s0); ...`: each error's
+  object, code, span and typing decision. Tools print the diagnostics
+  themselves first, with their `because` and `fix:` notes.
+- `interloko_lab run`, `trace`, `report` and the `run` affordance, the
+  corpus runner, and the REPL's `:run`, expressions and `run` affordance
+  all apply it. `interloko_session::Session` never accepts a source or
+  typing configuration with diagnostics, and mutations and the REPL's
+  forms and break-loop edits reject any that add errors, so an edit with a
+  strict error is never installed either.
+
+This covers every error-severity typing finding, not only strict ones: a
+policy such as `cast.refuted=error` asks for that finding to fail the
+compilation, and severity is the one notion of failure every tool gates
+on. Two kinds of error, one that blocks and one that does not, would make
+`has_errors()` and an accepted run disagree. Soft typing's defaults report
+no errors (refuted checks are warnings), so code written without opting in
+to strictness or an error-severity policy is unaffected.
+
 ## Runtime Type Errors
 
 A runtime check that fails does not trap. It signals a `<type-error>`
@@ -246,7 +284,8 @@ The corpus runner supports both forms:
 
 Code expectations are preferred for behavior. String expectations remain useful
 as compatibility checks for the default English catalog. A run's outcome is
-matched by its code too, as in `// expect: runtime code type-error.overflow`.
+matched by its code too, as in `// expect: runtime code type-error.overflow`,
+and `// expect: run blocked` says compile errors keep `main` from running.
 
 ## Glossary
 

@@ -140,6 +140,11 @@ Supported read-only invocations are:
 - `preview-strict`
 - `run`
 
+`run` runs `main` and, like `interloko_lab run`, refuses when compilation
+reported errors, strict typing's included, naming them; the affordance is
+still listed, since the errors are facts of this compilation, not of the
+function.
+
 The `add-method` mutation is now executable through `invoke-affordance` on
 `generic:gN` objects; see [`eop_mutation.md`](eop_mutation.md) for the
 contract. So are the typing adjustments `annotate`, `preview-annotation`,
@@ -399,7 +404,9 @@ strictness (see [Strict Typing](#strict-typing)). It re-derives
 diagnostics without re-checking, so verdicts and code do not change, only
 severities. `set-codegen-policy off|proved` lowers again, so codegen facets
 change and verdicts do not. Both print the change, the delta, and any new
-diagnostics. The lab is stateless, so the policy lasts for that invocation;
+diagnostics. A policy that reports a finding at `error`, the strict
+preset's errors included, makes the code unrunnable until it is fixed or
+the policy changes back. The lab is stateless, so the policy lasts for that invocation;
 the REPL keeps it (`:typing` and `:codegen`), as do `Session` and the
 compiler sessions.
 
@@ -466,15 +473,25 @@ diagnostics:
     because declared@265..266 <integer>
     fix: annotate parameter n as limited(<integer>, min: 0, max: 9)
     fix: write as(limited(<integer>, min: 0, max: 9), ...) to check deliberately
+  ...
+main did not run: compilation reported 2 errors: diagnostic:d0 typing.unproved-range at 302..303 (typing:def…:s0); diagnostic:d1 typing.unproved-range at 313..314 (typing:def…:s1)
 ```
 
 Strictness is reporting only, and an input of its own: toggling a
 definition's `strict` re-derives the typing diagnostics from the recorded
 decisions (the incremental graph's `strictness` artifact), and so does the
 policy, so nothing is re-typed or lowered again. A strict definition with
-errors still lowers and runs, keeping the checks it could not prove;
-mutations reject an edit that adds errors, and the REPL rejects a form
-that has them. In the REPL:
+errors still lowers, keeping the checks it could not prove, but its errors
+block running like any compile error
+([`diagnostics.md`](diagnostics.md#errors-block-running)): `run`, `trace`
+and the `run` affordance print the diagnostics, then the refusal naming
+each error's `diagnostic:d<n>` object, span and decision, and exit
+nonzero. So do the REPL's `:run`, expressions and `run` affordance, for
+instance after `:typing strict` leaves an error in the accepted buffer.
+Edits never install one: mutations (`add-method`, `annotate`, `apply-fix`)
+reject an edit that adds errors and print them, the REPL rejects a form
+that has them, and a break-loop edit with errors is not installed under
+the suspended run. In the REPL:
 
 ```text
 :invoke <function:...|method:...|generic:...|constant:...> preview-strict

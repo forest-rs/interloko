@@ -148,7 +148,6 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/values/float_unbox_cast.loko"));
     assert!(out.contains("pass/values/float_box_cast.loko"));
     assert!(out.contains("ok pass/typing/float_dispatch.loko"));
-    assert!(out.contains("ok pass/typing/float_casts.loko"));
     assert!(out.contains("ok pass/syntax/hyphenated_local_names.loko"));
     assert!(out.contains("ok fail/diagnostics/unresolved_hyphenated_local.loko"));
     assert!(out.contains("ok pass/conditions/guard_exit.loko"));
@@ -165,6 +164,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/strict/policy_strict.loko"));
     assert!(out.contains("ok fail/strict/unproved_dispatch.loko"));
     assert!(out.contains("ok fail/strict/unproved_overflow.loko"));
+    assert!(out.contains("ok fail/strict/float_casts.loko"));
     assert!(out.contains("corpus: 439 passed, 0 failed, 439 total"));
 }
 
@@ -267,5 +267,54 @@ fn check_rejects_an_unknown_codegen_policy() {
     assert!(
         stderr.contains("codegen must be one of `off`, `proved`"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn strict_errors_block_main_and_run_blocked_expects_that() {
+    let dir = std::env::temp_dir().join(format!("interloko-corpus-blocked-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temporary corpus directory");
+    let strict_body = "define function digit(d :: limited(<integer>, min: 0, max: 9)) => <integer>\n  d\nend;\n\
+         define strict function twice(n :: <integer>) => <integer>\n  digit(n) + digit(n)\nend;\n\
+         define function main() => <integer>\n  twice(3)\nend;\n";
+    std::fs::write(
+        dir.join("blocked.loko"),
+        format!("// expect: run blocked\n{strict_body}"),
+    )
+    .expect("temporary corpus case");
+    std::fs::write(
+        dir.join("expects_value.loko"),
+        format!("// expect: run 6\n{strict_body}"),
+    )
+    .expect("temporary corpus case");
+    std::fs::write(
+        dir.join("clean.loko"),
+        "// expect: run blocked\ndefine function main()\n  1\nend;\n",
+    )
+    .expect("temporary corpus case");
+    let output = Command::new(bin())
+        .args([
+            "check",
+            dir.to_str().expect("temporary path should be utf8"),
+        ])
+        .output()
+        .expect("interloko_corpus should run");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ok blocked.loko"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "FAILED expects_value.loko\n  expected run result 6, but main did not run: \
+             compilation failed with typing.unproved-range, typing.unproved-range"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "FAILED clean.loko\n  expected compilation errors to block main, but it ran: returned 1"
+        ),
+        "{stdout}"
     );
 }

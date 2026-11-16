@@ -1,0 +1,5 @@
+// A strict method whose result typing cannot prove in range: adding it
+// would add a `typing.unproved-range` error, so the mutation is refused.
+define strict method area(s :: <shape>) => limited(<integer>, min: 0, max: 9)
+  measure(s)
+end;

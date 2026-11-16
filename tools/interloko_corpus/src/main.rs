@@ -11,8 +11,8 @@ use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarF
 use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
-    CompilerSession, DumpStage, FunctionValue, IncrementalCompilerSession, RuntimeMode,
-    RuntimeResult, TurnStats,
+    CompilerSession, DumpStage, FunctionCallError, FunctionValue, IncrementalCompilerSession,
+    RuntimeMode, RuntimeResult, TurnStats,
 };
 use interloko_compiler::typing::TypingConfig;
 use interloko_diagnostics::DiagnosticRenderer;
@@ -574,6 +574,10 @@ fn parse_expectation(path: &Path, line: usize, input: &str) -> Result<Expectatio
         return Ok(Expectation::RunReports(text.into()));
     }
 
+    if input == "run blocked" {
+        return Ok(Expectation::RunBlocked);
+    }
+
     if let Some(value) = input.strip_prefix("run ") {
         let value = parse_run_value(value).ok_or_else(|| {
             invalid_header(
@@ -647,7 +651,10 @@ fn check_case(case: &Case) -> Vec<String> {
     let mode = if case.expectations.iter().any(|expectation| {
         matches!(
             expectation,
-            Expectation::Run(_) | Expectation::RuntimeCode(_) | Expectation::RunReports(_)
+            Expectation::Run(_)
+                | Expectation::RunBlocked
+                | Expectation::RuntimeCode(_)
+                | Expectation::RunReports(_)
         )
     }) {
         RuntimeMode::RunMain
@@ -673,6 +680,18 @@ fn check_case(case: &Case) -> Vec<String> {
                     did_not_run(&artifacts)
                 )),
             },
+            Expectation::RunBlocked => {
+                match (&artifacts.runtime_result, artifacts.check_runnable()) {
+                    (None, Err(FunctionCallError::CompilationFailed { .. })) => {}
+                    (Some(actual), _) => failures.push(format!(
+                        "expected compilation errors to block main, but it ran: {actual}"
+                    )),
+                    (None, _) => failures.push(format!(
+                        "expected compilation errors to block main, but {}",
+                        did_not_run(&artifacts)
+                    )),
+                }
+            }
             Expectation::RuntimeCode(expected) => match &artifacts.runtime_result {
                 Some(actual) if actual.code() == Some(*expected) => {}
                 Some(actual) => failures.push(format!(
@@ -923,13 +942,21 @@ enum Outcome {
 #[derive(Clone, Debug, PartialEq)]
 enum Expectation {
     Run(FunctionValue),
+    /// Compilation errors keep `main` from running.
+    RunBlocked,
     RuntimeCode(DiagnosticCode),
     RunReports(String),
     Diagnostics(usize),
     DiagnosticContains(String),
     DiagnosticCode(DiagnosticCode),
-    DumpContains { stage: DumpStage, text: String },
-    DumpLacks { stage: DumpStage, text: String },
+    DumpContains {
+        stage: DumpStage,
+        text: String,
+    },
+    DumpLacks {
+        stage: DumpStage,
+        text: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

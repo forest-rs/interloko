@@ -466,13 +466,42 @@ impl Repl {
         let artifacts = self.ensure_artifacts(stderr)?;
         match self.run_turn(&artifacts, name, source, stdout, stderr)? {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
-            Err(error) => writeln!(
-                stderr,
-                "{} {}",
-                self.style.error_label("runtime error:"),
-                error
-            )?,
+            Err(error) => self.report_call_error(name, &error, stderr)?,
         }
+        Ok(())
+    }
+
+    /// Reports a call that failed. One that compilation errors kept from
+    /// running, such as a strict definition's after `:typing strict`, lists
+    /// those errors with their notes (reasons and fixes) first.
+    fn report_call_error<E>(
+        &self,
+        name: &str,
+        error: &FunctionCallError,
+        stderr: &mut E,
+    ) -> Result<()>
+    where
+        E: Write,
+    {
+        if let FunctionCallError::CompilationFailed { errors } = error {
+            let diagnostics = errors
+                .iter()
+                .map(|(_, diagnostic)| diagnostic.clone())
+                .collect::<Vec<_>>();
+            self.print_diagnostics(&diagnostics, stderr)?;
+            writeln!(
+                stderr,
+                "{} `{name}` did not run: {error}",
+                self.style.error_label("error:")
+            )?;
+            return Ok(());
+        }
+        writeln!(
+            stderr,
+            "{} {}",
+            self.style.error_label("runtime error:"),
+            error
+        )?;
         Ok(())
     }
 
@@ -679,7 +708,7 @@ impl Repl {
         E: Write,
     {
         let mut chooser =
-            break_loop::BreakLoop::new(self, artifacts.code_unit(), source, stdout, stderr);
+            break_loop::BreakLoop::new(self, artifacts.code_unit().ok(), source, stdout, stderr);
         let result = runtime.call_function_with(
             artifacts,
             name,
@@ -1464,12 +1493,7 @@ impl Repl {
         };
         match artifacts.call_function(name, &[], None) {
             Ok(outcome) => writeln!(stdout, "{}", self.style.value(&outcome.value))?,
-            Err(error) => writeln!(
-                stderr,
-                "{} {}",
-                self.style.error_label("runtime error:"),
-                error
-            )?,
+            Err(error) => self.report_call_error(name, &error, stderr)?,
         }
         Ok(())
     }
