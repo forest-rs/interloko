@@ -221,6 +221,7 @@ pub use query::{
     TypeQueryError, TypeReport, TypeSelector, TypeSubject, TypesAnchor, TypingDependency, UseType,
     no_type_labels,
 };
+pub(crate) use strict::required_types;
 pub use strict::{
     StrictDefinition, StrictFix, StrictPolicy, StrictScope, StrictSource, StrictViolation,
     fixes as strict_fixes, strictness, type_source,
@@ -1753,6 +1754,22 @@ pub fn exact_class_tuples(
         return None;
     }
     Some((flow::product(&per_arg), sealed))
+}
+
+/// How many argument tuples a dispatch over `actual` distributes over: the
+/// product, over the arguments, of their union members once each cone over
+/// a sealed class is split into its pieces. A count above
+/// [`MAX_DISPATCH_TUPLES`] is checked against the whole argument types
+/// instead, so a send that every piece covers can still stay a runtime
+/// check.
+#[must_use]
+pub fn dispatch_tuple_count(module: &sem::Module, actual: &[Type]) -> usize {
+    let members = flow::dispatch_members(module, actual);
+    let (split, _) = flow::split_members(module, &members);
+    split
+        .iter()
+        .try_fold(1_usize, |count, members| count.checked_mul(members.len()))
+        .unwrap_or(usize::MAX)
 }
 
 /// Iterations [`widen_to_fixpoint`] runs before giving up on convergence.

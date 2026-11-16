@@ -2294,7 +2294,7 @@ fn decide_class_object(
 
 /// The members a dispatch distributes over, per argument: each union
 /// member on its own, or the whole type for [`Type::top`].
-fn dispatch_members(module: &sem::Module, actual: &[Type]) -> Vec<Vec<Type>> {
+pub(super) fn dispatch_members(module: &sem::Module, actual: &[Type]) -> Vec<Vec<Type>> {
     actual
         .iter()
         .map(|ty| match ty.atoms() {
@@ -2309,7 +2309,10 @@ fn dispatch_members(module: &sem::Module, actual: &[Type]) -> Vec<Vec<Type>> {
 
 /// Replaces every member that is a cone over a sealed class by its pieces,
 /// one level; also returns the classes split.
-fn split_members(module: &sem::Module, members: &[Vec<Type>]) -> (Vec<Vec<Type>>, Vec<ClassId>) {
+pub(super) fn split_members(
+    module: &sem::Module,
+    members: &[Vec<Type>],
+) -> (Vec<Vec<Type>>, Vec<ClassId>) {
     let mut split = Vec::new();
     let next = members
         .iter()

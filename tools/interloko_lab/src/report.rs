@@ -1717,6 +1717,9 @@ fn environment_kind_title(kind: EnvironmentKind) -> &'static str {
         EnvironmentKind::DefinitionResult => {
             "Result of a definition, or a constant's value, whose type can be annotated."
         }
+        EnvironmentKind::Claims => {
+            "What typing established about a definition, what its generated code relies on, and which checks stay at run time."
+        }
     }
 }
 

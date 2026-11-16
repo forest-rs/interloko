@@ -14,6 +14,7 @@ extern crate std;
 pub mod annotation;
 /// Surface AST produced from the CST.
 pub mod ast;
+pub mod claims;
 /// Shared diagnostic types.
 pub mod diagnostic;
 mod execution_trace;

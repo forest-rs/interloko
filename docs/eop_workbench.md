@@ -42,6 +42,8 @@ Typical IDs include:
   (see [Annotation Targets](#annotation-targets))
 - `result:<definition-id>` for a function's or method's result, or a
   constant's value
+- `claims:<definition-id>` for the claim report of a function, method, or
+  constant (see [Claim Reports](#claim-reports))
 - `runtime-class:c0` for the root runtime layout row
 - `runtime-class:c1`
 - `runtime-slot:c1.s0`
@@ -138,6 +140,7 @@ Supported read-only invocations are:
 - `show-types`
 - `show-dependents`
 - `preview-strict`
+- `show-claims` (optionally `summary` or `full`)
 - `run`
 
 `run` runs `main` and, like `interloko_lab run`, refuses when compilation
@@ -372,12 +375,12 @@ span, not by site number, since an annotation can add a check (a typed
 
 ```text
 preview annotate target=binding:def…:s annotation=<circle> previous=<shape> (not applied)
-typing delta: changed=2 added=0 removed=0 unchanged=1
-  verdicts proved 0->2 checked 3->1 refuted 0->0
-  codegen kept 3->2 elided 0->1 specialized 0->0 inlined 0->0 linked 0->0
 contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=1
   narrowed param s of function measure (contract:def…): <shape> -> <circle>; callers now carry the obligation, and inputs accepted before are rejected
 obligations: removed-here=2 added-here=0 moved-to-callers=0 (proved=0 runtime=0 refuted=0 errors=0) removed-in-callers=0
+typing delta: changed=2 added=0 removed=0 unchanged=1
+  verdicts proved 0->2 checked 3->1 refuted 0->0
+  codegen kept 3->2 elided 0->1 specialized 0->0 inlined 0->0 linked 0->0
   errors 0->0
   typing:def…:s0 instance verdict=checked->proved codegen=kept->elided severity=silent->warning
   typing:def…:s1 dispatch verdict=checked->proved codegen=kept severity=silent
@@ -491,7 +494,8 @@ to what it reports and to what could fix it:
   and applying adds an ordinary `Annotate` entry to the log. An annotation
   fix narrows a parameter's contract, and the preview says so first: the
   errors go because the checks moved to the callers, not because they were
-  removed.
+  removed. Each fix offered in a [claim report](#claim-reports) says what
+  it costs.
 - `preview-strict` on a function, method, generic, or constant reports
   what would fail if it were strict, without changing anything: each
   would-be error with its decision, reasons, and fixes. On a generic it
@@ -515,9 +519,6 @@ diagnostics:
 main did not run: compilation reported 2 errors: diagnostic:d0 typing.unproved-range at 302..303 (typing:def…:s0); diagnostic:d1 typing.unproved-range at 313..314 (typing:def…:s1)
 ```
 
-Strictness is reporting only, and an input of its own: toggling a
-definition's `strict` re-derives the typing diagnostics from the recorded
-decisions (the incremental graph's `strictness` artifact), and so does the
 `preview-fix` on `diagnostic:d0` shows that the fix clears both errors by
 narrowing `twice`'s contract, moving the range check to `main`, where
 typing proves the `3` it passes:
@@ -540,8 +541,12 @@ Strict does not mean check-free. A strict definition must prove every
 check the compiler inserts (send dispatch, implicit casts, range checks,
 and overflow under `strict.overflow=proved`); explicit `as(...)` casts,
 `instance?` tests, the guards of indirect entries, and by default integer
-overflow stay runtime checks.
+overflow stay runtime checks. A definition's claim report states this
+guarantee and counts the runtime checks it exempts.
 
+Strictness is reporting only, and an input of its own: toggling a
+definition's `strict` re-derives the typing diagnostics from the recorded
+decisions (the incremental graph's `strictness` artifact), and so does the
 policy, so nothing is re-typed or lowered again. A strict definition with
 errors still lowers, keeping the checks it could not prove, but its errors
 block running like any compile error
@@ -559,6 +564,98 @@ the suspended run. In the REPL:
 :invoke <function:...|method:...|generic:...|constant:...> preview-strict
 :invoke <diagnostic:dN> preview-fix|apply-fix [fix-index]
 ```
+
+## Claim Reports
+
+A definition's claim report is one reviewable account of what the compiler
+claims about a function, method, or constant, aggregated from facts it
+already records: the typing decisions, what lowering did with each check
+(`lower::CheckCodegenRecord`), and the contracts and closed worlds they
+rely on. It derives nothing new. Every source function, method, and
+constant has a `claims:<definition-id>` object; it and the definition's
+`function:`, `method:`, or `constant:` object offer `show-claims`:
+
+```sh
+cargo run -p interloko_lab -- claims tools/interloko_lab/fixtures/strict_digits.loko function:f1
+cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/strict_digits.loko function:f1 show-claims full
+```
+
+```text
+claims claims:def… function twice
+  revision=none basis=e6fd5d1656dff75b typing=checked codegen=proved detail=summary
+  contract contract:def…: params=(n: <integer>) results=(<integer>) relied-on-by=0
+  strict (declared): every check the compiler inserts is proved (send dispatch, implicit casts, range checks); explicit as(...) casts, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks; unmet=2 exempt-runtime=1
+  established: sites=3 proved=0 checked=3 refuted=0 unreachable=0
+  generated code: relies-on-proof=0 (elided=0 specialized=0 inlined=0 linked=0) proved-but-kept=0 runtime-checks=3 errors=2
+  supported-by:
+    contract:def… contract of function small sites=1 relied=0
+  unproved checks: 3
+    typing:def…:s0 range origin=implicit span=302..303 status=runtime verdict=checked codegen=kept strict=required expected=limited(<integer>, min: 0, max: 9) actual=<integer>
+      cause=declared: the declared type <integer> admits values outside limited(<integer>, min: 0, max: 9)
+      fix: annotate parameter n as limited(<integer>, min: 0, max: 9) [binding:def…:n]; narrows the contract: callers carry the obligation, and inputs accepted before are rejected
+      fix: write as(limited(<integer>, min: 0, max: 9), ...) to check deliberately; keeps the check at run time, deliberately
+    ...
+    typing:def…:s2 overflow origin=implicit span=296..315 status=runtime verdict=checked codegen=kept strict=exempt expected=limited(<integer>, min: -9223372036854775808, max: 9223372036854775807) actual=(<integer>, <integer>)
+      depends-on contract:def…
+      cause=declared: the operands' declared types (<integer>, <integer>) allow a result outside limited(<integer>, min: -9223372036854775808, max: 9223372036854775807)
+```
+
+The report answers, in order:
+
+- **Which compilation.** `revision` is the retained session's revision
+  (`interloko_session::Session::claims` stamps it; `none` from compiler
+  artifacts) and `basis` fingerprints the source text, typing
+  configuration, and codegen policy the report was derived from
+  (`SessionArtifacts::claims_basis`). A held report whose revision or
+  basis is no longer current is stale (`Session::is_current`).
+- **What it promises.** The definition's own contract, with parameter
+  names, and how many decisions elsewhere rely on it.
+- **What strictness guarantees,** exactly: which checks a strict
+  definition must prove, which stay runtime checks regardless, how many of
+  its checks strict typing would reject (`unmet`, its errors when strict,
+  `preview-strict`'s count when not), and how many runtime checks it
+  exempts.
+- **What typing established.** Verdict counts over every check site.
+- **What generated code relies on.** A proved check is `relied` on when
+  lowering acted on the proof (`elided`, `specialized`, `inlined`, or
+  `linked`), and `proved-kept` when the code still performs it, as under
+  `codegen=off`; `runtime-checks` counts every check the code performs.
+- **What supports it.** Each contract and closed world the decisions cite,
+  as its EOP id and a sentence, with how many sites cite it and how many
+  of those the generated code relies on: those are the assumptions an
+  install must keep, not just re-report.
+- **What stays at run time, and why.** Each unproved check, with its
+  cause and the fixes that could prove it, each saying what it costs.
+
+A cause distinguishes a check the program asked for, or one its declared
+types genuinely leave open, from lost precision:
+
+| cause | meaning |
+|-------|---------|
+| `requested(explicit)`, `requested(test)`, `requested(entry)` | an `as(...)`, an `instance?` test, or an indirect entry's guard: the program's own check |
+| `always-fails` | the check fails whenever it is reached |
+| `declared` | the written types admit values the check rejects |
+| `unannotated-input` | an operand comes from a parameter or a callee's result with no written type; `input` names the annotation target |
+| `open-class` | an operand is a cone over an open class whose current subclasses would satisfy the check: sealing would let typing rely on them |
+| `widened(atoms)` | an `instance?` test could not narrow a sealed hierarchy because what it leaves has more than `MAX_ATOMS` pieces |
+| `widened(dispatch-tuples)` | a send's arguments split into more than `MAX_DISPATCH_TUPLES` combinations of sealed pieces |
+| `widened(loop-head)` | a loop head widened the operand's facts (`ReasonKind::Widened`) |
+| `unsupported(float-integrality)` | converting a float to an integer needs integrality, which typing does not track |
+| `unsupported(unrefined-expression)` | typing has no rule refining the operand's expression, such as the result of a call through an untyped `<callable>` |
+
+The fixes are strict typing's (`typing::StrictFix`), offered for any
+unproved implicit check, each with its consequence: annotating a parameter
+narrows the contract and moves the check to the callers, testing with
+`instance?` proves it locally, sealing relies on a closed world, and an
+explicit `as` keeps the check deliberately.
+
+`summary` (the default) lists only the unproved checks; `full` lists every
+site with its reason chains and assumptions. Embedders call
+`SessionArtifacts::claim_report(id, ClaimDetail)` with a `claims:`,
+`function:`, `method:`, or `constant:` id, or a `def…` id, and read the
+typed `claims::ClaimReport`; the `claims:` object's `TypingFacet::Claims`
+carries its tallies. In the REPL, `:claims <id|name> [full]` or
+`:invoke <id> show-claims [full]`.
 
 ## Codegen Policy
 

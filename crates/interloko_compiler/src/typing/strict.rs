@@ -345,6 +345,29 @@ impl StrictFix {
         }
     }
 
+    /// What making the fix does to the program beyond proving the check,
+    /// which is what a reviewer must accept along with it:
+    ///
+    /// - [`Self::Annotate`] narrows the parameter's contract: its callers
+    ///   now carry the check, and inputs it accepted before are rejected;
+    /// - [`Self::Narrow`] proves the check locally, under a test the body
+    ///   makes;
+    /// - [`Self::Seal`] relies on a closed world: the class gains no
+    ///   subclasses outside its source;
+    /// - [`Self::Explicit`] keeps the check at run time, written
+    ///   deliberately.
+    #[must_use]
+    pub const fn consequence(&self) -> &'static str {
+        match self {
+            Self::Annotate { .. } => {
+                "narrows the contract: callers carry the obligation, and inputs accepted before are rejected"
+            }
+            Self::Narrow { .. } => "proves the check locally, under a test",
+            Self::Seal { .. } => "relies on a closed world: no subclasses outside its source",
+            Self::Explicit { .. } => "keeps the check at run time, deliberately",
+        }
+    }
+
     /// The type source an [`Self::Annotate`] fix writes, as an annotation
     /// mutation takes it.
     #[must_use]
@@ -422,7 +445,10 @@ fn push_unique(fixes: &mut Vec<StrictFix>, fix: StrictFix) {
 /// The operand positions of `decision` whose type falls short, with the
 /// type each needs: a cast's target, a range, or for a send, the union of
 /// its methods' specializers at a position the argument is not within.
-fn required_types(module: &sem::Module, decision: &TypingDecision) -> Vec<(usize, Type)> {
+pub(crate) fn required_types(
+    module: &sem::Module,
+    decision: &TypingDecision,
+) -> Vec<(usize, Type)> {
     match &decision.expected {
         TypingExpectation::Class(class) => {
             alloc::vec![(0, Type::of(Atom::Cone(*class), module))]

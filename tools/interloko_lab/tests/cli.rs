@@ -1747,3 +1747,59 @@ fn strict_errors_preview_strictness_and_fixes_through_affordances() {
         "{stderr}"
     );
 }
+
+#[test]
+fn claims_report_what_typing_established_and_why_checks_stay() {
+    let fixture = fixture("strict_digits.loko");
+    let path = fixture.to_str().expect("utf8 path");
+
+    let affordances = run_lab(&["affordances", path, "function:f1"]);
+    assert!(affordances.contains("show-claims"), "{affordances}");
+    let eop = run_lab(&["eop", path]);
+    assert!(eop.contains("  object claims:def"), "{eop}");
+    assert!(
+        eop.contains("presentation title=\"claims of function twice\""),
+        "{eop}"
+    );
+
+    let (stdout, _) = run_lab_success(&["claims", path, "function:f1"]);
+    assert!(stdout.starts_with("claims claims:def"), "{stdout}");
+    assert!(stdout.contains("  revision=none basis="), "{stdout}");
+    assert!(
+        stdout.contains(
+            "  strict (declared): every check the compiler inserts is proved (send dispatch, implicit casts, range checks); \
+             explicit as(...) casts, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks; \
+             unmet=2 exempt-runtime=1\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  established: sites=3 proved=0 checked=3 refuted=0 unreachable=0\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  unproved checks: 3\n"), "{stdout}");
+    assert!(
+        stdout.contains("cause=declared: the declared type <integer> admits values outside limited(<integer>, min: 0, max: 9)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "fix: annotate parameter n as limited(<integer>, min: 0, max: 9) [binding:def"
+        ) && stdout.contains("; narrows the contract: callers carry the obligation"),
+        "{stdout}"
+    );
+
+    let (full, _) = run_lab_success(&[
+        "invoke-affordance",
+        path,
+        "function:f1",
+        "show-claims",
+        "full",
+    ]);
+    assert!(full.contains("detail=full"), "{full}");
+    assert!(full.contains("  sites: 3 (3 unproved)\n"), "{full}");
+    assert!(full.contains("      because declared@"), "{full}");
+
+    let stderr = run_lab_failure(&["claims", path, "function:f1", "everything"]);
+    assert!(stderr.contains("takes `summary` or `full`"), "{stderr}");
+}

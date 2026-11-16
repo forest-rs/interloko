@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use interloko_compiler::annotation::AnnotationTarget;
+use interloko_compiler::claims::{ClaimDetail, ClaimReport};
 use interloko_compiler::diagnostic::Diagnostic;
 use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::HostMetaRegistry;
@@ -203,6 +204,28 @@ impl Session {
         self.artifacts
             .preview_annotation(target, type_source)
             .map_err(SessionError::Mutation)
+    }
+
+    /// Returns the claim report of the function, method, or constant `id`
+    /// names (a `claims:`, `function:`, `method:`, or `constant:` object id,
+    /// or a `def…` id) in the accepted revision, stamped with that revision.
+    ///
+    /// The report says what typing established, what the generated code
+    /// relies on, which checks stay at run time and why, and what contracts
+    /// and closed worlds support it; see [`interloko_compiler::claims`]. It
+    /// is stale once [`ClaimReport::revision`] is not [`Self::revision`].
+    /// Returns `None` when `id` names no such definition.
+    #[must_use]
+    pub fn claims(&self, id: &str, detail: ClaimDetail) -> Option<ClaimReport> {
+        self.artifacts
+            .claim_report(id, detail)
+            .map(|report| report.at_revision(self.revision))
+    }
+
+    /// Whether `report` describes the accepted revision.
+    #[must_use]
+    pub fn is_current(&self, report: &ClaimReport) -> bool {
+        report.revision == Some(self.revision) && report.basis == self.artifacts.claims_basis()
     }
 
     /// Accepted compiler evidence, including source, grammar and artifact facts.

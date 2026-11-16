@@ -147,7 +147,13 @@ The current slices include:
   Strictness only changes reporting: a strict definition compiles exactly
   as it otherwise would, and once its errors are fixed its checks are
   proved and dropped. Its errors block running and installing the code,
-  as every compile error does. A preview reports what would fail before opting in;
+  as every compile error does. A preview reports what would fail before opting in.
+  Strict is not check-free: explicit `as`, `instance?`, indirect-entry
+  guards and (by default) overflow stay runtime checks, and annotating a
+  parameter proves a body's check by moving it to the callers, a contract
+  change every annotation preview names. Each definition's claim report
+  (`claims:<definition>`) says what typing established, what the generated
+  code relies on, and why each remaining check stays;
   see [`docs/eop_workbench.md`](docs/eop_workbench.md#strict-typing),
   and `interloko_corpus strictness` measures how much of the corpus
   already meets it;
