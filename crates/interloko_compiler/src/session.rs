@@ -126,10 +126,11 @@ impl SourceFile {
 pub enum RuntimeMode {
     /// Compile only.
     CompileOnly,
-    /// Compile and run zero-argument `main` when possible.
+    /// Compile and run zero-argument `main` when possible: compilation
+    /// reported no errors ([`SessionArtifacts::check_runnable`]).
     RunMain,
     /// Compile and run zero-argument `main` while recording an execution
-    /// trace.
+    /// trace, when compilation reported no errors.
     RunMainTraced {
         /// Evidence retained by the recording.
         detail: ExecutionTraceDetail,
@@ -471,7 +472,10 @@ impl SessionRuntime {
     /// `artifacts` must have the runtime layout the image was created with;
     /// otherwise the call fails with
     /// [`FunctionCallError::RuntimeLayoutChanged`] and the image is
-    /// untouched.
+    /// untouched. Artifacts whose compilation reported errors are refused
+    /// with [`FunctionCallError::CompilationFailed`]
+    /// ([`SessionArtifacts::check_runnable`]), even when the image was made
+    /// for earlier artifacts that could run.
     pub fn call_function(
         &mut self,
         artifacts: &SessionArtifacts,
@@ -502,10 +506,7 @@ impl SessionRuntime {
         trace: Option<ExecutionTraceDetail>,
         services: CallServices<'a>,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
-        let tape = artifacts
-            .tape
-            .as_ref()
-            .ok_or(FunctionCallError::TapeUnavailable)?;
+        let tape = artifacts.runnable_tape()?;
         if *self.host.layout() != *tape.runtime() {
             return Err(FunctionCallError::RuntimeLayoutChanged);
         }
@@ -576,6 +577,18 @@ impl fmt::Display for HostFunctionFailure {
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum FunctionCallError {
+    /// Compilation reported errors, so its code may not run or be
+    /// installed. Every error-severity diagnostic blocks: semantic errors,
+    /// error-severity typing findings such as a strict definition's
+    /// `typing.unproved-*` errors, and internal lowering failures. Warnings
+    /// never do.
+    CompilationFailed {
+        /// Each error as `(index, diagnostic)`, where `index` is its position
+        /// in [`SessionArtifacts::diagnostics`] and so names its EOP object
+        /// `diagnostic:d<index>`. The diagnostic carries the typing
+        /// `decision` id and a strict error's `fix:` notes.
+        errors: Vec<(usize, Diagnostic)>,
+    },
     /// The artifacts do not contain an emitted tape program.
     TapeUnavailable,
     /// The requested function was not present in the semantic artifacts.
@@ -711,6 +724,7 @@ pub struct CallServices<'a> {
 impl fmt::Display for FunctionCallError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CompilationFailed { errors } => write_compilation_errors(formatter, errors),
             Self::TapeUnavailable => formatter.write_str("tape unavailable"),
             Self::MissingFunction { name } => write!(formatter, "missing function `{name}`"),
             Self::ArgumentCountMismatch {
@@ -779,6 +793,34 @@ impl fmt::Display for FunctionCallError {
 }
 
 impl core::error::Error for FunctionCallError {}
+
+/// Writes the errors that block running as one line: each error's
+/// `diagnostic:d<n>` id, code, span, and typing decision when it has one.
+fn write_compilation_errors(
+    formatter: &mut fmt::Formatter<'_>,
+    errors: &[(usize, Diagnostic)],
+) -> fmt::Result {
+    let plural = if errors.len() == 1 { "" } else { "s" };
+    write!(
+        formatter,
+        "compilation reported {} error{plural}: ",
+        errors.len()
+    )?;
+    for (position, (index, diagnostic)) in errors.iter().enumerate() {
+        if position > 0 {
+            formatter.write_str("; ")?;
+        }
+        write!(
+            formatter,
+            "diagnostic:d{index} {} at {}..{}",
+            diagnostic.code, diagnostic.span.start, diagnostic.span.end
+        )?;
+        if let Some(decision) = diagnostic.args.iter().find(|arg| arg.name == "decision") {
+            write!(formatter, " ({})", decision.value.render())?;
+        }
+    }
+    Ok(())
+}
 
 /// Stage that can be rendered as a text dump.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1540,9 +1582,13 @@ pub struct SessionArtifacts {
     /// soft typing warnings.
     pub diagnostics: Vec<Diagnostic>,
     /// Soft typing decisions and the configuration they were reported under.
-    /// Advisory: lowering, tape emission, and the runtime do not consult it.
+    /// The runtime does not consult it, but its error-severity findings, such
+    /// as strict typing's, block running like any other error.
     pub typing: typing::TypingArtifact,
-    /// Runtime result when [`RuntimeMode::RunMain`] or tracing was requested.
+    /// Runtime result when [`RuntimeMode::RunMain`] or tracing was requested
+    /// and compilation reported no errors. `None` when running was not
+    /// requested or errors blocked it; [`SessionArtifacts::check_runnable`]
+    /// says which errors.
     pub runtime_result: Option<RuntimeResult>,
     /// Captured runtime trace when traced execution was requested.
     pub runtime_trace: Option<ExecutionTrace>,
@@ -1761,8 +1807,11 @@ pub enum MutationError {
         /// Generic name parsed from `method_source`.
         actual: String,
     },
-    /// Semantic resolution rejected the candidate module. Carries the new
-    /// diagnostics that fired between the pre-mutation and candidate compiles.
+    /// Compiling the candidate module added errors: semantic errors, or
+    /// error-severity typing findings such as a strict definition's
+    /// `typing.unproved-*` errors, which would block running it. Carries
+    /// the new error diagnostics that fired between the pre-mutation and
+    /// candidate compiles.
     SemanticFailed {
         /// New diagnostics introduced by the candidate compile.
         diagnostics: Vec<Diagnostic>,
@@ -2110,7 +2159,8 @@ impl SessionArtifacts {
     ///
     /// Typing decisions do not depend on the configuration, so nothing is
     /// re-checked or recompiled: only the typing artifact's diagnostics and the
-    /// aggregated diagnostic list change.
+    /// aggregated diagnostic list change. A recorded run of `main` is kept
+    /// unless the new diagnostics include errors, which block running.
     #[must_use]
     pub fn with_typing_config(&self, config: typing::TypingConfig) -> Self {
         let mut artifacts = self.clone();
@@ -2129,6 +2179,10 @@ impl SessionArtifacts {
         timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
         artifacts.typing = typing;
         artifacts.diagnostics = diagnostics;
+        if artifacts.has_errors() {
+            artifacts.runtime_result = None;
+            artifacts.runtime_trace = None;
+        }
         artifacts.artifact_metrics = build_artifact_metrics(&artifacts, &timings);
         artifacts
     }
@@ -2870,16 +2924,16 @@ impl SessionArtifacts {
     /// This calm embedding surface currently supports integer, boolean, and
     /// string arguments and exactly one result of one of those categories.
     /// Object handles and VM-owned storage do not cross the API boundary.
+    /// Like every call, it is refused with
+    /// [`FunctionCallError::CompilationFailed`] when compilation reported
+    /// errors ([`Self::check_runnable`]).
     pub fn call_function(
         &self,
         function_name: &str,
         arguments: &[FunctionValue],
         trace: Option<ExecutionTraceDetail>,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
-        let tape = self
-            .tape
-            .as_ref()
-            .ok_or(FunctionCallError::TapeUnavailable)?;
+        let tape = self.runnable_tape()?;
         call_function(
             &self.sem,
             &self.host_registry,
@@ -2893,12 +2947,10 @@ impl SessionArtifacts {
     }
 
     /// Creates a runtime image for these artifacts that successive calls
-    /// share; see [`SessionRuntime`].
+    /// share; see [`SessionRuntime`]. Refused, like a call, when compilation
+    /// reported errors ([`Self::check_runnable`]).
     pub fn runtime(&self) -> Result<SessionRuntime, FunctionCallError> {
-        let tape = self
-            .tape
-            .as_ref()
-            .ok_or(FunctionCallError::TapeUnavailable)?;
+        let tape = self.runnable_tape()?;
         Ok(SessionRuntime::new(tape))
     }
 
@@ -2915,10 +2967,7 @@ impl SessionArtifacts {
         trace: Option<ExecutionTraceDetail>,
         handler: &mut dyn HostFunctionHandler,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
-        let tape = self
-            .tape
-            .as_ref()
-            .ok_or(FunctionCallError::TapeUnavailable)?;
+        let tape = self.runnable_tape()?;
         call_function(
             &self.sem,
             &self.host_registry,
@@ -2934,14 +2983,56 @@ impl SessionArtifacts {
         )
     }
 
-    /// The compiled program as a code unit, when the artifacts emitted tape.
+    /// The compiled program as a code unit, when it may run.
     ///
     /// A chooser installs it into a suspended run with
     /// [`interloko_runtime::chooser::Choice::Install`] to hot-swap edited
-    /// definitions under the frames that are still running.
-    #[must_use]
-    pub fn code_unit(&self) -> Option<Arc<CodeUnit>> {
-        self.tape.as_ref().map(|tape| Arc::clone(&tape.code))
+    /// definitions under the frames that are still running. Like a call,
+    /// it is refused with [`FunctionCallError::CompilationFailed`] when
+    /// compilation reported errors (see [`Self::check_runnable`]), so an
+    /// edit with errors, strict typing's included, is never installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FunctionCallError::CompilationFailed`] when compilation
+    /// reported errors, and [`FunctionCallError::TapeUnavailable`] when no
+    /// tape was emitted.
+    pub fn code_unit(&self) -> Result<Arc<CodeUnit>, FunctionCallError> {
+        self.runnable_tape().map(|tape| Arc::clone(&tape.code))
+    }
+
+    /// Checks that these artifacts' code may run: compilation reported no
+    /// errors and emitted tape.
+    ///
+    /// Every error-severity diagnostic blocks running and installing, the
+    /// way a semantic error leaves nothing to run: an error-severity typing
+    /// finding, such as a strict definition's `typing.unproved-*` error or
+    /// a finding a typing policy reports at `error`, blocks even though the
+    /// code it reports on was lowered. Warnings never block. Calls,
+    /// [`Self::runtime`], [`Self::code_unit`] and [`RuntimeMode::RunMain`]
+    /// all apply this check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FunctionCallError::CompilationFailed`] listing the errors,
+    /// or [`FunctionCallError::TapeUnavailable`] when no tape was emitted.
+    pub fn check_runnable(&self) -> Result<(), FunctionCallError> {
+        self.runnable_tape().map(|_| ())
+    }
+
+    /// The tape to run, unless compilation errors block running.
+    fn runnable_tape(&self) -> Result<&tape::TapeModule, FunctionCallError> {
+        let errors = self
+            .diagnostics
+            .iter()
+            .enumerate()
+            .filter(|(_, diagnostic)| diagnostic.is_error())
+            .map(|(index, diagnostic)| (index, diagnostic.clone()))
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            return Err(FunctionCallError::CompilationFailed { errors });
+        }
+        self.tape.as_ref().ok_or(FunctionCallError::TapeUnavailable)
     }
 
     /// Calls a direct function with embedding services: declared host
@@ -2957,10 +3048,7 @@ impl SessionArtifacts {
         trace: Option<ExecutionTraceDetail>,
         services: CallServices<'a>,
     ) -> Result<FunctionCallOutcome, FunctionCallError> {
-        let tape = self
-            .tape
-            .as_ref()
-            .ok_or(FunctionCallError::TapeUnavailable)?;
+        let tape = self.runnable_tape()?;
         call_function(
             &self.sem,
             &self.host_registry,
@@ -2977,7 +3065,12 @@ impl SessionArtifacts {
     #[must_use]
     pub fn dump_execution_trace(&self) -> String {
         self.runtime_trace.as_ref().map_or_else(
-            || "execution trace unavailable: traced execution was not requested\n".into(),
+            || match self.check_runnable() {
+                Err(error @ FunctionCallError::CompilationFailed { .. }) => {
+                    format!("execution trace unavailable: main did not run: {error}\n")
+                }
+                _ => "execution trace unavailable: traced execution was not requested\n".into(),
+            },
             |trace| self.execution_trace_view(trace).render(),
         )
     }
@@ -4529,21 +4622,20 @@ fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> Session
     let (runtime_result, runtime_trace) = match mode {
         RuntimeMode::CompileOnly => (None, None),
         RuntimeMode::RunMain => (
-            previous.runtime_result.clone().or_else(|| {
-                let (result, elapsed_nanos) = measure_elapsed(|| {
-                    previous
-                        .tape
-                        .as_ref()
-                        .map(|tape| run_main(&previous.sem, &previous.host_registry, tape))
-                });
-                timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
-                result
+            // Errors block running, and with it any recorded result.
+            previous.runnable_tape().ok().and_then(|tape| {
+                previous.runtime_result.clone().or_else(|| {
+                    let (result, elapsed_nanos) =
+                        measure_elapsed(|| run_main(&previous.sem, &previous.host_registry, tape));
+                    timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
+                    Some(result)
+                })
             }),
             None,
         ),
         RuntimeMode::RunMainTraced { detail } => {
             let ((result, trace), elapsed_nanos) = measure_elapsed(|| {
-                previous.tape.as_ref().map_or((None, None), |tape| {
+                previous.runnable_tape().ok().map_or((None, None), |tape| {
                     let (result, trace) = run_main_with_trace(
                         &previous.sem,
                         &previous.host_registry,
@@ -6388,13 +6480,15 @@ pub(crate) fn compile_file_with_registries(
         aggregate_diagnostics(&sem, &typing, lower_error.as_ref(), tape_error.as_ref())
     });
     timings.record(QueryArtifact::Diagnostics, elapsed_nanos);
+    // Errors block running, typing errors included, though the code they
+    // report on was lowered: see `SessionArtifacts::check_runnable`.
+    let runnable = tape
+        .as_ref()
+        .filter(|_| !diagnostics.iter().any(Diagnostic::is_error));
     let ((runtime_result, runtime_trace), elapsed_nanos) = measure_elapsed(|| match mode {
         RuntimeMode::CompileOnly => (None, None),
-        RuntimeMode::RunMain => (
-            tape.as_ref().map(|tape| run_main(&sem, registry, tape)),
-            None,
-        ),
-        RuntimeMode::RunMainTraced { detail } => tape.as_ref().map_or((None, None), |tape| {
+        RuntimeMode::RunMain => (runnable.map(|tape| run_main(&sem, registry, tape)), None),
+        RuntimeMode::RunMainTraced { detail } => runnable.map_or((None, None), |tape| {
             let (result, trace) = run_main_with_trace(&sem, registry, tape, Some(detail));
             (Some(result), trace)
         }),
@@ -6523,9 +6617,9 @@ fn runtime_result_for_main_error(
     error: FunctionCallError,
 ) -> (RuntimeResult, Option<ExecutionTrace>) {
     match error {
-        FunctionCallError::TapeUnavailable | FunctionCallError::MissingFunction { .. } => {
-            (RuntimeResult::MissingMain, None)
-        }
+        FunctionCallError::CompilationFailed { .. }
+        | FunctionCallError::TapeUnavailable
+        | FunctionCallError::MissingFunction { .. } => (RuntimeResult::MissingMain, None),
         FunctionCallError::ArgumentCountMismatch { .. }
         | FunctionCallError::ArgumentTypeMismatch { .. }
         | FunctionCallError::ArgumentOutOfRange { .. }
@@ -16432,6 +16526,110 @@ mod tests {
     }
 
     #[test]
+    fn error_severity_typing_findings_block_running_strict_or_not() {
+        // A policy that reports the refuted send at `error` blocks running
+        // as the strict preset's errors do: every typing error does, though
+        // the code it reports on was lowered.
+        for (spec, error_count) in [("dispatch.refuted=error", 1), ("strict", 2)] {
+            let config = typing::TypingConfig::soft()
+                .apply_spec(spec)
+                .expect("valid policy");
+            let mut session = IncrementalCompilerSession::new();
+            let id = session.add_source("typing.loko", SHAPES_WITH_UNTAKEN_REFUTED_CALL);
+            let soft = session
+                .compile(id, RuntimeMode::RunMain)
+                .expect("source was just added")
+                .artifacts;
+            assert!(matches!(
+                soft.runtime_result,
+                Some(RuntimeResult::Returned(FunctionValue::Integer(7)))
+            ));
+            let mut runtime = soft.runtime().expect("soft code runs");
+
+            session.set_typing_config(config);
+            let blocked = session
+                .compile(id, RuntimeMode::RunMain)
+                .expect("source was just added")
+                .artifacts;
+            assert!(blocked.tape.is_some(), "{spec}");
+            assert!(blocked.runtime_result.is_none(), "{spec}");
+            let Err(FunctionCallError::CompilationFailed { errors }) = blocked.check_runnable()
+            else {
+                panic!("{spec}: typing errors should block running");
+            };
+            assert_eq!(errors.len(), error_count, "{spec}");
+            for (index, error) in &errors {
+                assert_eq!(&blocked.diagnostics[*index], error, "{spec}");
+            }
+            let report = blocked.check_runnable().unwrap_err().to_string();
+            assert!(
+                report.starts_with(&format!(
+                    "compilation reported {error_count} error{}: diagnostic:d0 typing.",
+                    if error_count == 1 { "" } else { "s" }
+                )),
+                "{report}"
+            );
+            assert!(report.contains("(typing:def"), "{report}");
+
+            // Every way to run or install the code is refused the same way,
+            // including a runtime image made for the code before the change.
+            assert!(matches!(
+                blocked.call_function("main", &[], None),
+                Err(FunctionCallError::CompilationFailed { .. })
+            ));
+            assert!(matches!(
+                blocked.runtime(),
+                Err(FunctionCallError::CompilationFailed { .. })
+            ));
+            assert!(matches!(
+                blocked.code_unit(),
+                Err(FunctionCallError::CompilationFailed { .. })
+            ));
+            assert!(matches!(
+                runtime.call_function(&blocked, "main", &[], None),
+                Err(FunctionCallError::CompilationFailed { .. })
+            ));
+            let traced = session
+                .compile(
+                    id,
+                    RuntimeMode::RunMainTraced {
+                        detail: ExecutionTraceDetail::Boundaries,
+                    },
+                )
+                .expect("source was just added")
+                .artifacts;
+            assert!(traced.runtime_result.is_none());
+            assert!(
+                traced.dump_execution_trace().starts_with(
+                    "execution trace unavailable: main did not run: compilation reported"
+                ),
+                "{spec}"
+            );
+
+            // Back under soft typing the same source runs again.
+            session.set_typing_config(typing::TypingConfig::soft());
+            let again = session
+                .compile(id, RuntimeMode::RunMain)
+                .expect("source was just added")
+                .artifacts;
+            assert!(matches!(
+                again.runtime_result,
+                Some(RuntimeResult::Returned(FunctionValue::Integer(7)))
+            ));
+        }
+
+        // A fresh compile blocks the same way.
+        let mut session = CompilerSession::new();
+        session.set_typing_config(typing::TypingConfig::strict());
+        let id = session.add_source("typing.loko", SHAPES_WITH_UNTAKEN_REFUTED_CALL);
+        let artifacts = session
+            .compile(id, RuntimeMode::RunMain)
+            .expect("source was just added");
+        assert!(artifacts.tape.is_some());
+        assert!(artifacts.runtime_result.is_none());
+    }
+
+    #[test]
     fn session_typing_config_sets_reporting_policy() {
         let mut session = CompilerSession::new();
         assert_eq!(session.typing_config(), typing::TypingConfig::soft());
@@ -16462,7 +16660,7 @@ mod tests {
             ]
         );
         assert!(artifacts.has_errors());
-        // Typing errors are advisory for the pipeline: lowering still ran.
+        // Typing errors do not stop lowering, only running.
         assert!(artifacts.tape.is_some());
     }
 

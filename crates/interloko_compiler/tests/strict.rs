@@ -73,8 +73,20 @@ fn strict_errors_are_diagnostic_objects_tied_to_their_decisions() {
         ]
     );
     assert!(artifacts.has_errors());
-    // Strictness is reporting only: the program still lowers and runs.
+    // Strictness is reporting only: the program still lowers. Its errors
+    // block running, as any error does, and the refusal names them.
     assert!(artifacts.tape.is_some());
+    let blocked = CompilerSession::compile_source("strict.loko", DIGITS, RuntimeMode::RunMain);
+    assert!(blocked.runtime_result.is_none());
+    let refusal = blocked
+        .call_function("main", &[], None)
+        .expect_err("strict errors block calls")
+        .to_string();
+    assert!(
+        refusal
+            .starts_with("compilation reported 2 errors: diagnostic:d0 typing.unproved-range at "),
+        "{refusal}"
+    );
 
     let diagnostic = object(&artifacts, "diagnostic:d0");
     let decision = artifacts

@@ -64,7 +64,10 @@ traces come from the existing compiler/runtime interface.
 - The typing configuration sets the severity each soft typing verdict is
   reported at, and which definitions are held to strict typing beyond those
   declared `strict`. A strict definition's unproved checks are errors, so a
-  source or configuration that leaves one is rejected like any other error. `set_typing_config` changes it as a revision-checked edit that
+  source or configuration that leaves one is rejected like any other error,
+  with the error (its decision and fixes) in `SessionError::Compilation`;
+  errors block running, so accepted code is always code that may run.
+  `set_typing_config` changes it as a revision-checked edit that
   keeps source, code and mutation log, and source replacement keeps it. Like
   the codegen policy it is a session input, not a mutation: rewind does not
   undo it. The result must still be accepted, so a configuration that turns a

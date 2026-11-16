@@ -139,7 +139,7 @@ fn command_run(args: &[String], codegen: CodegenPolicy) -> Result<()> {
             Ok(())
         }
         Some(result) => Err(LabError::Runtime(result.to_string())),
-        None => Err(LabError::Runtime(missing_runtime_reason(&artifacts))),
+        None => Err(missing_runtime_error(&artifacts)),
     }
 }
 
@@ -1085,10 +1085,7 @@ fn invoke_add_method(
             generic,
             method_source,
         })
-        .map_err(|error| LabError::MutationFailed {
-            request: "add-method",
-            summary: format_mutation_error(&error),
-        })?;
+        .map_err(|error| mutation_failed("add-method", &error))?;
 
     print_mutation_outcome(&outcome, workbench.artifacts.mutations().len());
     Ok(())
@@ -1209,10 +1206,7 @@ fn annotate_target(
     type_source: &str,
     dry_run: bool,
 ) -> Result<()> {
-    let failed = |error: MutationError| LabError::MutationFailed {
-        request: "annotate",
-        summary: format_mutation_error(&error),
-    };
+    let failed = |error: MutationError| mutation_failed("annotate", &error);
     if dry_run {
         let preview = workbench
             .artifacts
@@ -1339,6 +1333,22 @@ fn print_mutation_outcome(outcome: &MutationOutcome, log_size: usize) {
     );
 }
 
+/// A refused mutation as the lab's error, after printing the diagnostics
+/// it would have added, with their notes, as a compile prints them: an edit
+/// that adds errors, a strict definition's included, is never applied.
+fn mutation_failed(request: &'static str, error: &MutationError) -> LabError {
+    if let MutationError::ParseFailed { diagnostics }
+    | MutationError::SemanticFailed { diagnostics } = error
+        && let Err(error) = print_diagnostics(diagnostics)
+    {
+        return error;
+    }
+    LabError::MutationFailed {
+        request,
+        summary: format_mutation_error(error),
+    }
+}
+
 fn format_mutation_error(error: &MutationError) -> String {
     match error {
         MutationError::ParseFailed { diagnostics } => {
@@ -1356,9 +1366,15 @@ fn format_mutation_error(error: &MutationError) -> String {
             "method names generic `{actual}` but target g{} is `{expected}`",
             generic.0
         ),
-        MutationError::SemanticFailed { diagnostics } => {
-            format!("semantic failure ({} new diagnostics)", diagnostics.len())
-        }
+        MutationError::SemanticFailed { diagnostics } => format!(
+            "semantic failure ({} new diagnostics: {})",
+            diagnostics.len(),
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         MutationError::DuplicateSpecializer {
             existing_method, ..
         } => format!(
@@ -1399,12 +1415,13 @@ fn ensure_object_has_affordance(
 }
 
 /// Explains a missing runtime result: compilation errors, already printed
-/// as diagnostics, stop `main` from running.
-fn missing_runtime_reason(artifacts: &SessionArtifacts) -> String {
-    if artifacts.has_errors() {
-        "main did not run because compilation failed".into()
-    } else {
-        "runtime was not requested".into()
+/// as diagnostics with their notes (reasons and fixes), stop `main` from
+/// running. Every error blocks, strict typing's included; the report names
+/// each one's `diagnostic:d<n>` id, code, span and typing decision.
+fn missing_runtime_error(artifacts: &SessionArtifacts) -> LabError {
+    match artifacts.check_runnable() {
+        Err(error) => LabError::RunBlocked(format!("main did not run: {error}")),
+        Ok(()) => LabError::Runtime("runtime was not requested".into()),
     }
 }
 
@@ -1415,7 +1432,7 @@ fn print_runtime_result(artifacts: &SessionArtifacts) -> Result<()> {
             Ok(())
         }
         Some(result) => Err(LabError::Runtime(result.to_string())),
-        None => Err(LabError::Runtime(missing_runtime_reason(artifacts))),
+        None => Err(missing_runtime_error(artifacts)),
     }
 }
 
@@ -1767,6 +1784,8 @@ enum LabError {
         summary: String,
     },
     Runtime(String),
+    /// Compilation errors kept `main` from running.
+    RunBlocked(String),
     DiagnosticCatalog(String),
 }
 
@@ -1783,7 +1802,10 @@ impl LabError {
             | Self::AffordanceUnavailable { .. }
             | Self::UnsupportedAffordance { .. }
             | Self::MutationFailed { .. } => 2,
-            Self::Io { .. } | Self::Runtime(_) | Self::DiagnosticCatalog(_) => 1,
+            Self::Io { .. }
+            | Self::Runtime(_)
+            | Self::RunBlocked(_)
+            | Self::DiagnosticCatalog(_) => 1,
         }
     }
 }
@@ -1842,6 +1864,7 @@ impl fmt::Display for LabError {
                 write!(f, "{request} mutation failed: {summary}")
             }
             Self::Runtime(message) => write!(f, "runtime failed: {message}"),
+            Self::RunBlocked(message) => f.write_str(message),
             Self::DiagnosticCatalog(message) => write!(f, "diagnostic catalog failed: {message}"),
         }
     }

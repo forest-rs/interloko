@@ -72,7 +72,7 @@ fn render_report(workbench: &CompiledWorkbench) -> String {
 
 fn render_hero(artifacts: &SessionArtifacts) -> String {
     let mut out = String::new();
-    let runtime = runtime_summary(artifacts.runtime_result.as_ref());
+    let runtime = runtime_summary(artifacts);
     let _ = writeln!(
         out,
         "    <header class=\"hero\" data-node=\"source:{}\">",
@@ -2175,8 +2175,8 @@ fn render_report_json(artifacts: &SessionArtifacts, objects: &[EnvironmentObject
     let _ = write!(
         out,
         ",\"runtime\":{{\"summary\":{},\"class\":{}}}",
-        json_string(runtime_summary(artifacts.runtime_result.as_ref()).as_str()),
-        json_string(runtime_summary(artifacts.runtime_result.as_ref()).class)
+        json_string(runtime_summary(artifacts).as_str()),
+        json_string(runtime_summary(artifacts).class)
     );
     out.push_str(",\"grammarStack\":[");
     for (index, grammar_id) in artifacts
@@ -2660,8 +2660,8 @@ fn artifact_label(artifact: QueryArtifact) -> String {
     artifact.label()
 }
 
-fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
-    match result {
+fn runtime_summary(artifacts: &SessionArtifacts) -> RuntimeSummary {
+    match artifacts.runtime_result.as_ref() {
         Some(RuntimeResult::Returned(value)) => RuntimeSummary {
             text: format!("returned {value}"),
             class: "metric--ok",
@@ -2695,9 +2695,15 @@ fn runtime_summary(result: Option<&RuntimeResult>) -> RuntimeSummary {
             text: result.to_string(),
             class: "metric--warn",
         },
-        None => RuntimeSummary {
-            text: "not requested".into(),
-            class: "metric--empty",
+        None => match artifacts.check_runnable() {
+            Err(error) => RuntimeSummary {
+                text: format!("did not run: {error}"),
+                class: "metric--warn",
+            },
+            Ok(()) => RuntimeSummary {
+                text: "not requested".into(),
+                class: "metric--empty",
+            },
         },
     }
 }

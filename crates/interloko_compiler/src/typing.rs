@@ -176,9 +176,11 @@
 //! otherwise: once its errors are fixed, every required check is proved
 //! and lowering under [`crate::lower::CodegenPolicy::Proved`] drops it. A
 //! strict definition with errors still lowers, keeping the checks it could
-//! not prove, so meaning never depends on strictness. Like the reporting
-//! policies, strictness is applied when diagnostics are derived, so
-//! changing it re-derives them without re-checking anything.
+//! not prove, so meaning never depends on strictness; but its errors, like
+//! every error-severity diagnostic, block running and installing the code
+//! (see [`crate::session::SessionArtifacts::check_runnable`]). Like the
+//! reporting policies, strictness is applied when diagnostics are derived,
+//! so changing it re-derives them without re-checking anything.
 //!
 //! # Types
 //!
@@ -382,8 +384,10 @@ pub enum TypingSeverity {
     Warning,
     /// The decision produces an error diagnostic.
     ///
-    /// Typing errors mark the compilation as failed for tools that gate on
-    /// errors, but lowering, tape emission, and execution do not consult them.
+    /// Typing errors mark the compilation as failed: lowering and tape
+    /// emission do not consult them, but like every error they keep the
+    /// code from running or being installed
+    /// ([`crate::session::SessionArtifacts::check_runnable`]).
     Error,
 }
 

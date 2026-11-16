@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use execution_tape::program::ValueType;
 use execution_tape::value::Value;
+use interloko_compiler::session::FunctionCallError;
 use interloko_runtime::chooser::{
     Choice, ConditionChooser, FrameSnapshot, LinkSnapshot, OfferedRestart, UnhandledCondition,
 };
@@ -271,17 +272,22 @@ impl<'a, W: Write, E: Write> BreakLoop<'a, W, E> {
         let artifacts =
             self.repl
                 .compile_source(candidate.rendered_source(), &mut *self.stderr, false)?;
-        if artifacts.has_errors() {
-            self.repl.restore_accepted_cache()?;
-            writeln!(
-                self.stderr,
-                "edit rejected; the definitions and break [1] are unchanged"
-            )?;
-            return Ok(None);
-        }
-        let Some(code) = artifacts.code_unit() else {
-            writeln!(self.stderr, "edit rejected: no code was emitted")?;
-            return Ok(None);
+        // Errors of any kind, strict typing's included, refuse the install.
+        // The compile printed them with their notes, reasons and fixes.
+        let code = match artifacts.code_unit() {
+            Ok(code) => code,
+            Err(error) => {
+                self.repl.restore_accepted_cache()?;
+                if matches!(error, FunctionCallError::CompilationFailed { .. }) {
+                    writeln!(
+                        self.stderr,
+                        "edit rejected; the definitions and break [1] are unchanged"
+                    )?;
+                } else {
+                    writeln!(self.stderr, "edit rejected: {error}")?;
+                }
+                return Ok(None);
+            }
         };
         candidate.rebuild_from_form_spans(&artifacts.syntax.source, &artifacts.top_level_forms());
         self.repl.source_buffer = candidate;

@@ -630,13 +630,16 @@ typing delta: changed=2 added=0 removed=0 unchanged=1
 ...
 ```
 
-Failure paths print structured rejection messages, for example:
+Failure paths print structured rejection messages, for example (a
+rejection for new diagnostics prints them first, with their notes; any
+error counts, a strict definition's `typing.unproved-*` included, since
+errors block running):
 
 ```text
 add-method mutation failed: specializer vector duplicates existing method m0
 add-method mutation failed: parse failure (3 new diagnostics)
 add-method mutation failed: unknown generic id g99
-annotate mutation failed: semantic failure (3 new diagnostics)
+add-method mutation failed: semantic failure (1 new diagnostics: typing.unproved-range)
 annotate mutation failed: `<integer> = 3` is not a type annotation
 ```
 

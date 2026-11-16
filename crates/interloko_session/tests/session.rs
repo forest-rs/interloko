@@ -294,3 +294,64 @@ fn typing_config_is_a_revisioned_session_input_kept_by_replacement() {
         .unwrap();
     assert_eq!(session.typing_config(), TypingConfig::silent());
 }
+
+#[test]
+fn strict_errors_are_refused_like_any_compile_error_and_keep_the_accepted_code() {
+    let mut session = Session::new("strict.loko", SOURCE).unwrap();
+    // `answer`'s send is on an open class: proved by its one `<object>`
+    // method. A strict function whose range check typing cannot prove is
+    // refused, with the strict error and its fixes as the reason, and the
+    // accepted code keeps running.
+    let strict = "
+define function digit(d :: limited(<integer>, min: 0, max: 9)) => <integer>
+  d
+end;
+define strict function answer() => <integer>
+  digit(7 + 0)
+end;
+define strict function twice(n :: <integer>) => <integer>
+  digit(n)
+end;
+";
+    let Err(SessionError::Compilation {
+        diagnostics,
+        emission_failed,
+    }) = session.replace_source(0, strict)
+    else {
+        panic!("a strict error should reject the source");
+    };
+    assert!(!emission_failed);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let error = &diagnostics[0];
+    assert!(error.is_error());
+    assert_eq!(error.code.as_str(), "typing.unproved-range");
+    assert!(error.args.iter().any(|arg| arg.name == "decision"));
+    assert!(
+        error
+            .notes
+            .iter()
+            .any(|note| note.message.starts_with("fix: annotate parameter n as")),
+        "{error:?}"
+    );
+    assert_eq!(session.revision(), 0);
+    assert_eq!(answer(&session), FunctionValue::Integer(0));
+
+    // Without `strict` on `twice` its range check stays at runtime and the
+    // source is accepted; holding every definition to strict typing is then
+    // refused the same way.
+    session
+        .replace_source(
+            0,
+            &strict.replace("strict function twice", "function twice"),
+        )
+        .unwrap();
+    assert_eq!(answer(&session), FunctionValue::Integer(7));
+    assert!(matches!(
+        session.set_typing_config(1, TypingConfig::strict()),
+        Err(SessionError::Compilation { .. })
+    ));
+    assert_eq!(session.revision(), 1);
+    assert_eq!(session.typing_config(), TypingConfig::soft());
+    assert!(session.artifacts().check_runnable().is_ok());
+    assert_eq!(answer(&session), FunctionValue::Integer(7));
+}

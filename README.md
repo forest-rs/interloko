@@ -146,7 +146,8 @@ The current slices include:
   `strict.overflow=proved`, since `<integer>` is held in 64 bits for now.
   Strictness only changes reporting: a strict definition compiles exactly
   as it otherwise would, and once its errors are fixed its checks are
-  proved and dropped. A preview reports what would fail before opting in;
+  proved and dropped. Its errors block running and installing the code,
+  as every compile error does. A preview reports what would fail before opting in;
   see [`docs/eop_workbench.md`](docs/eop_workbench.md#strict-typing),
   and `interloko_corpus strictness` measures how much of the corpus
   already meets it;
