@@ -3097,7 +3097,7 @@ mod tests {
     use execution_tape::asm::{Asm, FunctionSig, ProgramBuilder, Reg};
     use execution_tape::trace::TraceMask;
     use execution_tape::value::FuncRef;
-    use execution_tape::vm::{ExecutionContext, Limits, Vm};
+    use execution_tape::vm::{Limits, Vm};
 
     #[test]
     fn float_functions_follow_their_special_cases() {
@@ -3985,10 +3985,8 @@ mod tests {
 
         let mut vm = Vm::new(host, Limits::default());
         let unit = vm.install(program).expect("test program should install");
-        let mut ctx = ExecutionContext::new();
         let mut outputs = Vec::new();
-        vm.run_with_ctx(
-            &mut ctx,
+        vm.run_into(
             FuncRef::new(unit, entry),
             &[Value::Obj(object)],
             &mut outputs,
@@ -4055,10 +4053,8 @@ mod tests {
         vm.define_tag(control::CHECK_FAILED_TAG, &[])
             .expect("tag defines");
         let unit = vm.install(program).expect("test program should install");
-        let mut ctx = ExecutionContext::new();
         let mut outputs = Vec::new();
-        vm.run_with_ctx(
-            &mut ctx,
+        vm.run_into(
             FuncRef::new(unit, entry),
             &[Value::Obj(object)],
             &mut outputs,
