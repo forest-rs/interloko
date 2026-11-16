@@ -2,7 +2,8 @@
 //! their verdict deltas, and their place in the mutation log.
 
 use interloko_compiler::annotation::{
-    AnnotationRole, AnnotationTarget, DecisionChange, DeclarationOrigin,
+    AnnotationRole, AnnotationTarget, ContractDirection, DecisionChange, DeclarationOrigin,
+    ObligationEffect,
 };
 use interloko_compiler::lower::{CheckCodegen, CodegenPolicy};
 use interloko_compiler::session::{
@@ -10,6 +11,7 @@ use interloko_compiler::session::{
     SessionArtifacts, SessionMutation, SourceFile,
 };
 use interloko_compiler::typing::{TypeSelector, TypingCheck, TypingVerdict};
+use interloko_model::contract::ContractPosition;
 
 const SHAPES: &str = "\
 define class <shape> (<object>)
@@ -527,4 +529,115 @@ end;
         "{types}"
     );
     assert_eq!(run_main(&artifacts), before);
+}
+
+#[test]
+fn narrowing_a_parameter_reports_the_specification_change_and_the_moved_checks() {
+    // Limiting `n` proves the conversion in `digit` only by rejecting
+    // inputs `digit` accepted before: the range check moves to `main`.
+    let source = "\
+define function digit(n)
+  as(<u32>, n)
+end;
+define function main()
+  as(<integer>, digit(7))
+end;
+";
+    let artifacts = compile(source);
+    let target = binding(&artifacts, "digit", "n");
+    let preview = artifacts
+        .preview_annotation(&target, "limited(<integer>, min: 0, max: 9)")
+        .expect("annotation compiles");
+    let delta = &preview.delta;
+    assert!(delta.changes_specification());
+    let [contract] = delta.contracts.as_slice() else {
+        panic!("one contract change in\n{}", delta.render());
+    };
+    assert_eq!(contract.direction, ContractDirection::Narrowed);
+    assert_eq!(contract.position, ContractPosition::Parameter(0));
+    assert_eq!(contract.name.as_deref(), Some("n"));
+    assert_eq!(contract.before, "<integer>");
+    assert_eq!(contract.after, "limited(<integer>, min: 0, max: 9)");
+    assert!(contract.moves_obligation_to_callers());
+
+    let shift = delta.obligations();
+    assert_eq!(shift.removed_here, 1, "{}", delta.render());
+    assert_eq!(shift.moved_to_callers, 1, "{}", delta.render());
+    assert_eq!(shift.callers_proved, 1, "{}", delta.render());
+    assert_eq!(shift.callers_runtime, 0);
+    let moved = delta
+        .changes
+        .iter()
+        .find(|change| delta.in_caller(change))
+        .expect("a caller change");
+    assert_eq!(moved.effect(), ObligationEffect::Imposed);
+    assert!(moved.before.is_none());
+
+    let rendered = delta.render();
+    assert!(
+        rendered.starts_with("contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=1\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("narrowed param n of function digit (contract:def")
+            && rendered.contains(
+                "<integer> -> limited(<integer>, min: 0, max: 9); callers now carry the obligation"
+            ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("obligations: removed-here=1 added-here=0 moved-to-callers=1 (proved=1"),
+        "{rendered}"
+    );
+    assert!(rendered.contains(" in=caller\n"), "{rendered}");
+}
+
+#[test]
+fn widening_a_parameter_and_keeping_contracts_are_reported_as_such() {
+    let artifacts = compile(SHAPES);
+    let target = binding(&artifacts, "measure", "s");
+    let widened = artifacts
+        .preview_annotation(&target, "<object>")
+        .expect("annotation compiles");
+    let [contract] = widened.delta.contracts.as_slice() else {
+        panic!("one contract change in\n{}", widened.delta.render());
+    };
+    assert_eq!(contract.direction, ContractDirection::Widened);
+    assert!(!contract.moves_obligation_to_callers());
+    assert!(
+        widened
+            .delta
+            .render()
+            .contains("contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=0"),
+        "{}",
+        widened.delta.render()
+    );
+
+    // A `let` annotation and a result that writes the inferred type keep
+    // every contract.
+    let bonus = binding(&artifacts, "measure", "bonus");
+    let kept = artifacts
+        .preview_annotation(&bonus, "<integer>")
+        .expect("annotation compiles");
+    assert!(!kept.delta.changes_specification());
+    assert!(
+        kept.delta
+            .render()
+            .starts_with("contract delta: none (every contract kept)\n"),
+        "{}",
+        kept.delta.render()
+    );
+    let result = AnnotationTarget::Result {
+        definition: target.definition(),
+    };
+    let same = artifacts
+        .preview_annotation(&result, "<integer>")
+        .expect("annotation compiles");
+    assert!(same.delta.contracts.is_empty(), "{}", same.delta.render());
+
+    // A policy change edits no source, so it reports no contract delta.
+    let off = artifacts.with_codegen_policy(CodegenPolicy::Off);
+    let delta = artifacts.typing_delta(&off);
+    assert!(delta.edited.is_empty() && delta.contracts.is_empty());
+    assert!(delta.render().starts_with("typing delta:"));
 }

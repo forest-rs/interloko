@@ -3682,10 +3682,18 @@ impl SessionArtifacts {
             return Err(MutationError::RuntimeValidationFailed { error });
         }
 
+        let mut edited = alloc::vec![target.definition()];
+        if annotated.definition() != target.definition() {
+            edited.push(annotated.definition());
+        }
         let delta = TypingDelta::between(
             self.decision_snapshots(),
             candidate.decision_snapshots(),
             |owner, span| (remap(owner), edit.map_span(span)),
+        )
+        .for_edit(
+            edited,
+            contract_changes(&self.sem, &candidate.sem, &definitions),
         );
         let outcome = AnnotationOutcome {
             target: target.clone(),
@@ -3994,6 +4002,104 @@ fn paired_definitions(
         .zip(&after.constants)
         .map(|(old, new)| (old.definition, new.definition));
     Some(functions.chain(methods).chain(constants).collect())
+}
+
+/// The source names of a function's or method's parameters, in call order.
+pub(crate) fn param_names(module: &sem::Module, definition: DefinitionId) -> Vec<String> {
+    let (locals, params) = if let Some(function) = module
+        .functions
+        .iter()
+        .find(|function| function.definition == definition)
+    {
+        (&function.locals, &function.params)
+    } else if let Some(method) = module
+        .methods
+        .iter()
+        .find(|method| method.definition == definition)
+    {
+        (&method.locals, &method.params)
+    } else {
+        return Vec::new();
+    };
+    params
+        .iter()
+        .map(|param| {
+            locals
+                .iter()
+                .find(|local| local.id == *param)
+                .map_or_else(|| format!("{}", param.0), |local| local.name.clone())
+        })
+        .collect()
+}
+
+/// Every contract value that differs between `before` and `after`, for
+/// definitions paired across an edit (`pairs` maps old ids to new ones;
+/// generics keep their ids), in pair order.
+///
+/// Values are compared in `after`'s class hierarchy: the edits that report
+/// contract changes keep every class, so class ids agree.
+fn contract_changes(
+    before: &sem::Module,
+    after: &sem::Module,
+    pairs: &[(DefinitionId, DefinitionId)],
+) -> Vec<annotation::ContractChange> {
+    use annotation::{ContractChange, ContractDirection};
+    use interloko_model::contract::ContractPosition;
+
+    let generics = after
+        .generics
+        .iter()
+        .map(|generic| (generic.definition, generic.definition));
+    let mut out = Vec::new();
+    for (old_id, new_id) in pairs.iter().copied().chain(generics) {
+        let (Some(old), Some(new)) = (before.contract(old_id), after.contract(new_id)) else {
+            continue;
+        };
+        if old == new {
+            continue;
+        }
+        let names = param_names(after, new_id);
+        let label = typing::definition_label(after, new_id);
+        let positions = old
+            .params
+            .iter()
+            .zip(&new.params)
+            .enumerate()
+            .map(|(index, values)| (ContractPosition::Parameter(index), values))
+            .chain(
+                old.results
+                    .iter()
+                    .zip(&new.results)
+                    .enumerate()
+                    .map(|(index, values)| (ContractPosition::Result(index), values)),
+            );
+        for (position, (old_value, new_value)) in positions {
+            if old_value == new_value {
+                continue;
+            }
+            let narrower = new_value.ty.is_subtype(&old_value.ty, after);
+            let wider = old_value.ty.is_subtype(&new_value.ty, after);
+            let direction = match (narrower, wider) {
+                (true, false) => ContractDirection::Narrowed,
+                (false, true) => ContractDirection::Widened,
+                _ => ContractDirection::Changed,
+            };
+            let name = match position {
+                ContractPosition::Parameter(index) => names.get(index).cloned(),
+                ContractPosition::Result(_) => None,
+            };
+            out.push(ContractChange {
+                definition: new_id,
+                label: label.clone(),
+                position,
+                name,
+                before: format!("{}", old_value.display(before)),
+                after: format!("{}", new_value.display(after)),
+                direction,
+            });
+        }
+    }
+    out
 }
 
 /// Diff between two compiled source versions.

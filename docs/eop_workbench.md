@@ -375,18 +375,53 @@ preview annotate target=binding:def…:s annotation=<circle> previous=<shape> (n
 typing delta: changed=2 added=0 removed=0 unchanged=1
   verdicts proved 0->2 checked 3->1 refuted 0->0
   codegen kept 3->2 elided 0->1 specialized 0->0 inlined 0->0 linked 0->0
+contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=1
+  narrowed param s of function measure (contract:def…): <shape> -> <circle>; callers now carry the obligation, and inputs accepted before are rejected
+obligations: removed-here=2 added-here=0 moved-to-callers=0 (proved=0 runtime=0 refuted=0 errors=0) removed-in-callers=0
   errors 0->0
   typing:def…:s0 instance verdict=checked->proved codegen=kept->elided severity=silent->warning
   typing:def…:s1 dispatch verdict=checked->proved codegen=kept severity=silent
 ```
 
-The second to fourth lines count every decision before and after, the
-fourth those reported as errors, such as strict errors. Each
-change line names the decision after the change, then `old->new` for what
-changed; a decision the change introduced says `added`, one it removed says
-`removed`, with its values. An empty delta (`changed=0 added=0 removed=0`)
-means the annotation buys nothing. `TypingDelta` carries the same facts
-typed, as `DecisionChange { before, after }` pairs and tallies.
+An annotation can prove checks in two very different ways: by giving
+typing a fact the program already guaranteed, or by changing what the
+definition promises. Annotating a parameter with a narrower type, or a
+`limited` range, proves the body's checks by rejecting inputs the
+definition accepted before; the checks did not go away, their obligation
+moved to the callers. A delta that only said `errors 2->0` would let an
+agent "fix" code by quietly changing its specification, so an edit's delta
+starts with what it did to the program's contracts:
+
+- `contract delta:` lists every parameter or result whose contract
+  changed, `narrowed`, `widened`, or `changed` (neither), with the old and
+  new types and what that means for callers, and says `SPECIFICATION
+  CHANGED` with how many changes narrow a parameter's inputs. An
+  annotation that keeps every contract, such as one on a `let` or one that
+  writes the inferred type, says `contract delta: none (every contract
+  kept)`.
+- `obligations:` splits the decision changes: checks the edit proved or
+  removed in the edited definition (`removed-here`), checks it added
+  there (`added-here`), checks it added to, or no longer proves in, other
+  definitions (`moved-to-callers`, with how many of those typing proves,
+  leaves to the runtime, refutes, or reports as errors), and checks it
+  proved or removed elsewhere (`removed-in-callers`). A caller whose
+  argument sem already knows satisfies a narrowed class gains no check, so
+  `moved-to-callers=0` with a narrowed parameter means the callers satisfy
+  the new contract statically; one that cannot no longer compiles, and the
+  annotation is rejected.
+
+After the `typing delta:` summary, three lines count every decision
+before and after, the last of them those reported as errors, such as
+strict errors. Each change line in another definition ends ` in=caller`.
+Each change line names the
+decision after the change, then `old->new` for what changed; a decision
+the change introduced says `added`, one it removed says `removed`, with
+its values. An empty delta (no contract change and `changed=0 added=0
+removed=0`) means the annotation buys nothing. `TypingDelta` carries the
+same facts typed: `DecisionChange { before, after }` pairs and tallies,
+`contracts` as `ContractChange`s, `edited` naming the edited definition,
+and `obligations()` the `ObligationShift`. A policy change edits no source,
+so its delta has neither section.
 
 ### Policies
 
@@ -453,7 +488,10 @@ to what it reports and to what could fix it:
   offers `preview-fix [n]` and `apply-fix [n]` (fix `0` by default). They
   are `preview-annotation` and `annotate` on that target, so the delta
   shows which errors the fix resolves (`errors 2->0`, `severity=error->silent`)
-  and applying adds an ordinary `Annotate` entry to the log.
+  and applying adds an ordinary `Annotate` entry to the log. An annotation
+  fix narrows a parameter's contract, and the preview says so first: the
+  errors go because the checks moved to the callers, not because they were
+  removed.
 - `preview-strict` on a function, method, generic, or constant reports
   what would fail if it were strict, without changing anything: each
   would-be error with its decision, reasons, and fixes. On a generic it
@@ -480,6 +518,30 @@ main did not run: compilation reported 2 errors: diagnostic:d0 typing.unproved-r
 Strictness is reporting only, and an input of its own: toggling a
 definition's `strict` re-derives the typing diagnostics from the recorded
 decisions (the incremental graph's `strictness` artifact), and so does the
+`preview-fix` on `diagnostic:d0` shows that the fix clears both errors by
+narrowing `twice`'s contract, moving the range check to `main`, where
+typing proves the `3` it passes:
+
+```text
+fix 0 of diagnostic:d0: annotate binding:def…:n limited(<integer>, min: 0, max: 9)
+preview annotate target=binding:def…:n annotation=limited(<integer>, min: 0, max: 9) previous=<integer> (not applied)
+contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=1
+  narrowed param n of function twice (contract:def…): <integer> -> limited(<integer>, min: 0, max: 9); callers now carry the obligation, and inputs accepted before are rejected
+obligations: removed-here=2 added-here=0 moved-to-callers=1 (proved=1 runtime=0 refuted=0 errors=0) removed-in-callers=0
+typing delta: changed=2 added=1 removed=0 unchanged=1
+  ...
+  errors 2->0
+  typing:def…:s0 range verdict=checked->proved codegen=kept->elided severity=error->silent
+  typing:def…:s1 range verdict=checked->proved codegen=kept->elided severity=error->silent
+  typing:def…:s0 range added verdict=proved codegen=elided severity=silent in=caller
+```
+
+Strict does not mean check-free. A strict definition must prove every
+check the compiler inserts (send dispatch, implicit casts, range checks,
+and overflow under `strict.overflow=proved`); explicit `as(...)` casts,
+`instance?` tests, the guards of indirect entries, and by default integer
+overflow stay runtime checks.
+
 policy, so nothing is re-typed or lowered again. A strict definition with
 errors still lowers, keeping the checks it could not prove, but its errors
 block running like any compile error

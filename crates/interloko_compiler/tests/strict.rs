@@ -180,6 +180,30 @@ fn an_annotation_fix_previews_and_applies_as_an_annotate_mutation() {
         .count();
     assert_eq!(resolved, 2, "{}", preview.delta.render());
     assert!(preview.delta.render().contains("  errors 2->0\n"));
+    // The errors go because the fix narrows `twice`'s contract: its range
+    // checks are proved only by moving the obligation to `main`, which the
+    // preview reports before the error counts.
+    assert!(preview.delta.changes_specification());
+    assert!(
+        preview
+            .delta
+            .contracts
+            .iter()
+            .all(|change| change.moves_obligation_to_callers()),
+        "{}",
+        preview.delta.render()
+    );
+    let shift = preview.delta.obligations();
+    assert_eq!(shift.removed_here, 2, "{}", preview.delta.render());
+    assert_eq!(shift.moved_to_callers, 1, "{}", preview.delta.render());
+    assert!(
+        preview
+            .delta
+            .render()
+            .starts_with("contract delta: SPECIFICATION CHANGED"),
+        "{}",
+        preview.delta.render()
+    );
     // A preview changes nothing.
     assert!(artifacts.has_errors());
 

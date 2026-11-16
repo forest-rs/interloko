@@ -75,7 +75,10 @@ traces come from the existing compiler/runtime interface.
 - `SessionMutation::Annotate` writes a type annotation on a binding or result
   named by a stable `binding:` or `result:` id and reports which typing
   decisions it changed; `preview_annotation` reports the same without
-  changing the session.
+  changing the session. The delta names every contract the annotation
+  changed: narrowing a parameter can prove the body's checks only by moving
+  them to its callers, which is a change of specification, not just fewer
+  errors.
 - Construction uses the compiler's builtin grammar environment. Custom staged
   grammar registry injection is not exposed by this initial session wrapper.
 - Filesystem, transport, UI, document composition and execution scheduling belong

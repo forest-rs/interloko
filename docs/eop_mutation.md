@@ -585,10 +585,26 @@ differs only when annotating a method parameter changed the method's
 specializers, and so its definition id); the annotation it replaced, if
 any; the `SourceEdit` it made; and the `TypingDelta` comparing every
 typing decision before and after.
+
+The delta also says what the annotation did to the program's
+specification. `TypingDelta::contracts` lists every parameter or result
+contract that changed across the edit (`annotation::ContractChange`:
+definition, position, parameter name, old and new types, and whether it
+`narrowed`, `widened`, or `changed`), and `TypingDelta::obligations()`
+splits the decision changes into checks the edit removed from the
+annotated definition and checks it moved to, or removed from, other
+definitions (`ObligationShift`). This is what separates removing a check
+from moving its obligation: annotating a parameter with a narrower type
+or `limited` range proves the body's checks by rejecting inputs it
+accepted before, so the delta reports a narrowed contract and the
+callers' new checks, rather than only fewer errors. Contracts are
+compared in the candidate's class hierarchy, which an annotation leaves
+alone.
 `SessionArtifacts::preview_annotation(target, type_source)` returns the
 same `AnnotationOutcome` without swapping, logging, or using a mutation id.
 
-A strict error's annotation fix is this mutation:
+A strict error's annotation fix is this mutation, so its preview reports
+the contract it narrows before the errors it clears:
 `SessionArtifacts::strict_fix_annotation(diagnostic_id, index)` returns
 its target and type, and the `apply-fix` and `preview-fix` affordances
 apply or preview it (see
@@ -626,6 +642,9 @@ An annotation reports the same line shape followed by its delta:
 
 ```text
 applied annotate mutation_id=0 target=binding:def…:s annotation=<circle> previous=<shape> affected_artifacts=14 strategy=full-candidate-rebuild log_size=1
+contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=1
+  narrowed param s of function measure (contract:def…): <shape> -> <circle>; callers now carry the obligation, and inputs accepted before are rejected
+obligations: removed-here=2 added-here=0 moved-to-callers=0 (proved=0 runtime=0 refuted=0 errors=0) removed-in-callers=0
 typing delta: changed=2 added=0 removed=0 unchanged=1
 ...
 ```
