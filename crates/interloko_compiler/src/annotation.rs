@@ -14,6 +14,16 @@
 //! [`SourceEdit`] that writes a type there. [`TypingDelta`] compares the
 //! typing decisions of two compilations, matching each decision across the
 //! edit, and reports which verdicts and codegen facets changed.
+//!
+//! An edit can also change what a definition promises. Annotating a
+//! parameter with a narrower type, or a `limited` range, can prove the
+//! body's checks by rejecting inputs the definition accepted before: the
+//! checks are not gone, their obligation moved to the callers. A delta
+//! that only counted fewer errors would present that specification change
+//! as a pure improvement, so an edit's delta also reports each
+//! [`ContractChange`] and splits the decision changes into checks removed
+//! from the edited definition and checks moved to its callers
+//! ([`ObligationShift`]).
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -27,6 +37,7 @@ use crate::lower::CheckCodegen;
 use crate::sem::SiteId;
 use crate::syntax::{Span, SyntaxTree, Token, TokenKind, lex};
 use crate::typing::{TypingCheck, TypingSeverity, TypingVerdict};
+use interloko_model::contract::ContractPosition;
 
 /// A place in source where a type can be declared, named stably.
 ///
@@ -708,6 +719,29 @@ impl DecisionChange {
             .or(self.before.as_ref())
             .map_or("", |snapshot| snapshot.id.as_str())
     }
+
+    /// What the change did to the check's obligation.
+    #[must_use]
+    pub fn effect(&self) -> ObligationEffect {
+        let unproved = |snapshot: &DecisionSnapshot| snapshot.verdict != TypingVerdict::Proved;
+        match (&self.before, &self.after) {
+            (Some(old), Some(new)) if unproved(old) && !unproved(new) => {
+                ObligationEffect::Discharged
+            }
+            (Some(old), Some(new)) if !unproved(old) && unproved(new) => ObligationEffect::Imposed,
+            (Some(old), None) if unproved(old) => ObligationEffect::Discharged,
+            (None, Some(_)) => ObligationEffect::Imposed,
+            _ => ObligationEffect::Unchanged,
+        }
+    }
+
+    /// The decision's owner after the change, or before it when removed.
+    fn owner(&self) -> Option<DefinitionId> {
+        self.after
+            .as_ref()
+            .or(self.before.as_ref())
+            .map(|snapshot| snapshot.owner)
+    }
 }
 
 /// Counts of verdicts and codegen facets over every decision.
@@ -754,12 +788,163 @@ impl TypingTally {
     }
 }
 
+/// Which way a contract value moved across an edit.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ContractDirection {
+    /// The value now admits fewer values than before.
+    Narrowed,
+    /// The value now admits more values than before.
+    Widened,
+    /// The value admits some new values and rejects some old ones.
+    Changed,
+}
+
+impl ContractDirection {
+    /// Returns the stable label used in deltas: `narrowed`, `widened`, or
+    /// `changed`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Narrowed => "narrowed",
+            Self::Widened => "widened",
+            Self::Changed => "changed",
+        }
+    }
+}
+
+/// One parameter or result of a definition's contract that an edit
+/// changed: a change to the definition's specification, which code
+/// compiled against it relies on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractChange {
+    /// The definition, in the edited source.
+    pub definition: DefinitionId,
+    /// The definition as source names it, such as `function twice`.
+    pub label: String,
+    /// The parameter or result.
+    pub position: ContractPosition,
+    /// The parameter's source name, when it has one.
+    pub name: Option<String>,
+    /// The value before the edit, with source names.
+    pub before: String,
+    /// The value after the edit, with source names.
+    pub after: String,
+    /// Which way it moved.
+    pub direction: ContractDirection,
+}
+
+impl ContractChange {
+    /// Whether the change moves an obligation to the definition's callers:
+    /// a parameter that no longer accepts every value it did, so callers
+    /// are checked against it and inputs accepted before are rejected.
+    #[must_use]
+    pub const fn moves_obligation_to_callers(&self) -> bool {
+        matches!(self.position, ContractPosition::Parameter(_))
+            && !matches!(self.direction, ContractDirection::Widened)
+    }
+
+    /// What the change means for the definition's callers.
+    #[must_use]
+    pub const fn meaning(&self) -> &'static str {
+        match (self.position, self.direction) {
+            (ContractPosition::Parameter(_), ContractDirection::Narrowed) => {
+                "callers now carry the obligation, and inputs accepted before are rejected"
+            }
+            (ContractPosition::Parameter(_), ContractDirection::Widened) => {
+                "accepts more inputs; callers' checks against it may go away"
+            }
+            (ContractPosition::Parameter(_), ContractDirection::Changed) => {
+                "callers now carry a different obligation, and some inputs accepted before are rejected"
+            }
+            (ContractPosition::Result(_), ContractDirection::Narrowed) => {
+                "promises more: the body checks the result, and callers may rely on it"
+            }
+            (ContractPosition::Result(_), ContractDirection::Widened) => {
+                "promises less: callers that relied on the old result may gain checks"
+            }
+            (ContractPosition::Result(_), ContractDirection::Changed) => {
+                "promises something different: callers' facts about the result change"
+            }
+        }
+    }
+
+    /// Renders the change as one line, such as `narrowed param n of
+    /// function twice: <integer> -> limited(<integer>, min: 0, max: 9);
+    /// callers now carry the check, ...`.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let position = match (self.position, &self.name) {
+            (ContractPosition::Parameter(_), Some(name)) => format!("param {name}"),
+            (ContractPosition::Parameter(index), None) => format!("param {index}"),
+            (ContractPosition::Result(index), _) => format!("result {index}"),
+        };
+        format!(
+            "{} {position} of {} (contract:{}): {} -> {}; {}",
+            self.direction.as_str(),
+            self.label,
+            self.definition,
+            self.before,
+            self.after,
+            self.meaning()
+        )
+    }
+}
+
+/// What a decision change did to the check's obligation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ObligationEffect {
+    /// A check typing could not prove before is now proved, or gone.
+    Discharged,
+    /// A check appeared, or one typing proved before is no longer proved.
+    Imposed,
+    /// The obligation is the same; only codegen or severity changed.
+    Unchanged,
+}
+
+/// Where an edit moved the obligations of the checks it changed: the
+/// difference between removing a check and moving it to callers.
+///
+/// "Here" is the edited definition; "callers" is every other definition,
+/// whose decisions change only through what they rely on from the edited
+/// one, such as its contract.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ObligationShift {
+    /// Checks in the edited definition the edit proved or removed.
+    pub removed_here: usize,
+    /// Checks the edit added to the edited definition, or left unproved
+    /// that were proved, such as the cast a newly typed `let` makes.
+    pub added_here: usize,
+    /// Checks the edit added to other definitions, or left unproved that
+    /// were proved: obligations moved to callers. A caller whose argument
+    /// sem already knows to satisfy a narrowed parameter's class gains no
+    /// check, so this can be zero while a [`ContractChange`] still moves
+    /// the obligation; one that cannot satisfy it no longer compiles.
+    pub moved_to_callers: usize,
+    /// Of [`Self::moved_to_callers`], how many typing proves there.
+    pub callers_proved: usize,
+    /// Of [`Self::moved_to_callers`], how many stay runtime checks.
+    pub callers_runtime: usize,
+    /// Of [`Self::moved_to_callers`], how many always fail.
+    pub callers_refuted: usize,
+    /// Of [`Self::moved_to_callers`], how many are reported as errors.
+    pub callers_errors: usize,
+    /// Checks in other definitions the edit proved or removed, such as a
+    /// caller's argument check against a parameter it widened.
+    pub removed_in_callers: usize,
+}
+
 /// Which typing decisions changed verdict, severity, or codegen between two
 /// compilations: the payoff of an annotation or a policy change.
 ///
 /// Decisions are matched by owner, check kind, and source span mapped
 /// across the edit, not by site number, since an annotation can add a
 /// check and renumber the sites after it.
+///
+/// For a source edit, the delta also names the edited definition and the
+/// contract changes the edit made ([`Self::for_edit`]), so a reader can
+/// tell a check the edit removed from one it moved to callers
+/// ([`Self::obligations`]). A policy change edits no source and changes no
+/// contract.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TypingDelta {
     /// Decisions that changed, appeared, or disappeared, in source order.
@@ -770,6 +955,14 @@ pub struct TypingDelta {
     pub before: TypingTally,
     /// Counts after the change.
     pub after: TypingTally,
+    /// The edited definition's ids before and after the edit (they differ
+    /// when annotating a method parameter changed its specializers); empty
+    /// for a change that edits no source.
+    pub edited: Vec<DefinitionId>,
+    /// Every contract value the edit changed, in definition order: each is
+    /// a change to the program's specification, not only to its
+    /// diagnostics.
+    pub contracts: Vec<ContractChange>,
 }
 
 impl TypingDelta {
@@ -838,20 +1031,86 @@ impl TypingDelta {
         delta
     }
 
-    /// Whether nothing changed.
+    /// Returns this delta as the result of editing the definition whose
+    /// ids before and after the edit are `edited`, which changed
+    /// `contracts`.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+    pub fn for_edit(mut self, edited: Vec<DefinitionId>, contracts: Vec<ContractChange>) -> Self {
+        self.edited = edited;
+        self.contracts = contracts;
+        self
     }
 
-    /// Renders the delta: a summary line, the verdict, codegen, and error
-    /// counts before and after, then one line per change, such as
-    /// `typing:def…:s0 instance verdict=checked->proved codegen=kept->elided`.
+    /// Whether nothing changed: no decision and no contract.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty() && self.contracts.is_empty()
+    }
+
+    /// Whether the edit changed the specification: some contract changed.
+    #[must_use]
+    pub fn changes_specification(&self) -> bool {
+        !self.contracts.is_empty()
+    }
+
+    /// Whether `change` is in a definition other than the edited one.
+    #[must_use]
+    pub fn in_caller(&self, change: &DecisionChange) -> bool {
+        !self.edited.is_empty()
+            && change
+                .owner()
+                .is_some_and(|owner| !self.edited.contains(&owner))
+    }
+
+    /// Splits the decision changes into checks removed from the edited
+    /// definition and checks moved to, or removed from, other definitions.
+    /// All zero for a change that edits no source.
+    #[must_use]
+    pub fn obligations(&self) -> ObligationShift {
+        let mut shift = ObligationShift::default();
+        if self.edited.is_empty() {
+            return shift;
+        }
+        for change in &self.changes {
+            let caller = self.in_caller(change);
+            match (change.effect(), caller) {
+                (ObligationEffect::Discharged, false) => shift.removed_here += 1,
+                (ObligationEffect::Discharged, true) => shift.removed_in_callers += 1,
+                (ObligationEffect::Imposed, false) => shift.added_here += 1,
+                (ObligationEffect::Imposed, true) => {
+                    shift.moved_to_callers += 1;
+                    if let Some(after) = &change.after {
+                        match after.verdict {
+                            TypingVerdict::Proved => shift.callers_proved += 1,
+                            TypingVerdict::Checked => shift.callers_runtime += 1,
+                            TypingVerdict::Refuted => shift.callers_refuted += 1,
+                        }
+                        if after.severity == TypingSeverity::Error {
+                            shift.callers_errors += 1;
+                        }
+                    }
+                }
+                (ObligationEffect::Unchanged, _) => {}
+            }
+        }
+        shift
+    }
+
+    /// Renders the delta. For a source edit it starts with the contract
+    /// delta, one line per [`ContractChange`] (or `contract delta: none`),
+    /// and the [`ObligationShift`]; then, for every delta, a summary line,
+    /// the verdict, codegen, and error counts before and after, and one
+    /// line per change, such as `typing:def…:s0 instance
+    /// verdict=checked->proved codegen=kept->elided`. A change in a
+    /// definition other than the edited one ends ` in=caller`.
     #[must_use]
     pub fn render(&self) -> String {
         let count =
             |pick: fn(&DecisionChange) -> bool| self.changes.iter().filter(|c| pick(c)).count();
         let mut out = String::new();
+        if !self.edited.is_empty() {
+            self.render_specification(&mut out);
+        }
         let _ = writeln!(
             out,
             "typing delta: changed={} added={} removed={} unchanged={}",
@@ -882,9 +1141,48 @@ impl TypingDelta {
         );
         let _ = writeln!(out, "  errors {}->{}", b.errors, a.errors);
         for change in &self.changes {
-            let _ = writeln!(out, "  {}", render_change(change));
+            let caller = if self.in_caller(change) {
+                " in=caller"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "  {}{caller}", render_change(change));
         }
         out
+    }
+
+    /// Renders the contract delta and the obligation shift.
+    fn render_specification(&self, out: &mut String) {
+        if self.contracts.is_empty() {
+            let _ = writeln!(out, "contract delta: none (every contract kept)");
+        } else {
+            let narrowed = self
+                .contracts
+                .iter()
+                .filter(|change| change.moves_obligation_to_callers())
+                .count();
+            let _ = writeln!(
+                out,
+                "contract delta: SPECIFICATION CHANGED changes={} narrows-inputs={narrowed}",
+                self.contracts.len()
+            );
+            for change in &self.contracts {
+                let _ = writeln!(out, "  {}", change.render());
+            }
+        }
+        let shift = self.obligations();
+        let _ = writeln!(
+            out,
+            "obligations: removed-here={} added-here={} moved-to-callers={} (proved={} runtime={} refuted={} errors={}) removed-in-callers={}",
+            shift.removed_here,
+            shift.added_here,
+            shift.moved_to_callers,
+            shift.callers_proved,
+            shift.callers_runtime,
+            shift.callers_refuted,
+            shift.callers_errors,
+            shift.removed_in_callers
+        );
     }
 }
 

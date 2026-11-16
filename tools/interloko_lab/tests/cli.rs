@@ -1712,6 +1712,26 @@ fn strict_errors_preview_strictness_and_fixes_through_affordances() {
     let (stdout, _) = run_lab_success(&["invoke-affordance", path, "diagnostic:d0", "preview-fix"]);
     assert!(stdout.contains("(not applied)"), "{stdout}");
     assert!(stdout.contains("  errors 2->0\n"), "{stdout}");
+    // The fix clears the errors by narrowing `twice`'s contract, which the
+    // preview reports before the counts: the checks moved to `main`.
+    assert!(
+        stdout.contains("contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=1\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "<integer> -> limited(<integer>, min: 0, max: 9); callers now carry the obligation"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("obligations: removed-here=2 added-here=0 moved-to-callers=1 (proved=1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("range added verdict=proved codegen=elided severity=silent in=caller\n"),
+        "{stdout}"
+    );
     assert!(
         stdout
             .contains("range verdict=checked->proved codegen=kept->elided severity=error->silent"),
