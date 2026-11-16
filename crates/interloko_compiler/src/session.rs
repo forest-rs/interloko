@@ -6942,7 +6942,9 @@ fn run_turn_body<'a>(
 /// in it.
 ///
 /// Parking keeps only what a fresh VM for the same code would have: the
-/// control tags and the one installed unit. Calls lend it their own host.
+/// control tags and the one installed unit. It also keeps the VM's run
+/// buffers, sized for the largest call so far, so later calls reuse them.
+/// Calls lend it their own host.
 struct ParkedVm {
     vm: Vm<Idle>,
     installed: Installed,
