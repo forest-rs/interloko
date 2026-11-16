@@ -948,6 +948,10 @@ pub enum EnvironmentKind {
     /// A function's or method's result, or a constant's value, which can
     /// carry a type annotation.
     DefinitionResult,
+    /// The claim report of a function, method, or constant: what typing
+    /// established, what generated code relies on, and which checks stay
+    /// at run time and why ([`crate::claims`]).
+    Claims,
 }
 
 impl EnvironmentKind {
@@ -991,6 +995,7 @@ impl EnvironmentKind {
             Self::Contract => "contract",
             Self::Binding => "binding",
             Self::DefinitionResult => "result",
+            Self::Claims => "claims",
         }
     }
 }
@@ -1163,6 +1168,10 @@ pub enum EnvironmentAffordance {
     /// Apply one of a strict error's fixes: the [`Self::Annotate`] mutation
     /// it names.
     ApplyFix,
+    /// Show a definition's claim report: what typing established, what
+    /// generated code relies on, which checks stay at run time and why,
+    /// and what supports it ([`SessionArtifacts::claim_report`]).
+    ShowClaims,
 }
 
 impl EnvironmentAffordance {
@@ -1216,6 +1225,7 @@ impl EnvironmentAffordance {
             Self::PreviewStrict,
             Self::PreviewFix,
             Self::ApplyFix,
+            Self::ShowClaims,
         ]
     }
 
@@ -1278,6 +1288,7 @@ impl EnvironmentAffordance {
             Self::PreviewStrict => "preview-strict",
             Self::PreviewFix => "preview-fix",
             Self::ApplyFix => "apply-fix",
+            Self::ShowClaims => "show-claims",
         }
     }
 }
@@ -1486,6 +1497,16 @@ pub enum TypingFacet {
         violation: Option<typing::StrictViolation>,
         /// The fixes a strict error suggests, in order; empty otherwise.
         fixes: Vec<StrictFixOffer>,
+    },
+    /// A definition's claim report, in brief:
+    /// [`SessionArtifacts::claim_report`] gives the whole report.
+    Claims {
+        /// The function, method, or constant.
+        definition: DefinitionId,
+        /// Counts over its check sites.
+        tally: crate::claims::ClaimTally,
+        /// Checks strict typing would reject in it.
+        strict_unmet: usize,
     },
     /// A place a type annotation can be written.
     Annotation {
@@ -2306,29 +2327,7 @@ impl SessionArtifacts {
         let Some(typed) = self.typing.definition(decision.owner) else {
             return Vec::new();
         };
-        let sites = self.annotation_sites();
-        typing::strict_fixes(&self.sem, typed, decision)
-            .into_iter()
-            .map(|fix| {
-                let annotation = match &fix {
-                    typing::StrictFix::Annotate { span, .. } => sites
-                        .iter()
-                        .find(|site| {
-                            site.span == *span
-                                && site.target.definition() == decision.owner
-                                && matches!(site.target, AnnotationTarget::Binding { .. })
-                        })
-                        .zip(fix.annotation_source(&self.sem))
-                        .map(|(site, type_source)| (site.target.clone(), type_source)),
-                    _ => None,
-                };
-                StrictFixOffer {
-                    description: fix.describe(&self.sem),
-                    fix,
-                    annotation,
-                }
-            })
-            .collect()
+        fix_offers(&self.sem, typed, decision, &self.annotation_sites())
     }
 
     /// The annotation the `index`th fix (from zero) of the strict error
@@ -2562,6 +2561,72 @@ impl SessionArtifacts {
     #[must_use]
     pub fn dependency_object_id(&self, dependency: typing::TypingDependency) -> String {
         typing_dependency_object_id(&self.sem, dependency)
+    }
+
+    /// Fingerprint of what a claim report of these artifacts is derived
+    /// from: the source text, the typing configuration, and the codegen
+    /// policy. A [`ClaimReport`](crate::claims::ClaimReport) whose
+    /// [`basis`](crate::claims::ClaimReport::basis) differs describes
+    /// another compilation.
+    #[must_use]
+    pub fn claims_basis(&self) -> u64 {
+        let mut builder = crate::identity::StableIdBuilder::new(CLAIMS_BASIS_DOMAIN);
+        builder.mix_str(&self.source.source);
+        builder.mix_str(&format!("{:?}", self.typing.config));
+        builder.mix_str(self.codegen_policy.as_str());
+        builder.finish()
+    }
+
+    /// Returns the claim report of the function, method, or constant `id`
+    /// names: its `claims:<definition>` object, its `function:fN`,
+    /// `method:mN`, or `constant:kN` object, or its `def…` id.
+    ///
+    /// The report aggregates the recorded typing decisions, what lowering
+    /// did with each check, and the contracts and closed worlds they rely
+    /// on; see [`crate::claims`]. Its revision is `None`: a retained
+    /// session stamps its own (`interloko_session::Session::claims`).
+    ///
+    /// Returns `None` when `id` names no such definition.
+    #[must_use]
+    pub fn claim_report(
+        &self,
+        id: &str,
+        detail: crate::claims::ClaimDetail,
+    ) -> Option<crate::claims::ClaimReport> {
+        let definition = self.claims_definition(id)?;
+        let sites = self.annotation_sites();
+        crate::claims::build(&self.claim_inputs(&sites), definition, detail)
+    }
+
+    /// What claim reports of these artifacts are built from.
+    fn claim_inputs<'a>(&'a self, sites: &'a [AnnotationSite]) -> crate::claims::ClaimInputs<'a> {
+        crate::claims::ClaimInputs {
+            module: &self.sem,
+            typing: &self.typing,
+            lowered: self.lowered.as_ref(),
+            codegen: self.codegen_policy,
+            sites,
+            basis: self.claims_basis(),
+        }
+    }
+
+    /// Renders the claim report `id` names, as the `show-claims` affordance
+    /// does; see [`Self::claim_report`].
+    #[must_use]
+    pub fn explain_claims(&self, id: &str, detail: crate::claims::ClaimDetail) -> Option<String> {
+        self.claim_report(id, detail).map(|report| report.render())
+    }
+
+    /// The definition a claim report selector names.
+    fn claims_definition(&self, id: &str) -> Option<DefinitionId> {
+        let id = id.strip_prefix("claims:").unwrap_or(id);
+        if let Some(hex) = id.strip_prefix("def")
+            && hex.len() == 16
+            && let Ok(raw) = u64::from_str_radix(hex, 16)
+        {
+            return Some(DefinitionId(raw));
+        }
+        self.definition_object(id)
     }
 
     /// The definition of the function, method, or constant object `id`.
@@ -10434,6 +10499,17 @@ fn dump_environment_object_record(object: &EnvironmentObject) -> String {
             TypingFacet::Contract { definition, .. } => {
                 let _ = writeln!(out, "  contract of {definition}");
             }
+            TypingFacet::Claims {
+                definition,
+                tally,
+                strict_unmet,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "  claims of {definition} sites={} relied={} runtime={} strict-unmet={strict_unmet}",
+                    tally.sites, tally.relied, tally.runtime
+                );
+            }
             TypingFacet::Annotation {
                 target,
                 role,
@@ -10722,6 +10798,7 @@ fn project_session_environment(
     }
     project_typing(artifacts, &dispatch_sites, sink);
     project_contracts(artifacts, sink);
+    project_claims(artifacts, sink);
     project_annotation_sites(artifacts, sink);
     for entry in artifacts.mutations() {
         project_environment_mutation(module, sink, entry);
@@ -10915,7 +10992,8 @@ fn enrich_environment_object(artifacts: &SessionArtifacts, object: &mut Environm
         // facets from projection.
         EnvironmentKind::Contract
         | EnvironmentKind::Binding
-        | EnvironmentKind::DefinitionResult => {}
+        | EnvironmentKind::DefinitionResult
+        | EnvironmentKind::Claims => {}
         EnvironmentKind::TypingDecision => {
             if let Some(TypingFacet::Decision { decision, .. }) = &object.typing {
                 object.source =
@@ -12044,7 +12122,7 @@ fn project_environment_method(
         Aff::ShowTypes,
     ]);
     if !generated {
-        affordances.extend([Aff::EditBody, Aff::PreviewStrict]);
+        affordances.extend([Aff::EditBody, Aff::PreviewStrict, Aff::ShowClaims]);
     }
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("method:m{}", method.id.0),
@@ -12121,6 +12199,7 @@ fn project_environment_function(
             Aff::ShowTypes,
             Aff::EditBody,
             Aff::PreviewStrict,
+            Aff::ShowClaims,
         ]),
         execution: Some(format!("callable=direct arity={}", function.params.len())),
         inspection: format!(
@@ -12193,6 +12272,7 @@ fn project_environment_constant(
             Aff::ShowDependencies,
             Aff::ShowTypes,
             Aff::PreviewStrict,
+            Aff::ShowClaims,
         ]),
         execution: Some("binding=immutable top-level".to_string()),
         inspection: format!(
@@ -12263,6 +12343,42 @@ fn project_environment_dispatch_site(
         ),
     }));
 }
+
+/// The fixes that could prove `decision`, each with the annotation
+/// mutation that makes it when there is one; see
+/// [`SessionArtifacts::strict_fixes`].
+pub(crate) fn fix_offers(
+    module: &sem::Module,
+    typed: &typing::DefinitionTyping,
+    decision: &typing::TypingDecision,
+    sites: &[AnnotationSite],
+) -> Vec<StrictFixOffer> {
+    typing::strict_fixes(module, typed, decision)
+        .into_iter()
+        .map(|fix| {
+            let annotation = match &fix {
+                typing::StrictFix::Annotate { span, .. } => sites
+                    .iter()
+                    .find(|site| {
+                        site.span == *span
+                            && site.target.definition() == decision.owner
+                            && matches!(site.target, AnnotationTarget::Binding { .. })
+                    })
+                    .zip(fix.annotation_source(module))
+                    .map(|(site, type_source)| (site.target.clone(), type_source)),
+                _ => None,
+            };
+            StrictFixOffer {
+                description: fix.describe(module),
+                fix,
+                annotation,
+            }
+        })
+        .collect()
+}
+
+/// Hash domain of [`SessionArtifacts::claims_basis`].
+const CLAIMS_BASIS_DOMAIN: u64 = 0x636c_6169_6d73;
 
 /// Stable EOP id of the session typing configuration object.
 const TYPING_CONFIG_OBJECT_ID: &str = "typing-config:session";
@@ -12530,6 +12646,90 @@ fn project_contracts(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObj
     }
 }
 
+/// Projects one claims object per source function, method, and constant:
+/// its claim report in brief, with `show-claims` rendering the whole
+/// report.
+fn project_claims(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObjectSink) {
+    use EnvironmentAffordance as Aff;
+
+    let module = &artifacts.sem;
+    let definitions = module
+        .functions
+        .iter()
+        .map(|function| (function.definition, function.span))
+        .chain(
+            module
+                .methods
+                .iter()
+                .filter(|method| {
+                    matches!(
+                        method.origin,
+                        sem::MethodOrigin::Source | sem::MethodOrigin::Session { .. }
+                    )
+                })
+                .map(|method| (method.definition, method.span)),
+        )
+        .chain(
+            module
+                .constants
+                .iter()
+                .map(|constant| (constant.definition, constant.span)),
+        );
+    let sites = artifacts.annotation_sites();
+    let inputs = artifacts.claim_inputs(&sites);
+    for (definition, span) in definitions {
+        let Some(report) =
+            crate::claims::build(&inputs, definition, crate::claims::ClaimDetail::Summary)
+        else {
+            continue;
+        };
+        let tally = report.tally;
+        let mut object = environment_object(EnvironmentObjectParts {
+            id: report.object.clone(),
+            kind: EnvironmentKind::Claims,
+            meta_class: "<claims>",
+            origin: EnvironmentOrigin::CompilerGenerated,
+            storage: EnvironmentStorage::CachedArtifact,
+            title: format!("claims of {}", report.label),
+            affordances: Vec::from([Aff::Inspect, Aff::ShowClaims, Aff::OpenSource, Aff::DumpEop]),
+            execution: None,
+            inspection: format!(
+                "definition={definition} typing={} codegen={} strict={} sites={} proved={} relied={} runtime={} checked={} refuted={} errors={} strict-unmet={} support={}",
+                report.typing.as_str(),
+                report.codegen.as_str(),
+                report
+                    .strict
+                    .source
+                    .map_or("none", typing::StrictSource::as_str),
+                tally.sites,
+                tally.proved,
+                tally.relied,
+                tally.runtime,
+                tally.checked,
+                tally.refuted,
+                tally.errors,
+                report.strict.unmet,
+                report.support.len()
+            ),
+        });
+        object.source = SourceFacet::new(Some(artifacts.source.id), Some(definition), Some(span));
+        object.artifacts = artifact_facet(
+            artifacts.source.id,
+            &[
+                QueryArtifact::DefinitionTyping(definition),
+                QueryArtifact::Typing,
+                QueryArtifact::LoweredModule,
+            ],
+        );
+        object.typing = Some(TypingFacet::Claims {
+            definition,
+            tally,
+            strict_unmet: report.strict.unmet,
+        });
+        sink.emit(object);
+    }
+}
+
 /// For a generic's contract object, ` sealing=<open|sealed> methods=N
 /// assumed-by=M`: whether its method set is sealed, how many methods it has,
 /// and how many decisions rely on that set. Empty for other definitions.
@@ -12762,7 +12962,7 @@ fn value_contract_list_label(
 
 /// The EOP object a typing dependency refers to, as described by
 /// [`SessionArtifacts::dependency_object_id`].
-fn typing_dependency_object_id(
+pub(crate) fn typing_dependency_object_id(
     module: &sem::Module,
     dependency: typing::TypingDependency,
 ) -> String {
@@ -15618,6 +15818,7 @@ mod tests {
             (EnvironmentAffordance::PreviewStrict, "preview-strict"),
             (EnvironmentAffordance::PreviewFix, "preview-fix"),
             (EnvironmentAffordance::ApplyFix, "apply-fix"),
+            (EnvironmentAffordance::ShowClaims, "show-claims"),
         ];
 
         let all = EnvironmentAffordance::all();

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use interloko_compiler::annotation::AnnotationTarget;
+use interloko_compiler::claims::ClaimDetail;
 use interloko_compiler::diagnostic::{Diagnostic, DiagnosticCode};
 use interloko_compiler::grammar_frontend;
 use interloko_compiler::identity::{ArtifactKey, SourceFileId};
@@ -67,6 +68,7 @@ const COMMANDS: &[&str] = &[
     ":drop-form",
     ":invoke",
     ":annotate",
+    ":claims",
     ":frames",
 ];
 const DUMP_STAGES: &[&str] = &[
@@ -349,6 +351,7 @@ impl Repl {
             ":codegen" => self.codegen_command(&args, stdout, stderr)?,
             ":typing" => self.typing_command(&args, stdout, stderr)?,
             ":annotate" => self.annotate_command(&args, stdout, stderr)?,
+            ":claims" => self.claims_command(&args, stdout, stderr)?,
             ":cancel" | ":clear-pending" => {
                 if self.cancel_pending_definition() {
                     writeln!(stdout, "cancelled pending definition")?;
@@ -1162,6 +1165,13 @@ impl Repl {
                     writeln!(stderr, "error: unknown affordance `{affordance}`")?;
                     return Ok(());
                 };
+                if environment_affordance == EnvironmentAffordance::ShowClaims
+                    && object.affordances.contains(environment_affordance)
+                {
+                    let mut args = vec![object.id.as_str()];
+                    args.extend(extra.iter().copied());
+                    return self.claims_command(&args, stdout, stderr);
+                }
                 self.invoke_environment_affordance(
                     &artifacts,
                     &object,
@@ -1406,6 +1416,13 @@ impl Repl {
                 affordance,
                 object.id.as_str(),
             )?,
+            EnvironmentAffordance::ShowClaims => write_optional_affordance(
+                stdout,
+                stderr,
+                artifacts.explain_claims(object.id.as_str(), ClaimDetail::Summary),
+                affordance,
+                object.id.as_str(),
+            )?,
             EnvironmentAffordance::Run => {
                 self.run_environment_object(artifacts, object, stdout, stderr)?
             }
@@ -1639,6 +1656,40 @@ impl Repl {
         let after = self.ensure_artifacts(stderr)?;
         writeln!(stdout, "typing {}", typing::config_label(config))?;
         write!(stdout, "{}", before.typing_delta(&after).render())?;
+        Ok(())
+    }
+
+    /// `:claims <object-id|name> [full]`: the claim report of a function,
+    /// method, or constant, or of a `claims:` object.
+    fn claims_command<W, E>(&mut self, args: &[&str], stdout: &mut W, stderr: &mut E) -> Result<()>
+    where
+        W: Write,
+        E: Write,
+    {
+        let (reference, detail) = match args {
+            [reference] => (*reference, Some(ClaimDetail::Summary)),
+            [reference, detail] => (*reference, ClaimDetail::from_label(detail)),
+            _ => (".", None),
+        };
+        let Some(detail) = detail else {
+            writeln!(stderr, "usage: :claims <object-id|name> [summary|full]")?;
+            return Ok(());
+        };
+        let artifacts = self.ensure_artifacts(stderr)?;
+        let id = match resolve_environment_object_reference(&artifacts, reference) {
+            EnvironmentObjectReference::One(object) => object.id.as_str().to_string(),
+            EnvironmentObjectReference::Ambiguous(objects) => {
+                return write_ambiguous_object_reference(stderr, reference, &objects);
+            }
+            EnvironmentObjectReference::None => reference.to_string(),
+        };
+        match artifacts.explain_claims(&id, detail) {
+            Some(report) => write!(stdout, "{report}")?,
+            None => writeln!(
+                stderr,
+                "error: `{reference}` names no function, method, or constant"
+            )?,
+        }
         Ok(())
     }
 
@@ -2302,6 +2353,7 @@ where
                         | "set-codegen-policy"
                         | "preview-fix"
                         | "apply-fix"
+                        | "show-claims"
                 ) =>
         {
             Ok(Some((
@@ -3432,7 +3484,12 @@ typing:
   :invoke <function:...|method:...|generic:...|constant:...> preview-strict
                                 report what would fail if it were strict
   :invoke <diagnostic:dN> preview-fix|apply-fix [fix-index]
-                                preview or apply a strict error's annotation fix"
+                                preview or apply a strict error's annotation fix;
+                                the delta names any contract it narrows
+  :claims <object-id|name> [summary|full]
+                                what typing established for a definition, what
+                                its code relies on, and which checks stay at
+                                run time and why"
 }
 
 #[derive(Clone, Debug, Default)]

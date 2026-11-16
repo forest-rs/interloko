@@ -79,6 +79,10 @@ traces come from the existing compiler/runtime interface.
   changed: narrowing a parameter can prove the body's checks only by moving
   them to its callers, which is a change of specification, not just fewer
   errors.
+- `claims` returns a definition's claim report, stamped with the accepted
+  revision: what typing established, what the generated code relies on,
+  which checks stay at run time and why, and which contracts and closed
+  worlds support it. `is_current` tells a held report from a stale one.
 - Construction uses the compiler's builtin grammar environment. Custom staged
   grammar registry injection is not exposed by this initial session wrapper.
 - Filesystem, transport, UI, document composition and execution scheduling belong

@@ -7,6 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use interloko_compiler::annotation::AnnotationTarget;
+use interloko_compiler::claims::ClaimDetail;
 use interloko_compiler::grammar_frontend::{GrammarEnvironmentSelection, GrammarFrontendRegistry};
 use interloko_compiler::identity::SourceFileId;
 use interloko_compiler::lower::CodegenPolicy;
@@ -75,6 +76,7 @@ fn run(args: Vec<String>) -> Result<()> {
         "affordances" => command_affordances(&args, codegen),
         "invoke-affordance" => command_invoke_affordance(&args, codegen),
         "annotate" => command_annotate(&args, codegen),
+        "claims" => command_claims(&args, codegen),
         "artifacts" => command_artifacts(&args, codegen),
         "report" => command_report(&args, codegen),
         "diff" => command_diff(&args, codegen),
@@ -731,6 +733,11 @@ fn invoke_affordance(
         return invoke_fix(file, object_id, affordance, index, codegen);
     }
 
+    if affordance == EnvironmentAffordance::ShowClaims {
+        let detail = parse_claims_detail(affordance, extra)?;
+        return show_claims(file, object_id, detail, codegen);
+    }
+
     if !extra.is_empty() {
         return Err(LabError::Usage(format!(
             "affordance `{}` does not accept extra arguments",
@@ -1134,6 +1141,60 @@ fn invoke_fix(
     println!("fix {index} of {object_id}: annotate {target} {type_source}");
     let dry_run = affordance == EnvironmentAffordance::PreviewFix;
     annotate_target(workbench, target, &type_source, dry_run)
+}
+
+fn parse_claims_detail(affordance: EnvironmentAffordance, extra: &[String]) -> Result<ClaimDetail> {
+    match extra {
+        [] => Ok(ClaimDetail::Summary),
+        [detail] => ClaimDetail::from_label(detail).ok_or_else(|| {
+            LabError::Usage(format!(
+                "affordance `{}` takes `summary` or `full`, got `{detail}`",
+                affordance.as_str()
+            ))
+        }),
+        _ => Err(LabError::Usage(format!(
+            "affordance `{}` takes at most one argument: `summary` or `full`",
+            affordance.as_str()
+        ))),
+    }
+}
+
+/// `claims <file.loko> <object-id> [summary|full]`: the `show-claims`
+/// affordance as a command.
+fn command_claims(args: &[String], codegen: CodegenPolicy) -> Result<()> {
+    let (file, object_id, extra) = match args {
+        [_, file, object_id, extra @ ..] => (file, object_id, extra),
+        _ => {
+            return Err(LabError::Usage(
+                "usage: interloko_lab claims <file.loko> <claims:...|function:...|method:...|constant:...> [summary|full]".into(),
+            ));
+        }
+    };
+    let detail = parse_claims_detail(EnvironmentAffordance::ShowClaims, extra)?;
+    show_claims(file, object_id, detail, codegen)
+}
+
+/// Prints the claim report of the definition `object_id` names.
+fn show_claims(
+    file: &str,
+    object_id: &str,
+    detail: ClaimDetail,
+    codegen: CodegenPolicy,
+) -> Result<()> {
+    let workbench = compile_workbench_path(file, RuntimeMode::CompileOnly, codegen)?;
+    print_diagnostics(&workbench.artifacts.diagnostics)?;
+    let object = workbench.object(object_id)?;
+    ensure_object_has_affordance(&object, EnvironmentAffordance::ShowClaims)?;
+    print!(
+        "{}",
+        workbench
+            .artifacts
+            .explain_claims(object_id, detail)
+            .ok_or_else(|| LabError::UnsupportedAffordance {
+                name: EnvironmentAffordance::ShowClaims.as_str().into(),
+            })?
+    );
+    Ok(())
 }
 
 fn parse_annotate_args(affordance: EnvironmentAffordance, extra: &[String]) -> Result<String> {
@@ -1735,7 +1796,7 @@ fn usage() -> String {
         })
         .unwrap_or_else(|| "interloko_lab".into());
     format!(
-        "usage:\n  {binary} [--codegen off|proved] COMMAND ...\n\ncommands:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]\n  {binary} invoke-affordance <file.loko> <generic:gN> add-method --source <method.loko>\n  {binary} invoke-affordance <file.loko> <binding:...|result:...> annotate|preview-annotation --type <type>\n  {binary} invoke-affordance <file.loko> typing-config:session set-typing-policy <preset|check.verdict=severity>...\n  {binary} invoke-affordance <file.loko> typing-config:session set-codegen-policy off|proved\n  {binary} invoke-affordance <file.loko> <function:...|method:...|generic:...|constant:...> preview-strict\n  {binary} invoke-affordance <file.loko> <diagnostic:dN> preview-fix|apply-fix [fix-index]\n  {binary} annotate <file.loko> <binding:...|result:...> <type> [--dry-run]\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\noptions:\n  --codegen off|proved   codegen policy for every compile (default proved); may appear anywhere\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
+        "usage:\n  {binary} [--codegen off|proved] COMMAND ...\n\ncommands:\n  {binary} run [--trace] [--instructions] <file.loko>\n  {binary} trace [--instructions] <file.loko>\n  {binary} dump <file.loko> --stage syntax|ast|sem|mop|eop|lowered|tape|typing|types|all\n  {binary} mop <file.loko>\n  {binary} eop <file.loko>\n  {binary} registry <file.loko>\n  {binary} extensions <file.loko>\n  {binary} dispatch <file.loko> [dispatch-site-id]\n  {binary} inspect <file.loko> <object-id>\n  {binary} affordances <file.loko> <object-id>\n  {binary} invoke-affordance <file.loko> <object-id> <affordance> [affordance-args...]\n  {binary} invoke-affordance <file.loko> <generic:gN> add-method --source <method.loko>\n  {binary} invoke-affordance <file.loko> <binding:...|result:...> annotate|preview-annotation --type <type>\n  {binary} invoke-affordance <file.loko> typing-config:session set-typing-policy <preset|check.verdict=severity>...\n  {binary} invoke-affordance <file.loko> typing-config:session set-codegen-policy off|proved\n  {binary} invoke-affordance <file.loko> <function:...|method:...|generic:...|constant:...> preview-strict\n  {binary} invoke-affordance <file.loko> <diagnostic:dN> preview-fix|apply-fix [fix-index]\n  {binary} annotate <file.loko> <binding:...|result:...> <type> [--dry-run]\n  {binary} claims <file.loko> <claims:...|function:...|method:...|constant:...> [summary|full]\n  {binary} artifacts <file.loko>\n  {binary} report <file.loko> --output <report.html>\n  {binary} diff <before.loko> <after.loko>\n\noptions:\n  --codegen off|proved   codegen policy for every compile (default proved); may appear anywhere\n\ndiagnostics:\n  INTERLOKO_DIAGNOSTIC_LOCALE=en|pseudo\n  INTERLOKO_DIAGNOSTIC_CATALOG=path/to/catalog.mf2.toml"
     )
 }
 

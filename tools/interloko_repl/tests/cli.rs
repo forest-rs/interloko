@@ -1227,3 +1227,41 @@ fn break_loop_refuses_to_install_an_edit_with_strict_errors() {
         "{stderr}"
     );
 }
+
+#[test]
+fn claims_report_a_definition_and_annotations_name_the_contracts_they_narrow() {
+    let id = shapes_param_id();
+    let (stdout, stderr) = run_repl(&format!(
+        "{SHAPES}\
+         :claims measure\n\
+         :invoke function:f0 show-claims full\n\
+         :annotate --dry-run {id} <circle>\n\
+         :claims nothing\n\
+         :claims measure everything\n\
+         :quit\n"
+    ));
+    assert!(stdout.contains("claims claims:def"), "{stdout}");
+    assert!(stdout.contains(" function measure\n"), "{stdout}");
+    assert!(stdout.contains("  revision=none basis="), "{stdout}");
+    assert!(
+        stdout.contains("cause=open-class: <shape> is open"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("detail=full"), "{stdout}");
+    assert!(
+        stdout.contains("contract delta: SPECIFICATION CHANGED changes=1 narrows-inputs=1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("narrowed param s of function measure"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("error: `nothing` names no function, method, or constant"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("usage: :claims <object-id|name> [summary|full]"),
+        "{stderr}"
+    );
+}

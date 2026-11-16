@@ -1,13 +1,14 @@
 //! Embedding contracts across accepted edits and explicit host behavior.
 
 use interloko_compiler::annotation::AnnotationTarget;
+use interloko_compiler::claims::{ClaimDetail, ResidualCause};
 use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{HostFunction, HostMetaRegistry, HostValueKind};
 use interloko_compiler::session::{
     DumpStage, ExecutionTraceDetail, FunctionCallError, FunctionValue, HostFunctionFailure,
     HostFunctionHandler, SessionMutation,
 };
-use interloko_compiler::typing::TypingConfig;
+use interloko_compiler::typing::{CheckOrigin, TypingConfig};
 use interloko_session::{Session, SessionError};
 
 const SOURCE: &str = "
@@ -354,4 +355,71 @@ end;
     assert_eq!(session.typing_config(), TypingConfig::soft());
     assert!(session.artifacts().check_runnable().is_ok());
     assert_eq!(answer(&session), FunctionValue::Integer(7));
+}
+
+#[test]
+fn claim_reports_carry_the_revision_and_show_contract_narrowing_moving_checks() {
+    let source = "
+define function digit(n)
+  as(<u32>, n)
+end;
+define function answer()
+  as(<integer>, digit(7))
+end;
+";
+    let mut session = Session::new("claims.loko", source).unwrap();
+    let definition = session
+        .artifacts()
+        .sem
+        .functions
+        .iter()
+        .find(|function| function.name == "digit")
+        .unwrap()
+        .definition;
+    let id = format!("claims:{definition}");
+    let before = session.claims(&id, ClaimDetail::Summary).unwrap();
+    assert_eq!(before.revision, Some(0));
+    assert!(session.is_current(&before));
+    assert_eq!(before.tally.checked, 1);
+    // The program asked for the conversion with `as`, so it is not lost
+    // precision, even though `n` has no written type.
+    let site = before.residual_sites().next().unwrap();
+    assert_eq!(
+        site.residual.as_ref().map(|residual| residual.cause),
+        Some(ResidualCause::Requested(CheckOrigin::Explicit))
+    );
+
+    let target = AnnotationTarget::Binding {
+        definition,
+        name: "n".into(),
+        occurrence: 0,
+    };
+    let digit = "limited(<integer>, min: 0, max: 9)";
+    let preview = session.preview_annotation(&target, digit).unwrap();
+    assert!(preview.delta.changes_specification());
+    assert_eq!(preview.delta.obligations().moved_to_callers, 1);
+    session
+        .mutate(
+            0,
+            SessionMutation::Annotate {
+                target,
+                type_source: digit.into(),
+            },
+        )
+        .unwrap();
+
+    // The edit makes the held report stale; the new one shows the check
+    // proved in `digit` and the contract callers now satisfy.
+    assert!(!session.is_current(&before));
+    let after = session.claims(&id, ClaimDetail::Summary).unwrap();
+    assert_eq!(after.revision, Some(1));
+    assert_eq!((after.tally.checked, after.tally.relied), (0, 1));
+    assert_eq!(
+        after
+            .contract
+            .as_ref()
+            .map(|contract| contract.params.clone()),
+        Some(vec![format!("n: {digit}")])
+    );
+    assert_eq!(session.claims("generic:g99", ClaimDetail::Summary), None);
 }

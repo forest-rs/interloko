@@ -649,6 +649,13 @@ typing delta: changed=2 added=0 removed=0 unchanged=1
 ...
 ```
 
+After applying, the definition's claim report (`claims:<definition>`, see
+[`eop_workbench.md`](eop_workbench.md#claim-reports)) shows the result:
+which of its checks typing now proves, which the generated code relies
+on, and which stay at run time and why. A report from a retained session
+carries the session revision, so one held from before the edit is
+recognizably stale.
+
 Failure paths print structured rejection messages, for example (a
 rejection for new diagnostics prints them first, with their notes; any
 error counts, a strict definition's `typing.unproved-*` included, since
