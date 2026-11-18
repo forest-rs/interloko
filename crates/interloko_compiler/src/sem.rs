@@ -8263,14 +8263,10 @@ impl Lowering {
                 });
         }
         let Some(result_kinds) = expected_results else {
-            ctx.diagnostics.push(
-                Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
-                    .with_arg(DiagnosticArg::text(
-                        "expected",
-                        "<callable> with known result context",
-                    ))
-                    .with_arg(DiagnosticArg::text("actual", "<callable>")),
-            );
+            ctx.diagnostics.push(Diagnostic::error(
+                target.span(),
+                DiagnosticCode::UntypedCallableResult,
+            ));
             return Expr::Error { span };
         };
         // An untyped callable's register kinds come from the call site, and
@@ -12049,6 +12045,13 @@ mod tests {
             &non_callable,
             DiagnosticCode::ApplyTargetTypeMismatch,
             &[("actual", "<integer>")]
+        ));
+        let untyped =
+            lower_source("define function run(f :: <callable>)\n  let r = apply(f, 4);\n  r\nend;");
+        assert!(has_diagnostic(
+            &untyped,
+            DiagnosticCode::UntypedCallableResult,
+            &[]
         ));
     }
 

@@ -289,6 +289,18 @@ used, 1, is retired with those of the failed type checks; `make` on a class
 value still traps (`runtime.trap`) when the class needs an init keyword the
 call cannot pass, which is not a dispatch failure.
 
+## Calls Through `<callable>`
+
+An untyped `<callable>` value says nothing about what it returns, so a
+call through it (`apply(f, ...)`) takes its result types from context: a
+declared binding (`let r :: <integer> = apply(f, 4)`), the enclosing
+function's declared result, or an argument's parameter type. With no such
+context it reports `sem.untyped-callable-result`, which suggests declaring
+one or giving the callable a signature such as `callable(<integer>) =>
+<integer>`. A result the call site relies on but cannot check is
+`sem.unchecked-callable-result`, and a target that is not callable at all
+is `sem.apply-target-type-mismatch`.
+
 ## Corpus
 
 The corpus runner supports both forms:
