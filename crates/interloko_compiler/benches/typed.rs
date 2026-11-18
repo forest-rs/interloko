@@ -53,6 +53,16 @@
 //!   runs the same test and reads the slot through a `<square>` parameter
 //!   holding the same object.
 //!
+//! Three cases measure calls through callable values, each against a
+//! direct call of the same function:
+//!
+//! - `untyped call`: `apply(f, d)` on a `<callable>` parameter holding a
+//!   function value.
+//! - `typed callable`: `f(d)` on a `callable(<integer>) => <integer>`
+//!   parameter holding the same function.
+//! - `untyped closure`: `apply(f, d)` on a `<callable>` holding an
+//!   anonymous function.
+//!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
 use std::hint::black_box;
@@ -258,6 +268,38 @@ end;
 define function kept(d :: <integer>) => <integer>
   if d = 0 then as(<integer>, keep(1i32, 3i32)) else kept(d - 1) + kept(d - 1) end
 end;
+
+define function inc(n :: <integer>) => <integer>
+  n + 1
+end;
+
+define function inc-called(d :: <integer>) => <integer>
+  if d = 0 then inc(d) else inc-called(d - 1) + inc-called(d - 1) end
+end;
+
+define function untyped-tree(f :: <callable>, d :: <integer>) => <integer>
+  if d = 0 then apply(f, d) else untyped-tree(f, d - 1) + untyped-tree(f, d - 1) end
+end;
+
+define function untyped(d :: <integer>) => <integer>
+  untyped-tree(inc, d)
+end;
+
+define function typed-tree(f :: callable(<integer>) => <integer>, d :: <integer>) => <integer>
+  if d = 0 then f(d) else typed-tree(f, d - 1) + typed-tree(f, d - 1) end
+end;
+
+define function typed-callable(d :: <integer>) => <integer>
+  typed-tree(inc, d)
+end;
+
+define function closure-tree(f :: <callable>, d :: <integer>) => <integer>
+  if d = 0 then apply(f, d) else closure-tree(f, d - 1) + closure-tree(f, d - 1) end
+end;
+
+define function closure-call(d :: <integer>) => <integer>
+  closure-tree(function (n :: <integer>) => <integer> n + 1 end, d)
+end;
 ";
 
 /// Cases recurse as a balanced binary tree this deep and operate at its
@@ -344,6 +386,9 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("shape send", net("shape-sent", "shape-called")),
         ("leaf send", net("leaf-sent", "leaf-called")),
         ("typecase cast", net("cast-past", "test-only")),
+        ("untyped call", net("untyped", "inc-called")),
+        ("typed callable", net("typed-callable", "inc-called")),
+        ("untyped closure", net("closure-call", "inc-called")),
     ]
 }
 
