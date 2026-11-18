@@ -444,6 +444,7 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
         | E::Capture { .. }
         | E::ConstantRef { .. }
         | E::ClassObject { .. }
+        | E::TypeObject { .. }
         | E::KnownCallable { .. }
         | E::GenericFunctionObject { .. }
         | E::Error { .. } => {}

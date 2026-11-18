@@ -1,0 +1,30 @@
+// expect: run 63
+// expect: diagnostics 0
+
+// Following Dylan, `limited(<integer>, ...)` written as an expression is a
+// `<limited-integer>` type object, and so are `<i32>` and `<u32>`. A type
+// object is a `<type>`, as a class object is: `instance?` tests a value
+// against one, `=` compares them as types (a named type equals its range
+// spelled out), and the accessors read its base and bounds, `#f` for a
+// bound it does not have.
+
+define function score(t :: <type>, n :: <integer>) => <integer>
+  if instance?(n, t) then 1 else 0 end
+end;
+
+define function type?(x :: <object>) => <boolean>
+  instance?(x, <type>)
+end;
+
+define function main() => <integer>
+  let digit = limited(<integer>, min: 0, max: 9);
+  let natural = limited(<integer>, min: 0);
+  score(digit, 7)
+    + 2 * score(digit, 10)
+    + 2 * score(natural, 4000000000)
+    + 4 * (if <i32> = limited(<integer>, min: -2147483648, max: 2147483647) then 1 else 0 end)
+    + 8 * (if digit = <u32> then 1 else 0 end)
+    + 8 * (if instance?(limited-integer-max(as(<limited-integer>, natural)), <integer>) then 0 else 1 end)
+    + 16 * (if limited-integer-base(as(<limited-integer>, digit)) = <integer> then 1 else 0 end)
+    + 32 * (if type?(<i32>) then 1 else 0 end)
+end;

@@ -14,6 +14,7 @@
 "ast.annotation-not-class" = "{ $position } `{ $name }` is declared { $type }, but it must name a class"
 "ast.invalid-instance-of" = "invalid instance? form"
 "ast.invalid-cast" = "invalid as form"
+"ast.invalid-type-literal" = "`limited` takes a type and its `min:` and `max:` bounds, as in `limited(<integer>, min: 0, max: 255)`"
 "ast.invalid-signal" = "signal expects exactly one condition"
 "ast.invalid-slot-assignment" = "slot assignment target must be `object.slot`"
 "ast.duplicate-adjective" = "`{ $adjective }` is written twice"

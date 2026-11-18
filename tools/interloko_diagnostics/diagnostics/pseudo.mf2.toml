@@ -14,6 +14,7 @@
 "ast.annotation-not-class" = "[ps] { $position } { $name } needs a class, not { $type }"
 "ast.invalid-instance-of" = "[ps] instance? form is invalid"
 "ast.invalid-cast" = "[ps] as form is invalid"
+"ast.invalid-type-literal" = "[ps] limited form is invalid"
 "ast.invalid-signal" = "[ps] signal condition count is invalid"
 "ast.invalid-slot-assignment" = "[ps] slot assignment target must be object.slot"
 "ast.duplicate-adjective" = "[ps] adjective { $adjective } repeated"

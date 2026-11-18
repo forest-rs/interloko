@@ -200,7 +200,8 @@ The current slices include:
   `as(<u32>, x)` and friends convert exactly between every numeric type
   (out-of-range integers and non-integral floats signal
   `type-error.range`), and
-  `instance?(x, <u32>)` tests for an `<integer>` in the range. Wrapping is
+  `instance?(x, <u32>)` tests for an `<integer>` in the range.
+  As values, `<i32>` and `<u32>` are `<limited-integer>` type objects. Wrapping is
   only ever explicit: `+%`, `-%` and `*%` compute modulo 2^32 on two
   operands of one fixed-width type. `logand`, `logior` and `logxor` are
   exact on every integer type, and `shift-left`/`shift-right` shift an
@@ -215,6 +216,8 @@ The current slices include:
   `<integer>`s; each declaration checks what reaches it (the caller checks
   an argument, where typing usually proves it), so the code reading it may
   assume the range, and the ranges are part of a definition's contract.
+  Written as a value, `limited(...)` is a `<limited-integer>` type object,
+  as in Dylan, which `instance?` tests against and `=` compares by range.
   An `<integer>` reaches a limited type with that implicit check because
   the representation does not change, while reaching `<i32>` or `<u32>`
   changes it and so takes an explicit `as`. A method's limited parameter

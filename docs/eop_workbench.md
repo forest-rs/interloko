@@ -788,9 +788,12 @@ check's type is spelled out even when it equals `<i32>`'s, since the
 checked value is an `<integer>`. Callable types never appear: no check
 expects one (a call through an untyped `<callable>` is the VM's).
 
-A class name written as a value is its class object, and a
-`<type-error>` the program makes with `make(<type-error>, ...)` takes a
-type object for `expected-type:`.
+A program can write the same type objects: `limited(<integer>, min: 0,
+max: 9)` used as a value is a `<limited-integer>`, as are `<i32>` and
+`<u32>`, and a class name is its class object (a `limited(...)` value that
+writes no type to limit is `ast.invalid-type-literal`). One the program
+makes with `make(<type-error>, ...)` takes a type object for
+`expected-type:`.
 
 Rust code reads the condition through `TypeErrorReport`, whose `expected`
 is the printed type and `expected_type` the
