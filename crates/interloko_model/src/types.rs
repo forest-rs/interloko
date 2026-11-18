@@ -341,8 +341,9 @@ impl Atom {
         match self {
             Self::Cone(class) | Self::Exact(class) => Some(*class),
             Self::Integer(_) => hierarchy.builtin_class(BuiltinValueClass::Integer),
+            Self::Boolean(_) => hierarchy.builtin_class(BuiltinValueClass::Boolean),
             Self::Singleton(object) => hierarchy.builtin_class(object.metaclass()),
-            Self::Boolean(_) | Self::Callable => None,
+            Self::Callable => None,
         }
     }
 
@@ -350,8 +351,10 @@ impl Atom {
     /// exactly one.
     fn exact_class<H: ClassHierarchy + ?Sized>(&self, hierarchy: &H) -> Option<ClassId> {
         match self {
-            Self::Exact(_) | Self::Integer(_) | Self::Singleton(_) => self.class(hierarchy),
-            Self::Cone(_) | Self::Boolean(_) | Self::Callable => None,
+            Self::Exact(_) | Self::Integer(_) | Self::Boolean(_) | Self::Singleton(_) => {
+                self.class(hierarchy)
+            }
+            Self::Cone(_) | Self::Callable => None,
         }
     }
 
@@ -863,8 +866,16 @@ fn normalize<H: ClassHierarchy + ?Sized>(
     atoms: impl IntoIterator<Item = Atom>,
     hierarchy: &H,
 ) -> Type {
+    let boolean = hierarchy.builtin_class(BuiltinValueClass::Boolean);
     let mut out = Vec::new();
     for atom in atoms {
+        // `<boolean>` is exactly its two values.
+        if let Atom::Cone(class) | Atom::Exact(class) = atom
+            && Some(class) == boolean
+        {
+            out.extend([Atom::Boolean(false), Atom::Boolean(true)]);
+            continue;
+        }
         match canonical(atom, hierarchy) {
             Canonical::Top => return Type::top(),
             Canonical::Empty => {}

@@ -874,12 +874,13 @@ signature (a hash the value carries) and calls the typed entry when they
 match, so passing an `<integer>` to a function that takes one costs about
 what a typed call does. Otherwise it boxes the arguments and calls the boxed
 entry, where the callee checks each parameter it relies on: an `<integer>`
-passed to a function that takes a `<double-float>` or `<single-float>`, or
-a boxed `<square>` to one that takes a `<circle>`, signals
+passed to a function that takes a `<double-float>`, `<single-float>` or
+`<boolean>`, or a boxed `<square>` to one that takes a `<circle>`, signals
 `type-error.entry`, and an `<integer>` outside an `<i32>` or `<u32>`
 parameter's range `type-error.range`, at the entry check's site (its typing
 decision, or `entry:<function>:<index>` for a thunk no typing classifies).
-The caller unboxes each result where it lands: a number of another class signals `type-error.cast` at the call, such as an `<object>`
+The caller unboxes each result where it lands: a number or boolean of
+another class signals `type-error.cast` at the call, such as an `<object>`
 holding a string where a `<double-float>` is expected, and a class result is
 cast at a site typing classifies.
 
@@ -895,12 +896,10 @@ the parameter stay static and sound. `use-value` continues all of these
 checks like any other, so code after an entry, a call or an adapter only
 sees values that passed them.
 
-Three mismatches still trap: a callable passed where a value is expected,
-or a value where a callable is (a callable is not an `<object>`, so it has
-no boxed form); a boolean where another value is expected, or another value
-where a boolean is (a boolean has no class, so no type object a failed
-unboxing could report, and it crosses unboxed); and a call through a
-callable value with the wrong number of arguments or results.
+Two mismatches still trap: a callable passed where a value is expected, or
+a value where a callable is (a callable is not an `<object>`, so it has no
+boxed form), and a call through a callable value with the wrong number of
+arguments or results.
 
 ## Failed Sends
 

@@ -163,6 +163,9 @@ The current slices include:
   an abstract specializer such as `<real>` or `<float>` receives the boxed
   value unless the generic fixes a scalar parameter type, while annotations
   name a concrete class;
+- booleans: `#t` and `#f` are the instances of the concrete `<boolean>`
+  class, so methods may specialize on it, `instance?` and `class-of` see it,
+  and a boolean boxes to `<object>` and back like a number;
 - floats: literals such as `1.5`/`2e10` are `<double-float>` (IEEE 754
   binary64) instances under the abstract `<number>` > `<real>` > `<float>`
   classes, with slots, boxing to `<object>`, `<double-float>`

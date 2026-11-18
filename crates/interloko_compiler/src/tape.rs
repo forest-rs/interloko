@@ -444,6 +444,7 @@ struct AbiTables {
     unbox_i64: HostSigId,
     unbox_f64: HostSigId,
     unbox_f32: HostSigId,
+    unbox_bool: HostSigId,
     slot_get: Vec<Vec<HostSigId>>,
     slot_set: Vec<Vec<HostSigId>>,
     string_literal: Option<HostSigId>,
@@ -838,6 +839,10 @@ impl AbiTables {
             runtime::UNBOX_VALUE,
             runtime::unbox_value_signature(ValueType::F32),
         );
+        let unbox_bool = builder.host_sig_for(
+            runtime::UNBOX_VALUE,
+            runtime::unbox_value_signature(ValueType::Bool),
+        );
         let box_i64 = builder.host_sig_for(
             runtime::BOX_VALUE,
             runtime::box_value_signature(ValueType::I64),
@@ -933,6 +938,7 @@ impl AbiTables {
             unbox_i64,
             unbox_f64,
             unbox_f32,
+            unbox_bool,
             slot_get,
             slot_set,
             string_literal,
@@ -2043,6 +2049,7 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::I64 => self.abi.unbox_i64,
                     lower::ValueKind::F64 => self.abi.unbox_f64,
                     lower::ValueKind::F32 => self.abi.unbox_f32,
+                    lower::ValueKind::Bool => self.abi.unbox_bool,
                     _ => return Err(invalid_lowered("unbox result kind is not a scalar")),
                 };
                 // Every value of the result's register type is an instance

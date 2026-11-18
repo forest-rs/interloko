@@ -69,8 +69,8 @@ pub const SLOT_GET: &str = "interloko.slot_get";
 pub const SLOT_SET: &str = "interloko.slot_set";
 /// Host-call symbol for boxing a concrete value as the top `<object>` value.
 pub const BOX_VALUE: &str = "interloko.box_value";
-/// Host-call symbol for unboxing an integer or float from a boxed top
-/// `<object>` value after checking its class.
+/// Host-call symbol for unboxing an integer, float or boolean from a boxed
+/// top `<object>` value after checking its class.
 pub const UNBOX_VALUE: &str = "interloko.unbox_value";
 /// Host-call symbol for testing whether a value is an instance of a class.
 pub const INSTANCE_OF: &str = "interloko.instance_of";
@@ -2497,7 +2497,9 @@ impl Host for InterlokoHost {
                     return Err(type_error::check_failed(&ctx));
                 }
                 rets[0] = match self.boxed_value(*obj)? {
-                    value @ (Value::I64(_) | Value::F64(_) | Value::F32(_)) => value,
+                    value @ (Value::I64(_) | Value::F64(_) | Value::F32(_) | Value::Bool(_)) => {
+                        value
+                    }
                     _ => return Err(HostError::Failed),
                 };
                 Ok(0)
@@ -2728,7 +2730,12 @@ impl InterlokoHost {
             }
             ValueRef::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),
             ValueRef::F32(_) => self.builtin_class(BuiltinValueClass::SingleFloat),
-            ValueRef::Bool(_) | ValueRef::U64(_) => Ok(OBJECT_CLASS_ID),
+            // A layout without `<boolean>` predates it; its booleans are
+            // plain `<object>`s.
+            ValueRef::Bool(_) => self
+                .builtin_class(BuiltinValueClass::Boolean)
+                .or(Ok(OBJECT_CLASS_ID)),
+            ValueRef::U64(_) => Ok(OBJECT_CLASS_ID),
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.object(obj)?.class)
             }
@@ -2739,7 +2746,10 @@ impl InterlokoHost {
                     }
                     Value::F64(_) => self.builtin_class(BuiltinValueClass::DoubleFloat),
                     Value::F32(_) => self.builtin_class(BuiltinValueClass::SingleFloat),
-                    Value::Bool(_) | Value::U64(_) => Ok(OBJECT_CLASS_ID),
+                    Value::Bool(_) => self
+                        .builtin_class(BuiltinValueClass::Boolean)
+                        .or(Ok(OBJECT_CLASS_ID)),
+                    Value::U64(_) => Ok(OBJECT_CLASS_ID),
                     Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
                         Ok(self.object(boxed)?.class)
                     }

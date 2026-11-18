@@ -1,0 +1,13 @@
+// expect: runtime code type-error.cast
+// expect: run reports type-error.cast: 3 is not of type <boolean> at typing:def
+// expect: diagnostics 0
+
+// `as(<boolean>, x)` checks the class of what the box holds.
+
+define function flip(x :: <object>) => <boolean>
+  if as(<boolean>, x) then #f else #t end
+end;
+
+define function main() => <boolean>
+  flip(as(<object>, 3))
+end;
