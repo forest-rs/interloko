@@ -1125,6 +1125,36 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::string_concatenate_signature(),
         ),
         (
+            RuntimeOp::InstanceOfType,
+            runtime::INSTANCE_OF_TYPE,
+            runtime::instance_of_type_signature(),
+        ),
+        (
+            RuntimeOp::LimitedIntegerBase,
+            runtime::MOP_LIMITED_INTEGER_BASE,
+            runtime::meta_query_object_signature(),
+        ),
+        (
+            RuntimeOp::LimitedIntegerMin,
+            runtime::MOP_LIMITED_INTEGER_MIN,
+            runtime::meta_query_any_signature(),
+        ),
+        (
+            RuntimeOp::LimitedIntegerMax,
+            runtime::MOP_LIMITED_INTEGER_MAX,
+            runtime::meta_query_any_signature(),
+        ),
+        (
+            RuntimeOp::SubclassTypeClass,
+            runtime::MOP_SUBCLASS_TYPE_CLASS,
+            runtime::meta_query_object_signature(),
+        ),
+        (
+            RuntimeOp::TypeName,
+            runtime::MOP_TYPE_NAME,
+            runtime::meta_query_object_signature(),
+        ),
+        (
             RuntimeOp::MethodSpecializers,
             runtime::MOP_METHOD_SPECIALIZERS,
             runtime::meta_query_object_signature(),

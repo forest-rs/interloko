@@ -1,0 +1,64 @@
+// expect: run 1255
+// expect: diagnostics 0
+
+// A `<type-error>`'s expected type is a type object, not text: a handler
+// tests values against it with `instance?`, reads a limited type's bounds,
+// and names it with `type-name`. A failed cast expects a class, here
+// `<circle>`, and a failed range check a `<limited-integer>`.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>
+  n
+end;
+
+// A circle would have passed the cast; the rejected square would not.
+define function judge(expected :: <type>, rejected :: <object>) => <integer>
+  if instance?(make(<circle>, radius: 1), expected) then
+    if instance?(rejected, expected) then 0 else 1000 end
+  else
+    0
+  end
+end;
+
+// The largest value the failed check would have accepted.
+define function largest(expected :: <type>) => <integer>
+  if instance?(expected, <limited-integer>) then
+    as(<integer>, limited-integer-max(as(<limited-integer>, expected)))
+  else
+    0
+  end
+end;
+
+define function radius-of(s :: <shape>) => <integer>
+  handle
+    as(<circle>, s).radius
+  with restart e :: <type-error>
+    judge(e.type-error-expected-type, e.type-error-value)
+  end
+end;
+
+define function clamp(n :: <integer>) => <integer>
+  handle
+    byte(n)
+  with restart e :: <type-error>
+    if type-name(e.type-error-expected-type) = "limited(<integer>, min: 0, max: 255)" then
+      largest(e.type-error-expected-type)
+    else
+      -1
+    end
+  end
+end;
+
+define function main() => <integer>
+  radius-of(make(<square>, side: 2)) + clamp(300)
+end;

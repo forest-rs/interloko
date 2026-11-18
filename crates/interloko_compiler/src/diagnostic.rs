@@ -1091,6 +1091,9 @@ mod tests {
                 crate::session::TypeErrorReport {
                     code: "type-error.overflow".into(),
                     expected: "<integer>".into(),
+                    expected_type: interloko_model::type_object::TypeObject::Class(
+                        interloko_model::ClassId(1)
+                    ),
                     site: "typing:def0000000000000001:s0".into(),
                     value: "#[9223372036854775807, 1]".into(),
                 }

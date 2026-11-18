@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-argument-type-mismatch
+// expect: diagnostic contains <type>
+
+// `instance?` tests a value against a type: a type it writes, such as
+// `<integer>`, or a type object it computes. An integer is neither.
+
+define function main() => <boolean>
+  let n = 3;
+  instance?(1, n)
+end;

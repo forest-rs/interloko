@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use execution_tape::host::{HostContext, HostError, ValueRef};
 use execution_tape::value::{Obj, Value};
 use interloko_model::condition::{ConditionClass, TypeErrorKind, TypeErrorSlot};
+use interloko_model::type_object::TypeObject;
 use interloko_model::{ClassId, FloatBits, SingleFloatBits, SlotId};
 
 use crate::control::{CHECK_FAILED_TAG, TypeErrorSite};
@@ -27,8 +28,13 @@ pub struct TypeErrorReport {
     /// The stable code, such as `type-error.cast`. A program that makes its
     /// own `<type-error>` may store any text here; [`Self::kind`] parses it.
     pub code: String,
-    /// The printed expected type, such as `<circle>`.
+    /// The expected type, printed as Loko writes it, such as `<circle>`
+    /// or `limited(<integer>, min: 0, max: 255)`.
     pub expected: String,
+    /// The expected type as the condition holds it, a type object: a chooser
+    /// can test a candidate replacement against it with
+    /// [`InterlokoHost::value_is_type_instance`].
+    pub expected_type: TypeObject,
     /// Where the check is, such as `typing:def…:s2`.
     pub site: String,
     /// The rejected value, written as Loko literal text where it has one,
@@ -100,13 +106,14 @@ impl InterlokoHost {
                 self.box_top_value(vector)?
             }
         };
+        let expected = self.make_type_object(&site.expected)?;
         let mut text = |text: &str| {
             self.push_string(text.to_string())
                 .map_err(|_| RuntimeError::MissingBuiltinClass { name: "<string>" })
         };
         let mut fields = [Value::Unit, Value::Unit, Value::Unit, Value::Unit];
         fields[TypeErrorSlot::Value.index()] = value;
-        fields[TypeErrorSlot::ExpectedType.index()] = text(&site.expected)?;
+        fields[TypeErrorSlot::ExpectedType.index()] = expected;
         fields[TypeErrorSlot::Site.index()] = text(&site.site)?;
         fields[TypeErrorSlot::Code.index()] = text(site.kind.code())?;
         let refs = fields.iter().map(ValueRef::from_value).collect::<Vec<_>>();
@@ -132,9 +139,12 @@ impl InterlokoHost {
         let text = |which: TypeErrorSlot| -> Option<String> {
             Some(self.string_text(&slot(which)?).ok()?.to_string())
         };
+        let expected =
+            self.type_object(ValueRef::from_value(&slot(TypeErrorSlot::ExpectedType)?))?;
         Some(TypeErrorReport {
             code: text(TypeErrorSlot::Code)?,
-            expected: text(TypeErrorSlot::ExpectedType)?,
+            expected: self.type_object_name(&expected),
+            expected_type: expected,
             site: text(TypeErrorSlot::Site)?,
             value: self.describe_value(ValueRef::from_value(&slot(TypeErrorSlot::Value)?)),
         })
@@ -148,8 +158,9 @@ impl InterlokoHost {
     }
 
     /// Writes `value` for a report: Loko literal text for numbers,
-    /// booleans, strings, symbols and vectors, a class's own name for a
-    /// class object, and `{<class>}` for any other instance.
+    /// booleans, strings, symbols and vectors, a type object as Loko writes
+    /// the type (a class object as its class's own name), and `{<class>}`
+    /// for any other instance.
     #[must_use]
     pub fn describe_value(&self, value: ValueRef<'_>) -> String {
         match value {
@@ -194,8 +205,10 @@ impl InterlokoHost {
                     .collect::<Vec<_>>();
                 format!("#[{}]", elements.join(", "))
             }
-            RuntimeObjectStorage::ClassMeta { class } => class_name(*class),
-            _ => format!("{{{}}}", class_name(object.class)),
+            storage => match storage.type_object() {
+                Some(ty) => self.type_object_name(&ty),
+                None => format!("{{{}}}", class_name(object.class)),
+            },
         }
     }
 }
@@ -253,8 +266,8 @@ mod tests {
         }
     }
 
-    /// `<object>`, `<string>`, `<vector>`, `<square>`, then the kernel
-    /// condition classes.
+    /// `<object>`, `<string>`, `<vector>`, `<square>`, the kernel condition
+    /// classes, then `<type>`, `<class>` and `<limited-integer>`.
     fn host() -> InterlokoHost {
         let type_error = ClassId(6);
         let slots = TYPE_ERROR_SLOTS
@@ -265,6 +278,8 @@ mod tests {
                 type_name: slot.type_name.into(),
                 kind: if index == TypeErrorSlot::Value.index() {
                     ValueKind::Any
+                } else if index == TypeErrorSlot::ExpectedType.index() {
+                    ValueKind::Object(ClassId(7))
                 } else {
                     ValueKind::String(ClassId(1))
                 },
@@ -286,6 +301,9 @@ mod tests {
                 class("<condition>", Some(OBJECT_CLASS_ID), Vec::new()),
                 class("<error>", Some(ClassId(4)), Vec::new()),
                 class("<type-error>", Some(ClassId(5)), slots),
+                class("<type>", Some(OBJECT_CLASS_ID), Vec::new()),
+                class("<class>", Some(ClassId(7)), Vec::new()),
+                class("<limited-integer>", Some(ClassId(7)), Vec::new()),
             ],
             generics: Vec::new(),
             methods: Vec::new(),
@@ -293,10 +311,10 @@ mod tests {
         .expect("layout")
     }
 
-    fn site(kind: TypeErrorKind, expected: &str) -> TypeErrorSite {
+    fn site(kind: TypeErrorKind, expected: TypeObject) -> TypeErrorSite {
         TypeErrorSite {
             kind,
-            expected: expected.into(),
+            expected,
             site: "typing:def0000000000000001:s0".into(),
             span: 4..9,
         }
@@ -307,14 +325,18 @@ mod tests {
         let mut host = host();
         let square = host.make_object(ClassId(3), &[]).expect("square");
         let condition = host
-            .make_type_error(&site(TypeErrorKind::Cast, "<circle>"), &[square])
+            .make_type_error(
+                &site(TypeErrorKind::Cast, TypeObject::Class(ClassId(3))),
+                &[square],
+            )
             .expect("type error");
         let report = host.type_error_report(condition).expect("report");
         assert_eq!(
             report,
             TypeErrorReport {
                 code: "type-error.cast".into(),
-                expected: "<circle>".into(),
+                expected: "<square>".into(),
+                expected_type: TypeObject::Class(ClassId(3)),
                 site: "typing:def0000000000000001:s0".into(),
                 value: "{<square>}".into(),
             }
@@ -322,7 +344,7 @@ mod tests {
         assert_eq!(report.kind(), Some(TypeErrorKind::Cast));
         assert_eq!(
             report.to_string(),
-            "type-error.cast: {<square>} is not of type <circle> at typing:def0000000000000001:s0"
+            "type-error.cast: {<square>} is not of type <square> at typing:def0000000000000001:s0"
         );
         // Any other object reports nothing.
         let Value::Obj(square) = host.make_object(ClassId(3), &[]).expect("square") else {
@@ -336,7 +358,10 @@ mod tests {
         let mut host = host();
         let condition = host
             .make_type_error(
-                &site(TypeErrorKind::Overflow, "<integer>"),
+                &site(
+                    TypeErrorKind::Overflow,
+                    TypeObject::named(interloko_model::LimitedInteger::I32),
+                ),
                 &[Value::I64(i64::MAX), Value::I64(1)],
             )
             .expect("type error");
@@ -365,7 +390,13 @@ mod tests {
         })
         .expect("layout");
         assert_eq!(
-            host.make_type_error(&site(TypeErrorKind::Range, "<i32>"), &[Value::I64(1)]),
+            host.make_type_error(
+                &site(
+                    TypeErrorKind::Range,
+                    TypeObject::named(interloko_model::LimitedInteger::I32)
+                ),
+                &[Value::I64(1)]
+            ),
             Err(RuntimeError::MissingBuiltinClass {
                 name: "<type-error>"
             })

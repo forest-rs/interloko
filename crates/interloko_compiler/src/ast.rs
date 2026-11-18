@@ -2070,6 +2070,20 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_instance_of(&mut self, node: &CstNode) -> Expr {
+        // A type operand that writes no type is a type object the program
+        // computes, such as a `<type-error>`'s expected type, so the test
+        // is an ordinary call that sem resolves to its intrinsic.
+        if let [value, target] = regular_arg_nodes(node).as_slice()
+            && !self.writes_type(target)
+        {
+            let args = vec![self.lower_expr(value), self.lower_expr(target)];
+            return Expr::Call {
+                id: self.ast_id(node),
+                callee: "instance?".into(),
+                args,
+                span: node.span,
+            };
+        }
         let Some((value, target)) =
             self.lower_typed_args(node, false, DiagnosticCode::AstInvalidInstanceOf)
         else {
@@ -2136,6 +2150,19 @@ impl<'tree> Lowering<'tree> {
             return None;
         };
         Some((value, target))
+    }
+
+    /// Whether `node` writes a type where `as` and `instance?` take one,
+    /// rather than an expression computing a type object: a type name, or a
+    /// `limited(...)` call, which [`Self::type_expr_from_node`] reads.
+    fn writes_type(&self, node: &CstNode) -> bool {
+        match node.kind {
+            CstKind::TypeExpr => true,
+            CstKind::CallExpr => self
+                .first_token_text(node, TokenKind::Ident)
+                .is_some_and(|(_, callee)| callee == "limited"),
+            _ => false,
+        }
     }
 
     /// The type an expression node writes where `as` and `instance?` take

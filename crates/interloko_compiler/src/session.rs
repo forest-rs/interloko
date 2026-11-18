@@ -13588,6 +13588,12 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
         sem::Intrinsic::FloatToString => "float-to-string",
         sem::Intrinsic::IntegerToString => "integer-to-string",
         sem::Intrinsic::Concatenate => "concatenate",
+        sem::Intrinsic::InstanceOfType => "instance?",
+        sem::Intrinsic::LimitedIntegerBase => "limited-integer-base",
+        sem::Intrinsic::LimitedIntegerMin => "limited-integer-min",
+        sem::Intrinsic::LimitedIntegerMax => "limited-integer-max",
+        sem::Intrinsic::SubclassTypeClass => "subclass-type-class",
+        sem::Intrinsic::TypeName => "type-name",
     }
 }
 
@@ -22455,8 +22461,18 @@ end;
                 } else {
                     "<circle>"
                 };
+                // The condition holds the expected type as a type object,
+                // which tells a replacement that passes from one that fails.
+                let replacement = register_of_class(condition, replacement);
+                assert_eq!(
+                    condition.runtime.value_is_type_instance(
+                        execution_tape::host::ValueRef::from_value(&replacement),
+                        &report.expected_type
+                    ),
+                    !reports.is_empty()
+                );
                 reports.push(report);
-                Choice::UseValue(vec![register_of_class(condition, replacement)])
+                Choice::UseValue(vec![replacement])
             });
             let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
             assert_eq!(value, FunctionValue::Integer(10), "{policy:?}");
@@ -22556,7 +22572,7 @@ end;
         let artifacts = CompilerSession::compile_source(
             "mine.loko",
             "define function main() => <integer>\n  \
-             signal(make(<type-error>, value: 1, expected-type: \"<string>\", \
+             signal(make(<type-error>, value: 1, expected-type: <string>, \
              site: \"mine\", code: \"type-error.cast\"))\nend;",
             RuntimeMode::RunMain,
         );
