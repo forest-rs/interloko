@@ -177,9 +177,9 @@ pub enum Choice {
     /// Install replacement code while every frame stays suspended, then be
     /// asked again. Frames keep the code they run; generic sends and retries
     /// take the newest. The unit must keep the run's runtime layout and each
-    /// generic's signature and contract
-    /// ([`CodeUnit::check_replaces`]); otherwise it is refused and
-    /// [`UnhandledCondition::refused`] says why.
+    /// generic's signature and contract, as every unit whose code may still
+    /// run has them, earlier runs' included ([`CodeUnit::check_replaces`]);
+    /// otherwise it is refused and [`UnhandledCondition::refused`] says why.
     Install(Arc<CodeUnit>),
     /// Invoke [`OfferedRestart::Retry`] on the frame with this activation.
     Retry {
