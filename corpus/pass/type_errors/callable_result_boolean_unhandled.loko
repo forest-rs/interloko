@@ -1,0 +1,16 @@
+// expect: runtime code type-error.cast
+// expect: run reports type-error.cast: 3 is not of type <boolean> at check:def
+// expect: diagnostics 0
+
+// `three` returns an `<object>`, not the `<boolean>` the untyped call wants,
+// so the call unboxes the result where it lands, and an integer fails.
+
+define function three(x :: <integer>) => <object>
+  as(<object>, 3)
+end;
+define function call(f :: <callable>, x :: <integer>) => <boolean>
+  apply(f, x)
+end;
+define function main() => <boolean>
+  call(three, 3)
+end;

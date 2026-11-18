@@ -1,0 +1,13 @@
+// expect: run 120
+// expect: diagnostics 0
+
+// `#t` and `#f` are instances of `<boolean>`: `instance?` finds them in an
+// `<object>`, and a test refines the `<object>` to the boolean it holds.
+
+define function test(x :: <object>) => <integer>
+  if instance?(x, <boolean>) then (if x then 1 else 2 end) else 0 end
+end;
+
+define function main() => <integer>
+  test(as(<object>, #t)) * 100 + test(as(<object>, #f)) * 10 + test(as(<object>, 7))
+end;

@@ -97,6 +97,9 @@ pub enum BuiltinValueClass {
     /// are the class objects naming a class or one of its subclasses,
     /// written `class <shape>` and printed `subclass(<shape>)`.
     SubclassType,
+    /// The concrete built-in `<boolean>` class of `#t` and `#f`. It comes
+    /// last so that adding it moved no other built-in class's id.
+    Boolean,
 }
 
 impl BuiltinValueClass {
@@ -119,6 +122,7 @@ impl BuiltinValueClass {
         (Self::Type, "<type>"),
         (Self::LimitedIntegerType, "<limited-integer>"),
         (Self::SubclassType, "<subclass-type>"),
+        (Self::Boolean, "<boolean>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -142,6 +146,7 @@ impl BuiltinValueClass {
             Self::Type => "<type>",
             Self::LimitedIntegerType => "<limited-integer>",
             Self::SubclassType => "<subclass-type>",
+            Self::Boolean => "<boolean>",
         }
     }
 
@@ -166,6 +171,7 @@ impl BuiltinValueClass {
             b"<type>" => Some(Self::Type),
             b"<limited-integer>" => Some(Self::LimitedIntegerType),
             b"<subclass-type>" => Some(Self::SubclassType),
+            b"<boolean>" => Some(Self::Boolean),
             _ => None,
         }
     }
@@ -191,6 +197,7 @@ impl BuiltinValueClass {
             Self::Type => 14,
             Self::LimitedIntegerType => 15,
             Self::SubclassType => 16,
+            Self::Boolean => 17,
         }
     }
 
@@ -225,10 +232,15 @@ impl BuiltinValueClass {
         )
     }
 
+    /// Returns whether this class's instances are unboxed scalars: numbers
+    /// and booleans. They are boxed rather than referenced when they travel
+    /// as `<object>`.
+    #[must_use]
+    pub const fn is_scalar(self) -> bool {
+        matches!(self, Self::Boolean) || self.is_numeric()
+    }
+
     /// Returns whether this class is `<number>` or one of its subclasses.
-    ///
-    /// Numeric values are unboxed scalars, so they are boxed rather than
-    /// referenced when they travel as `<object>`.
     #[must_use]
     pub const fn is_numeric(self) -> bool {
         let mut class = self;
@@ -511,6 +523,14 @@ mod tests {
         assert!(BuiltinValueClass::Rational.is_abstract());
         assert!(!BuiltinValueClass::Integer.is_abstract());
         assert!(!BuiltinValueClass::String.is_numeric());
+        assert_eq!(chain(BuiltinValueClass::Boolean), ["<boolean>"]);
+        assert!(!BuiltinValueClass::Boolean.is_abstract());
+        assert!(BuiltinValueClass::Boolean.is_scalar());
+        assert!(!BuiltinValueClass::Boolean.is_numeric());
+        assert_eq!(
+            BuiltinValueClass::Boolean.index(),
+            BuiltinValueClass::ALL.len() - 1
+        );
     }
 
     #[test]

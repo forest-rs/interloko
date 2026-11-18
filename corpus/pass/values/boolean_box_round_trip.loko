@@ -1,0 +1,12 @@
+// expect: run #f
+// expect: diagnostics 0
+
+// A boolean boxes to `<object>` and casts back to `<boolean>` like a number.
+
+define function flip(x :: <object>) => <boolean>
+  if as(<boolean>, x) then #f else #t end
+end;
+
+define function main() => <boolean>
+  flip(as(<object>, #t))
+end;

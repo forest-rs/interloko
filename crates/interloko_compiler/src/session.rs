@@ -23094,6 +23094,36 @@ end;
     }
 
     #[test]
+    fn a_non_boolean_signals_at_a_boolean_callable_entry_and_takes_a_boolean() {
+        // `take` wants a `<boolean>`; the `<integer>` 3 arrives boxed, and
+        // its entry signals. The replacement is a `bool`, the register's
+        // kind; an `<integer>` is an invalid choice.
+        let source = through_a_callable("<boolean>", "3", "<boolean>");
+        let artifacts =
+            CompilerSession::compile_source("callable.loko", &source, RuntimeMode::CompileOnly);
+        let site = entry_site(&artifacts, "take");
+        let runs = breaks_under_each_policy(&source, |_, condition| {
+            assert_eq!(use_value_types(condition), [ValueType::Bool]);
+            Choice::UseValue(vec![Value::Bool(true)])
+        });
+        for (reports, value) in runs {
+            assert_eq!(value, FunctionValue::Boolean(true));
+            let [report] = reports.as_slice() else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(report.kind(), Some(TypeErrorKind::Entry));
+            assert_eq!(report.value, "3");
+            assert_eq!(report.site, site);
+        }
+        let mut chooser =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::I64(1)]));
+        let Err(FunctionCallError::Trap { .. }) = call_with_chooser(&artifacts, &mut chooser)
+        else {
+            panic!("an integer cannot stand in for a <boolean>");
+        };
+    }
+
+    #[test]
     fn values_of_the_parameter_class_cross_a_callable_unchanged() {
         for (parameter, argument, result, value) in [
             ("<i32>", "41", "<i32>", FunctionValue::I32(41)),
@@ -23105,6 +23135,7 @@ end;
                 FunctionValue::SingleFloat(1.5),
             ),
             ("<object>", "41", "<integer>", FunctionValue::Integer(41)),
+            ("<boolean>", "#t", "<boolean>", FunctionValue::Boolean(true)),
         ] {
             let source = through_a_callable(parameter, argument, result);
             let runs = breaks_under_each_policy(&source, |_, condition| {

@@ -1,0 +1,8 @@
+// expect: run "<boolean>"
+// expect: diagnostics 0
+
+// A boolean's class is `<boolean>`, which `class-of` reports.
+
+define function main() => <string>
+  class-name(class-of(#t))
+end;

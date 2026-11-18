@@ -825,6 +825,9 @@ impl Module {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::SingleFloat,
             } => Some(ValueKind::F32),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Boolean,
+            } => Some(ValueKind::Bool),
             // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
@@ -857,7 +860,7 @@ impl Module {
     ///
     /// Returns `None` for categories without a class-shaped runtime
     /// representation in this slice: [`ValueKind::Any`] (unbounded),
-    /// [`ValueKind::Bool`], callables, and [`ValueKind::Error`].
+    /// callables, and [`ValueKind::Error`].
     #[must_use]
     pub fn value_kind_class(&self, kind: ValueKind) -> Option<ClassId> {
         match kind {
@@ -879,8 +882,8 @@ impl Module {
             ValueKind::SlotDescriptorObject { .. } => {
                 self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
             }
+            ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
             ValueKind::Any
-            | ValueKind::Bool
             | ValueKind::Callable
             | ValueKind::KnownCallable(_)
             | ValueKind::Error => None,
@@ -1743,11 +1746,11 @@ impl Block {
 }
 
 /// Returns whether instances of `class` are unboxed scalars: `<number>` and
-/// every numeric class below it.
+/// every numeric class below it, and `<boolean>`.
 fn is_scalar_value_class_in(classes: &[Class], class: ClassId) -> bool {
     matches!(
         classes.get(class.0 as usize).map(|class| class.origin),
-        Some(ClassOrigin::BuiltinValue { kind }) if kind.is_numeric()
+        Some(ClassOrigin::BuiltinValue { kind }) if kind.is_scalar()
     )
 }
 
@@ -2603,9 +2606,9 @@ pub struct Function {
 /// a subclass, or an `<integer>` in a `limited(<integer>, ...)` range.
 /// Every other untyped call goes through the boxed entry, under the boxed
 /// callable ABI, where each argument that is not a callable arrives as a
-/// boxed `<object>`, so it also checks a number of the parameter's kind
-/// ([`EntryTarget::Unbox`]). Only an `<object>` parameter takes the box as
-/// it is; a boolean, which has no class to check, crosses unboxed.
+/// boxed `<object>`, so it also checks a number or boolean of the
+/// parameter's kind ([`EntryTarget::Unbox`]). Only an `<object>` parameter
+/// takes the box as it is.
 ///
 /// Each check is a site of the definition whose sites number its body,
 /// after the body's own, so soft typing classifies it like any cast.
@@ -2628,8 +2631,8 @@ pub enum EntryTarget {
     ClassObject(ClassId),
     /// An `<integer>` in the range.
     Range(IntRange),
-    /// A number of the kind: an `<integer>`, `<i32>`, `<u32>`,
-    /// `<double-float>` or `<single-float>`, unboxed
+    /// A number or boolean of the kind: an `<integer>`, `<i32>`, `<u32>`,
+    /// `<double-float>`, `<single-float>` or `<boolean>`, unboxed
     /// from the boxed `<object>` an untyped caller passed to the boxed
     /// entry; the typed entry's register type establishes it. An `<i32>`
     /// or `<u32>` is an `<integer>` in its range.
@@ -2651,9 +2654,12 @@ impl EntryTarget {
                 Some(Self::Instance(class))
             }
             ValueKind::ClassObject(class) => Some(Self::ClassObject(class)),
-            ValueKind::I64 | ValueKind::F64 | ValueKind::I32 | ValueKind::U32 | ValueKind::F32 => {
-                Some(Self::Unbox(kind))
-            }
+            ValueKind::I64
+            | ValueKind::F64
+            | ValueKind::I32
+            | ValueKind::U32
+            | ValueKind::F32
+            | ValueKind::Bool => Some(Self::Unbox(kind)),
             _ => None,
         }
     }
@@ -9534,6 +9540,7 @@ impl Lowering {
             | ValueKind::I32
             | ValueKind::U32
             | ValueKind::F32
+            | ValueKind::Bool
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -10260,6 +10267,9 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::SingleFloat,
             } => Some(ValueKind::F32),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Boolean,
+            } => Some(ValueKind::Bool),
             // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
@@ -10308,8 +10318,8 @@ impl Lowering {
             ValueKind::SlotDescriptorObject { .. } => {
                 self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
             }
+            ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
             ValueKind::Any
-            | ValueKind::Bool
             | ValueKind::Callable
             | ValueKind::KnownCallable(_)
             | ValueKind::Error => None,
@@ -11339,7 +11349,7 @@ impl Lowering {
             }
         }
         // The class a method would specialize on to take the argument: a
-        // number's own, or `<object>` for a boolean, which has none.
+        // number's or boolean's own, else `<object>`.
         let class = self.value_kind_class(actual).or(Some(OBJECT_CLASS_ID));
         let code = if specializers.is_empty() {
             DiagnosticCode::GenericWithoutMethods
@@ -12656,7 +12666,7 @@ mod tests {
         ));
 
         // Methods on object classes only: the diagnostic names them, and
-        // a boolean, which has no class of its own, needs one on <object>.
+        // the class a method would need to take the argument.
         let shapes = "define class <circle> (<object>)\nend;\n\
              define class <square> (<object>)\nend;\n\
              define generic area(x) => <integer>;\n\
@@ -12665,7 +12675,7 @@ mod tests {
         for (call, actual, class) in [
             ("area(5)", "<integer>", "<integer>"),
             ("apply(area, 2.5)", "<double-float>", "<double-float>"),
-            ("area(#t)", "<boolean>", "<object>"),
+            ("area(#t)", "<boolean>", "<boolean>"),
         ] {
             let module = lower_source(&format!("{shapes}define function main()\n  {call}\nend;"));
             assert!(

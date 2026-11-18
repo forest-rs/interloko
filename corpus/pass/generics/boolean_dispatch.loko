@@ -1,0 +1,18 @@
+// expect: run 10201
+// expect: diagnostics 0
+
+// A method may specialize on `<boolean>`, beside methods on number classes.
+
+define generic describe(x) => <integer>;
+
+define method describe(b :: <boolean>) => <integer>
+  if b then 1 else 2 end
+end;
+
+define method describe(n :: <integer>) => <integer>
+  10
+end;
+
+define function main() => <integer>
+  describe(#t) + describe(#f) * 100 + describe(5) * 1000
+end;

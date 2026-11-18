@@ -5095,7 +5095,7 @@ impl<'module> BodyLowering<'module> {
             .get(index)
             .copied()
             .flatten()
-            .filter(|kind| kind.is_number())
+            .filter(|kind| kind.is_number() || *kind == sem::ValueKind::Bool)
         {
             let label = if is_scalar_value_class(self.module, value_kind(scalar)?, specializer) {
                 labels.success
@@ -5495,7 +5495,7 @@ impl<'module> BodyLowering<'module> {
             } => {
                 let object = self.lower_expr(object)?;
                 let result = self.alloc(ValueKind::ClassObject(Some(*class)));
-                if is_unboxed_number(object.kind) {
+                if is_unboxed_scalar(object.kind) {
                     self.emit_class_meta_object(result.reg, *class, *span);
                 } else {
                     let class_id = self.alloc(ValueKind::U64);
@@ -5525,7 +5525,7 @@ impl<'module> BodyLowering<'module> {
                 if let Some(outcome) = self.decided_test(*site) {
                     return Ok(self.decided_test_value(*site, outcome, *span));
                 }
-                if is_unboxed_number(value.kind) {
+                if is_unboxed_scalar(value.kind) {
                     let result = self.alloc(ValueKind::Bool);
                     self.instructions.push(Instr::ConstBool {
                         dst: result.reg,
@@ -6312,7 +6312,7 @@ impl<'module> BodyLowering<'module> {
             return Ok(None);
         };
         if boxed.kind != ValueKind::Any
-            || !is_unboxed_number(kind)
+            || !is_unboxed_scalar(kind)
             || !facts::reads_local(branch, refinement.local)
         {
             return Ok(None);
@@ -7902,7 +7902,6 @@ impl<'module> BodyLowering<'module> {
                 kind: ValueKind::Closure(None),
                 ..value
             }),
-            ValueKind::Bool => Ok(value),
             _ => self.box_any(value, span),
         }
     }
@@ -7934,8 +7933,11 @@ impl<'module> BodyLowering<'module> {
         match (value.kind, kind) {
             (ValueKind::Closure(_), ValueKind::Closure(Some(sig))) => self.adapt(value, sig, span),
             (ValueKind::Closure(_), ValueKind::Closure(None)) => Ok(Value { kind, ..value }),
-            (ValueKind::Any, ValueKind::Any) | (ValueKind::Bool, ValueKind::Bool) => Ok(value),
-            (ValueKind::Any, ValueKind::I64 | ValueKind::F64 | ValueKind::F32) => {
+            (ValueKind::Any, ValueKind::Any) => Ok(value),
+            (
+                ValueKind::Any,
+                ValueKind::I64 | ValueKind::F64 | ValueKind::F32 | ValueKind::Bool,
+            ) => {
                 let class = scalar_concrete_class(self.module, kind)
                     .ok_or_else(|| invalid_semantic("a number class is missing"))?;
                 let expected = match range {
@@ -9296,6 +9298,12 @@ const fn num32_compare(kind: sem::NumericKind, op: sem::CompareOp) -> Num32Binar
     }
 }
 
+/// Returns whether `kind` is an unboxed number or boolean, whose class is
+/// known statically.
+const fn is_unboxed_scalar(kind: ValueKind) -> bool {
+    matches!(kind, ValueKind::Bool) || is_unboxed_number(kind)
+}
+
 /// Returns whether `kind` is an unboxed number, whose class is known
 /// statically.
 const fn is_unboxed_number(kind: ValueKind) -> bool {
@@ -9306,8 +9314,8 @@ const fn is_unboxed_number(kind: ValueKind) -> bool {
 }
 
 /// Returns the unboxed scalar kind whose values `class` describes: `i64`
-/// for `<integer>`, `f64` for `<double-float>` and `f32` for
-/// `<single-float>`.
+/// for `<integer>`, `f64` for `<double-float>`, `f32` for `<single-float>`
+/// and `bool` for `<boolean>`.
 fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<ValueKind> {
     match module.classes.get(class.0 as usize)?.origin {
         sem::ClassOrigin::BuiltinValue {
@@ -9319,6 +9327,9 @@ fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<Va
         sem::ClassOrigin::BuiltinValue {
             kind: sem::BuiltinValueClass::SingleFloat,
         } => Some(ValueKind::F32),
+        sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::Boolean,
+        } => Some(ValueKind::Bool),
         _ => None,
     }
 }
@@ -9333,6 +9344,7 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         }
         ValueKind::F64 => builtin_class(module, sem::BuiltinValueClass::DoubleFloat),
         ValueKind::F32 => builtin_class(module, sem::BuiltinValueClass::SingleFloat),
+        ValueKind::Bool => builtin_class(module, sem::BuiltinValueClass::Boolean),
         _ => None,
     }
 }
@@ -9340,12 +9352,14 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
 /// Returns whether every value of the unboxed scalar category `kind` is an
 /// instance of `class`: the scalar's concrete class (`<integer>` for `i64`,
 /// `<double-float>` for `f64`) or one of its superclasses, such as
-/// `<rational>` or `<float>`, `<real>`, `<number>`, and `<object>`.
+/// `<rational>` or `<float>`, `<real>`, `<number>`, and `<object>`;
+/// `<boolean>` for `bool`.
 fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::ClassId) -> bool {
     let concrete = match kind {
         ValueKind::I64 | ValueKind::I32 | ValueKind::U32 => sem::BuiltinValueClass::Integer,
         ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
         ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
+        ValueKind::Bool => sem::BuiltinValueClass::Boolean,
         _ => return false,
     };
     builtin_class(module, concrete).is_some_and(|actual| module.is_same_or_subclass(actual, class))
@@ -9483,13 +9497,14 @@ const fn class_object_expected(bound: sem::ClassId) -> TypeObject {
 }
 
 /// The expected type of a check whose result has register kind `kind`:
-/// `<integer>`, `<i32>`, `<u32>`, or a float class.
+/// `<integer>`, `<i32>`, `<u32>`, a float class, or `<boolean>`.
 fn kind_expected(module: &sem::Module, kind: ValueKind) -> TypeObject {
     let class = match kind {
         ValueKind::I32 => return TypeObject::named(sem::LimitedInteger::I32),
         ValueKind::U32 => return TypeObject::named(sem::LimitedInteger::U32),
         ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
         ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
+        ValueKind::Bool => sem::BuiltinValueClass::Boolean,
         _ => sem::BuiltinValueClass::Integer,
     };
     module
@@ -9637,9 +9652,6 @@ impl CodeBuffer<'_> {
 fn callable_wire(kind: ValueKind) -> ValueKind {
     match kind {
         ValueKind::Closure(_) => ValueKind::Closure(None),
-        // A boolean has no class, so no type object a failed unboxing could
-        // report: it crosses as a boolean.
-        ValueKind::Bool => ValueKind::Bool,
         _ => ValueKind::Any,
     }
 }
@@ -9727,7 +9739,7 @@ fn signature_label(
         ValueKind::I64 => String::from("<integer>"),
         ValueKind::Closure(Some(inner)) => signature_label(module, signatures, inner),
         ValueKind::Closure(None) => String::from("<callable>"),
-        ValueKind::Bool => String::from("<boolean>"),
+        ValueKind::Bool => format!("{}", kind_expected(module, *kind).display(module)),
         ValueKind::Object(Some(class)) => format!("{}", class_expected(class).display(module)),
         ValueKind::ClassObject(Some(class)) => {
             format!("{}", class_object_expected(class).display(module))

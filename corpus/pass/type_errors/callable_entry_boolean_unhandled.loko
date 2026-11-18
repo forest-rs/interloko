@@ -1,0 +1,16 @@
+// expect: runtime code type-error.entry
+// expect: run reports type-error.entry: 3 is not of type <boolean> at typing:def
+// expect: diagnostics 0
+
+// A `<boolean>` parameter takes only a boolean out of the box an untyped
+// call passes it: the boxed entry unboxes it and signals for anything else.
+
+define function flip(b :: <boolean>) => <boolean>
+  if b then #f else #t end
+end;
+define function call(f :: <callable>, x :: <integer>) => <boolean>
+  apply(f, x)
+end;
+define function main() => <boolean>
+  call(flip, 3)
+end;

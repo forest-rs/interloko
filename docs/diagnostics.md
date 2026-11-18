@@ -216,7 +216,7 @@ failed:
 | Code | Check |
 | --- | --- |
 | `type-error.cast` | a value is not an instance of the class an `as` (or a boxed `<object>` read as a number, such as a callable value's result) expects |
-| `type-error.entry` | an argument passed through a callable value is not of its parameter's class or number kind, a callable from untyped code returns a value its typed binding's signature does not allow, an exit procedure's value is not of its block's class, or a `use-value` replacing a failed send's result is not of its generic's result class (see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
+| `type-error.entry` | an argument passed through a callable value is not of its parameter's class, number kind or `<boolean>`, a callable from untyped code returns a value its typed binding's signature does not allow, an exit procedure's value is not of its block's class, or a `use-value` replacing a failed send's result is not of its generic's result class (see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
 | `type-error.range` | a number is outside a limited type's range: a conversion to `<i32>`/`<u32>`, a float converted to an integer it does not equal, a shift count outside `0..=31`, or an argument, binding, slot value, constant or result outside its `limited(<integer>, ...)` type |
 | `type-error.overflow` | integer arithmetic produced a result its type cannot represent |
 
@@ -272,13 +272,13 @@ unhandled condition <no-applicable-method>: dispatch.no-applicable-method: no me
 Some sends fail for every value of an argument's type, and those are
 compile errors. A parameter whose methods all specialize on object classes
 carries runtime objects, which a number or boolean is not (only a boxed
-`<object>` parameter, one some method specializes on `<object>` or a
-number class, carries those), so passing one names the language-level
+`<object>` parameter, one some method specializes on `<object>`, a number
+class or `<boolean>`, carries those), so passing one names the language-level
 reason rather than how the parameter is carried:
 
 | Code | When |
 | --- | --- |
-| `sem.no-applicable-method` | no method of the generic accepts the argument's type there (args `generic`, `argument_index`, `actual`, `specializers`, the classes its methods specialize that argument on, and `class`, the one a new method would need: the number's class, or `<object>` for a boolean) |
+| `sem.no-applicable-method` | no method of the generic accepts the argument's type there (args `generic`, `argument_index`, `actual`, `specializers`, the classes its methods specialize that argument on, and `class`, the one a new method would need: the number's class, or `<boolean>`) |
 | `sem.generic-without-methods` | the same, for a generic with no methods yet (no `specializers`) |
 | `sem.generic-argument-type-mismatch` | the argument is not of the parameter's declared class, such as a `<square>` for `<circle>`, or a callable, which is not an `<object>` |
 
