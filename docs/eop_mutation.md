@@ -715,6 +715,13 @@ as a layout change is:
   choice. The REPL lists the reason beside the frame and refuses `retry`
   with it, leaving the break waiting.
 
+Every comparison needs both contracts. A unit that records no contract
+for a definition (compiled units record one for every definition; only a
+unit built by hand can lack one) cannot take over from, or be taken over
+by, another unit's: nothing says what code compiled against it relies on,
+or what it promises, so the install or retry is refused with
+`CodeMismatch::Uncontracted`.
+
 The check applies only where code compiled against one unit can reach
 another's definitions, which is within one run. A run starts from a
 single unit and compares nothing with units from earlier runs, so

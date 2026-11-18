@@ -25209,6 +25209,67 @@ end;
     }
 
     #[test]
+    fn a_unit_without_contracts_cannot_take_over_or_be_taken_over() {
+        // The edit makes `make-shape` return a <square>, which the waiting
+        // `main` would read as a <circle>. Without contracts on either side
+        // nothing says what `main` relies on, so the install is refused
+        // rather than accepted unchecked.
+        let new = SHAPES
+            .replace("make(<circle>, radius: n)", "make(<square>, side: 40)")
+            .replace("pause() + make-shape(3).radius", "pause()");
+        let old = CompilerSession::compile_source("shapes.loko", SHAPES, RuntimeMode::CompileOnly);
+        let new = CompilerSession::compile_source("shapes.loko", &new, RuntimeMode::CompileOnly);
+        let uncontracted = |artifacts: &SessionArtifacts| {
+            let code = artifacts.code_unit().expect("tape");
+            Arc::new(CodeUnit {
+                contracts: interloko_runtime::code::Contracts::default(),
+                ..(*code).clone()
+            })
+        };
+        let new_code = uncontracted(&new);
+        assert!(
+            new_code
+                .check_replaces(&old.code_unit().expect("tape"))
+                .is_err()
+        );
+        let old_code = uncontracted(&old);
+        let refusal = new
+            .code_unit()
+            .expect("tape")
+            .check_replaces(&old_code)
+            .expect_err("nothing says what the old code relies on");
+        assert_eq!(
+            refusal,
+            interloko_runtime::code::CodeMismatch::Uncontracted {
+                definition: interloko_runtime::code::Definition::Generic(
+                    interloko_model::GenericFunctionId(0)
+                ),
+                name: "make-shape".into(),
+            }
+        );
+
+        let mut asked = 0;
+        let mut refused = None;
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            asked += 1;
+            match asked {
+                1 => Choice::Install(Arc::clone(&new_code)),
+                _ => {
+                    refused = condition.refused.cloned();
+                    Choice::UseValue(vec![Value::I64(0)])
+                }
+            }
+        });
+        let value = call_with_chooser(&old, &mut chooser);
+        assert_eq!(
+            refused.expect("refused").to_string(),
+            "cannot replace running code: make-shape has no contract to compare, so what \
+             code compiled against it relies on is unknown"
+        );
+        assert_eq!(value.expect("main finishes"), FunctionValue::Integer(3));
+    }
+
+    #[test]
     fn link_ids_do_not_depend_on_which_sends_exist() {
         // Dropping the only send of another method from `other` leaves
         // `main`, which sends to the <circle> method, byte for byte the same.
