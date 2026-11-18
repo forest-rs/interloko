@@ -12,7 +12,7 @@
 use std::error::Error;
 
 use execution_tape::value::Value;
-use execution_tape::vm::{InvocationOptions, Limits, Vm};
+use execution_tape::vm::{Limits, TurnOptions, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
@@ -117,7 +117,7 @@ fn sum_areas(
         &tape.code,
         *entry,
         &args,
-        InvocationOptions::default(),
+        TurnOptions::default(),
         &mut interloko_runtime::chooser::ReportUnhandled,
     )
     .map_err(|failure| format!("`sum-areas` failed: {failure}"))?;
