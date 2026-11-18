@@ -761,7 +761,8 @@ impl<'a> Analysis<'a> {
             | E::StringLiteral { span, .. }
             | E::SymbolLiteral { span, .. }
             | E::KnownCallable { span, .. }
-            | E::GenericFunctionObject { span, .. } => {
+            | E::GenericFunctionObject { span, .. }
+            | E::TypeObject { span, .. } => {
                 let ty = self.bound(expr);
                 self.literal(*span, ty)
             }
@@ -2619,6 +2620,7 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         | E::Capture { .. }
         | E::ConstantRef { .. }
         | E::ClassObject { .. }
+        | E::TypeObject { .. }
         | E::KnownCallable { .. }
         | E::GenericFunctionObject { .. }
         | E::Error { .. } => {}

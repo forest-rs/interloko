@@ -131,6 +131,9 @@ pub const MOP_METHOD_SPECIALIZERS: &str = "interloko.mop.method_specializers";
 /// object: a class object, a `<limited-integer>` or a `<subclass-type>`.
 /// It takes [`instance_of_type_signature`].
 pub const INSTANCE_OF_TYPE: &str = "interloko.instance_of_type";
+/// Host-call symbol for constructing a `<limited-integer>` type object. It
+/// takes [`limited_integer_type_signature`].
+pub const LIMITED_INTEGER_TYPE: &str = "interloko.limited_integer_type";
 /// Host-call symbol for reading a `<limited-integer>`'s base class, which is
 /// always `<integer>`.
 pub const MOP_LIMITED_INTEGER_BASE: &str = "interloko.mop.limited_integer_base";
@@ -2323,6 +2326,36 @@ impl Host for InterlokoHost {
                 rets[0] = Value::Bool(self.value_is_type_instance(*value, &ty));
                 Ok(0)
             }
+            LIMITED_INTEGER_TYPE => {
+                let [
+                    ValueRef::Bool(has_min),
+                    ValueRef::I64(min),
+                    ValueRef::Bool(has_max),
+                    ValueRef::I64(max),
+                    ValueRef::U64(named),
+                ] = args
+                else {
+                    return Err(HostError::Failed);
+                };
+                let range = IntRange {
+                    min: has_min.then_some(*min),
+                    max: has_max.then_some(*max),
+                };
+                let named = match named {
+                    0 => None,
+                    index => Some(
+                        *LimitedInteger::ALL
+                            .get(usize::try_from(index - 1).map_err(|_| HostError::Failed)?)
+                            .ok_or(HostError::Failed)?,
+                    ),
+                };
+                rets[0] =
+                    self.make_type_object(
+                        &interloko_model::type_object::TypeObject::LimitedInteger { range, named },
+                    )
+                    .map_err(|_| HostError::Failed)?;
+                Ok(0)
+            }
             MOP_LIMITED_INTEGER_BASE | MOP_LIMITED_INTEGER_MIN | MOP_LIMITED_INTEGER_MAX => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
@@ -3120,6 +3153,24 @@ pub fn instance_of_type_signature() -> HostSig {
     HostSig {
         args: vec![any_type(), any_type()],
         rets: vec![ValueType::Bool],
+    }
+}
+
+/// Host signature for constructing a `<limited-integer>`: whether it has a
+/// lower bound and the bound, the same for its upper bound, and the named
+/// limited type it is written as, `0` for none or one plus its index in
+/// [`LimitedInteger::ALL`].
+#[must_use]
+pub fn limited_integer_type_signature() -> HostSig {
+    HostSig {
+        args: vec![
+            ValueType::Bool,
+            ValueType::I64,
+            ValueType::Bool,
+            ValueType::I64,
+            ValueType::U64,
+        ],
+        rets: vec![object_type()],
     }
 }
 

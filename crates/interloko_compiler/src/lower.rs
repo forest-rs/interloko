@@ -427,6 +427,9 @@ pub enum RuntimeOp {
     Concatenate,
     /// Tests a value against a type object.
     InstanceOfType,
+    /// Builds a `<limited-integer>` type object from whether it has each
+    /// bound, the bounds, and the named type it is written as.
+    LimitedIntegerType,
     /// Returns a `<limited-integer>`'s base class.
     LimitedIntegerBase,
     /// Returns a `<limited-integer>`'s lower bound as `<object>`, or `#f`.
@@ -2988,6 +2991,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         | sem::Expr::Capture { .. }
         | sem::Expr::ConstantRef { .. }
         | sem::Expr::ClassObject { .. }
+        | sem::Expr::TypeObject { .. }
         | sem::Expr::GenericFunctionObject { .. }
         | sem::Expr::Error { .. } => {}
     }
@@ -4655,6 +4659,11 @@ impl<'module> BodyLowering<'module> {
                 self.coerce_value(lowered?, expected, *span)
             }
             sem::Expr::ClassObject { class, span } => self.lower_class_meta_object(*class, *span),
+            sem::Expr::TypeObject {
+                object,
+                class,
+                span,
+            } => self.lower_type_object(*object, *class, *span),
             sem::Expr::GenericFunctionObject { generic, span } => {
                 self.lower_generic_meta_object(*generic, *span)
             }
@@ -5837,6 +5846,59 @@ impl<'module> BodyLowering<'module> {
     ) -> Result<Value, LowerError> {
         let result = self.alloc(ValueKind::ClassObject(Some(class)));
         self.emit_class_meta_object(result.reg, class, span);
+        Ok(result)
+    }
+
+    /// Builds the `<limited-integer>` type object `object` from constants.
+    fn lower_type_object(
+        &mut self,
+        object: TypeObject,
+        class: sem::ClassId,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let TypeObject::LimitedInteger { range, named } = object else {
+            return Err(invalid_semantic(
+                "only limited integer types are written as type objects",
+            ));
+        };
+        let mut args = Vec::with_capacity(5);
+        for bound in [range.min, range.max] {
+            let present = self.alloc(ValueKind::Bool);
+            self.instructions.push(Instr::ConstBool {
+                dst: present.reg,
+                value: bound.is_some(),
+                span,
+            });
+            let value = self.alloc(ValueKind::I64);
+            self.instructions.push(Instr::ConstI64 {
+                dst: value.reg,
+                value: bound.unwrap_or(0),
+                span,
+            });
+            args.extend([present.reg, value.reg]);
+        }
+        let named_index = named
+            .and_then(|named| {
+                sem::LimitedInteger::ALL
+                    .iter()
+                    .position(|kind| *kind == named)
+            })
+            .map_or(0, |index| index + 1);
+        let named = self.alloc(ValueKind::U64);
+        self.instructions.push(Instr::ConstU64 {
+            dst: named.reg,
+            value: u64::try_from(named_index).unwrap_or(0),
+            span,
+        });
+        args.push(named.reg);
+        let result = self.alloc(ValueKind::Object(Some(class)));
+        self.instructions.push(Instr::RuntimeCall {
+            dst: result.reg,
+            op: RuntimeOp::LimitedIntegerType,
+            args,
+            kind: result.kind,
+            span,
+        });
         Ok(result)
     }
 
@@ -8062,6 +8124,7 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::TypeName => index == 0,
         RuntimeOp::VectorRef => index == 0,
         RuntimeOp::InstanceOfType => true,
+        RuntimeOp::LimitedIntegerType => false,
         RuntimeOp::ClassMetaObject
         | RuntimeOp::ClassMetaId
         | RuntimeOp::GenericMetaObject
@@ -8695,6 +8758,7 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",
         RuntimeOp::InstanceOfType => "instance?",
+        RuntimeOp::LimitedIntegerType => "limited",
         RuntimeOp::LimitedIntegerBase => "limited-integer-base",
         RuntimeOp::LimitedIntegerMin => "limited-integer-min",
         RuntimeOp::LimitedIntegerMax => "limited-integer-max",

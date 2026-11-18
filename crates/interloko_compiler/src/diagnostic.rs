@@ -72,6 +72,8 @@ pub enum DiagnosticCode {
     AstInvalidInstanceOf,
     /// `as` has the wrong syntactic argument shape.
     AstInvalidCast,
+    /// `limited(...)` written as an expression writes no type.
+    AstInvalidTypeLiteral,
     /// `signal` has the wrong syntactic argument shape.
     AstInvalidSignal,
     /// `:=` was used with something other than an object slot target.
@@ -343,6 +345,7 @@ impl DiagnosticCode {
         Self::AstAnnotationNotClass,
         Self::AstInvalidInstanceOf,
         Self::AstInvalidCast,
+        Self::AstInvalidTypeLiteral,
         Self::AstInvalidSignal,
         Self::AstInvalidSlotAssignment,
         Self::AstDuplicateAdjective,
@@ -480,6 +483,7 @@ impl DiagnosticCode {
             Self::AstAnnotationNotClass => "ast.annotation-not-class",
             Self::AstInvalidInstanceOf => "ast.invalid-instance-of",
             Self::AstInvalidCast => "ast.invalid-cast",
+            Self::AstInvalidTypeLiteral => "ast.invalid-type-literal",
             Self::AstInvalidSignal => "ast.invalid-signal",
             Self::AstInvalidSlotAssignment => "ast.invalid-slot-assignment",
             Self::AstDuplicateAdjective => "ast.duplicate-adjective",
@@ -620,6 +624,7 @@ impl DiagnosticCode {
             "ast.annotation-not-class" => Self::AstAnnotationNotClass,
             "ast.invalid-instance-of" => Self::AstInvalidInstanceOf,
             "ast.invalid-cast" => Self::AstInvalidCast,
+            "ast.invalid-type-literal" => Self::AstInvalidTypeLiteral,
             "ast.invalid-signal" => Self::AstInvalidSignal,
             "ast.invalid-slot-assignment" => Self::AstInvalidSlotAssignment,
             "ast.duplicate-adjective" => Self::AstDuplicateAdjective,

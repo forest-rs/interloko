@@ -14,6 +14,7 @@ use crate::syntax::{self, Span};
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::sealing::Sealing;
+pub use interloko_model::type_object::TypeObject;
 use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
 
 pub use interloko_model::condition::ConditionClass;
@@ -1228,6 +1229,7 @@ impl Module {
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
             }
+            Expr::TypeObject { class, .. } => ValueKind::Object(*class),
             Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
             Expr::GenericFunctionObject { generic, .. } => {
                 ValueKind::GenericFunctionObject(*generic)
@@ -1714,6 +1716,7 @@ impl<'a> SiteNumbering<'a> {
             | Expr::Capture { .. }
             | Expr::ConstantRef { .. }
             | Expr::ClassObject { .. }
+            | Expr::TypeObject { .. }
             | Expr::KnownCallable { .. }
             | Expr::GenericFunctionObject { .. }
             | Expr::Error { .. } => {}
@@ -3363,6 +3366,16 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// A type object the program writes that is not a class:
+    /// `limited(<integer>, min: 0, max: 255)`, `<i32>` or `<u32>`.
+    TypeObject {
+        /// The type.
+        object: TypeObject,
+        /// The built-in class of the type object, `<limited-integer>`.
+        class: ClassId,
+        /// Source span.
+        span: Span,
+    },
     /// Compile-time-known callable value.
     KnownCallable {
         /// Known callable identity.
@@ -3764,6 +3777,7 @@ impl Expr {
             | Self::Capture { span, .. }
             | Self::ConstantRef { span, .. }
             | Self::ClassObject { span, .. }
+            | Self::TypeObject { span, .. }
             | Self::KnownCallable { span, .. }
             | Self::Closure { span, .. }
             | Self::GenericFunctionObject { span, .. }
@@ -6885,7 +6899,23 @@ impl Lowering {
             },
             ast::Expr::ClassName {
                 class_name, span, ..
-            } => self.lower_class_object(ctx, class_name, *span),
+            } => match LimitedInteger::from_name(class_name) {
+                Some(limited) => self.lower_type_object(TypeObject::named(limited), *span),
+                None => self.lower_class_object(ctx, class_name, *span),
+            },
+            ast::Expr::TypeLiteral { target, span, .. } => {
+                match self.resolve_type_annotation_detail_in_context(ctx, target) {
+                    ResolvedType {
+                        kind: ValueKind::I64,
+                        range,
+                        ..
+                    } => self.lower_type_object(
+                        TypeObject::limited(range.unwrap_or(IntRange::INTEGER)),
+                        *span,
+                    ),
+                    _ => Expr::Error { span: *span },
+                }
+            }
             ast::Expr::InstanceOf {
                 value,
                 target,
@@ -9228,6 +9258,18 @@ impl Lowering {
         Expr::Error { span }
     }
 
+    /// The type object `object`, of the built-in class `<limited-integer>`.
+    fn lower_type_object(&self, object: TypeObject, span: Span) -> Expr {
+        match self.builtin_value_class(BuiltinValueClass::LimitedIntegerType) {
+            Some(class) => Expr::TypeObject {
+                object,
+                class,
+                span,
+            },
+            None => Expr::Error { span },
+        }
+    }
+
     fn lower_class_object(&self, ctx: &mut FunctionContext, class_name: &str, span: Span) -> Expr {
         let Some(class) = self.resolve_class(class_name) else {
             ctx.diagnostics.push(
@@ -10000,6 +10042,7 @@ impl Lowering {
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
             }
+            Expr::TypeObject { class, .. } => ValueKind::Object(*class),
             Expr::KnownCallable { callable, .. } => ValueKind::KnownCallable(*callable),
             Expr::Closure { result_kind, .. } => *result_kind,
             Expr::GenericFunctionObject { generic, .. } => {
@@ -11764,6 +11807,56 @@ mod tests {
                 result_kind: ValueKind::KnownCallable(KnownCallable::GenericFunction(
                     GenericFunctionId(0)
                 )),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn limited_types_written_as_values_are_type_objects() {
+        let module = lower_source(
+            "define function main() => <boolean>\n  \
+             let t = limited(<integer>, min: 0, max: 9);\n  \
+             let member = instance?(3, t);\n  \
+             t = <u32>\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let limited_integer = class_id(&module, "<limited-integer>");
+        let body = &module.functions[0].body;
+        assert_eq!(
+            body.lets[0].value,
+            Expr::TypeObject {
+                object: TypeObject::limited(IntRange {
+                    min: Some(0),
+                    max: Some(9)
+                }),
+                class: limited_integer,
+                span: body.lets[0].value.span(),
+            }
+        );
+        assert_eq!(
+            module.functions[0].locals[0].kind,
+            ValueKind::Object(limited_integer)
+        );
+        assert!(matches!(
+            body.lets[1].value,
+            Expr::IntrinsicCall {
+                intrinsic: Intrinsic::InstanceOfType,
+                result_kind: ValueKind::Bool,
+                ..
+            }
+        ));
+        let Expr::ValueEqual { rhs, .. } = &body.result else {
+            panic!("expected type objects compared, got {:?}", body.result);
+        };
+        assert!(matches!(
+            rhs.as_ref(),
+            Expr::TypeObject {
+                object: TypeObject::LimitedInteger {
+                    named: Some(LimitedInteger::U32),
+                    ..
+                },
                 ..
             }
         ));

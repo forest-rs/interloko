@@ -165,7 +165,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok fail/strict/unproved_dispatch.loko"));
     assert!(out.contains("ok fail/strict/unproved_overflow.loko"));
     assert!(out.contains("ok fail/strict/float_casts.loko"));
-    assert!(out.contains("corpus: 441 passed, 0 failed, 441 total"));
+    assert!(out.contains("corpus: 443 passed, 0 failed, 443 total"));
 }
 
 #[test]

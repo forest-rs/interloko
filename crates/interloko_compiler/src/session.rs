@@ -5921,6 +5921,7 @@ fn collect_dispatch_sites_in_expr(
         | sem::Expr::Capture { .. }
         | sem::Expr::ConstantRef { .. }
         | sem::Expr::ClassObject { .. }
+        | sem::Expr::TypeObject { .. }
         | sem::Expr::KnownCallable { .. }
         | sem::Expr::GenericFunctionObject { .. }
         | sem::Expr::Error { .. } => {}
@@ -7920,6 +7921,9 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         }
         ast::Expr::ClassName { id, class_name, .. } => {
             let _ = writeln!(out, "{id} class-name {class_name}");
+        }
+        ast::Expr::TypeLiteral { id, target, .. } => {
+            let _ = writeln!(out, "{id} type {target}");
         }
         ast::Expr::InstanceOf {
             id, value, target, ..
@@ -13805,6 +13809,9 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::ClassObject { class, .. } => {
             let _ = writeln!(out, "class-object c{}", class.0);
         }
+        sem::Expr::TypeObject { object, .. } => {
+            let _ = writeln!(out, "type-object {object:?}");
+        }
         sem::Expr::KnownCallable { callable, .. } => {
             let _ = writeln!(
                 out,
@@ -15150,6 +15157,9 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .get(class.0 as usize)
                 .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "class-object({definition})");
+        }
+        sem::Expr::TypeObject { object, .. } => {
+            let _ = write!(out, "type-object({})", object.display(module));
         }
         sem::Expr::KnownCallable { callable, .. } => {
             let fingerprint = sem_callable_fingerprint(module, *callable);

@@ -525,6 +525,7 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
         | Expr::Symbol { .. }
         | Expr::Name { .. }
         | Expr::ClassName { .. }
+        | Expr::TypeLiteral { .. }
         | Expr::Error { .. } => {}
         Expr::Vector { elements, .. } => {
             for element in elements {

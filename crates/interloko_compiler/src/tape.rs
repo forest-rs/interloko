@@ -1130,6 +1130,11 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::instance_of_type_signature(),
         ),
         (
+            RuntimeOp::LimitedIntegerType,
+            runtime::LIMITED_INTEGER_TYPE,
+            runtime::limited_integer_type_signature(),
+        ),
+        (
             RuntimeOp::LimitedIntegerBase,
             runtime::MOP_LIMITED_INTEGER_BASE,
             runtime::meta_query_object_signature(),

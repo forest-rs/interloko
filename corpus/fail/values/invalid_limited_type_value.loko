@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.invalid-type-literal
+
+// `limited(...)` as an expression is a type object, so its first argument
+// must write a type.
+
+define function main() => <boolean>
+  let n = 3;
+  let t = limited(n, min: 0);
+  instance?(n, t)
+end;

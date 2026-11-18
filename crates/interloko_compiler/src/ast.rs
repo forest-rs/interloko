@@ -603,6 +603,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// A type written as an expression, whose value is a type object:
+    /// `limited(<integer>, min: 0, max: 255)`. A type name such as `<i32>`
+    /// is a [`Self::ClassName`].
+    TypeLiteral {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// The type.
+        target: TypeExpr,
+        /// Source span.
+        span: Span,
+    },
     /// Runtime type membership test: `instance?(value, type)`.
     InstanceOf {
         /// Stable-ish AST node identity.
@@ -780,6 +791,7 @@ impl Expr {
             | Self::Function { id, .. }
             | Self::Name { id, .. }
             | Self::ClassName { id, .. }
+            | Self::TypeLiteral { id, .. }
             | Self::InstanceOf { id, .. }
             | Self::Cast { id, .. }
             | Self::Call { id, .. }
@@ -811,6 +823,7 @@ impl Expr {
             | Self::Function { span, .. }
             | Self::Name { span, .. }
             | Self::ClassName { span, .. }
+            | Self::TypeLiteral { span, .. }
             | Self::InstanceOf { span, .. }
             | Self::Cast { span, .. }
             | Self::Call { span, .. }
@@ -2050,6 +2063,9 @@ impl<'tree> Lowering<'tree> {
         if text == "as" {
             return self.lower_cast(node);
         }
+        if text == "limited" {
+            return self.lower_type_literal(node);
+        }
         let mut args = Vec::new();
         for arg_list in node.child_nodes(CstKind::ArgList) {
             for child in &arg_list.children {
@@ -2097,6 +2113,28 @@ impl<'tree> Lowering<'tree> {
             value: Box::new(value),
             target,
             span: node.span,
+        }
+    }
+
+    /// Lowers `limited(...)` written as an expression, whose value is the
+    /// type object; a call that writes no type is reported as one.
+    fn lower_type_literal(&mut self, node: &CstNode) -> Expr {
+        match self.type_expr_from_node(node) {
+            Some(target) => Expr::TypeLiteral {
+                id: self.ast_id(node),
+                target,
+                span: node.span,
+            },
+            None => {
+                self.diagnostics.push(Diagnostic::error(
+                    node.span,
+                    DiagnosticCode::AstInvalidTypeLiteral,
+                ));
+                Expr::Error {
+                    id: self.ast_id(node),
+                    span: node.span,
+                }
+            }
         }
     }
 
