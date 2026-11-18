@@ -1,0 +1,19 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.untyped-callable-result
+// expect: diagnostic contains the result of a call through a <callable> value needs a declared type here: write `let r :: <integer> = apply(…)`
+
+// An untyped `<callable>` says nothing about its result, and nothing here
+// declares one: the binding has no type, and neither does `run`'s result.
+
+define function twice(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define function run(f :: <callable>)
+  let r = apply(f, 4);
+  r
+end;
+
+define function main() => <integer>
+  0
+end;
