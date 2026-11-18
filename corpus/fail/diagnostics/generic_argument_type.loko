@@ -1,5 +1,6 @@
 // expect: diagnostics 1
-// expect: diagnostic contains generic `area` argument 1 expects <object> but got <integer>
+// expect: diagnostic code sem.generic-without-methods
+// expect: diagnostic contains `area` has no methods, so none accepts <integer> as argument 1; define one on <integer>
 
 define generic area(x :: <object>) => <integer>;
 

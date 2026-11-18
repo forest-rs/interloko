@@ -145,6 +145,13 @@ pub enum DiagnosticCode {
     MethodReturnTypeMismatch,
     /// A generic call argument does not satisfy the generic contract.
     GenericArgumentTypeMismatch,
+    /// A generic call passes a number where no method of the generic can
+    /// accept one, because every method specializes that argument on a
+    /// class that numbers are not instances of.
+    NoApplicableMethod,
+    /// A generic call passes a number to a generic that has no methods, so
+    /// none can accept it.
+    GenericWithoutMethods,
     /// `if` condition is not boolean.
     IfConditionTypeMismatch,
     /// `if` branch result kinds differ.
@@ -380,6 +387,8 @@ impl DiagnosticCode {
         Self::GenericMethodResultTypeMismatch,
         Self::MethodReturnTypeMismatch,
         Self::GenericArgumentTypeMismatch,
+        Self::NoApplicableMethod,
+        Self::GenericWithoutMethods,
         Self::IfConditionTypeMismatch,
         Self::IfBranchTypeMismatch,
         Self::ArithmeticOperandTypeMismatch,
@@ -520,6 +529,8 @@ impl DiagnosticCode {
             Self::GenericMethodResultTypeMismatch => "sem.generic-method-result-type-mismatch",
             Self::MethodReturnTypeMismatch => "sem.method-return-type-mismatch",
             Self::GenericArgumentTypeMismatch => "sem.generic-argument-type-mismatch",
+            Self::NoApplicableMethod => "sem.no-applicable-method",
+            Self::GenericWithoutMethods => "sem.generic-without-methods",
             Self::IfConditionTypeMismatch => "sem.if-condition-type-mismatch",
             Self::IfBranchTypeMismatch => "sem.if-branch-type-mismatch",
             Self::ArithmeticOperandTypeMismatch => "sem.arithmetic-operand-type-mismatch",
@@ -661,6 +672,8 @@ impl DiagnosticCode {
             "sem.generic-method-result-type-mismatch" => Self::GenericMethodResultTypeMismatch,
             "sem.method-return-type-mismatch" => Self::MethodReturnTypeMismatch,
             "sem.generic-argument-type-mismatch" => Self::GenericArgumentTypeMismatch,
+            "sem.no-applicable-method" => Self::NoApplicableMethod,
+            "sem.generic-without-methods" => Self::GenericWithoutMethods,
             "sem.if-condition-type-mismatch" => Self::IfConditionTypeMismatch,
             "sem.if-branch-type-mismatch" => Self::IfBranchTypeMismatch,
             "sem.arithmetic-operand-type-mismatch" => Self::ArithmeticOperandTypeMismatch,

@@ -49,6 +49,8 @@
 "sem.generic-method-result-type-mismatch" = "[ps] method { $method } result { $actual } violates generic return { $expected }"
 "sem.method-return-type-mismatch" = "[ps] method { $method } body is { $actual }, return requires { $expected }"
 "sem.generic-argument-type-mismatch" = "[ps] generic { $generic } arg { $argument_index }: got { $actual }, need { $expected }"
+"sem.no-applicable-method" = "[ps] no { $generic } method takes { $actual } at arg { $argument_index }; methods take { $specializers }; add one on { $class }"
+"sem.generic-without-methods" = "[ps] { $generic } has no methods for { $actual } at arg { $argument_index }; add one on { $class }"
 "sem.if-condition-type-mismatch" = "[ps] if condition got { $actual }, need { $expected }"
 "sem.if-branch-type-mismatch" = "[ps] if branches differ: then { $then }, else { $else }"
 "sem.arithmetic-operand-type-mismatch" = "[ps] arithmetic operands are { $lhs } and { $rhs }, need numbers"

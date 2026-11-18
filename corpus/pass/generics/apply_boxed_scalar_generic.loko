@@ -1,0 +1,29 @@
+// expect: run 102
+// expect: diagnostics 0
+
+// A generic with a method on a number class carries boxed values, so
+// `apply` passes it a number as a direct send does, and a boolean reaches
+// its method on `<object>`.
+
+define class <circle> (<object>)
+end;
+
+define generic weight(x :: <object>) => <integer>;
+
+define method weight(n :: <integer>) => <integer>
+  n + 1
+end;
+
+define method weight(c :: <circle>) => <integer>
+  100
+end;
+
+define generic truthy(x :: <object>) => <integer>;
+
+define method truthy(x :: <object>) => <integer>
+  if instance?(x, <circle>) then 0 else 1 end
+end;
+
+define function main() => <integer>
+  apply(weight, 0) + weight(make(<circle>)) + truthy(#t)
+end;
