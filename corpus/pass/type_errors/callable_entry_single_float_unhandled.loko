@@ -1,0 +1,18 @@
+// expect: runtime code type-error.entry
+// expect: run reports type-error.entry: 3 is not of type <single-float> at typing:def
+// expect: diagnostics 0
+
+// An `<integer>` is no `<single-float>` either: the entry of a function
+// taking one signals on the boxed argument.
+
+define function half(x :: <single-float>) => <single-float>
+  x / 2.0f32
+end;
+
+define function call(f :: <callable>, n :: <integer>) => <single-float>
+  apply(f, n)
+end;
+
+define function main() => <single-float>
+  call(half, 3)
+end;

@@ -181,7 +181,8 @@ impl InterlokoHost {
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 self.describe_object(obj)
             }
-            ValueRef::Func(_) | ValueRef::Closure(_) => "{<callable>}".into(),
+            // A callable value is an aggregate of its entries.
+            ValueRef::Func(_) | ValueRef::Closure(_) | ValueRef::Agg(_) => "{<callable>}".into(),
             _ => "{value}".into(),
         }
     }

@@ -2889,7 +2889,7 @@ impl InterlokoHost {
             (ValueKind::U32, ValueRef::U32(value)) => Ok(Value::U32(value)),
             (ValueKind::F32, ValueRef::F32(value)) => Ok(Value::F32(value)),
             (ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
-            (ValueKind::Callable, ValueRef::Closure(closure)) => Ok(Value::Closure(closure)),
+            (ValueKind::Callable, ValueRef::Agg(callable)) => Ok(Value::Agg(callable)),
             (
                 ValueKind::Object(expected_class)
                 | ValueKind::String(expected_class)
@@ -3209,7 +3209,7 @@ fn value_type(kind: ValueKind) -> Option<ValueType> {
         | ValueKind::GenericFunctionObject(_)
         | ValueKind::MethodObject(_)
         | ValueKind::SlotDescriptorObject { .. } => Some(object_type()),
-        ValueKind::Callable => Some(ValueType::Closure),
+        ValueKind::Callable => Some(ValueType::Agg),
     }
 }
 

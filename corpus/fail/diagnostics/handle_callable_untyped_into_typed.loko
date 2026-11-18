@@ -1,0 +1,17 @@
+// expect: diagnostics 1
+// expect: diagnostic contains local `g` expects callable(<i32>) => <i32> but initializer has <callable>
+
+// A `handle` produces its body's values or its restart's, so its callable
+// result keeps a signature only when both have it. Here the body is an
+// untyped `h`, so the result cannot initialize a typed binding.
+
+define class <stop> (<object>)
+end;
+define function go(h :: <callable>) => <integer>
+  let g :: callable(<i32>) => <i32> =
+    handle h with restart <stop> function (x :: <i32>) => <i32> x end end;
+  as(<integer>, g(3i32)) + 1
+end;
+define function main() => <integer>
+  go(function (x :: <integer>) => <double-float> 1.5 end)
+end;

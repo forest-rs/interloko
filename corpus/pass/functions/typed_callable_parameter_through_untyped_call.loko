@@ -1,0 +1,26 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 2500000000 is not of type <i32> at typing:def
+// expect: diagnostics 0
+
+// `twice` declares that `g` takes an `<integer>`, but it is itself applied
+// as an untyped `<callable>`, so nothing checked the `g` it receives: here
+// one that takes an `<i32>`. A call through `g` is a call through a
+// callable value like any other, so `narrow`'s entry converts the
+// `<integer>` and signals for one outside its range, rather than the call
+// trapping.
+
+define function twice(g :: callable(<integer>) => <integer>) => <integer>
+  g(g(2500000000))
+end;
+
+define function narrow(x :: <i32>) => <integer>
+  as(<integer>, x) * 2
+end;
+
+define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
+  apply(f, g)
+end;
+
+define function main() => <integer>
+  apply-untyped(twice, narrow)
+end;

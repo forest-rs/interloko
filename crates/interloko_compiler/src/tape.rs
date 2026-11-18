@@ -11,7 +11,9 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use execution_tape::asm::{Asm, Catch, FunctionAbi, FunctionSig, Label, ProgramBuilder, Reg};
+use execution_tape::asm::{
+    Asm, Catch, ContractRef, FunctionAbi, FunctionSig, Label, ProgramBuilder, Reg,
+};
 use execution_tape::contract::{Contract, ContractId};
 use execution_tape::host::HostSig;
 use execution_tape::program::{
@@ -121,16 +123,19 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         if function.id.0 as usize != ids.functions.len() {
             return Err(invalid_lowered("lowered functions are not in id order"));
         }
-        let sig = FunctionSig {
-            arg_types: function
+        let mut signature = FunctionAbi {
+            args: function
                 .params
                 .iter()
-                .map(|param| value_type(param.kind))
+                .map(|param| abi_ref(param.kind, abi.callable))
                 .collect(),
-            ret_types: function.rets.iter().copied().map(value_type).collect(),
+            rets: function
+                .rets
+                .iter()
+                .map(|kind| abi_ref(*kind, abi.callable))
+                .collect(),
         };
-        let mut signature = FunctionAbi::from(sig);
-        if let Some(environment) = closure_env_contract(function, &mut builder)? {
+        if let Some(environment) = closure_env_contract(function, abi.callable, &mut builder)? {
             signature.args[0] = environment.into();
         }
         let func = builder.declare_function(signature).map_err(build_error)?;
@@ -228,7 +233,8 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
         lower::ValueKind::Function(_) => ValueType::Func,
-        lower::ValueKind::Closure(_) => ValueType::Closure,
+        lower::ValueKind::Closure(_) => ValueType::Agg,
+        lower::ValueKind::Entry => ValueType::Closure,
         lower::ValueKind::Aggregate => ValueType::Agg,
         lower::ValueKind::Exn => ValueType::Exn,
         lower::ValueKind::Object(_) => runtime::object_type(),
@@ -239,18 +245,46 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
     }
 }
 
+/// What a register of `kind` holds at a function or call boundary: its
+/// kind, or for a callable value the `callable` contract, so the code that
+/// receives one can open it ([`lower::FunctionKind::CallableParts`]).
+fn abi_ref(kind: lower::ValueKind, callable: ContractId) -> ContractRef {
+    match kind {
+        lower::ValueKind::Closure(_) => callable.into(),
+        kind => ContractRef::Kind(value_type(kind)),
+    }
+}
+
+/// The contract of a callable value: a tuple of its typed entry, its boxed
+/// entry and its shape ([`lower::Instr::CallableNew`]).
+fn callable_contract(builder: &mut ProgramBuilder) -> Result<ContractId, TapeError> {
+    let entry = builder
+        .contract(Contract::Kind(ValueType::Closure))
+        .map_err(build_error)?;
+    let shape = builder
+        .contract(Contract::Kind(ValueType::U64))
+        .map_err(build_error)?;
+    builder
+        .contract(Contract::Tuple(&[Some(entry), Some(entry), Some(shape)]))
+        .map_err(build_error)
+}
+
 fn closure_env_contract(
     function: &lower::Function,
+    callable: ContractId,
     builder: &mut ProgramBuilder,
 ) -> Result<Option<ContractId>, TapeError> {
     if !matches!(
         function.kind,
-        lower::FunctionKind::Closure(_) | lower::FunctionKind::ExitThunk { .. }
+        lower::FunctionKind::Closure(_)
+            | lower::FunctionKind::ExitThunk { .. }
+            | lower::FunctionKind::BoxedEntry { .. }
+            | lower::FunctionKind::Adapter { .. }
     ) {
         return Ok(None);
     }
 
-    let mut elems: Vec<Option<ValueType>> = Vec::new();
+    let mut elems: Vec<Option<ContractRef>> = Vec::new();
     for instr in &function.instructions {
         let lower::Instr::CaptureGet { index, kind, .. } = instr else {
             continue;
@@ -258,13 +292,13 @@ fn closure_env_contract(
         if elems.len() <= *index {
             elems.resize(index.saturating_add(1), None);
         }
-        let ty = value_type(*kind);
+        let reference = abi_ref(*kind, callable);
         match elems[*index] {
-            Some(existing) if existing != ty => {
+            Some(existing) if existing != reference => {
                 return Err(invalid_lowered("capture index has conflicting value kinds"));
             }
             _ => {
-                elems[*index] = Some(ty);
+                elems[*index] = Some(reference);
             }
         }
     }
@@ -274,8 +308,12 @@ fn closure_env_contract(
     } else {
         let children: Vec<_> = elems
             .into_iter()
-            .map(|kind| {
-                kind.map(|kind| builder.contract(Contract::Kind(kind)))
+            .map(|reference| {
+                reference
+                    .map(|reference| match reference {
+                        ContractRef::Kind(kind) => builder.contract(Contract::Kind(kind)),
+                        ContractRef::Id(id) => Ok(id),
+                    })
                     .transpose()
             })
             .collect::<Result<_, _>>()
@@ -397,6 +435,8 @@ fn method_link_name(layout: &RuntimeLayout, method: sem::MethodId) -> String {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AbiTables {
+    /// The contract of every callable value register ([`callable_contract`]).
+    callable: ContractId,
     make_object: HostSigId,
     class_count: usize,
     class_of: HostSigId,
@@ -885,6 +925,7 @@ impl AbiTables {
             })
             .collect();
         Ok(Self {
+            callable: callable_contract(builder)?,
             make_object,
             class_count: module.runtime.classes.len(),
             class_of,
@@ -1524,6 +1565,64 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm.tuple_new(env_reg, captures);
                 self.asm.closure_new(*dst, func_reg, env_reg);
             }
+            lower::Instr::CallableNew {
+                dst,
+                typed,
+                boxed,
+                shape,
+                captures,
+                span,
+            } => {
+                let function = |id: &lower::FunctionId| {
+                    self.ids
+                        .functions
+                        .get(id.0 as usize)
+                        .copied()
+                        .ok_or_else(|| {
+                            invalid_lowered("callable entry function id is out of range")
+                        })
+                };
+                let typed = function(typed)?;
+                let func_reg = self.alloc_temp(ValueType::Func);
+                let env_reg = self.alloc_temp(ValueType::Agg);
+                let typed_reg = self.alloc_temp(ValueType::Closure);
+                let shape_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.tuple_new(env_reg, captures);
+                self.asm.const_func(func_reg, typed);
+                self.asm.closure_new(typed_reg, func_reg, env_reg);
+                let boxed_reg = match boxed {
+                    lower::BoxedEntry::Function(boxed) => {
+                        let boxed = function(boxed)?;
+                        let boxed_func = self.alloc_temp(ValueType::Func);
+                        let boxed_reg = self.alloc_temp(ValueType::Closure);
+                        self.asm.const_func(boxed_func, boxed);
+                        self.asm.closure_new(boxed_reg, boxed_func, env_reg);
+                        boxed_reg
+                    }
+                    lower::BoxedEntry::Shared(entry) => *entry,
+                };
+                self.asm.const_u64(shape_reg, *shape);
+                self.asm.tuple_new(*dst, &[typed_reg, boxed_reg, shape_reg]);
+            }
+            lower::Instr::OpenCallable {
+                typed,
+                boxed,
+                shape,
+                callable,
+                span,
+            } => {
+                self.set_span(*span);
+                for (index, part) in [typed, boxed, shape].into_iter().enumerate() {
+                    if let Some(part) = part {
+                        self.asm.tuple_get(
+                            *part,
+                            *callable,
+                            u32::try_from(index).unwrap_or(u32::MAX),
+                        );
+                    }
+                }
+            }
             lower::Instr::CaptureGet {
                 dst,
                 env,
@@ -1559,6 +1658,7 @@ impl<'a> FunctionEmitter<'a> {
                     | lower::ValueKind::U64
                     | lower::ValueKind::Function(_)
                     | lower::ValueKind::Closure(_)
+                    | lower::ValueKind::Entry
                     | lower::ValueKind::Aggregate
                     | lower::ValueKind::Exn => {
                         return Err(invalid_lowered("invalid boxed value input kind"));
@@ -1789,16 +1889,15 @@ impl<'a> FunctionEmitter<'a> {
                 rets,
                 span,
             } => {
-                let args_types = arg_kinds
-                    .iter()
-                    .map(|kind| value_type(*kind))
-                    .collect::<Vec<_>>();
-                let ret_types = rets.iter().copied().map(value_type).collect::<Vec<_>>();
+                let callable = self.abi.callable;
                 let sig = self
                     .builder
-                    .call_sig(FunctionSig {
-                        arg_types: args_types,
-                        ret_types,
+                    .call_sig(FunctionAbi {
+                        args: arg_kinds
+                            .iter()
+                            .map(|kind| abi_ref(*kind, callable))
+                            .collect(),
+                        rets: rets.iter().map(|kind| abi_ref(*kind, callable)).collect(),
                     })
                     .map_err(build_error)?;
                 self.set_span(*span);
@@ -2655,7 +2754,7 @@ mod tests {
             program
                 .function_arg_types(program.function(FuncId(1)).expect("callit"))
                 .expect("callit args should decode"),
-            &[ValueType::Closure],
+            &[ValueType::Agg],
         );
         let disassembly = execution_tape::disasm::disassemble_verified(tape.program()).to_string();
         assert!(disassembly.contains("name=\"callit\""));

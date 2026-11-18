@@ -215,8 +215,8 @@ failed:
 
 | Code | Check |
 | --- | --- |
-| `type-error.cast` | a value is not an instance of the class an `as` (or a boxed `<object>` read as a number) expects |
-| `type-error.entry` | an object argument passed through an untyped `<callable>` is not of its parameter's class, an exit procedure's value is not of its block's class, or a `use-value` replacing a failed send's result is not of its generic's result class (a scalar of the wrong representation still traps; see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
+| `type-error.cast` | a value is not an instance of the class an `as` (or a boxed `<object>` read as a number, such as a callable value's result) expects |
+| `type-error.entry` | an argument passed through a callable value is not of its parameter's class or number kind, a callable from untyped code returns a value its typed binding's signature does not allow, an exit procedure's value is not of its block's class, or a `use-value` replacing a failed send's result is not of its generic's result class (see [`eop_workbench.md`](eop_workbench.md#runtime-type-errors)) |
 | `type-error.range` | a number is outside a limited type's range: a conversion to `<i32>`/`<u32>`, a float converted to an integer it does not equal, a shift count outside `0..=31`, or an argument, binding, slot value, constant or result outside its `limited(<integer>, ...)` type |
 | `type-error.overflow` | integer arithmetic produced a result its type cannot represent |
 

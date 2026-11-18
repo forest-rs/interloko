@@ -1,0 +1,30 @@
+// expect: run 1111
+// expect: diagnostics 0
+// expect: dump lowered contains = callable.open %r
+// expect: dump lowered contains callable#parts
+
+// A callable value is opened in place when the tape can see its shape, as
+// for a join of parameters, and through `callable#parts` otherwise, as for
+// a slot's value. Either way the call reaches the same entries.
+
+define class <stash> (<object>)
+  slot fn :: <callable>, init-keyword: fn:;
+end;
+
+define function choose(c :: <boolean>, f :: <callable>, g :: <callable>) => <integer>
+  let h :: <callable> = if c then f else g end;
+  let r :: <integer> = apply(h, 1);
+  r
+end;
+
+define function from-slot(s :: <stash>) => <integer>
+  let r :: <integer> = apply(s.fn, 10);
+  r
+end;
+
+define function main() => <integer>
+  let tenfold :: <callable> = function (x :: <integer>) => <integer> x * 10 end;
+  let hundredfold :: <callable> = function (x :: <integer>) => <integer> x * 100 end;
+  choose(#t, tenfold, hundredfold) + choose(#f, tenfold, hundredfold)
+    + from-slot(make(<stash>, fn: hundredfold)) + 1
+end;

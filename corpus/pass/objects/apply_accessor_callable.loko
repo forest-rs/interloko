@@ -1,7 +1,7 @@
 // expect: run 3
 // expect: diagnostics 0
 // expect: dump sem contains callable-call result=integer
-// expect: dump lowered contains closure.new
+// expect: dump lowered contains callable.new
 // expect: dump lowered contains call.indirect
 // expect: dump lowered contains slot.read
 // expect: dump tape contains const.func

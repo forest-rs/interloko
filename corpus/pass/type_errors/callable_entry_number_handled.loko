@@ -1,0 +1,21 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// The caller of a callable value can handle the `<type-error>` its
+// entry signals for a number of the wrong class like any other.
+
+define function twice(x :: <double-float>) => <double-float>
+  x * 2.0
+end;
+
+define function call(f :: <callable>, n :: <integer>) => <integer>
+  handle
+    if apply(f, n) > 0.0 then 1 else 0 end
+  with restart e :: <type-error>
+    if e.type-error-code = "type-error.entry" then 2 else 3 end
+  end
+end;
+
+define function main() => <integer>
+  call(twice, 3)
+end;

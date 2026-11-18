@@ -1,0 +1,20 @@
+// expect: runtime code type-error.cast
+// expect: run reports type-error.cast: "seven" is not of type <double-float> at check:def
+// expect: diagnostics 0
+// expect: dump lowered contains unbox <double-float>
+
+// `name` returns an `<object>`, not the `<double-float>` the untyped call
+// wants, so the call takes its boxed entry, and unboxes the result to a
+// `<double-float>` where it lands. The string `name` returns fails that.
+
+define function name(n :: <integer>) => <object>
+  "seven"
+end;
+
+define function call(f :: <callable>, n :: <integer>) => <double-float>
+  apply(f, n)
+end;
+
+define function main() => <double-float>
+  call(name, 3)
+end;
