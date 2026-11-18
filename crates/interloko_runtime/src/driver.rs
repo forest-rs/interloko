@@ -1,6 +1,6 @@
 //! The one way to run Interloko tape.
 //!
-//! [`run`] starts an `execution_tape` invocation that yields its host
+//! [`run`] drives one `execution_tape` turn that yields its host
 //! requests and its unhandled suspensions, and services both. Control
 //! requests (handler and exit bindings, handler searches) are language policy
 //! and are handled here, where the VM's frames are visible: a signal searches
@@ -43,8 +43,8 @@ use execution_tape::program::LinkId;
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, UnitId, Value};
 use execution_tape::vm::{
-    ActivationId, InstallError, InvocationInspection, InvocationOptions, PendingHostCall,
-    PendingSuspension, RelinkError, RunStatus, TagError, Trap, TrapInfo, Units, Vm,
+    ActivationId, ComputationInspection, InstallError, PendingHostCall, PendingSuspension,
+    RelinkError, RunStatus, TagError, Trap, TrapInfo, TurnOptions, TurnOutcome, Units, Vm,
 };
 use interloko_model::{ClassId, GenericFunctionId};
 
@@ -79,7 +79,7 @@ impl RuntimeHost for InterlokoHost {
 #[derive(Debug)]
 pub struct RunOutcome {
     /// Values returned by the entry function. Aggregate handles belong to the
-    /// VM that ran the invocation.
+    /// VM that ran the turn.
     pub outputs: Vec<Value>,
     /// Control work performed by the run.
     pub stats: ControlStats,
@@ -94,18 +94,18 @@ pub enum RunFailure {
     Control {
         /// The language-level fault.
         fault: ControlFault,
-        /// The trap that ended the VM invocation.
+        /// The trap that ended the VM turn.
         trap: Box<TrapInfo>,
     },
     /// A chooser aborted the run; every crossed cleanup ran.
     Aborted {
-        /// The uncaught abort that ended the VM invocation.
+        /// The uncaught abort that ended the VM turn.
         trap: Box<TrapInfo>,
     },
     /// The entry unit could not be linked into the VM; nothing ran.
     Link(LinkError),
     /// The VM paused with a run status this driver does not service, so the
-    /// invocation was cancelled and rolled back.
+    /// turn was cancelled and rolled back.
     UnsupportedStatus {
         /// The status's `Debug` text.
         status: String,
@@ -113,7 +113,7 @@ pub enum RunFailure {
 }
 
 impl RunFailure {
-    /// The trap that ended the VM invocation, if one started.
+    /// The trap that ended the VM turn, if one started.
     #[must_use]
     pub const fn trap(&self) -> Option<&TrapInfo> {
         match self {
@@ -282,7 +282,7 @@ pub fn run<'a, H: RuntimeHost>(
     unit: &Arc<CodeUnit>,
     entry: FuncId,
     args: &'a [Value],
-    options: InvocationOptions<'a>,
+    options: TurnOptions<'a>,
     chooser: &mut dyn ConditionChooser,
 ) -> Result<RunOutcome, RunFailure> {
     let mut installed = install(vm, unit).map_err(RunFailure::Link)?;
@@ -313,7 +313,7 @@ pub fn run_installed<'a, H: RuntimeHost>(
     installed: &mut Installed,
     entry: FuncId,
     args: &'a [Value],
-    options: InvocationOptions<'a>,
+    options: TurnOptions<'a>,
     chooser: &mut dyn ConditionChooser,
 ) -> Result<RunOutcome, RunFailure> {
     let unit = installed.unit;
@@ -350,7 +350,7 @@ pub fn run_installed<'a, H: RuntimeHost>(
     )
     .map_err(RunFailure::Link)?;
     units.push(unit, Arc::clone(&installed.code));
-    let mut invocation = vm
+    let mut turn = vm
         .start(
             FuncRef::new(unit, entry),
             args,
@@ -369,26 +369,32 @@ pub fn run_installed<'a, H: RuntimeHost>(
         fault: None,
     };
     loop {
-        let status = match invocation.resume(u64::MAX) {
+        let status = match turn.drive(u64::MAX) {
             Ok(status) => status,
             Err(trap) => return Err(driver.failure(trap)),
         };
         let serviced = match status {
+            // Finishing publishes the outputs; a turn dropped without it
+            // discards them along with everything else it allocated.
             RunStatus::Complete => {
+                let outputs = match turn.finish() {
+                    Ok(TurnOutcome::Returned(outputs)) => outputs,
+                    _ => unreachable!("a computation that reported Complete returned"),
+                };
                 return Ok(RunOutcome {
-                    outputs: invocation.take_outputs().unwrap_or_default(),
+                    outputs,
                     stats: driver.state.stats(),
                 });
             }
             RunStatus::Suspended => Ok(()),
-            RunStatus::AwaitingHost | RunStatus::CallbackReturned => invocation
+            RunStatus::AwaitingHost | RunStatus::CallbackReturned => turn
                 .pending_host_call()
                 .map_or(Ok(()), |pending| driver.service(pending, status)),
-            RunStatus::AwaitingHandler => invocation
+            RunStatus::AwaitingHandler => turn
                 .pending_suspension()
                 .map_or(Ok(()), |suspension| driver.answer(suspension, chooser)),
             // A status from a newer VM that this driver cannot service.
-            // Returning drops the invocation, which cancels and rolls it back.
+            // Returning drops the turn, which cancels and rolls it back.
             status => {
                 return Err(RunFailure::UnsupportedStatus {
                     status: format!("{status:?}"),
@@ -452,7 +458,7 @@ fn snapshot_links(vm: Units<'_>, units: &UnitTable) -> Vec<LinkSnapshot> {
 }
 
 fn snapshot_frames(
-    mut inspection: InvocationInspection<'_>,
+    mut inspection: ComputationInspection<'_>,
     units: &UnitTable,
 ) -> Vec<FrameSnapshot> {
     let frames = inspection.frames().collect::<Vec<_>>();

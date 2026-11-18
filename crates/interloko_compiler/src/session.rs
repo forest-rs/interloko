@@ -15,7 +15,7 @@ use core::fmt::{self, Write as _};
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
 use execution_tape::value::Value;
-use execution_tape::vm::{InvocationOptions, Limits, Trap, TrapInfo, Vm};
+use execution_tape::vm::{Limits, Trap, TrapInfo, TurnOptions, Vm};
 
 use crate::annotation::{
     self, AnnotationSite, AnnotationTarget, DecisionSnapshot, DeclarationOrigin, SourceEdit,
@@ -7012,7 +7012,7 @@ fn run_turn_body<'a>(
     // runs on it and gets its idle host back before it is parked again.
     let (mut lent, idle) = parked.vm.replace_host(host.clone());
     let run = {
-        let mut options = InvocationOptions::default();
+        let mut options = TurnOptions::default();
         if let Some(capture) = capture.as_mut() {
             options = options.trace(capture.mask(), capture.sink());
         }
@@ -23855,7 +23855,7 @@ end;
             &tape.code,
             tape.main.expect("main"),
             &[],
-            InvocationOptions::default(),
+            TurnOptions::default(),
             &mut chooser,
         )
         .expect("the outer handler recovers");
@@ -23903,7 +23903,7 @@ end;
             &tape.code,
             tape.main.expect("main"),
             &[],
-            InvocationOptions::default(),
+            TurnOptions::default(),
             &mut chooser,
         )
         .expect("use-value resumes");
@@ -25062,7 +25062,7 @@ end;
             installed,
             entry,
             args,
-            InvocationOptions::default(),
+            TurnOptions::default(),
             &mut Scripted(choose),
         )
         .expect("the run completes")
@@ -25294,7 +25294,7 @@ end;
                 &mut installed,
                 tape_function(&a, "apply-it"),
                 &probe,
-                InvocationOptions::default(),
+                TurnOptions::default(),
                 &mut Scripted(|_: &UnhandledCondition<'_>| Choice::Abort),
             );
             let error = match run {
@@ -25468,7 +25468,7 @@ end;
                 &mut second,
                 tape_function(&a, "apply-it"),
                 &probe,
-                InvocationOptions::default(),
+                TurnOptions::default(),
                 &mut Scripted(|_: &UnhandledCondition<'_>| Choice::Abort),
             )
             .map(|outcome| outcome.outputs)
@@ -25795,7 +25795,7 @@ end;
                 &mut installed,
                 entry,
                 &[],
-                InvocationOptions::default(),
+                TurnOptions::default(),
                 &mut ReportUnhandled,
             )
         };

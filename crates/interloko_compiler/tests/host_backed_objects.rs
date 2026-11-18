@@ -5,7 +5,7 @@
 //! the Rust objects, the same way an embedder passes host objects.
 
 use execution_tape::value::Value;
-use execution_tape::vm::{InvocationOptions, Limits, Vm};
+use execution_tape::vm::{Limits, TurnOptions, Vm};
 use interloko_compiler::sem::{
     HostClass, HostMetaRegistry, HostSlot, SlotId, ValueKind as SemValueKind,
 };
@@ -113,7 +113,7 @@ fn call_with_host_object(
         &tape.code,
         entry,
         &args,
-        InvocationOptions::default(),
+        TurnOptions::default(),
         &mut interloko_runtime::chooser::ReportUnhandled,
     )
     .expect("function should run");

@@ -348,10 +348,7 @@ impl<'a> ExecutionTraceView<'a> {
         tape: Option<&'a tape::TapeModule>,
         source: &'a str,
     ) -> Self {
-        let entry = trace
-            .recording
-            .invocation()
-            .map(|invocation| invocation.entry.unit);
+        let entry = trace.recording.entry().map(|recorded| recorded.entry.unit);
         let meaning = match (lowered, tape, entry) {
             (Some(lowered), Some(tape), Some(unit))
                 if core::ptr::eq(trace.recording.program(), Arc::as_ptr(tape.program())) =>
@@ -415,17 +412,15 @@ impl<'a> ExecutionTraceView<'a> {
     pub fn entry(&self) -> Option<TracedFunction<'a>> {
         let recording = self.trace.recording.as_ref();
         recording
-            .invocation()
-            .map(|invocation| self.function(invocation.entry))
+            .entry()
+            .map(|recorded| self.function(recorded.entry))
     }
 
     /// Returns the captured entry arguments.
     #[must_use]
     pub fn arguments(&self) -> &'a [RecordedValue] {
         let recording = self.trace.recording.as_ref();
-        recording
-            .invocation()
-            .map_or(&[], |invocation| invocation.args)
+        recording.entry().map_or(&[], |recorded| recorded.args)
     }
 
     /// Returns how many guest activations were entered and retained.
