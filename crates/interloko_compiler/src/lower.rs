@@ -3292,6 +3292,10 @@ struct BodyLowering<'module> {
     /// the boxed register they came from, innermost last. Boxing one of them
     /// again reuses the box it came from.
     unboxed_locals: Vec<(Reg, Reg)>,
+    /// The exit procedures of the blocks whose bodies are being lowered,
+    /// innermost last, by the local each is bound to: a call of one is
+    /// lowered as the exit it makes ([`Self::lower_exit_call`]).
+    exits: Vec<(sem::LocalId, BoundExit)>,
 }
 
 impl<'module> BodyLowering<'module> {
@@ -3430,6 +3434,7 @@ impl<'module> BodyLowering<'module> {
             checks: Vec::new(),
             closure: None,
             unboxed_locals: Vec::new(),
+            exits: Vec::new(),
         }
     }
 
@@ -3458,6 +3463,7 @@ impl<'module> BodyLowering<'module> {
             checks: Vec::new(),
             closure: None,
             unboxed_locals: Vec::new(),
+            exits: Vec::new(),
         }
     }
 
@@ -3962,6 +3968,7 @@ impl<'module> BodyLowering<'module> {
             .map(|exit| self.value_kinds(&exit.result_kinds))
             .transpose()?
             .unwrap_or_default();
+        let exit_local = exit.map(|exit| exit.local);
         let exit = exit.map(|exit| self.bind_exit(exit, span)).transpose()?;
         let unwind_label = self.alloc_label();
         let exit_label = self.alloc_label();
@@ -3977,8 +3984,15 @@ impl<'module> BodyLowering<'module> {
             target: unwind_label,
         });
         self.instructions.push(Instr::EnterRegion { catches });
+        if let (Some(sem_exit), Some(bound)) = (exit_local, exit) {
+            self.exits.push((sem_exit, bound));
+        }
         self.lower_lets(&body.lets)?;
-        let body_values = self.lower_results_expr(&body.result)?;
+        let body_values = self.lower_results_expr(&body.result);
+        if exit_local.is_some() {
+            self.exits.pop();
+        }
+        let body_values = body_values?;
         self.instructions.push(Instr::LeaveRegion);
         let results = self
             .value_kinds(result_kinds)?
@@ -6128,6 +6142,10 @@ impl<'module> BodyLowering<'module> {
                 self.lower_known_generic_call(callable, generic, args, &[result_kind], span)?;
             return Ok(results.remove(0));
         }
+        if let Some(exit) = self.bound_exit(callable) {
+            let mut results = self.lower_exit_call(exit, args, arg_kinds, &[result_kind], span)?;
+            return Ok(results.remove(0));
+        }
         let callee = self.lower_expr(callable)?;
         if !matches!(callee.kind, ValueKind::Function(_) | ValueKind::Closure(_)) {
             return Err(invalid_semantic(
@@ -6170,6 +6188,9 @@ impl<'module> BodyLowering<'module> {
         {
             return self.lower_known_generic_call(callable, generic, args, result_kinds, span);
         }
+        if let Some(exit) = self.bound_exit(callable) {
+            return self.lower_exit_call(exit, args, arg_kinds, result_kinds, span);
+        }
         let callee = self.lower_expr(callable)?;
         if !matches!(callee.kind, ValueKind::Function(_) | ValueKind::Closure(_)) {
             return Err(invalid_semantic(
@@ -6192,6 +6213,64 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(results)
+    }
+
+    /// The exit point `callable` names, when it is the local a `block`
+    /// whose body this is binds its exit procedure to.
+    fn bound_exit(&self, callable: &sem::Expr) -> Option<BoundExit> {
+        let sem::Expr::Local { local, .. } = callable else {
+            return None;
+        };
+        self.exits
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == local)
+            .map(|(_, exit)| *exit)
+    }
+
+    /// Lowers a call of the exit procedure of a block whose body this is,
+    /// named by its local, as the exit it makes: the exit procedure's own
+    /// code ([`Lowering::lower_exit_thunk`]) inline, with the values at the
+    /// block's kinds sem already checked them against, rather than an
+    /// indirect call of it. The call never returns, so its results are
+    /// unreachable registers nothing writes.
+    fn lower_exit_call(
+        &mut self,
+        exit: BoundExit,
+        args: &[sem::Expr],
+        arg_kinds: &[sem::ValueKind],
+        result_kinds: &[sem::ValueKind],
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let mut payload = vec![exit.token.reg];
+        for (arg, expected) in args.iter().zip(arg_kinds) {
+            let value = self.lower_expr(arg)?;
+            let expected = self.value_kind(*expected)?;
+            payload.push(self.coerce_value(value, expected, arg.span())?.reg);
+        }
+        let after = self.alloc_label();
+        self.instructions.extend([
+            Instr::CheckExit {
+                token: exit.token.reg,
+                span,
+            },
+            Instr::Throw {
+                tag: ControlTag::Exit(exit.signature),
+                payload,
+                span,
+            },
+            // Code after the exit starts at a label nothing jumps to.
+            Instr::Label { label: after },
+        ]);
+        self.value_kinds(result_kinds)?
+            .into_iter()
+            .map(|kind| {
+                Ok(Value {
+                    reachable: false,
+                    ..self.alloc(kind)
+                })
+            })
+            .collect()
     }
 
     fn value_kind(&self, kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
@@ -9728,6 +9807,53 @@ mod tests {
         let dump = module.dump();
         assert!(dump.contains("closure.new l3"));
         assert!(dump.contains("closure.new l4"));
+    }
+
+    #[test]
+    fn lowers_a_blocks_own_exit_calls_as_throws() {
+        // `return` called in its block's body throws to the block itself;
+        // handed to `deliver` it is a callable value, entered through its
+        // exit procedure.
+        let module = lower_source(
+            "define function deliver(f :: <callable>, n :: <integer>) => <integer>\n  apply(f, n)\nend;\n\
+             define function pick(n :: <integer>) => <integer>\n  \
+               block (return)\n    if n > 3 then return(n) + 1 else deliver(return, 7) end\n  end\nend;",
+        );
+        let function = |name: &str| {
+            module
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .expect("function was lowered")
+        };
+        let calls_through = |function: &Function, local: &str| {
+            let reg = function
+                .locals
+                .iter()
+                .find(|candidate| candidate.name == local)
+                .expect("local")
+                .reg;
+            function
+                .instructions
+                .iter()
+                .any(|instr| matches!(instr, Instr::CallIndirect { callee, .. } if *callee == reg))
+        };
+        let pick = function("pick");
+        assert!(!calls_through(pick, "return"));
+        assert_eq!(
+            pick.instructions
+                .iter()
+                .filter(|instr| matches!(
+                    instr,
+                    Instr::Throw {
+                        tag: ControlTag::Exit(_),
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(calls_through(function("deliver"), "f"));
     }
 
     #[test]
