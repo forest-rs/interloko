@@ -296,6 +296,12 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "float-to-string" => Intrinsic::FloatToString,
         "integer-to-string" => Intrinsic::IntegerToString,
         "concatenate" => Intrinsic::Concatenate,
+        "instance?" => Intrinsic::InstanceOfType,
+        "limited-integer-base" => Intrinsic::LimitedIntegerBase,
+        "limited-integer-min" => Intrinsic::LimitedIntegerMin,
+        "limited-integer-max" => Intrinsic::LimitedIntegerMax,
+        "subclass-type-class" => Intrinsic::SubclassTypeClass,
+        "type-name" => Intrinsic::TypeName,
         _ => return None,
     })
 }
@@ -317,8 +323,13 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         | Intrinsic::GenericFunctionMethods
         | Intrinsic::MethodGenericFunction
         | Intrinsic::MethodSpecializers
-        | Intrinsic::VectorSize => 1,
-        Intrinsic::VectorRef | Intrinsic::Concatenate => 2,
+        | Intrinsic::VectorSize
+        | Intrinsic::LimitedIntegerBase
+        | Intrinsic::LimitedIntegerMin
+        | Intrinsic::LimitedIntegerMax
+        | Intrinsic::SubclassTypeClass
+        | Intrinsic::TypeName => 1,
+        Intrinsic::VectorRef | Intrinsic::Concatenate | Intrinsic::InstanceOfType => 2,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
@@ -350,6 +361,14 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
         (Intrinsic::VectorRef, 1) | (Intrinsic::IntegerToString, 0) => "<integer>",
         (Intrinsic::FloatToString, 0) => "<float>",
         (Intrinsic::Concatenate, _) => "<string>",
+        (Intrinsic::InstanceOfType, 1) | (Intrinsic::TypeName, 0) => "<type>",
+        (
+            Intrinsic::LimitedIntegerBase
+            | Intrinsic::LimitedIntegerMin
+            | Intrinsic::LimitedIntegerMax,
+            0,
+        ) => "<limited-integer>",
+        (Intrinsic::SubclassTypeClass, 0) => "<subclass-type>",
         _ => "<object>",
     }
 }
@@ -821,7 +840,10 @@ impl Module {
                     BuiltinValueClass::Class
                     | BuiltinValueClass::GenericFunction
                     | BuiltinValueClass::Method
-                    | BuiltinValueClass::SlotDescriptor,
+                    | BuiltinValueClass::SlotDescriptor
+                    | BuiltinValueClass::Type
+                    | BuiltinValueClass::LimitedIntegerType
+                    | BuiltinValueClass::SubclassType,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -3213,6 +3235,25 @@ pub enum Intrinsic {
     IntegerToString,
     /// Returns a new string holding two strings joined in order.
     Concatenate,
+    /// `instance?(value, type)` with a type object computed at run time,
+    /// such as a `<type-error>`'s expected type: whether the value is an
+    /// instance of it. A type the program writes, such as `<circle>`, is
+    /// tested by [`Expr::InstanceOf`] or [`Expr::InstanceOfLimited`].
+    InstanceOfType,
+    /// Returns a `<limited-integer>`'s base class, `<integer>`.
+    LimitedIntegerBase,
+    /// Returns a `<limited-integer>`'s lower bound, or `#f` when it has
+    /// none.
+    LimitedIntegerMin,
+    /// Returns a `<limited-integer>`'s upper bound, or `#f` when it has
+    /// none.
+    LimitedIntegerMax,
+    /// Returns the class a `<subclass-type>` bounds.
+    SubclassTypeClass,
+    /// Returns a type object's name as Loko writes the type: `<circle>`,
+    /// `<i32>`, `limited(<integer>, min: 0, max: 255)` or
+    /// `subclass(<shape>)`.
+    TypeName,
 }
 
 /// Semantic expression.
@@ -7819,7 +7860,8 @@ impl Lowering {
             | Intrinsic::GenericFunctionName
             | Intrinsic::FloatToString
             | Intrinsic::IntegerToString
-            | Intrinsic::Concatenate => self
+            | Intrinsic::Concatenate
+            | Intrinsic::TypeName => self
                 .builtin_value_class(BuiltinValueClass::String)
                 .map_or(ValueKind::Error, ValueKind::String),
             Intrinsic::ClassDirectSlots
@@ -7828,14 +7870,34 @@ impl Lowering {
             | Intrinsic::MethodSpecializers => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
-            Intrinsic::SlotMutable => ValueKind::Bool,
+            Intrinsic::SlotMutable | Intrinsic::InstanceOfType => ValueKind::Bool,
             Intrinsic::VectorSize => ValueKind::I64,
+            Intrinsic::LimitedIntegerBase => self
+                .builtin_value_class(BuiltinValueClass::Integer)
+                .map_or(ValueKind::Error, ValueKind::ClassObject),
+            Intrinsic::SubclassTypeClass => ValueKind::ClassObject(OBJECT_CLASS_ID),
             Intrinsic::ObjectClass
             | Intrinsic::ClassDirectSuperclass
             | Intrinsic::SlotSetter
             | Intrinsic::MethodGenericFunction
-            | Intrinsic::VectorRef => ValueKind::Any,
+            | Intrinsic::VectorRef
+            | Intrinsic::LimitedIntegerMin
+            | Intrinsic::LimitedIntegerMax => ValueKind::Any,
         }
+    }
+
+    /// Whether `actual` is a type object: a class object, or a value
+    /// declared as `<type>` or one of its subclasses.
+    fn is_type_object_kind(&self, actual: ValueKind) -> bool {
+        matches!(actual, ValueKind::ClassObject(_) | ValueKind::Any)
+            || self.is_builtin_subclass_instance(actual, BuiltinValueClass::Type)
+    }
+
+    /// Whether `actual` is the object kind of the built-in class `class` or
+    /// a built-in subclass of it.
+    fn is_builtin_subclass_instance(&self, actual: ValueKind, class: BuiltinValueClass) -> bool {
+        matches!(actual, ValueKind::Object(id)
+            if self.builtin_value_class(class).is_some_and(|class| self.is_same_or_subclass(id, class)))
     }
 
     /// Whether `actual` is the object kind of the built-in class `class`,
@@ -7903,6 +7965,26 @@ impl Lowering {
             }
             (Intrinsic::FloatToString, 0) => matches!(actual, ValueKind::F64 | ValueKind::F32),
             (Intrinsic::Concatenate, 0 | 1) => matches!(actual, ValueKind::String(_)),
+            (Intrinsic::InstanceOfType, 0) => {
+                !matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_))
+            }
+            (Intrinsic::InstanceOfType, 1) | (Intrinsic::TypeName, 0) => {
+                self.is_type_object_kind(actual)
+            }
+            (
+                Intrinsic::LimitedIntegerBase
+                | Intrinsic::LimitedIntegerMin
+                | Intrinsic::LimitedIntegerMax,
+                0,
+            ) => {
+                actual == ValueKind::Any
+                    || self
+                        .is_builtin_subclass_instance(actual, BuiltinValueClass::LimitedIntegerType)
+            }
+            (Intrinsic::SubclassTypeClass, 0) => {
+                actual == ValueKind::Any
+                    || self.is_builtin_subclass_instance(actual, BuiltinValueClass::SubclassType)
+            }
             _ => false,
         }
     }
@@ -9097,6 +9179,17 @@ impl Lowering {
         let lhs = adapt_literal(lhs, Some(&[self.expr_kind(&rhs)]));
         let lhs_kind = self.expr_kind(&lhs);
         let rhs_kind = self.expr_kind(&rhs);
+        // Type objects compare as types: the same class, the same range of
+        // integers whatever its name, or the same subclass bound.
+        let type_object = |kind| kind != ValueKind::Any && self.is_type_object_kind(kind);
+        if op == ast::CompareOp::Eq && type_object(lhs_kind) && type_object(rhs_kind) {
+            return Expr::ValueEqual {
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                kind: lhs_kind,
+                span,
+            };
+        }
         if Self::dispatches_numerically(&[lhs_kind, rhs_kind]) {
             return self.numeric_dispatch(
                 promotion::NumericOperator::Compare(op.into()),
@@ -10132,7 +10225,10 @@ impl Lowering {
                     BuiltinValueClass::Class
                     | BuiltinValueClass::GenericFunction
                     | BuiltinValueClass::Method
-                    | BuiltinValueClass::SlotDescriptor,
+                    | BuiltinValueClass::SlotDescriptor
+                    | BuiltinValueClass::Type
+                    | BuiltinValueClass::LimitedIntegerType
+                    | BuiltinValueClass::SubclassType,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -11925,7 +12021,7 @@ mod tests {
     fn defines_the_kernel_condition_classes_in_every_module() {
         let module = lower_source(
             "define class <bad-input> (<error>)\n  slot cause :: <type-error>;\nend;\n\
-             define function main()\n  make(<type-error>, value: 1, expected-type: \"<string>\", \
+             define function main()\n  make(<type-error>, value: 1, expected-type: <string>, \
              site: \"here\", code: \"type-error.cast\").type-error-site\nend;",
         );
 

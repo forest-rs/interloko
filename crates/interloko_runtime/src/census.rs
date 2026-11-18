@@ -86,6 +86,8 @@ pub(crate) fn object_bytes(object: &RuntimeObject) -> usize {
         | RuntimeObjectStorage::GenericMeta { .. }
         | RuntimeObjectStorage::MethodMeta { .. }
         | RuntimeObjectStorage::SlotDescriptor { .. }
+        | RuntimeObjectStorage::LimitedIntegerType { .. }
+        | RuntimeObjectStorage::SubclassType { .. }
         | RuntimeObjectStorage::HostBacked { .. } => 0,
     };
     size_of::<RuntimeObject>() + payload

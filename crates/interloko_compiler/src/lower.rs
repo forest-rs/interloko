@@ -78,6 +78,7 @@ use crate::syntax::Span;
 use crate::typing;
 use interloko_model::condition::TypeErrorKind;
 use interloko_model::sealing::ClosedWorld;
+use interloko_model::type_object::TypeObject;
 use interloko_model::types::IntRange;
 use interloko_runtime::RuntimeLayout;
 use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
@@ -424,6 +425,18 @@ pub enum RuntimeOp {
     IntegerToString,
     /// Joins two strings into a new string.
     Concatenate,
+    /// Tests a value against a type object.
+    InstanceOfType,
+    /// Returns a `<limited-integer>`'s base class.
+    LimitedIntegerBase,
+    /// Returns a `<limited-integer>`'s lower bound as `<object>`, or `#f`.
+    LimitedIntegerMin,
+    /// Returns a `<limited-integer>`'s upper bound as `<object>`, or `#f`.
+    LimitedIntegerMax,
+    /// Returns the class a `<subclass-type>` bounds.
+    SubclassTypeClass,
+    /// Returns a type object's name as Loko writes the type.
+    TypeName,
 }
 
 /// The name of the symbol that stands in for a callable argument in the
@@ -2243,7 +2256,6 @@ impl<'module> Lowering<'module> {
                 instructions: &mut checks,
             };
             payload.push(entry_check(
-                self.module,
                 &mut code,
                 target,
                 *value,
@@ -2610,7 +2622,7 @@ impl<'module> Lowering<'module> {
                 next_label: &mut next_label,
                 instructions: &mut instructions,
             };
-            *arg = entry_check(self.module, &mut code, target, *arg, *kind, site, spec.span);
+            *arg = entry_check(&mut code, target, *arg, *kind, site, spec.span);
         }
         let call = match spec.callable {
             // A first-class generic sends like a call site.
@@ -3364,16 +3376,7 @@ impl<'module> BodyLowering<'module> {
                 (Some(_), Some(_)) => check_site_name(self.site_owner, site, closure.span),
                 _ => entry_site_name(&format!("closure#{}", closure.id.0), index),
             };
-            let module = self.module;
-            let checked = entry_check(
-                module,
-                &mut self.code(),
-                target,
-                reg,
-                kind,
-                name,
-                closure.span,
-            );
+            let checked = entry_check(&mut self.code(), target, reg, kind, name, closure.span);
             self.next_reg = register_at(self.register_kinds.len());
             self.set_local(
                 local_id,
@@ -3472,7 +3475,7 @@ impl<'module> BodyLowering<'module> {
     fn type_error(
         &self,
         kind: TypeErrorKind,
-        expected: String,
+        expected: TypeObject,
         site: Option<sem::SiteId>,
         span: Span,
     ) -> Box<TypeErrorSite> {
@@ -4365,9 +4368,7 @@ impl<'module> BodyLowering<'module> {
                 values.push(result.reg);
                 continue;
             };
-            let module = self.module;
             let checked = entry_check(
-                module,
                 &mut self.code(),
                 target,
                 result.reg,
@@ -4897,7 +4898,7 @@ impl<'module> BodyLowering<'module> {
                 {
                     let type_error = self.type_error(
                         TypeErrorKind::Cast,
-                        class_expected(self.module, *class),
+                        class_expected(*class),
                         Some(*site),
                         *span,
                     );
@@ -4925,7 +4926,7 @@ impl<'module> BodyLowering<'module> {
                 }
                 let type_error = self.type_error(
                     TypeErrorKind::Cast,
-                    class_expected(self.module, *class),
+                    class_expected(*class),
                     Some(*site),
                     *span,
                 );
@@ -5621,7 +5622,7 @@ impl<'module> BodyLowering<'module> {
             .ok_or_else(|| invalid_semantic("refined scalar kind has no class"))?;
         // The test that refined the local proved the class, so this cannot
         // fail.
-        let type_error = self.coercion_error(class_expected(self.module, class), span);
+        let type_error = self.coercion_error(class_expected(class), span);
         let unboxed = self.unbox(boxed, class, kind, type_error, span);
         self.unboxed_locals.push((unboxed.reg, boxed.reg));
         self.local_regs[index] = Some(unboxed);
@@ -6702,7 +6703,7 @@ impl<'module> BodyLowering<'module> {
             (value.kind, expected)
             && self.module.classes_may_overlap(actual, expected_class)
         {
-            let type_error = self.coercion_error(class_expected(self.module, expected_class), span);
+            let type_error = self.coercion_error(class_expected(expected_class), span);
             let casted = self.alloc(expected);
             self.instructions.push(Instr::CastObject {
                 dst: casted.reg,
@@ -6752,19 +6753,19 @@ impl<'module> BodyLowering<'module> {
             && matches!(expected, ValueKind::I32 | ValueKind::U32)
             && let Some(class) = scalar_concrete_class(self.module, expected)
         {
-            let type_error = self.coercion_error(class_expected(self.module, class), span);
+            let type_error = self.coercion_error(class_expected(class), span);
             let integer = self.unbox(value, class, ValueKind::I64, type_error, span);
             let type_error = Box::new(TypeErrorSite {
                 kind: TypeErrorKind::Range,
-                expected: kind_expected(expected),
-                ..*self.coercion_error(String::new(), span)
+                expected: kind_expected(self.module, expected),
+                ..*self.coercion_error(kind_expected(self.module, expected), span)
             });
             return Ok(self.narrow_integer(integer, expected, type_error, span));
         }
         if value.kind == ValueKind::Any
             && let Some(class) = scalar_concrete_class(self.module, expected)
         {
-            let type_error = self.coercion_error(class_expected(self.module, class), span);
+            let type_error = self.coercion_error(class_expected(class), span);
             return Ok(self.unbox(value, class, expected, type_error, span));
         }
         // A class object of a narrower bound already names a class within
@@ -6785,7 +6786,7 @@ impl<'module> BodyLowering<'module> {
                 ValueKind::Any | ValueKind::Object(_) | ValueKind::ClassObject(_)
             )
         {
-            let type_error = self.coercion_error(class_object_expected(self.module, bound), span);
+            let type_error = self.coercion_error(class_object_expected(bound), span);
             let casted = self.alloc(expected);
             self.instructions.push(Instr::CastClassObject {
                 dst: casted.reg,
@@ -6800,7 +6801,7 @@ impl<'module> BodyLowering<'module> {
         if matches!(value.kind, ValueKind::Any | ValueKind::Object(None))
             && let ValueKind::Object(Some(class)) = expected
         {
-            let type_error = self.coercion_error(class_expected(self.module, class), span);
+            let type_error = self.coercion_error(class_expected(class), span);
             let casted = self.alloc(expected);
             self.instructions.push(Instr::CastObject {
                 dst: casted.reg,
@@ -6820,7 +6821,7 @@ impl<'module> BodyLowering<'module> {
     /// The `<type-error>` a check that coerces a value to what its context
     /// takes signals. Typing classifies no such check, so it is named by
     /// its span.
-    fn coercion_error(&self, expected: String, span: Span) -> Box<TypeErrorSite> {
+    fn coercion_error(&self, expected: TypeObject, span: Span) -> Box<TypeErrorSite> {
         self.type_error(TypeErrorKind::Cast, expected, None, span)
     }
 
@@ -6973,8 +6974,7 @@ impl<'module> BodyLowering<'module> {
                     Instr::Label { label: check },
                 ]);
                 // The `instance?` test just passed, so this cannot fail.
-                let type_error =
-                    self.coercion_error(class_expected(self.module, integer_class), span);
+                let type_error = self.coercion_error(class_expected(integer_class), span);
                 let integer = self.unbox(value, integer_class, ValueKind::I64, type_error, span);
                 let inside = self.lower_integer_in_range(integer, range, span);
                 self.instructions.extend([
@@ -7290,7 +7290,12 @@ impl<'module> BodyLowering<'module> {
         let unary =
             |this: &mut Self, op, value: Value, kind| this.num32_unary(op, value.reg, kind, span);
         let range_error = |this: &Self, to: ValueKind| {
-            this.type_error(TypeErrorKind::Range, kind_expected(to), site, span)
+            this.type_error(
+                TypeErrorKind::Range,
+                kind_expected(this.module, to),
+                site,
+                span,
+            )
         };
         Ok(match (from, to) {
             (from, to) if from == to => value,
@@ -7924,7 +7929,12 @@ impl<'module> BodyLowering<'module> {
         site: Option<sem::SiteId>,
         span: Span,
     ) -> Box<TypeErrorSite> {
-        self.type_error(TypeErrorKind::Overflow, kind_expected(kind), site, span)
+        self.type_error(
+            TypeErrorKind::Overflow,
+            kind_expected(self.module, kind),
+            site,
+            span,
+        )
     }
 
     fn alloc_label(&mut self) -> LabelId {
@@ -8018,6 +8028,12 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
         sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
         sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
+        sem::Intrinsic::InstanceOfType => RuntimeOp::InstanceOfType,
+        sem::Intrinsic::LimitedIntegerBase => RuntimeOp::LimitedIntegerBase,
+        sem::Intrinsic::LimitedIntegerMin => RuntimeOp::LimitedIntegerMin,
+        sem::Intrinsic::LimitedIntegerMax => RuntimeOp::LimitedIntegerMax,
+        sem::Intrinsic::SubclassTypeClass => RuntimeOp::SubclassTypeClass,
+        sem::Intrinsic::TypeName => RuntimeOp::TypeName,
     }
 }
 
@@ -8038,8 +8054,14 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::GenericFunctionMethods
         | RuntimeOp::MethodGenericFunction
         | RuntimeOp::MethodSpecializers
-        | RuntimeOp::VectorSize => index == 0,
+        | RuntimeOp::VectorSize
+        | RuntimeOp::LimitedIntegerBase
+        | RuntimeOp::LimitedIntegerMin
+        | RuntimeOp::LimitedIntegerMax
+        | RuntimeOp::SubclassTypeClass
+        | RuntimeOp::TypeName => index == 0,
         RuntimeOp::VectorRef => index == 0,
+        RuntimeOp::InstanceOfType => true,
         RuntimeOp::ClassMetaObject
         | RuntimeOp::ClassMetaId
         | RuntimeOp::GenericMetaObject
@@ -8258,7 +8280,7 @@ fn shares_register_type(lhs: ValueKind, rhs: ValueKind) -> bool {
 /// Builds the `<type-error>` site a failing check signals.
 fn type_error_site(
     kind: TypeErrorKind,
-    expected: String,
+    expected: TypeObject,
     site: String,
     span: Span,
 ) -> Box<TypeErrorSite> {
@@ -8282,31 +8304,33 @@ fn check_site_name(owner: Option<DefinitionId>, site: Option<sem::SiteId>, span:
 }
 
 /// The expected type of a check that a value is an instance of `class`.
-fn class_expected(module: &sem::Module, class: sem::ClassId) -> String {
-    typing::expectation_label(module, &typing::TypingExpectation::Class(class))
+const fn class_expected(class: sem::ClassId) -> TypeObject {
+    TypeObject::Class(class)
 }
 
 /// The expected type of a check that a value is a class object naming
 /// `bound` or one of its subclasses: Dylan's `subclass(<bound>)`.
-fn class_object_expected(module: &sem::Module, bound: sem::ClassId) -> String {
-    format!("subclass({})", class_expected(module, bound))
+const fn class_object_expected(bound: sem::ClassId) -> TypeObject {
+    TypeObject::Subclass(bound)
 }
 
 /// The expected type of a check whose result has register kind `kind`:
 /// `<integer>`, `<i32>`, `<u32>`, or a float class.
-fn kind_expected(kind: ValueKind) -> String {
-    match kind {
-        ValueKind::I32 => sem::LimitedInteger::I32.name(),
-        ValueKind::U32 => sem::LimitedInteger::U32.name(),
-        ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat.name(),
-        ValueKind::F32 => sem::BuiltinValueClass::SingleFloat.name(),
-        _ => sem::BuiltinValueClass::Integer.name(),
-    }
-    .into()
+fn kind_expected(module: &sem::Module, kind: ValueKind) -> TypeObject {
+    let class = match kind {
+        ValueKind::I32 => return TypeObject::named(sem::LimitedInteger::I32),
+        ValueKind::U32 => return TypeObject::named(sem::LimitedInteger::U32),
+        ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
+        ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
+        _ => sem::BuiltinValueClass::Integer,
+    };
+    module
+        .builtin_value_class(class)
+        .map_or(TypeObject::Class(sem::OBJECT_CLASS_ID), TypeObject::Class)
 }
 
 /// The expected type of a shift count: `limited(<integer>, min: 0, max: 31)`.
-fn shift_count_expected() -> String {
+const fn shift_count_expected() -> TypeObject {
     range_expected(IntRange {
         min: Some(0),
         max: Some(31),
@@ -8316,8 +8340,8 @@ fn shift_count_expected() -> String {
 /// The expected type of a check that an `<integer>` is in `range`, such as
 /// `limited(<integer>, min: 0, max: 255)`: spelled out even when it equals
 /// `<i32>`'s, since the checked value is an `<integer>`.
-fn range_expected(range: IntRange) -> String {
-    sem::limited_type_name(range)
+const fn range_expected(range: IntRange) -> TypeObject {
+    TypeObject::limited(range)
 }
 
 /// The registers, labels and instructions of a function being lowered, for
@@ -8459,7 +8483,6 @@ fn entry_target(kind: ValueKind) -> Option<sem::EntryTarget> {
 /// failing signals a [`TypeErrorKind::Entry`] error at `site`, and a range
 /// check a [`TypeErrorKind::Range`] one, whose replacement is checked again.
 fn entry_check(
-    module: &sem::Module,
     code: &mut CodeBuffer<'_>,
     target: sem::EntryTarget,
     value: Reg,
@@ -8482,7 +8505,7 @@ fn entry_check(
                 class,
                 type_error: type_error_site(
                     TypeErrorKind::Entry,
-                    class_expected(module, class),
+                    class_expected(class),
                     site,
                     span,
                 ),
@@ -8499,7 +8522,7 @@ fn entry_check(
                 bound,
                 type_error: type_error_site(
                     TypeErrorKind::Entry,
-                    class_object_expected(module, bound),
+                    class_object_expected(bound),
                     site,
                     span,
                 ),
@@ -8671,6 +8694,12 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",
+        RuntimeOp::InstanceOfType => "instance?",
+        RuntimeOp::LimitedIntegerBase => "limited-integer-base",
+        RuntimeOp::LimitedIntegerMin => "limited-integer-min",
+        RuntimeOp::LimitedIntegerMax => "limited-integer-max",
+        RuntimeOp::SubclassTypeClass => "subclass-type-class",
+        RuntimeOp::TypeName => "type-name",
     }
 }
 
@@ -9147,7 +9176,7 @@ impl Module {
                 self.fmt_class(f, *class)?;
                 write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *kind)?;
-                fmt_type_error(f, type_error)?;
+                fmt_type_error(f, &self.runtime, type_error)?;
                 fmt_span(f, *span)
             }
             Instr::InstanceOf {
@@ -9175,7 +9204,7 @@ impl Module {
                 self.fmt_class(f, *class)?;
                 write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *input)?;
-                fmt_type_error(f, type_error)?;
+                fmt_type_error(f, &self.runtime, type_error)?;
                 fmt_span(f, *span)
             }
             Instr::CastClassObject {
@@ -9190,7 +9219,7 @@ impl Module {
                 self.fmt_class(f, *bound)?;
                 write!(f, ", %{value}: ")?;
                 self.fmt_kind(f, *input)?;
-                fmt_type_error(f, type_error)?;
+                fmt_type_error(f, &self.runtime, type_error)?;
                 fmt_span(f, *span)
             }
             Instr::EqU64 {
@@ -9239,7 +9268,7 @@ impl Module {
                     f,
                     "  {dst} = signal {} {} at {} (",
                     type_error.kind.code(),
-                    type_error.expected,
+                    type_error.expected.display(&self.runtime),
                     type_error.site
                 )?;
                 for (index, value) in values.iter().enumerate() {
@@ -9492,12 +9521,16 @@ impl Module {
 
 /// Writes what a failing check signals, as ` else type-error.cast <circle>
 /// at typing:def…:s0`.
-fn fmt_type_error(f: &mut fmt::Formatter<'_>, type_error: &TypeErrorSite) -> fmt::Result {
+fn fmt_type_error(
+    f: &mut fmt::Formatter<'_>,
+    runtime: &RuntimeLayout,
+    type_error: &TypeErrorSite,
+) -> fmt::Result {
     write!(
         f,
         " else {} {} at {}",
         type_error.kind.code(),
-        type_error.expected,
+        type_error.expected.display(runtime),
         type_error.site
     )
 }

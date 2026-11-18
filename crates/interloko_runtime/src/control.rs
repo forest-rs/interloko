@@ -27,6 +27,7 @@ use execution_tape::value::{FuncId, Obj, UnitId, Value};
 use execution_tape::vm::ActivationId;
 use interloko_model::ClassId;
 use interloko_model::condition::TypeErrorKind;
+use interloko_model::type_object::TypeObject;
 
 use crate::object_type;
 
@@ -142,16 +143,17 @@ pub struct RestartDescriptor {
 /// when it fails.
 ///
 /// The condition records the site's kind as its stable code, its expected
-/// type, and its site, so a handler, a chooser or an agent can tie a
+/// type as a type object, and its site, so a handler, a chooser or an agent can tie a
 /// failure at run time to the check, and to the typing decision when soft
 /// typing classified the check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypeErrorSite {
     /// What kind of check failed; its stable code.
     pub kind: TypeErrorKind,
-    /// The expected type, printed with the program's class names, such as
-    /// `<circle>`, `<i32>` or `subclass(<shape>)`.
-    pub expected: String,
+    /// The expected type, which the condition holds as a type object:
+    /// a class such as `<circle>`, a limited integer type such as `<i32>`,
+    /// or a subclass type such as `subclass(<shape>)`.
+    pub expected: TypeObject,
     /// Where the check is, in one of these forms:
     ///
     /// - `typing:<definition>:s<n>`, the EOP id of the typing decision that

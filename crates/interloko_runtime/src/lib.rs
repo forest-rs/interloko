@@ -19,6 +19,7 @@ mod no_applicable_method;
 mod region;
 mod turn;
 mod type_error;
+mod type_object;
 
 use alloc::string::String;
 use alloc::vec;
@@ -34,10 +35,10 @@ use execution_tape::program::{HostTypeId, ValueType};
 use execution_tape::value::{Obj, ObjHandle, Value};
 
 use interloko_model::sealing::{ClosedWorld, Sealing};
-use interloko_model::types::{ClassHierarchy, TypeNames};
+use interloko_model::types::{ClassHierarchy, IntRange, TypeNames};
 use interloko_model::{
-    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, MethodId, OBJECT_CLASS_ID,
-    SingleFloatBits, SlotId,
+    BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, LimitedInteger, MethodId,
+    OBJECT_CLASS_ID, SingleFloatBits, SlotId,
 };
 
 /// Host object type used for Interloko runtime objects.
@@ -126,6 +127,21 @@ pub const MOP_GENERIC_FUNCTION_METHODS: &str = "interloko.mop.generic_function_m
 pub const MOP_METHOD_GENERIC_FUNCTION: &str = "interloko.mop.method_generic_function";
 /// Host-call symbol for reading a method metaobject's specializers.
 pub const MOP_METHOD_SPECIALIZERS: &str = "interloko.mop.method_specializers";
+/// Host-call symbol for testing whether a value is an instance of a type
+/// object: a class object, a `<limited-integer>` or a `<subclass-type>`.
+/// It takes [`instance_of_type_signature`].
+pub const INSTANCE_OF_TYPE: &str = "interloko.instance_of_type";
+/// Host-call symbol for reading a `<limited-integer>`'s base class, which is
+/// always `<integer>`.
+pub const MOP_LIMITED_INTEGER_BASE: &str = "interloko.mop.limited_integer_base";
+/// Host-call symbol for reading a `<limited-integer>`'s lower bound, or `#f`.
+pub const MOP_LIMITED_INTEGER_MIN: &str = "interloko.mop.limited_integer_min";
+/// Host-call symbol for reading a `<limited-integer>`'s upper bound, or `#f`.
+pub const MOP_LIMITED_INTEGER_MAX: &str = "interloko.mop.limited_integer_max";
+/// Host-call symbol for reading the class a `<subclass-type>` bounds.
+pub const MOP_SUBCLASS_TYPE_CLASS: &str = "interloko.mop.subclass_type_class";
+/// Host-call symbol for writing a type object as Loko writes the type.
+pub const MOP_TYPE_NAME: &str = "interloko.mop.type_name";
 /// Host-call symbol for immutable vector length.
 pub const VECTOR_SIZE: &str = "interloko.vector_size";
 /// Host-call symbol for immutable vector indexing.
@@ -1578,6 +1594,15 @@ enum RuntimeObjectStorage {
         class: ClassId,
         slot: SlotId,
     },
+    /// A `<limited-integer>` type object.
+    LimitedIntegerType {
+        range: IntRange,
+        named: Option<LimitedInteger>,
+    },
+    /// A `<subclass-type>` type object.
+    SubclassType {
+        bound: ClassId,
+    },
     HostBacked {
         adapter: alloc::boxed::Box<dyn HostObjectAdapter>,
     },
@@ -1746,7 +1771,9 @@ impl InterlokoHost {
             | RuntimeObjectStorage::ClassMeta { .. }
             | RuntimeObjectStorage::GenericMeta { .. }
             | RuntimeObjectStorage::MethodMeta { .. }
-            | RuntimeObjectStorage::SlotDescriptor { .. } => Err(RuntimeError::InvalidSlot {
+            | RuntimeObjectStorage::SlotDescriptor { .. }
+            | RuntimeObjectStorage::LimitedIntegerType { .. }
+            | RuntimeObjectStorage::SubclassType { .. } => Err(RuntimeError::InvalidSlot {
                 class: object_class,
                 slot,
             }),
@@ -2288,6 +2315,55 @@ impl Host for InterlokoHost {
                 rets[0] = self.push_boxed_value(generic);
                 Ok(0)
             }
+            INSTANCE_OF_TYPE => {
+                let [value, ty] = args else {
+                    return Err(HostError::Failed);
+                };
+                let ty = self.type_object_from_any(*ty)?;
+                rets[0] = Value::Bool(self.value_is_type_instance(*value, &ty));
+                Ok(0)
+            }
+            MOP_LIMITED_INTEGER_BASE | MOP_LIMITED_INTEGER_MIN | MOP_LIMITED_INTEGER_MAX => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let interloko_model::type_object::TypeObject::LimitedInteger { range, .. } =
+                    self.type_object_from_any(*arg)?
+                else {
+                    return Err(HostError::Failed);
+                };
+                let bound = match symbol {
+                    MOP_LIMITED_INTEGER_BASE => {
+                        let integer = self.builtin_class(BuiltinValueClass::Integer)?;
+                        rets[0] = self.push_class_meta(integer)?;
+                        return Ok(0);
+                    }
+                    MOP_LIMITED_INTEGER_MIN => range.min,
+                    _ => range.max,
+                };
+                rets[0] = self.push_boxed_value(bound.map_or(Value::Bool(false), Value::I64));
+                Ok(0)
+            }
+            MOP_TYPE_NAME => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let name = self.type_object_name(&self.type_object_from_any(*arg)?);
+                rets[0] = self.push_string(name)?;
+                Ok(0)
+            }
+            MOP_SUBCLASS_TYPE_CLASS => {
+                let [arg] = args else {
+                    return Err(HostError::Failed);
+                };
+                let interloko_model::type_object::TypeObject::Subclass(bound) =
+                    self.type_object_from_any(*arg)?
+                else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.push_class_meta(bound)?;
+                Ok(0)
+            }
             MOP_METHOD_SPECIALIZERS => {
                 let [arg] = args else {
                     return Err(HostError::Failed);
@@ -2742,7 +2818,11 @@ impl InterlokoHost {
                     slot: right_slot,
                 },
             ) => left_class == right_class && left_slot == right_slot,
-            _ => false,
+            // Type objects compare as types.
+            (left, right) => match (left.type_object(), right.type_object()) {
+                (Some(left), Some(right)) => left.same_type(&right),
+                _ => false,
+            },
         })
     }
 
@@ -3029,6 +3109,16 @@ pub fn meta_query_any_signature() -> HostSig {
 pub fn meta_query_bool_signature() -> HostSig {
     HostSig {
         args: vec![any_type()],
+        rets: vec![ValueType::Bool],
+    }
+}
+
+/// Host signature for `instance?` against a type object: the value and
+/// the type, both boxed.
+#[must_use]
+pub fn instance_of_type_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type(), any_type()],
         rets: vec![ValueType::Bool],
     }
 }

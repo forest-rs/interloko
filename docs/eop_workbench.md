@@ -753,9 +753,49 @@ end
 
 Its slots are `type-error-value` (the rejected value, as an `<object>`;
 for an overflow, a vector of the operation's operands),
-`type-error-expected-type` (the printed type, such as `<circle>`, `<i32>`,
-`limited(<integer>, min: 0, max: 255)` or `subclass(<shape>)`),
-`type-error-site` and `type-error-code`.
+`type-error-expected-type`, `type-error-site` and `type-error-code`.
+
+The expected type is a type object, an instance of the abstract kernel
+class `<type>`, so a handler can test values against it, compare it and
+name it rather than parse text. Following Dylan, there are three kinds:
+
+| Expected type | Type object | Inspect with |
+| --- | --- | --- |
+| a class, such as `<circle>` or `<integer>` (a cast, an entry check, an overflow) | the class object, a `<class>` | `class-name`, the class MOP |
+| a limited integer type, such as `<i32>` or `limited(<integer>, min: 0, max: 255)` (a range check) | a `<limited-integer>` | `limited-integer-base` (always `<integer>`), `limited-integer-min`, `limited-integer-max` (each an `<integer>`, or `#f` for no bound) |
+| the class objects of a class and its subclasses, written `class <shape>` | a `<subclass-type>`, printed `subclass(<shape>)` | `subclass-type-class` |
+
+```loko
+define function largest(expected :: <type>) => <integer>
+  if instance?(expected, <limited-integer>) then
+    as(<integer>, limited-integer-max(as(<limited-integer>, expected)))
+  else
+    0
+  end
+end;
+```
+
+`instance?(value, e.type-error-expected-type)` tests a value against it,
+which is how a handler or chooser tells whether a replacement would pass;
+`instance?` takes a type it writes, such as `<circle>`, or a type object it
+computes, and the latter is a runtime test typing does not classify. `=`
+compares type objects as types: the same class, the same range of integers
+whatever its name (`<i32>` equals its range spelled out), or the same
+subclass bound. `type-name` writes one as Loko does, which is how it prints
+in diagnostics, the break loop and the EOP: `<circle>`, `<i32>`,
+`limited(<integer>, min: 0, max: 255)` or `subclass(<shape>)`. A range
+check's type is spelled out even when it equals `<i32>`'s, since the
+checked value is an `<integer>`. Callable types never appear: no check
+expects one (a call through an untyped `<callable>` is the VM's).
+
+A class name written as a value is its class object, and a
+`<type-error>` the program makes with `make(<type-error>, ...)` takes a
+type object for `expected-type:`.
+
+Rust code reads the condition through `TypeErrorReport`, whose `expected`
+is the printed type and `expected_type` the
+`interloko_model::type_object::TypeObject`, which
+`InterlokoHost::value_is_type_instance` tests a value against.
 
 A `limited(<integer>, min: m, max: n)` type is checked where a value
 reaches its declaration, so code reading the declared value may assume the

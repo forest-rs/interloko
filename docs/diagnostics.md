@@ -223,7 +223,10 @@ failed:
 `interloko_model::condition::TypeErrorKind` owns the codes, and
 `DiagnosticCode` mirrors them (`DiagnosticCode::TypeErrorCast`, ...). A
 condition carries its code in its `type-error-code` slot, beside the
-rejected value, the printed expected type, and the check's site:
+rejected value, the expected type (a type object a handler can test values
+against, printed as Loko writes the type; see
+[`eop_workbench.md`](eop_workbench.md#runtime-type-errors)), and the
+check's site:
 
 - `typing:<definition>:s<n>`, the EOP id of the typing decision that
   classified the check, which `interloko_lab inspect` and the workbench

@@ -15,7 +15,8 @@
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
-//! rejected, the type it expected, where the check is, and a stable
+//! rejected, the type it expected (a `<type>` object a handler can test
+//! values against), where the check is, and a stable
 //! [`TypeErrorKind`] code. A `<no-applicable-method>` reports a generic
 //! send that found no method for its arguments: the generic, the arguments
 //! and the stable code [`NO_APPLICABLE_METHOD_CODE`]. Their slots are
@@ -119,7 +120,7 @@ pub const TYPE_ERROR_SLOTS: [ConditionSlot; 4] = [
     },
     ConditionSlot {
         name: "type-error-expected-type",
-        type_name: "<string>",
+        type_name: "<type>",
         init_keyword: "expected-type",
     },
     ConditionSlot {
@@ -139,7 +140,9 @@ pub const TYPE_ERROR_SLOTS: [ConditionSlot; 4] = [
 pub enum TypeErrorSlot {
     /// The value the check rejected, as an `<object>`.
     Value,
-    /// The printed type the check expected, such as `<circle>` or `<i32>`.
+    /// The type the check expected, as a `<type>` object
+    /// ([`crate::type_object::TypeObject`]): the class object `<circle>`, or
+    /// a `<limited-integer>` such as `<i32>`, or a `<subclass-type>`.
     ExpectedType,
     /// Where the check is: the typing decision id `typing:<def>:s<n>` of a
     /// check typing classified, or a description of a check it did not.

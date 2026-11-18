@@ -64,6 +64,18 @@ method-generic-function(method)     => generic-function metaobject as <object>
 method-specializers(method)         => <vector> of class metaobjects or #f
 ```
 
+Type object queries (a type object is a `<type>`: a class object, a
+`<limited-integer>` or a `<subclass-type>`):
+
+```text
+instance?(value, type)              => <boolean>, for a type object computed at run time
+type-name(type)                     => <string>, the type as Loko writes it
+limited-integer-base(limited)       => <integer>'s class metaobject
+limited-integer-min(limited)        => <integer> as <object>, or #f
+limited-integer-max(limited)        => <integer> as <object>, or #f
+subclass-type-class(subclass)       => class metaobject
+```
+
 Vector helpers:
 
 ```text
@@ -86,9 +98,9 @@ effective slot lists.
 
 ## Current Limits
 
-- `slot-type` returns declared type text, not a first-class type object. Interloko
-  does not yet have a type metaobject layer for `<object>` and future richer
-  type expressions.
+- `slot-type` returns declared type text, not a first-class type object. Type
+  objects cover classes, limited integer types and subclass types, but not
+  `<boolean>` or callable types, which a slot may declare.
 - `slot-getter` returns the getter accessor name. Getter accessors are not
   generic-function metaobjects yet.
 - `slot-setter` returns the compiler-synthesized setter generic when a mutable

@@ -6,7 +6,8 @@
 //! kernel's [`condition`] classes and runtime type-error codes, the type
 //! [`contract`]s a definition promises its callers across code units, and
 //! the [`sealing`] of classes and generics with the closed-world
-//! assumptions it lets compiled code rely on. It intentionally does not own syntax, semantic IR, lowering, tape
+//! assumptions it lets compiled code rely on, and the [`type_object`]s a
+//! program can hold and test values against. It intentionally does not own syntax, semantic IR, lowering, tape
 //! emission, runtime host execution, sessions, collaboration, permissions, or
 //! persistence.
 
@@ -17,6 +18,7 @@ extern crate alloc;
 pub mod condition;
 pub mod contract;
 pub mod sealing;
+pub mod type_object;
 pub mod types;
 
 use core::fmt;
@@ -85,6 +87,16 @@ pub enum BuiltinValueClass {
     /// The concrete built-in `<single-float>` class of IEEE 754 binary32
     /// values, written with an `f32` suffix such as `1.5f32`.
     SingleFloat,
+    /// The abstract built-in `<type>` class of type objects: values that
+    /// denote a set of values, which `instance?` tests against.
+    Type,
+    /// The built-in `<limited-integer>` class of `limited(<integer>, ...)`
+    /// type objects, such as `<i32>`.
+    LimitedIntegerType,
+    /// The built-in `<subclass-type>` class of type objects whose instances
+    /// are the class objects naming a class or one of its subclasses,
+    /// written `class <shape>` and printed `subclass(<shape>)`.
+    SubclassType,
 }
 
 impl BuiltinValueClass {
@@ -104,6 +116,9 @@ impl BuiltinValueClass {
         (Self::DoubleFloat, "<double-float>"),
         (Self::Rational, "<rational>"),
         (Self::SingleFloat, "<single-float>"),
+        (Self::Type, "<type>"),
+        (Self::LimitedIntegerType, "<limited-integer>"),
+        (Self::SubclassType, "<subclass-type>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -124,6 +139,9 @@ impl BuiltinValueClass {
             Self::DoubleFloat => "<double-float>",
             Self::Rational => "<rational>",
             Self::SingleFloat => "<single-float>",
+            Self::Type => "<type>",
+            Self::LimitedIntegerType => "<limited-integer>",
+            Self::SubclassType => "<subclass-type>",
         }
     }
 
@@ -145,6 +163,9 @@ impl BuiltinValueClass {
             b"<double-float>" => Some(Self::DoubleFloat),
             b"<rational>" => Some(Self::Rational),
             b"<single-float>" => Some(Self::SingleFloat),
+            b"<type>" => Some(Self::Type),
+            b"<limited-integer>" => Some(Self::LimitedIntegerType),
+            b"<subclass-type>" => Some(Self::SubclassType),
             _ => None,
         }
     }
@@ -167,6 +188,9 @@ impl BuiltinValueClass {
             Self::DoubleFloat => 11,
             Self::Rational => 12,
             Self::SingleFloat => 13,
+            Self::Type => 14,
+            Self::LimitedIntegerType => 15,
+            Self::SubclassType => 16,
         }
     }
 
@@ -176,10 +200,13 @@ impl BuiltinValueClass {
     /// The numeric classes form a numeric tower: `<number>` > `<real>`,
     /// then `<real>` > `<rational>` > `<integer>` for exact numbers and
     /// `<real>` > `<float>` > `<double-float>` and `<single-float>` for
-    /// floats. [`Self::ALL`] is in declaration order, not superclass order.
+    /// floats. The type objects sit under `<type>`: `<class>`,
+    /// `<limited-integer>` and `<subclass-type>`. [`Self::ALL`] is in
+    /// declaration order, not superclass order.
     #[must_use]
     pub const fn builtin_superclass(self) -> Option<Self> {
         match self {
+            Self::Class | Self::LimitedIntegerType | Self::SubclassType => Some(Self::Type),
             Self::Real => Some(Self::Number),
             Self::Rational | Self::Float => Some(Self::Real),
             Self::Integer => Some(Self::Rational),
@@ -194,7 +221,7 @@ impl BuiltinValueClass {
     pub const fn is_abstract(self) -> bool {
         matches!(
             self,
-            Self::Number | Self::Real | Self::Rational | Self::Float
+            Self::Number | Self::Real | Self::Rational | Self::Float | Self::Type
         )
     }
 
@@ -473,6 +500,14 @@ mod tests {
                 "{name}"
             );
         }
+        for class in [
+            BuiltinValueClass::Class,
+            BuiltinValueClass::LimitedIntegerType,
+            BuiltinValueClass::SubclassType,
+        ] {
+            assert_eq!(chain(class)[1..], ["<type>"]);
+        }
+        assert!(BuiltinValueClass::Type.is_abstract());
         assert!(BuiltinValueClass::Rational.is_abstract());
         assert!(!BuiltinValueClass::Integer.is_abstract());
         assert!(!BuiltinValueClass::String.is_numeric());
