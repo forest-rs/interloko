@@ -1,0 +1,21 @@
+// expect: runtime code type-error.entry
+// expect: run reports type-error.entry: 1.5 is not of type <integer> at entry:callable(<integer>) => <integer>:0
+// expect: diagnostics 0
+// expect: dump lowered contains fn l7 callable(<integer>) => <integer>(
+
+// `apply-untyped` hands `twice` a callable from untyped code, but `twice`
+// calls `g` as the `callable(<integer>) => <integer>` it declares, without
+// boxing. So `twice`'s entry adapts `g` to that signature where it enters,
+// and the adapter checks each result: this `g` returns a `<double-float>`.
+
+define function twice(g :: callable(<integer>) => <integer>) => <integer>
+  g(g(1))
+end;
+
+define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
+  apply(f, g)
+end;
+
+define function main() => <integer>
+  apply-untyped(twice, function (x :: <integer>) => <double-float> 1.5 end)
+end;

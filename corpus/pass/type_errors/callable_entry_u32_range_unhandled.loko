@@ -1,0 +1,17 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: -1 is not of type <u32> at typing:def
+// expect: diagnostics 0
+
+// As for `<i32>`: a negative `<integer>` is outside a `<u32>` parameter.
+
+define function widen(x :: <u32>) => <integer>
+  as(<integer>, x)
+end;
+
+define function call(f :: <callable>, n :: <integer>) => <integer>
+  apply(f, n)
+end;
+
+define function main() => <integer>
+  call(widen, -1)
+end;

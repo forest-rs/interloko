@@ -195,7 +195,10 @@ impl<'a> TracedFunction<'a> {
             lower::FunctionKind::SlotAccessor { .. }
             | lower::FunctionKind::CallableThunk { .. }
             | lower::FunctionKind::Closure(_)
-            | lower::FunctionKind::ExitThunk { .. } => None,
+            | lower::FunctionKind::ExitThunk { .. }
+            | lower::FunctionKind::BoxedEntry { .. }
+            | lower::FunctionKind::CallableParts
+            | lower::FunctionKind::Adapter { .. } => None,
         }
     }
 }

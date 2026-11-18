@@ -4,7 +4,7 @@
 // expect: dump sem contains closure c0 (x:integer) captures=1
 // expect: dump sem contains capture c0 l0 n integer
 // expect: dump sem contains capture c0 as integer
-// expect: dump lowered contains closure.new
+// expect: dump lowered contains callable.new
 // expect: dump lowered contains capture.get
 // expect: dump tape contains closure.new
 // expect: dump tape contains tuple.get

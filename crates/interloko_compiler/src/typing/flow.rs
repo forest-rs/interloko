@@ -363,7 +363,7 @@ impl<'a> Analysis<'a> {
 
     /// Classifies the checks a function's indirect entry makes on its
     /// parameters; see [`sem::EntryCheck`]. The values are whatever an
-    /// indirect caller passes, so only their register type is known.
+    /// indirect caller passes.
     pub(super) fn entry_checks(&mut self, locals: &'a [sem::Local], checks: &[sem::EntryCheck]) {
         self.contexts.push(Context::new(None, locals, &[]));
         self.check_entry(&Env::new(locals.len(), 0), checks);
@@ -375,15 +375,10 @@ impl<'a> Analysis<'a> {
             let Some(span) = self.local(check.param).map(|local| local.span) else {
                 continue;
             };
-            // A limited integer parameter's register holds an `<integer>`;
-            // an object register may hold anything.
-            let passed_type = match check.target {
-                sem::EntryTarget::Range(_) => self
-                    .local(check.param)
-                    .map_or_else(Type::top, |local| self.module.kind_type(local.kind)),
-                _ => Type::top(),
-            };
-            let passed = self.fact(ReasonKind::IndirectEntry, span, passed_type, Vec::new());
+            // An argument reaches the typed entry at its register type and
+            // the boxed entry as a boxed `<object>`; either may hold any value
+            // of that type.
+            let passed = self.fact(ReasonKind::IndirectEntry, span, Type::top(), Vec::new());
             let check_kind = match check.target {
                 sem::EntryTarget::Range(_) => TypingCheck::Range,
                 _ => TypingCheck::Cast,
@@ -406,6 +401,14 @@ impl<'a> Analysis<'a> {
                     let target = range_type(self.module, range);
                     (
                         decide(self.module, env, &passed.ty, &target, RANGE_RULES),
+                        TypingExpectation::Type(target),
+                        Vec::new(),
+                    )
+                }
+                sem::EntryTarget::Unbox(kind) => {
+                    let target = self.module.kind_type(kind);
+                    (
+                        decide(self.module, env, &passed.ty, &target, CAST_RULES),
                         TypingExpectation::Type(target),
                         Vec::new(),
                     )

@@ -226,14 +226,14 @@ The current slices include:
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
   `<type-error>` and `<no-applicable-method>` defined by the kernel: a
-  runtime check that fails (a cast, an untyped callable's argument, a range,
-  an overflow) signals a `<type-error>` naming the value, the expected
-  type (a type object: a class, a `<limited-integer>` or a
+  runtime check that fails (a cast, a callable value's argument or result,
+  a range, an overflow) signals a `<type-error>` naming the value, the
+  expected type (a type object: a class, a `<limited-integer>` or a
   `<subclass-type>`, which `instance?` tests values against), the check's
-  typing decision and a stable `type-error.*` code, and
-  its `use-value` restart continues with a replacement of the expected type
-  (an object a failed cast checks again); a send that finds no method
-  signals a `<no-applicable-method>` naming the generic and the arguments
+  typing decision and a stable `type-error.*` code, and its `use-value`
+  restart continues with a replacement of the expected type (an object a
+  failed cast checks again); a send that finds no method signals a
+  `<no-applicable-method>` naming the generic and the arguments
   (`dispatch.no-applicable-method`), whose `use-value` supplies the send's
   results, checked against the generic's declared result types;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;

@@ -1,0 +1,18 @@
+// expect: diagnostics 1
+// expect: diagnostic contains local `g` expects callable(<i32>) => <i32> but initializer has <callable>
+
+// A block with an exit procedure produces whatever its exit is passed, and
+// the exit takes untyped callables, so its callable result is untyped too:
+// it cannot initialize a typed binding, or an untyped `h` would reach typed
+// calls through `g` unchecked.
+
+define function go(h :: <callable>, n :: <integer>) => <integer>
+  let g :: callable(<i32>) => <i32> = block (return)
+    let ignored :: <callable> = if n > 0 then return(h) else h end;
+    function (x :: <i32>) => <i32> x end
+  end;
+  as(<integer>, g(3i32)) + 1
+end;
+define function main() => <integer>
+  go(function (x :: <integer>) => <double-float> 1.5 end, 1)
+end;

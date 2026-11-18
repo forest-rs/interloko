@@ -10583,6 +10583,9 @@ fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
         }
         lower::FunctionKind::Closure(id) => format!("closure:{}", id.0),
         lower::FunctionKind::ExitThunk { signature } => format!("exit-thunk sig{}", signature.0),
+        lower::FunctionKind::BoxedEntry { typed } => format!("boxed-entry l{}", typed.0),
+        lower::FunctionKind::CallableParts => String::from("callable-parts"),
+        lower::FunctionKind::Adapter { signature } => format!("adapter sig{}", signature.0),
     }
 }
 
@@ -22393,6 +22396,7 @@ end;
     }
 
     use alloc::vec;
+    use execution_tape::program::ValueType;
     use interloko_model::condition::TypeErrorKind;
     use interloko_model::contract::{Contract, ContractBreak, ContractPosition};
     use interloko_model::sealing::Sealing;
@@ -22852,6 +22856,264 @@ end;
         else {
             panic!("an integer cannot stand in for a <circle>");
         };
+    }
+
+    /// A program that passes `argument`, as an `<object>`, through an
+    /// untyped `<callable>` to a function taking and returning `parameter`,
+    /// and returns its result as `result`. A `<circle>` result returns its
+    /// radius.
+    fn through_a_callable(parameter: &str, argument: &str, result: &str) -> String {
+        let (main, finish) = if result == "<circle>" {
+            ("<integer>", ".radius")
+        } else {
+            (result, "")
+        };
+        format!(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
+             define function take(x :: {parameter}) => {parameter}\n  x\nend;\n\
+             define function call(f :: <callable>, x :: <object>) => {result}\n  apply(f, x)\nend;\n\
+             define function main() => {main}\n  \
+             let spare :: <circle> = make(<circle>, radius: 5);\n  \
+             let wrong :: <square> = make(<square>, side: 2);\n  \
+             call(take, {argument}){finish}\nend;"
+        )
+    }
+
+    /// A runtime object of `class` in a frame's registers, not a boxed
+    /// `<object>` holding one.
+    fn object_of_class(condition: &UnhandledCondition<'_>, class: &str) -> Value {
+        let class = condition.runtime.layout().class_id(class).expect("class");
+        condition
+            .frames
+            .iter()
+            .flat_map(|frame| &frame.registers)
+            .map(|register| register.value.clone())
+            .find(|value| {
+                matches!(value, Value::Obj(object)
+                    if ValueType::Obj(object.host_type) == runtime::object_type())
+                    && condition.runtime.value_class(value) == Some(class)
+            })
+            .expect("a frame holds an object of the class")
+    }
+
+    /// The use-value replacement types the condition being chosen offers.
+    fn use_value_types(condition: &UnhandledCondition<'_>) -> Vec<ValueType> {
+        condition
+            .restarts
+            .iter()
+            .find_map(|restart| match restart {
+                OfferedRestart::UseValue { types } => Some(types.to_vec()),
+                _ => None,
+            })
+            .expect("use-value is offered")
+    }
+
+    /// Runs `source`'s `main` under each codegen policy, choosing with
+    /// `choose` (given how many breaks came before) and returning the
+    /// reports and the value of each run.
+    fn breaks_under_each_policy(
+        source: &str,
+        mut choose: impl FnMut(usize, &UnhandledCondition<'_>) -> Choice,
+    ) -> Vec<(Vec<interloko_runtime::TypeErrorReport>, FunctionValue)> {
+        let artifacts =
+            CompilerSession::compile_source("callable.loko", source, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new(), "{source}");
+        lower::CodegenPolicy::ALL
+            .iter()
+            .map(|policy| {
+                let artifacts = artifacts.with_codegen_policy(*policy);
+                let mut reports = Vec::new();
+                let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                    assert!(condition.failed_check);
+                    let choice = choose(reports.len(), condition);
+                    reports.push(condition.type_error().expect("a type error"));
+                    choice
+                });
+                let value = call_with_chooser(&artifacts, &mut chooser)
+                    .unwrap_or_else(|error| panic!("{policy:?}: {error}"));
+                (reports, value)
+            })
+            .collect()
+    }
+
+    /// The EOP id of the decision for the entry check `function` makes on
+    /// its first parameter.
+    fn entry_site(artifacts: &SessionArtifacts, function: &str) -> String {
+        let function = artifacts
+            .sem
+            .functions
+            .iter()
+            .find(|candidate| candidate.name == function)
+            .expect("function");
+        let check = function.entry_checks.first().expect("an entry check");
+        let decision = artifacts
+            .typing
+            .decisions()
+            .find(|decision| decision.owner == function.definition && decision.site == check.site)
+            .expect("the entry check's decision");
+        typing_decision_object_id(decision)
+    }
+
+    #[test]
+    fn a_number_of_the_wrong_class_signals_at_a_callable_entry_and_takes_a_replacement() {
+        // `take` wants a `<double-float>`; the `<integer>` 3 arrives boxed,
+        // and its entry check signals rather than the call trapping. The
+        // replacement is a `double`, the entry's register type.
+        let source = through_a_callable("<double-float>", "3", "<double-float>");
+        let artifacts =
+            CompilerSession::compile_source("callable.loko", &source, RuntimeMode::CompileOnly);
+        let site = entry_site(&artifacts, "take");
+        let runs = breaks_under_each_policy(&source, |_, condition| {
+            assert_eq!(use_value_types(condition), [ValueType::F64]);
+            Choice::UseValue(vec![Value::F64(1.5)])
+        });
+        for (reports, value) in runs {
+            assert_eq!(value, FunctionValue::Float(1.5));
+            let [report] = reports.as_slice() else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(report.kind(), Some(TypeErrorKind::Entry));
+            assert_eq!(report.value, "3");
+            assert_eq!(report.site, site);
+        }
+        // A replacement of another kind is not a `double`: an invalid choice.
+        let mut chooser =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::I64(1)]));
+        let Err(FunctionCallError::Trap { .. }) = call_with_chooser(&artifacts, &mut chooser)
+        else {
+            panic!("an integer cannot stand in for a <double-float>");
+        };
+    }
+
+    #[test]
+    fn an_integer_out_of_a_callables_i32_range_takes_an_i32_replacement() {
+        let source = through_a_callable("<i32>", "5000000000", "<i32>");
+        let runs = breaks_under_each_policy(&source, |_, condition| {
+            assert_eq!(use_value_types(condition), [ValueType::I32]);
+            Choice::UseValue(vec![Value::I32(7)])
+        });
+        for (reports, value) in runs {
+            assert_eq!(value, FunctionValue::I32(7));
+            let [report] = reports.as_slice() else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(report.kind(), Some(TypeErrorKind::Range));
+            assert_eq!(report.value, "5000000000");
+        }
+        let artifacts =
+            CompilerSession::compile_source("callable.loko", &source, RuntimeMode::CompileOnly);
+        let mut chooser =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::I64(7)]));
+        let Err(FunctionCallError::Trap { .. }) = call_with_chooser(&artifacts, &mut chooser)
+        else {
+            panic!("an <integer> register cannot stand in for an <i32>");
+        };
+    }
+
+    #[test]
+    fn a_boxed_object_of_the_wrong_class_is_checked_again_at_a_callable_entry() {
+        // The `<square>` replacement fails the same entry check; the
+        // `<circle>` passes.
+        let source = through_a_callable("<circle>", "wrong", "<circle>");
+        let artifacts =
+            CompilerSession::compile_source("callable.loko", &source, RuntimeMode::CompileOnly);
+        let site = entry_site(&artifacts, "take");
+        let runs = breaks_under_each_policy(&source, |seen, condition| {
+            assert_eq!(use_value_types(condition), [runtime::object_type()]);
+            let class = if seen == 0 { "<square>" } else { "<circle>" };
+            Choice::UseValue(vec![object_of_class(condition, class)])
+        });
+        for (reports, value) in runs {
+            assert_eq!(value, FunctionValue::Integer(5), "the spare's radius");
+            let [first, second] = reports.as_slice() else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(first.kind(), Some(TypeErrorKind::Entry));
+            assert_eq!(first.value, "{<square>}");
+            assert_eq!(first.site, site);
+            assert_eq!(second, first);
+        }
+    }
+
+    #[test]
+    fn a_callables_result_is_unboxed_where_it_lands_and_takes_a_replacement() {
+        // `take` returns the `<object>` it was given, a string, where `call`
+        // wants a `<double-float>`: the unboxing at the call signals.
+        let source = through_a_callable("<object>", "\"seven\"", "<double-float>");
+        let runs = breaks_under_each_policy(&source, |_, condition| {
+            assert_eq!(use_value_types(condition), [ValueType::F64]);
+            Choice::UseValue(vec![Value::F64(2.5)])
+        });
+        for (reports, value) in runs {
+            assert_eq!(value, FunctionValue::Float(2.5));
+            let [report] = reports.as_slice() else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(report.kind(), Some(TypeErrorKind::Cast));
+            assert_eq!(report.value, "\"seven\"");
+        }
+    }
+
+    #[test]
+    fn an_untyped_callable_entering_typed_code_is_adapted_and_checks_its_results() {
+        // `twice` calls `g` statically as the `callable(<integer>) =>
+        // <integer>` it declares; the `g` it is handed from untyped code
+        // returns a `<double-float>`, which the adapter `g` got where it
+        // entered rejects. Its replacement is an `<integer>`, the register's
+        // kind.
+        let source = "define function twice(g :: callable(<integer>) => <integer>) => <integer>\n  \
+             g(g(1))\nend;\n\
+             define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>\n  \
+             apply(f, g)\nend;\n\
+             define function main() => <integer>\n  \
+             apply-untyped(twice, function (x :: <integer>) => <double-float> 1.5 end)\nend;";
+        let runs = breaks_under_each_policy(source, |seen, condition| {
+            assert_eq!(use_value_types(condition), [ValueType::I64]);
+            Choice::UseValue(vec![Value::I64(i64::try_from(seen).unwrap_or(0) + 5)])
+        });
+        for (reports, value) in runs {
+            assert_eq!(value, FunctionValue::Integer(6));
+            let [first, second] = reports.as_slice() else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(first.kind(), Some(TypeErrorKind::Entry));
+            assert_eq!(first.value, "1.5");
+            assert_eq!(first.site, "entry:callable(<integer>) => <integer>:0");
+            assert_eq!(second, first);
+        }
+        // A `double` replacement is not of the register's kind.
+        let artifacts =
+            CompilerSession::compile_source("callable.loko", source, RuntimeMode::CompileOnly);
+        let mut chooser =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::F64(1.0)]));
+        let Err(FunctionCallError::Trap { .. }) = call_with_chooser(&artifacts, &mut chooser)
+        else {
+            panic!("a <double-float> cannot stand in for the adapter's <integer>");
+        };
+    }
+
+    #[test]
+    fn values_of_the_parameter_class_cross_a_callable_unchanged() {
+        for (parameter, argument, result, value) in [
+            ("<i32>", "41", "<i32>", FunctionValue::I32(41)),
+            ("<u32>", "41", "<integer>", FunctionValue::Integer(41)),
+            (
+                "<single-float>",
+                "1.5f32",
+                "<single-float>",
+                FunctionValue::SingleFloat(1.5),
+            ),
+            ("<object>", "41", "<integer>", FunctionValue::Integer(41)),
+        ] {
+            let source = through_a_callable(parameter, argument, result);
+            let runs = breaks_under_each_policy(&source, |_, condition| {
+                panic!("{parameter}: {:?}", condition.type_error())
+            });
+            for (_, actual) in runs {
+                assert_eq!(actual, value, "{parameter}");
+            }
+        }
     }
 
     #[test]

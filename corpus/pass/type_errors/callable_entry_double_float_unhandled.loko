@@ -1,0 +1,20 @@
+// expect: runtime code type-error.entry
+// expect: run reports type-error.entry: 3 is not of type <double-float> at typing:def
+// expect: diagnostics 0
+
+// An untyped call whose shape differs from the callee's passes its
+// arguments boxed, so an `<integer>` reaches a function that takes a
+// `<double-float>` as an `<object>`. The function's boxed entry unboxes it
+// and signals rather than the call trapping on the register types.
+
+define function twice(x :: <double-float>) => <double-float>
+  x * 2.0
+end;
+
+define function call(f :: <callable>, n :: <integer>) => <double-float>
+  apply(f, n)
+end;
+
+define function main() => <double-float>
+  call(twice, 3)
+end;

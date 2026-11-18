@@ -1,0 +1,20 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump lowered contains %r3, _, _ = callable.open %r1
+// expect: dump lowered contains %r4 = call.indirect %r3(%r2): i64
+
+// A call through a callable of a known signature is a static call: it
+// opens the value and calls its typed entry with its arguments as they
+// are, with nothing boxed. Static typing, and the adapter an untyped
+// callable gets where it enters typed code, make that entry's signature
+// the one declared. The same goes for an anonymous function bound to a
+// typed local and called through it.
+
+define function twice(g :: callable(<integer>) => <integer>, x :: <integer>) => <integer>
+  g(g(x))
+end;
+
+define function main() => <integer>
+  let inc :: callable(<integer>) => <integer> = function (n :: <integer>) => <integer> n + 1 end;
+  twice(inc, 7) + inc(1) - 1
+end;

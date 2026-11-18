@@ -202,6 +202,16 @@ pub struct LabelId(
     pub u32,
 );
 
+/// The boxed entry of a callable value [`Instr::CallableNew`] makes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoxedEntry {
+    /// A closure of this function over the value's captures.
+    Function(FunctionId),
+    /// The boxed entry, a [`ValueKind::Entry`], of another callable value,
+    /// which an adapter shares.
+    Shared(Reg),
+}
+
 /// Durable callable signature identifier within a lowered module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CallableSigId(
@@ -230,8 +240,12 @@ pub enum ValueKind {
     Bool,
     /// Internal direct function reference, optionally tied to a callable signature.
     Function(Option<CallableSigId>),
-    /// First-class callable closure, optionally tied to a callable signature.
+    /// First-class callable value, optionally tied to a callable signature:
+    /// a tape aggregate of the value's typed entry, its boxed entry and its
+    /// shape ([`Instr::CallableNew`]).
     Closure(Option<CallableSigId>),
+    /// A tape closure: one entry of a callable value, or a restart guard.
+    Entry,
     /// Execution aggregate value, used for closure environments.
     Aggregate,
     /// Caught exception reference, bound by a catch target and rethrown.
@@ -366,6 +380,25 @@ pub enum FunctionKind {
     /// is still live and throws the values to the block.
     ExitThunk {
         /// Exit procedure signature; parameters are the block's results.
+        signature: CallableSigId,
+    },
+    /// The boxed entry of the callable values whose typed entry is `typed`
+    /// (a callable thunk, a closure body or an exit thunk): it takes and
+    /// returns values under the boxed callable ABI, checks and unboxes the
+    /// arguments, and calls the typed entry's code.
+    BoxedEntry {
+        /// The function of the typed entry it boxes.
+        typed: FunctionId,
+    },
+    /// Opens a callable value, an aggregate whose shape only this function's
+    /// parameter contract proves to the tape: it returns the value's typed
+    /// entry, its boxed entry and its shape.
+    CallableParts,
+    /// The typed entry of a callable value that came from untyped code into
+    /// a binding of `signature`: it boxes the arguments, calls the value's
+    /// boxed entry, and checks and unboxes the results.
+    Adapter {
+        /// The signature the adapted value is called with.
         signature: CallableSigId,
     },
 }
@@ -1199,6 +1232,43 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Creates a first-class callable value: an aggregate of its typed
+    /// entry, a closure of `typed` over `captures` that takes and returns
+    /// values at the value's own signature, its boxed entry, which takes
+    /// and returns every value but a callable as a boxed `<object>`, and
+    /// `shape`, a hash of the typed entry's signature that an untyped
+    /// caller compares its own call's against to call the typed entry
+    /// directly.
+    CallableNew {
+        /// Destination register.
+        dst: Reg,
+        /// The typed entry's function.
+        typed: FunctionId,
+        /// The boxed entry.
+        boxed: BoxedEntry,
+        /// The typed entry's signature shape.
+        shape: u64,
+        /// Captured value registers in environment order, shared by both
+        /// entries.
+        captures: Vec<Reg>,
+        /// Source span.
+        span: Span,
+    },
+    /// Opens a callable value the tape knows the shape of
+    /// ([`FunctionKind::CallableParts`] opens any other): reads its typed
+    /// entry, boxed entry and shape into the registers given.
+    OpenCallable {
+        /// Destination [`ValueKind::Entry`] register of the typed entry.
+        typed: Option<Reg>,
+        /// Destination [`ValueKind::Entry`] register of the boxed entry.
+        boxed: Option<Reg>,
+        /// Destination `u64` register of the shape.
+        shape: Option<Reg>,
+        /// Callable value register.
+        callable: Reg,
+        /// Source span.
+        span: Span,
+    },
     /// Reads one value from the current closure environment.
     CaptureGet {
         /// Destination register.
@@ -1850,6 +1920,21 @@ struct LowerIds {
     closures: Vec<FunctionId>,
     closure_sigs: Vec<CallableSigId>,
     exit_thunks: Vec<ExitThunk>,
+    /// The boxed entry of each function's callable values, parallel to
+    /// `function_closure_thunks`.
+    function_boxed_thunks: Vec<Option<FunctionId>>,
+    /// The boxed entry of each generic's callable values, parallel to
+    /// `generic_closure_thunks`.
+    generic_boxed_thunks: Vec<Option<FunctionId>>,
+    /// The boxed entry of each closure, parallel to `closures`; a restart
+    /// guard, which is never a callable value, has none.
+    closure_boxed: Vec<Option<FunctionId>>,
+    /// The adapter of each signature an untyped value may enter, in
+    /// discovery order.
+    adapters: Vec<(CallableSigId, FunctionId)>,
+    /// The function that opens callable values
+    /// ([`FunctionKind::CallableParts`]).
+    callable_parts: Option<FunctionId>,
     restarts: Vec<RestartDescriptor>,
     call_sigs: Vec<CallableSignature>,
     /// Runtime method selection of each generic, in generic id order, which
@@ -1863,6 +1948,7 @@ struct ExitThunk {
     kinds: Vec<sem::ValueKind>,
     signature: CallableSigId,
     function: FunctionId,
+    boxed: FunctionId,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1872,6 +1958,7 @@ struct AccessorFunction {
     slot: sem::SlotId,
     function: FunctionId,
     closure_thunk: FunctionId,
+    boxed_thunk: FunctionId,
     sig: CallableSigId,
 }
 
@@ -1882,15 +1969,19 @@ struct AccessorTarget {
     slot: sem::SlotId,
 }
 
-struct KnownCallableThunk<'a> {
+/// What a callable value of a function, generic or slot accessor calls,
+/// for its typed and boxed entries.
+struct KnownCallableThunk {
     id: FunctionId,
     name: String,
     callable: sem::KnownCallable,
     target: FunctionId,
-    call_params: &'a [ValueKind],
+    /// The value's signature.
+    sig: CallableSigId,
+    call_params: Vec<ValueKind>,
     /// Ranges of `limited(<integer>, ...)` parameters, parallel to
     /// `call_params`, which the thunk checks.
-    param_ranges: &'a [Option<IntRange>],
+    param_ranges: Vec<Option<IntRange>>,
     /// The definition numbering the thunk's entry checks and, per
     /// parameter, the site of its check; checks without one always stay.
     entry_sites: Option<(DefinitionId, Vec<Option<sem::SiteId>>)>,
@@ -1961,6 +2052,7 @@ impl<'module> Lowering<'module> {
                 slot: callable.slot,
                 function: FunctionId(next),
                 closure_thunk: FunctionId(u32::MAX),
+                boxed_thunk: FunctionId(u32::MAX),
                 sig,
             });
             next = next.saturating_add(1);
@@ -2021,11 +2113,74 @@ impl<'module> Lowering<'module> {
                 kinds,
                 signature,
                 function: FunctionId(next),
+                boxed: FunctionId(u32::MAX),
             });
             next = next.saturating_add(1);
         }
 
         intern_recorded_signatures(&mut ids.call_sigs, module)?;
+        // Every callable value has a boxed entry too, in the same order.
+        let mut take = || {
+            let id = FunctionId(next);
+            next = next.saturating_add(1);
+            id
+        };
+        ids.function_boxed_thunks = ids
+            .function_closure_thunks
+            .iter()
+            .map(|thunk| thunk.map(|_| take()))
+            .collect();
+        ids.generic_boxed_thunks = ids
+            .generic_closure_thunks
+            .iter()
+            .map(|thunk| thunk.map(|_| take()))
+            .collect();
+        for accessor in &mut ids.accessors {
+            accessor.boxed_thunk = take();
+        }
+        ids.closure_boxed = module
+            .closures
+            .iter()
+            .map(|closure| (!closure.restart_guard).then(&mut take))
+            .collect();
+        for thunk in &mut ids.exit_thunks {
+            thunk.boxed = take();
+        }
+        // A boxed entry adapts each typed callable it is passed, and an
+        // adapter each typed callable it returns.
+        let mut pending = Vec::new();
+        let mut boxed_params = |sig: CallableSigId| {
+            if let Some(signature) = ids.call_sigs.get(sig.0 as usize) {
+                pending.extend(signature.params.iter().filter_map(typed_callable));
+            }
+        };
+        for (thunk, sig) in ids.function_closure_thunks.iter().zip(&ids.function_sigs) {
+            if thunk.is_some() {
+                boxed_params(*sig);
+            }
+        }
+        for (thunk, sig) in ids.generic_closure_thunks.iter().zip(&ids.generic_sigs) {
+            if thunk.is_some() {
+                boxed_params(*sig);
+            }
+        }
+        for (boxed, sig) in ids.closure_boxed.iter().zip(&ids.closure_sigs) {
+            if boxed.is_some() {
+                boxed_params(*sig);
+            }
+        }
+        while let Some(sig) = pending.pop() {
+            if ids.adapters.iter().any(|(adapted, _)| *adapted == sig) {
+                continue;
+            }
+            ids.adapters.push((sig, take()));
+            if let Some(signature) = ids.call_sigs.get(sig.0 as usize) {
+                pending.extend(signature.rets.iter().filter_map(typed_callable));
+            }
+        }
+        // The last id, so a module that never opens a callable value whose
+        // shape the tape cannot see leaves it out without renumbering.
+        ids.callable_parts = Some(take());
         ids.restarts = callable_uses.restarts;
 
         let mut this = Self {
@@ -2124,6 +2279,43 @@ impl<'module> Lowering<'module> {
         }
         for thunk in &self.ids.exit_thunks {
             functions.push(self.lower_exit_thunk(thunk)?);
+        }
+        for function in &self.module.functions {
+            if let Some(Some(boxed)) = self.ids.function_boxed_thunks.get(function.id.0 as usize) {
+                functions.push(self.lower_function_boxed_thunk(function, *boxed)?);
+            }
+        }
+        for generic in &self.module.generics {
+            if let Some(Some(boxed)) = self.ids.generic_boxed_thunks.get(generic.id.0 as usize) {
+                functions.push(self.lower_generic_boxed_thunk(generic, *boxed)?);
+            }
+        }
+        for accessor in &self.ids.accessors {
+            functions.push(self.lower_accessor_boxed_thunk(*accessor)?);
+        }
+        for closure in &self.module.closures {
+            if let Some(Some(boxed)) = self.ids.closure_boxed.get(closure.id.0 as usize) {
+                functions.push(
+                    self.lower_closure_boxed(closure, *boxed)
+                        .map_err(|error| error.within(closure.span))?,
+                );
+            }
+        }
+        for thunk in &self.ids.exit_thunks {
+            functions.push(self.lower_exit_boxed_thunk(thunk)?);
+        }
+        for (signature, id) in &self.ids.adapters {
+            functions.push(self.lower_adapter(*signature, *id)?);
+        }
+        if let Some(parts) = self.ids.callable_parts
+            && functions.iter().any(|function| {
+                function
+                    .instructions
+                    .iter()
+                    .any(|instr| matches!(instr, Instr::Call { callee, .. } if *callee == parts))
+            })
+        {
+            functions.push(self.lower_callable_parts());
         }
 
         let host_functions = self
@@ -2300,6 +2492,65 @@ impl<'module> Lowering<'module> {
         })
     }
 
+    /// Lowers the boxed entry of the exit procedures of one signature:
+    /// [`Self::lower_exit_thunk`] for arguments that arrive boxed, each
+    /// checked and unboxed to the block's kind.
+    fn lower_exit_boxed_thunk(&self, thunk: &ExitThunk) -> Result<Function, LowerError> {
+        let kinds = self.value_kinds(&thunk.kinds)?;
+        let span = Span::new(0, 0);
+        let mut body = BodyLowering::new(self.module, &self.ids, &[]);
+        let env = body.push_param("$env", ValueKind::Aggregate);
+        let wires = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| body.push_param(&format!("value{index}"), callable_wire(*kind)))
+            .collect::<Vec<_>>();
+        let token = body.alloc(ValueKind::U64);
+        body.instructions.extend([
+            Instr::CaptureGet {
+                dst: token.reg,
+                env: env.reg,
+                index: 0,
+                kind: ValueKind::U64,
+                span,
+            },
+            Instr::CheckExit {
+                token: token.reg,
+                span,
+            },
+        ]);
+        // An exit procedure is a first-class callable, so whoever invokes it
+        // may not know the block's result kinds. Exit thunks are shared by
+        // every block with the same result kinds, so their checks belong to
+        // no one body's sites and always stay.
+        let name = format!("exit#{}", thunk.signature.0);
+        let mut payload = vec![token.reg];
+        for (index, (wire, kind)) in wires.into_iter().zip(&kinds).enumerate() {
+            let site = entry_site_name(&name, index);
+            payload.push(body.unwire(wire, *kind, None, &site, span)?.reg);
+        }
+        body.instructions.push(Instr::Throw {
+            tag: ControlTag::Exit(thunk.signature),
+            payload,
+            span,
+        });
+        let rets = kinds.iter().copied().map(callable_wire).collect::<Vec<_>>();
+        Ok(Function {
+            id: thunk.boxed,
+            name: format!("{name}#boxed"),
+            kind: FunctionKind::BoxedEntry {
+                typed: thunk.function,
+            },
+            params: body.params,
+            ret: rets.first().copied().unwrap_or(ValueKind::Any),
+            rets,
+            register_kinds: body.register_kinds,
+            locals: Vec::new(),
+            instructions: body.instructions,
+            span,
+        })
+    }
+
     fn lower_function(
         &self,
         function: &sem::Function,
@@ -2432,11 +2683,7 @@ impl<'module> Lowering<'module> {
         })
     }
 
-    fn lower_function_closure_thunk(
-        &self,
-        function: &sem::Function,
-        checks: &mut Vec<CheckCodegenRecord>,
-    ) -> Result<Function, LowerError> {
+    fn function_thunk(&self, function: &sem::Function) -> Result<KnownCallableThunk, LowerError> {
         let id = self
             .ids
             .function_closure_thunks
@@ -2444,8 +2691,13 @@ impl<'module> Lowering<'module> {
             .copied()
             .flatten()
             .ok_or_else(|| invalid_semantic("function closure thunk id is out of range"))?;
-        let target = self.lower_function_id(function.id)?;
-        let params = function
+        let sig = self
+            .ids
+            .function_sigs
+            .get(function.id.0 as usize)
+            .copied()
+            .ok_or_else(|| invalid_semantic("function signature id is out of range"))?;
+        let call_params = function
             .param_kinds
             .iter()
             .copied()
@@ -2462,26 +2714,24 @@ impl<'module> Lowering<'module> {
                     .map(|check| check.site)
             })
             .collect();
-        self.lower_known_callable_thunk(
-            KnownCallableThunk {
-                id,
-                name: format!("{}#closure", function.name),
-                callable: sem::KnownCallable::DirectFunction(function.id),
-                target,
-                call_params: &params,
-                param_ranges: &function.param_ranges,
-                entry_sites: Some((function.definition, sites)),
-                rets: self.value_kinds(&function.result_kinds)?,
-                span: function.span,
-            },
-            checks,
-        )
+        Ok(KnownCallableThunk {
+            id,
+            name: format!("{}#closure", function.name),
+            callable: sem::KnownCallable::DirectFunction(function.id),
+            target: self.lower_function_id(function.id)?,
+            sig,
+            call_params,
+            param_ranges: function.param_ranges.clone(),
+            entry_sites: Some((function.definition, sites)),
+            rets: self.value_kinds(&function.result_kinds)?,
+            span: function.span,
+        })
     }
 
-    fn lower_generic_closure_thunk(
+    fn generic_thunk(
         &self,
         generic: &sem::GenericFunction,
-    ) -> Result<Function, LowerError> {
+    ) -> Result<KnownCallableThunk, LowerError> {
         let id = self
             .ids
             .generic_closure_thunks
@@ -2489,30 +2739,29 @@ impl<'module> Lowering<'module> {
             .copied()
             .flatten()
             .ok_or_else(|| invalid_semantic("generic closure thunk id is out of range"))?;
-        let target = self.lower_generic_id(generic.id)?;
-        let params = (0..generic.arity)
-            .map(|index| dispatcher_param_kind(self.module, generic, index))
-            .collect::<Vec<_>>();
-        self.lower_known_callable_thunk(
-            KnownCallableThunk {
-                id,
-                name: format!("{}#closure", generic.name),
-                callable: sem::KnownCallable::GenericFunction(generic.id),
-                target,
-                call_params: &params,
-                param_ranges: &generic.param_ranges,
-                entry_sites: None,
-                rets: self.value_kinds(&generic.result_kinds)?,
-                span: generic.span,
-            },
-            &mut Vec::new(),
-        )
+        let sig = self
+            .ids
+            .generic_sigs
+            .get(generic.id.0 as usize)
+            .copied()
+            .ok_or_else(|| invalid_semantic("generic signature id is out of range"))?;
+        Ok(KnownCallableThunk {
+            id,
+            name: format!("{}#closure", generic.name),
+            callable: sem::KnownCallable::GenericFunction(generic.id),
+            target: self.lower_generic_id(generic.id)?,
+            sig,
+            call_params: (0..generic.arity)
+                .map(|index| dispatcher_param_kind(self.module, generic, index))
+                .collect(),
+            param_ranges: generic.param_ranges.clone(),
+            entry_sites: None,
+            rets: self.value_kinds(&generic.result_kinds)?,
+            span: generic.span,
+        })
     }
 
-    fn lower_accessor_closure_thunk(
-        &self,
-        accessor: AccessorFunction,
-    ) -> Result<Function, LowerError> {
+    fn accessor_thunk(&self, accessor: AccessorFunction) -> Result<KnownCallableThunk, LowerError> {
         let class = self
             .module
             .classes
@@ -2522,32 +2771,78 @@ impl<'module> Lowering<'module> {
             .effective_slots
             .get(accessor.slot.0 as usize)
             .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
-        let params = [ValueKind::Object(Some(accessor.class))];
         // An accessor has no body numbering sites, so its receiver check
         // always stays.
-        self.lower_known_callable_thunk(
-            KnownCallableThunk {
-                id: accessor.closure_thunk,
-                name: format!("{}#closure", slot.accessor.name),
-                callable: sem::KnownCallable::SlotAccessor {
-                    accessor: accessor.accessor,
-                    class: accessor.class,
-                    slot: accessor.slot,
-                },
-                target: accessor.function,
-                call_params: &params,
-                param_ranges: &[None],
-                entry_sites: None,
-                rets: vec![self.value_kind(slot.kind)?],
-                span: slot.span,
+        Ok(KnownCallableThunk {
+            id: accessor.closure_thunk,
+            name: format!("{}#closure", slot.accessor.name),
+            callable: sem::KnownCallable::SlotAccessor {
+                accessor: accessor.accessor,
+                class: accessor.class,
+                slot: accessor.slot,
             },
-            &mut Vec::new(),
-        )
+            target: accessor.function,
+            sig: accessor.sig,
+            call_params: vec![ValueKind::Object(Some(accessor.class))],
+            param_ranges: vec![None],
+            entry_sites: None,
+            rets: vec![self.value_kind(slot.kind)?],
+            span: slot.span,
+        })
     }
 
+    fn lower_function_closure_thunk(
+        &self,
+        function: &sem::Function,
+        checks: &mut Vec<CheckCodegenRecord>,
+    ) -> Result<Function, LowerError> {
+        self.lower_known_callable_thunk(&self.function_thunk(function)?, checks)
+    }
+
+    fn lower_function_boxed_thunk(
+        &self,
+        function: &sem::Function,
+        boxed: FunctionId,
+    ) -> Result<Function, LowerError> {
+        self.lower_known_callable_boxed_thunk(&self.function_thunk(function)?, boxed)
+    }
+
+    fn lower_generic_closure_thunk(
+        &self,
+        generic: &sem::GenericFunction,
+    ) -> Result<Function, LowerError> {
+        self.lower_known_callable_thunk(&self.generic_thunk(generic)?, &mut Vec::new())
+    }
+
+    fn lower_generic_boxed_thunk(
+        &self,
+        generic: &sem::GenericFunction,
+        boxed: FunctionId,
+    ) -> Result<Function, LowerError> {
+        self.lower_known_callable_boxed_thunk(&self.generic_thunk(generic)?, boxed)
+    }
+
+    fn lower_accessor_closure_thunk(
+        &self,
+        accessor: AccessorFunction,
+    ) -> Result<Function, LowerError> {
+        self.lower_known_callable_thunk(&self.accessor_thunk(accessor)?, &mut Vec::new())
+    }
+
+    fn lower_accessor_boxed_thunk(
+        &self,
+        accessor: AccessorFunction,
+    ) -> Result<Function, LowerError> {
+        self.lower_known_callable_boxed_thunk(&self.accessor_thunk(accessor)?, accessor.boxed_thunk)
+    }
+
+    /// Lowers the typed entry of the callable values of a function, generic
+    /// or slot accessor: it takes the arguments at the target's own kinds,
+    /// checks the parameter types the target relies on that a typed
+    /// caller's register types do not establish, and calls the target.
     fn lower_known_callable_thunk(
         &self,
-        spec: KnownCallableThunk<'_>,
+        spec: &KnownCallableThunk,
         checks: &mut Vec<CheckCodegenRecord>,
     ) -> Result<Function, LowerError> {
         let mut params = Vec::with_capacity(spec.call_params.len() + 1);
@@ -2591,7 +2886,7 @@ impl<'module> Lowering<'module> {
         let mut instructions = Vec::new();
         let mut next_label = 0;
         let sends = matches!(spec.callable, sem::KnownCallable::GenericFunction(_));
-        for (index, (arg, kind)) in call_args.iter_mut().zip(spec.call_params).enumerate() {
+        for (index, (arg, kind)) in call_args.iter_mut().zip(&spec.call_params).enumerate() {
             let target = match spec.param_ranges.get(index).copied().flatten() {
                 Some(range) if *kind == ValueKind::I64 => sem::EntryTarget::Range(range),
                 _ if sends => continue,
@@ -2643,7 +2938,7 @@ impl<'module> Lowering<'module> {
                         dsts: results.clone(),
                         callee,
                         args: call_args,
-                        arg_kinds: spec.call_params.to_vec(),
+                        arg_kinds: spec.call_params.clone(),
                         rets: spec.rets.clone(),
                         span: spec.span,
                     },
@@ -2663,18 +2958,135 @@ impl<'module> Lowering<'module> {
         });
         Ok(Function {
             id: spec.id,
-            name: spec.name,
+            name: spec.name.clone(),
             kind: FunctionKind::CallableThunk {
                 callable: spec.callable,
             },
             register_kinds,
             params,
             ret,
-            rets: spec.rets,
+            rets: spec.rets.clone(),
             locals: Vec::new(),
             instructions,
             span: spec.span,
         })
+    }
+
+    /// Lowers the boxed entry of the callable values of a function, generic
+    /// or slot accessor: under the boxed callable ABI ([`callable_wire`]),
+    /// it checks and unboxes each argument as the target takes it
+    /// ([`BodyLowering::unwire`]), adapting a typed callable to its
+    /// signature, calls the target, and boxes the results.
+    ///
+    /// A generic's dispatch already checks the class of an argument it
+    /// dispatches on, and its methods those of the runtime objects they
+    /// take, so an argument the dispatcher takes as a runtime object stays
+    /// boxed for [`BodyLowering::send`], which signals
+    /// `<no-applicable-method>` when the box holds no object, as a send
+    /// does.
+    fn lower_known_callable_boxed_thunk(
+        &self,
+        spec: &KnownCallableThunk,
+        id: FunctionId,
+    ) -> Result<Function, LowerError> {
+        let mut body = BodyLowering::new(self.module, &self.ids, &[]);
+        let call_params = self.adapted_params(&spec.call_params, spec.sig);
+        let _env = body.push_param("$env", ValueKind::Aggregate);
+        let wires = call_params
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| body.push_param(&format!("arg{index}"), callable_wire(*kind)))
+            .collect::<Vec<_>>();
+        let generic = match spec.callable {
+            sem::KnownCallable::GenericFunction(generic) => Some(
+                self.module
+                    .generics
+                    .get(generic.0 as usize)
+                    .ok_or_else(|| invalid_semantic("generic id is out of range"))?,
+            ),
+            _ => None,
+        };
+        let mut args = Vec::with_capacity(wires.len());
+        for (index, (wire, kind)) in wires.into_iter().zip(&call_params).enumerate() {
+            if let Some(generic) = generic
+                && match kind {
+                    ValueKind::Object(None) => true,
+                    ValueKind::Object(Some(_)) => generic.dispatch_params.contains(&index),
+                    _ => false,
+                }
+            {
+                args.push(wire);
+                continue;
+            }
+            let site = match &spec.entry_sites {
+                Some((owner, sites)) => {
+                    check_site_name(Some(*owner), sites.get(index).copied().flatten(), spec.span)
+                }
+                None => entry_site_name(&spec.name, index),
+            };
+            let range = spec.param_ranges.get(index).copied().flatten();
+            args.push(body.unwire(wire, *kind, range, &site, spec.span)?);
+        }
+        let results = spec
+            .rets
+            .iter()
+            .map(|kind| body.alloc(*kind))
+            .collect::<Vec<_>>();
+        let dsts = results.iter().map(|result| result.reg).collect::<Vec<_>>();
+        match generic {
+            // A first-class generic sends like a call site.
+            Some(generic) => body.send(generic, args, dsts, spec.span, None)?,
+            None => body.instructions.push(Instr::Call {
+                dsts,
+                callee: spec.target,
+                args: args.iter().map(|arg| arg.reg).collect(),
+                span: spec.span,
+            }),
+        }
+        let values = results
+            .into_iter()
+            .map(|result| body.wire_value(result, spec.span).map(|value| value.reg))
+            .collect::<Result<Vec<_>, _>>()?;
+        body.instructions.push(Instr::Return {
+            values,
+            span: spec.span,
+        });
+        let rets = spec
+            .rets
+            .iter()
+            .copied()
+            .map(callable_wire)
+            .collect::<Vec<_>>();
+        Ok(Function {
+            id,
+            name: format!("{}#boxed", spec.name),
+            kind: FunctionKind::BoxedEntry { typed: spec.id },
+            register_kinds: body.register_kinds,
+            params: body.params,
+            ret: rets.first().copied().unwrap_or(ValueKind::Any),
+            rets,
+            locals: Vec::new(),
+            instructions: body.instructions,
+            span: spec.span,
+        })
+    }
+
+    /// `params`, with each typed callable `sig` takes in place of the
+    /// untyped one, so a boxed entry adapts it.
+    fn adapted_params(&self, params: &[ValueKind], sig: CallableSigId) -> Vec<ValueKind> {
+        let declared = self
+            .ids
+            .call_sigs
+            .get(sig.0 as usize)
+            .map_or(&[][..], |signature| signature.params.as_slice());
+        params
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| match declared.get(index) {
+                Some(typed @ ValueKind::Closure(Some(_))) => *typed,
+                _ => *kind,
+            })
+            .collect()
     }
 
     fn lower_closure(
@@ -2706,6 +3118,216 @@ impl<'module> Lowering<'module> {
             instructions: body.instructions,
             span: closure.span,
         })
+    }
+
+    /// Lowers the boxed entry of a closure's callable values: under the
+    /// boxed callable ABI, it checks and unboxes each argument at the
+    /// closure's entry check sites ([`BodyLowering::unwire`]), adapting a
+    /// typed callable to its signature, calls the closure body with the
+    /// same environment, and boxes the results.
+    fn lower_closure_boxed(
+        &self,
+        closure: &sem::Closure,
+        id: FunctionId,
+    ) -> Result<Function, LowerError> {
+        let owner = self
+            .closure_owners
+            .get(closure.id.0 as usize)
+            .copied()
+            .flatten();
+        let typed = self.lower_closure_id(closure.id)?;
+        let sig = self
+            .ids
+            .closure_sigs
+            .get(closure.id.0 as usize)
+            .and_then(|sig| self.ids.call_sigs.get(sig.0 as usize))
+            .ok_or_else(|| invalid_semantic("closure signature id is out of range"))?;
+        let mut body = BodyLowering::new(self.module, &self.ids, &[]).typed(self.facts, owner);
+        let env = body.push_param("$env", ValueKind::Aggregate);
+        let wires = sig
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| body.push_param(&format!("arg{index}"), callable_wire(*kind)))
+            .collect::<Vec<_>>();
+        let mut args = vec![env.reg];
+        for (index, (wire, kind)) in wires.into_iter().zip(&sig.params).enumerate() {
+            let site = closure
+                .params
+                .get(index)
+                .and_then(|param| {
+                    closure
+                        .entry_checks
+                        .iter()
+                        .find(|check| check.param == *param)
+                })
+                .map(|check| check.site);
+            let name = match (owner, site) {
+                (Some(_), Some(_)) => check_site_name(owner, site, closure.span),
+                _ => entry_site_name(&format!("closure#{}", closure.id.0), index),
+            };
+            let range = closure.param_ranges.get(index).copied().flatten();
+            args.push(body.unwire(wire, *kind, range, &name, closure.span)?.reg);
+        }
+        let results = sig
+            .rets
+            .iter()
+            .map(|kind| body.alloc(*kind))
+            .collect::<Vec<_>>();
+        body.instructions.push(Instr::Call {
+            dsts: results.iter().map(|result| result.reg).collect(),
+            callee: typed,
+            args,
+            span: closure.span,
+        });
+        let values = results
+            .into_iter()
+            .map(|result| body.wire_value(result, closure.span).map(|value| value.reg))
+            .collect::<Result<Vec<_>, _>>()?;
+        body.instructions.push(Instr::Return {
+            values,
+            span: closure.span,
+        });
+        let rets = sig
+            .rets
+            .iter()
+            .copied()
+            .map(callable_wire)
+            .collect::<Vec<_>>();
+        Ok(Function {
+            id,
+            name: format!("closure#{}#boxed", closure.id.0),
+            kind: FunctionKind::BoxedEntry { typed },
+            register_kinds: body.register_kinds,
+            params: body.params,
+            ret: rets.first().copied().unwrap_or(ValueKind::Any),
+            rets,
+            locals: Vec::new(),
+            instructions: body.instructions,
+            span: closure.span,
+        })
+    }
+
+    /// Lowers the adapter that gives a callable value from untyped code the
+    /// typed entry `signature` promises ([`BodyLowering::adapt`]): it boxes
+    /// the arguments, calls the value's boxed entry, which its environment
+    /// holds, and checks and unboxes each result to the signature's kind,
+    /// adapting a typed callable result in turn. A result of another kind
+    /// signals `type-error.entry` at `entry:<adapter>:<index>`; a class
+    /// result is only checked to be an object, as callers cast it.
+    fn lower_adapter(
+        &self,
+        signature: CallableSigId,
+        id: FunctionId,
+    ) -> Result<Function, LowerError> {
+        let sig = self
+            .ids
+            .call_sigs
+            .get(signature.0 as usize)
+            .ok_or_else(|| invalid_semantic("adapter signature id is out of range"))?;
+        let span = Span::new(0, 0);
+        let name = signature_label(self.module, &self.ids.call_sigs, signature);
+        let mut body = BodyLowering::new(self.module, &self.ids, &[]);
+        let env = body.push_param("$env", ValueKind::Aggregate);
+        let params = sig
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| body.push_param(&format!("arg{index}"), *kind))
+            .collect::<Vec<_>>();
+        let boxed = body.alloc(ValueKind::Entry);
+        body.instructions.push(Instr::CaptureGet {
+            dst: boxed.reg,
+            env: env.reg,
+            index: 0,
+            kind: ValueKind::Entry,
+            span,
+        });
+        let wired = params
+            .into_iter()
+            .map(|param| body.wire_value(param, span))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rets = sig
+            .rets
+            .iter()
+            .copied()
+            .map(callable_wire)
+            .collect::<Vec<_>>();
+        let results = rets
+            .iter()
+            .map(|kind| body.alloc(*kind))
+            .collect::<Vec<_>>();
+        body.instructions.push(Instr::CallIndirect {
+            dsts: results.iter().map(|result| result.reg).collect(),
+            callee: boxed.reg,
+            args: wired.iter().map(|arg| arg.reg).collect(),
+            arg_kinds: wired.iter().map(|arg| arg.kind).collect(),
+            rets,
+            span,
+        });
+        // A class result need only be an object here: typed callers cast
+        // the class results they rely on themselves, at sites typing
+        // classifies.
+        let mut values = Vec::with_capacity(results.len());
+        for (index, (result, kind)) in results.into_iter().zip(&sig.rets).enumerate() {
+            let site = entry_site_name(&name, index);
+            let kind = match kind {
+                ValueKind::Object(Some(_)) => ValueKind::Object(Some(sem::OBJECT_CLASS_ID)),
+                kind => *kind,
+            };
+            values.push(body.unwire(result, kind, None, &site, span)?.reg);
+        }
+        body.instructions.push(Instr::Return { values, span });
+        Ok(Function {
+            id,
+            name,
+            kind: FunctionKind::Adapter { signature },
+            register_kinds: body.register_kinds,
+            params: body.params,
+            ret: sig.rets.first().copied().unwrap_or(ValueKind::Any),
+            rets: sig.rets.clone(),
+            locals: Vec::new(),
+            instructions: body.instructions,
+            span,
+        })
+    }
+
+    /// Lowers [`FunctionKind::CallableParts`].
+    fn lower_callable_parts(&self) -> Function {
+        let span = Span::new(0, 0);
+        let mut body = BodyLowering::new(self.module, &self.ids, &[]);
+        let callable = body.push_param("callable", ValueKind::Closure(None));
+        let parts = [ValueKind::Entry, ValueKind::Entry, ValueKind::U64]
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let part = body.alloc(kind);
+                body.instructions.push(Instr::CaptureGet {
+                    dst: part.reg,
+                    env: callable.reg,
+                    index,
+                    kind,
+                    span,
+                });
+                part.reg
+            })
+            .collect::<Vec<_>>();
+        body.instructions.push(Instr::Return {
+            values: parts,
+            span,
+        });
+        Function {
+            id: self.ids.callable_parts.unwrap_or(FunctionId(u32::MAX)),
+            name: String::from("callable#parts"),
+            kind: FunctionKind::CallableParts,
+            register_kinds: body.register_kinds,
+            params: body.params,
+            ret: ValueKind::Entry,
+            rets: vec![ValueKind::Entry, ValueKind::Entry, ValueKind::U64],
+            locals: Vec::new(),
+            instructions: body.instructions,
+            span,
+        }
     }
 
     fn lower_function_id(&self, id: sem::FunctionId) -> Result<FunctionId, LowerError> {
@@ -3296,6 +3918,14 @@ struct BodyLowering<'module> {
     /// innermost last, by the local each is bound to: a call of one is
     /// lowered as the exit it makes ([`Self::lower_exit_call`]).
     exits: Vec<(sem::LocalId, BoundExit)>,
+    /// Callable value registers the tape knows the shape of: parameters,
+    /// results of calls, captures and new callable values, each written
+    /// once, whose contract says so ([`Self::open_callable`]).
+    proven_callables: Vec<Reg>,
+    /// Join registers of callable values, with whether every value moved
+    /// into them so far is one whose shape the tape knows: the tape keeps a
+    /// fact every incoming path agrees on.
+    callable_joins: Vec<(Reg, bool)>,
 }
 
 impl<'module> BodyLowering<'module> {
@@ -3435,6 +4065,8 @@ impl<'module> BodyLowering<'module> {
             closure: None,
             unboxed_locals: Vec::new(),
             exits: Vec::new(),
+            proven_callables: Vec::new(),
+            callable_joins: Vec::new(),
         }
     }
 
@@ -3464,6 +4096,8 @@ impl<'module> BodyLowering<'module> {
             closure: None,
             unboxed_locals: Vec::new(),
             exits: Vec::new(),
+            proven_callables: Vec::new(),
+            callable_joins: Vec::new(),
         }
     }
 
@@ -3599,6 +4233,9 @@ impl<'module> BodyLowering<'module> {
         self.set_local(local_id, value)?;
         assert_eq!(register_at(self.register_kinds.len()), reg);
         self.register_kinds.push(kind);
+        if matches!(kind, ValueKind::Closure(_)) {
+            self.proven_callables.push(reg);
+        }
         self.params.push(Param {
             source: Some(local_id),
             name: local.name.clone(),
@@ -4095,19 +4732,19 @@ impl<'module> BodyLowering<'module> {
             .iter()
             .find(|thunk| thunk.kinds == exit.result_kinds)
             .ok_or_else(|| invalid_semantic("block exit signature has no thunk"))?;
-        let (signature, function) = (thunk.signature, thunk.function);
+        let (signature, function, boxed) = (thunk.signature, thunk.function, thunk.boxed);
         let token = self.alloc(ValueKind::U64);
         self.instructions.push(Instr::PushExit {
             dst: token.reg,
             span,
         });
-        let procedure = self.alloc(ValueKind::Closure(Some(signature)));
-        self.instructions.push(Instr::ClosureNew {
-            dst: procedure.reg,
+        let procedure = self.emit_callable_new(
             function,
-            captures: vec![token.reg],
+            BoxedEntry::Function(boxed),
+            signature,
+            &[token.reg],
             span,
-        });
+        )?;
         self.set_local(exit.local, procedure)?;
         let local = self
             .current_local(exit.local)
@@ -4152,6 +4789,7 @@ impl<'module> BodyLowering<'module> {
     ) -> Result<(), LowerError> {
         for (result, value) in results.iter().zip(values) {
             let value = self.coerce_value(*value, result.kind, span)?;
+            self.note_callable_move(result.reg, value.reg);
             self.instructions.push(Instr::Move {
                 dst: result.reg,
                 src: value.reg,
@@ -4159,6 +4797,41 @@ impl<'module> BodyLowering<'module> {
             });
         }
         Ok(())
+    }
+
+    /// Records that a join moves `src` into `dst`, for
+    /// [`Self::callable_shape_known`].
+    fn note_callable_move(&mut self, dst: Reg, src: Reg) {
+        let index = (dst.0 as usize).wrapping_sub(1);
+        if !matches!(self.register_kinds.get(index), Some(ValueKind::Closure(_))) {
+            return;
+        }
+        let known = self.callable_shape_known(src);
+        match self
+            .callable_joins
+            .iter_mut()
+            .find(|(join, _)| *join == dst)
+        {
+            Some((_, all)) => *all &= known,
+            None => self.callable_joins.push((dst, known)),
+        }
+    }
+
+    /// Whether the tape knows the shape of the callable value in `reg`: a
+    /// parameter, a capture, a new callable value or a call's result, whose
+    /// contract proves it, or a join of only such values. Any other, such
+    /// as a slot's value, opens through [`FunctionKind::CallableParts`].
+    fn callable_shape_known(&self, reg: Reg) -> bool {
+        if let Some((_, known)) = self.callable_joins.iter().find(|(join, _)| *join == reg) {
+            return *known;
+        }
+        self.proven_callables.contains(&reg)
+            || self.instructions.iter().any(|instr| match instr {
+                Instr::Call { dsts, .. }
+                | Instr::CallIndirect { dsts, .. }
+                | Instr::LinkedSend { dsts, .. } => dsts.contains(&reg),
+                _ => false,
+            })
     }
 
     /// Lowers a cleanup body for effect, returning whether control can
@@ -4625,6 +5298,9 @@ impl<'module> BodyLowering<'module> {
                     kind,
                     span: *span,
                 });
+                if matches!(kind, ValueKind::Closure(_)) {
+                    self.proven_callables.push(result.reg);
+                }
                 let expected = self.value_kind_with_callable_signature(
                     *result_kind,
                     callable_signature.as_ref(),
@@ -5959,7 +6635,7 @@ impl<'module> BodyLowering<'module> {
         callable: sem::KnownCallable,
         span: Span,
     ) -> Result<Value, LowerError> {
-        let (function, sig) = match callable {
+        let (function, boxed, sig) = match callable {
             sem::KnownCallable::DirectFunction(function) => {
                 let lowered = self
                     .ids
@@ -5967,13 +6643,19 @@ impl<'module> BodyLowering<'module> {
                     .get(function.0 as usize)
                     .and_then(|id| *id)
                     .ok_or_else(|| invalid_semantic("function closure thunk id is out of range"))?;
+                let boxed = self
+                    .ids
+                    .function_boxed_thunks
+                    .get(function.0 as usize)
+                    .and_then(|id| *id)
+                    .ok_or_else(|| invalid_semantic("function boxed thunk id is out of range"))?;
                 let sig = self
                     .ids
                     .function_sigs
                     .get(function.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_semantic("function signature id is out of range"))?;
-                (lowered, sig)
+                (lowered, boxed, sig)
             }
             sem::KnownCallable::GenericFunction(generic) => {
                 let lowered = self
@@ -5982,13 +6664,19 @@ impl<'module> BodyLowering<'module> {
                     .get(generic.0 as usize)
                     .and_then(|id| *id)
                     .ok_or_else(|| invalid_semantic("generic closure thunk id is out of range"))?;
+                let boxed = self
+                    .ids
+                    .generic_boxed_thunks
+                    .get(generic.0 as usize)
+                    .and_then(|id| *id)
+                    .ok_or_else(|| invalid_semantic("generic boxed thunk id is out of range"))?;
                 let sig = self
                     .ids
                     .generic_sigs
                     .get(generic.0 as usize)
                     .copied()
                     .ok_or_else(|| invalid_semantic("generic signature id is out of range"))?;
-                (lowered, sig)
+                (lowered, boxed, sig)
             }
             sem::KnownCallable::SlotAccessor {
                 accessor,
@@ -5996,10 +6684,10 @@ impl<'module> BodyLowering<'module> {
                 slot,
             } => {
                 let accessor = self.lower_accessor_function(accessor, class, slot)?;
-                (accessor.closure_thunk, accessor.sig)
+                (accessor.closure_thunk, accessor.boxed_thunk, accessor.sig)
             }
         };
-        self.emit_closure_new(function, sig, &[], span)
+        self.emit_callable_new(function, BoxedEntry::Function(boxed), sig, &[], span)
     }
 
     fn lower_closure_value(
@@ -6030,24 +6718,123 @@ impl<'module> BodyLowering<'module> {
             let value = self.coerce_value(value, self.value_kind(capture.kind)?, span)?;
             capture_regs.push(value.reg);
         }
-        self.emit_closure_new(function, sig, &capture_regs, span)
+        // A restart guard is never a callable value: the handler search
+        // calls its closure directly.
+        match self
+            .ids
+            .closure_boxed
+            .get(closure.0 as usize)
+            .copied()
+            .flatten()
+        {
+            Some(boxed) => self.emit_callable_new(
+                function,
+                BoxedEntry::Function(boxed),
+                sig,
+                &capture_regs,
+                span,
+            ),
+            None => {
+                let result = self.alloc(ValueKind::Entry);
+                self.instructions.push(Instr::ClosureNew {
+                    dst: result.reg,
+                    function,
+                    captures: capture_regs,
+                    span,
+                });
+                Ok(result)
+            }
+        }
     }
 
-    fn emit_closure_new(
+    /// Makes a callable value of signature `sig` whose typed entry is
+    /// `typed` over `captures` ([`Instr::CallableNew`]).
+    fn emit_callable_new(
         &mut self,
-        function: FunctionId,
+        typed: FunctionId,
+        boxed: BoxedEntry,
         sig: CallableSigId,
         captures: &[Reg],
         span: Span,
     ) -> Result<Value, LowerError> {
+        let signature = self
+            .ids
+            .call_sigs
+            .get(sig.0 as usize)
+            .ok_or_else(|| invalid_semantic("callable signature id is out of range"))?;
+        let shape = callable_shape(&self.ids.call_sigs, &signature.params, &signature.rets);
         let result = self.alloc(ValueKind::Closure(Some(sig)));
-        self.instructions.push(Instr::ClosureNew {
+        self.proven_callables.push(result.reg);
+        self.instructions.push(Instr::CallableNew {
             dst: result.reg,
-            function,
+            typed,
+            boxed,
+            shape,
             captures: captures.to_vec(),
             span,
         });
         Ok(result)
+    }
+
+    /// Opens the callable value `callable`: its typed entry, its boxed entry
+    /// and its shape, those of them `wanted` asks for. A register whose
+    /// shape the tape knows is opened in place; any other through
+    /// [`FunctionKind::CallableParts`], whose parameter contract proves it.
+    fn open_callable(
+        &mut self,
+        callable: Reg,
+        wanted: [bool; 3],
+        span: Span,
+    ) -> [Option<Value>; 3] {
+        let kinds = [ValueKind::Entry, ValueKind::Entry, ValueKind::U64];
+        if self.callable_shape_known(callable) {
+            let parts = [0, 1, 2].map(|index| wanted[index].then(|| self.alloc(kinds[index])));
+            self.instructions.push(Instr::OpenCallable {
+                typed: parts[0].map(|part| part.reg),
+                boxed: parts[1].map(|part| part.reg),
+                shape: parts[2].map(|part| part.reg),
+                callable,
+                span,
+            });
+            return parts;
+        }
+        let parts = kinds.map(|kind| self.alloc(kind));
+        self.instructions.push(Instr::Call {
+            dsts: parts.iter().map(|part| part.reg).collect(),
+            callee: self.ids.callable_parts.unwrap_or(FunctionId(u32::MAX)),
+            args: vec![callable],
+            span,
+        });
+        [0, 1, 2].map(|index| wanted[index].then_some(parts[index]))
+    }
+
+    /// Gives `value`, a callable from untyped code, the typed entry `sig`
+    /// promises: a callable value whose typed entry is `sig`'s adapter
+    /// ([`Lowering::lower_adapter`]) over `value`'s boxed entry, which it
+    /// shares. This is where an untyped callable enters typed code, so
+    /// typed calls through it check what they rely on there.
+    fn adapt(&mut self, value: Value, sig: CallableSigId, span: Span) -> Result<Value, LowerError> {
+        let adapter = self
+            .ids
+            .adapters
+            .iter()
+            .find(|(adapted, _)| *adapted == sig)
+            .map(|(_, adapter)| *adapter)
+            .ok_or_else(|| {
+                invalid_semantic("a typed callable entering from untyped code has no adapter")
+            })?;
+        let [_, Some(boxed), _] = self.open_callable(value.reg, [false, true, false], span) else {
+            return Err(invalid_semantic(
+                "opening a callable dropped its boxed entry",
+            ));
+        };
+        self.emit_callable_new(
+            adapter,
+            BoxedEntry::Shared(boxed.reg),
+            sig,
+            &[boxed.reg],
+            span,
+        )
     }
 
     fn lower_accessor_function(
@@ -6135,37 +6922,20 @@ impl<'module> BodyLowering<'module> {
         result_kind: sem::ValueKind,
         span: Span,
     ) -> Result<Value, LowerError> {
-        if let sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) =
-            self.module.expr_kind(callable)
-        {
-            let mut results =
-                self.lower_known_generic_call(callable, generic, args, &[result_kind], span)?;
-            return Ok(results.remove(0));
-        }
-        if let Some(exit) = self.bound_exit(callable) {
-            let mut results = self.lower_exit_call(exit, args, arg_kinds, &[result_kind], span)?;
-            return Ok(results.remove(0));
-        }
-        let callee = self.lower_expr(callable)?;
-        if !matches!(callee.kind, ValueKind::Function(_) | ValueKind::Closure(_)) {
-            return Err(invalid_semantic(
-                "callable call target is not a function or closure value",
-            ));
-        }
-        let (args, arg_kinds) = self.lower_args_with_expected_and_kinds(args, arg_kinds)?;
-        let ret = self.value_kind(result_kind)?;
-        let result = self.alloc(ret);
-        self.instructions.push(Instr::CallIndirect {
-            dsts: vec![result.reg],
-            callee: callee.reg,
-            args,
-            arg_kinds,
-            rets: vec![ret],
-            span,
-        });
-        Ok(result)
+        let mut results =
+            self.lower_callable_results(callable, args, arg_kinds, &[result_kind], span)?;
+        Ok(results.remove(0))
     }
 
+    /// Calls the callable value `callable` with `args`, each first taken at
+    /// its `arg_kinds` kind, and returns its results at `result_kinds`.
+    ///
+    /// A known generic sends ([`Self::lower_known_generic_call`]), and a
+    /// block's body calls its own exit procedure as the exit it makes
+    /// ([`Self::lower_exit_call`]). A callable of a known signature is
+    /// called through its typed entry ([`Self::call_typed_entry`]), and an
+    /// untyped one through whichever entry the call's shape picks
+    /// ([`Self::call_untyped`]).
     fn lower_callable_results(
         &mut self,
         callable: &sem::Expr,
@@ -6174,15 +6944,6 @@ impl<'module> BodyLowering<'module> {
         result_kinds: &[sem::ValueKind],
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
-        if result_kinds.len() == 1 {
-            return Ok(vec![self.lower_callable_call(
-                callable,
-                args,
-                arg_kinds,
-                result_kinds[0],
-                span,
-            )?]);
-        }
         if let sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) =
             self.module.expr_kind(callable)
         {
@@ -6192,26 +6953,174 @@ impl<'module> BodyLowering<'module> {
             return self.lower_exit_call(exit, args, arg_kinds, result_kinds, span);
         }
         let callee = self.lower_expr(callable)?;
-        if !matches!(callee.kind, ValueKind::Function(_) | ValueKind::Closure(_)) {
-            return Err(invalid_semantic(
-                "callable call target is not a function or closure value",
-            ));
+        let mut values = Vec::with_capacity(args.len());
+        for (arg, expected) in args.iter().zip(arg_kinds) {
+            let value = self.lower_expr(arg)?;
+            let expected = self.value_kind(*expected)?;
+            values.push(self.coerce_value(value, expected, arg.span())?);
         }
-        let (args, arg_kinds) = self.lower_args_with_expected_and_kinds(args, arg_kinds)?;
-        let rets = self.value_kinds(result_kinds)?;
-        let results = rets
+        let kinds = self.value_kinds(result_kinds)?;
+        match callee.kind {
+            ValueKind::Closure(Some(sig)) => {
+                self.call_typed_entry(callee, values, sig, &kinds, span)
+            }
+            ValueKind::Closure(None) => self.call_untyped(callee, values, &kinds, span),
+            _ => Err(invalid_semantic(
+                "callable call target is not a callable value",
+            )),
+        }
+    }
+
+    /// Calls `callee`, a callable value of signature `sig`, through its
+    /// typed entry, with `args` at their kinds, and returns its results at
+    /// `kinds`. Static typing and the adapters at the places untyped
+    /// callables enter typed code ([`Self::adapt`]) make the entry's
+    /// signature agree with `sig`.
+    fn call_typed_entry(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        sig: CallableSigId,
+        kinds: &[ValueKind],
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let signature = self
+            .ids
+            .call_sigs
+            .get(sig.0 as usize)
+            .cloned()
+            .ok_or_else(|| invalid_semantic("callable signature id is out of range"))?;
+        let mut regs = Vec::with_capacity(args.len());
+        for (arg, kind) in args.into_iter().zip(&signature.params) {
+            regs.push(self.coerce_value(arg, *kind, span)?.reg);
+        }
+        let [Some(entry), _, _] = self.open_callable(callee.reg, [true, false, false], span) else {
+            return Err(invalid_semantic(
+                "opening a callable dropped its typed entry",
+            ));
+        };
+        let results = signature
+            .rets
             .iter()
-            .copied()
-            .map(|kind| self.alloc(kind))
+            .map(|kind| self.alloc(*kind))
             .collect::<Vec<_>>();
         self.instructions.push(Instr::CallIndirect {
             dsts: results.iter().map(|result| result.reg).collect(),
-            callee: callee.reg,
-            args,
-            arg_kinds,
+            callee: entry.reg,
+            args: regs,
+            arg_kinds: signature.params,
+            rets: signature.rets,
+            span,
+        });
+        for result in &results {
+            if matches!(result.kind, ValueKind::Closure(_)) {
+                self.proven_callables.push(result.reg);
+            }
+        }
+        results
+            .into_iter()
+            .zip(kinds)
+            .map(|(result, kind)| self.coerce_value(result, *kind, span))
+            .collect()
+    }
+
+    /// Calls `callee`, an untyped callable value, with `args` at their
+    /// kinds, and returns its results at `kinds`.
+    ///
+    /// When the value's typed entry has exactly this call's shape
+    /// ([`callable_shape`]), the call is a typed one. Otherwise it crosses
+    /// under the boxed callable ABI ([`callable_wire`]): the arguments are
+    /// boxed, the boxed entry checks and unboxes what the callee relies on,
+    /// and each result comes back boxed and is unboxed to the kind the call
+    /// site takes, a number or boolean of another kind signalling a
+    /// `type-error.cast` here. Sem casts a class result itself, at a site
+    /// typing classifies.
+    fn call_untyped(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        kinds: &[ValueKind],
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let arg_kinds = args.iter().map(|arg| arg.kind).collect::<Vec<_>>();
+        let shape = callable_shape(&self.ids.call_sigs, &arg_kinds, kinds);
+        let results = kinds
+            .iter()
+            .map(|kind| self.alloc(*kind))
+            .collect::<Vec<_>>();
+        let [Some(typed_entry), _, Some(actual)] =
+            self.open_callable(callee.reg, [true, false, true], span)
+        else {
+            return Err(invalid_semantic("opening a callable dropped a part"));
+        };
+        let (expected, same) = (self.alloc(ValueKind::U64), self.alloc(ValueKind::Bool));
+        let (typed, boxed, join) = (self.alloc_label(), self.alloc_label(), self.alloc_label());
+        self.instructions.extend([
+            Instr::ConstU64 {
+                dst: expected.reg,
+                value: shape,
+                span,
+            },
+            Instr::EqU64 {
+                dst: same.reg,
+                lhs: actual.reg,
+                rhs: expected.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: same.reg,
+                then_label: typed,
+                else_label: boxed,
+                span,
+            },
+            Instr::Label { label: typed },
+            Instr::CallIndirect {
+                dsts: results.iter().map(|result| result.reg).collect(),
+                callee: typed_entry.reg,
+                args: args.iter().map(|arg| arg.reg).collect(),
+                arg_kinds: arg_kinds.clone(),
+                rets: kinds.to_vec(),
+                span,
+            },
+            Instr::Jump { label: join, span },
+            Instr::Label { label: boxed },
+        ]);
+        let [_, Some(boxed_entry), _] = self.open_callable(callee.reg, [false, true, false], span)
+        else {
+            return Err(invalid_semantic(
+                "opening a callable dropped its boxed entry",
+            ));
+        };
+        let mut wired = Vec::with_capacity(args.len());
+        for arg in args {
+            wired.push(self.wire_value(arg, span)?);
+        }
+        let rets = kinds.iter().copied().map(callable_wire).collect::<Vec<_>>();
+        let boxed_results = rets
+            .iter()
+            .map(|kind| self.alloc(*kind))
+            .collect::<Vec<_>>();
+        self.instructions.push(Instr::CallIndirect {
+            dsts: boxed_results.iter().map(|result| result.reg).collect(),
+            callee: boxed_entry.reg,
+            args: wired.iter().map(|arg| arg.reg).collect(),
+            arg_kinds: wired.iter().map(|arg| arg.kind).collect(),
             rets,
             span,
         });
+        for (result, boxed_result) in results.iter().zip(boxed_results) {
+            let value = self.coerce_value(boxed_result, result.kind, span)?;
+            self.note_callable_move(result.reg, value.reg);
+            self.instructions.push(Instr::Move {
+                dst: result.reg,
+                src: value.reg,
+                span,
+            });
+        }
+        self.instructions.extend([
+            Instr::Jump { label: join, span },
+            Instr::Label { label: join },
+        ]);
         Ok(results)
     }
 
@@ -6566,23 +7475,6 @@ impl<'module> BodyLowering<'module> {
             lowered.push(value.reg);
         }
         Ok(lowered)
-    }
-
-    fn lower_args_with_expected_and_kinds(
-        &mut self,
-        args: &[sem::Expr],
-        expected: &[sem::ValueKind],
-    ) -> Result<(Vec<Reg>, Vec<ValueKind>), LowerError> {
-        let mut regs = Vec::with_capacity(args.len());
-        let mut kinds = Vec::with_capacity(args.len());
-        for (arg, expected) in args.iter().zip(expected) {
-            let value = self.lower_expr(arg)?;
-            let expected = self.value_kind(*expected)?;
-            let value = self.coerce_value(value, expected, arg.span())?;
-            regs.push(value.reg);
-            kinds.push(value.kind);
-        }
-        Ok((regs, kinds))
     }
 
     fn lower_generic_args(
@@ -6986,6 +7878,135 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
+    /// Adds a parameter of `kind` named `name` to a function built without a
+    /// source body, such as a thunk.
+    fn push_param(&mut self, name: &str, kind: ValueKind) -> Value {
+        let value = self.alloc(kind);
+        if matches!(kind, ValueKind::Closure(_)) {
+            self.proven_callables.push(value.reg);
+        }
+        self.params.push(Param {
+            source: None,
+            name: name.into(),
+            kind,
+            reg: value.reg,
+        });
+        value
+    }
+
+    /// Puts `value` in the kind it crosses a call through a callable value
+    /// at ([`callable_wire`]).
+    fn wire_value(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
+        match value.kind {
+            ValueKind::Closure(_) => Ok(Value {
+                kind: ValueKind::Closure(None),
+                ..value
+            }),
+            ValueKind::Bool => Ok(value),
+            _ => self.box_any(value, span),
+        }
+    }
+
+    /// Takes `value`, an argument that crossed a callable value's boxed
+    /// entry at its [`callable_wire`] kind, as a parameter of `kind` and
+    /// `range`: the entry check of [`sem::EntryCheck`].
+    ///
+    /// A boxed `<object>` is unboxed to a number or boolean, or cast to a
+    /// class or class object. A callable for a typed callable parameter is
+    /// adapted to its signature ([`Self::adapt`]): this is where an untyped
+    /// callable enters typed code. A value of another class or kind signals a
+    /// `type-error.entry` at `site`, and an `<integer>` outside `range` or
+    /// outside an `<i32>` or `<u32>` a `type-error.range`. A `use-value`
+    /// replacement continues the check as any check's does: a number of the
+    /// register's kind is taken as it is (and then range-checked), and an
+    /// object or a limited integer is checked again.
+    fn unwire(
+        &mut self,
+        value: Value,
+        kind: ValueKind,
+        range: Option<IntRange>,
+        site: &str,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let error = |kind: TypeErrorKind, expected: TypeObject| {
+            type_error_site(kind, expected, String::from(site), span)
+        };
+        match (value.kind, kind) {
+            (ValueKind::Closure(_), ValueKind::Closure(Some(sig))) => self.adapt(value, sig, span),
+            (ValueKind::Closure(_), ValueKind::Closure(None)) => Ok(Value { kind, ..value }),
+            (ValueKind::Any, ValueKind::Any) | (ValueKind::Bool, ValueKind::Bool) => Ok(value),
+            (ValueKind::Any, ValueKind::I64 | ValueKind::F64 | ValueKind::F32) => {
+                let class = scalar_concrete_class(self.module, kind)
+                    .ok_or_else(|| invalid_semantic("a number class is missing"))?;
+                let expected = match range {
+                    Some(range) if kind == ValueKind::I64 => range_expected(range),
+                    _ => kind_expected(self.module, kind),
+                };
+                let unboxed = self.unbox(
+                    value,
+                    class,
+                    kind,
+                    error(TypeErrorKind::Entry, expected),
+                    span,
+                );
+                let Some(range) = range.filter(|_| kind == ValueKind::I64) else {
+                    return Ok(unboxed);
+                };
+                let type_error = error(TypeErrorKind::Range, expected);
+                let checked = self
+                    .code()
+                    .range_check(unboxed.reg, range, type_error, span);
+                self.next_reg = register_at(self.register_kinds.len());
+                Ok(Value {
+                    reg: checked,
+                    ..unboxed
+                })
+            }
+            (ValueKind::Any, ValueKind::I32 | ValueKind::U32) => {
+                let class = scalar_concrete_class(self.module, kind)
+                    .ok_or_else(|| invalid_semantic("the integer class is missing"))?;
+                let integer = self.unbox(
+                    value,
+                    class,
+                    ValueKind::I64,
+                    error(TypeErrorKind::Entry, kind_expected(self.module, kind)),
+                    span,
+                );
+                let type_error = error(TypeErrorKind::Range, kind_expected(self.module, kind));
+                Ok(self.narrow_integer(integer, kind, type_error, span))
+            }
+            (ValueKind::Any, ValueKind::Object(Some(class))) => {
+                let type_error = error(TypeErrorKind::Entry, class_expected(class));
+                let casted = self.alloc(kind);
+                self.instructions.push(Instr::CastObject {
+                    dst: casted.reg,
+                    value: value.reg,
+                    input: value.kind,
+                    class,
+                    type_error,
+                    span,
+                });
+                Ok(casted)
+            }
+            (ValueKind::Any, ValueKind::ClassObject(Some(bound))) => {
+                let type_error = error(TypeErrorKind::Entry, class_object_expected(bound));
+                let casted = self.alloc(kind);
+                self.instructions.push(Instr::CastClassObject {
+                    dst: casted.reg,
+                    value: value.reg,
+                    input: value.kind,
+                    bound,
+                    type_error,
+                    span,
+                });
+                Ok(casted)
+            }
+            _ => Err(invalid_semantic(
+                "a callable's parameter kind has no boxed callable ABI form",
+            )),
+        }
+    }
+
     fn box_any(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
         if value.kind == ValueKind::Any {
             return Ok(value);
@@ -7011,7 +8032,11 @@ impl<'module> BodyLowering<'module> {
         };
         if matches!(
             value.kind,
-            ValueKind::U64 | ValueKind::Function(_) | ValueKind::Closure(_) | ValueKind::Aggregate
+            ValueKind::U64
+                | ValueKind::Function(_)
+                | ValueKind::Closure(_)
+                | ValueKind::Entry
+                | ValueKind::Aggregate
         ) {
             return Err(invalid_semantic(
                 "runtime metadata or callable values cannot be boxed as <object>",
@@ -8347,6 +9372,7 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         | ValueKind::Bool
         | ValueKind::Function(_)
         | ValueKind::Closure(_)
+        | ValueKind::Entry
         | ValueKind::Aggregate
         | ValueKind::Exn
         | ValueKind::Object(None) => None,
@@ -8600,8 +9626,140 @@ impl CodeBuffer<'_> {
     }
 }
 
-/// Returns what a callable's indirect entry must check a `kind` parameter
-/// is, if anything; see [`sem::EntryCheck`].
+/// The register kind a value of `kind` crosses a callable value's boxed
+/// entry at: the boxed callable ABI. A callable stays a callable value and
+/// every other value is a boxed `<object>`, whatever the caller and the
+/// callee declare, so the tape's signature check at `call.indirect` always
+/// passes and the callee's entry ([`sem::EntryCheck`]) and the caller's
+/// result checks decide what each side may rely on. Only untyped calls
+/// whose shape differs from the value's typed entry take it
+/// ([`BodyLowering::call_untyped`]).
+fn callable_wire(kind: ValueKind) -> ValueKind {
+    match kind {
+        ValueKind::Closure(_) => ValueKind::Closure(None),
+        // A boolean has no class, so no type object a failed unboxing could
+        // report: it crosses as a boolean.
+        ValueKind::Bool => ValueKind::Bool,
+        _ => ValueKind::Any,
+    }
+}
+
+/// The shape of a call taking `params` and returning `rets`, which a
+/// callable value records for its typed entry ([`Instr::CallableNew`]): a
+/// hash of what a caller must agree on to call that entry directly. It
+/// covers each value's tape register type and, for a typed callable
+/// parameter, its full signature, since the entry relies on the value it
+/// is passed having that signature's typed entry. A callable result is any
+/// callable value, which an untyped caller takes as one.
+///
+/// The hash is of the signature's text, so units compiled apart agree on
+/// it. Two different signatures with the same hash would let the caller
+/// call the typed entry with registers the tape refuses, a trap, never a
+/// misread value.
+fn callable_shape(
+    signatures: &[CallableSignature],
+    params: &[ValueKind],
+    rets: &[ValueKind],
+) -> u64 {
+    let mut text = String::new();
+    for kind in params {
+        shape_text(signatures, *kind, true, &mut text);
+    }
+    text.push_str("->");
+    for kind in rets {
+        shape_text(signatures, *kind, false, &mut text);
+    }
+    // FNV-1a.
+    text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Writes `kind`'s part of a [`callable_shape`]: its register type, and a
+/// typed callable's signature when `full`.
+fn shape_text(signatures: &[CallableSignature], kind: ValueKind, full: bool, text: &mut String) {
+    let code = match kind {
+        ValueKind::Any => "a",
+        ValueKind::I64 => "i",
+        ValueKind::F64 => "f",
+        ValueKind::I32 => "w",
+        ValueKind::U32 => "u",
+        ValueKind::F32 => "s",
+        ValueKind::U64 => "q",
+        ValueKind::Bool => "b",
+        ValueKind::Object(_)
+        | ValueKind::ClassObject(_)
+        | ValueKind::GenericFunctionObject(_)
+        | ValueKind::MethodObject(_)
+        | ValueKind::SlotDescriptorObject => "o",
+        ValueKind::Closure(Some(sig)) if full => {
+            text.push_str("c(");
+            if let Some(signature) = signatures.get(sig.0 as usize) {
+                for kind in &signature.params {
+                    shape_text(signatures, *kind, true, text);
+                }
+                text.push_str("->");
+                for kind in &signature.rets {
+                    shape_text(signatures, *kind, true, text);
+                }
+            }
+            ")"
+        }
+        ValueKind::Closure(_) => "c",
+        ValueKind::Entry => "e",
+        ValueKind::Function(_) => "F",
+        ValueKind::Aggregate => "g",
+        ValueKind::Exn => "x",
+    };
+    text.push_str(code);
+    text.push(',');
+}
+
+/// Writes signature `sig` as source writes it, such as
+/// `callable(<integer>) => <circle>`, which names its adapter
+/// ([`Lowering::lower_adapter`]) and the sites of its checks.
+fn signature_label(
+    module: &sem::Module,
+    signatures: &[CallableSignature],
+    sig: CallableSigId,
+) -> String {
+    let kind = |kind: &ValueKind| match *kind {
+        ValueKind::I64 => String::from("<integer>"),
+        ValueKind::Closure(Some(inner)) => signature_label(module, signatures, inner),
+        ValueKind::Closure(None) => String::from("<callable>"),
+        ValueKind::Bool => String::from("<boolean>"),
+        ValueKind::Object(Some(class)) => format!("{}", class_expected(class).display(module)),
+        ValueKind::ClassObject(Some(class)) => {
+            format!("{}", class_object_expected(class).display(module))
+        }
+        kind if is_unboxed_number(kind) => {
+            format!("{}", kind_expected(module, kind).display(module))
+        }
+        _ => String::from("<object>"),
+    };
+    let Some(signature) = signatures.get(sig.0 as usize) else {
+        return String::from("<callable>");
+    };
+    let params = signature.params.iter().map(kind).collect::<Vec<_>>();
+    let rets = signature.rets.iter().map(kind).collect::<Vec<_>>();
+    match rets.as_slice() {
+        [ret] => format!("callable({}) => {ret}", params.join(", ")),
+        _ => format!("callable({}) => ({})", params.join(", "), rets.join(", ")),
+    }
+}
+
+/// The signature of `kind`, when it is a typed callable.
+fn typed_callable(kind: &ValueKind) -> Option<CallableSigId> {
+    match kind {
+        ValueKind::Closure(Some(sig)) => Some(*sig),
+        _ => None,
+    }
+}
+
+/// Returns what a typed entry (a callable thunk, a closure body, an exit
+/// procedure, a restart guard) must check a `kind` parameter is, if
+/// anything; see [`sem::EntryTarget::for_guard_kind`]. A dispatcher checks
+/// a `use-value` replacement for a failed send's result the same way.
 ///
 /// A `call.indirect` caller holding an untyped `<callable>` supplies whatever
 /// classes it has, and the tape's `object` register type erases them, so an
@@ -8624,6 +9782,9 @@ fn entry_target(kind: ValueKind) -> Option<sem::EntryTarget> {
 /// `code` and returns the register of the checked value. A class check
 /// failing signals a [`TypeErrorKind::Entry`] error at `site`, and a range
 /// check a [`TypeErrorKind::Range`] one, whose replacement is checked again.
+/// A value already in a number or boolean register needs no
+/// [`sem::EntryTarget::Unbox`] check; a boxed one is checked by
+/// [`BodyLowering::unwire`].
 fn entry_check(
     code: &mut CodeBuffer<'_>,
     target: sem::EntryTarget,
@@ -8633,6 +9794,7 @@ fn entry_check(
     span: Span,
 ) -> Reg {
     match target {
+        sem::EntryTarget::Unbox(_) => value,
         sem::EntryTarget::Range(range) => {
             let type_error =
                 type_error_site(TypeErrorKind::Range, range_expected(range), site, span);
@@ -8912,6 +10074,11 @@ impl Module {
             FunctionKind::ExitThunk { signature } => {
                 writeln!(f, " ; exit thunk for signature {}", signature.0)
             }
+            FunctionKind::BoxedEntry { typed } => writeln!(f, " ; boxed entry of l{}", typed.0),
+            FunctionKind::CallableParts => writeln!(f, " ; opens callable values"),
+            FunctionKind::Adapter { signature } => {
+                writeln!(f, " ; adapter to signature {}", signature.0)
+            }
         }
     }
 
@@ -9025,6 +10192,42 @@ impl Module {
             } => {
                 write!(f, "  %{dst} = closure.new l{}", function.0)?;
                 self.fmt_arg_list(f, captures)?;
+                fmt_span(f, *span)
+            }
+            Instr::CallableNew {
+                dst,
+                typed,
+                boxed,
+                shape,
+                captures,
+                span,
+            } => {
+                write!(f, "  %{dst} = callable.new l{}", typed.0)?;
+                match boxed {
+                    BoxedEntry::Function(function) => write!(f, " boxed l{}", function.0)?,
+                    BoxedEntry::Shared(entry) => write!(f, " boxed %{entry}")?,
+                }
+                write!(f, " shape {shape:#018x}")?;
+                self.fmt_arg_list(f, captures)?;
+                fmt_span(f, *span)
+            }
+            Instr::OpenCallable {
+                typed,
+                boxed,
+                shape,
+                callable,
+                span,
+            } => {
+                let part = |reg: &Option<Reg>| {
+                    reg.map_or_else(|| String::from("_"), |reg| format!("%{reg}"))
+                };
+                write!(
+                    f,
+                    "  {}, {}, {} = callable.open %{callable}",
+                    part(typed),
+                    part(boxed),
+                    part(shape)
+                )?;
                 fmt_span(f, *span)
             }
             Instr::CaptureGet {
@@ -9556,6 +10759,7 @@ impl Module {
                 }
             }
             ValueKind::Closure(None) => write!(f, "callable"),
+            ValueKind::Entry => write!(f, "entry"),
             ValueKind::Object(Some(class)) => {
                 write!(f, "object(")?;
                 self.fmt_class(f, class)?;
@@ -9770,7 +10974,7 @@ mod tests {
         let dump = module.dump();
         assert!(dump.contains("fn l0 inc"));
         assert!(dump.contains("fn l1 main"));
-        assert!(dump.contains("closure.new l"));
+        assert!(dump.contains("callable.new l"));
         assert!(dump.contains("call.indirect"));
         assert!(dump.contains("call l3("));
         assert!(dump.contains("local l0 f"));
@@ -9805,8 +11009,8 @@ mod tests {
             ValueKind::Closure(Some(CallableSigId(0)))
         );
         let dump = module.dump();
-        assert!(dump.contains("closure.new l3"));
-        assert!(dump.contains("closure.new l4"));
+        assert!(dump.contains("callable.new l3"));
+        assert!(dump.contains("callable.new l4"));
     }
 
     #[test]
@@ -9833,10 +11037,9 @@ mod tests {
                 .find(|candidate| candidate.name == local)
                 .expect("local")
                 .reg;
-            function
-                .instructions
-                .iter()
-                .any(|instr| matches!(instr, Instr::CallIndirect { callee, .. } if *callee == reg))
+            function.instructions.iter().any(
+                |instr| matches!(instr, Instr::OpenCallable { callable, .. } if *callable == reg),
+            )
         };
         let pick = function("pick");
         assert!(!calls_through(pick, "return"));
@@ -9871,8 +11074,18 @@ mod tests {
         assert_eq!(module.functions[1].params[0].kind, ValueKind::Closure(None));
         let dump = module.dump();
         assert!(dump.contains("fn l1 callit(%r1 f: callable) -> i64"));
-        assert!(dump.contains("= call.indirect %r1(%r2): i64"));
-        assert!(dump.contains("closure.new l3"));
+        // A call whose shape matches the value's typed entry calls it as it
+        // is; any other crosses boxed, and its result is unboxed where it
+        // lands.
+        assert!(dump.contains("%r4, _, %r5 = callable.open %r1"));
+        assert!(dump.contains("%r3 = call.indirect %r4(%r2): i64"));
+        assert!(dump.contains("%r9 = box.any %r2: i64"));
+        assert!(dump.contains("%r10 = call.indirect %r8(%r9): any"));
+        assert!(dump.contains("unbox <integer>, %r10: i64 else type-error.cast <integer>"));
+        assert!(dump.contains("callable.new l3 boxed l4"));
+        assert!(dump.contains("fn l3 inc#closure(%r1 $env: agg, %r2 arg0: i64) -> i64"));
+        assert!(dump.contains("fn l4 inc#closure#boxed(%r1 $env: agg, %r2 arg0: any) -> any"));
+        assert!(dump.contains("unbox <integer>, %r2: i64 else type-error.entry <integer>"));
     }
 
     #[test]
@@ -9887,7 +11100,7 @@ mod tests {
         assert!(dump.contains("radius#accessor"));
         assert!(dump.contains(" ; slot accessor <circle>.radius"));
         assert!(dump.contains("local l0 getter"));
-        assert!(dump.contains("closure.new l"));
+        assert!(dump.contains("callable.new l"));
         assert!(dump.contains("call.indirect"));
         assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
     }

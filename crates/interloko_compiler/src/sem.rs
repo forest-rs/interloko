@@ -1484,7 +1484,7 @@ fn assign_check_sites(module: &mut Module) {
             continue;
         }
         let mut next = next;
-        function.entry_checks = entry_checks(&function.params, &function.locals, || {
+        function.entry_checks = entry_checks(&function.params, &function.locals, false, || {
             let site = SiteId(next);
             next = next.saturating_add(1);
             site
@@ -1492,10 +1492,12 @@ fn assign_check_sites(module: &mut Module) {
     }
 }
 
-/// The checks an indirect entry makes on `params`, numbered by `site`.
+/// The checks an indirect entry makes on `params`, numbered by `site`; a
+/// restart `guard` takes its parameter unboxed.
 fn entry_checks(
     params: &[LocalId],
     locals: &[Local],
+    guard: bool,
     mut site: impl FnMut() -> SiteId,
 ) -> Vec<EntryCheck> {
     params
@@ -1504,6 +1506,7 @@ fn entry_checks(
             let local = locals.get(param.0 as usize)?;
             let target = match local.range {
                 Some(range) if local.kind == ValueKind::I64 => EntryTarget::Range(range),
+                _ if guard => EntryTarget::for_guard_kind(local.kind)?,
                 _ => EntryTarget::for_kind(local.kind)?,
             };
             Some(EntryCheck {
@@ -1600,11 +1603,13 @@ impl<'a> SiteNumbering<'a> {
                 if let Some(closure) = self.closures.get_mut(index) {
                     closure.body = body;
                     let mut next = self.next;
-                    closure.entry_checks = entry_checks(&closure.params, &closure.locals, || {
-                        let site = SiteId(next);
-                        next = next.saturating_add(1);
-                        site
-                    });
+                    let guard = closure.restart_guard;
+                    closure.entry_checks =
+                        entry_checks(&closure.params, &closure.locals, guard, || {
+                            let site = SiteId(next);
+                            next = next.saturating_add(1);
+                            site
+                        });
                     self.next = next;
                 }
             }
@@ -2589,16 +2594,18 @@ pub struct Function {
 /// A check a callable's indirect entry makes on one parameter before its
 /// body relies on the parameter's declared type.
 ///
-/// A caller holding an untyped `<callable>`, or one whose signature
-/// nothing checked, supplies whatever value it has, and the tape's
-/// `object` register type erases classes. So a function reached through a
-/// callable value, a closure, or a block's exit procedure checks each
-/// parameter that names a class: an instance of it, or a class object
-/// naming it or a subclass. Unboxed numbers, booleans, and callables are
-/// register types the tape checks itself, but no register type holds a
-/// limited integer's range, so a `limited(<integer>, ...)` parameter is
-/// checked against it too: a direct call checks its argument itself, and
-/// an indirect caller may not know the range.
+/// A callable value has two entries. Its typed entry takes the arguments
+/// at its own signature's register types; static typing, and the adapter
+/// an untyped callable gets where it enters typed code, let a caller of a
+/// known signature call it directly, and an untyped caller calls it when
+/// its own call has the same shape. That entry checks what a register type
+/// does not establish: an instance of a class, a class object naming it or
+/// a subclass, or an `<integer>` in a `limited(<integer>, ...)` range.
+/// Every other untyped call goes through the boxed entry, under the boxed
+/// callable ABI, where each argument that is not a callable arrives as a
+/// boxed `<object>`, so it also checks a number of the parameter's kind
+/// ([`EntryTarget::Unbox`]). Only an `<object>` parameter takes the box as
+/// it is; a boolean, which has no class to check, crosses unboxed.
 ///
 /// Each check is a site of the definition whose sites number its body,
 /// after the body's own, so soft typing classifies it like any cast.
@@ -2621,10 +2628,17 @@ pub enum EntryTarget {
     ClassObject(ClassId),
     /// An `<integer>` in the range.
     Range(IntRange),
+    /// A number of the kind: an `<integer>`, `<i32>`, `<u32>`,
+    /// `<double-float>` or `<single-float>`, unboxed
+    /// from the boxed `<object>` an untyped caller passed to the boxed
+    /// entry; the typed entry's register type establishes it. An `<i32>`
+    /// or `<u32>` is an `<integer>` in its range.
+    Unbox(ValueKind),
 }
 
 impl EntryTarget {
-    /// The check a parameter of `kind` needs at an indirect entry, if any.
+    /// The check a parameter of `kind` needs at an indirect entry, if any; a
+    /// limited integer's is [`Self::Range`] instead.
     #[must_use]
     pub fn for_kind(kind: ValueKind) -> Option<Self> {
         match kind {
@@ -2637,7 +2651,21 @@ impl EntryTarget {
                 Some(Self::Instance(class))
             }
             ValueKind::ClassObject(class) => Some(Self::ClassObject(class)),
+            ValueKind::I64 | ValueKind::F64 | ValueKind::I32 | ValueKind::U32 | ValueKind::F32 => {
+                Some(Self::Unbox(kind))
+            }
             _ => None,
+        }
+    }
+
+    /// The check a restart guard's parameter needs: the handler search
+    /// calls a guard with the condition in its own register type, so only
+    /// a class is checked.
+    #[must_use]
+    pub fn for_guard_kind(kind: ValueKind) -> Option<Self> {
+        match Self::for_kind(kind) {
+            Some(Self::Unbox(_)) => None,
+            target => target,
         }
     }
 }
@@ -2676,6 +2704,11 @@ pub struct Closure {
     /// Checks the closure's entry makes; a closure is only ever entered
     /// indirectly. Its sites belong to the body that creates it.
     pub entry_checks: Vec<EntryCheck>,
+    /// Whether this is a `handle` clause's restart guard, which the handler
+    /// search calls with the condition at the clause's class and which never
+    /// becomes a callable value. Every other closure is a callable value,
+    /// with a typed entry and a boxed one ([`EntryCheck`]).
+    pub restart_guard: bool,
     /// Source span.
     pub span: Span,
 }
@@ -3977,11 +4010,12 @@ impl GenericSymbol {
     }
 }
 
-/// How one result of a call through a `<callable>` value is checked back to
-/// the kind its call site relies on.
+/// How one result of a call through a `<callable>` value, or of a body, is
+/// checked back to the kind its consumer relies on.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum CallableResultCheck {
-    /// The tape's register type already establishes the kind.
+    /// The value's register type establishes the kind: once lowering has
+    /// unboxed it, for a callable value's number or boolean result.
     Trusted(ValueKind),
     /// An `<integer>` result is converted, with a range check, to a limited
     /// integer.
@@ -7513,6 +7547,7 @@ impl Lowering {
             result_ranges: vec![None],
             return_annotation: None,
             entry_checks: Vec::new(),
+            restart_guard: false,
             span,
         });
 
@@ -7631,6 +7666,7 @@ impl Lowering {
                 result_ranges: result_ranges.clone(),
                 return_annotation,
                 entry_checks: Vec::new(),
+                restart_guard: false,
                 span,
             };
         }
@@ -8240,14 +8276,14 @@ impl Lowering {
                     span,
                 };
             }
-            // Otherwise the signature is only the value's declared type, and
-            // nothing checked the callable it holds against it: the value may
-            // have arrived through an untyped call, whose callee entry checks
-            // only its own parameter classes. The tape enforces the register
-            // kinds the signature fixes, but every class shares the `object`
-            // register type, so class results are cast as for an untyped
-            // call. Arguments need nothing here: the callee's indirect entry
-            // checks the classes it relies on.
+            // Otherwise the call is a typed one: lowering calls the value's
+            // typed entry with the signature's register types, which static
+            // typing, and the adapter an untyped callable gets where it
+            // enters typed code, make agree with the entry. Every class shares
+            // the `object` register type, so class results are cast as for an
+            // untyped call, and a limited result is checked against its range.
+            // Arguments need nothing here: the callee's indirect entry checks
+            // the classes and ranges it relies on.
             return self
                 .checked_callable_call(
                     ctx,
@@ -8270,15 +8306,17 @@ impl Lowering {
             return Expr::Error { span };
         };
         // An untyped callable's register kinds come from the call site, and
-        // nothing about the callee backs them: the registers only carry
-        // `object`, so a `<square>` arrives where the context wants a
-        // `<circle>`. Each result therefore crosses at the widest kind its
-        // register can carry and is checked back to the context's kind: a
-        // limited integer by a range conversion, a class by a cast. Both are
-        // ordinary check sites, so soft typing sees (and may later prove)
-        // them. Arguments go at the caller's kinds, limited integers widened;
-        // the callee's indirect entry checks the parameter classes it relies
-        // on, since only it knows them.
+        // nothing about the callee backs them. Lowering calls the value's
+        // typed entry when its signature has exactly this call's shape, and
+        // otherwise its boxed entry, unboxing each result where it lands.
+        // Either way the registers only carry `object` for classes, so a
+        // `<square>` arrives where the context wants a `<circle>`: each
+        // result crosses at the widest kind its register can carry and is
+        // checked back to the context's kind, a limited integer by a range
+        // conversion, a class by a cast. Both are ordinary check sites, so
+        // soft typing sees (and may later prove) them. Arguments go at the
+        // caller's kinds, limited integers widened; the callee's entry checks
+        // what it relies on, since only it knows.
         let as_integer = |kind: ValueKind| match kind {
             ValueKind::I32 | ValueKind::U32 => ValueKind::I64,
             kind => kind,
@@ -8554,7 +8592,8 @@ impl Lowering {
     /// site's `kind`, or `None` when no runtime check can establish it.
     ///
     /// Unboxed numbers, booleans, `<object>` and callables are register
-    /// types the tape itself enforces at the call. Every class shares the
+    /// types a typed entry returns at, and lowering unboxes them to that
+    /// type from a boxed entry, checking the class. Every class shares the
     /// `object` register type, so a class result arrives as any object and
     /// is cast. Metaobject kinds name one class, generic, method or slot,
     /// which no cast can check.
@@ -8589,8 +8628,8 @@ impl Lowering {
     /// runtime check can establish it.
     ///
     /// As [`Self::untyped_result_check`], except that a declared signature
-    /// fixes a limited integer's register kind, which the tape checks at
-    /// the call, and that a declared `limited(<integer>, ...)` result is
+    /// fixes a limited integer's register kind, which the typed entry
+    /// returns at, and that a declared `limited(<integer>, ...)` result is
     /// checked against its range, as a class result is cast.
     fn signature_result_check(
         &self,
@@ -8943,6 +8982,11 @@ impl Lowering {
         };
         let closure =
             self.lower_closure_expr(ctx, core::slice::from_ref(&param), None, &body, span);
+        if let Expr::Closure { closure, .. } = &closure
+            && let Some(closure) = self.closures.get_mut(closure.0 as usize)
+        {
+            closure.restart_guard = true;
+        }
         let results = match &closure {
             Expr::Closure {
                 callable_signature, ..
@@ -10093,7 +10137,6 @@ impl Lowering {
                 callable_signature, ..
             } => Some(callable_signature.clone()),
             Expr::KnownCallable { callable, .. } => self.known_callable_signature(*callable),
-            Expr::Block { body, .. } => self.expr_callable_signature(&body.result),
             Expr::AccessorCall { class, slot, .. } => self
                 .classes
                 .get(class.0 as usize)
@@ -10104,7 +10147,8 @@ impl Lowering {
             | Expr::DirectCall { .. }
             | Expr::GenericCall { .. }
             | Expr::If { .. }
-            | Expr::Handle { .. } => {
+            | Expr::Handle { .. }
+            | Expr::Block { .. } => {
                 match self.expr_result_callable_signatures(expr).as_mut_slice() {
                     [signature] => signature.take(),
                     _ => None,
@@ -10148,7 +10192,22 @@ impl Lowering {
                     vec![None; self.expr_kinds(expr).len()]
                 }
             }
-            Expr::Handle { restart, .. } => restart.result_callable_sigs.clone(),
+            // A join keeps a callable's signature only when every way out
+            // agrees on it: otherwise an untyped callable could reach a typed
+            // binding through the other.
+            Expr::Handle { body, restart, .. } => {
+                let body_signatures = self.expr_result_callable_signatures(body);
+                if body_signatures == restart.result_callable_sigs {
+                    body_signatures
+                } else {
+                    vec![None; self.expr_kinds(expr).len()]
+                }
+            }
+            // A block's exit procedure takes untyped callables, so a block
+            // with one produces untyped callables.
+            Expr::Block {
+                exit: Some(exit), ..
+            } => vec![None; exit.result_kinds.len()],
             Expr::Block { body, .. } => self.expr_result_callable_signatures(&body.result),
             _ => vec![self.expr_callable_signature(expr)],
         }
@@ -11411,7 +11470,7 @@ mod tests {
     }
 
     #[test]
-    fn indirect_entries_check_class_parameters_after_the_body_sites() {
+    fn indirect_entries_check_parameters_after_the_body_sites() {
         let module = lower_source(&format!(
             "{SITES}define function named(c :: class <shape>, s :: <shape>, n :: <integer>) => <integer>\n  area(s)\nend;\n\
              define function apply-named(c :: class <shape>) => <integer>\n  \
@@ -11424,7 +11483,8 @@ mod tests {
         // `first` is never a value, so only direct calls enter it.
         assert!(function(&module, "first").entry_checks.is_empty());
         assert!(function(&module, "apply-named").entry_checks.is_empty());
-        // `named` is: its class parameters are checked after `area(s)`, s0.
+        // `named` is: its parameters are checked after `area(s)`, s0, the
+        // `<integer>` too, since it arrives boxed.
         let named = function(&module, "named");
         assert_eq!(
             named.entry_checks,
@@ -11438,6 +11498,11 @@ mod tests {
                     param: named.params[1],
                     target: EntryTarget::Instance(shape),
                     site: SiteId(2),
+                },
+                EntryCheck {
+                    param: named.params[2],
+                    target: EntryTarget::Unbox(ValueKind::I64),
+                    site: SiteId(3),
                 },
             ]
         );

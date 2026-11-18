@@ -862,20 +862,45 @@ break loop parses literals only, so it can resume a numeric check; a cast
 needs an object, which a programmatic chooser can take from a frame's
 registers (`InterlokoHost::value_class` finds one of the right class).
 
-One mismatch still traps rather than signalling. A call through an
-untyped `<callable>` passes each argument in the register type the call
-site has, and expects its results in the type its context needs. Objects
-and class objects share one register type, so their classes are checked at
-the callee's entry (`type-error.entry`) or on the result (`type-error.cast`).
-Scalars and boxed `<object>`s do not: applying a function that takes a
-`<double-float>` or an `<i32>` to an `<integer>`, one that returns an
-`<object>` where a `<double-float>` is expected, or one that takes a
-`<circle>` (or a generic that takes runtime objects) to an `<object>`
-value, fails the VM's own signature check at the call (`runtime.trap`,
-"type mismatch") before any Loko code runs. Making
-those signal needs every untyped callable call to box its scalars and
-every callable entry and result to check and unbox them, a calling
-convention change for all callable values, so it waits for its own slice.
+A callable value has two entries. Its typed entry takes and returns
+values at the value's own signature, unboxed; its boxed entry takes and
+returns every value that is not itself a callable as a boxed `<object>`,
+whatever either side declares, and checks and unboxes the arguments. A call
+through a callable of a known signature, such as a
+`callable(<integer>) => <integer>` parameter or an anonymous function bound
+to a typed local, is a static call of the typed entry. An untyped call,
+through a `<callable>` or `apply`, compares its own shape with the value's
+signature (a hash the value carries) and calls the typed entry when they
+match, so passing an `<integer>` to a function that takes one costs about
+what a typed call does. Otherwise it boxes the arguments and calls the boxed
+entry, where the callee checks each parameter it relies on: an `<integer>`
+passed to a function that takes a `<double-float>` or `<single-float>`, or
+a boxed `<square>` to one that takes a `<circle>`, signals
+`type-error.entry`, and an `<integer>` outside an `<i32>` or `<u32>`
+parameter's range `type-error.range`, at the entry check's site (its typing
+decision, or `entry:<function>:<index>` for a thunk no typing classifies).
+The caller unboxes each result where it lands: a number of another class signals `type-error.cast` at the call, such as an `<object>`
+holding a string where a `<double-float>` is expected, and a class result is
+cast at a site typing classifies.
+
+Static typing keeps an untyped callable out of a typed binding: a join (an
+`if`, a `handle`, a `block` with an exit procedure, which takes untyped
+callables) keeps a callable's signature only when every way out has it. The
+one place an untyped callable still enters typed code is where a boxed entry
+passes it to a typed callable parameter. There it gets an adapter: a typed
+entry for the declared signature that boxes the arguments, calls the
+value's boxed entry and checks each result, signalling `type-error.entry` at
+`entry:<signature>:<index>` for one of another kind, so typed calls through
+the parameter stay static and sound. `use-value` continues all of these
+checks like any other, so code after an entry, a call or an adapter only
+sees values that passed them.
+
+Three mismatches still trap: a callable passed where a value is expected,
+or a value where a callable is (a callable is not an `<object>`, so it has
+no boxed form); a boolean where another value is expected, or another value
+where a boolean is (a boolean has no class, so no type object a failed
+unboxing could report, and it crosses unboxed); and a call through a
+callable value with the wrong number of arguments or results.
 
 ## Failed Sends
 

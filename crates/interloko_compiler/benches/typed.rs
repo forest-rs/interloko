@@ -53,7 +53,7 @@
 //!   runs the same test and reads the slot through a `<square>` parameter
 //!   holding the same object.
 //!
-//! Three cases measure calls through callable values, each against a
+//! Four cases measure calls through callable values, each against a
 //! direct call of the same function:
 //!
 //! - `untyped call`: `apply(f, d)` on a `<callable>` parameter holding a
@@ -62,6 +62,13 @@
 //!   parameter holding the same function.
 //! - `untyped closure`: `apply(f, d)` on a `<callable>` holding an
 //!   anonymous function.
+//! - `mismatched call`: `apply(f, x)` on the same function value with an
+//!   `<object>` argument, whose call shape is not the function's, so the
+//!   argument and result cross boxed.
+//!
+//! Two more measure carrying a callable value through calls without calling
+//! it, against `plain`: `typed passed` through a typed callable parameter,
+//! `untyped passed` through a `<callable>` one.
 //!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
@@ -300,6 +307,30 @@ end;
 define function closure-call(d :: <integer>) => <integer>
   closure-tree(function (n :: <integer>) => <integer> n + 1 end, d)
 end;
+
+define function mismatched-tree(f :: <callable>, x :: <object>, d :: <integer>) => <integer>
+  if d = 0 then apply(f, x) else mismatched-tree(f, x, d - 1) + mismatched-tree(f, x, d - 1) end
+end;
+
+define function mismatched(d :: <integer>) => <integer>
+  mismatched-tree(inc, as(<object>, d), d)
+end;
+
+define function typed-carry(f :: callable(<integer>) => <integer>, d :: <integer>) => <integer>
+  if d = 0 then 1 else typed-carry(f, d - 1) + typed-carry(f, d - 1) end
+end;
+
+define function typed-passed(d :: <integer>) => <integer>
+  typed-carry(inc, d)
+end;
+
+define function untyped-carry(f :: <callable>, d :: <integer>) => <integer>
+  if d = 0 then 1 else untyped-carry(f, d - 1) + untyped-carry(f, d - 1) end
+end;
+
+define function untyped-passed(d :: <integer>) => <integer>
+  untyped-carry(inc, d)
+end;
 ";
 
 /// Cases recurse as a balanced binary tree this deep and operate at its
@@ -389,6 +420,9 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("untyped call", net("untyped", "inc-called")),
         ("typed callable", net("typed-callable", "inc-called")),
         ("untyped closure", net("closure-call", "inc-called")),
+        ("mismatched call", net("mismatched", "inc-called")),
+        ("typed passed", net("typed-passed", "plain")),
+        ("untyped passed", net("untyped-passed", "plain")),
     ]
 }
 

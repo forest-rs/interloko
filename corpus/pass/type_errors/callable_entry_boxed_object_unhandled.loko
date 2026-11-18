@@ -1,0 +1,26 @@
+// expect: runtime code type-error.entry
+// expect: run reports type-error.entry: {<square>} is not of type <circle> at typing:def
+// expect: diagnostics 0
+
+// An `<object>` argument is passed as the box it already is; the entry of
+// a function taking a `<circle>` casts what the box holds.
+
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define function radius-of(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define function call(f :: <callable>, x :: <object>) => <integer>
+  apply(f, x)
+end;
+
+define function main() => <integer>
+  call(radius-of, as(<object>, make(<square>, side: 3)))
+end;

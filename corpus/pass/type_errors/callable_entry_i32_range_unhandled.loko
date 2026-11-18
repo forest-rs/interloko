@@ -1,0 +1,20 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 5000000000 is not of type <i32> at typing:def
+// expect: diagnostics 0
+
+// An `<i32>` is an `<integer>` in its range. An untyped call passing an
+// `<integer>` does not have the shape of a function taking an `<i32>`, so
+// it passes it boxed, and the function's boxed entry converts it, signalling
+// a range error for one outside the range.
+
+define function widen(x :: <i32>) => <integer>
+  as(<integer>, x)
+end;
+
+define function call(f :: <callable>, n :: <integer>) => <integer>
+  apply(f, n)
+end;
+
+define function main() => <integer>
+  call(widen, 5000000000)
+end;
