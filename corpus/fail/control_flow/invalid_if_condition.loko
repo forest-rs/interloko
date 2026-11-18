@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code sem.if-condition-type-mismatch
-// expect: diagnostic contains if condition must be bool
+// expect: diagnostic contains if condition must be a <boolean>, not <integer>
 
 define function main()
   if 1 then 2 else 3 end

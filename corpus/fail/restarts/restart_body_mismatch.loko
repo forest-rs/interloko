@@ -1,5 +1,5 @@
 // expect: diagnostics 1
-// expect: diagnostic contains handle body and restart must have matching result kinds
+// expect: diagnostic contains handle body and restart must produce the same types, not <integer> and <boolean>
 
 define class <bad-input> (<object>)
   slot fallback :: <integer>;

@@ -1,5 +1,5 @@
 // expect: diagnostic code sem.constant-initializer-type-mismatch
-// expect: diagnostic contains constant `$helper` initializer must produce a runtime value
+// expect: diagnostic contains constant `$helper` cannot hold function `helper` without a declared type; declare it `:: <callable>`
 
 define function helper()
   1

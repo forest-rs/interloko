@@ -5103,22 +5103,17 @@ impl Lowering {
                             | ValueKind::Vector(_)
                             | ValueKind::Error
                     )
+                    && let Some(param) = generic.params.get(param_index)
+                    && let Some(annotation) = param.type_annotation.as_ref()
                 {
+                    // Methods specialize a generic's parameters on classes,
+                    // and neither `<boolean>` nor a callable type is one: the
+                    // same fact a method parameter declared so reports.
                     self.diagnostics.push(
-                        Diagnostic::error(
-                            generic
-                                .params
-                                .get(param_index)
-                                .map_or(generic.span, |param| param.span),
-                            DiagnosticCode::GenericArgumentTypeMismatch,
-                        )
-                        .with_arg(DiagnosticArg::text("generic", generic.name.clone()))
-                        .with_arg(DiagnosticArg::unsigned(
-                            "argument_index",
-                            u64::try_from(param_index + 1).unwrap_or(u64::MAX),
-                        ))
-                        .with_arg(DiagnosticArg::text("expected", "<object>"))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(*kind))),
+                        Diagnostic::error(annotation.span(), DiagnosticCode::AstAnnotationNotClass)
+                            .with_arg(DiagnosticArg::text("position", "generic parameter"))
+                            .with_arg(DiagnosticArg::text("name", param.name.clone()))
+                            .with_arg(DiagnosticArg::text("type", annotation.to_string())),
                     );
                 }
             }
@@ -7696,10 +7691,7 @@ impl Lowering {
             actual => {
                 ctx.diagnostics.push(
                     Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
-                        .with_arg(DiagnosticArg::text(
-                            "expected",
-                            "known callable, generic function, or <callable>",
-                        ))
+                        .with_arg(DiagnosticArg::text("expected", "<callable>"))
                         .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
                 );
                 Expr::Error { span }
@@ -10928,6 +10920,21 @@ impl Lowering {
         params
             .chain(results)
             .find_map(|(position, expected, actual, from, into)| {
+                // A generic whose methods all specialize a parameter on
+                // object classes takes only objects there, never the
+                // number or boolean a caller passing any `<object>` may:
+                // its parameter is narrower, which source has no name for.
+                if matches!(position, ContractPosition::Parameter(_))
+                    && expected.kind == ValueKind::Any
+                    && expected.signature.is_none()
+                    && actual.kind == ValueKind::Object(OBJECT_CLASS_ID)
+                {
+                    return Some(SignatureMismatch::Variance {
+                        position,
+                        expected: self.kind_name(ValueKind::Any),
+                        actual: "an object that is not a number or boolean".into(),
+                    });
+                }
                 if !shares_register_type(expected.kind, actual.kind) {
                     return Some(SignatureMismatch::Incompatible);
                 }

@@ -1,0 +1,25 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.callable-parameter-variance
+// expect: diagnostic contains its parameter 1 accepts only an object that is not a number or boolean, but callers may pass any <object>
+
+// Every method of `area` specializes on an object class, so it takes only
+// objects; a caller of a `callable(<object>) => <integer>` may pass it a
+// number. Declaring the parameter `callable(<circle>) => <integer>`, or
+// adding a method on `<object>`, makes the two agree.
+
+define class <circle> (<object>)
+end;
+
+define generic area(shape) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  1
+end;
+
+define function total(measure :: callable(<object>) => <integer>) => <integer>
+  0
+end;
+
+define function main() => <integer>
+  total(area)
+end;

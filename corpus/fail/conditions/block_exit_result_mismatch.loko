@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code sem.block-exit-result-mismatch
-// expect: diagnostic contains block body and exit must have matching result kinds
+// expect: diagnostic contains block body and exit must produce the same types, not <boolean> and <integer>
 
 // The exit takes the block's result values, which come from the context:
 // here `<integer>`, so a body producing a boolean disagrees with its exit.
