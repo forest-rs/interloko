@@ -25208,6 +25208,179 @@ end;
         assert_eq!(outcomes[1], (vec![Value::I64(10)], vec![Value::I64(30)]));
     }
 
+    /// `main` stops, and once a chooser has installed newer code and
+    /// retried it, returns that code's `probe`, which weighs a circle.
+    /// `weight` promises no range here.
+    const RANGED: &str = "define class <stop> (<object>)\nend;\n\
+         define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic weight(s :: <shape>) => <integer>;\n\
+         define method weight(s :: <circle>) => <integer>\n  1000\nend;\n\
+         define function stop() => <integer>\n  signal(make(<stop>))\nend;\n\
+         define function probe() => <integer>\n  weight(make(<circle>))\nend;\n\
+         define function main() => <callable>\n  let x = stop();\n  probe\nend;\n\
+         define function apply-it(f :: <callable>) => <integer>\n  apply(f)\nend;";
+
+    /// [`RANGED`] edited so that `weight`, and `probe` with it, promise a
+    /// result from 0 to 100, and `main` no longer stops.
+    fn ranged_edit() -> String {
+        let limited = "limited(<integer>, min: 0, max: 100)";
+        RANGED
+            .replace(
+                "weight(s :: <shape>) => <integer>",
+                &format!("weight(s :: <shape>) => {limited}"),
+            )
+            .replace(
+                "weight(s :: <circle>) => <integer>\n  1000",
+                &format!("weight(s :: <circle>) => {limited}\n  20"),
+            )
+            .replace("probe() => <integer>", &format!("probe() => {limited}"))
+            .replace("let x = stop();\n  probe", "let x = 0;\n  probe")
+    }
+
+    /// Installs `a` in a new VM and runs its `main`, which stops; the
+    /// chooser installs `b` and retries `main`, which returns `b`'s `probe`.
+    fn probe_from_an_edit(
+        a: &SessionArtifacts,
+        b: &SessionArtifacts,
+    ) -> (Vm<InterlokoHost>, Installed, Vec<Value>) {
+        assert_eq!(a.diagnostics, Vec::new());
+        assert_eq!(b.diagnostics, Vec::new());
+        let tape = a.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let mut asked = 0;
+        let probe = run_driver(
+            &mut vm,
+            &mut installed,
+            tape_function(a, "main"),
+            &[],
+            |condition| {
+                asked += 1;
+                if asked == 1 {
+                    return Choice::Install(b.code_unit().expect("tape"));
+                }
+                assert!(condition.refused.is_none(), "{:?}", condition.refused);
+                let main = condition
+                    .frames
+                    .iter()
+                    .find(|frame| frame.code.name.as_deref() == Some("main"))
+                    .expect("main waits");
+                Choice::Retry {
+                    frame: main.frame.activation.clone(),
+                }
+            },
+        );
+        (vm, installed, probe)
+    }
+
+    #[test]
+    fn a_run_is_refused_when_its_entry_breaks_what_earlier_runs_code_relies_on() {
+        // Run 1 installs B, whose `weight` promises a result from 0 to 100,
+        // and returns B's `probe`, which was compiled against that promise.
+        // Run 2 starts from A, whose `weight` returns 1000: B's `probe` would
+        // return it as a value its own declared range excludes, unchecked
+        // under `proved` (its sends' results are proved in range), so the
+        // run is refused before anything runs.
+        for policy in [lower::CodegenPolicy::Off, lower::CodegenPolicy::Proved] {
+            let a = compile_under(RANGED, policy);
+            let b = compile_under(&ranged_edit(), policy);
+            let (mut vm, mut installed, probe) = probe_from_an_edit(&a, &b);
+            let run = driver::run_installed(
+                &mut vm,
+                &mut installed,
+                tape_function(&a, "apply-it"),
+                &probe,
+                InvocationOptions::default(),
+                &mut Scripted(|_: &UnhandledCondition<'_>| Choice::Abort),
+            );
+            let error = match run {
+                Err(RunFailure::Link(error)) => error,
+                other => panic!("{policy:?}: expected a refused run, got {other:?}"),
+            };
+            let driver::LinkError::EarlierCode { mismatch, .. } = &error else {
+                panic!("{policy:?}: {error:?}");
+            };
+            assert_eq!(
+                broken_contract(Some(mismatch)),
+                (
+                    "weight".into(),
+                    ContractPosition::Result(0),
+                    "limited(<integer>, min: 0, max: 100)".into(),
+                    "<integer>".into()
+                ),
+                "{policy:?}"
+            );
+            assert_eq!(
+                FunctionCallError::Link { error }.to_string(),
+                "cannot link the program: cannot run over code an earlier run installed, \
+                 which values from that run may still call: weight would return <integer> \
+                 as result 1 where callers expect limited(<integer>, min: 0, max: 100)"
+            );
+        }
+    }
+
+    #[test]
+    fn earlier_runs_code_that_keeps_its_promises_runs_in_later_runs() {
+        // B edits `weight`'s body within the same contract, so A can take
+        // over from it: B's `probe` weighs with A's method again, linked or
+        // dynamic, and its run may install C under it and retry its frame.
+        let edit = |weight: &str, probe: &str| {
+            RANGED
+                .replace("<integer>\n  1000", &format!("<integer>\n  {weight}"))
+                .replace(
+                    "probe() => <integer>\n  weight(make(<circle>))",
+                    &format!("probe() => <integer>\n  {probe}"),
+                )
+                .replace("let x = stop();\n  probe", "let x = 0;\n  probe")
+        };
+        let outcomes = [lower::CodegenPolicy::Off, lower::CodegenPolicy::Proved].map(|policy| {
+            let a = compile_under(RANGED, policy);
+            // B's `probe` stops after weighing; C's adds 5 instead.
+            let b = compile_under(&edit("20", "weight(make(<circle>)) + stop()"), policy);
+            let c = compile_under(&edit("30", "weight(make(<circle>)) + 5"), policy);
+            assert_eq!(c.diagnostics, Vec::new());
+            let (mut vm, mut installed, probe) = probe_from_an_edit(&a, &b);
+            let mut asked = 0;
+            let mut seen = None;
+            let retried = run_driver(
+                &mut vm,
+                &mut installed,
+                tape_function(&a, "apply-it"),
+                &probe,
+                |condition| {
+                    asked += 1;
+                    if asked == 1 {
+                        return Choice::Install(c.code_unit().expect("tape"));
+                    }
+                    assert!(condition.refused.is_none(), "{:?}", condition.refused);
+                    let frame = condition
+                        .frames
+                        .iter()
+                        .find(|frame| frame.code.name.as_deref() == Some("probe"))
+                        .expect("B's probe waits");
+                    seen = Some(frame.code.clone());
+                    Choice::Retry {
+                        frame: frame.frame.activation.clone(),
+                    }
+                },
+            );
+            let seen = seen.expect("the chooser saw B's probe");
+            assert_eq!(seen.func.unit.0, 1, "the frame runs B's code");
+            assert_eq!(seen.current.map(|current| current.unit.0), Some(2));
+            assert!(seen.is_retryable(), "{seen:?}");
+            retried
+        });
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "linked sends follow dynamic dispatch"
+        );
+        assert_eq!(outcomes[1], vec![Value::I64(30 + 5)]);
+    }
+
     #[test]
     fn a_unit_without_contracts_cannot_take_over_or_be_taken_over() {
         // The edit makes `make-shape` return a <square>, which the waiting
@@ -25267,6 +25440,50 @@ end;
              code compiled against it relies on is unknown"
         );
         assert_eq!(value.expect("main finishes"), FunctionValue::Integer(3));
+    }
+
+    #[test]
+    fn code_another_install_put_in_the_vm_cannot_send_into_this_run() {
+        // Two installs of the same program in one VM are unrelated: the
+        // second's runs never compared anything with the first's code, so
+        // the first's `probe`, passed in as an argument, may not send to the
+        // second's methods. A linked send keeps following the first's own
+        // links, which no run of the second repoints.
+        let source = RANGED.replace("let x = stop();\n  probe", "let x = 0;\n  probe");
+        let outcomes = [lower::CodegenPolicy::Off, lower::CodegenPolicy::Proved].map(|policy| {
+            let a = compile_under(&source, policy);
+            assert_eq!(a.diagnostics, Vec::new());
+            let tape = a.tape.as_ref().expect("tape");
+            let mut vm = Vm::new(
+                InterlokoHost::new(tape.runtime().clone()),
+                Limits::default(),
+            );
+            let mut first = driver::install(&mut vm, &tape.code).expect("installs");
+            let probe = run_driver(&mut vm, &mut first, tape_function(&a, "main"), &[], |_| {
+                Choice::Abort
+            });
+            let mut second = driver::install(&mut vm, &tape.code).expect("installs");
+            driver::run_installed(
+                &mut vm,
+                &mut second,
+                tape_function(&a, "apply-it"),
+                &probe,
+                InvocationOptions::default(),
+                &mut Scripted(|_: &UnhandledCondition<'_>| Choice::Abort),
+            )
+            .map(|outcome| outcome.outputs)
+            .map_err(|failure| match failure {
+                RunFailure::Control { fault, .. } => Some(fault),
+                _ => None,
+            })
+        });
+        assert_eq!(
+            outcomes[0],
+            Err(Some(ControlFault::ForeignCode {
+                unit: execution_tape::value::UnitId(0)
+            }))
+        );
+        assert_eq!(outcomes[1], Ok(vec![Value::I64(1000)]));
     }
 
     #[test]

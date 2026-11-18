@@ -694,8 +694,8 @@ sends and dispatcher call it. Contracts never come from the soft typing
 pass or any finer reading of a body, so a body edit changes a contract
 only when it changes what callers were compiled to trust.
 
-Newer code may stand in for older code that live frames were compiled
-against only when its contract keeps the older one's promise: each
+Newer code may stand in for older code that live frames or values were
+compiled against only when its contract keeps the older one's promise: each
 parameter may *widen* (accept at least what callers pass) and each result
 may *narrow* (return only what callers expect). Anything else is refused,
 as a layout change is:
@@ -703,8 +703,10 @@ as a layout change is:
 - **Install.** A unit installed while frames are suspended must keep the
   runtime layout, and every generic must keep its tape signature and keep
   its contract's promise, because old frames send to its newest methods.
-  Functions and methods are not checked here: direct calls stay within
-  the caller's unit, and methods are reached only through their generic.
+  It is checked against every unit whose code may still run, earlier
+  runs' included (see below). Functions and methods are not checked here:
+  direct calls stay within the caller's unit, and methods are reached only
+  through their generic.
   A refused unit is not installed; the chooser is asked again with the
   reason (`UnhandledCondition::refused`), and the REPL reports that the
   edit applies to new runs only.
@@ -714,19 +716,48 @@ as a layout change is:
   retryable (`FrameCode::retry_refusal`); choosing it anyway is an invalid
   choice. The REPL lists the reason beside the frame and refuses `retry`
   with it, leaving the break waiting.
+- **Earlier runs.** Code a chooser installed outlives its run when a value
+  it made does, such as a returned closure, and a later run of the same
+  installed code (`driver::run_installed`) starts from its entry unit
+  again: that code's sends now reach the entry unit's methods. So the
+  entry unit must take over from every unit an earlier run installed by
+  the install rule above, closed-world assumptions and `limited` ranges
+  included. A run whose entry would break such a promise is refused before
+  anything runs (`LinkError::EarlierCode`), naming the definition and the
+  contract or assumption. That unit had itself to keep the entry's
+  promises when it installed, so the two generic contracts can only be
+  equivalent: an edit that changes a generic's contract at all ends later
+  runs of the same installed program. For example:
+
+  ```text
+  cannot run over code an earlier run installed, which values from that run may
+  still call: weight would return <integer> as result 1 where callers expect
+  limited(<integer>, min: 0, max: 100)
+  ```
+
+  Leaving the older unit's links on its own code instead would not help:
+  its dynamic sends still go to the methods the run selects from, and it
+  would quietly run code no edit chose. Such a VM can no longer run its
+  installed code; dropping it drops the values with it, and installing in
+  a new VM starts afresh. The session's runtime already drops a VM whose
+  run installed code. A frame of earlier-run code is otherwise one like
+  any other: a chooser sees it, and may retry it with the newest code
+  under the retry rule.
 
 Every comparison needs both contracts. A unit that records no contract
 for a definition (compiled units record one for every definition; only a
 unit built by hand can lack one) cannot take over from, or be taken over
 by, another unit's: nothing says what code compiled against it relies on,
-or what it promises, so the install or retry is refused with
+or what it promises, so the install, retry or run is refused with
 `CodeMismatch::Uncontracted`.
 
-The check applies only where code compiled against one unit can reach
-another's definitions, which is within one run. A run starts from a
-single unit and compares nothing with units from earlier runs, so
-recompiling with no suspended frames, and running again, accepts any
-change.
+The check applies wherever code compiled against one unit can reach
+another's definitions: within one run, and across runs of one installed
+program. Separate installs never reach each other's code: a run refuses a
+send from code another install put in the VM, such as a closure passed in
+as an argument (`ControlFault::ForeignCode`), and nothing repoints that
+code's links. So recompiling with no suspended frames, and installing and
+running again, accepts any change.
 
 Lowering under `CodegenPolicy::Proved`, the default, drops runtime checks
 that soft typing proved, so proved code trusts typing facts too. Those facts rely on
@@ -802,10 +833,11 @@ frame calls the newest version as usual.
 Linked sends agree with dynamic sends across runs too. A run selects from
 its entry unit and what it installs, so the driver's `Installed` handle
 remembers every unit its runs installed, and each run starts by pointing
-all their links back at the entry unit's methods; an install during a run
-repoints them all at the new code. A value made by a unit an earlier run
-installed, such as a returned closure, therefore sends where the same
-dynamic send would. The VM always accepts these targets: the units took
+all their links back at the entry unit's methods, once the entry unit is
+known to keep their promises (see **Earlier runs** above); an install
+during a run is checked against them too, and repoints them all at the new
+code. A value made by a unit an earlier run installed, such as a returned
+closure, therefore sends where the same dynamic send would. The VM always accepts these targets: the units took
 over from one another, so they share the layout and each generic's tape
 signature, and a link's target has its generic's signature. A chooser sees
 every linked send with the function it calls now
@@ -868,7 +900,7 @@ live frames anyway; the assumption names the promise an edit would break.
 Code lowered under `off`, or that no proof touched, relies on no
 assumption, so the same edit is refused as a plain layout change, and an
 edit that keeps the layout, such as a body edit inside a sealed hierarchy,
-installs. A new run accepts any edit.
+installs. A new install accepts any edit.
 
 A class object's kind is only a static bound, so a contract records a
 class object as any `<class>`. `make` on a class value allocates the class

@@ -23,6 +23,13 @@
 //! repoints ([`crate::code::CodeUnit::link_target`]),
 //! and a retried frame calls the newest version of its function, while every
 //! frame keeps running the unit it entered.
+//!
+//! Code older than the newest unit may reach it only where the newest unit
+//! keeps what that code relies on ([`crate::code::CodeUnit::check_replaces`]):
+//! a chooser's install is checked against every unit whose code may still
+//! run, and so is a run's entry unit against those that earlier runs of the
+//! same [`Installed`] code put in place, since values those runs made may
+//! still call their code.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -142,6 +149,18 @@ pub enum LinkError {
     Install(InstallError),
     /// The unit cannot replace the code the run already installed.
     Mismatch(CodeMismatch),
+    /// A run's entry unit cannot take over from a unit an earlier run of
+    /// the same [`Installed`] code installed, whose code values from that
+    /// run, such as returned closures, may still call; nothing ran.
+    ///
+    /// Such a VM can no longer run its installed code: the values must be
+    /// dropped with it, and the code installed in a new VM.
+    EarlierCode {
+        /// The unit the earlier run installed.
+        unit: UnitId,
+        /// What the entry unit would break.
+        mismatch: CodeMismatch,
+    },
     /// The VM asked to run an [`Installed`] unit did not install it.
     NotInstalled,
     /// The VM refused to repoint a linked send's link at the newest code.
@@ -160,6 +179,11 @@ impl core::fmt::Display for LinkError {
             Self::Mismatch(mismatch) => {
                 write!(formatter, "cannot replace running code: {mismatch}")
             }
+            Self::EarlierCode { mismatch, .. } => write!(
+                formatter,
+                "cannot run over code an earlier run installed, which values from that run \
+                 may still call: {mismatch}"
+            ),
             Self::NotInstalled => formatter.write_str("the code is not installed in this VM"),
             Self::Relink(error) => write!(formatter, "cannot repoint a linked send: {error}"),
         }
@@ -172,7 +196,7 @@ impl core::fmt::Display for LinkError {
 /// It also remembers the units choosers install during its runs, for the
 /// VM's lifetime: their linked sends must keep following the code each run
 /// selects from, even when a value made by such a unit is called in a later
-/// run.
+/// run, and each run's entry must keep the promises their code relies on.
 #[derive(Clone, Debug)]
 pub struct Installed {
     unit: UnitId,
@@ -199,7 +223,7 @@ impl Installed {
 /// with `newest`, installed as `unit`, as a run's newest code: see
 /// [`CodeUnit::link_target`].
 ///
-/// The VM accepts every target. Each unit took over from the one before it
+/// The VM accepts every target. `newest` took over from every unit
 /// ([`CodeUnit::check_replaces`]), so they all share the layout and each
 /// generic's tape signature; a link's signature is its method's, which a
 /// unit only calls directly when it is its generic's; and the target is the
@@ -278,7 +302,12 @@ pub fn run<'a, H: RuntimeHost>(
 /// remembers it: every run starts by pointing the linked sends of all those
 /// units back at the entry unit's methods, which is where their dynamic
 /// sends go too, since a run selects from its entry unit and what it
-/// installs.
+/// installs. Values a run made, such as returned closures, may run such a
+/// unit's code in a later run, so the entry unit must keep every promise
+/// that code relies on, as a chooser's install must
+/// ([`CodeUnit::check_replaces`]); otherwise the run is refused with
+/// [`LinkError::EarlierCode`] before anything runs. A frame of such code
+/// may be retried like any other.
 pub fn run_installed<'a, H: RuntimeHost>(
     vm: &'a mut Vm<H>,
     installed: &mut Installed,
@@ -295,10 +324,21 @@ pub fn run_installed<'a, H: RuntimeHost>(
     {
         return Err(RunFailure::Link(LinkError::NotInstalled));
     }
+    // Refusing is the only sound answer to a broken promise: leaving the
+    // older units' links on their own code would still send their dynamic
+    // sends to the entry unit's methods, and quietly run stale code.
+    installed
+        .linked
+        .check_takes_over(&installed.code, Some(unit))
+        .map_err(|(unit, mismatch)| RunFailure::Link(LinkError::EarlierCode { unit, mismatch }))?;
     let tags = define_tags(vm).map_err(RunFailure::Link)?;
+    // A run starts from its entry unit, so every linked send, including
+    // those of units an earlier run installed, follows it; their frames
+    // resolve against it as superseded code.
     let mut units = UnitTable::default();
-    // A run starts from its entry unit alone, so every linked send, including
-    // those of units an earlier run installed, follows it.
+    for (owner, code) in installed.linked.iter().filter(|(owner, _)| *owner != unit) {
+        units.push(owner, Arc::clone(code));
+    }
     relink_all(
         installed
             .linked
@@ -443,6 +483,9 @@ fn snapshot_frames(
 }
 
 struct Driver<'a> {
+    /// The units whose code the run may run, as [`Self::linked`] has them
+    /// but with the entry unit after those earlier runs installed, so the
+    /// newest is the one the run selects from.
     units: UnitTable,
     /// Every unit installed through the run's [`Installed`], this run's
     /// included, whose linked sends follow the run's newest code.
@@ -651,10 +694,19 @@ impl Driver<'_> {
     /// unit's dispatch table cannot decide or selects nothing, so the
     /// dispatcher's own checks apply and a send that finds no method
     /// signals its `<no-applicable-method>` there.
+    ///
+    /// Only code the run's [`Installed`] knows may send: nothing compared
+    /// another install's code with the newest unit.
     fn dispatch<H: RuntimeHost>(
         &mut self,
         mut pending: PendingHostCall<'_, '_, H>,
     ) -> Result<(), TrapInfo> {
+        let sender = pending.unit();
+        if self.units.get(sender).is_none() {
+            self.fault
+                .get_or_insert(ControlFault::ForeignCode { unit: sender });
+            return pending.complete(&mut [], Err(HostError::Failed));
+        }
         let args = pending
             .arguments()
             .map(|value| value.to_value())
@@ -1044,20 +1096,18 @@ impl Driver<'_> {
     }
 
     /// Installs `code` while the signal waits, after checking it can take
-    /// over from the newest unit and keeps the closed-world assumptions of
-    /// every unit whose code may still run: this run's and those earlier
-    /// runs of the same installed code put in place.
+    /// over from every unit whose code may still run: this run's and those
+    /// earlier runs of the same installed code put in place.
     fn install<H: RuntimeHost>(
         &mut self,
         pending: &mut PendingSuspension<'_, '_, H>,
         code: Arc<CodeUnit>,
     ) -> Result<(), LinkError> {
-        for (_, older) in self.linked.iter() {
-            code.check_assumptions(older).map_err(LinkError::Mismatch)?;
-        }
-        if let Some(newest) = self.units.newest() {
-            code.check_replaces(newest).map_err(LinkError::Mismatch)?;
-        }
+        // The run's units are every unit through its `Installed`, the run's
+        // newest last, so a refusal names what that newest one promised.
+        self.units
+            .check_takes_over(&code, None)
+            .map_err(|(_, mismatch)| LinkError::Mismatch(mismatch))?;
         let unit = pending
             .install(Arc::clone(&code.program))
             .map_err(LinkError::Install)?;

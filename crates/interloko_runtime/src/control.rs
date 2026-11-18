@@ -269,6 +269,13 @@ pub enum ControlFault {
     /// A chooser's answer did not match the restarts on offer or their
     /// parameter types.
     InvalidChoice,
+    /// Code another install put in the VM, such as a closure passed in as
+    /// an argument, sent a generic: nothing compared what that code relies
+    /// on with the run's methods, so the send is refused.
+    ForeignCode {
+        /// The sending code's unit.
+        unit: UnitId,
+    },
 }
 
 /// Cumulative control work performed in one run.

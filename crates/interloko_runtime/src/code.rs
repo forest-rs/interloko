@@ -43,14 +43,17 @@
 //! result also records the signature callers call it with, compared by the
 //! same rule.
 //!
-//! The rule applies exactly where code compiled against one unit can reach
-//! another unit's definition, which happens only within one run, after a
-//! chooser installs a unit while frames are suspended:
+//! The rule applies wherever code compiled against one unit can reach
+//! another unit's definition: after a chooser installs a unit while frames
+//! are suspended, and when a later run of the same
+//! [`crate::driver::Installed`] code starts while values made by code an
+//! earlier run installed, such as returned closures, may still be called:
 //!
 //! - a generic send is late-bound, dynamically or through a repointed link,
-//!   so an old frame may send to the newest unit's methods;
+//!   so older code may send to the newest unit's methods;
 //!   [`CodeUnit::check_replaces`] refuses a unit that changes a generic's
-//!   contract incompatibly;
+//!   contract incompatibly, whether a chooser installs it or a run starts
+//!   from it over code an earlier run installed;
 //! - a retried frame calls the newest version of its function or method,
 //!   with the frame's own arguments, and returns to the frame's old caller;
 //!   such a retry is refused ([`FrameCode::retry_refusal`]) when that
@@ -58,9 +61,9 @@
 //!
 //! Direct function calls stay within their unit, so a unit that changes a
 //! function's contract installs, and only retrying a frame of the old
-//! function is refused. A run starts from one unit and checks nothing
-//! against units from earlier runs, so recompiling and running again
-//! accepts any change.
+//! function is refused. Code that one install put in a VM never reaches
+//! another install's code, so compiling anew and installing again accepts
+//! any change.
 //!
 //! The rule needs both contracts: a definition that either unit records no
 //! contract for cannot take over or be taken over
@@ -656,8 +659,10 @@ impl FrameCode {
     }
 }
 
-/// Code units installed in one VM, oldest first: the units of one run, or
-/// every unit installed through one [`crate::driver::Installed`].
+/// Code units installed in one VM, superseded ones first: every unit
+/// installed through one [`crate::driver::Installed`], oldest first, or the
+/// units whose code one run may run, with its entry unit after those
+/// earlier runs installed.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct UnitTable {
     units: Vec<(UnitId, Arc<CodeUnit>)>,
@@ -666,6 +671,34 @@ pub(crate) struct UnitTable {
 impl UnitTable {
     pub(crate) fn push(&mut self, unit: UnitId, code: Arc<CodeUnit>) {
         self.units.push((unit, code));
+    }
+
+    /// Checks that `code` can take over from every unit here but `except`,
+    /// whose code may still run: every closed-world assumption any of them
+    /// relies on holds in its layout, and it takes over from each, newest
+    /// first ([`CodeUnit::check_replaces`]). Assumptions come first, so a
+    /// layout change that breaks one is reported as the assumption.
+    ///
+    /// A refusal names the unit refused.
+    pub(crate) fn check_takes_over(
+        &self,
+        code: &CodeUnit,
+        except: Option<UnitId>,
+    ) -> Result<(), (UnitId, CodeMismatch)> {
+        let olders = || {
+            self.units
+                .iter()
+                .filter(move |(unit, _)| Some(*unit) != except)
+        };
+        for (unit, older) in olders() {
+            code.check_assumptions(older)
+                .map_err(|mismatch| (*unit, mismatch))?;
+        }
+        for (unit, older) in olders().rev() {
+            code.check_replaces(older)
+                .map_err(|mismatch| (*unit, mismatch))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn newest(&self) -> Option<&Arc<CodeUnit>> {
