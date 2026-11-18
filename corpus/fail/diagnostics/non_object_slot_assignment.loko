@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code sem.slot-receiver-type-mismatch
-// expect: diagnostic contains slot receiver must be a known object, got <integer>
+// expect: diagnostic contains slot `radius` needs an instance of a known class, not <integer>
 
 define function main()
   1.radius := 10

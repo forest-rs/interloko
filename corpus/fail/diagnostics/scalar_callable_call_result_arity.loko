@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code sem.scalar-result-arity-mismatch
-// expect: diagnostic contains scalar expression expects 1 value but got 2 values (<integer>, <integer>)
+// expect: diagnostic contains this expression needs exactly 1 value, not 2 values (<integer>, <integer>); bind several with `let (a, b) = …` first
 
 define function split(flag :: <boolean>) => (<integer>, <integer>)
   if flag then
