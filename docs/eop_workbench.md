@@ -914,8 +914,10 @@ runtime object, while an `<object>` value (a parameter or binding declared
 send, including `apply` of a known generic, evaluates its arguments and
 then unboxes each such one; when one holds a number, no method can apply,
 and the send itself signals the condition, so the sender is the innermost
-frame. A number written directly is rejected when the program compiles
-(`sem.generic-argument-type-mismatch`), since no method can ever take it.
+frame. A number or boolean written directly is rejected when the program
+compiles, since no method can ever take it: `sem.no-applicable-method`
+names the classes the methods specialize on and the class a method would
+need (`sem.generic-without-methods` when there are no methods yet).
 
 An unhandled one suspends with every frame live, the dispatcher innermost
 (`area#dispatch`), and the driver marks it as a failed check's

@@ -7142,37 +7142,12 @@ impl Lowering {
                             &mut lowered_args,
                             symbol.param_kinds.iter().map(Option::as_ref),
                         );
-                        for (index, (arg, expected)) in
+                        for (index, (arg, declared)) in
                             lowered_args.iter().zip(&symbol.param_kinds).enumerate()
                         {
-                            let actual = self.expr_kind(arg);
-                            let boxed_scalar = actual.is_number()
-                                && self.generic_param_boxes_scalars(symbol.id, index);
-                            let Some(expected) =
-                                expected.or_else(|| actual.is_number().then_some(ValueKind::Any))
-                            else {
-                                continue;
-                            };
-                            if !boxed_scalar && !self.generic_argument_matches(expected, actual) {
-                                ctx.diagnostics.push(
-                                    Diagnostic::error(
-                                        arg.span(),
-                                        DiagnosticCode::GenericArgumentTypeMismatch,
-                                    )
-                                    .with_arg(DiagnosticArg::text("generic", callee.clone()))
-                                    .with_arg(DiagnosticArg::unsigned(
-                                        "argument_index",
-                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
-                                    ))
-                                    .with_arg(DiagnosticArg::text(
-                                        "expected",
-                                        self.kind_name(expected),
-                                    ))
-                                    .with_arg(
-                                        DiagnosticArg::text("actual", self.kind_name(actual)),
-                                    ),
-                                );
-                            }
+                            ctx.diagnostics.extend(
+                                self.generic_argument_diagnostic(arg, symbol.id, index, *declared),
+                            );
                         }
                         // Every send checks its arguments for limited
                         // parameters, so methods may assume the ranges.
@@ -8194,23 +8169,9 @@ impl Lowering {
             return Expr::Error { span };
         }
         adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Option::as_ref));
-        for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
-            let Some(expected) = *expected else {
-                continue;
-            };
-            let actual = self.expr_kind(arg);
-            if !self.generic_argument_matches(expected, actual) {
-                ctx.diagnostics.push(
-                    Diagnostic::error(arg.span(), DiagnosticCode::GenericArgumentTypeMismatch)
-                        .with_arg(DiagnosticArg::text("generic", symbol.name.clone()))
-                        .with_arg(DiagnosticArg::unsigned(
-                            "argument_index",
-                            u64::try_from(index + 1).unwrap_or(u64::MAX),
-                        ))
-                        .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
-                );
-            }
+        for (index, (arg, declared)) in args.iter().zip(&symbol.param_kinds).enumerate() {
+            ctx.diagnostics
+                .extend(self.generic_argument_diagnostic(arg, generic, index, *declared));
         }
         Expr::CallableCall {
             callable: Box::new(target),
@@ -11240,6 +11201,107 @@ impl Lowering {
             })
     }
 
+    /// Returns the diagnostic for `arg`, passed as argument `index` of
+    /// `generic` whose parameter is `declared`, when the generic cannot
+    /// take it.
+    ///
+    /// A parameter whose methods all specialize on object classes carries
+    /// runtime objects, so a number or boolean, which only a boxed
+    /// `<object>` parameter can carry, has no method to reach: the
+    /// diagnostic says so and names the classes the methods take. A
+    /// callable is not an `<object>` and no method ever takes one.
+    fn generic_argument_diagnostic(
+        &self,
+        arg: &Expr,
+        generic: GenericFunctionId,
+        index: usize,
+        declared: Option<ValueKind>,
+    ) -> Option<Diagnostic> {
+        let actual = self.expr_kind(arg);
+        let unboxed = actual.is_number() || actual == ValueKind::Bool;
+        let needs_object =
+            unboxed || matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_));
+        if unboxed && self.generic_param_boxes_scalars(generic, index) {
+            return None;
+        }
+        let expected = declared.or_else(|| needs_object.then_some(ValueKind::Any))?;
+        if self.generic_argument_matches(expected, actual) {
+            return None;
+        }
+        if expected == ValueKind::Any && unboxed {
+            return Some(self.no_applicable_method_diagnostic(arg.span(), generic, index, actual));
+        }
+        let name = self.generic_symbols.get(generic.0 as usize).map_or_else(
+            || format!("generic#{}", generic.0),
+            |symbol| symbol.name.clone(),
+        );
+        Some(
+            Diagnostic::error(arg.span(), DiagnosticCode::GenericArgumentTypeMismatch)
+                .with_arg(DiagnosticArg::text("generic", name))
+                .with_arg(DiagnosticArg::unsigned(
+                    "argument_index",
+                    u64::try_from(index + 1).unwrap_or(u64::MAX),
+                ))
+                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
+                .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+        )
+    }
+
+    /// Returns the diagnostic for a number or boolean passed as argument
+    /// `index` of `generic` where no method can accept one: every method
+    /// specializes that argument on a class it is not an instance of, or
+    /// there is no method at all. It names those classes and the class a
+    /// method would take the argument on, so the fix (pass an instance of
+    /// one, or define such a method) reads off the message.
+    fn no_applicable_method_diagnostic(
+        &self,
+        span: Span,
+        generic: GenericFunctionId,
+        index: usize,
+        actual: ValueKind,
+    ) -> Diagnostic {
+        let name = self.generic_symbols.get(generic.0 as usize).map_or_else(
+            || format!("generic#{}", generic.0),
+            |symbol| symbol.name.clone(),
+        );
+        let mut specializers = Vec::<String>::new();
+        for (_, method_specializers) in self
+            .dispatch_specializers
+            .iter()
+            .filter(|(method_generic, _)| *method_generic == generic)
+        {
+            let label =
+                self.method_specializer_label(method_specializers.get(index).copied().flatten());
+            if !specializers.contains(&label) {
+                specializers.push(label);
+            }
+        }
+        // The class a method would specialize on to take the argument: a
+        // number's own, or `<object>` for a boolean, which has none.
+        let class = self.value_kind_class(actual).or(Some(OBJECT_CLASS_ID));
+        let code = if specializers.is_empty() {
+            DiagnosticCode::GenericWithoutMethods
+        } else {
+            DiagnosticCode::NoApplicableMethod
+        };
+        let diagnostic = Diagnostic::error(span, code)
+            .with_arg(DiagnosticArg::text("generic", name))
+            .with_arg(DiagnosticArg::unsigned(
+                "argument_index",
+                u64::try_from(index + 1).unwrap_or(u64::MAX),
+            ))
+            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual)))
+            .with_arg(DiagnosticArg::text(
+                "class",
+                self.method_specializer_label(class),
+            ));
+        if specializers.is_empty() {
+            diagnostic
+        } else {
+            diagnostic.with_arg(DiagnosticArg::text("specializers", specializers.join(", ")))
+        }
+    }
+
     fn snapshot_dispatch_specializers(&mut self) {
         if !self.methods.is_empty() {
             self.dispatch_specializers = self
@@ -12509,13 +12571,52 @@ mod tests {
         );
         assert!(has_diagnostic(
             &bad_call,
-            DiagnosticCode::GenericArgumentTypeMismatch,
+            DiagnosticCode::GenericWithoutMethods,
             &[
                 ("generic", "area"),
                 ("argument_index", "1"),
-                ("expected", "<object>"),
-                ("actual", "<integer>")
+                ("actual", "<integer>"),
+                ("class", "<integer>")
             ]
+        ));
+
+        // Methods on object classes only: the diagnostic names them, and
+        // a boolean, which has no class of its own, needs one on <object>.
+        let shapes = "define class <circle> (<object>)\nend;\n\
+             define class <square> (<object>)\nend;\n\
+             define generic area(x) => <integer>;\n\
+             define method area(c :: <circle>) => <integer>\n  1\nend;\n\
+             define method area(s :: <square>) => <integer>\n  2\nend;\n";
+        for (call, actual, class) in [
+            ("area(5)", "<integer>", "<integer>"),
+            ("apply(area, 2.5)", "<double-float>", "<double-float>"),
+            ("area(#t)", "<boolean>", "<object>"),
+        ] {
+            let module = lower_source(&format!("{shapes}define function main()\n  {call}\nend;"));
+            assert!(
+                has_diagnostic(
+                    &module,
+                    DiagnosticCode::NoApplicableMethod,
+                    &[
+                        ("generic", "area"),
+                        ("argument_index", "1"),
+                        ("actual", actual),
+                        ("specializers", "<circle>, <square>"),
+                        ("class", class)
+                    ]
+                ),
+                "{call}: {:?}",
+                module.diagnostics
+            );
+        }
+        // A callable is no object, and no method takes one.
+        let module = lower_source(&format!(
+            "{shapes}define function main()\n  area(area)\nend;"
+        ));
+        assert!(has_diagnostic(
+            &module,
+            DiagnosticCode::GenericArgumentTypeMismatch,
+            &[("expected", "<object>"), ("actual", "generic `area`")]
         ));
 
         let bad_method_return = lower_source(

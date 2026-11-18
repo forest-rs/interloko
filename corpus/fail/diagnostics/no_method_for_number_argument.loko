@@ -1,0 +1,28 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.no-applicable-method
+// expect: diagnostic contains no method of `area` accepts <integer> as argument 1: its methods specialize it on <circle>, <square>; pass one of those, or define a method on <integer>
+
+// Every method of `area` specializes on an object class, so no method can
+// ever take a number. The diagnostic names the classes the methods take,
+// rather than the `<object>` the parameter is carried as.
+define class <circle> (<object>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<object>)
+  slot side :: <integer>;
+end;
+
+define generic area(shape);
+
+define method area(c :: <circle>) => <integer>
+  c.radius * c.radius
+end;
+
+define method area(s :: <square>) => <integer>
+  s.side * s.side
+end;
+
+define function main() => <integer>
+  area(5)
+end;

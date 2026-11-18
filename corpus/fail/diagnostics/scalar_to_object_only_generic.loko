@@ -1,5 +1,6 @@
 // expect: diagnostics 1
-// expect: diagnostic contains generic `area` argument 1 expects <object> but got <double-float>
+// expect: diagnostic code sem.no-applicable-method
+// expect: diagnostic contains no method of `area` accepts <double-float> as argument 1: its methods specialize it on <circle>; pass one of those, or define a method on <double-float>
 
 // No method of `area` can apply to a float, so its parameter carries raw
 // object handles and a float argument is rejected.
