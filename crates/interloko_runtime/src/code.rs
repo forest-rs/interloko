@@ -62,6 +62,11 @@
 //! against units from earlier runs, so recompiling and running again
 //! accepts any change.
 //!
+//! The rule needs both contracts: a definition that either unit records no
+//! contract for cannot take over or be taken over
+//! ([`CodeMismatch::Uncontracted`]), since nothing says what code compiled
+//! against it relies on. Compiled units record one for every definition.
+//!
 //! # Closed-world assumptions
 //!
 //! Code compiled under proved typing may also rely on the closed world:
@@ -179,8 +184,9 @@ pub struct CodeUnit {
     /// the ones a run must keep repointing.
     pub links: Vec<MethodId>,
     /// What code compiled against each definition relies on. A definition
-    /// with no contract here (as in a unit built without any) is checked
-    /// by its signature alone.
+    /// with no contract here (as in a unit built without any) cannot take
+    /// over from another unit's or be taken over by one
+    /// ([`CodeMismatch::Uncontracted`]).
     pub contracts: Contracts,
     /// The closed-world assumptions the program's code relies on: sealed
     /// classes whose direct subclasses it read, and generics whose method
@@ -258,6 +264,15 @@ pub enum CodeMismatch {
     /// A definition's contract changed in a way code compiled against the
     /// older one could observe.
     Contract(Box<ContractMismatch>),
+    /// One of the units records no contract for a definition, so nothing
+    /// says what code compiled against the older one relies on, or what the
+    /// newer one promises.
+    Uncontracted {
+        /// The definition without a contract.
+        definition: Definition,
+        /// Its name, for messages.
+        name: String,
+    },
     /// A closed-world assumption code compiled against the older unit relies
     /// on does not hold in the newer one: a sealed class gained or lost a
     /// direct subclass, changed its abstractness or was unsealed, or a
@@ -324,6 +339,11 @@ impl core::fmt::Display for CodeMismatch {
                 )
             }
             Self::Contract(mismatch) => write!(formatter, "{mismatch}"),
+            Self::Uncontracted { name, .. } => write!(
+                formatter,
+                "{name} has no contract to compare, so what code compiled against it \
+                 relies on is unknown"
+            ),
             Self::Assumption(mismatch) => write!(formatter, "{mismatch}"),
         }
     }
@@ -483,7 +503,7 @@ impl CodeUnit {
 
     /// Checks that this unit's `definition` can be called by code compiled
     /// against `older`'s: the same signature and a contract that keeps the
-    /// older one's promise.
+    /// older one's promise. Both units must record a contract for it.
     pub fn check_takes_over(
         &self,
         definition: &Definition,
@@ -505,8 +525,12 @@ impl CodeUnit {
             self.contracts.get(definition),
             older.contracts.get(definition),
         ) else {
-            // A unit without contracts makes no promise to compare.
-            return Ok(());
+            // Code compiled against `older` may rely on more than the tape
+            // signature, and nothing says what.
+            return Err(CodeMismatch::Uncontracted {
+                definition: definition.clone(),
+                name: name(),
+            });
         };
         new.check_replaces(old, &self.layout).map_err(|change| {
             let types = match &change {
