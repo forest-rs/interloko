@@ -828,6 +828,10 @@ impl Module {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Boolean,
             } => Some(ValueKind::Bool),
+            // A value declared `<function>` is any callable value.
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Function,
+            } => Some(ValueKind::Callable),
             // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
@@ -858,9 +862,8 @@ impl Module {
 
     /// Returns the nominal class that bounds every runtime value of `kind`.
     ///
-    /// Returns `None` for categories without a class-shaped runtime
-    /// representation in this slice: [`ValueKind::Any`] (unbounded),
-    /// callables, and [`ValueKind::Error`].
+    /// Returns `None` for [`ValueKind::Any`] (unbounded) and
+    /// [`ValueKind::Error`]. Every callable is a `<function>`.
     #[must_use]
     pub fn value_kind_class(&self, kind: ValueKind) -> Option<ClassId> {
         match kind {
@@ -883,10 +886,10 @@ impl Module {
                 self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
             }
             ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
-            ValueKind::Any
-            | ValueKind::Callable
-            | ValueKind::KnownCallable(_)
-            | ValueKind::Error => None,
+            ValueKind::Callable | ValueKind::KnownCallable(_) => {
+                self.builtin_value_class(BuiltinValueClass::Function)
+            }
+            ValueKind::Any | ValueKind::Error => None,
         }
     }
 
@@ -902,8 +905,9 @@ impl Module {
     /// - [`ValueKind::ClassObject`] is any `<class>`: `object-class` records
     ///   the static class bound of its operand there, not the runtime class,
     ///   so it does not name a singleton.
-    /// - Callables have no class: [`ValueKind::KnownCallable`] is
-    ///   [`Atom::Callable`] even when it names a generic function.
+    /// - Every callable is [`Atom::Callable`], the `<function>` class,
+    ///   whatever its signature: [`ValueKind::KnownCallable`] is too, even
+    ///   when it names a generic function.
     /// - [`ValueKind::Error`] is [`Type::top`].
     #[must_use]
     pub fn kind_type(&self, kind: ValueKind) -> Type {
@@ -1750,12 +1754,13 @@ impl Block {
     }
 }
 
-/// Returns whether instances of `class` are unboxed scalars: `<number>` and
-/// every numeric class below it, and `<boolean>`.
-fn is_scalar_value_class_in(classes: &[Class], class: ClassId) -> bool {
+/// Returns whether instances of `class` are unboxed values rather than
+/// runtime objects: `<number>` and every numeric class below it,
+/// `<boolean>`, and `<function>`.
+fn is_unboxed_value_class_in(classes: &[Class], class: ClassId) -> bool {
     matches!(
         classes.get(class.0 as usize).map(|class| class.origin),
-        Some(ClassOrigin::BuiltinValue { kind }) if kind.is_scalar()
+        Some(ClassOrigin::BuiltinValue { kind }) if kind.is_unboxed()
     )
 }
 
@@ -1764,10 +1769,10 @@ fn is_scalar_value_class_in(classes: &[Class], class: ClassId) -> bool {
 ///
 /// An `<object>` or unannotated parameter is a raw object handle, which
 /// keeps dispatch over object classes allocation-free. When some method
-/// specializes the parameter on `<object>` or on a scalar class such as
-/// `<integer>` or `<float>`, integers and floats can apply, so the
-/// parameter carries boxed values instead and scalar arguments are boxed
-/// at the call through the ordinary `<object>` boxing path.
+/// specializes the parameter on `<object>` or on an unboxed value's class
+/// such as `<integer>`, `<float>` or `<function>`, such values can apply,
+/// so the parameter carries boxed values instead and they are boxed at the
+/// call through the ordinary `<object>` boxing path.
 fn generic_param_boxes_scalars_in<'a>(
     classes: &[Class],
     methods: impl IntoIterator<Item = (GenericFunctionId, &'a [MethodSpecializer])>,
@@ -1781,7 +1786,7 @@ fn generic_param_boxes_scalars_in<'a>(
         .into_iter()
         .filter(|(method_generic, _)| *method_generic == generic.id)
         .filter_map(|(_, specializers)| specializers.get(index).copied().flatten())
-        .any(|class| class == OBJECT_CLASS_ID || is_scalar_value_class_in(classes, class))
+        .any(|class| class == OBJECT_CLASS_ID || is_unboxed_value_class_in(classes, class))
 }
 
 /// Returns the result category of a float builtin call: `<boolean>` for
@@ -1820,8 +1825,7 @@ fn kind_holds(
     is_same_or_subclass: impl Fn(ClassId, ClassId) -> bool,
     class_of: impl Fn(ValueKind) -> Option<ClassId>,
 ) -> bool {
-    (matches!(expected, ValueKind::Any)
-        && !matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_)))
+    matches!(expected, ValueKind::Any)
         || (matches!(expected, ValueKind::Callable)
             && matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_)))
         || matches!((expected, actual), (ValueKind::Object(expected), ValueKind::Object(actual)) if is_same_or_subclass(actual, expected))
@@ -2610,10 +2614,11 @@ pub struct Function {
 /// does not establish: an instance of a class, a class object naming it or
 /// a subclass, or an `<integer>` in a `limited(<integer>, ...)` range.
 /// Every other untyped call goes through the boxed entry, under the boxed
-/// callable ABI, where each argument that is not a callable arrives as a
-/// boxed `<object>`, so it also checks a number or boolean of the
-/// parameter's kind ([`EntryTarget::Unbox`]). Only an `<object>` parameter
-/// takes the box as it is.
+/// callable ABI, where each argument arrives as a boxed `<object>`, so it
+/// also checks a number or boolean of the parameter's kind
+/// ([`EntryTarget::Unbox`]); lowering unboxes a callable parameter's
+/// `<function>` itself. Only an `<object>` parameter takes the box as it
+/// is.
 ///
 /// Each check is a site of the definition whose sites number its body,
 /// after the body's own, so soft typing classifies it like any cast.
@@ -5228,14 +5233,16 @@ impl Lowering {
                             | ValueKind::U32
                             | ValueKind::F32
                             | ValueKind::Vector(_)
+                            | ValueKind::Callable
                             | ValueKind::Error
                     )
                     && let Some(param) = generic.params.get(param_index)
                     && let Some(annotation) = param.type_annotation.as_ref()
                 {
-                    // Methods specialize a generic's parameters on classes,
-                    // and neither `<boolean>` nor a callable type is one: the
-                    // same fact a method parameter declared so reports.
+                    // Methods specialize a generic's parameters on classes. A
+                    // callable signature is not one (`<function>` is), and
+                    // a `<boolean>` parameter is not supported yet: the same
+                    // fact a method parameter declared so reports.
                     self.diagnostics.push(
                         Diagnostic::error(annotation.span(), DiagnosticCode::AstAnnotationNotClass)
                             .with_arg(DiagnosticArg::text("position", "generic parameter"))
@@ -6985,38 +6992,16 @@ impl Lowering {
                     .unwrap_or(ClassId(u32::MAX)),
                 span: *span,
             },
-            ast::Expr::Vector { elements, span, .. } => {
-                let elements = elements
+            ast::Expr::Vector { elements, span, .. } => Expr::VectorLiteral {
+                elements: elements
                     .iter()
                     .map(|element| self.lower_expr(ctx, element))
-                    .collect::<Vec<_>>();
-                // A vector holds `<object>`s, so each element must be a value
-                // that boxes as one.
-                for (index, element) in elements.iter().enumerate() {
-                    let actual = self.expr_kind(element);
-                    if !self.kinds_match(ValueKind::Any, actual) {
-                        ctx.diagnostics.push(
-                            Diagnostic::error(
-                                element.span(),
-                                DiagnosticCode::VectorElementTypeMismatch,
-                            )
-                            .with_arg(DiagnosticArg::unsigned(
-                                "element_index",
-                                u64::try_from(index + 1).unwrap_or(u64::MAX),
-                            ))
-                            .with_arg(DiagnosticArg::text("expected", "<object>"))
-                            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
-                        );
-                    }
-                }
-                Expr::VectorLiteral {
-                    elements,
-                    class: self
-                        .builtin_value_class(BuiltinValueClass::Vector)
-                        .unwrap_or(ClassId(u32::MAX)),
-                    span: *span,
-                }
-            }
+                    .collect(),
+                class: self
+                    .builtin_value_class(BuiltinValueClass::Vector)
+                    .unwrap_or(ClassId(u32::MAX)),
+                span: *span,
+            },
             ast::Expr::Function {
                 params,
                 return_type,
@@ -8065,6 +8050,8 @@ impl Lowering {
                     | ValueKind::GenericFunctionObject(_)
                     | ValueKind::MethodObject(_)
                     | ValueKind::SlotDescriptorObject { .. }
+                    | ValueKind::Callable
+                    | ValueKind::KnownCallable(_)
             ),
             (
                 Intrinsic::ClassName
@@ -8107,9 +8094,7 @@ impl Lowering {
             }
             (Intrinsic::FloatToString, 0) => matches!(actual, ValueKind::F64 | ValueKind::F32),
             (Intrinsic::Concatenate, 0 | 1) => matches!(actual, ValueKind::String(_)),
-            (Intrinsic::InstanceOfType, 0) => {
-                !matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_))
-            }
+            (Intrinsic::InstanceOfType, 0) => true,
             (Intrinsic::InstanceOfType, 1) | (Intrinsic::TypeName, 0) => {
                 self.is_type_object_kind(actual)
             }
@@ -9510,19 +9495,9 @@ impl Lowering {
         if integer(lhs_kind) && integer(rhs_kind) {
             return self.lower_compare(ctx, ast::CompareOp::Eq, lhs, rhs, span);
         }
-        let mut valid = true;
-        for (operand, kind) in [(&lhs, lhs_kind), (&rhs, rhs_kind)] {
-            if kind == ValueKind::Error {
-                valid = false;
-            } else if !self.kinds_match(ValueKind::Any, kind) {
-                ctx.diagnostics.push(
-                    Diagnostic::error(operand.span(), DiagnosticCode::IdentityOperandTypeMismatch)
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(kind))),
-                );
-                valid = false;
-            }
-        }
-        if !valid {
+        // Every value is an object, so only an operand that failed to
+        // check stops the test.
+        if lhs_kind == ValueKind::Error || rhs_kind == ValueKind::Error {
             return Expr::Error { span };
         }
         Expr::Identical {
@@ -9632,30 +9607,6 @@ impl Lowering {
         };
         let class_id = class.id;
         let value = self.lower_expr(ctx, value);
-        match self.expr_kind(&value) {
-            ValueKind::Any
-            | ValueKind::Object(_)
-            | ValueKind::String(_)
-            | ValueKind::Symbol(_)
-            | ValueKind::Vector(_)
-            | ValueKind::I64
-            | ValueKind::F64
-            | ValueKind::I32
-            | ValueKind::U32
-            | ValueKind::F32
-            | ValueKind::ClassObject(_)
-            | ValueKind::GenericFunctionObject(_)
-            | ValueKind::MethodObject(_)
-            | ValueKind::SlotDescriptorObject { .. }
-            | ValueKind::Error => {}
-            actual => {
-                ctx.diagnostics.push(
-                    Diagnostic::error(span, DiagnosticCode::InstanceOfTypeMismatch)
-                        .with_arg(DiagnosticArg::text("expected", "<object>"))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
-                );
-            }
-        }
         if let Some(actual) = self.value_kind_class(self.expr_kind(&value))
             && !self.classes_may_overlap(actual, class_id)
         {
@@ -9803,31 +9754,6 @@ impl Lowering {
                 explicit: true,
                 span,
             };
-        }
-        match self.expr_kind(&value) {
-            ValueKind::Any
-            | ValueKind::Object(_)
-            | ValueKind::String(_)
-            | ValueKind::Symbol(_)
-            | ValueKind::Vector(_)
-            | ValueKind::I64
-            | ValueKind::F64
-            | ValueKind::I32
-            | ValueKind::U32
-            | ValueKind::F32
-            | ValueKind::Bool
-            | ValueKind::ClassObject(_)
-            | ValueKind::GenericFunctionObject(_)
-            | ValueKind::MethodObject(_)
-            | ValueKind::SlotDescriptorObject { .. }
-            | ValueKind::Error => {}
-            actual => {
-                ctx.diagnostics.push(
-                    Diagnostic::error(span, DiagnosticCode::CastTypeMismatch)
-                        .with_arg(DiagnosticArg::text("expected", "<object>"))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
-                );
-            }
         }
         if let Some(actual) = self.value_kind_class(self.expr_kind(&value))
             && !self.classes_may_overlap(actual, class_id)
@@ -10269,7 +10195,7 @@ impl Lowering {
         };
         let class = match class {
             None => return unboxed(ValueKind::I64),
-            Some(class) if is_scalar_value_class_in(&self.classes, class) => {
+            Some(class) if is_unboxed_value_class_in(&self.classes, class) => {
                 return self.kind_for_builtin_class(class).and_then(unboxed);
             }
             Some(class) => class,
@@ -10548,6 +10474,10 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Boolean,
             } => Some(ValueKind::Bool),
+            // A value declared `<function>` is any callable value.
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Function,
+            } => Some(ValueKind::Callable),
             // Abstract numeric classes have no single representation.
             ClassOrigin::BuiltinValue {
                 kind:
@@ -10597,10 +10527,10 @@ impl Lowering {
                 self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
             }
             ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
-            ValueKind::Any
-            | ValueKind::Callable
-            | ValueKind::KnownCallable(_)
-            | ValueKind::Error => None,
+            ValueKind::Callable | ValueKind::KnownCallable(_) => {
+                self.builtin_value_class(BuiltinValueClass::Function)
+            }
+            ValueKind::Any | ValueKind::Error => None,
         }
     }
 
@@ -10975,7 +10905,9 @@ impl Lowering {
                 );
                 ValueKind::Error
             }
-            "<callable>" => ValueKind::Callable,
+            // `<function>` is the class of every callable value, which
+            // `<callable>` names without a signature.
+            "<callable>" | "<function>" => ValueKind::Callable,
             "<vector>" => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
@@ -11043,13 +10975,15 @@ impl Lowering {
                 self.value_kind_class(expected)
                     .is_some_and(|class| self.is_same_or_subclass(class, specializer))
             }
+            // A callable reaches methods on `<function>` and `<object>`.
+            ValueKind::Callable | ValueKind::KnownCallable(_) => self
+                .value_kind_class(expected)
+                .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
             ValueKind::Bool
-            | ValueKind::Callable
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
-            | ValueKind::SlotDescriptorObject { .. }
-            | ValueKind::KnownCallable(_) => false,
+            | ValueKind::SlotDescriptorObject { .. } => false,
         }
     }
 
@@ -11058,8 +10992,8 @@ impl Lowering {
             // A boxed `<object>` is an `<object>` too. A parameter whose
             // methods all specialize on object classes takes runtime
             // objects, so a send unboxes it, and finds no method when it
-            // holds a number. A number itself is rejected here: no method
-            // can ever take it.
+            // holds a number. A number or callable itself is rejected here:
+            // no method can ever take it.
             ValueKind::Any => matches!(
                 actual,
                 ValueKind::Any
@@ -11556,10 +11490,9 @@ impl Lowering {
     /// take it.
     ///
     /// A parameter whose methods all specialize on object classes carries
-    /// runtime objects, so a number or boolean, which only a boxed
-    /// `<object>` parameter can carry, has no method to reach: the
-    /// diagnostic says so and names the classes the methods take. A
-    /// callable is not an `<object>` and no method ever takes one.
+    /// runtime objects, so a number, boolean or callable, which only a
+    /// boxed `<object>` parameter can carry, has no method to reach: the
+    /// diagnostic says so and names the classes the methods take.
     fn generic_argument_diagnostic(
         &self,
         arg: &Expr,
@@ -11568,13 +11501,15 @@ impl Lowering {
         declared: Option<ValueKind>,
     ) -> Option<Diagnostic> {
         let actual = self.expr_kind(arg);
-        let unboxed = actual.is_number() || actual == ValueKind::Bool;
-        let needs_object =
-            unboxed || matches!(actual, ValueKind::Callable | ValueKind::KnownCallable(_));
+        let unboxed = actual.is_number()
+            || matches!(
+                actual,
+                ValueKind::Bool | ValueKind::Callable | ValueKind::KnownCallable(_)
+            );
         if unboxed && self.generic_param_boxes_scalars(generic, index) {
             return None;
         }
-        let expected = declared.or_else(|| needs_object.then_some(ValueKind::Any))?;
+        let expected = declared.or_else(|| unboxed.then_some(ValueKind::Any))?;
         if self.generic_argument_matches(expected, actual) {
             return None;
         }
@@ -12954,6 +12889,7 @@ mod tests {
             ("area(5)", "<integer>", "<integer>"),
             ("apply(area, 2.5)", "<double-float>", "<double-float>"),
             ("area(#t)", "<boolean>", "<boolean>"),
+            ("area(area)", "generic `area`", "<function>"),
         ] {
             let module = lower_source(&format!("{shapes}define function main()\n  {call}\nend;"));
             assert!(
@@ -12972,15 +12908,6 @@ mod tests {
                 module.diagnostics
             );
         }
-        // A callable is no object, and no method takes one.
-        let module = lower_source(&format!(
-            "{shapes}define function main()\n  area(area)\nend;"
-        ));
-        assert!(has_diagnostic(
-            &module,
-            DiagnosticCode::GenericArgumentTypeMismatch,
-            &[("expected", "<object>"), ("actual", "generic `area`")]
-        ));
 
         let bad_method_return = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
@@ -13275,11 +13202,7 @@ mod tests {
         ));
 
         let integer = lower_source("define function main()\n  instance?(1, <integer>)\nend;");
-        assert!(!has_diagnostic(
-            &integer,
-            DiagnosticCode::InstanceOfTypeMismatch,
-            &[]
-        ));
+        assert_eq!(integer.diagnostics, Vec::new());
     }
 
     #[test]

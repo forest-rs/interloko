@@ -208,18 +208,10 @@ pub enum DiagnosticCode {
     RestartGuardTypeMismatch,
     /// `class-of` received an invalid value.
     ClassOfTypeMismatch,
-    /// `instance?` received an invalid value.
-    InstanceOfTypeMismatch,
     /// An `instance?` test is statically impossible.
     InstanceOfImpossible,
-    /// `as` received an invalid value.
-    CastTypeMismatch,
     /// An `as` cast is statically impossible.
     CastImpossible,
-    /// A vector literal element is not a value a vector can hold.
-    VectorElementTypeMismatch,
-    /// An `==` operand is not an object.
-    IdentityOperandTypeMismatch,
     /// `make` was called with a non-class object argument.
     MakeClassArgumentTypeMismatch,
     /// A host-backed class was passed to `make`.
@@ -422,12 +414,8 @@ impl DiagnosticCode {
         Self::BlockExitResultMismatch,
         Self::RestartGuardTypeMismatch,
         Self::ClassOfTypeMismatch,
-        Self::InstanceOfTypeMismatch,
         Self::InstanceOfImpossible,
-        Self::CastTypeMismatch,
         Self::CastImpossible,
-        Self::VectorElementTypeMismatch,
-        Self::IdentityOperandTypeMismatch,
         Self::MakeClassArgumentTypeMismatch,
         Self::HostBackedMake,
         Self::BuiltinValueMake,
@@ -567,12 +555,8 @@ impl DiagnosticCode {
             Self::BlockExitResultMismatch => "sem.block-exit-result-mismatch",
             Self::RestartGuardTypeMismatch => "sem.restart-guard-type-mismatch",
             Self::ClassOfTypeMismatch => "sem.class-of-type-mismatch",
-            Self::InstanceOfTypeMismatch => "sem.instance-of-type-mismatch",
             Self::InstanceOfImpossible => "sem.instance-of-impossible",
-            Self::CastTypeMismatch => "sem.cast-type-mismatch",
             Self::CastImpossible => "sem.cast-impossible",
-            Self::VectorElementTypeMismatch => "sem.vector-element-type-mismatch",
-            Self::IdentityOperandTypeMismatch => "sem.identity-operand-type-mismatch",
             Self::MakeClassArgumentTypeMismatch => "sem.make-class-argument-type-mismatch",
             Self::HostBackedMake => "sem.host-backed-make",
             Self::BuiltinValueMake => "sem.builtin-value-make",
@@ -713,12 +697,8 @@ impl DiagnosticCode {
             "sem.block-exit-result-mismatch" => Self::BlockExitResultMismatch,
             "sem.restart-guard-type-mismatch" => Self::RestartGuardTypeMismatch,
             "sem.class-of-type-mismatch" => Self::ClassOfTypeMismatch,
-            "sem.instance-of-type-mismatch" => Self::InstanceOfTypeMismatch,
             "sem.instance-of-impossible" => Self::InstanceOfImpossible,
-            "sem.cast-type-mismatch" => Self::CastTypeMismatch,
             "sem.cast-impossible" => Self::CastImpossible,
-            "sem.vector-element-type-mismatch" => Self::VectorElementTypeMismatch,
-            "sem.identity-operand-type-mismatch" => Self::IdentityOperandTypeMismatch,
             "sem.make-class-argument-type-mismatch" => Self::MakeClassArgumentTypeMismatch,
             "sem.host-backed-make" => Self::HostBackedMake,
             "sem.builtin-value-make" => Self::BuiltinValueMake,

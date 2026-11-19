@@ -1,0 +1,21 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// A callable is an `<object>`: it can sit in an `<object>` slot or a vector,
+// come back out as an `<object>`, and be cast back to a `<function>` and
+// called.
+
+define class <cell> (<object>)
+  slot item :: <object>;
+end;
+
+define function twice(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define function main() => <integer>
+  let cell = make(<cell>, item: twice);
+  let steps = #[function (x :: <integer>) => <integer> x + 1 end, cell.item];
+  let first :: <integer> = apply(as(<function>, vector-ref(steps, 0)), 20);
+  apply(as(<function>, vector-ref(steps, 1)), first)
+end;

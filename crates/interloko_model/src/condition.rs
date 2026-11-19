@@ -192,9 +192,7 @@ pub enum NoApplicableMethodSlot {
     /// The generic function the send called, as its `<generic-function>`
     /// metaobject.
     Generic,
-    /// The send's arguments, in order, as a `<vector>`. A callable
-    /// argument, which is not an `<object>` and so cannot be an element,
-    /// appears as the symbol `#<callable>`; it never selects a method.
+    /// The send's arguments, in order, as a `<vector>`.
     Arguments,
     /// The stable code, [`NO_APPLICABLE_METHOD_CODE`] when the runtime
     /// signalled the condition.

@@ -475,11 +475,6 @@ pub enum RuntimeOp {
     TypeName,
 }
 
-/// The name of the symbol that stands in for a callable argument in the
-/// arguments of a `<no-applicable-method>`: no `<vector>` can hold a
-/// callable, which is not an `<object>`.
-pub const CALLABLE_ARGUMENT_SYMBOL: &str = "<callable>";
-
 /// Condition that compiled Loko code signals with an explicit tape `trap`.
 ///
 /// The tape carries [`LokoTrap::code`] as its trap code; runtime reporting
@@ -2514,7 +2509,7 @@ impl<'module> Lowering<'module> {
         let wires = kinds
             .iter()
             .enumerate()
-            .map(|(index, kind)| body.push_param(&format!("value{index}"), callable_wire(*kind)))
+            .map(|(index, _)| body.push_param(&format!("value{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
         let token = body.alloc(ValueKind::U64);
         body.instructions.extend([
@@ -2545,7 +2540,7 @@ impl<'module> Lowering<'module> {
             payload,
             span,
         });
-        let rets = kinds.iter().copied().map(callable_wire).collect::<Vec<_>>();
+        let rets = vec![BOXED_WIRE; kinds.len()];
         Ok(Function {
             id: thunk.boxed,
             name: format!("{name}#boxed"),
@@ -2984,7 +2979,7 @@ impl<'module> Lowering<'module> {
     }
 
     /// Lowers the boxed entry of the callable values of a function, generic
-    /// or slot accessor: under the boxed callable ABI ([`callable_wire`]),
+    /// or slot accessor: under the boxed callable ABI ([`BOXED_WIRE`]),
     /// it checks and unboxes each argument as the target takes it
     /// ([`BodyLowering::unwire`]), adapting a typed callable to its
     /// signature, calls the target, and boxes the results.
@@ -3006,7 +3001,7 @@ impl<'module> Lowering<'module> {
         let wires = call_params
             .iter()
             .enumerate()
-            .map(|(index, kind)| body.push_param(&format!("arg{index}"), callable_wire(*kind)))
+            .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
         let generic = match spec.callable {
             sem::KnownCallable::GenericFunction(generic) => Some(
@@ -3062,12 +3057,7 @@ impl<'module> Lowering<'module> {
             values,
             span: spec.span,
         });
-        let rets = spec
-            .rets
-            .iter()
-            .copied()
-            .map(callable_wire)
-            .collect::<Vec<_>>();
+        let rets = vec![BOXED_WIRE; spec.rets.len()];
         Ok(Function {
             id,
             name: format!("{}#boxed", spec.name),
@@ -3159,7 +3149,7 @@ impl<'module> Lowering<'module> {
             .params
             .iter()
             .enumerate()
-            .map(|(index, kind)| body.push_param(&format!("arg{index}"), callable_wire(*kind)))
+            .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
         let mut args = vec![env.reg];
         for (index, (wire, kind)) in wires.into_iter().zip(&sig.params).enumerate() {
@@ -3199,12 +3189,7 @@ impl<'module> Lowering<'module> {
             values,
             span: closure.span,
         });
-        let rets = sig
-            .rets
-            .iter()
-            .copied()
-            .map(callable_wire)
-            .collect::<Vec<_>>();
+        let rets = vec![BOXED_WIRE; sig.rets.len()];
         Ok(Function {
             id,
             name: format!("closure#{}#boxed", closure.id.0),
@@ -3258,12 +3243,7 @@ impl<'module> Lowering<'module> {
             .into_iter()
             .map(|param| body.wire_value(param, span))
             .collect::<Result<Vec<_>, _>>()?;
-        let rets = sig
-            .rets
-            .iter()
-            .copied()
-            .map(callable_wire)
-            .collect::<Vec<_>>();
+        let rets = vec![BOXED_WIRE; sig.rets.len()];
         let results = rets
             .iter()
             .map(|kind| body.alloc(*kind))
@@ -4999,29 +4979,7 @@ impl<'module> BodyLowering<'module> {
             .ok_or_else(|| invalid_semantic("module has no <no-applicable-method> class"))?;
         let mut elements = Vec::with_capacity(arguments.len());
         for argument in arguments {
-            // No `<vector>` can hold a callable, which is not an `<object>`
-            // and never selects a method, so the symbol `#<callable>`
-            // stands in for it.
-            let argument = if matches!(
-                argument.kind,
-                ValueKind::Closure(_) | ValueKind::Function(_)
-            ) {
-                let class = self
-                    .module
-                    .builtin_value_class(sem::BuiltinValueClass::Symbol)
-                    .ok_or_else(|| invalid_semantic("module has no <symbol> class"))?;
-                let symbol = self.alloc(ValueKind::Object(Some(class)));
-                self.instructions.push(Instr::SymbolLiteral {
-                    dst: symbol.reg,
-                    name: CALLABLE_ARGUMENT_SYMBOL.into(),
-                    class,
-                    span,
-                });
-                symbol
-            } else {
-                *argument
-            };
-            elements.push(self.box_any(argument, span)?.reg);
+            elements.push(self.box_any(*argument, span)?.reg);
         }
         let arguments = self.alloc(ValueKind::Object(Some(vector_class)));
         self.instructions.push(Instr::VectorLiteral {
@@ -5108,7 +5066,15 @@ impl<'module> BodyLowering<'module> {
             .get(index)
             .copied()
             .flatten()
-            .filter(|kind| kind.is_number() || *kind == sem::ValueKind::Bool)
+            .filter(|kind| {
+                kind.is_number()
+                    || matches!(
+                        kind,
+                        sem::ValueKind::Bool
+                            | sem::ValueKind::Callable
+                            | sem::ValueKind::KnownCallable(_)
+                    )
+            })
         {
             let label = if is_scalar_value_class(self.module, value_kind(scalar)?, specializer) {
                 labels.success
@@ -5508,7 +5474,7 @@ impl<'module> BodyLowering<'module> {
             } => {
                 let object = self.lower_expr(object)?;
                 let result = self.alloc(ValueKind::ClassObject(Some(*class)));
-                if is_unboxed_scalar(object.kind) {
+                if is_unboxed(object.kind) {
                     self.emit_class_meta_object(result.reg, *class, *span);
                 } else {
                     let class_id = self.alloc(ValueKind::U64);
@@ -5538,7 +5504,7 @@ impl<'module> BodyLowering<'module> {
                 if let Some(outcome) = self.decided_test(*site) {
                     return Ok(self.decided_test_value(*site, outcome, *span));
                 }
-                if is_unboxed_scalar(value.kind) {
+                if is_unboxed(value.kind) {
                     let result = self.alloc(ValueKind::Bool);
                     self.instructions.push(Instr::ConstBool {
                         dst: result.reg,
@@ -6346,7 +6312,7 @@ impl<'module> BodyLowering<'module> {
             return Ok(None);
         };
         if boxed.kind != ValueKind::Any
-            || !is_unboxed_scalar(kind)
+            || !is_unboxed(kind)
             || !facts::reads_local(branch, refinement.local)
         {
             return Ok(None);
@@ -7063,7 +7029,7 @@ impl<'module> BodyLowering<'module> {
     ///
     /// When the value's typed entry has exactly this call's shape
     /// ([`callable_shape`]), the call is a typed one. Otherwise it crosses
-    /// under the boxed callable ABI ([`callable_wire`]): the arguments are
+    /// under the boxed callable ABI ([`BOXED_WIRE`]): the arguments are
     /// boxed, the boxed entry checks and unboxes what the callee relies on,
     /// and each result comes back boxed and is unboxed to the kind the call
     /// site takes, a number or boolean of another kind signalling a
@@ -7129,7 +7095,7 @@ impl<'module> BodyLowering<'module> {
         for arg in args {
             wired.push(self.wire_value(arg, span)?);
         }
-        let rets = kinds.iter().copied().map(callable_wire).collect::<Vec<_>>();
+        let rets = vec![BOXED_WIRE; kinds.len()];
         let boxed_results = rets
             .iter()
             .map(|kind| self.alloc(*kind))
@@ -7829,6 +7795,19 @@ impl<'module> BodyLowering<'module> {
             });
             return Ok(self.narrow_integer(integer, expected, type_error, span));
         }
+        // A callable comes out of its box untyped; a typed one is adapted,
+        // so calls through it check what crossed.
+        if value.kind == ValueKind::Any
+            && let ValueKind::Closure(sig) = expected
+            && let Some(class) = scalar_concrete_class(self.module, expected)
+        {
+            let type_error = self.coercion_error(class_expected(class), span);
+            let callable = self.unbox(value, class, ValueKind::Closure(None), type_error, span);
+            return match sig {
+                Some(sig) => self.adapt(callable, sig, span),
+                None => Ok(callable),
+            };
+        }
         if value.kind == ValueKind::Any
             && let Some(class) = scalar_concrete_class(self.module, expected)
         {
@@ -7929,19 +7908,13 @@ impl<'module> BodyLowering<'module> {
     }
 
     /// Puts `value` in the kind it crosses a call through a callable value
-    /// at ([`callable_wire`]).
+    /// at ([`BOXED_WIRE`]): boxed.
     fn wire_value(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
-        match value.kind {
-            ValueKind::Closure(_) => Ok(Value {
-                kind: ValueKind::Closure(None),
-                ..value
-            }),
-            _ => self.box_any(value, span),
-        }
+        self.box_any(value, span)
     }
 
     /// Takes `value`, an argument that crossed a callable value's boxed
-    /// entry at its [`callable_wire`] kind, as a parameter of `kind` and
+    /// entry at its [`BOXED_WIRE`] kind, as a parameter of `kind` and
     /// `range`: the entry check of [`sem::EntryCheck`].
     ///
     /// A boxed `<object>` is unboxed to a number or boolean, or cast to a
@@ -7965,8 +7938,23 @@ impl<'module> BodyLowering<'module> {
             type_error_site(kind, expected, String::from(site), span)
         };
         match (value.kind, kind) {
-            (ValueKind::Closure(_), ValueKind::Closure(Some(sig))) => self.adapt(value, sig, span),
-            (ValueKind::Closure(_), ValueKind::Closure(None)) => Ok(Value { kind, ..value }),
+            (ValueKind::Any, ValueKind::Closure(sig)) => {
+                let class = scalar_concrete_class(self.module, kind)
+                    .ok_or_else(|| invalid_semantic("the <function> class is missing"))?;
+                let callable = self.unbox(
+                    value,
+                    class,
+                    ValueKind::Closure(None),
+                    error(TypeErrorKind::Entry, kind_expected(self.module, kind)),
+                    span,
+                );
+                // The host hands back an aggregate the tape knows only as
+                // one, so the value opens as a slot's callable does.
+                match sig {
+                    Some(sig) => self.adapt(callable, sig, span),
+                    None => Ok(callable),
+                }
+            }
             (ValueKind::Any, ValueKind::Any) => Ok(value),
             (
                 ValueKind::Any,
@@ -8068,14 +8056,10 @@ impl<'module> BodyLowering<'module> {
         };
         if matches!(
             value.kind,
-            ValueKind::U64
-                | ValueKind::Function(_)
-                | ValueKind::Closure(_)
-                | ValueKind::Entry
-                | ValueKind::Aggregate
+            ValueKind::U64 | ValueKind::Function(_) | ValueKind::Entry | ValueKind::Aggregate
         ) {
             return Err(invalid_semantic(
-                "runtime metadata or callable values cannot be boxed as <object>",
+                "runtime metadata cannot be boxed as <object>",
             ));
         }
         let boxed = self.alloc(ValueKind::Any);
@@ -9332,10 +9316,10 @@ const fn num32_compare(kind: sem::NumericKind, op: sem::CompareOp) -> Num32Binar
     }
 }
 
-/// Returns whether `kind` is an unboxed number or boolean, whose class is
-/// known statically.
-const fn is_unboxed_scalar(kind: ValueKind) -> bool {
-    matches!(kind, ValueKind::Bool) || is_unboxed_number(kind)
+/// Returns whether `kind` is an unboxed number, boolean or callable, whose
+/// class is known statically: a callable is a `<function>`.
+const fn is_unboxed(kind: ValueKind) -> bool {
+    matches!(kind, ValueKind::Bool | ValueKind::Closure(_)) || is_unboxed_number(kind)
 }
 
 /// Returns whether `kind` is an unboxed number, whose class is known
@@ -9347,9 +9331,9 @@ const fn is_unboxed_number(kind: ValueKind) -> bool {
     )
 }
 
-/// Returns the unboxed scalar kind whose values `class` describes: `i64`
-/// for `<integer>`, `f64` for `<double-float>`, `f32` for `<single-float>`
-/// and `bool` for `<boolean>`.
+/// Returns the unboxed kind whose values `class` describes: `i64` for
+/// `<integer>`, `f64` for `<double-float>`, `f32` for `<single-float>`,
+/// `bool` for `<boolean>` and an untyped callable for `<function>`.
 fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<ValueKind> {
     match module.classes.get(class.0 as usize)?.origin {
         sem::ClassOrigin::BuiltinValue {
@@ -9364,13 +9348,16 @@ fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<Va
         sem::ClassOrigin::BuiltinValue {
             kind: sem::BuiltinValueClass::Boolean,
         } => Some(ValueKind::Bool),
+        sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::Function,
+        } => Some(ValueKind::Closure(None)),
         _ => None,
     }
 }
 
-/// Returns the concrete built-in class of the unboxed scalar kind `kind`.
+/// Returns the concrete built-in class of the unboxed kind `kind`.
 ///
-/// `<i32>` and `<u32>` values are `<integer>`s.
+/// `<i32>` and `<u32>` values are `<integer>`s, and callables `<function>`s.
 fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::ClassId> {
     match kind {
         ValueKind::I64 | ValueKind::I32 | ValueKind::U32 => {
@@ -9379,6 +9366,7 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         ValueKind::F64 => builtin_class(module, sem::BuiltinValueClass::DoubleFloat),
         ValueKind::F32 => builtin_class(module, sem::BuiltinValueClass::SingleFloat),
         ValueKind::Bool => builtin_class(module, sem::BuiltinValueClass::Boolean),
+        ValueKind::Closure(_) => builtin_class(module, sem::BuiltinValueClass::Function),
         _ => None,
     }
 }
@@ -9387,13 +9375,14 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
 /// instance of `class`: the scalar's concrete class (`<integer>` for `i64`,
 /// `<double-float>` for `f64`) or one of its superclasses, such as
 /// `<rational>` or `<float>`, `<real>`, `<number>`, and `<object>`;
-/// `<boolean>` for `bool`.
+/// `<boolean>` for `bool` and `<function>` for a callable.
 fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::ClassId) -> bool {
     let concrete = match kind {
         ValueKind::I64 | ValueKind::I32 | ValueKind::U32 => sem::BuiltinValueClass::Integer,
         ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
         ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
         ValueKind::Bool => sem::BuiltinValueClass::Boolean,
+        ValueKind::Closure(_) => sem::BuiltinValueClass::Function,
         _ => return false,
     };
     builtin_class(module, concrete).is_some_and(|actual| module.is_same_or_subclass(actual, class))
@@ -9531,9 +9520,11 @@ const fn class_object_expected(bound: sem::ClassId) -> TypeObject {
 }
 
 /// The expected type of a check whose result has register kind `kind`:
-/// `<integer>`, `<i32>`, `<u32>`, a float class, or `<boolean>`.
+/// `<integer>`, `<i32>`, `<u32>`, a float class, `<boolean>` or
+/// `<function>`.
 fn kind_expected(module: &sem::Module, kind: ValueKind) -> TypeObject {
     let class = match kind {
+        ValueKind::Closure(_) => sem::BuiltinValueClass::Function,
         ValueKind::I32 => return TypeObject::named(sem::LimitedInteger::I32),
         ValueKind::U32 => return TypeObject::named(sem::LimitedInteger::U32),
         ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
@@ -9675,20 +9666,14 @@ impl CodeBuffer<'_> {
     }
 }
 
-/// The register kind a value of `kind` crosses a callable value's boxed
-/// entry at: the boxed callable ABI. A callable stays a callable value and
-/// every other value is a boxed `<object>`, whatever the caller and the
-/// callee declare, so the tape's signature check at `call.indirect` always
-/// passes and the callee's entry ([`sem::EntryCheck`]) and the caller's
-/// result checks decide what each side may rely on. Only untyped calls
-/// whose shape differs from the value's typed entry take it
-/// ([`BodyLowering::call_untyped`]).
-fn callable_wire(kind: ValueKind) -> ValueKind {
-    match kind {
-        ValueKind::Closure(_) => ValueKind::Closure(None),
-        _ => ValueKind::Any,
-    }
-}
+/// The register kind every value crosses a callable value's boxed entry at:
+/// the boxed callable ABI. Every value, a callable too, is a boxed
+/// `<object>`, whatever the caller and the callee declare, so the tape's
+/// signature check at `call.indirect` always passes and the callee's entry
+/// ([`sem::EntryCheck`]) and the caller's result checks decide what each
+/// side may rely on. Only untyped calls whose shape differs from the
+/// value's typed entry take it ([`BodyLowering::call_untyped`]).
+const BOXED_WIRE: ValueKind = ValueKind::Any;
 
 /// The shape of a call taking `params` and returning `rets`, which a
 /// callable value records for its typed entry ([`Instr::CallableNew`]): a

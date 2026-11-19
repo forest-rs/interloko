@@ -968,3 +968,39 @@ fn a_difference_with_too_many_pieces_widens_back_to_the_cone() {
         (Relation::Maybe, Vec::new())
     );
 }
+
+/// A hierarchy with `<function>`, the class of callable values.
+struct Callables;
+
+const FUNCTION: ClassId = ClassId(1);
+
+impl ClassHierarchy for Callables {
+    fn superclass(&self, class: ClassId) -> Option<ClassId> {
+        (class != OBJECT).then_some(OBJECT)
+    }
+
+    fn is_closed(&self, class: ClassId) -> bool {
+        class == FUNCTION
+    }
+
+    fn builtin_class(&self, class: BuiltinValueClass) -> Option<ClassId> {
+        (class == BuiltinValueClass::Function).then_some(FUNCTION)
+    }
+}
+
+#[test]
+fn callables_are_the_function_class() {
+    let callable = Type::of(Atom::Callable, &Callables);
+    // `<function>` is exactly the callables, whatever names it.
+    assert_eq!(Type::of(Atom::Cone(FUNCTION), &Callables), callable);
+    assert_eq!(Type::of(Atom::Exact(FUNCTION), &Callables), callable);
+    assert_eq!(callable.exact_class(&Callables), Some(FUNCTION));
+    assert_eq!(
+        callable.relate(&Type::of(Atom::Cone(OBJECT), &Callables), &Callables),
+        Relation::Always
+    );
+    assert_eq!(
+        Type::of(Atom::Cone(LABEL), &Callables).relate(&callable, &Callables),
+        Relation::Never
+    );
+}

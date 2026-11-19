@@ -1,11 +1,11 @@
 // expect: diagnostics 2
 // expect: diagnostic code sem.no-applicable-method
 // expect: diagnostic contains no method of `area` accepts <boolean> as argument 1: its methods specialize it on <circle>; pass one of those, or define a method on <boolean>
-// expect: diagnostic contains generic `area` argument 1 expects <object> but got function `twice`
+// expect: diagnostic contains no method of `area` accepts function `twice` as argument 1: its methods specialize it on <circle>; pass one of those, or define a method on <function>
 
-// A boolean is a `<boolean>`, which no method here specializes on, so a
-// method on `<boolean>` would take one; a callable is not an `<object>` at
-// all. Both were once accepted here and failed to build.
+// A boolean is a `<boolean>` and a callable a `<function>`, which no method
+// here specializes on, so a method on `<boolean>` or `<function>` would take
+// one. Both were once accepted here and failed to build.
 define class <circle> (<object>)
 end;
 

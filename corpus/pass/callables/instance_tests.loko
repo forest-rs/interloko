@@ -1,0 +1,18 @@
+// expect: run 101
+// expect: diagnostics 0
+
+// `instance?` finds a `<function>` in an `<object>`, and its true branch
+// may call the value it found.
+
+define function call-with-100(f :: <function>) => <integer>
+  let result :: <integer> = apply(f, 100);
+  result
+end;
+
+define function try-call(x :: <object>) => <integer>
+  if (instance?(x, <function>)) call-with-100(x) else 0 end
+end;
+
+define function main() => <integer>
+  try-call(function (n :: <integer>) => <integer> n + 1 end) + try-call(7) + try-call("f")
+end;

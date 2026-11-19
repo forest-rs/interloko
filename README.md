@@ -173,6 +173,19 @@ The current slices include:
 - booleans: `#t` and `#f` are the instances of the concrete `<boolean>`
   class, so methods may specialize on it, `instance?` and `class-of` see it,
   and a boolean boxes to `<object>` and back like a number;
+- callables as objects: functions, closures and generic functions used as
+  values are instances of the concrete `<function>` class, and every
+  callable type, `<callable>` or `callable(...) => ...` with a signature,
+  is a subtype of it. A callable boxes to `<object>`, so it can live in
+  `<object>` slots and vectors and be passed to `<object>` parameters;
+  `class-of`, `instance?` and dispatch see `<function>`, and methods and
+  generic parameters may specialize on it. `as(<function>, o)` casts one
+  back out as an untyped callable, whose calls check their arguments and
+  results like any untyped call (`type-error.entry` and `use-value`).
+  A callable is `==` itself boxed or not, and two values of the same
+  function with nothing captured, such as two mentions of one function,
+  are `==`. Like a callable in a slot, a boxed one holds its environment
+  only for the invocation that made it;
 - identity: `a == b` is Dylan's `==`, defined on any two objects, never
   dispatching and not user-definable; `=` stays the equality of numbers,
   strings, symbols and types. Heap objects are `==` when they are the same

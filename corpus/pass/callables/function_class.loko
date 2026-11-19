@@ -1,0 +1,14 @@
+// expect: run "<function>"
+// expect: diagnostics 0
+
+// Functions and closures are instances of the built-in class `<function>`,
+// which `class-of` reports, statically or through an `<object>`.
+
+define function twice(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define function main() => <string>
+  let held :: <object> = function (x :: <integer>) => <integer> x + 1 end;
+  if (class-of(twice) = <function>) class-name(object-class(held)) else "no" end
+end;

@@ -13,7 +13,8 @@
 //! - [`Atom::Boolean`]: one boolean value;
 //! - [`Atom::Singleton`]: one metaobject, such as a particular generic
 //!   function;
-//! - [`Atom::Callable`]: first-class callable values.
+//! - [`Atom::Callable`]: first-class callable values, the instances of
+//!   `<function>`, whatever their signatures.
 //!
 //! Classes come from a [`ClassHierarchy`]. Inheritance is single, so two
 //! cones over unrelated classes are disjoint. The lattice is open-world: a
@@ -343,7 +344,7 @@ impl Atom {
             Self::Integer(_) => hierarchy.builtin_class(BuiltinValueClass::Integer),
             Self::Boolean(_) => hierarchy.builtin_class(BuiltinValueClass::Boolean),
             Self::Singleton(object) => hierarchy.builtin_class(object.metaclass()),
-            Self::Callable => None,
+            Self::Callable => hierarchy.builtin_class(BuiltinValueClass::Function),
         }
     }
 
@@ -351,10 +352,12 @@ impl Atom {
     /// exactly one.
     fn exact_class<H: ClassHierarchy + ?Sized>(&self, hierarchy: &H) -> Option<ClassId> {
         match self {
-            Self::Exact(_) | Self::Integer(_) | Self::Boolean(_) | Self::Singleton(_) => {
-                self.class(hierarchy)
-            }
-            Self::Cone(_) | Self::Callable => None,
+            Self::Exact(_)
+            | Self::Integer(_)
+            | Self::Boolean(_)
+            | Self::Singleton(_)
+            | Self::Callable => self.class(hierarchy),
+            Self::Cone(_) => None,
         }
     }
 
@@ -867,6 +870,7 @@ fn normalize<H: ClassHierarchy + ?Sized>(
     hierarchy: &H,
 ) -> Type {
     let boolean = hierarchy.builtin_class(BuiltinValueClass::Boolean);
+    let function = hierarchy.builtin_class(BuiltinValueClass::Function);
     let mut out = Vec::new();
     for atom in atoms {
         // `<boolean>` is exactly its two values.
@@ -874,6 +878,13 @@ fn normalize<H: ClassHierarchy + ?Sized>(
             && Some(class) == boolean
         {
             out.extend([Atom::Boolean(false), Atom::Boolean(true)]);
+            continue;
+        }
+        // `<function>` is exactly the callable values.
+        if let Atom::Cone(class) | Atom::Exact(class) = atom
+            && Some(class) == function
+        {
+            out.push(Atom::Callable);
             continue;
         }
         match canonical(atom, hierarchy) {

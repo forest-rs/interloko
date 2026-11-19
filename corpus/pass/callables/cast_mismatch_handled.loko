@@ -1,0 +1,23 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// A callable cast back out of an `<object>` is untyped, so calling it with
+// an argument its signature rejects signals the `<type-error>` its entry
+// check makes, which the caller can handle like any other.
+
+define function twice(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define function call(f :: <function>) => <integer>
+  handle
+    if (apply(f, "seven") > 0) 1 else 0 end
+  with restart e :: <type-error>
+    if (e.type-error-code = "type-error.entry") 2 else 3 end
+  end
+end;
+
+define function main() => <integer>
+  let held :: <object> = twice;
+  call(as(<function>, held))
+end;

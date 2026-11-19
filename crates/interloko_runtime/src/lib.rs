@@ -32,7 +32,7 @@ use execution_tape::host::{
     Host, HostContext, HostError, HostSig, ResourceKeyRef, SigHash, ValueRef,
 };
 use execution_tape::program::{HostTypeId, ValueType};
-use execution_tape::value::{Obj, ObjHandle, Value};
+use execution_tape::value::{AggHandle, Obj, ObjHandle, Value};
 
 use interloko_model::sealing::{ClosedWorld, Sealing};
 use interloko_model::types::{ClassHierarchy, IntRange, TypeNames};
@@ -1929,7 +1929,8 @@ impl InterlokoHost {
             | Value::U32(_)
             | Value::F32(_)
             | Value::Bool(_)
-            | Value::U64(_) => Ok(self.push_boxed_value(value)),
+            | Value::U64(_)
+            | Value::Agg(_) => Ok(self.push_boxed_value(value)),
             Value::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.push_boxed_value(Value::Obj(obj)))
             }
@@ -2165,7 +2166,7 @@ impl Host for InterlokoHost {
                 let [ValueRef::Obj(lhs), ValueRef::Obj(rhs)] = args else {
                     return Err(HostError::Failed);
                 };
-                rets[0] = Value::Bool(self.identical(*lhs, *rhs)?);
+                rets[0] = Value::Bool(self.identical(*lhs, *rhs, &ctx)?);
                 Ok(0)
             }
             META_CLASS_OBJECT => {
@@ -2547,9 +2548,11 @@ impl Host for InterlokoHost {
                     return Err(type_error::check_failed(&ctx));
                 }
                 rets[0] = match self.boxed_value(*obj)? {
-                    value @ (Value::I64(_) | Value::F64(_) | Value::F32(_) | Value::Bool(_)) => {
-                        value
-                    }
+                    value @ (Value::I64(_)
+                    | Value::F64(_)
+                    | Value::F32(_)
+                    | Value::Bool(_)
+                    | Value::Agg(_)) => value,
                     _ => return Err(HostError::Failed),
                 };
                 Ok(0)
@@ -2577,6 +2580,8 @@ impl Host for InterlokoHost {
                     [ValueRef::F32(value)] => Value::F32(*value),
                     [ValueRef::Bool(value)] => Value::Bool(*value),
                     [ValueRef::U64(value)] => Value::U64(*value),
+                    // A callable value boxes as the `<function>` it is.
+                    [ValueRef::Agg(callable)] => Value::Agg(*callable),
                     [ValueRef::Obj(obj)] if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                         Value::Obj(*obj)
                     }
@@ -2786,6 +2791,8 @@ impl InterlokoHost {
                 .builtin_class(BuiltinValueClass::Boolean)
                 .or(Ok(OBJECT_CLASS_ID)),
             ValueRef::U64(_) => Ok(OBJECT_CLASS_ID),
+            // A callable value is a tuple of its entries and shape.
+            ValueRef::Agg(_) => self.builtin_class(BuiltinValueClass::Function),
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 Ok(self.object(obj)?.class)
             }
@@ -2800,6 +2807,7 @@ impl InterlokoHost {
                         .builtin_class(BuiltinValueClass::Boolean)
                         .or(Ok(OBJECT_CLASS_ID)),
                     Value::U64(_) => Ok(OBJECT_CLASS_ID),
+                    Value::Agg(_) => self.builtin_class(BuiltinValueClass::Function),
                     Value::Obj(boxed) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
                         Ok(self.object(boxed)?.class)
                     }
@@ -2891,13 +2899,15 @@ impl InterlokoHost {
 
     /// Whether two boxed values are identical, `==`.
     ///
-    /// Heap objects are identical when they are the same object. Integers,
+    /// Heap objects are identical when they are the same object, and
+    /// callables when they are the same function closed over the same
+    /// environment ([`same_callable`]). Integers,
     /// floats and booleans have no identity apart from their value, so they
     /// are identical when they are the same class and value: integers by
     /// value, floats by class and IEEE 754 bit pattern (so a NaN is identical
     /// to itself, and `0.0` and `-0.0` are not identical). Whether a value is
     /// boxed in its handle or on the heap does not change the answer.
-    fn identical(&self, lhs: Obj, rhs: Obj) -> Result<bool, HostError> {
+    fn identical(&self, lhs: Obj, rhs: Obj, ctx: &HostContext<'_, '_>) -> Result<bool, HostError> {
         if lhs == rhs {
             return Ok(true);
         }
@@ -2908,6 +2918,7 @@ impl InterlokoHost {
             (Value::F64(left), Value::F64(right)) => left.to_bits() == right.to_bits(),
             (Value::F32(left), Value::F32(right)) => left.to_bits() == right.to_bits(),
             (Value::Bool(left), Value::Bool(right)) => left == right,
+            (Value::Agg(left), Value::Agg(right)) => same_callable(left, right, ctx)?,
             (Value::Obj(left), Value::Obj(right))
                 if left.host_type == INTERLOKO_OBJECT_TYPE
                     && right.host_type == INTERLOKO_OBJECT_TYPE =>
@@ -3144,6 +3155,34 @@ pub fn identical_signature() -> HostSig {
         args: vec![any_type(), any_type()],
         rets: vec![ValueType::Bool],
     }
+}
+
+/// Whether two callable values, tuples of a typed entry, a boxed entry and
+/// a shape, are the same `<function>`.
+///
+/// A callable value is made afresh each time a function is named or a
+/// closure built, so the tuple is not its identity: the typed entry's code
+/// and environment are. Two values running the same code over the same
+/// environment cannot be told apart, and neither can two values of the same
+/// code with nothing captured, such as two mentions of one function.
+fn same_callable(
+    left: AggHandle,
+    right: AggHandle,
+    ctx: &HostContext<'_, '_>,
+) -> Result<bool, HostError> {
+    if left == right {
+        return Ok(true);
+    }
+    let entry = |callable| match ctx.tuple_get(callable, 0) {
+        Ok(Value::Closure(closure)) => Ok(closure),
+        _ => Err(HostError::Failed),
+    };
+    let (left, right) = (entry(left)?, entry(right)?);
+    if left.func != right.func {
+        return Ok(false);
+    }
+    let captures = |env| ctx.tuple_len(env).map_err(|_| HostError::Failed);
+    Ok(left.env == right.env || (captures(left.env)? == 0 && captures(right.env)? == 0))
 }
 
 /// Host signature for constructing a class metaobject from a class id.
