@@ -23,8 +23,8 @@ define function from-slot(s :: <stash>) => <integer>
 end;
 
 define function main() => <integer>
-  let tenfold :: <callable> = function (x :: <integer>) => <integer> x * 10 end;
-  let hundredfold :: <callable> = function (x :: <integer>) => <integer> x * 100 end;
+  let tenfold :: <callable> = method (x :: <integer>) => <integer> x * 10 end;
+  let hundredfold :: <callable> = method (x :: <integer>) => <integer> x * 100 end;
   choose(#t, tenfold, hundredfold) + choose(#f, tenfold, hundredfold)
     + from-slot(make(<stash>, fn: hundredfold)) + 1
 end;

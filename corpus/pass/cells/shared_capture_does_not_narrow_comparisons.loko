@@ -7,7 +7,7 @@
 
 define function main() => <integer>
   let n = 0;
-  let pick = function (y :: limited(<integer>, min: 0, max: 1000)) => <integer>
+  let pick = method (y :: limited(<integer>, min: 0, max: 1000)) => <integer>
     if (y <= n)
       let z :: limited(<integer>, min: 0, max: 0) = y;
       z

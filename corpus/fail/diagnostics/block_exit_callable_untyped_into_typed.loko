@@ -9,10 +9,10 @@
 define function go(h :: <callable>, n :: <integer>) => <integer>
   let g :: callable(<i32>) => <i32> = block (return)
     let ignored :: <callable> = if (n > 0) return(h) else h end;
-    function (x :: <i32>) => <i32> x end
+    method (x :: <i32>) => <i32> x end
   end;
   as(<integer>, g(3i32)) + 1
 end;
 define function main() => <integer>
-  go(function (x :: <integer>) => <double-float> 1.5 end, 1)
+  go(method (x :: <integer>) => <double-float> 1.5 end, 1)
 end;

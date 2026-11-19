@@ -3356,13 +3356,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "primary-expression",
-            "function-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression",
+            "method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression",
             "syntax.rs:Parser::parse_primary",
         ),
         (
-            "function-expression",
-            "`function` `(` parameter-list? `)` result-annotation? body `end`",
-            "syntax.rs:Parser::parse_function_expr",
+            "method-expression",
+            "`method` `(` parameter-list? `)` result-annotation? body `end`",
+            "syntax.rs:Parser::parse_method_expr",
         ),
         (
             "call-name",
@@ -4021,7 +4021,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         | CstKind::SymbolExpr
         | CstKind::TypeExpr => Some("primary-expression"),
         CstKind::KeywordExpr => Some("keyword-symbol"),
-        CstKind::FunctionExpr => Some("function-expression"),
+        CstKind::MethodExpr => Some("method-expression"),
         CstKind::VectorExpr => Some("vector-expression"),
         CstKind::IfExpr => Some("if-expression"),
         CstKind::ElseifClause => Some("elseif-clause"),

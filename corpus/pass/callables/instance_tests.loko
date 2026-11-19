@@ -14,5 +14,5 @@ define function try-call(x :: <object>) => <integer>
 end;
 
 define function main() => <integer>
-  try-call(function (n :: <integer>) => <integer> n + 1 end) + try-call(7) + try-call("f")
+  try-call(method (n :: <integer>) => <integer> n + 1 end) + try-call(7) + try-call("f")
 end;

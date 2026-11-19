@@ -12,8 +12,8 @@ end;
 define function make-account(start :: <integer>) => <account>
   let money = start;
   make(<account>,
-       deposit: function (amount :: <integer>) => <integer> money := money + amount end,
-       balance: function () => <integer> money end)
+       deposit: method (amount :: <integer>) => <integer> money := money + amount end,
+       balance: method () => <integer> money end)
 end;
 
 define function main() => <integer>

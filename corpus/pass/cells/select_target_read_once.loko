@@ -6,7 +6,7 @@
 
 define function main() => <integer>
   let n = 1;
-  let bump = function () => <integer>
+  let bump = method () => <integer>
     n := 2;
     2
   end;

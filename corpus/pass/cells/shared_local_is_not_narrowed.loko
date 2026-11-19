@@ -10,7 +10,7 @@
 
 define function main() => <integer>
   let x :: <object> = 1;
-  let reset = function () => <integer>
+  let reset = method () => <integer>
     x := "text";
     0
   end;

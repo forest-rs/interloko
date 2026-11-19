@@ -7,7 +7,7 @@
 
 define constant $builtins :: <table> = begin
   let t = make(<table>);
-  t["sqrt"] := function (xs :: <stretchy-vector>) => <integer>
+  t["sqrt"] := method (xs :: <stretchy-vector>) => <integer>
                  as(<integer>, floor(sqrt(as(<double-float>, xs[0]))))
                end;
   t

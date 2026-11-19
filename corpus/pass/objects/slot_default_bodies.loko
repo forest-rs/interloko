@@ -30,7 +30,7 @@ define class <tally> (<object>)
   end;
   slot scale :: callable(<integer>) => <integer>, init-value: begin
     let factor = 10;
-    function (x :: <integer>) => <integer> x * factor end
+    method (x :: <integer>) => <integer> x * factor end
   end;
 end;
 

@@ -15,7 +15,7 @@ end;
 
 define function twice(f :: callable(<integer>) => <integer>)
     => callable(<integer>) => <integer>
-  function (x :: <integer>) => <integer> f(f(x)) end
+  method (x :: <integer>) => <integer> f(f(x)) end
 end;
 
 define function main()

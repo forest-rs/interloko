@@ -20,7 +20,7 @@ define function main() => <integer>
   end;
   let late :: <object> = 300;
   let kept :: <integer> = 0;
-  let store = function () kept := late end;
+  let store = method () kept := late end;
   store();
   hits(held) * 1000 + kept + total * 10 + held.hits
 end;

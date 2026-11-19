@@ -17,8 +17,8 @@ define function pick(f :: callable(<integer>) => <integer>) => <integer>
 end;
 
 define function main() => <integer>
-  let inc = function (a :: <integer>) => <integer> a + 1 end;
-  let dec = function (a :: <integer>) => <integer> a - 1 end;
+  let inc = method (a :: <integer>) => <integer> a + 1 end;
+  let dec = method (a :: <integer>) => <integer> a - 1 end;
   let missed = handle pick(dec)
     with restart e :: <select-error>
       if (e.select-error-value == dec) 11 else 0 end

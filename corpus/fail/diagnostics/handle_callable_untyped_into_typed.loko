@@ -9,9 +9,9 @@ define class <stop> (<object>)
 end;
 define function go(h :: <callable>) => <integer>
   let g :: callable(<i32>) => <i32> =
-    handle h with restart <stop> function (x :: <i32>) => <i32> x end end;
+    handle h with restart <stop> method (x :: <i32>) => <i32> x end end;
   as(<integer>, g(3i32)) + 1
 end;
 define function main() => <integer>
-  go(function (x :: <integer>) => <double-float> 1.5 end)
+  go(method (x :: <integer>) => <double-float> 1.5 end)
 end;

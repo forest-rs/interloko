@@ -30,5 +30,5 @@ define function main() => <integer>
   let held :: <object> = make(<num>, value: 3);
   let n :: <object> = 5;
   let r = eval(held) * 100 + double(n) * 2;
-  r + apply-to(function (x :: <integer>) => <integer> x + 1 end, n - 4 + 0) - 1
+  r + apply-to(method (x :: <integer>) => <integer> x + 1 end, n - 4 + 0) - 1
 end;

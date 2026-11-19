@@ -16,12 +16,12 @@ define method forward-iteration-protocol (o :: <odds>)
      callable(<object>, <object>) => <object>,
      callable(<object>, <object>) => <object>, <object>)
   values(1, o.below,
-         function (c :: <object>, s :: <object>) => <object> as(<integer>, s) + 2 end,
-         function (c :: <object>, s :: <object>, l :: <object>) => <boolean>
+         method (c :: <object>, s :: <object>) => <object> as(<integer>, s) + 2 end,
+         method (c :: <object>, s :: <object>, l :: <object>) => <boolean>
            as(<integer>, s) >= as(<integer>, l)
          end,
-         function (c :: <object>, s :: <object>) => <object> s end,
-         function (c :: <object>, s :: <object>) => <object> s end,
+         method (c :: <object>, s :: <object>) => <object> s end,
+         method (c :: <object>, s :: <object>) => <object> s end,
          #f)
 end;
 

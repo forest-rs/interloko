@@ -9,7 +9,7 @@ define function main() => <integer>
   let total = 0;
   // Each closure adds the `j` of the iteration that made it.
   for (j from 1 to 3)
-    let add-j = function (n :: <integer>) => <integer> n + j * 10 end;
+    let add-j = method (n :: <integer>) => <integer> n + j * 10 end;
     total := add-j(total)
   end;
   // 60 so far. A `for` variable may be annotated like a `let`.

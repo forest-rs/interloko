@@ -9,14 +9,14 @@ define class <box> (<object>)
 end;
 
 define function main() => <integer>
-  let first :: <box> = make(<box>, get: function () => <integer> 0 end);
+  let first :: <box> = make(<box>, get: method () => <integer> 0 end);
   let i = 1;
   while (i <= 3)
     let mine = 0;
-    let bump = function () => <integer> mine := mine + i end;
+    let bump = method () => <integer> mine := mine + i end;
     bump();
     bump();
-    if (i = 3) first := make(<box>, get: function () => <integer> mine end) end;
+    if (i = 3) first := make(<box>, get: method () => <integer> mine end) end;
     i := i + 1
   end;
   let get = first.get;

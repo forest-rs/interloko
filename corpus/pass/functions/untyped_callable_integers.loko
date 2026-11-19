@@ -13,6 +13,6 @@ define function narrow(f :: <callable>) => <u32>
 end;
 
 define function main() => <integer>
-  call(function (x :: <integer>) => <integer> x + 1 end)
-    + as(<integer>, narrow(function (x :: <integer>) => <integer> x + 1 end))
+  call(method (x :: <integer>) => <integer> x + 1 end)
+    + as(<integer>, narrow(method (x :: <integer>) => <integer> x + 1 end))
 end;

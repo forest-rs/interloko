@@ -17119,7 +17119,7 @@ mod tests {
         define method area(s :: <shape>) => <integer>\n  1\nend;\n\
         define function first(s :: <shape>, n :: <integer>) => <integer>\n  \
         let a = area(s) + n;\n  \
-        let f :: <callable> = function () => <integer>\n    area(as(<shape>, s)) + 1\n  end;\n  \
+        let f :: <callable> = method () => <integer>\n    area(as(<shape>, s)) + 1\n  end;\n  \
         a - area(s)\nend;\n";
 
     fn function<'a>(module: &'a Module, name: &str) -> &'a Function {
@@ -17260,7 +17260,7 @@ mod tests {
             "{SITES}define function named(c :: class <shape>, s :: <shape>, n :: <integer>) => <integer>\n  area(s)\nend;\n\
              define function apply-named(c :: class <shape>) => <integer>\n  \
              let f :: <callable> = named;\n  \
-             let g :: <callable> = function (k :: class <shape>, o :: <object>) => <integer> 1 end;\n  \
+             let g :: <callable> = method (k :: class <shape>, o :: <object>) => <integer> 1 end;\n  \
              0\nend;"
         ));
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
@@ -17322,7 +17322,7 @@ mod tests {
         // and `second` gains checks.
         let after = lower_source(&format!(
             "define function zeroth(n :: <integer>) => <integer>\n  \
-             let g :: <callable> = function () => <integer>\n    n * 2\n  end;\n  \
+             let g :: <callable> = method () => <integer>\n    n * 2\n  end;\n  \
              -n\nend;\n\
              {SITES}define function second(s :: <shape>) => <integer>\n  \
              area(s) + area(s) * 3\nend;"
@@ -18776,8 +18776,8 @@ mod tests {
              n := \"text\";\n  \
              p := 1;\n  \
              let k = 1;\n  \
-             let f = function () => <integer> k end;\n  \
-             let g = function () => <integer> p := 2 end;\n  \
+             let f = method () => <integer> k end;\n  \
+             let g = method () => <integer> p := 2 end;\n  \
              k := 2;\n  \
              while (k) k := 3 end;\n  \
              n\nend;",
@@ -19356,7 +19356,7 @@ mod tests {
         assert_eq!(hint("$limit-1"), spaced("$limit - 1"));
         assert_eq!(hint("x-2i32"), spaced("x - 2i32"));
         // A closure sees `x` in its enclosing scope.
-        assert_eq!(hint("function() x-1 end"), spaced("x - 1"));
+        assert_eq!(hint("method() x-1 end"), spaced("x - 1"));
         // Without a bound name on the left and an operand on the right, it
         // is an ordinary unresolved local.
         assert_eq!(hint("y-1"), (DiagnosticCode::UnresolvedLocal, None));

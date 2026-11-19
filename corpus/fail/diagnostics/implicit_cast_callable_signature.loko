@@ -9,9 +9,9 @@
 
 define function main() => <integer>
   let t = make(<table>);
-  t["f"] := function (s :: <string>) => <string> s end;
+  t["f"] := method (s :: <string>) => <string> s end;
   let g :: callable(<integer>) => <integer> = t["f"];
-  let f = function (n :: <integer>) => <integer> n + 1 end;
+  let f = method (n :: <integer>) => <integer> n + 1 end;
   f := t["f"];
   f(1) + g(1)
 end;

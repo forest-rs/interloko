@@ -18,5 +18,5 @@ define function circle-class(f :: <callable>) => class <circle>
 end;
 
 define function main()
-  make(circle-class(function () => class <square> <square> end), radius: 3).radius
+  make(circle-class(method () => class <square> <square> end), radius: 3).radius
 end;

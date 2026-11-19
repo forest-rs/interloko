@@ -417,7 +417,7 @@ fn binding_ids_survive_unrelated_edits() {
     let source = "\
 define function first(n :: <integer>)
   let x = n + 1;
-  let y = function (x :: <integer>) x end;
+  let y = method (x :: <integer>) x end;
   y(x)
 end;
 define function main()

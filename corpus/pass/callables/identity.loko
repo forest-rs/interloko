@@ -10,7 +10,7 @@ define function twice(x :: <integer>) => <integer>
 end;
 
 define function adder(n :: <integer>) => <callable>
-  function (x :: <integer>) => <integer> x + n end
+  method (x :: <integer>) => <integer> x + n end
 end;
 
 define function bit(b :: <boolean>) => <integer>

@@ -16,5 +16,5 @@ define function first-radius(f :: <callable>) => <integer>
 end;
 
 define function main()
-  first-radius(function (x :: <integer>) => (<circle>, <integer>) values(make(<circle>, radius: x), 1) end)
+  first-radius(method (x :: <integer>) => (<circle>, <integer>) values(make(<circle>, radius: x), 1) end)
 end;

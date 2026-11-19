@@ -23,6 +23,6 @@ define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
 end;
 
 define function main()
-  apply-untyped(function (g :: callable(<integer>) => <circle>) => <integer> g(1).radius end,
+  apply-untyped(method (g :: callable(<integer>) => <circle>) => <integer> g(1).radius end,
                 square-of)
 end;
