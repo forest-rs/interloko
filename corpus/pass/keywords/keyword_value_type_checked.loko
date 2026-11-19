@@ -1,0 +1,14 @@
+// expect: runtime code type-error.entry
+// expect: diagnostics 0
+// The value's entry checks a keyword argument against the type its callee
+// declares, as it checks a positional one.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>
+  x * by
+end;
+
+define function main() => <integer>
+  let f :: <callable> = scale;
+  let r :: <integer> = f(3, by: "two");
+  r
+end;

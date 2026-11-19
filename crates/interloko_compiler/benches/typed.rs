@@ -106,6 +106,8 @@
 //!   which is a direct call with the keyword in its parameter's place.
 //! - `keyword default`: `step(d)`, which calls the keyword's hidden default
 //!   function for its value first.
+//! - `keyword value`: `f(d, by: 1)` on a `<callable>` holding `step`, which
+//!   crosses boxed with the keyword in the boxed entry's tail.
 //!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
@@ -353,6 +355,19 @@ end;
 
 define function keyword-called(d :: <integer>) => <integer>
   if (d = 0) step(d, by: 1) else keyword-called(d - 1) + keyword-called(d - 1) end
+end;
+
+define function keyword-value-tree(f :: <callable>, d :: <integer>) => <integer>
+  if (d = 0)
+    let r :: <integer> = f(d, by: 1);
+    r
+  else
+    keyword-value-tree(f, d - 1) + keyword-value-tree(f, d - 1)
+  end
+end;
+
+define function keyword-value(d :: <integer>) => <integer>
+  keyword-value-tree(step, d)
 end;
 
 define function default-called(d :: <integer>) => <integer>
@@ -628,6 +643,7 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("table lookup", net("table-read", "table-filled")),
         ("keyword call", net("keyword-called", "inc-called")),
         ("keyword default", net("default-called", "inc-called")),
+        ("keyword value", net("keyword-value", "inc-called")),
     ]
 }
 

@@ -1,0 +1,13 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: diagnostics 0
+// Unhandled, an unknown keyword ends the run.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>
+  x * by
+end;
+
+define function main() => <integer>
+  let f :: <callable> = scale;
+  let r :: <integer> = f(3, times: 2);
+  r
+end;

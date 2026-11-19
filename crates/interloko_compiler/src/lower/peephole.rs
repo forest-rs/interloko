@@ -86,7 +86,13 @@ fn for_each_read(instr: &Instr, mut f: impl FnMut(Reg)) {
         | Instr::I64Compare { lhs, rhs, .. }
         | Instr::ValueEqual { lhs, rhs, .. }
         | Instr::Identical { lhs, rhs, .. }
-        | Instr::EqU64 { lhs, rhs, .. } => all(&[*lhs, *rhs]),
+        | Instr::EqU64 { lhs, rhs, .. }
+        | Instr::AddU64 { lhs, rhs, .. }
+        | Instr::StrEq { lhs, rhs, .. } => all(&[*lhs, *rhs]),
+        Instr::ConstStr { .. } => {}
+        Instr::ArrayNew { values, .. } => all(values),
+        Instr::ArrayLen { array, .. } => all(&[*array]),
+        Instr::ArrayGet { array, index, .. } => all(&[*array, *index]),
         Instr::ClosureNew { captures, .. } => all(captures),
         Instr::CallableNew {
             boxed, captures, ..
@@ -212,6 +218,12 @@ fn for_each_write(instr: &Instr, mut f: impl FnMut(Reg)) {
         | Instr::CastObject { dst, .. }
         | Instr::CastClassObject { dst, .. }
         | Instr::EqU64 { dst, .. }
+        | Instr::AddU64 { dst, .. }
+        | Instr::StrEq { dst, .. }
+        | Instr::ConstStr { dst, .. }
+        | Instr::ArrayNew { dst, .. }
+        | Instr::ArrayLen { dst, .. }
+        | Instr::ArrayGet { dst, .. }
         | Instr::Move { dst, .. }
         | Instr::SignalTypeError { dst, .. }
         | Instr::PushHandler { dst, .. }
@@ -335,6 +347,12 @@ fn for_each_label_ref(instr: &Instr, mut f: impl FnMut(LabelId)) {
         | Instr::CastObject { .. }
         | Instr::CastClassObject { .. }
         | Instr::EqU64 { .. }
+        | Instr::AddU64 { .. }
+        | Instr::StrEq { .. }
+        | Instr::ConstStr { .. }
+        | Instr::ArrayNew { .. }
+        | Instr::ArrayLen { .. }
+        | Instr::ArrayGet { .. }
         | Instr::Move { .. }
         | Instr::Return { .. }
         | Instr::Trap { .. }
@@ -464,6 +482,12 @@ fn result_mut(instr: &mut Instr) -> Option<&mut Reg> {
         | Instr::F64ToI64 { dst, .. }
         | Instr::I64Compare { dst, .. }
         | Instr::EqU64 { dst, .. }
+        | Instr::AddU64 { dst, .. }
+        | Instr::StrEq { dst, .. }
+        | Instr::ConstStr { dst, .. }
+        | Instr::ArrayNew { dst, .. }
+        | Instr::ArrayLen { dst, .. }
+        | Instr::ArrayGet { dst, .. }
         | Instr::Identical { dst, .. }
         | Instr::Move { dst, .. }
         | Instr::FloatCall { dst, .. }
