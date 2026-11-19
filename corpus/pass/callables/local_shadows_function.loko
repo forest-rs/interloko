@@ -1,0 +1,19 @@
+// expect: run 6
+// expect: diagnostics 0
+// A local shadows a module-level function of its name, collection
+// generics included: a call of the name calls the local's value.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function dec(x :: <integer>) => <integer>
+  x - 1
+end;
+
+define function main() => <integer>
+  let inc = dec;
+  let size = dec;
+  // 0 + 6 + 0
+  inc(1) + size(7) + apply(size, 1)
+end;

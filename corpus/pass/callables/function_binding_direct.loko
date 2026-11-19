@@ -1,0 +1,14 @@
+// expect: run 2
+// expect: diagnostics 0
+// expect: dump lowered lacks callable.open
+// A binding known to hold a function calls it directly, not through the
+// value's entry.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function main() => <integer>
+  let f = inc;
+  f(1)
+end;

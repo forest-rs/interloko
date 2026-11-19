@@ -1,0 +1,37 @@
+// expect: run 18
+// expect: diagnostics 0
+// A `<function>`, `<callable>` or typed callable binding, a parameter or a
+// local, is called by its name through its value: typed when its signature
+// is known, otherwise through its boxed entry, as a table of builtins is.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function twice(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define constant $builtins = #[inc, twice];
+
+define function eval(index :: <integer>, value :: <integer>) => <integer>
+  let f :: <function> = as(<function>, $builtins[index]);
+  let r :: <integer> = f(value);
+  r
+end;
+
+define function apply-twice(f :: callable(<integer>) => <integer>, x :: <integer>) => <integer>
+  f(f(x))
+end;
+
+define function thrice(f :: <function>, x :: <integer>) => <integer>
+  let a :: <integer> = f(x);
+  let b :: <integer> = f(a);
+  let c :: <integer> = f(b);
+  c
+end;
+
+define function main() => <integer>
+  // 3 + 6 + 2 + 3 + 4 = 18
+  eval(0, 2) + eval(1, 3) + apply-twice(inc, 0) + thrice(inc, 0) + apply(inc, 3)
+end;
