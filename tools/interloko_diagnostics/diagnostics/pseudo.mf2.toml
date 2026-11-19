@@ -95,6 +95,7 @@
 "sem.assignment-target-not-assignable" = "[ps] { $kind } { $name } is not assignable"
 "sem.unexpected-keyword-argument" = "[ps] { $callee } takes no { $keyword }: argument"
 "sem.duplicate-keyword-argument" = "[ps] keyword { $keyword }: repeated"
+"sem.keyword-argument-type-mismatch" = "[ps] { $callee } { $keyword }: expects { $expected }, got { $actual }"
 "sem.reserved-name" = "[ps] { $name } is reserved"
 "sem.keyword-parameter-needs-default" = "[ps] #key { $keyword } :: { $type } needs a default"
 "sem.method-keyword-not-in-generic" = "[ps] { $generic } has no #key { $keyword }"
