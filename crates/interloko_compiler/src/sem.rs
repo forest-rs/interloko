@@ -300,9 +300,10 @@ pub struct CallableSignature {
     /// `None` where a result is not one.
     pub result_ranges: Vec<Option<IntRange>>,
     /// `#key` parameters after `params`, in declaration order. A call
-    /// through the value passes each as a boxed `<object>`, `$unsupplied`
-    /// when it does not pass it, and the value's entry fills its default
-    /// and checks its type.
+    /// through the value passes each as a boxed `<object>`, the
+    /// keyword-absent marker ([`Intrinsic::KeywordAbsent`]) when it does not
+    /// pass it, and the value's entry fills its default and checks its
+    /// type.
     pub keywords: Vec<CallableKeyword>,
 }
 
@@ -436,7 +437,7 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         | Intrinsic::TypeName => 1,
         Intrinsic::VectorRef | Intrinsic::Concatenate | Intrinsic::InstanceOfType => 2,
         Intrinsic::VectorElementOr => 3,
-        Intrinsic::Unsupplied => 0,
+        Intrinsic::Unsupplied | Intrinsic::KeywordAbsent => 0,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
@@ -3603,6 +3604,10 @@ pub enum Intrinsic {
     /// when the keyword has no default: one object, which nothing else is
     /// `==`. It has no name of its own.
     Unsupplied,
+    /// The marker a call through a callable value passes for a keyword it
+    /// does not pass, distinct from `$unsupplied`: only the value's entry
+    /// sees it, and replaces it with the keyword's default. It has no name.
+    KeywordAbsent,
     /// Returns a new string holding two strings joined in order.
     Concatenate,
     /// `instance?(value, type)` with a type object computed at run time,
@@ -3822,9 +3827,9 @@ pub enum Expr {
         arg_kinds: Vec<ValueKind>,
         /// The keywords the last `keywords.len()` arguments pass, each a
         /// boxed `<object>`: for a typed callable, every keyword of its
-        /// signature in declaration order, `$unsupplied` for one the call
-        /// does not pass; for an untyped one, those the call passes, in
-        /// source order.
+        /// signature in declaration order, the keyword-absent marker
+        /// ([`Intrinsic::KeywordAbsent`]) for one the call does not pass;
+        /// for an untyped one, those the call passes, in source order.
         keywords: Vec<String>,
         /// Result value categories in return order.
         result_kinds: Vec<ValueKind>,
@@ -8532,6 +8537,7 @@ impl Lowering {
                 ctx,
                 target,
                 lowered_args,
+                false,
                 Vec::new(),
                 expected_results,
                 span,
@@ -8552,6 +8558,7 @@ impl Lowering {
                 ctx,
                 target,
                 lowered_args,
+                false,
                 Vec::new(),
                 expected_results,
                 span,
@@ -8629,6 +8636,17 @@ impl Lowering {
     fn unsupplied(&self, span: Span) -> Expr {
         Expr::IntrinsicCall {
             intrinsic: Intrinsic::Unsupplied,
+            args: Vec::new(),
+            result_kind: ValueKind::Any,
+            span,
+        }
+    }
+
+    /// The marker a call through a callable value passes for a keyword it
+    /// does not pass ([`Intrinsic::KeywordAbsent`]).
+    fn keyword_absent(&self, span: Span) -> Expr {
+        Expr::IntrinsicCall {
+            intrinsic: Intrinsic::KeywordAbsent,
             args: Vec::new(),
             result_kind: ValueKind::Any,
             span,
@@ -9497,6 +9515,7 @@ impl Lowering {
             | Intrinsic::VectorRef
             | Intrinsic::VectorElementOr
             | Intrinsic::Unsupplied
+            | Intrinsic::KeywordAbsent
             | Intrinsic::LimitedIntegerMin
             | Intrinsic::LimitedIntegerMax => ValueKind::Any,
         }
@@ -9826,6 +9845,7 @@ impl Lowering {
                 ctx,
                 target,
                 args,
+                false,
                 Vec::new(),
                 expected_results,
                 span,
@@ -9881,6 +9901,7 @@ impl Lowering {
                 ctx,
                 target,
                 args,
+                false,
                 names,
                 expected_results,
                 span,
@@ -9945,13 +9966,14 @@ impl Lowering {
         args.extend(
             slots
                 .into_iter()
-                .map(|slot| slot.unwrap_or_else(|| self.unsupplied(span))),
+                .map(|slot| slot.unwrap_or_else(|| self.keyword_absent(span))),
         );
         ctx.hide_locals_from(scope);
         let call = self.lower_applied_dynamic_callable_call(
             ctx,
             target,
             args,
+            true,
             Vec::new(),
             expected_results,
             span,
@@ -9969,23 +9991,33 @@ impl Lowering {
             })
     }
 
+    /// Lowers a call through `target` with `args`. For a typed callable,
+    /// `with_keywords` says whether `args` end with one argument per
+    /// keyword of its signature; otherwise the call passes none, as `apply`
+    /// does. For an untyped one, the last `untyped_keywords.len()` of
+    /// `args` pass those keywords.
+    #[allow(clippy::too_many_arguments)]
     fn lower_applied_dynamic_callable_call(
         &self,
         ctx: &mut FunctionContext,
         target: Expr,
         mut args: Vec<Expr>,
+        with_keywords: bool,
         untyped_keywords: Vec<String>,
         expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
         if let Some(signature) = self.callable_signature_of(&target) {
             // Keyword arguments, `$unsupplied` for those the call does not
-            // pass, follow the positional ones; `apply` passes none.
+            // pass, follow the positional ones.
             let keyword_count = signature.keywords.len();
-            if keyword_count > 0 && args.len() == signature.params.len() {
-                args.extend((0..keyword_count).map(|_| self.unsupplied(span)));
-            }
-            let keyword_args = args.split_off(args.len().saturating_sub(keyword_count));
+            let keyword_args = if with_keywords {
+                args.split_off(args.len().saturating_sub(keyword_count))
+            } else {
+                (0..keyword_count)
+                    .map(|_| self.keyword_absent(span))
+                    .collect()
+            };
             if signature.params.len() != args.len() {
                 ctx.diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
@@ -12860,6 +12892,21 @@ impl Lowering {
             ast::TypeExpr::Callable { signature, .. } => {
                 let params = self.resolve_result_types(&signature.params, diagnostics);
                 let results = self.resolve_result_types(&signature.results.values, diagnostics);
+                let keyword_types = signature
+                    .keywords
+                    .iter()
+                    .map(|(_, ty)| ty.clone())
+                    .collect::<Vec<_>>();
+                let keyword_kinds = self.resolve_result_types(&keyword_types, diagnostics);
+                let keywords = signature
+                    .keywords
+                    .iter()
+                    .zip(keyword_kinds.kinds)
+                    .map(|((name, _), kind)| CallableKeyword {
+                        name: name.clone(),
+                        kind,
+                    })
+                    .collect();
                 ResolvedType {
                     kind: ValueKind::Callable,
                     callable_signature: Some(CallableSignature {
@@ -12869,7 +12916,7 @@ impl Lowering {
                         results: results.kinds,
                         result_sigs: results.callable_sigs,
                         result_ranges: results.ranges,
-                        keywords: Vec::new(),
+                        keywords,
                     }),
                     range: None,
                 }

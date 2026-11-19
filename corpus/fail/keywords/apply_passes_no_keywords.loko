@@ -1,0 +1,12 @@
+// expect: diagnostic code sem.function-arity-mismatch
+// expect: diagnostics 2
+// `apply` passes no keywords, so an argument after the required ones is
+// one too many, not a keyword.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>
+  x * by
+end;
+
+define function main() => <integer>
+  apply(scale, 3, 5) + as(<integer>, apply(element, #[1], 5, 7))
+end;

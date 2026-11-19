@@ -13777,6 +13777,7 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
         sem::Intrinsic::VectorRef => "vector-ref",
         sem::Intrinsic::VectorElementOr => "element",
         sem::Intrinsic::Unsupplied => "$unsupplied",
+        sem::Intrinsic::KeywordAbsent => "keyword-absent",
         sem::Intrinsic::FloatToString => "float-to-string",
         sem::Intrinsic::IntegerToString => "integer-to-string",
         sem::Intrinsic::Concatenate => "concatenate",

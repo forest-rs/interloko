@@ -3336,7 +3336,17 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "callable-parameter-types",
-            "trailing-list-of<type-annotation-value, `,`>",
+            "callable-keyword-types | trailing-list-of<type-annotation-value, `,`> callable-keyword-types?",
+            "syntax.rs:Parser::parse_type_annotation",
+        ),
+        (
+            "callable-keyword-types",
+            "`#key` trailing-list-of<callable-keyword-type, `,`>",
+            "syntax.rs:Parser::parse_type_annotation",
+        ),
+        (
+            "callable-keyword-type",
+            "name type-annotation",
             "syntax.rs:Parser::parse_type_annotation",
         ),
         (
@@ -4423,7 +4433,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 77);
+        assert_eq!(grammar.effective_rules.len(), 79);
 
         assert!(
             !records

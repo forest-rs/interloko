@@ -1,0 +1,14 @@
+// expect: run "ab"
+// expect: diagnostics 0
+// A keyword function's value checks its required arguments' classes and
+// ranges, as any function's does, before taking its keywords.
+
+define function cat2(x :: <string>, #key tail :: <string> = "b") => <string>
+  concatenate(x, tail)
+end;
+
+define function main() => <string>
+  let f :: <callable> = cat2;
+  let r :: <string> = f("a");
+  r
+end;

@@ -1,0 +1,27 @@
+// expect: run 321
+// expect: diagnostics 0
+// A call through a typed value evaluates its keyword arguments in source
+// order, though it passes them in declaration order.
+
+define class <log> (<object>)
+  slot n :: <integer>, init-keyword: n:;
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.n := log.n * 10 + digit;
+  digit
+end;
+
+define function pair(x :: <integer>, #key a :: <integer> = 0, b :: <integer> = 0) => <integer>
+  x + a + b
+end;
+
+define function use(f :: callable(<integer>, #key a :: <integer>, b :: <integer>) => <integer>, log :: <log>) => <integer>
+  f(note(log, 3), b: note(log, 2), a: note(log, 1))
+end;
+
+define function main() => <integer>
+  let log = make(<log>, n: 0);
+  use(pair, log);
+  log.n
+end;

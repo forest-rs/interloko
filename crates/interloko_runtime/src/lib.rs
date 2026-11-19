@@ -168,8 +168,14 @@ pub const VECTOR_REF: &str = "interloko.vector_ref";
 /// call does not pass when the keyword has no default: one object, made
 /// with the host, that nothing else is `==`.
 pub const UNSUPPLIED: &str = "interloko.unsupplied";
-/// Host-call symbol for testing whether a boxed value is `$unsupplied`.
-pub const IS_UNSUPPLIED: &str = "interloko.is_unsupplied";
+/// Host-call symbol for the marker a call through a callable value passes
+/// for a keyword it does not pass: an object of its own, distinct from
+/// `$unsupplied`, which only the value's entry ever sees, and which it
+/// replaces with the keyword's default.
+pub const KEYWORD_ABSENT: &str = "interloko.keyword_absent";
+/// Host-call symbol for testing whether a boxed value is the
+/// [`KEYWORD_ABSENT`] marker.
+pub const IS_KEYWORD_ABSENT: &str = "interloko.is_keyword_absent";
 /// Host-call symbol for rendering a float as its shortest round-trip literal.
 pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
 /// Host-call symbol for rendering an integer in decimal.
@@ -1629,9 +1635,9 @@ enum RuntimeObjectStorage {
     SubclassType {
         bound: ClassId,
     },
-    /// `$unsupplied`: the one object of its kind, a direct `<object>`
+    /// A kernel marker: the one object of its kind, a direct `<object>`
     /// instance, which no other value is `==`.
-    Unsupplied,
+    Marker(Marker),
     HostBacked {
         adapter: alloc::boxed::Box<dyn HostObjectAdapter>,
     },
@@ -1674,6 +1680,29 @@ impl RuntimeObjectStorage {
     }
 }
 
+/// A kernel marker object; see [`InterlokoHost::marker`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Marker {
+    /// `$unsupplied`, which a keyword without a default takes when a call
+    /// does not pass it.
+    Unsupplied,
+    /// What a call through a callable value passes for a keyword it does
+    /// not pass ([`KEYWORD_ABSENT`]).
+    KeywordAbsent,
+}
+
+impl Marker {
+    const COUNT: usize = 2;
+
+    /// How a value report writes the marker.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Unsupplied => "$unsupplied",
+            Self::KeywordAbsent => "{keyword absent}",
+        }
+    }
+}
+
 struct InternedObject {
     name: String,
     object: Obj,
@@ -1699,10 +1728,11 @@ pub struct InterlokoHost {
     /// Where the open turn's nursery handle serials start.
     nursery_serials: NurserySerials,
     symbols: Vec<InternedObject>,
-    /// `$unsupplied`, made in the image the first time anything asks for
-    /// it, so testing for it is one handle compare. Like an interned
-    /// symbol, it stays however the turn that made it ends.
-    unsupplied: Option<Obj>,
+    /// `$unsupplied` and the keyword-absent marker, by [`Marker`], each made
+    /// in the image the first time anything asks for it, so testing for
+    /// one is a handle compare. Like an interned symbol, a marker stays
+    /// however the turn that made it ends.
+    markers: [Option<Obj>; Marker::COUNT],
     /// Values registered as image roots; released roots leave `None`.
     roots: Vec<Option<Value>>,
     turn: Option<OpenTurn>,
@@ -1724,7 +1754,7 @@ impl InterlokoHost {
             nursery: Region::default(),
             nursery_serials: NurserySerials::default(),
             symbols: Vec::new(),
-            unsupplied: None,
+            markers: [None; Marker::COUNT],
             roots: Vec::new(),
             turn: None,
             evacuation_budget: u64::MAX,
@@ -1849,7 +1879,7 @@ impl InterlokoHost {
             | RuntimeObjectStorage::SlotDescriptor { .. }
             | RuntimeObjectStorage::LimitedIntegerType { .. }
             | RuntimeObjectStorage::SubclassType { .. }
-            | RuntimeObjectStorage::Unsupplied => Err(RuntimeError::InvalidSlot {
+            | RuntimeObjectStorage::Marker(_) => Err(RuntimeError::InvalidSlot {
                 class: object_class,
                 slot,
             }),
@@ -2220,21 +2250,24 @@ impl Host for InterlokoHost {
                 });
                 Ok(0)
             }
-            IS_UNSUPPLIED => {
+            IS_KEYWORD_ABSENT => {
                 let [value] = args else {
                     return Err(HostError::Failed);
                 };
-                rets[0] = Value::Bool(
-                    self.unsupplied.is_some() && self.value_object(*value) == self.unsupplied,
-                );
+                rets[0] = Value::Bool(self.is_marker(*value, Marker::KeywordAbsent));
                 Ok(0)
             }
-            UNSUPPLIED => {
+            UNSUPPLIED | KEYWORD_ABSENT => {
                 let [] = args else {
                     return Err(HostError::Failed);
                 };
-                let unsupplied = self.unsupplied();
-                rets[0] = self.push_boxed_value(Value::Obj(unsupplied));
+                let marker = if symbol == UNSUPPLIED {
+                    Marker::Unsupplied
+                } else {
+                    Marker::KeywordAbsent
+                };
+                let object = self.marker(marker);
+                rets[0] = self.push_boxed_value(Value::Obj(object));
                 Ok(0)
             }
             SYMBOL_LITERAL => {
@@ -2621,8 +2654,7 @@ impl Host for InterlokoHost {
                     [arg, ValueRef::I64(index)] => (arg, index, None),
                     [arg, ValueRef::I64(index), default @ ValueRef::Obj(_)] => {
                         // `$unsupplied` is no default.
-                        let unsupplied = self.unsupplied.is_some()
-                            && self.value_object(*default) == self.unsupplied;
+                        let unsupplied = self.is_marker(*default, Marker::Unsupplied);
                         (arg, index, (!unsupplied).then_some(default))
                     }
                     _ => return Err(HostError::Failed),
@@ -2787,22 +2819,32 @@ impl InterlokoHost {
         self.layout.class_id(kind.name()).ok_or(HostError::Failed)
     }
 
-    /// `$unsupplied`, made in the image on first use.
-    fn unsupplied(&mut self) -> Obj {
-        if let Some(unsupplied) = self.unsupplied {
-            return unsupplied;
+    /// The `marker` object, made in the image on first use.
+    fn marker(&mut self, marker: Marker) -> Obj {
+        if let Some(object) = self.markers[marker as usize] {
+            return object;
         }
-        let Value::Obj(unsupplied) = self.push_object_in(
+        let Value::Obj(object) = self.push_object_in(
             Space::Image,
             RuntimeObject {
                 class: OBJECT_CLASS_ID,
-                storage: RuntimeObjectStorage::Unsupplied,
+                storage: RuntimeObjectStorage::Marker(marker),
             },
         ) else {
             unreachable!("pushing an object yields an object");
         };
-        self.unsupplied = Some(unsupplied);
-        unsupplied
+        self.markers[marker as usize] = Some(object);
+        object
+    }
+
+    /// Whether `value` is the `marker` object.
+    fn is_marker(&self, value: ValueRef<'_>, marker: Marker) -> bool {
+        self.markers[marker as usize].is_some_and(|object| self.value_object(value) == Some(object))
+    }
+
+    /// How many markers have been made.
+    pub(crate) fn markers_made(&self) -> usize {
+        self.markers.iter().flatten().count()
     }
 
     fn intern_symbol(&mut self, name: String) -> Result<Value, HostError> {
@@ -3309,16 +3351,17 @@ pub fn string_literal_signature() -> HostSig {
     }
 }
 
-/// Host signature for [`IS_UNSUPPLIED`].
+/// Host signature for [`IS_KEYWORD_ABSENT`].
 #[must_use]
-pub fn is_unsupplied_signature() -> HostSig {
+pub fn is_keyword_absent_signature() -> HostSig {
     HostSig {
         args: vec![any_type()],
         rets: vec![ValueType::Bool],
     }
 }
 
-/// Host signature for [`UNSUPPLIED`], which returns `$unsupplied` boxed.
+/// Host signature for [`UNSUPPLIED`] and [`KEYWORD_ABSENT`], which return
+/// their marker boxed.
 #[must_use]
 pub fn unsupplied_signature() -> HostSig {
     HostSig {
@@ -4002,12 +4045,12 @@ mod tests {
         let (mut host, ..) = abort_fixture();
         let before = host.image_stats();
         host.begin_turn().expect("turn opens");
-        let unsupplied = host.unsupplied();
+        let unsupplied = host.marker(Marker::Unsupplied);
         let symbol = host.intern_symbol("unsupplied".into()).expect("symbol");
         host.abort_turn().expect("turn aborts");
         // Made once, it stays however its turn ends, and nothing else,
         // not even the symbol of its name, denotes it.
-        assert_eq!(host.unsupplied(), unsupplied);
+        assert_eq!(host.marker(Marker::Unsupplied), unsupplied);
         assert_eq!(host.image_stats().objects, before.objects + 2);
         let Value::Obj(symbol) = symbol else {
             panic!("a symbol is an object");
@@ -4016,7 +4059,7 @@ mod tests {
         let storage = |obj| &host.object(obj).expect("object resolves").storage;
         assert!(!storage(unsupplied).denotes_same(storage(symbol)));
         host.begin_turn().expect("turn opens");
-        assert_eq!(host.unsupplied(), unsupplied);
+        assert_eq!(host.marker(Marker::Unsupplied), unsupplied);
         let stats = host.abort_turn().expect("turn aborts");
         assert_eq!(stats.interned, HeapStats::default());
     }

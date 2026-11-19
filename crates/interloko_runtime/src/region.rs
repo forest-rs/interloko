@@ -9,8 +9,8 @@
 //! reclaim.
 //!
 //! The image only grows. A turn appends to it only by interning symbols
-//! and by making `$unsupplied` the first time it is used, and an aborted
-//! turn keeps them: abort restores everything except the
+//! and by making a kernel marker such as `$unsupplied` the first time it is
+//! used, and an aborted turn keeps them: abort restores everything except the
 //! symbols interned during the turn, which stay interned. No image index is
 //! ever reused, so an image handle names the same object for the host's
 //! lifetime.
@@ -188,8 +188,8 @@ pub(crate) struct OpenTurn {
     pub(crate) image: RegionMark,
     /// Interned-symbol count when the turn began.
     pub(crate) symbols: usize,
-    /// Whether `$unsupplied` had been made when the turn began.
-    pub(crate) unsupplied: bool,
+    /// How many kernel markers had been made when the turn began.
+    pub(crate) markers: usize,
     /// Every store the turn made into an image object, in order.
     pub(crate) write_log: Vec<LoggedStore>,
     /// Registered-root count when the turn began; roots at or past it were

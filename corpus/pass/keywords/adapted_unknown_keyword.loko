@@ -1,0 +1,19 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports <unknown-keyword-error>
+// expect: diagnostics 0
+// An adapted callable that takes no keywords signals for those its
+// signature claims.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function use(f :: callable(<integer>, #key by :: <integer>) => <integer>) => <integer>
+  f(3, by: 2)
+end;
+
+define function main() => <integer>
+  let u :: <callable> = use;
+  let r :: <integer> = u(inc);
+  r
+end;

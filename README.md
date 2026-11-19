@@ -180,12 +180,16 @@ The current slices include:
   none of its own, and dispatch looks only at the required parameters.
   A function or generic that takes keywords is a value like any other:
   a call through a value of known signature passes every keyword, boxed
-  and in declaration order, `$unsupplied` for those it leaves out, and the
-  value's entry fills their defaults and checks their types; a call
+  and in declaration order, with a kernel marker source cannot write for
+  those it leaves out (so passing `$unsupplied` explicitly means what it
+  means in a direct call), and the value's entry fills their defaults and
+  checks their types; a call
   through an untyped `<callable>` passes the keywords it names, by name, in
   a tail every boxed entry takes, and a value that does not take one
   signals `<unknown-keyword-error>`, which holds the keyword, rather than
-  dropping it. `apply` passes no keywords. Statically, a keyword its
+  dropping it. A typed callable type may declare keywords too, as in
+  `callable(<integer>, #key by :: <integer>) => <integer>`, and only a
+  value with exactly those keywords has it. `apply` passes no keywords. Statically, a keyword its
   callee does not take, or one passed twice, is an error. Anonymous
   functions cannot declare keywords yet;
 - Dylan's class and generic adjectives: `define abstract class` (no direct
