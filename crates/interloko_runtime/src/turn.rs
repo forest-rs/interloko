@@ -2,8 +2,8 @@
 //!
 //! A turn begins with [`InterlokoHost::begin_turn`]. Until it ends, every
 //! object and heap box the runtime allocates goes to the nursery, except
-//! interned symbols, which belong to the image. Stores into image objects
-//! are recorded in the turn's write log.
+//! interned symbols and `$unsupplied`, which belong to the image. Stores
+//! into image objects are recorded in the turn's write log.
 //!
 //! A turn that returned ends with [`InterlokoHost::finish_turn`]: the
 //! nursery entries reachable from the turn's roots (values the caller keeps,
@@ -13,6 +13,9 @@
 //! image stores and root changes are undone and the nursery is emptied,
 //! restoring everything except the symbols interned during the turn, which
 //! stay interned.
+//!
+//! `$unsupplied`, made once per host the first time a turn needs it, stays
+//! for the same reason symbols do.
 //!
 //! Symbols are the one exception because interning is idempotent: interning
 //! a name again finds the same symbol, so keeping one changes nothing a later
@@ -56,6 +59,7 @@ impl InterlokoHost {
         self.turn = Some(OpenTurn {
             image: self.image.mark(),
             symbols: self.symbols.len(),
+            unsupplied: self.unsupplied.is_some(),
             write_log: Vec::new(),
             roots: self.roots.len(),
             released_roots: Vec::new(),
@@ -153,11 +157,13 @@ impl InterlokoHost {
         self.nursery_serials.advance(self.nursery.mark());
         self.nursery.clear();
         // The image is left to grow: the only entries the turn appended to
-        // it are the symbols it interned, and those stay.
+        // it are the symbols it interned and `$unsupplied`, if it made it,
+        // and those stay.
         debug_assert_eq!(self.image.values.len(), turn.image.values);
         debug_assert_eq!(
             self.image.objects.len() - turn.image.objects,
             self.symbols.len() - turn.symbols
+                + usize::from(self.unsupplied.is_some() && !turn.unsupplied)
         );
         stats.image = self.image.stats();
         Ok(stats)

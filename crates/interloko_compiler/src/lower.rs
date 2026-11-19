@@ -454,6 +454,8 @@ pub enum RuntimeOp {
     /// Returns a vector element as `<object>`, or a default when the index
     /// is outside the vector.
     VectorElementOr,
+    /// Returns `$unsupplied`.
+    Unsupplied,
     /// Renders a float as literal text.
     FloatToString,
     /// Renders a `<single-float>` as suffixed literal text.
@@ -9766,6 +9768,7 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
         sem::Intrinsic::VectorSize => RuntimeOp::VectorSize,
         sem::Intrinsic::VectorRef => RuntimeOp::VectorRef,
         sem::Intrinsic::VectorElementOr => RuntimeOp::VectorElementOr,
+        sem::Intrinsic::Unsupplied => RuntimeOp::Unsupplied,
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
         sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
         sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
@@ -9803,6 +9806,7 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::TypeName => index == 0,
         RuntimeOp::VectorRef => index == 0,
         RuntimeOp::VectorElementOr => index != 1,
+        RuntimeOp::Unsupplied => false,
         RuntimeOp::InstanceOfType => true,
         RuntimeOp::LimitedIntegerType => false,
         RuntimeOp::ClassMetaObject
@@ -10583,6 +10587,7 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::VectorSize => "vector-size",
         RuntimeOp::VectorRef => "vector-ref",
         RuntimeOp::VectorElementOr => "vector-element-or",
+        RuntimeOp::Unsupplied => "unsupplied",
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",

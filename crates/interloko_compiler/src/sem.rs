@@ -397,6 +397,7 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         | Intrinsic::TypeName => 1,
         Intrinsic::VectorRef | Intrinsic::Concatenate | Intrinsic::InstanceOfType => 2,
         Intrinsic::VectorElementOr => 3,
+        Intrinsic::Unsupplied => 0,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
@@ -3543,6 +3544,10 @@ pub enum Intrinsic {
     FloatToString,
     /// Renders an integer in decimal.
     IntegerToString,
+    /// `$unsupplied`, the value of a keyword argument a call does not pass
+    /// when the keyword has no default: one object, which nothing else is
+    /// `==`. It has no name of its own.
+    Unsupplied,
     /// Returns a new string holding two strings joined in order.
     Concatenate,
     /// `instance?(value, type)` with a type object computed at run time,
@@ -4138,7 +4143,13 @@ impl Expr {
     /// argument it does not pass and that has no default.
     #[must_use]
     pub fn is_unsupplied(&self) -> bool {
-        matches!(self, Self::SymbolLiteral { name, .. } if name == keywords::UNSUPPLIED_SYMBOL)
+        matches!(
+            self,
+            Self::IntrinsicCall {
+                intrinsic: Intrinsic::Unsupplied,
+                ..
+            }
+        )
     }
 
     /// Visits this expression's direct subexpressions in evaluation order,
@@ -8483,14 +8494,13 @@ impl Lowering {
             .map(|(_, signature)| signature)
     }
 
-    /// `$unsupplied`: the symbol `#unsupplied`, which a keyword declared
+    /// `$unsupplied`: the one kernel object, which a keyword declared
     /// without a default takes when a call does not pass it.
     fn unsupplied(&self, span: Span) -> Expr {
-        Expr::SymbolLiteral {
-            name: keywords::UNSUPPLIED_SYMBOL.into(),
-            class: self
-                .builtin_value_class(BuiltinValueClass::Symbol)
-                .unwrap_or(ClassId(u32::MAX)),
+        Expr::IntrinsicCall {
+            intrinsic: Intrinsic::Unsupplied,
+            args: Vec::new(),
+            result_kind: ValueKind::Any,
             span,
         }
     }
@@ -9348,6 +9358,7 @@ impl Lowering {
             | Intrinsic::MethodGenericFunction
             | Intrinsic::VectorRef
             | Intrinsic::VectorElementOr
+            | Intrinsic::Unsupplied
             | Intrinsic::LimitedIntegerMin
             | Intrinsic::LimitedIntegerMax => ValueKind::Any,
         }
