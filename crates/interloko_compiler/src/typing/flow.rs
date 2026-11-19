@@ -1093,6 +1093,9 @@ impl<'a> Analysis<'a> {
                 span,
                 ..
             } => self.read(env, Var::Capture(*capture), *result_kind, *span),
+            // The default runs in a frame of its own, typed as the slot's own
+            // definition; here it is the slot's declared type.
+            E::SlotDefault { .. } => self.declared(expr),
             E::ConstantRef { constant, span, .. } => {
                 let Some(definition) = module.constants.get(constant.0 as usize) else {
                     return self.declared(expr);
@@ -3091,6 +3094,8 @@ pub(super) fn operation_at(
         walk_block(module, &method.body, &mut visit);
     } else if let Some(constant) = module.constants.iter().find(|c| c.definition == owner) {
         walk(module, &constant.value, &mut visit);
+    } else if let Some(initializer) = module.slot_initializer(owner) {
+        walk(module, &initializer.value, &mut visit);
     }
     found
 }
@@ -3220,6 +3225,7 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         | E::Local { .. }
         | E::Capture { .. }
         | E::ConstantRef { .. }
+        | E::SlotDefault { .. }
         | E::ClassObject { .. }
         | E::TypeObject { .. }
         | E::KnownCallable { .. }

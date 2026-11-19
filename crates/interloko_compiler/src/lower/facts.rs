@@ -40,9 +40,10 @@
 //! # Sites decided twice
 //!
 //! Typing analyzes a closure where the closure is created, so a closure
-//! whose expression appears more than once (a slot default copied into
-//! several `make` calls) can leave two decisions for one site. A site whose
-//! decisions disagree is treated as undecided.
+//! whose expression appeared more than once could leave two decisions for
+//! one site. Slot defaults and constant initializers now run as code of
+//! their own, so none does today; a site whose decisions disagree is still
+//! treated as undecided.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -257,6 +258,18 @@ pub(super) fn closure_owners(module: &sem::Module) -> Vec<Option<DefinitionId>> 
     });
     for value in initializers {
         claim_expr(module, &mut owners, None, value);
+    }
+    // A default with code of its own makes its closures in the one place
+    // its code runs, as the slot.
+    for slot in module.classes.iter().flat_map(|class| &class.direct_slots) {
+        if let Some(initializer) = &slot.initializer {
+            claim_expr(
+                module,
+                &mut owners,
+                Some(slot.definition),
+                &initializer.value,
+            );
+        }
     }
     owners
         .into_iter()

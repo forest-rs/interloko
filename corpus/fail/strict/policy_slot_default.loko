@@ -1,0 +1,24 @@
+// typing: strict
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-dispatch
+// expect: diagnostic contains slot default <holder>.size
+
+// A slot default that runs code is held to the session's strict policy,
+// as a function or constant is.
+define class <shape> (<object>)
+end;
+define class <circle> (<shape>)
+end;
+define generic area(s :: <shape>) => <integer>;
+define method area(c :: <circle>) => <integer>
+  1
+end;
+define function pick(s :: <circle>) => <shape>
+  s
+end;
+define class <holder> (<object>)
+  slot size :: <integer>, init-value: begin let s :: <shape> = pick(make(<circle>)); area(s) end;
+end;
+define function main() => <integer>
+  make(<holder>).size
+end;

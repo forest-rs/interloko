@@ -460,7 +460,7 @@ fn site_status(decision: &TypingDecision, codegen: CheckCodegen) -> SiteStatus {
 }
 
 /// Builds the report for `definition`, or `None` when it names no
-/// function, method, or constant.
+/// function, method, constant, or slot default that runs code.
 pub(crate) fn build(
     inputs: &ClaimInputs<'_>,
     definition: DefinitionId,
@@ -478,7 +478,8 @@ pub(crate) fn build(
         || module
             .constants
             .iter()
-            .any(|constant| constant.definition == definition);
+            .any(|constant| constant.definition == definition)
+        || module.slot_initializer(definition).is_some();
     if !is_definition {
         return None;
     }

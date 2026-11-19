@@ -1223,10 +1223,44 @@ impl Module {
         {
             return Some((&method.locals, &method.params));
         }
-        self.constants
+        if let Some(constant) = self
+            .constants
             .iter()
             .find(|constant| constant.definition == definition)
-            .map(|constant| (constant.locals.as_slice(), [].as_slice()))
+        {
+            return Some((constant.locals.as_slice(), [].as_slice()));
+        }
+        self.slot_initializer(definition)
+            .map(|initializer| (initializer.locals.as_slice(), [].as_slice()))
+    }
+
+    /// The default code of the slot `definition` names, when its default is
+    /// more than a literal.
+    #[must_use]
+    pub fn slot_initializer(&self, definition: DefinitionId) -> Option<&SlotInitializer> {
+        self.direct_slot(definition)?.1.initializer.as_ref()
+    }
+
+    /// The class that declares the slot `definition` names, and the slot.
+    #[must_use]
+    pub fn direct_slot(&self, definition: DefinitionId) -> Option<(&Class, &Slot)> {
+        self.classes.iter().find_map(|class| {
+            class
+                .direct_slots
+                .iter()
+                .find(|slot| slot.definition == definition)
+                .map(|slot| (class, slot))
+        })
+    }
+
+    /// The source name of the slot default `definition` names,
+    /// `<class>.slot`, when that slot's default runs code.
+    #[must_use]
+    pub fn slot_default_name(&self, definition: DefinitionId) -> Option<String> {
+        let (class, slot) = self.direct_slot(definition)?;
+        slot.initializer
+            .as_ref()
+            .map(|_| format!("{}.{}", class.name, slot.name))
     }
 
     /// Returns the type contract of the generic, method or function
@@ -1517,6 +1551,7 @@ impl Module {
             Expr::Local { result_kind, .. }
             | Expr::Capture { result_kind, .. }
             | Expr::ConstantRef { result_kind, .. }
+            | Expr::SlotDefault { result_kind, .. }
             | Expr::Closure { result_kind, .. }
             | Expr::IntrinsicCall { result_kind, .. }
             | Expr::HostCall { result_kind, .. }
@@ -1845,6 +1880,14 @@ fn assign_check_sites(module: &mut Module) {
         for value in initializers.flatten() {
             SiteNumbering::new(closures, &mut referenced).expr(value);
         }
+        // A default with code of its own numbers its sites as the slot's.
+        for initializer in class
+            .direct_slots
+            .iter_mut()
+            .filter_map(|slot| slot.initializer.as_mut())
+        {
+            SiteNumbering::new(closures, &mut referenced).expr(&mut initializer.value);
+        }
     }
     // A function used as a value is also entered indirectly; its entry
     // checks follow its body's sites, so they leave those numbers alone.
@@ -2100,6 +2143,7 @@ impl<'a> SiteNumbering<'a> {
             | Expr::Local { .. }
             | Expr::Capture { .. }
             | Expr::ConstantRef { .. }
+            | Expr::SlotDefault { .. }
             | Expr::ClassObject { .. }
             | Expr::TypeObject { .. }
             | Expr::KnownCallable { .. }
@@ -2857,14 +2901,30 @@ pub struct Slot {
     pub init_keyword: String,
     /// Whether the slot declared `required-init-keyword:`.
     pub required_init_keyword: bool,
-    /// Optional default initializer used when construction omits this slot.
+    /// Optional default initializer used when construction omits this slot:
+    /// what each `make` that takes the default evaluates. A default that is
+    /// a literal is the literal; any other is an [`Expr::SlotDefault`] that
+    /// runs [`Self::initializer`].
     pub init_value: Option<Expr>,
+    /// The default's own code, when it is more than a literal: a frame of
+    /// its own, evaluated afresh at each `make` that takes it.
+    pub initializer: Option<SlotInitializer>,
     /// Allocation policy.
     pub allocation: SlotAllocation,
     /// Mutability metadata.
     pub mutability: SlotMutability,
     /// Source span.
     pub span: Span,
+}
+
+/// A slot default's code, run by each `make` that takes the default.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlotInitializer {
+    /// The default's value expression.
+    pub value: Expr,
+    /// Its own locals, indexed by [`LocalId`]: those its `let`s, loops,
+    /// `block` exits and handlers bind.
+    pub locals: Vec<Local>,
 }
 
 /// Computed slot definition after class finalization.
@@ -4156,6 +4216,20 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// A slot's default, evaluated by running its
+    /// [`SlotInitializer`] in a frame of its own.
+    SlotDefault {
+        /// Class that declares the slot.
+        class: ClassId,
+        /// The slot's id among that class's direct slots.
+        slot: SlotId,
+        /// Slot value category.
+        result_kind: ValueKind,
+        /// Typed callable signature when the slot holds a typed callable.
+        callable_signature: Option<CallableSignature>,
+        /// Source span of the default.
+        span: Span,
+    },
     /// Resolved class object value.
     ClassObject {
         /// Nominal class represented by this value.
@@ -4745,6 +4819,7 @@ impl Expr {
             | Self::Local { .. }
             | Self::Capture { .. }
             | Self::ConstantRef { .. }
+            | Self::SlotDefault { .. }
             | Self::ClassObject { .. }
             | Self::TypeObject { .. }
             | Self::KnownCallable { .. }
@@ -4801,6 +4876,7 @@ impl Expr {
             | Self::Local { span, .. }
             | Self::Capture { span, .. }
             | Self::ConstantRef { span, .. }
+            | Self::SlotDefault { span, .. }
             | Self::ClassObject { span, .. }
             | Self::TypeObject { span, .. }
             | Self::KnownCallable { span, .. }
@@ -5163,6 +5239,7 @@ pub fn visit_evaluated(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | E::Local { .. }
         | E::Capture { .. }
         | E::ConstantRef { .. }
+        | E::SlotDefault { .. }
         | E::ClassObject { .. }
         | E::TypeObject { .. }
         | E::KnownCallable { .. }
@@ -5217,6 +5294,42 @@ const fn builtin_value_kind(kind: BuiltinValueClass, class: ClassId) -> Option<V
         | BuiltinValueClass::StretchyVector
         | BuiltinValueClass::Table
         | BuiltinValueClass::Sequence => Some(ValueKind::Object(class)),
+    }
+}
+
+/// Whether a slot default `value` is a literal, cheap and the same wherever
+/// it is computed, which each `make` computes in place: a number, boolean,
+/// symbol, metaobject, known function or constant, or check-free float
+/// arithmetic over them, and the range check a limited slot puts on one.
+/// Any other default runs as code of its own.
+fn default_inlines(value: &Expr) -> bool {
+    match value {
+        Expr::CheckRange {
+            value,
+            explicit: false,
+            ..
+        } => default_inlines(value),
+        Expr::ConstI64 { .. }
+        | Expr::ConstF64 { .. }
+        | Expr::Const32 { .. }
+        | Expr::ConstBool { .. }
+        | Expr::SymbolLiteral { .. }
+        | Expr::ClassObject { .. }
+        | Expr::TypeObject { .. }
+        | Expr::GenericFunctionObject { .. }
+        | Expr::KnownCallable { .. }
+        | Expr::ConstantRef { .. } => true,
+        Expr::Negate {
+            value, site: None, ..
+        } => default_inlines(value),
+        Expr::Binary {
+            lhs,
+            rhs,
+            site: None,
+            ..
+        }
+        | Expr::Compare { lhs, rhs, .. } => default_inlines(lhs) && default_inlines(rhs),
+        _ => false,
     }
 }
 
@@ -5772,7 +5885,7 @@ impl Lowering {
         lowering.collect_functions(module);
         lowering.collect_generic_keywords();
         lowering.collect_constant_symbols(module);
-        lowering.collect_slot_init_values(module);
+        lowering.mark_slot_defaults(module);
         lowering.finalize_classes();
         lowering.collect_slot_setter_generics();
         lowering.check_host_function_conflicts();
@@ -5952,6 +6065,7 @@ impl Lowering {
                             .unwrap_or_else(|| slot.name.clone()),
                         required_init_keyword: slot.required_init_keyword,
                         init_value: None,
+                        initializer: None,
                         allocation: slot.allocation.into(),
                         mutability: slot.mutability.into(),
                         span: slot.span,
@@ -6027,6 +6141,7 @@ impl Lowering {
                         init_keyword: host_slot.name.clone(),
                         required_init_keyword: false,
                         init_value: None,
+                        initializer: None,
                         allocation: SlotAllocation::Instance,
                         mutability: SlotMutability::Mutable,
                         span: Span::default(),
@@ -6183,6 +6298,7 @@ impl Lowering {
                         init_keyword: slot.init_keyword.into(),
                         required_init_keyword: true,
                         init_value: None,
+                        initializer: None,
                         allocation: SlotAllocation::Instance,
                         mutability: SlotMutability::Constant,
                         span: Span::default(),
@@ -6284,7 +6400,36 @@ impl Lowering {
         }
     }
 
-    fn collect_slot_init_values(&mut self, module: &ast::Module) {
+    /// Gives every slot with a default its [`Expr::SlotDefault`], so class
+    /// finalization and initialization plans see the default before
+    /// [`Self::lower_slot_defaults`] lowers it, once methods are known.
+    fn mark_slot_defaults(&mut self, module: &ast::Module) {
+        for (class_index, class) in module.classes.iter().enumerate() {
+            let lowered_class_index = class_index + 1;
+            for (slot_index, slot) in class.slots.iter().enumerate() {
+                let Some(init_value) = &slot.init_value else {
+                    continue;
+                };
+                if let Some(lowered) = self
+                    .classes
+                    .get_mut(lowered_class_index)
+                    .and_then(|class| class.direct_slots.get_mut(slot_index))
+                {
+                    lowered.init_value = Some(Expr::SlotDefault {
+                        class: ClassId(u32::try_from(lowered_class_index).unwrap_or(u32::MAX)),
+                        slot: SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX)),
+                        result_kind: lowered.kind,
+                        callable_signature: lowered.callable_signature.clone(),
+                        span: init_value.span(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Lowers every slot default and hands each class's effective slots the
+    /// default their declaring slot now has.
+    fn lower_slot_defaults(&mut self, module: &ast::Module) {
         let mut lowered_values = Vec::new();
         for (class_index, class) in module.classes.iter().enumerate() {
             let lowered_class_index = class_index + 1;
@@ -6307,26 +6452,6 @@ impl Lowering {
                 );
                 let value = self.narrow(value, slot_kind, slot_signature.as_ref());
                 self.diagnostics.extend(ctx.diagnostics);
-                // A default is lowered inline wherever an instance is made,
-                // in the making body's frame, so it has none of its own to
-                // bind locals in.
-                if let Some(local) = ctx.locals.first() {
-                    self.diagnostics.push(
-                        Diagnostic::error(local.span, DiagnosticCode::SlotDefaultBindsLocals)
-                            .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
-                            .with_arg(DiagnosticArg::text("local", local.name.clone())),
-                    );
-                    // The slot still has a default, so a `make` relying on
-                    // it reports nothing more.
-                    lowered_values.push((
-                        lowered_class_index,
-                        slot_index,
-                        Expr::Error {
-                            span: init_value.span(),
-                        },
-                    ));
-                    continue;
-                }
                 let value_kind = self.expr_kind(&value);
                 if !self.kinds_match(slot_kind, value_kind) {
                     self.diagnostics.push(
@@ -6356,20 +6481,61 @@ impl Lowering {
                     );
                     self.diagnostics.extend(diagnostic);
                 }
-                // Every `make` that takes the default checks it, as it
-                // checks an init argument.
+                // The default checks its value against the slot's range, as
+                // `make` checks an init argument.
                 let value = self.limit_value(value, slot_kind, slot_range);
-                lowered_values.push((lowered_class_index, slot_index, value));
+                // A literal is read in place at each `make`; anything else
+                // runs as code of its own, in a frame of its own.
+                let (value, initializer) = if ctx.locals.is_empty() && default_inlines(&value) {
+                    (value, None)
+                } else {
+                    let span = value.span();
+                    let default = Expr::SlotDefault {
+                        class: ClassId(u32::try_from(lowered_class_index).unwrap_or(u32::MAX)),
+                        slot: SlotId(u32::try_from(slot_index).unwrap_or(u32::MAX)),
+                        result_kind: slot_kind,
+                        callable_signature: slot_signature,
+                        span,
+                    };
+                    let initializer = SlotInitializer {
+                        value,
+                        locals: ctx.locals,
+                    };
+                    (default, Some(initializer))
+                };
+                lowered_values.push((lowered_class_index, slot_index, value, initializer));
             }
         }
 
-        for (class_index, slot_index, value) in lowered_values {
+        for (class_index, slot_index, value, initializer) in lowered_values {
             if let Some(slot) = self
                 .classes
                 .get_mut(class_index)
                 .and_then(|class| class.direct_slots.get_mut(slot_index))
             {
                 slot.init_value = Some(value);
+                slot.initializer = initializer;
+            }
+        }
+        let defaults = self
+            .classes
+            .iter()
+            .map(|class| {
+                class
+                    .direct_slots
+                    .iter()
+                    .map(|slot| slot.init_value.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for class in &mut self.classes {
+            for slot in &mut class.effective_slots {
+                if let Some(default) = defaults
+                    .get(slot.source_class.0 as usize)
+                    .and_then(|slots| slots.get(slot.source_slot.0 as usize))
+                {
+                    slot.init_value.clone_from(default);
+                }
             }
         }
     }
@@ -7335,23 +7501,14 @@ impl Lowering {
 
     /// Reports each cycle of constants whose initializers read one another,
     /// such as `$a = $b + 1` and `$b = $a + 1`: none of them could finish
-    /// initializing. Only reads the initializers make themselves count; one
-    /// made through a function call fails when it runs instead.
+    /// initializing. Only reads the initializers make themselves count,
+    /// with those of the slot defaults their `make`s run; one made through
+    /// a function call fails when it runs instead.
     fn report_constant_cycles(&mut self) {
         let reads = self
             .constants
             .iter()
-            .map(|constant| {
-                let mut reads = Vec::new();
-                visit_evaluated(&constant.value, &mut |expr| {
-                    if let Expr::ConstantRef { constant, .. } = expr
-                        && !reads.contains(&(constant.0 as usize))
-                    {
-                        reads.push(constant.0 as usize);
-                    }
-                });
-                reads
-            })
+            .map(|constant| self.constant_reads(&constant.value))
             .collect::<Vec<_>>();
         // Depth-first from each constant in turn: a constant met again while
         // its own reads are being followed closes a cycle.
@@ -7394,6 +7551,43 @@ impl Lowering {
                 }
             }
         }
+    }
+
+    /// The constants `value` reads, by index, itself or in the code of a
+    /// slot default it runs.
+    fn constant_reads(&self, value: &Expr) -> Vec<usize> {
+        let mut reads = Vec::new();
+        let mut defaults: Vec<(ClassId, SlotId)> = Vec::new();
+        let mut visit = |expr: &Expr, defaults: &mut Vec<(ClassId, SlotId)>| match expr {
+            Expr::ConstantRef { constant, .. } if !reads.contains(&(constant.0 as usize)) => {
+                reads.push(constant.0 as usize);
+            }
+            Expr::SlotDefault { class, slot, .. } if !defaults.contains(&(*class, *slot)) => {
+                defaults.push((*class, *slot));
+            }
+            _ => {}
+        };
+        visit_evaluated(value, &mut |expr| visit(expr, &mut defaults));
+        let mut next = 0;
+        while let Some(&(class, slot)) = defaults.get(next) {
+            next += 1;
+            let Some(initializer) = self
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.direct_slots.get(slot.0 as usize))
+                .and_then(|slot| slot.initializer.as_ref())
+            else {
+                continue;
+            };
+            let mut found = Vec::new();
+            visit_evaluated(&initializer.value, &mut |expr| visit(expr, &mut found));
+            for default in found {
+                if !defaults.contains(&default) {
+                    defaults.push(default);
+                }
+            }
+        }
+        reads
     }
 
     fn report_constant_cycle(&mut self, cycle: &[usize]) {
@@ -7537,7 +7731,9 @@ impl Lowering {
         self.collect_collection_methods();
         self.refresh_inferred_generic_results();
         self.check_ambiguous_generic_methods();
-        // After the methods, so an initializer's sends find them.
+        // After the methods, so a default's or an initializer's sends find
+        // them, and before the code whose `make`s take the defaults.
+        self.lower_slot_defaults(module);
         self.lower_constants(module);
         self.report_constant_cycles();
 
@@ -7612,6 +7808,7 @@ impl Lowering {
             self.collect_numeric_methods();
             self.collect_collection_methods();
             self.refresh_inferred_generic_results();
+            self.lower_slot_defaults(module);
             self.lower_constants(module);
             for (index, function) in module.functions.iter().enumerate() {
                 let _ = self.lower_function(
@@ -15347,7 +15544,9 @@ impl Lowering {
             | Expr::InstanceOfLimited { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,
             Expr::Capture { result_kind, .. } => *result_kind,
-            Expr::ConstantRef { result_kind, .. } => *result_kind,
+            Expr::ConstantRef { result_kind, .. } | Expr::SlotDefault { result_kind, .. } => {
+                *result_kind
+            }
             Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
             Expr::Cast { class, .. } => self
                 .kind_for_builtin_class(*class)
@@ -15428,6 +15627,9 @@ impl Lowering {
                 callable_signature, ..
             }
             | Expr::ConstantRef {
+                callable_signature, ..
+            }
+            | Expr::SlotDefault {
                 callable_signature, ..
             }
             | Expr::AssignLocal {

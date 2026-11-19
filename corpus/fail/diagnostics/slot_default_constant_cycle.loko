@@ -1,0 +1,19 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.constant-initializer-cycle
+// expect: diagnostic contains constant `$c` reads itself while it is initialized: `$c` -> `$c`
+
+// A constant's `make` runs the slot defaults it takes, so a default that
+// reads the constant is a read of it while it is initialized.
+
+define class <a> (<object>)
+  slot n :: <object>, init-value: begin
+    let seen = $c;
+    seen
+  end;
+end;
+
+define constant $c = make(<a>);
+
+define function main() => <integer>
+  0
+end;

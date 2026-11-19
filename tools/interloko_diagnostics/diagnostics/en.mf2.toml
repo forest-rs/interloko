@@ -105,7 +105,6 @@
 "sem.collection-method-overrides-kernel" = "`{ $function }` already has the kernel's method for { $class }; a method for it or a subclass would override it"
 "sem.for-clause-type-mismatch" = "`for` clause `{ $word }` expects { $expected } but has { $actual }; a numeric `for` counts in <integer>s"
 "sem.slot-default-type-mismatch" = "slot `{ $slot }` expects { $expected } but default init-value has { $actual }"
-"sem.slot-default-binds-locals" = "slot `{ $slot }`'s init-value binds the local `{ $local }`; slot defaults cannot bind locals yet, so define a function and call it"
 "sem.constant-initializer-cycle" = "constant `{ $constant }` reads itself while it is initialized: { $cycle }"
 "sem.missing-required-init-keyword" = "missing required init keyword `{ $keyword }` for slot `{ $slot }`"
 "sem.missing-slot-initializer" = "missing initializer for slot `{ $slot }`"

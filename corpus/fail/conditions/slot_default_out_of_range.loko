@@ -1,0 +1,20 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 0
+
+// A default's value is checked against the slot's range in the default's
+// own code, at each `make` that takes it.
+
+define function ten() => <integer>
+  10
+end;
+
+define class <digit> (<object>)
+  slot value :: limited(<integer>, min: 0, max: 9), init-value: begin
+    let n = ten();
+    n
+  end;
+end;
+
+define function main() => <integer>
+  make(<digit>).value
+end;

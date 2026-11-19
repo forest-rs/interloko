@@ -196,6 +196,7 @@ impl<'a> TracedFunction<'a> {
                 alloc::format!("constant:k{}", id.0),
             )),
             lower::FunctionKind::SlotAccessor { .. }
+            | lower::FunctionKind::SlotDefault { .. }
             | lower::FunctionKind::CallableThunk { .. }
             | lower::FunctionKind::Closure(_)
             | lower::FunctionKind::ExitThunk { .. }

@@ -1,0 +1,31 @@
+// expect: run 321
+// expect: diagnostics 0
+
+// A subclass's `make` runs an inherited slot's default, which here selects
+// on a call, binding a hidden local in the default's own frame, and leaves
+// a block through its exit.
+
+define function three() => <integer>
+  3
+end;
+
+define class <base> (<object>)
+  slot code :: <integer>, init-value: block (done)
+    let n = select (three())
+      1 => 100;
+      3 => 300;
+      otherwise => 0;
+    end;
+    if (n > 200) done(n + 20) end;
+    n
+  end;
+end;
+
+define class <derived> (<base>)
+  slot extra :: <integer>, init-value: 1;
+end;
+
+define function main() => <integer>
+  let d = make(<derived>);
+  d.code + d.extra
+end;

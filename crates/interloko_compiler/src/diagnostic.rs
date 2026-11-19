@@ -272,8 +272,6 @@ pub enum DiagnosticCode {
     ForClauseTypeMismatch,
     /// A slot default `init-value:` has the wrong type.
     SlotDefaultTypeMismatch,
-    /// A slot's `init-value` binds locals, which slot defaults cannot hold yet.
-    SlotDefaultBindsLocals,
     /// A constant's initializer reads the constant itself.
     ConstantInitializerCycle,
     /// A required init keyword is missing.
@@ -490,7 +488,6 @@ impl DiagnosticCode {
         Self::CollectionMethodOverridesKernel,
         Self::ForClauseTypeMismatch,
         Self::SlotDefaultTypeMismatch,
-        Self::SlotDefaultBindsLocals,
         Self::ConstantInitializerCycle,
         Self::MissingRequiredInitKeyword,
         Self::MissingSlotInitializer,
@@ -650,7 +647,6 @@ impl DiagnosticCode {
             Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
             Self::ForClauseTypeMismatch => "sem.for-clause-type-mismatch",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
-            Self::SlotDefaultBindsLocals => "sem.slot-default-binds-locals",
             Self::ConstantInitializerCycle => "sem.constant-initializer-cycle",
             Self::MissingRequiredInitKeyword => "sem.missing-required-init-keyword",
             Self::MissingSlotInitializer => "sem.missing-slot-initializer",
@@ -811,7 +807,6 @@ impl DiagnosticCode {
             "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
             "sem.for-clause-type-mismatch" => Self::ForClauseTypeMismatch,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
-            "sem.slot-default-binds-locals" => Self::SlotDefaultBindsLocals,
             "sem.constant-initializer-cycle" => Self::ConstantInitializerCycle,
             "sem.missing-required-init-keyword" => Self::MissingRequiredInitKeyword,
             "sem.missing-slot-initializer" => Self::MissingSlotInitializer,

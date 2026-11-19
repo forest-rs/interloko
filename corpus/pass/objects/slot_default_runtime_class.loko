@@ -1,0 +1,42 @@
+// expect: run 3321
+// expect: diagnostics 0
+
+// A `make` of a class known only at run time runs the same slot defaults
+// as one of a class known statically, inherited ones included, each afresh
+// and in slot order.
+
+define class <counter> (<object>)
+  slot n :: <integer>, init-value: 0;
+end;
+
+define constant $k = make(<counter>);
+
+define function bump() => <integer>
+  $k.n := $k.n + 1;
+  $k.n
+end;
+
+define class <base> (<object>)
+  slot a :: <integer>, init-value: begin
+    let t = bump();
+    t
+  end;
+end;
+
+define class <mid> (<base>)
+  slot b :: <integer>, init-value: bump() * 10;
+end;
+
+define class <leaf> (<mid>)
+  slot c :: <integer>, init-value: bump() * 100;
+end;
+
+define function build(s :: <base>) => <base>
+  make(class-of(s))
+end;
+
+define function main() => <integer>
+  let seed = make(<leaf>, a: 0, b: 0, c: 0);
+  let x :: <leaf> = as(<leaf>, build(seed));
+  $k.n * 1000 + x.a + x.b + x.c
+end;

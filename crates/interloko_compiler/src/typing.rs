@@ -1647,6 +1647,14 @@ pub fn analyze(module: &sem::Module, config: TypingConfig) -> TypingArtifact {
         .map(|function| function.definition)
         .chain(module.methods.iter().map(|method| method.definition))
         .chain(module.constants.iter().map(|constant| constant.definition))
+        .chain(
+            module
+                .classes
+                .iter()
+                .flat_map(|class| &class.direct_slots)
+                .filter(|slot| slot.initializer.is_some())
+                .map(|slot| slot.definition),
+        )
         .filter_map(|definition| check_definition(module, definition))
         .collect();
     TypingArtifact::from_definitions(module, config, TypingStatus::Checked, definitions)
@@ -1690,13 +1698,18 @@ fn run_definition(
     {
         analysis.body(&method.locals, &method.params, &method.body);
         DefinitionKind::Method
-    } else {
-        let constant = module
-            .constants
-            .iter()
-            .find(|constant| constant.definition == definition)?;
+    } else if let Some(constant) = module
+        .constants
+        .iter()
+        .find(|constant| constant.definition == definition)
+    {
         let _ = analysis.detached(&constant.locals, &constant.value);
         DefinitionKind::Constant
+    } else {
+        // A slot default with code of its own, typed as the slot.
+        let initializer = module.slot_initializer(definition)?;
+        let _ = analysis.detached(&initializer.locals, &initializer.value);
+        DefinitionKind::Slot
     };
     let finished = analysis.finish();
     Some((
@@ -2335,6 +2348,9 @@ pub fn definition_label(module: &sem::Module, definition: DefinitionId) -> Strin
         .find(|generic| generic.definition == definition)
     {
         return format!("generic {}", generic.name);
+    }
+    if let Some(name) = module.slot_default_name(definition) {
+        return format!("slot default {name}");
     }
     format!("definition {definition}")
 }

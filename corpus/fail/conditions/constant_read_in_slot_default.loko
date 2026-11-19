@@ -1,0 +1,24 @@
+// expect: runtime code constant.read-during-initialization
+// expect: run reports `$box` was read while its own initializer was running (via `<box>.peer`)
+// expect: diagnostics 0
+
+// A slot default that reads a constant while that constant's initializer
+// runs it, through a function the compiler does not follow, names itself
+// as the reader.
+
+define class <box> (<object>)
+  slot peer :: <object>, init-value: begin
+    let seen = $box;
+    seen
+  end;
+end;
+
+define function fresh-box() => <box>
+  make(<box>)
+end;
+
+define constant $box = fresh-box();
+
+define function main() => <integer>
+  if ($box == $box) 1 else 0 end
+end;

@@ -1,0 +1,47 @@
+// expect: run 2040
+// expect: diagnostics 0
+// expect: dump lowered contains <tally>.items#default
+// expect: dump lowered lacks <tally>.start#default
+// expect: dump lowered lacks <tally>.digit#default
+
+// A slot default may be any expression, a body included: `let`s, loops and
+// closures over its own locals. It runs afresh at each `make` that takes
+// it, so each instance gets its own value. A literal default is computed in
+// place instead, range check and all on a limited slot.
+
+define class <counter> (<object>)
+  slot made :: <integer>, init-value: 0;
+end;
+
+define constant $log = make(<counter>);
+
+define class <tally> (<object>)
+  slot start :: <integer>, init-value: 1;
+  slot digit :: limited(<integer>, min: 0, max: 9), init-value: 7;
+  slot items :: <object>, init-value: begin
+    let v = make(<stretchy-vector>);
+    let i = 0;
+    while (i < 3)
+      add!(v, i);
+      i := i + 1
+    end;
+    $log.made := $log.made + 1;
+    v
+  end;
+  slot scale :: callable(<integer>) => <integer>, init-value: begin
+    let factor = 10;
+    function (x :: <integer>) => <integer> x * factor end
+  end;
+end;
+
+define function main() => <integer>
+  let a = make(<tally>);
+  let b = make(<tally>);
+  let fresh = if (a.items == b.items) 0 else 1000 end;
+  let scale = a.scale;
+  let items :: <stretchy-vector> = as(<stretchy-vector>, b.items);
+  // 1000 for two vectors, 500 for each of the two initializations, 30 for
+  // the closure scaling 3 items, 3 for the literal starts and the 1, and
+  // 7 for the literal digit.
+  fresh + $log.made * 500 + scale(size(items)) + a.start + b.start + 1 + a.digit
+end;

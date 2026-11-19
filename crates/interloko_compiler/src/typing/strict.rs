@@ -209,8 +209,11 @@ impl StrictViolation {
 ///
 /// A definition's own `strict` comes first, then its generic's for a
 /// method, then the session's [`StrictScope::All`]. Only functions,
-/// constants, and methods from source are ever strict: the compiler's
-/// numeric and slot-setter methods are not code a program can change.
+/// constants, methods from source, and slot defaults that run code are ever
+/// strict: the compiler's numeric and slot-setter methods are not code a
+/// program can change. A slot default has no `strict` of its own, so only
+/// the session's policy holds it; a strict function that makes the object
+/// does not make the defaults it runs strict.
 #[must_use]
 pub fn strictness(
     module: &sem::Module,
@@ -249,6 +252,9 @@ pub fn strictness(
         } else {
             policy
         };
+    }
+    if module.slot_initializer(definition).is_some() {
+        return policy;
     }
     let constant = module
         .constants

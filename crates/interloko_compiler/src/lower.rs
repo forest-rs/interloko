@@ -497,6 +497,13 @@ pub enum FunctionKind {
     /// Evaluates a constant's initializer, once per turn: the first read of
     /// the constant calls it and keeps the value in the constant's cell.
     ConstantInitializer(sem::ConstantId),
+    /// Evaluates a slot's default, at each `make` that takes it.
+    SlotDefault {
+        /// Class that declares the slot.
+        class: sem::ClassId,
+        /// The slot's id among that class's direct slots.
+        slot: sem::SlotId,
+    },
     /// Opens a callable value, an aggregate whose shape only this function's
     /// parameter contract proves to the tape: it returns the value's typed
     /// entry, its boxed entry and its shape.
@@ -2364,6 +2371,9 @@ struct LowerIds {
     /// The initializer of each constant that is kept in a cell, in
     /// constant id order; a constant that folds to its value has none.
     constant_initializers: Vec<Option<FunctionId>>,
+    /// The function each slot default with code of its own runs, by its
+    /// declaring class and direct slot, in class and slot order.
+    slot_initializers: Vec<(sem::ClassId, sem::SlotId, FunctionId)>,
     /// The function that opens callable values
     /// ([`FunctionKind::CallableParts`]).
     callable_parts: Option<FunctionId>,
@@ -2671,6 +2681,13 @@ impl<'module> Lowering<'module> {
             .into_iter()
             .map(|folds| (!folds).then(&mut take))
             .collect();
+        for class in &module.classes {
+            for slot in &class.direct_slots {
+                if slot.initializer.is_some() {
+                    ids.slot_initializers.push((class.id, slot.id, take()));
+                }
+            }
+        }
         // The last id, so a module that never opens a callable value whose
         // shape the tape cannot see leaves it out without renumbering.
         ids.callable_parts = Some(take());
@@ -2828,6 +2845,25 @@ impl<'module> Lowering<'module> {
                         .map_err(|error| error.within(constant.span))?,
                 );
             }
+        }
+        for (class, slot, id) in &self.ids.slot_initializers {
+            let class = self
+                .module
+                .classes
+                .get(class.0 as usize)
+                .ok_or_else(|| invalid_semantic("slot default class is out of range"))?;
+            let slot = class
+                .direct_slots
+                .get(slot.0 as usize)
+                .ok_or_else(|| invalid_semantic("slot default slot is out of range"))?;
+            let initializer = slot
+                .initializer
+                .as_ref()
+                .ok_or_else(|| invalid_semantic("slot default has no initializer"))?;
+            functions.push(
+                self.lower_slot_initializer(class, slot, initializer, *id, &mut checks)
+                    .map_err(|error| error.within(slot.span))?,
+            );
         }
         if let Some(parts) = self.ids.callable_parts
             && functions.iter().any(|function| {
@@ -3133,6 +3169,44 @@ impl<'module> Lowering<'module> {
             locals: body.locals,
             instructions: body.instructions,
             span: constant.span,
+        })
+    }
+
+    /// Lowers a slot default's code as a function of its own, with the
+    /// default's locals as its frame and its checks the slot's.
+    fn lower_slot_initializer(
+        &self,
+        class: &sem::Class,
+        slot: &sem::Slot,
+        initializer: &sem::SlotInitializer,
+        id: FunctionId,
+        checks: &mut Vec<CheckCodegenRecord>,
+    ) -> Result<Function, LowerError> {
+        let mut body = BodyLowering::new(self.module, &self.ids, &initializer.locals)
+            .typed(self.facts, Some(slot.definition));
+        let ret =
+            body.value_kind_with_callable_signature(slot.kind, slot.callable_signature.as_ref())?;
+        let block = sem::Block {
+            statements: Vec::new(),
+            result: initializer.value.clone(),
+            span: initializer.value.span(),
+        };
+        body.lower_block(&block, &[ret])?;
+        checks.append(&mut body.checks);
+        Ok(Function {
+            id,
+            name: format!("{}.{}#default", class.name, slot.name),
+            kind: FunctionKind::SlotDefault {
+                class: class.id,
+                slot: slot.id,
+            },
+            register_kinds: body.register_kinds,
+            params: body.params,
+            ret,
+            rets: vec![ret],
+            locals: body.locals,
+            instructions: body.instructions,
+            span: slot.span,
         })
     }
 
@@ -4431,6 +4505,15 @@ fn collect_known_callable_uses(module: &sem::Module) -> CallableUses<'_> {
         uses.locals = &constant.locals;
         collect_known_callable_uses_in_expr(&constant.value, &mut uses);
     }
+    for initializer in module
+        .classes
+        .iter()
+        .flat_map(|class| &class.direct_slots)
+        .filter_map(|slot| slot.initializer.as_ref())
+    {
+        uses.locals = &initializer.locals;
+        collect_known_callable_uses_in_expr(&initializer.value, &mut uses);
+    }
     for function in &module.functions {
         uses.locals = &function.locals;
         collect_known_callable_uses_in_block(&function.body, &mut uses);
@@ -4632,6 +4715,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         | sem::Expr::Local { .. }
         | sem::Expr::Capture { .. }
         | sem::Expr::ConstantRef { .. }
+        | sem::Expr::SlotDefault { .. }
         | sem::Expr::ClassObject { .. }
         | sem::Expr::TypeObject { .. }
         | sem::Expr::GenericFunctionObject { .. }
@@ -7276,6 +7360,33 @@ impl<'module> BodyLowering<'module> {
                     return Ok(result);
                 }
                 self.coerce_value(result, expected, *span)
+            }
+            sem::Expr::SlotDefault {
+                class,
+                slot,
+                result_kind,
+                callable_signature,
+                span,
+            } => {
+                let callee = self
+                    .ids
+                    .slot_initializers
+                    .iter()
+                    .find(|(owner, id, _)| owner == class && id == slot)
+                    .map(|(_, _, function)| *function)
+                    .ok_or_else(|| invalid_semantic("slot default has no function"))?;
+                let kind = self.value_kind_with_callable_signature(
+                    *result_kind,
+                    callable_signature.as_ref(),
+                )?;
+                let result = self.alloc(kind);
+                self.instructions.push(Instr::Call {
+                    dsts: vec![result.reg],
+                    callee,
+                    args: Vec::new(),
+                    span: *span,
+                });
+                Ok(result)
             }
             sem::Expr::ConstantRef { constant, span, .. } => {
                 if self
@@ -12834,14 +12945,17 @@ fn definition_source_name(module: &sem::Module, definition: DefinitionId) -> Opt
     {
         return Some(constant.name.clone());
     }
-    let method = module
+    if let Some(method) = module
         .methods
         .iter()
-        .find(|method| method.definition == definition)?;
-    module
-        .generics
-        .get(method.generic.0 as usize)
-        .map(|generic| generic.name.clone())
+        .find(|method| method.definition == definition)
+    {
+        return module
+            .generics
+            .get(method.generic.0 as usize)
+            .map(|generic| generic.name.clone());
+    }
+    module.slot_default_name(definition)
 }
 
 fn builtin_class(module: &sem::Module, kind: sem::BuiltinValueClass) -> Option<sem::ClassId> {
@@ -13646,6 +13760,9 @@ impl Module {
             FunctionKind::CallableParts => writeln!(f, " ; opens callable values"),
             FunctionKind::ConstantInitializer(id) => {
                 writeln!(f, " ; initializer of constant {}", id.0)
+            }
+            FunctionKind::SlotDefault { class, slot } => {
+                writeln!(f, " ; default of slot c{}.s{}", class.0, slot.0)
             }
             FunctionKind::Adapter { signature } => {
                 writeln!(f, " ; adapter to signature {}", signature.0)
@@ -15307,10 +15424,10 @@ mod tests {
     }
 
     #[test]
-    fn a_closure_two_bodies_create_keeps_its_checks() {
-        // A slot default is copied into every `make`, so its closure is
-        // created by both functions and is typed twice; lowering trusts
-        // neither. The same closure written in one body is specialized.
+    fn a_slot_default_closure_is_typed_once() {
+        // A slot default runs as code of its own, so its closure is created
+        // in one place, however many `make`s take the default, and is
+        // specialized as the same closure written in a function body is.
         let source = "define class <box> (<object>)\n  \
               slot f :: <callable>, init-value: function (x :: <integer>) => <integer>\n    \
                 if (x < 10) if (x > 0) x + 1 else 0 end else 0 end\n  end;\n\
@@ -15328,8 +15445,9 @@ mod tests {
             .map(|function| function_dump(&proved, &function.name))
             .collect::<Vec<_>>();
         assert_eq!(closures.len(), 2);
-        assert!(closures[0].contains("i64.add_ovf"), "{}", closures[0]);
-        assert!(!closures[1].contains("i64.add_ovf"), "{}", closures[1]);
+        for closure in &closures {
+            assert!(!closure.contains("i64.add_ovf"), "{closure}");
+        }
     }
 
     #[test]
